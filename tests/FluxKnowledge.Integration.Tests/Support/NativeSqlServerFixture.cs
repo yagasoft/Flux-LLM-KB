@@ -94,6 +94,9 @@ public sealed class NativeSqlServerFixture : IAsyncLifetime
     internal async Task<PreviousMigrationDatabase> CreateGpuSchedulerOpaqueKeyPreviousMigrationDatabaseAsync()
         => await CreateMigrationDatabaseAsync("20260802182703_AddGpuSchedulerBinaryFenceCollation").ConfigureAwait(false);
 
+    internal async Task<PreviousMigrationDatabase> CreateIdentitylessOutlookExportPreviousMigrationDatabaseAsync()
+        => await CreateMigrationDatabaseAsync("20260811143122_RecordOutlookExportBlockedReason").ConfigureAwait(false);
+
     private async Task<PreviousMigrationDatabase> CreateMigrationDatabaseAsync(string targetMigration)
     {
         if (string.IsNullOrWhiteSpace(_serverConnectionString))

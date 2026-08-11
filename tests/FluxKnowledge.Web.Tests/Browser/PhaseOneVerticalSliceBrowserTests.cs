@@ -10,6 +10,7 @@ using FluxKnowledge.Web.Components.Status;
 using FluxKnowledge.Web.Endpoints;
 using FluxKnowledge.Web.Mcp;
 using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Components.Authorization;
 using Microsoft.AspNetCore.Components.Server.Circuits;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.EntityFrameworkCore;
@@ -131,7 +132,8 @@ public sealed class PhaseOneVerticalSliceBrowserTests
         public static async Task<BrowserHost> StartAsync(
             string connectionString,
             string ingressRoot,
-            string indexRoot)
+            string indexRoot,
+            Action<IServiceCollection>? configureServices = null)
         {
             var builder = WebApplication.CreateBuilder(
                 new WebApplicationOptions
@@ -148,6 +150,7 @@ public sealed class PhaseOneVerticalSliceBrowserTests
                 {
                     ["ConnectionStrings:FluxKnowledge"] = ValidatedPlaceholderConnection,
                     ["LocalIngress:AllowedRoots:0"] = ingressRoot,
+                    ["Outlook:AllowedSpoolRoots:0"] = ingressRoot,
                     ["Usearch:RootPath"] = indexRoot
                 });
             WebHostComposition.AddFluxKnowledgeServices(builder.Services, builder.Configuration);
@@ -158,6 +161,9 @@ public sealed class PhaseOneVerticalSliceBrowserTests
             builder.Services.AddSingleton<IDbContextFactory<FluxKnowledgeDbContext>>(
                 new DisposableDbContextFactory(connectionString));
             builder.Services.AddRazorComponents().AddInteractiveServerComponents();
+            builder.Services.AddAuthentication();
+            builder.Services.AddAuthorization();
+            builder.Services.AddCascadingAuthenticationState();
             builder.Services.AddSingleton<StatusEventFeed>();
             builder.Services.AddSingleton<IStatusEventPublisher>(provider => provider.GetRequiredService<StatusEventFeed>());
             builder.Services.AddScoped<IProjectionReader, SqlProjectionReader>();
@@ -165,8 +171,10 @@ public sealed class PhaseOneVerticalSliceBrowserTests
             builder.Services.AddScoped<CircuitHandler, StatusEventCircuitHandler>();
             builder.Services.AddFluxKnowledgeMcp();
             builder.Services.AddMcpServer().WithHttpTransport(options => options.Stateless = true).WithTools<KnowledgeMcpTools>();
+            configureServices?.Invoke(builder.Services);
 
             var application = builder.Build();
+            application.UseOutlookOperatorAuthentication();
             application.UseAntiforgery();
             application.MapStaticAssets();
             application.MapRazorComponents<App>().AddInteractiveServerRenderMode();

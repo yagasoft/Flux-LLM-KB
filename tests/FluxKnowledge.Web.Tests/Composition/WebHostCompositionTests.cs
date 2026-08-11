@@ -13,10 +13,13 @@ using FluxKnowledge.Infrastructure.SqlServer.Provisioning;
 using FluxKnowledge.Infrastructure.SqlServer.Workers;
 using FluxKnowledge.Infrastructure.Usearch;
 using FluxKnowledge.Integrations.Files;
+using FluxKnowledge.Integrations.Outlook;
 using FluxKnowledge.Web;
 using FluxKnowledge.Web.Components.Status;
 using FluxKnowledge.Web.Components.Sources;
+using FluxKnowledge.Web.Components.Outlook;
 using FluxKnowledge.Web.Endpoints;
+using FluxKnowledge.Web.Mcp;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
@@ -37,6 +40,153 @@ public sealed class WebHostCompositionTests : IDisposable
     public WebHostCompositionTests()
     {
         Directory.CreateDirectory(_ingressRoot);
+    }
+
+    [Fact]
+    public void Disabled_options_register_no_com_host_or_external_capture_service()
+    {
+        var configuration = CreateOutlookRecoveryConfiguration(enabled: null);
+        var services = new ServiceCollection();
+        services.AddLogging();
+
+        WebHostComposition.AddFluxKnowledgeServices(services, configuration);
+        using var provider = services.BuildServiceProvider(
+            new ServiceProviderOptions { ValidateScopes = true, ValidateOnBuild = true });
+
+        Assert.False(provider.GetRequiredService<OutlookCaptureRecoveryOptions>().Enabled);
+        Assert.Empty(provider.GetServices<IHostedService>().OfType<OutlookCaptureRecoveryService>());
+        Assert.DoesNotContain(
+            typeof(WebHostComposition).Assembly.GetReferencedAssemblies(),
+            reference => reference.Name?.Contains("OutlookHost", StringComparison.Ordinal) == true);
+        Assert.DoesNotContain(
+            services,
+            descriptor => descriptor.ServiceType.Assembly.GetName().Name?.Contains(
+                "OutlookHost",
+                StringComparison.Ordinal) == true ||
+                descriptor.ImplementationType?.Assembly.GetName().Name?.Contains(
+                    "OutlookHost",
+                    StringComparison.Ordinal) == true);
+    }
+
+    [Fact]
+    public void Enabled_options_register_only_durable_Outlook_recovery()
+    {
+        var configuration = CreateOutlookRecoveryConfiguration(enabled: true);
+        var services = new ServiceCollection();
+        services.AddLogging();
+
+        WebHostComposition.AddFluxKnowledgeServices(services, configuration);
+        using var provider = services.BuildServiceProvider(
+            new ServiceProviderOptions { ValidateScopes = true, ValidateOnBuild = true });
+
+        var options = provider.GetRequiredService<OutlookCaptureRecoveryOptions>();
+        Assert.True(options.Enabled);
+        Assert.Equal(TimeSpan.FromSeconds(5), options.HintDebounce);
+        Assert.Equal(TimeSpan.FromMinutes(1), options.RecoveryCadence);
+        Assert.Equal(TimeSpan.FromMinutes(10), options.StaleLeaseAge);
+        Assert.Single(provider.GetServices<IHostedService>().OfType<OutlookCaptureRecoveryService>());
+        using var scope = provider.CreateScope();
+        Assert.IsType<SqlOutlookCaptureStore>(
+            scope.ServiceProvider.GetRequiredService<IOutlookCaptureRecoveryStore>());
+        Assert.DoesNotContain(
+            provider.GetServices<IHostedService>(),
+            service => service.GetType().Assembly.GetName().Name?.Contains(
+                "OutlookHost",
+                StringComparison.Ordinal) == true);
+    }
+
+    [Fact]
+    public void Outlook_validation_projection_uses_environment_and_command_line_precedence()
+    {
+        var prefix = $"FLUX_TEST_OUTLOOK_{Guid.NewGuid():N}_";
+        var environmentName = $"{prefix}OutlookCapture__Enabled";
+        Environment.SetEnvironmentVariable(environmentName, "true");
+        try
+        {
+            var configuration = new ConfigurationBuilder()
+                .AddInMemoryCollection(new Dictionary<string, string?>
+                {
+                    ["OutlookCapture:Enabled"] = "false"
+                })
+                .AddEnvironmentVariables(prefix)
+                .AddCommandLine(["--OutlookCapture:Enabled=false"])
+                .Build();
+
+            var projection = OutlookCaptureConfigurationProjection.Create(configuration);
+
+            Assert.False(projection.OutlookEnabled);
+            Assert.Single(projection.GetType().GetProperties());
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(environmentName, null);
+        }
+    }
+
+    [Fact]
+    public void Outlook_validation_projection_observes_an_environment_override()
+    {
+        var prefix = $"FLUX_TEST_OUTLOOK_{Guid.NewGuid():N}_";
+        var environmentName = $"{prefix}OutlookCapture__Enabled";
+        Environment.SetEnvironmentVariable(environmentName, "true");
+        try
+        {
+            var configuration = new ConfigurationBuilder()
+                .AddInMemoryCollection(new Dictionary<string, string?>
+                {
+                    ["OutlookCapture:Enabled"] = "false"
+                })
+                .AddEnvironmentVariables(prefix)
+                .Build();
+
+            Assert.True(OutlookCaptureConfigurationProjection.Create(configuration).OutlookEnabled);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(environmentName, null);
+        }
+    }
+
+    [Fact]
+    public void Composition_registers_the_SQL_only_Outlook_UI_without_a_COM_or_process_service()
+    {
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["ConnectionStrings:FluxKnowledge"] = "Server=unreachable.invalid;Initial Catalog=FluxKnowledge;Integrated Security=true;Encrypt=true;TrustServerCertificate=true",
+                ["LocalIngress:AllowedRoots:0"] = _ingressRoot,
+                ["Usearch:RootPath"] = Path.Combine(Path.GetTempPath(), $"FluxKnowledgeIndexes_{Guid.NewGuid():N}"),
+                ["Outlook:AllowedSpoolRoots:0"] = _ingressRoot
+            })
+            .Build();
+        var services = new ServiceCollection();
+        services.AddLogging();
+
+        WebHostComposition.AddFluxKnowledgeServices(services, configuration);
+        using var provider = services.BuildServiceProvider(new ServiceProviderOptions { ValidateScopes = true, ValidateOnBuild = true });
+        using var scope = provider.CreateScope();
+
+        Assert.IsType<SqlOutlookCaptureStore>(scope.ServiceProvider.GetRequiredService<IOutlookCaptureStore>());
+        Assert.IsType<SqlOutlookProjectionReader>(scope.ServiceProvider.GetRequiredService<IOutlookProjectionReader>());
+        Assert.IsType<LocalOutlookSpoolValidator>(scope.ServiceProvider.GetRequiredService<IOutlookSpoolValidator>());
+        Assert.IsType<LocalOutlookOperatorPolicy>(scope.ServiceProvider.GetRequiredService<IOutlookOperatorPolicy>());
+        _ = scope.ServiceProvider.GetRequiredService<OutlookPageState>();
+        Assert.DoesNotContain(
+            provider.GetServices<IHostedService>(),
+            service => service.GetType().Assembly.GetName().Name?.Contains("OutlookHost", StringComparison.Ordinal) == true);
+    }
+
+    [Fact]
+    public void Native_outlook_adds_no_REST_MCP_or_CLI_mutation_surface()
+    {
+        var endpointTypes = typeof(WebHostComposition).Assembly.GetTypes()
+            .Where(type => string.Equals(type.Namespace, "FluxKnowledge.Web.Endpoints", StringComparison.Ordinal))
+            .ToArray();
+
+        Assert.DoesNotContain(endpointTypes, type => type.Name.Contains("Outlook", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(
+            typeof(KnowledgeMcpTools).GetMethods(System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.DeclaredOnly),
+            method => method.Name.Contains("Outlook", StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]
@@ -286,6 +436,25 @@ public sealed class WebHostCompositionTests : IDisposable
     public void Dispose()
     {
         Directory.Delete(_ingressRoot, recursive: true);
+    }
+
+    private IConfiguration CreateOutlookRecoveryConfiguration(bool? enabled)
+    {
+        var values = new Dictionary<string, string?>
+        {
+            ["ConnectionStrings:FluxKnowledge"] = "Server=unreachable.invalid;Initial Catalog=FluxKnowledge;Integrated Security=true;Encrypt=true;TrustServerCertificate=true",
+            ["LocalIngress:AllowedRoots:0"] = _ingressRoot,
+            ["Usearch:RootPath"] = Path.Combine(Path.GetTempPath(), $"FluxKnowledgeIndexes_{Guid.NewGuid():N}"),
+            ["OutlookCapture:HintDebounceSeconds"] = "5",
+            ["OutlookCapture:RecoveryCadenceSeconds"] = "60",
+            ["OutlookCapture:StaleLeaseSeconds"] = "600"
+        };
+        if (enabled is not null)
+        {
+            values["OutlookCapture:Enabled"] = enabled.Value.ToString();
+        }
+
+        return new ConfigurationBuilder().AddInMemoryCollection(values).Build();
     }
 
     private sealed class ConfiguredWebApplicationFactory(string ingressRoot)

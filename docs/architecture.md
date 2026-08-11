@@ -217,11 +217,61 @@ legacy/RabbitMQ/Docker/Vespa component. See [the Phase 3A validation
 record](operations/native-windows-phase-3a-source-management-validation.md).
 
 Phase 3B delivers the approved watcher-driven PipelineRecord Corpus and durable
-Events dashboard. Local processors and content branches, Gmail/Outlook ingress,
-and approved native model adapters remain separately gated later work. The full
-54-tool MCP/plugin/REST/CLI contract ledger is Phase 3C, deliberately sequenced
-after Phases 1–6 complete and before the Phase 7 readiness gate. Final
-replacement and legacy retirement remain separately gated.
+Events dashboard. Local processors and content branches, approved native model
+adapters and live Outlook activation remain separately gated later work. Legacy
+Gmail is retained but excluded from the native replacement. The full 54-tool
+MCP/plugin/REST/CLI contract ledger is Phase 3C, deliberately sequenced after
+Phases 1–6 complete and before the Phase 7 readiness gate. Final replacement and
+legacy retirement remain separately gated.
+
+### Phase 4 native Outlook ingress boundary
+
+Phase 4 implements a disabled-by-default Outlook-only ingress path. Private SQL
+records are authoritative for profiles, canonical folders, configuration
+revisions, browse requests/results, coalesced catch-up work, host/session leases,
+operation receipts, exports and deferred capabilities. Events are wake hints;
+reconciliation and claims come from SQL. Configuration mutations exist only in
+the authenticated loopback `/outlook` UI. REST, MCP and CLI remain read-only for
+this capability.
+
+Classic Outlook access is isolated in a `net10.0-windows` STA executable. Its
+factory checks the Windows interactive user/session, one-instance ownership and
+an enabled, unexpired, fenced durable browse or catch-up claim before constructing
+the COM adapter. The adapter exposes browse, subscribe, enumerate and read-for-
+export operations only. Web startup, profile save, recovery, deployment planning
+and configuration projection cannot construct or start it, and deployment does
+not register an autostart task or Windows Service.
+
+The private spool uses `_inflight/<export-id>` followed by atomic promotion to
+`ready/<export-id>`. Ingestion reopens only the promoted retained artifacts,
+validates their recovery envelope and fingerprints, and commits parent/child
+source revisions, supported or deferred activity and the export receipt before
+advancing the folder cursor. Restart replay is idempotent; conflicting identity
+or fingerprint evidence is blocked durably. Deferred processors must claim the
+retained artifact by fingerprint and processor version after explicit
+enablement; they do not reopen Outlook or an original watched file.
+
+Supported Outlook text remains in that private spool. The retained-source reader
+resolves its relative content-addressed artifact through the profile's unique
+source-root binding and then repeats the leased-root, containment, no-follow,
+length, SHA-256 and strict UTF-8 checks used for shared retained artifacts.
+Existing profiles cannot rebind that source root to another spool; same-root
+configuration edits remain valid. Ordinary spool, validation and SQL ingestion
+failures become a sanitised durable retryable-host failure, while a ready-export
+fencing race becomes lease-lost evidence. Neither failure path completes catch-up
+or moves the folder cursor.
+
+Canonical Outlook identifiers and the configured spool root are restricted to
+private SQL reconciliation fields. Exports retain only private relative sidecar
+references. Local/public projections, audit details, REST/MCP/CLI, SignalR,
+logs and future validation records must not expose those values, raw mail,
+credentials or raw COM diagnostics.
+
+Fresh offline/disposable verification has exercised the implemented boundary,
+but it is not deployment evidence. The host and recovery options remain disabled,
+no real Outlook profile has been contacted and no Phase 4 validation record
+exists. Deployment, migrations, COM activation and a bounded non-production
+profile/folder run remain separate written approval gates.
 
 Legacy architecture below remains a compatibility reference only. It is not the
 target architecture for this branch and must not be deleted until local

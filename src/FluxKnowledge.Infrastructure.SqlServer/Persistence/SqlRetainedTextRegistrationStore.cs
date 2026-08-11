@@ -18,12 +18,16 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
 /// <summary>Atomically binds one retained text activity to the established pipeline Job/outbox path.</summary>
 public sealed class SqlRetainedTextRegistrationStore(
     IDbContextFactory<FluxKnowledgeDbContext> contextFactory,
-    TimeProvider timeProvider) : IRetainedTextRegistrationStore, IDeferredActivityReplayStore, ISourceActivityRestartStore
+    TimeProvider timeProvider,
+    string? retainedArtifactRoot = null) : IRetainedTextRegistrationStore, IDeferredActivityReplayStore, ISourceActivityRestartStore
 {
     private const string RetainedSourceKind = "retained local source";
     private const string AcceptedUtf8Classification = "AcceptedUtf8Text";
     private const string AcceptedMimePolicy = "[\"text/plain\"]";
     private const string ExtractUtf8OutputContract = "pipeline:extract-utf8";
+    private readonly string? _retainedArtifactRoot = string.IsNullOrWhiteSpace(retainedArtifactRoot)
+        ? null
+        : Path.TrimEndingDirectorySeparator(Path.GetFullPath(retainedArtifactRoot));
 
     public async ValueTask<bool> RegisterAsync(SourceActivity activity, CancellationToken cancellationToken)
     {
@@ -175,9 +179,22 @@ public sealed class SqlRetainedTextRegistrationStore(
             }
         }
 
-        var linkedRecords = await context.PipelineRecords
-            .FromSqlInterpolated($"SELECT * FROM [PipelineRecords] WITH (UPDLOCK, HOLDLOCK, INDEX([IX_PipelineRecords_SourceRevisionId])) WHERE [SourceRevisionId] = {sourceRevision.Id}")
-            .ToListAsync(cancellationToken).ConfigureAwait(false);
+        var deferredCapability = replayCapability is null
+            ? null
+            : await context.DeferredCapabilities
+                .FromSqlInterpolated($"SELECT * FROM [DeferredCapabilities] WITH (UPDLOCK, HOLDLOCK) WHERE [SourceRevisionId] = {sourceRevision.Id} AND [ArtifactFingerprint] = {artifact.ContentSha256} AND [RequiredCapability] = {activity.RequiredCapability}")
+                .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+        if (replayCapability is not null &&
+            (deferredCapability is null ||
+             !string.Equals(deferredCapability.ArtifactFingerprint, sourceRevision.ContentSha256, StringComparison.Ordinal) ||
+             !string.Equals(deferredCapability.RequiredCapability, replayCapability.ProcessorKind, StringComparison.Ordinal) ||
+             (deferredCapability.ClaimedProcessorVersion is not null &&
+              !string.Equals(deferredCapability.ClaimedProcessorVersion, replayCapability.ProcessorVersion, StringComparison.Ordinal))))
+        {
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            return false;
+        }
+
         var durableActivity = await context.SourceActivities
             .FromSqlInterpolated($"SELECT * FROM [SourceActivities] WITH (UPDLOCK, HOLDLOCK) WHERE [Id] = {activity.Id.Value}")
             .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
@@ -187,6 +204,38 @@ public sealed class SqlRetainedTextRegistrationStore(
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
             return false;
         }
+        if (replayCapability is not null)
+        {
+            var reasonCode = await VerifyReplayArtifactAsync(
+                context,
+                sourceRevision,
+                artifact,
+                cancellationToken).ConfigureAwait(false);
+            if (reasonCode is not null)
+            {
+                durableActivity.State = (int)SourceActivityState.DeferredPolicy;
+                durableActivity.Reason = reasonCode;
+                durableActivity.UpdatedAtUtc = timeProvider.GetUtcNow();
+                OperatorEventAppender.Add(context, new OperatorEventDraft(
+                    "activity.retained_artifact_blocked",
+                    "activity",
+                    "warning",
+                    "source-reconciliation",
+                    timeProvider.GetUtcNow(),
+                    SourceRootId: sourceRevision.SourceRootId,
+                    SourceRevisionId: sourceRevision.Id,
+                    SourceActivityId: durableActivity.Id,
+                    CorrelationId: $"source:{sourceRevision.Id:N}",
+                    Details: new { reasonCode }));
+                await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+                await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+                return false;
+            }
+        }
+
+        var linkedRecords = await context.PipelineRecords
+            .FromSqlInterpolated($"SELECT * FROM [PipelineRecords] WITH (UPDLOCK, HOLDLOCK, INDEX([IX_PipelineRecords_SourceRevisionId])) WHERE [SourceRevisionId] = {sourceRevision.Id}")
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
         var existingRecord = linkedRecords.SingleOrDefault()
             ?? await context.PipelineRecords.SingleOrDefaultAsync(record => record.SourceRevisionId == sourceRevision.Id, cancellationToken)
             .ConfigureAwait(false);
@@ -240,6 +289,11 @@ public sealed class SqlRetainedTextRegistrationStore(
         durableActivity.ResultingPipelineRecordId = recordId;
         durableActivity.ResultingPipelineRecordRevision = revision;
         durableActivity.UpdatedAtUtc = now;
+        if (deferredCapability is not null)
+        {
+            deferredCapability.ClaimedAtUtc = now;
+            deferredCapability.ClaimedProcessorVersion = replayCapability!.ProcessorVersion;
+        }
         var jobId = Guid.NewGuid();
         context.Jobs.Add(new JobEntity
         {
@@ -317,8 +371,20 @@ public sealed class SqlRetainedTextRegistrationStore(
         var query = from activity in context.SourceActivities.AsNoTracking()
             join revision in context.SourceRevisions.AsNoTracking() on activity.SourceRevisionId equals revision.Id
             join artifact in context.SourceArtifacts.AsNoTracking() on revision.Id equals artifact.SourceRevisionId
+            join deferred in context.DeferredCapabilities.AsNoTracking() on new
+            {
+                SourceRevisionId = activity.SourceRevisionId,
+                ArtifactFingerprint = activity.InputFingerprint,
+                RequiredCapability = activity.RequiredCapability!
+            } equals new
+            {
+                deferred.SourceRevisionId,
+                deferred.ArtifactFingerprint,
+                deferred.RequiredCapability
+            }
             where activity.State == (int)SourceActivityState.DeferredUnsupported &&
                 activity.ExecutionClass == (int)ExecutionClass.DeferredCapability &&
+                revision.Classification == AcceptedUtf8Classification &&
                 activity.RequiredCapability == capability.ProcessorKind &&
                 activity.ProcessorVersion == capability.ProcessorVersion &&
                 activity.ResultingPipelineRecordId == null &&
@@ -355,6 +421,52 @@ public sealed class SqlRetainedTextRegistrationStore(
 
     private static string CreateRetainedSourceKey(SourceRevisionEntity revision) =>
         $"retained:{revision.SourceRootId:N}:{Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(revision.StableSourceIdentity)))}";
+
+    private async Task<string?> VerifyReplayArtifactAsync(
+        FluxKnowledgeDbContext context,
+        SourceRevisionEntity sourceRevision,
+        SourceArtifactEntity artifact,
+        CancellationToken cancellationToken)
+    {
+        var outlookSpoolRoot = await context.OutlookCaptureProfiles.AsNoTracking()
+            .Where(profile => profile.SourceRootId == sourceRevision.SourceRootId)
+            .Select(profile => profile.SpoolRoot)
+            .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+        var artifactRoot = outlookSpoolRoot ?? _retainedArtifactRoot;
+        if (artifactRoot is null)
+        {
+            return "retained-artifact-root-unavailable";
+        }
+
+        try
+        {
+            var verified = await ContainedFileReader.ReadAsync(
+                artifactRoot,
+                artifact.StoreRelativePath,
+                16L * 1024 * 1024,
+                cancellationToken,
+                sourceRevision.ContentSha256,
+                sourceRevision.ByteLength).ConfigureAwait(false);
+            _ = new UTF8Encoding(false, true).GetString(verified.Bytes);
+            return null;
+        }
+        catch (Exception exception) when (exception is FileNotFoundException or DirectoryNotFoundException)
+        {
+            return "retained-artifact-missing";
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return "retained-artifact-path-invalid";
+        }
+        catch (IOException)
+        {
+            return "retained-artifact-path-invalid";
+        }
+        catch (Exception exception) when (exception is InvalidDataException or DecoderFallbackException)
+        {
+            return "retained-artifact-checksum-invalid";
+        }
+    }
 }
 
 /// <summary>Reads only the source artifact bound to an immutable revision and verifies it before decoding.</summary>
@@ -376,6 +488,7 @@ public sealed class SqlRetainedSourceReader(
             where revision.Id == sourceRevisionId.Value
             select new
             {
+                revision.SourceRootId,
                 revision.CanonicalPath,
                 revision.ContentSha256,
                 artifact.StoreRelativePath,
@@ -393,63 +506,101 @@ public sealed class SqlRetainedSourceReader(
             throw new InvalidDataException("The retained artifact checksum does not match its source revision.");
         }
 
-        var artifactPath = ResolveArtifactPath(source.StoreRelativePath, source.ContentSha256);
-        if (source.ByteLength < 0 || source.ByteLength > MaximumAcceptedTextBytes)
+        var outlookSpoolRoot = await context.OutlookCaptureProfiles
+            .AsNoTracking()
+            .Where(profile => profile.SourceRootId == source.SourceRootId)
+            .Select(profile => profile.SpoolRoot)
+            .SingleOrDefaultAsync(cancellationToken)
+            .ConfigureAwait(false);
+        var selectedArtifactRoot = _artifactRoot;
+        PhysicalDirectoryLease? privateRootLease = null;
+        if (outlookSpoolRoot is not null)
         {
-            throw new InvalidDataException("The retained artifact exceeds the accepted UTF-8 text limit.");
-        }
-        var bytes = new byte[checked((int)source.ByteLength)];
-        using var sha256Lease = OpenContainedLease(Path.Combine(_artifactRoot, "sha256"));
-        using var shardLease = OpenContainedLease(Path.GetDirectoryName(artifactPath)!);
-        using var artifactHandle = PhysicalFileIdentity.OpenReadNoFollow(artifactPath);
-        var finalArtifactPath = PhysicalFileIdentity.GetFinalPath(artifactHandle);
-        var finalShardPath = Path.GetDirectoryName(finalArtifactPath)
-            ?? throw new InvalidDataException("The retained artifact final path has no shard directory.");
-        PhysicalFileIdentity.EnsureNoReparsePointTraversal(finalShardPath);
-        var finalShard = PhysicalFileIdentity.GetDirectory(finalShardPath);
-        if (!IsWithin(shardLease.Identity.CanonicalPath, finalArtifactPath) ||
-            !string.Equals(finalShard.IdentityFingerprint, shardLease.Identity.IdentityFingerprint, StringComparison.Ordinal))
-        {
-            throw new InvalidDataException("The retained artifact final file does not belong to its leased shard.");
-        }
-        await using var stream = new FileStream(artifactHandle, FileAccess.Read, bufferSize: 81920, isAsync: true);
-        if (stream.Length != source.ByteLength)
-        {
-            throw new InvalidDataException("The retained artifact has an unexpected byte length.");
-        }
-        var offset = 0;
-        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-        while (offset < bytes.Length)
-        {
-            var read = await stream.ReadAsync(bytes.AsMemory(offset), cancellationToken).ConfigureAwait(false);
-            if (read == 0) throw new InvalidDataException("The retained artifact ended before its recorded length.");
-            hash.AppendData(bytes, offset, read);
-            offset += read;
-        }
-        if (stream.ReadByte() != -1 || !string.Equals(Convert.ToHexStringLower(hash.GetHashAndReset()), source.ContentSha256, StringComparison.Ordinal))
-        {
-            throw new InvalidDataException("The retained artifact checksum is invalid.");
+            if (string.IsNullOrWhiteSpace(outlookSpoolRoot))
+            {
+                throw new InvalidDataException("The retained Outlook artifact root is invalid.");
+            }
+
+            selectedArtifactRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(outlookSpoolRoot));
+            PhysicalFileIdentity.EnsureNoReparsePointTraversal(selectedArtifactRoot);
+            privateRootLease = PhysicalFileIdentity.OpenDirectoryLease(selectedArtifactRoot);
         }
 
-        try
+        using (privateRootLease)
         {
-            var payload = bytes.AsSpan();
-            if (payload.StartsWith(new byte[] { 0xef, 0xbb, 0xbf }))
+            var selectedRootLease = privateRootLease ?? _rootLease;
+            var artifactPath = ResolveArtifactPath(
+                source.StoreRelativePath,
+                source.ContentSha256,
+                selectedArtifactRoot,
+                selectedRootLease);
+            if (source.ByteLength < 0 || source.ByteLength > MaximumAcceptedTextBytes)
             {
-                payload = payload[3..];
+                throw new InvalidDataException("The retained artifact exceeds the accepted UTF-8 text limit.");
             }
-            var text = new UTF8Encoding(false, true).GetString(payload);
-            return new Utf8FileSource(source.CanonicalPath, bytes, text, source.ContentSha256);
-        }
-        catch (DecoderFallbackException exception)
-        {
-            throw new InvalidDataException("The retained artifact is not valid UTF-8.", exception);
+            var bytes = new byte[checked((int)source.ByteLength)];
+            using var sha256Lease = OpenContainedLease(
+                Path.Combine(selectedArtifactRoot, "sha256"),
+                selectedArtifactRoot,
+                selectedRootLease);
+            using var shardLease = OpenContainedLease(
+                Path.GetDirectoryName(artifactPath)!,
+                selectedArtifactRoot,
+                selectedRootLease);
+            using var artifactHandle = PhysicalFileIdentity.OpenReadNoFollow(artifactPath);
+            var finalArtifactPath = PhysicalFileIdentity.GetFinalPath(artifactHandle);
+            var finalShardPath = Path.GetDirectoryName(finalArtifactPath)
+                ?? throw new InvalidDataException("The retained artifact final path has no shard directory.");
+            PhysicalFileIdentity.EnsureNoReparsePointTraversal(finalShardPath);
+            var finalShard = PhysicalFileIdentity.GetDirectory(finalShardPath);
+            if (!IsWithin(shardLease.Identity.CanonicalPath, finalArtifactPath) ||
+                !string.Equals(finalShard.IdentityFingerprint, shardLease.Identity.IdentityFingerprint, StringComparison.Ordinal))
+            {
+                throw new InvalidDataException("The retained artifact final file does not belong to its leased shard.");
+            }
+            await using var stream = new FileStream(artifactHandle, FileAccess.Read, bufferSize: 81920, isAsync: true);
+            if (stream.Length != source.ByteLength)
+            {
+                throw new InvalidDataException("The retained artifact has an unexpected byte length.");
+            }
+            var offset = 0;
+            using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+            while (offset < bytes.Length)
+            {
+                var read = await stream.ReadAsync(bytes.AsMemory(offset), cancellationToken).ConfigureAwait(false);
+                if (read == 0) throw new InvalidDataException("The retained artifact ended before its recorded length.");
+                hash.AppendData(bytes, offset, read);
+                offset += read;
+            }
+            if (stream.ReadByte() != -1 || !string.Equals(Convert.ToHexStringLower(hash.GetHashAndReset()), source.ContentSha256, StringComparison.Ordinal))
+            {
+                throw new InvalidDataException("The retained artifact checksum is invalid.");
+            }
+
+            try
+            {
+                var payload = bytes.AsSpan();
+                if (payload.StartsWith(new byte[] { 0xef, 0xbb, 0xbf }))
+                {
+                    payload = payload[3..];
+                }
+                var text = new UTF8Encoding(false, true).GetString(payload);
+                return new Utf8FileSource(source.CanonicalPath, bytes, text, source.ContentSha256);
+            }
+            catch (DecoderFallbackException exception)
+            {
+                throw new InvalidDataException("The retained artifact is not valid UTF-8.", exception);
+            }
         }
     }
 
-    private string ResolveArtifactPath(string storedRelativePath, string contentSha256)
+    private static string ResolveArtifactPath(
+        string storedRelativePath,
+        string contentSha256,
+        string artifactRoot,
+        PhysicalDirectoryLease rootLease)
     {
-        EnsureRootCurrent();
+        EnsureRootCurrent(artifactRoot, rootLease);
         var expectedRelativePath = Path.Combine("sha256", contentSha256[..2], $"{contentSha256}.bin");
         if (string.IsNullOrWhiteSpace(storedRelativePath) || Path.IsPathRooted(storedRelativePath) ||
             !string.Equals(storedRelativePath, expectedRelativePath, StringComparison.OrdinalIgnoreCase))
@@ -457,28 +608,31 @@ public sealed class SqlRetainedSourceReader(
             throw new InvalidDataException("The retained artifact path is invalid.");
         }
 
-        return Path.Combine(_artifactRoot, expectedRelativePath);
+        return Path.Combine(artifactRoot, expectedRelativePath);
     }
 
-    private PhysicalDirectoryLease OpenContainedLease(string path)
+    private static PhysicalDirectoryLease OpenContainedLease(
+        string path,
+        string artifactRoot,
+        PhysicalDirectoryLease rootLease)
     {
         PhysicalFileIdentity.EnsureNoReparsePointTraversal(path);
         var lease = PhysicalFileIdentity.OpenDirectoryLease(path);
-        if (!IsWithin(_rootLease.Identity.CanonicalPath, lease.Identity.CanonicalPath))
+        if (!IsWithin(rootLease.Identity.CanonicalPath, lease.Identity.CanonicalPath))
         {
             lease.Dispose();
             throw new InvalidDataException("The retained artifact path escapes the configured store.");
         }
-        EnsureRootCurrent();
+        EnsureRootCurrent(artifactRoot, rootLease);
         return lease;
     }
 
-    private void EnsureRootCurrent()
+    private static void EnsureRootCurrent(string artifactRoot, PhysicalDirectoryLease rootLease)
     {
-        PhysicalFileIdentity.EnsureNoReparsePointTraversal(_artifactRoot);
-        var current = PhysicalFileIdentity.GetDirectory(_artifactRoot);
-        if (!string.Equals(current.CanonicalPath, _rootLease.Identity.CanonicalPath, StringComparison.OrdinalIgnoreCase) ||
-            !string.Equals(current.IdentityFingerprint, _rootLease.Identity.IdentityFingerprint, StringComparison.Ordinal))
+        PhysicalFileIdentity.EnsureNoReparsePointTraversal(artifactRoot);
+        var current = PhysicalFileIdentity.GetDirectory(artifactRoot);
+        if (!string.Equals(current.CanonicalPath, rootLease.Identity.CanonicalPath, StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(current.IdentityFingerprint, rootLease.Identity.IdentityFingerprint, StringComparison.Ordinal))
         {
             throw new IOException("The retained artifact root changed after reader registration.");
         }

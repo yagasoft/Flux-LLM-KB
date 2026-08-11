@@ -12,8 +12,10 @@ using FluxKnowledge.Infrastructure.SqlServer.Persistence;
 using FluxKnowledge.Infrastructure.SqlServer.Workers;
 using FluxKnowledge.Infrastructure.Usearch;
 using FluxKnowledge.Integrations.Files;
+using FluxKnowledge.Integrations.Outlook;
 using FluxKnowledge.Web.Components.Status;
 using FluxKnowledge.Web.Components.Sources;
+using FluxKnowledge.Web.Components.Outlook;
 using Microsoft.EntityFrameworkCore;
 
 namespace FluxKnowledge.Web;
@@ -38,6 +40,7 @@ public static class WebHostComposition
         _ = LocalIngressOptionsValidator.ValidateAndCanonicalise(ingressOptions);
 
         services.AddFluxKnowledgeSqlServer(configuration);
+        services.AddHttpContextAccessor();
         services.AddFluxKnowledgeUsearch(configuration);
         var sqlDataRoot = Path.GetDirectoryName(SqlServerOptions.ProductionDataFilePath)!;
         var sqlLogRoot = Path.GetDirectoryName(SqlServerOptions.ProductionLogFilePath)!;
@@ -109,6 +112,25 @@ public static class WebHostComposition
             provider.GetRequiredService<ISourceRootProjectionReader>(),
             provider.GetService<IDeferredContentReprocessor>(),
             provider.GetRequiredService<IOperatorEventProjectionReader>()));
+        services.AddScoped<SqlOutlookCaptureStore>();
+        services.AddScoped<IOutlookCaptureStore>(provider => provider.GetRequiredService<SqlOutlookCaptureStore>());
+        services.AddScoped<IOutlookCaptureRecoveryStore>(provider => provider.GetRequiredService<SqlOutlookCaptureStore>());
+        var outlookRecoveryOptions = ReadOutlookRecoveryOptions(configuration);
+        services.AddSingleton(outlookRecoveryOptions);
+        if (outlookRecoveryOptions.Enabled)
+        {
+            services.AddSingleton<IHostedService, OutlookCaptureRecoveryService>();
+        }
+        services.AddSingleton(new OutlookSpoolPolicyOptions(
+            ReadRoots(configuration, "Outlook:AllowedSpoolRoots").ToArray(),
+            ReadPositiveLong(configuration["Outlook:MinimumSpoolAvailableBytes"], OutlookSpoolPolicyOptions.DefaultMinimumAvailableBytes)));
+        services.AddSingleton<LocalOutlookSpoolValidator>();
+        services.AddSingleton<IOutlookSpoolValidator>(provider => provider.GetRequiredService<LocalOutlookSpoolValidator>());
+        services.AddSingleton<IOutlookSpoolHealthReader>(provider => provider.GetRequiredService<LocalOutlookSpoolValidator>());
+        services.AddScoped<IOutlookOperatorPolicy, LocalOutlookOperatorPolicy>();
+        services.AddScoped<LocalOutlookConnectionContext>();
+        services.AddScoped<IOutlookProjectionReader, SqlOutlookProjectionReader>();
+        services.AddScoped<OutlookPageState>();
         services.AddFluxKnowledgeGpuScheduler();
         services.AddScoped<IProjectionReader, SqlProjectionReader>();
         services.AddScoped<ICorpusProjectionReader, SqlCorpusProjectionReader>();
@@ -135,4 +157,68 @@ public static class WebHostComposition
             .Select(child => child.Value)
             .Where(static value => !string.IsNullOrWhiteSpace(value))
             .Select(static value => value!);
+
+    private static long ReadPositiveLong(string? configured, long defaultValue) =>
+        long.TryParse(configured, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var value) && value > 0
+            ? value
+            : defaultValue;
+
+    internal static OutlookCaptureRecoveryOptions ReadOutlookRecoveryOptions(IConfiguration configuration)
+    {
+        var section = OutlookCaptureRecoveryOptions.ConfigurationSectionName;
+        var configuredEnabled = configuration[$"{section}:Enabled"];
+        if (configuredEnabled is not null && !bool.TryParse(configuredEnabled, out _))
+        {
+            throw new InvalidOperationException($"{section}:Enabled must be true or false.");
+        }
+
+        var options = new OutlookCaptureRecoveryOptions
+        {
+            Enabled = bool.TryParse(configuredEnabled, out var enabled) && enabled,
+            HintDebounce = TimeSpan.FromSeconds(ReadBoundedSeconds(
+                configuration[$"{section}:HintDebounceSeconds"],
+                $"{section}:HintDebounceSeconds",
+                5,
+                1,
+                60)),
+            RecoveryCadence = TimeSpan.FromSeconds(ReadBoundedSeconds(
+                configuration[$"{section}:RecoveryCadenceSeconds"],
+                $"{section}:RecoveryCadenceSeconds",
+                60,
+                30,
+                900)),
+            StaleLeaseAge = TimeSpan.FromSeconds(ReadBoundedSeconds(
+                configuration[$"{section}:StaleLeaseSeconds"],
+                $"{section}:StaleLeaseSeconds",
+                600,
+                60,
+                3600))
+        };
+        options.Validate();
+        return options;
+    }
+
+    private static int ReadBoundedSeconds(
+        string? configured,
+        string configurationKey,
+        int defaultValue,
+        int minimum,
+        int maximum)
+    {
+        if (configured is null)
+        {
+            return defaultValue;
+        }
+        if (!int.TryParse(
+                configured,
+                System.Globalization.NumberStyles.None,
+                System.Globalization.CultureInfo.InvariantCulture,
+                out var value) || value < minimum || value > maximum)
+        {
+            throw new InvalidOperationException(
+                $"{configurationKey} must be between {minimum} and {maximum} seconds.");
+        }
+
+        return value;
+    }
 }

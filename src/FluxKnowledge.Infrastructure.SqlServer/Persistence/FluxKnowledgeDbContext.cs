@@ -37,6 +37,14 @@ public sealed class FluxKnowledgeDbContext(DbContextOptions<FluxKnowledgeDbConte
     public DbSet<SourceArtifactEntity> SourceArtifacts => Set<SourceArtifactEntity>();
     public DbSet<SourceActivityEntity> SourceActivities => Set<SourceActivityEntity>();
     public DbSet<SourceCapabilityEntity> SourceCapabilities => Set<SourceCapabilityEntity>();
+    public DbSet<OutlookCaptureProfileEntity> OutlookCaptureProfiles => Set<OutlookCaptureProfileEntity>();
+    public DbSet<OutlookCaptureFolderEntity> OutlookCaptureFolders => Set<OutlookCaptureFolderEntity>();
+    public DbSet<OutlookCaptureOperationEntity> OutlookCaptureOperations => Set<OutlookCaptureOperationEntity>();
+    public DbSet<OutlookCaptureExportEntity> OutlookCaptureExports => Set<OutlookCaptureExportEntity>();
+    public DbSet<OutlookBrowseRequestEntity> OutlookBrowseRequests => Set<OutlookBrowseRequestEntity>();
+    public DbSet<OutlookBrowseResultEntity> OutlookBrowseResults => Set<OutlookBrowseResultEntity>();
+    public DbSet<OutlookCatchUpEntity> OutlookCatchUps => Set<OutlookCatchUpEntity>();
+    public DbSet<DeferredCapabilityEntity> DeferredCapabilities => Set<DeferredCapabilityEntity>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {

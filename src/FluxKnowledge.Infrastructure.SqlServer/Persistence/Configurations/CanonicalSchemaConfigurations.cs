@@ -34,6 +34,129 @@ internal static class SchemaConfiguration
         property.Metadata.SetAfterSaveBehavior(PropertySaveBehavior.Throw);
 }
 
+public sealed class OutlookCaptureProfileConfiguration : IEntityTypeConfiguration<OutlookCaptureProfileEntity>
+{
+    public void Configure(EntityTypeBuilder<OutlookCaptureProfileEntity> builder)
+    {
+        builder.ToTable("OutlookCaptureProfiles"); builder.HasKey(x => x.Id); builder.Property(x => x.Id).ValueGeneratedNever();
+        builder.Property(x => x.DisplayName).HasMaxLength(256).IsRequired();
+        builder.Property(x => x.SpoolRoot).HasMaxLength(2048).IsRequired().UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(x => x.CreatedAtUtc).HasColumnType("datetimeoffset(7)"); builder.Property(x => x.UpdatedAtUtc).HasColumnType("datetimeoffset(7)");
+        SchemaConfiguration.ConfigureImmutableAfterInsert(builder.Property(x => x.SourceRootId));
+        SchemaConfiguration.ConfigureRowVersion(builder.Property(x => x.RowVersion));
+        builder.HasIndex(x => x.SourceRootId).IsUnique();
+        builder.HasOne<SourceRootConfigurationEntity>().WithMany().HasForeignKey(x => x.SourceRootId).OnDelete(DeleteBehavior.Restrict);
+    }
+}
+
+public sealed class OutlookCaptureFolderConfiguration : IEntityTypeConfiguration<OutlookCaptureFolderEntity>
+{
+    public void Configure(EntityTypeBuilder<OutlookCaptureFolderEntity> builder)
+    {
+        builder.ToTable("OutlookCaptureFolders"); builder.HasKey(x => x.Id); builder.Property(x => x.Id).ValueGeneratedNever();
+        builder.Property(x => x.StoreId).HasColumnType("nvarchar(max)").IsRequired().UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(x => x.FolderEntryId).HasColumnType("nvarchar(max)").IsRequired().UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(x => x.CanonicalIdentityFingerprint).HasColumnType("char(64)").IsUnicode(false).IsFixedLength().HasMaxLength(64)
+            .HasComputedColumnSql("CONVERT(char(64), HASHBYTES('SHA2_256', CONCAT(CONVERT(nvarchar(20), DATALENGTH([StoreId])), N':', [StoreId], CONVERT(nvarchar(20), DATALENGTH([FolderEntryId])), N':', [FolderEntryId])), 2)", stored: true)
+            .UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(x => x.DisplayName).HasMaxLength(256).IsRequired(); builder.Property(x => x.CursorUtc).HasColumnType("datetimeoffset(7)");
+        builder.Property(x => x.CursorFingerprint).HasColumnType("char(64)").IsUnicode(false).IsFixedLength().HasMaxLength(64);
+        SchemaConfiguration.ConfigureRowVersion(builder.Property(x => x.RowVersion));
+        builder.HasIndex(x => new { x.ProfileId, x.CanonicalIdentityFingerprint }).IsUnique();
+        builder.HasOne<OutlookCaptureProfileEntity>().WithMany().HasForeignKey(x => x.ProfileId).OnDelete(DeleteBehavior.Restrict);
+    }
+}
+
+public sealed class OutlookCaptureOperationConfiguration : IEntityTypeConfiguration<OutlookCaptureOperationEntity>
+{
+    public void Configure(EntityTypeBuilder<OutlookCaptureOperationEntity> builder)
+    {
+        builder.ToTable("OutlookCaptureOperations"); builder.HasKey(x => x.Id); builder.Property(x => x.Id).ValueGeneratedNever();
+        builder.Property(x => x.Kind).HasMaxLength(64).IsRequired(); builder.Property(x => x.RequestFingerprint).HasColumnType("char(64)").IsUnicode(false).IsFixedLength().HasMaxLength(64).IsRequired();
+        builder.Property(x => x.CompletedAtUtc).HasColumnType("datetimeoffset(7)"); builder.HasIndex(x => x.OperationId).IsUnique();
+    }
+}
+
+public sealed class OutlookCaptureExportConfiguration : IEntityTypeConfiguration<OutlookCaptureExportEntity>
+{
+    public void Configure(EntityTypeBuilder<OutlookCaptureExportEntity> builder)
+    {
+        builder.ToTable("OutlookCaptureExports", table => table.HasCheckConstraint(
+            "CK_OutlookCaptureExports_IdentityRequiredUnlessBlocked",
+            $"([State] = {(int)FluxKnowledge.Domain.Outlook.OutlookExportState.Blocked} AND [ProfileId] IS NULL AND [FolderId] IS NULL) OR " +
+            "([ProfileId] IS NOT NULL AND [FolderId] IS NOT NULL)"));
+        builder.HasKey(x => x.Id); builder.Property(x => x.Id).ValueGeneratedNever();
+        builder.Property(x => x.EntryId).HasColumnType("nvarchar(max)").IsRequired().UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(x => x.EntryIdFingerprint).HasColumnType("char(64)").IsUnicode(false).IsFixedLength().HasMaxLength(64)
+            .HasComputedColumnSql("CONVERT(char(64), HASHBYTES('SHA2_256', [EntryId]), 2)", stored: true)
+            .UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(x => x.SourceFingerprint).HasColumnType("char(64)").IsUnicode(false).IsFixedLength().HasMaxLength(64).IsRequired();
+        builder.Property(x => x.ManifestHash).HasColumnType("char(64)").IsUnicode(false).IsFixedLength().HasMaxLength(64);
+        builder.Property(x => x.RelativeSpoolPath).HasMaxLength(2048).UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(x => x.BlockedReasonCode).HasMaxLength(64).IsUnicode(false).UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        SchemaConfiguration.ConfigureRowVersion(builder.Property(x => x.RowVersion));
+        SchemaConfiguration.ConfigureImmutableAfterInsert(builder.Property(x => x.CatchUpId));
+        SchemaConfiguration.ConfigureImmutableAfterInsert(builder.Property(x => x.FencingToken));
+        builder.HasIndex(x => new { x.FolderId, x.EntryIdFingerprint })
+            .HasFilter($"[State] <> {(int)FluxKnowledge.Domain.Outlook.OutlookExportState.Blocked}")
+            .IsUnique();
+        builder.HasOne<OutlookCaptureProfileEntity>().WithMany().HasForeignKey(x => x.ProfileId).OnDelete(DeleteBehavior.Restrict);
+        builder.HasOne<OutlookCaptureFolderEntity>().WithMany().HasForeignKey(x => x.FolderId).OnDelete(DeleteBehavior.Restrict);
+        builder.HasOne<OutlookCatchUpEntity>().WithMany().HasForeignKey(x => x.CatchUpId).OnDelete(DeleteBehavior.Restrict);
+    }
+}
+
+public sealed class OutlookBrowseRequestConfiguration : IEntityTypeConfiguration<OutlookBrowseRequestEntity>
+{
+    public void Configure(EntityTypeBuilder<OutlookBrowseRequestEntity> builder)
+    {
+        builder.ToTable("OutlookBrowseRequests"); builder.HasKey(x => x.Id); builder.Property(x => x.Id).ValueGeneratedNever();
+        builder.Property(x => x.ExpiresAtUtc).HasColumnType("datetimeoffset(7)"); builder.Property(x => x.LeaseExpiresAtUtc).HasColumnType("datetimeoffset(7)");
+        builder.Property(x => x.LeaseOwner).HasMaxLength(768).UseCollation(SchemaConfiguration.SchedulerFenceCollation); SchemaConfiguration.ConfigureRowVersion(builder.Property(x => x.RowVersion));
+        builder.HasIndex(x => new { x.State, x.ExpiresAtUtc });
+        builder.HasOne<OutlookCaptureProfileEntity>().WithMany().HasForeignKey(x => x.ProfileId).OnDelete(DeleteBehavior.Restrict);
+    }
+}
+
+public sealed class OutlookBrowseResultConfiguration : IEntityTypeConfiguration<OutlookBrowseResultEntity>
+{
+    public void Configure(EntityTypeBuilder<OutlookBrowseResultEntity> builder)
+    {
+        builder.ToTable("OutlookBrowseResults"); builder.HasKey(x => x.Id); builder.Property(x => x.Id).ValueGeneratedNever(); builder.Property(x => x.DisplayName).HasMaxLength(256).IsRequired();
+        builder.HasIndex(x => new { x.BrowseRequestId, x.FolderId }).IsUnique();
+        builder.HasOne<OutlookBrowseRequestEntity>().WithMany().HasForeignKey(x => x.BrowseRequestId).OnDelete(DeleteBehavior.Restrict);
+        builder.HasOne<OutlookCaptureFolderEntity>().WithMany().HasForeignKey(x => x.FolderId).OnDelete(DeleteBehavior.Restrict);
+    }
+}
+
+public sealed class OutlookCatchUpConfiguration : IEntityTypeConfiguration<OutlookCatchUpEntity>
+{
+    public void Configure(EntityTypeBuilder<OutlookCatchUpEntity> builder)
+    {
+        builder.ToTable("OutlookCatchUps"); builder.HasKey(x => x.Id); builder.Property(x => x.Id).ValueGeneratedNever();
+        builder.Property(x => x.CoalescingKey).HasMaxLength(256).IsRequired().UseCollation(SchemaConfiguration.SchedulerFenceCollation); builder.Property(x => x.Reason).HasMaxLength(1024);
+        builder.Property(x => x.NotBeforeUtc).HasColumnType("datetimeoffset(7)"); builder.Property(x => x.LeaseExpiresAtUtc).HasColumnType("datetimeoffset(7)"); builder.Property(x => x.LastHeartbeatAtUtc).HasColumnType("datetimeoffset(7)");
+        builder.Property(x => x.LeaseOwner).HasMaxLength(768).UseCollation(SchemaConfiguration.SchedulerFenceCollation); SchemaConfiguration.ConfigureRowVersion(builder.Property(x => x.RowVersion));
+        builder.HasIndex(x => new { x.ProfileId, x.CoalescingKey }).HasFilter("[State] IN (0, 1)").IsUnique(); builder.HasIndex(x => new { x.State, x.NotBeforeUtc, x.LeaseExpiresAtUtc });
+        builder.HasOne<OutlookCaptureProfileEntity>().WithMany().HasForeignKey(x => x.ProfileId).OnDelete(DeleteBehavior.Restrict);
+    }
+}
+
+public sealed class DeferredCapabilityConfiguration : IEntityTypeConfiguration<DeferredCapabilityEntity>
+{
+    public void Configure(EntityTypeBuilder<DeferredCapabilityEntity> builder)
+    {
+        builder.ToTable("DeferredCapabilities"); builder.HasKey(x => x.Id); builder.Property(x => x.Id).ValueGeneratedNever();
+        builder.Property(x => x.ArtifactFingerprint).HasColumnType("char(64)").IsUnicode(false).IsFixedLength().HasMaxLength(64).IsRequired()
+            .UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(x => x.RequiredCapability).HasMaxLength(256).IsRequired().UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(x => x.Provenance).HasMaxLength(256).IsRequired().UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(x => x.ClaimedProcessorVersion).HasMaxLength(256).UseCollation(SchemaConfiguration.SchedulerFenceCollation); builder.Property(x => x.CreatedAtUtc).HasColumnType("datetimeoffset(7)"); builder.Property(x => x.ClaimedAtUtc).HasColumnType("datetimeoffset(7)"); SchemaConfiguration.ConfigureRowVersion(builder.Property(x => x.RowVersion));
+        builder.HasIndex(x => new { x.SourceRevisionId, x.ArtifactFingerprint, x.RequiredCapability }).IsUnique();
+        builder.HasOne<SourceRevisionEntity>().WithMany().HasForeignKey(x => x.SourceRevisionId).OnDelete(DeleteBehavior.Restrict);
+    }
+}
+
 public sealed class SourceIdentityConfiguration : IEntityTypeConfiguration<SourceIdentityEntity>
 {
     public void Configure(EntityTypeBuilder<SourceIdentityEntity> builder)

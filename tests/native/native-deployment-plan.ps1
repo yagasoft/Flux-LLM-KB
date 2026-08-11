@@ -9,8 +9,12 @@ if ([string]::IsNullOrWhiteSpace($SourceRoot)) {
 }
 $SourceRoot = (Resolve-Path -LiteralPath $SourceRoot).Path
 $deploymentScript = Join-Path $SourceRoot "scripts\deploy\update-native-windows.ps1"
+$outlookValidator = Join-Path $SourceRoot "scripts\deploy\validate-native-outlook-ingress.ps1"
 if (-not (Test-Path -LiteralPath $deploymentScript)) {
     throw "The native deployment script is missing."
+}
+if (-not (Test-Path -LiteralPath $outlookValidator)) {
+    throw "The native Outlook validator is missing."
 }
 
 $output = & powershell -NoProfile -ExecutionPolicy Bypass -File $deploymentScript -PlanOnly 2>&1 | Out-String
@@ -24,6 +28,9 @@ if ($plan.mode -ne "plan-only" -or -not $plan.loopback_only -or -not $plan.requi
 }
 if ($plan.required_site -ne "FluxKnowledge") {
     throw "The native deployment plan is not fixed to the FluxKnowledge IIS site."
+}
+if ($plan.outlook_host_activation -ne $false -or $plan.windows_service_registration -ne $false) {
+    throw "The native deployment plan may not activate the Outlook host or register a Windows Service."
 }
 
 $previousErrorActionPreference = $ErrorActionPreference
@@ -94,8 +101,53 @@ $nativeWorkerMigrationId = $nativeWorkerMigration[0].BaseName
 if ((@($plan.native_worker_supervision_migration_ids) -join "|") -ne $nativeWorkerMigrationId) {
     throw "The native deployment plan does not require the generated native-worker supervision migration."
 }
-if ($plan.deployment_migration_target -ne $nativeWorkerMigrationId) {
-    throw "The native deployment plan does not target the generated native-worker supervision migration."
+$expectedOutlookMigrations = @(
+    Get-ChildItem -LiteralPath $nativeWorkerMigrationDirectory -File -Filter "*.cs" |
+        Where-Object {
+            $_.BaseName -match '^\d{14}_[A-Za-z0-9]+$' -and
+            [string]::CompareOrdinal($_.BaseName, $nativeWorkerMigrationId) -gt 0
+        } |
+        Sort-Object BaseName |
+        Select-Object -ExpandProperty BaseName
+)
+if ($expectedOutlookMigrations.Count -eq 0 -or $expectedOutlookMigrations[0] -ne "20260811093501_AddNativeOutlookIngress") {
+    throw "The generated Outlook migration sequence does not start with AddNativeOutlookIngress."
+}
+if ((@($plan.native_outlook_ingress_migration_ids) -join "|") -ne ($expectedOutlookMigrations -join "|")) {
+    throw "The native deployment plan does not expose the complete generated Outlook migration sequence."
+}
+if ($plan.native_outlook_ingress_baseline_migration -ne $expectedOutlookMigrations[0]) {
+    throw "The native deployment plan does not identify AddNativeOutlookIngress as the Outlook baseline."
+}
+if ($plan.deployment_migration_target -ne $expectedOutlookMigrations[-1]) {
+    throw "The native deployment plan does not target the latest compiled-model Outlook migration."
+}
+if ($plan.post_deploy_validator -ne "validate-native-outlook-ingress.ps1") {
+    throw "The native deployment plan does not require the Outlook post-deploy validator."
+}
+
+$validatorOutput = & powershell -NoProfile -ExecutionPolicy Bypass -File $outlookValidator -PlanOnly 2>&1 | Out-String
+if ($LASTEXITCODE -ne 0) {
+    throw "The native Outlook validation plan failed: $validatorOutput"
+}
+$validatorPlan = $validatorOutput | ConvertFrom-Json
+if ($validatorPlan.mode -ne "plan-only" -or -not $validatorPlan.loopback_only -or
+    $validatorPlan.outlook_enabled -ne $false -or $validatorPlan.outlook_host_activation -ne $false -or
+    -not $validatorPlan.effective_configuration_projection -or $validatorPlan.configuration_projection_starts_host -ne $false) {
+    throw "The native Outlook validator lost its disabled loopback-only boundary."
+}
+$allowedRecordFields = @(
+    "started_at_utc", "completed_at_utc", "loopback_status_codes", "migration_ids",
+    "outlook_enabled", "aggregate_counts", "private_schema_policy"
+)
+if ((@($validatorPlan.validation_record_fields) -join "|") -ne ($allowedRecordFields -join "|")) {
+    throw "The native Outlook validator record is not restricted to the approved aggregate fields."
+}
+$privateTerms = @("folder_name", "spool", "store_id", "folder_entry_id", "entry_id", "content", "credential", "diagnostic")
+foreach ($term in $privateTerms) {
+    if ($term -in @($validatorPlan.validation_record_fields)) {
+        throw "The native Outlook validation plan exposes prohibited private field $term."
+    }
 }
 if (-not $plan.source_artifact_store_requires_app_pool_modify_access) {
     throw "The native deployment plan does not require writable and lease-safe retained source storage for the IIS application pool."

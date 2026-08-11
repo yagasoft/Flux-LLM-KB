@@ -2,6 +2,7 @@ using FluxKnowledge.Application.Contracts;
 using FluxKnowledge.Application.Indexing;
 using FluxKnowledge.Domain.Gpu;
 using FluxKnowledge.Domain.Jobs;
+using FluxKnowledge.Domain.Outlook;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
 using Microsoft.EntityFrameworkCore;
 using GpuSchedulerStore = FluxKnowledge.Application.Gpu.IGpuSchedulerStore;
@@ -83,6 +84,17 @@ public sealed class SqlProjectionReader(
                 select generation == null ? null : generation.Id.ToString("N"))
             .SingleOrDefaultAsync(cancellationToken)
             .ConfigureAwait(false) ?? "none";
+        var outlookProfileCount = await context.OutlookCaptureProfiles.AsNoTracking()
+            .CountAsync(profile => profile.State != (int)OutlookCaptureState.Stale, cancellationToken).ConfigureAwait(false);
+        var outlookEnabledProfileCount = await context.OutlookCaptureProfiles.AsNoTracking()
+            .CountAsync(profile => profile.IsEnabled, cancellationToken).ConfigureAwait(false);
+        var outlookFolderCount = await context.OutlookCaptureFolders.AsNoTracking()
+            .CountAsync(folder => folder.State != (int)OutlookCaptureState.Disabled, cancellationToken).ConfigureAwait(false);
+        var outlookExportCounts = await context.OutlookCaptureExports.AsNoTracking()
+            .GroupBy(export => export.State)
+            .Select(group => new { State = group.Key, Count = group.Count() })
+            .ToDictionaryAsync(row => row.State, row => row.Count, cancellationToken)
+            .ConfigureAwait(false);
 
         var recovery = recoveryStatus.Snapshot;
         var gpuSchedulerStatus = await ReadGpuSchedulerStatusAsync(cancellationToken)
@@ -110,10 +122,18 @@ public sealed class SqlProjectionReader(
                 sourceIndexed,
                 sourceDeferred,
                 sourceBlocked,
-                sourceFailed + latestSourceRequests.Sum(request => request.ErrorFileCount))
+                sourceFailed + latestSourceRequests.Sum(request => request.ErrorFileCount)),
+            OutlookCapture = new OutlookCaptureSummary(
+                outlookProfileCount,
+                outlookEnabledProfileCount,
+                outlookFolderCount,
+                OutlookCount(OutlookExportState.Ingested),
+                OutlookCount(OutlookExportState.Deferred),
+                OutlookCount(OutlookExportState.Blocked))
         };
 
         int GetCount(PublicJobState state) => jobCounts.GetValueOrDefault((int)state);
+        int OutlookCount(OutlookExportState state) => outlookExportCounts.GetValueOrDefault((int)state);
     }
 
     public async ValueTask<IReadOnlyList<PipelineRecordProjection>> ReadPipelineRecordsAsync(

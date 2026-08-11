@@ -1,0 +1,265 @@
+@page "/outlook"
+@attribute [Microsoft.AspNetCore.Authorization.Authorize]
+@implements IDisposable
+@using FluxKnowledge.Application.Contracts
+@using FluxKnowledge.Domain.Outlook
+@using FluxKnowledge.Web.Components.Outlook
+@inject OutlookPageState PageState
+
+<PageTitle>Outlook capture | Flux Knowledge</PageTitle>
+
+<section aria-labelledby="outlook-heading">
+    <h1 id="outlook-heading">Outlook capture</h1>
+    <p>Configure read-only classic Outlook capture for this computer. Saving or enabling a profile creates SQL control-plane work only; it never starts Outlook.</p>
+    <p role="status" aria-live="polite">@_status</p>
+
+    <p><button type="button" @onclick="NewProfile">Add profile</button></p>
+
+    @if (PageState.Projection.Profiles.Count == 0)
+    {
+        <p>No Outlook capture profiles are configured.</p>
+    }
+    else
+    {
+        @foreach (var profile in PageState.Projection.Profiles)
+        {
+            <article class="status-card" aria-labelledby="@($"outlook-profile-{profile.ProfileId:N}")">
+                <h2 id="@($"outlook-profile-{profile.ProfileId:N}")">@profile.DisplayName</h2>
+                <dl class="status-grid">
+                    <div><dt>Capture state</dt><dd>@profile.State</dd></div>
+                    <div><dt>Incremental basis</dt><dd>@FormatBasis(profile.IncrementalBasis)</dd></div>
+                    <div><dt>Schedule</dt><dd>Every @profile.Cadence.TotalMinutes.ToString("0") minutes</dd></div>
+                    <div><dt>Overlap</dt><dd>@profile.MaximumOverlap.TotalMinutes.ToString("0") minutes</dd></div>
+                    <div><dt>Spool</dt><dd>@profile.Spool.Status · @profile.Spool.Health · @profile.Spool.Capacity capacity</dd></div>
+                    <div><dt>Created</dt><dd>@profile.CreatedAtUtc.LocalDateTime</dd></div>
+                    <div><dt>Updated</dt><dd>@profile.UpdatedAtUtc.LocalDateTime</dd></div>
+                    <div><dt>Last successful catch-up</dt><dd>@(profile.LastSuccessfulCatchUpAtUtc?.LocalDateTime.ToString() ?? "Not completed")</dd></div>
+                </dl>
+                @foreach (var warning in profile.Warnings)
+                {
+                    <p role="alert">@warning</p>
+                }
+                @if (profile.Folders.Count == 0)
+                {
+                    <p>No selected folders are currently available.</p>
+                }
+                else
+                {
+                    <div class="table-scroll">
+                        <table>
+                            <caption>Selected Outlook folders</caption>
+                            <thead><tr><th>Folder</th><th>State</th><th>Cursor</th><th>Ingested</th><th>Deferred</th><th>Blocked</th></tr></thead>
+                            <tbody>
+                            @foreach (var folder in profile.Folders)
+                            {
+                                <tr>
+                                    <td>@folder.DisplayName</td><td>@folder.State</td>
+                                    <td>@(folder.CursorUtc?.LocalDateTime.ToString() ?? "Not captured")</td>
+                                    <td>@folder.IngestedCount</td><td>@folder.DeferredCount</td><td>@folder.BlockedCount</td>
+                                </tr>
+                            }
+                            </tbody>
+                        </table>
+                    </div>
+                }
+                <p>
+                    <button type="button" @onclick="() => EditProfile(profile)">Edit</button>
+                    <button type="button" @onclick="() => PauseAsync(profile.ProfileId)">Pause</button>
+                    <button type="button" @onclick="() => RemoveAsync(profile.ProfileId)">Remove</button>
+                    <button type="button" @onclick="() => CatchUpAsync(profile.ProfileId, false)">Catch up</button>
+                    @if (profile.IncrementalBasis == OutlookIncrementalBasis.ReceivedTime)
+                    {
+                        <button type="button" @onclick="() => CatchUpAsync(profile.ProfileId, true)">Reconcile moved messages</button>
+                    }
+                </p>
+            </article>
+        }
+    }
+
+    @if (_showForm)
+    {
+        <section class="source-form" aria-labelledby="outlook-form-heading">
+            <h2 id="outlook-form-heading">@(_editingProfileId is null ? "Add Outlook profile" : "Edit Outlook profile")</h2>
+            @if (_editingProfileId is not null)
+            {
+                <p>Select a server-configured spool when saving. Private paths are never returned through UI projections or the interactive circuit.</p>
+            }
+            <EditForm Model="_formModel" OnSubmit="SaveAsync" FormName="outlook-profile">
+                <AntiforgeryToken />
+                <label>Profile name <input @bind-value="_displayName" @bind-value:event="oninput" @bind-value:after="DraftChanged" /></label>
+                <label>Configured spool
+                    <select @bind="_spoolConfigurationKey" @bind:after="DraftChanged">
+                        <option value="">Select a configured spool</option>
+                        @foreach (var spool in PageState.SpoolChoices)
+                        {
+                            <option value="@spool.Key">@spool.DisplayName</option>
+                        }
+                    </select>
+                </label>
+                <label>Incremental basis
+                    <select @bind="_basis" @bind:after="DraftChanged">
+                        <option value="@OutlookIncrementalBasis.LastModificationTime">Last modification time</option>
+                        <option value="@OutlookIncrementalBasis.ReceivedTime">Received time</option>
+                    </select>
+                </label>
+                @if (_basis == OutlookIncrementalBasis.ReceivedTime)
+                {
+                    <p role="alert">Received-time capture may miss older moved messages; use manual reconciliation when needed.</p>
+                }
+                <label>Cadence (minutes) <input type="number" min="5" max="1440" @bind="_cadenceMinutes" @bind:after="DraftChanged" /></label>
+                <label>Overlap (minutes) <input type="number" min="0" max="240" @bind="_overlapMinutes" @bind:after="DraftChanged" /></label>
+                <label><input type="checkbox" @bind="_enable" @bind:after="DraftChanged" /> Enable for a later Outlook host claim</label>
+                @if (_editingProfileId is not null)
+                {
+                    <p>
+                        <button type="button" @onclick="BrowseAsync">Browse folders in Outlook</button>
+                        <button type="button" @onclick="RefreshBrowseAsync">Refresh browse result</button>
+                    </p>
+                    @if (PageState.BrowseFolders.Count > 0)
+                    {
+                        <p>Selected by the Outlook host: @string.Join(", ", PageState.BrowseFolders.Select(folder => folder.DisplayName))</p>
+                    }
+                }
+                <p><button type="submit">Save profile</button></p>
+            </EditForm>
+        </section>
+    }
+</section>
+
+@code {
+    private sealed class FormModel;
+    private readonly FormModel _formModel = new();
+    private CancellationTokenSource _stopping = new();
+    private bool _showForm;
+    private Guid? _editingProfileId;
+    private long _configurationRevision = 1;
+    private string _displayName = string.Empty;
+    private string _spoolConfigurationKey = string.Empty;
+    private OutlookIncrementalBasis _basis = OutlookIncrementalBasis.LastModificationTime;
+    private int _cadenceMinutes = 15;
+    private int _overlapMinutes = 2;
+    private bool _enable;
+    private string _status = "Loading Outlook capture status from SQL…";
+
+    protected override async Task OnInitializedAsync()
+    {
+        await PageState.ReloadAsync(_stopping.Token);
+        _status = "Outlook capture status loaded from SQL.";
+    }
+
+    private void NewProfile()
+    {
+        _showForm = true;
+        _editingProfileId = null;
+        _configurationRevision = 1;
+        _displayName = string.Empty;
+        _spoolConfigurationKey = PageState.SpoolChoices.FirstOrDefault()?.Key ?? string.Empty;
+        _basis = OutlookIncrementalBasis.LastModificationTime;
+        _cadenceMinutes = 15;
+        _overlapMinutes = 2;
+        _enable = false;
+        PageState.InvalidateBrowse();
+    }
+
+    private void EditProfile(OutlookProfileStatusProjection profile)
+    {
+        _showForm = true;
+        _editingProfileId = profile.ProfileId;
+        _configurationRevision = profile.ConfigurationRevision;
+        _displayName = profile.DisplayName;
+        _spoolConfigurationKey = profile.Spool.ConfigurationKey ?? string.Empty;
+        _basis = profile.IncrementalBasis;
+        _cadenceMinutes = checked((int)profile.Cadence.TotalMinutes);
+        _overlapMinutes = checked((int)profile.MaximumOverlap.TotalMinutes);
+        _enable = profile.State != OutlookCaptureState.Disabled.ToString();
+        PageState.InvalidateBrowse();
+    }
+
+    private void DraftChanged()
+    {
+        PageState.InvalidateBrowse();
+        _status = "Configuration changed. Browse again before enabling and saving this profile.";
+    }
+
+    private async Task SaveAsync(EditContext _)
+    {
+        await RunMutationAsync(async () =>
+        {
+            await PageState.SaveAsync(BuildDraft(), _stopping.Token);
+            _status = _editingProfileId is null
+                ? "Profile saved disabled. Edit it to browse folders before enabling."
+                : "Profile configuration committed to SQL.";
+            _showForm = false;
+        });
+    }
+
+    private async Task BrowseAsync() => await RunMutationAsync(async () =>
+    {
+        await PageState.RequestBrowseAsync(BuildDraft(), _stopping.Token);
+        _status = "Folder browse requested. Run the local Outlook host, then refresh the result.";
+    });
+
+    private async Task RefreshBrowseAsync() => await RunMutationAsync(async () =>
+    {
+        var folders = await PageState.RefreshBrowseResultAsync(BuildDraft(), _stopping.Token);
+        _status = folders.Count == 0 ? "The Outlook host has not completed this browse request." : "Current folder selection loaded from SQL.";
+    });
+
+    private async Task PauseAsync(Guid profileId) => await RunMutationAsync(async () =>
+    {
+        await PageState.PauseAsync(new OutlookCaptureProfileId(profileId), _stopping.Token);
+        _status = "Profile paused in SQL. No new host claim is eligible.";
+    });
+
+    private async Task RemoveAsync(Guid profileId) => await RunMutationAsync(async () =>
+    {
+        await PageState.RemoveAsync(new OutlookCaptureProfileId(profileId), _stopping.Token);
+        _status = "Profile removed from active capture configuration.";
+    });
+
+    private async Task CatchUpAsync(Guid profileId, bool reconciliation) => await RunMutationAsync(async () =>
+    {
+        var receipt = await PageState.RequestCatchUpAsync(new OutlookCaptureProfileId(profileId), reconciliation, _stopping.Token);
+        _status = receipt.Accepted
+            ? "Durable catch-up work recorded for a later Outlook host claim."
+            : "Catch-up was not accepted because the profile is disabled.";
+    });
+
+    private async Task RunMutationAsync(Func<Task> mutation)
+    {
+        try
+        {
+            await mutation();
+        }
+        catch (OperationCanceledException) when (_stopping.IsCancellationRequested)
+        {
+            _status = "Outlook operation cancelled.";
+        }
+        catch (Exception exception)
+        {
+            _status = OutlookPageState.ToSafeOperatorMessage(exception);
+        }
+    }
+
+    private OutlookProfileDraft BuildDraft() => new(
+        _editingProfileId is { } id ? new OutlookCaptureProfileId(id) : null,
+        _displayName,
+        _spoolConfigurationKey,
+        _basis,
+        new OutlookCaptureSchedule(TimeSpan.FromMinutes(_cadenceMinutes), TimeSpan.FromMinutes(_overlapMinutes)),
+        _enable,
+        _configurationRevision);
+
+    private static string FormatBasis(OutlookIncrementalBasis basis) => basis switch
+    {
+        OutlookIncrementalBasis.LastModificationTime => "Last modification time",
+        OutlookIncrementalBasis.ReceivedTime => "Received time",
+        _ => "Unknown"
+    };
+
+    public void Dispose()
+    {
+        _stopping.Cancel();
+        _stopping.Dispose();
+    }
+}

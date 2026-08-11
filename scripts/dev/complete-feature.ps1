@@ -149,7 +149,8 @@ function Invoke-FeatureStep {
         [string]$Command,
         [string]$Cwd,
         [int]$TimeoutSeconds = 0,
-        [string]$FailureHint = ""
+        [string]$FailureHint = "",
+        [switch]$RunInDryRun
     )
 
     $logPath = New-StepLogPath -Name $Name
@@ -163,11 +164,11 @@ function Invoke-FeatureStep {
         duration_seconds = $null
         exit_code = 0
         log_path = $logPath
-        skipped = [bool]$DryRun
+        skipped = [bool]($DryRun -and -not $RunInDryRun)
     }
     $script:Steps += $record
 
-    if ($DryRun) {
+    if ($DryRun -and -not $RunInDryRun) {
         "DRY RUN: $Command" | Out-File -FilePath $logPath -Encoding utf8
         Complete-FeatureStepRecord -Record $record -StartedAt $startedAt
         return
@@ -330,15 +331,23 @@ if (-not $DryRun -and [string]::IsNullOrWhiteSpace($env:FLUXKNOWLEDGE_TEST_SQL_C
     throw "Native closeout requires FLUXKNOWLEDGE_TEST_SQL_CONNECTION for the disposable SQL integration suite."
 }
 
+$gmailGuardScript = Join-Path $PSScriptRoot "assert-legacy-gmail-unchanged.ps1"
+if (-not (Test-Path -LiteralPath $gmailGuardScript -PathType Leaf)) {
+    throw "The legacy Gmail preservation guard is missing."
+}
 $script:LogRoot = Join-Path $MainRoot ".agents\run-logs"
 New-Item -ItemType Directory -Force -Path $script:LogRoot | Out-Null
 $script:Steps = @()
 $script:FailedStep = $null
+$safeGmailGuardScript = $gmailGuardScript.Replace("'", "''")
 $safeCommitMessage = $CommitMessage.Replace("'", "''")
 $safeBranch = $Branch.Replace("'", "''")
+$gmailRegressionCommand = 'python -m pytest -q tests\test_mail_ingestion.py tests\test_mail_oauth.py tests\test_mail_post_process.py tests\test_mail_scheduler.py tests\test_mail_cli_rest.py tests\test_background_jobs.py; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; python -m pytest -q tests\test_worker.py -k imap'
 $nativeDeployCommand = ".\scripts\deploy\update-native-windows.ps1 -SiteName '$SiteName' -SiteUrl '$SiteUrl' -DeployRoot '$DeployRoot' -BackupRoot '$BackupRoot'"
 $nativeWorkerValidationRecord = "docs\operations\native-windows-phase-2-native-worker-supervision-validation.md"
 $nativeWorkerValidationCommand = ".\scripts\deploy\validate-native-worker-supervision.ps1 -SiteUrl '$SiteUrl' -DeployRoot '$DeployRoot' -ExpectedMigrationId '20260810185641_AddNativeWorkerSupervision' -ValidationRecordPath '$nativeWorkerValidationRecord'"
+$nativeOutlookValidationRecord = "docs\operations\native-windows-phase-4-outlook-ingress-validation.md"
+$nativeOutlookValidationCommand = ".\scripts\deploy\validate-native-outlook-ingress.ps1 -SiteUrl '$SiteUrl' -DeployRoot '$DeployRoot' -ExpectedMigrationId '20260811152249_AllowIdentitylessBlockedOutlookExports' -BaselineMigrationId '20260811093501_AddNativeOutlookIngress' -ValidationRecordPath '$nativeOutlookValidationRecord'"
 if ($ApplyMigrations) {
     $nativeDeployCommand += " -ApplyMigrations -ConfirmApplyMigrations"
 }
@@ -351,6 +360,8 @@ try {
     Invoke-FeatureStep -Name "dotnet-test-native" -Cwd $FeatureWorktree -Command 'dotnet test FluxKnowledge.slnx -c Release --no-build --logger "console;verbosity=minimal"' -TimeoutSeconds $TestStepTimeoutSeconds
     Invoke-FeatureStep -Name "native-closeout-contract" -Cwd $FeatureWorktree -Command 'powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\native\complete-feature-dryrun.ps1'
     Invoke-FeatureStep -Name "native-deployment-contract" -Cwd $FeatureWorktree -Command 'powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\native\native-deployment-plan.ps1'
+    Invoke-FeatureStep -Name "legacy-gmail-regression" -Cwd $FeatureWorktree -Command $gmailRegressionCommand -TimeoutSeconds $TestStepTimeoutSeconds
+    Invoke-FeatureStep -Name "legacy-gmail-preservation-diff-guard" -Cwd $FeatureWorktree -Command "powershell -NoProfile -ExecutionPolicy Bypass -File '$safeGmailGuardScript' -RepositoryRoot . -BaselineRef main" -RunInDryRun
     Invoke-FeatureStep -Name "feature-commit" -Cwd $FeatureWorktree -Command "git add -A; if ((git status --porcelain) -ne `$null) { git commit -m '$safeCommitMessage' }"
     Invoke-FeatureStep -Name "sync-main" -Cwd $MainRoot -Command 'git pull --ff-only origin main'
     Invoke-FeatureStep -Name "squash-merge" -Cwd $MainRoot -Command "git merge --squash '$safeBranch'"
@@ -358,6 +369,8 @@ try {
     Invoke-FeatureStep -Name "dotnet-restore-locked-main" -Cwd $MainRoot -Command 'dotnet restore FluxKnowledge.slnx --locked-mode'
     Invoke-FeatureStep -Name "dotnet-build-release-main" -Cwd $MainRoot -Command 'dotnet build FluxKnowledge.slnx -c Release --no-restore -warnaserror'
     Invoke-FeatureStep -Name "dotnet-test-native-main" -Cwd $MainRoot -Command 'dotnet test FluxKnowledge.slnx -c Release --no-build --logger "console;verbosity=minimal"' -TimeoutSeconds $TestStepTimeoutSeconds
+    Invoke-FeatureStep -Name "legacy-gmail-regression-main" -Cwd $MainRoot -Command $gmailRegressionCommand -TimeoutSeconds $TestStepTimeoutSeconds
+    Invoke-FeatureStep -Name "legacy-gmail-preservation-diff-guard-main" -Cwd $MainRoot -Command "powershell -NoProfile -ExecutionPolicy Bypass -File '$safeGmailGuardScript' -RepositoryRoot . -BaselineRef HEAD" -RunInDryRun
     Invoke-FeatureStep -Name "main-commit" -Cwd $MainRoot -Command "if ((git status --porcelain) -ne `$null) { git commit -m '$safeCommitMessage' } else { 'No staged changes to commit.' }"
     Invoke-FeatureStep -Name "push-main" -Cwd $MainRoot -Command 'git push origin main'
     Invoke-FeatureStep -Name "verify-origin-main" -Cwd $MainRoot -Command '$headSha = (git rev-parse HEAD).Trim(); git fetch origin main; $originSha = (git rev-parse origin/main).Trim(); if ($headSha -ne $originSha) { Write-Host "HEAD $headSha differs from origin/main $originSha"; exit 1 }'
@@ -365,7 +378,8 @@ try {
     if (-not $SkipDeploy) {
         Invoke-FeatureStep -Name "deploy-native-windows" -Cwd $MainRoot -Command $nativeDeployCommand -TimeoutSeconds $DeployStepTimeoutSeconds
         Invoke-FeatureStep -Name "post-deploy-native-worker-supervision-validation" -Cwd $MainRoot -Command $nativeWorkerValidationCommand -TimeoutSeconds $DeployStepTimeoutSeconds
-        Invoke-FeatureStep -Name "post-deploy-validation-record-commit" -Cwd $MainRoot -Command "git add -- '$nativeWorkerValidationRecord'; if ((git status --porcelain) -ne `$null) { git commit -m 'docs: record native worker supervision validation' }"
+        Invoke-FeatureStep -Name "post-deploy-native-outlook-ingress-validation" -Cwd $MainRoot -Command $nativeOutlookValidationCommand -TimeoutSeconds $DeployStepTimeoutSeconds
+        Invoke-FeatureStep -Name "post-deploy-validation-record-commit" -Cwd $MainRoot -Command "git add -- '$nativeWorkerValidationRecord' '$nativeOutlookValidationRecord'; if ((git status --porcelain) -ne `$null) { git commit -m 'docs: record native ingress validation' }"
         Invoke-FeatureStep -Name "post-deploy-validation-record-push" -Cwd $MainRoot -Command 'git push origin main'
     }
 

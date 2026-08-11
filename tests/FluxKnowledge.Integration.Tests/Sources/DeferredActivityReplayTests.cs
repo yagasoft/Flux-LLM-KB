@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Sources;
 using FluxKnowledge.Domain.Sources;
@@ -16,12 +18,16 @@ public sealed class DeferredActivityReplayTests(NativeSqlServerFixture fixture) 
     [NativeSqlServerFact]
     public async Task Deferred_replay_links_one_pipeline_record_job_and_outbox_without_mutating_the_deferred_activity_key()
     {
-        var seeded = await SeedAsync();
+        using var seeded = await SeedAsync();
         var capability = new RegisteredSourceCapability(seeded.CapabilityId, "text-metadata", "phase-3a-v1",
             ExecutionClass.InProcess, "phase-3a-inprocess-text-metadata-v1", true);
         var request = new DeferredContentReplayRequest(seeded.ActivityId, seeded.IdempotencyKey, "text-metadata",
             seeded.CapabilityId, "phase-3a-v1", "phase-3a-inprocess-text-metadata-v1");
-        var store = new SqlRetainedTextRegistrationStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System);
+
+        var store = new SqlRetainedTextRegistrationStore(
+            new ContextFactory(_fixture.ConnectionString),
+            TimeProvider.System,
+            seeded.ArtifactRoot);
 
         Assert.Equal(1, await store.ReplayActivityAsync(request, capability, CancellationToken.None));
         Assert.Equal(0, await store.ReplayActivityAsync(request, capability, CancellationToken.None));
@@ -41,7 +47,7 @@ public sealed class DeferredActivityReplayTests(NativeSqlServerFixture fixture) 
     [NativeSqlServerFact]
     public async Task Deferred_document_parsing_cannot_be_routed_to_the_retained_utf8_extract_operation()
     {
-        var seeded = await SeedAsync();
+        using var seeded = await SeedAsync();
         await using (var setup = CreateContext())
         {
             var activity = await setup.SourceActivities.SingleAsync(value => value.Id == seeded.ActivityId);
@@ -62,9 +68,41 @@ public sealed class DeferredActivityReplayTests(NativeSqlServerFixture fixture) 
             .ToListAsync());
     }
 
+    [NativeSqlServerFact]
+    public async Task Deferred_replay_requires_matching_retained_capability_evidence()
+    {
+        using var seeded = await SeedAsync();
+        var capability = new RegisteredSourceCapability(seeded.CapabilityId, "text-metadata", "phase-3a-v1",
+            ExecutionClass.InProcess, "phase-3a-inprocess-text-metadata-v1", true);
+        var request = new DeferredContentReplayRequest(seeded.ActivityId, seeded.IdempotencyKey, "text-metadata",
+            seeded.CapabilityId, "phase-3a-v1", "phase-3a-inprocess-text-metadata-v1");
+
+        await using (var setup = CreateContext())
+        {
+            setup.DeferredCapabilities.RemoveRange(await setup.DeferredCapabilities
+                .Where(value => value.SourceRevisionId == seeded.RevisionId)
+                .ToListAsync());
+            await setup.SaveChangesAsync();
+        }
+        await using (var check = CreateContext())
+        {
+            Assert.Empty(await check.DeferredCapabilities.Where(value => value.SourceRevisionId == seeded.RevisionId).ToListAsync());
+        }
+
+        Assert.Equal(0, await new SqlRetainedTextRegistrationStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System)
+            .ReplayActivityAsync(request, capability, CancellationToken.None));
+        await using var verification = CreateContext();
+        Assert.Null((await verification.SourceActivities.SingleAsync(value => value.Id == seeded.ActivityId)).ResultingPipelineRecordId);
+    }
+
     private async Task<Seed> SeedAsync()
     {
-        const string hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        var bytes = new UTF8Encoding(false).GetBytes("test");
+        var hash = Convert.ToHexStringLower(SHA256.HashData(bytes));
+        var artifactRoot = Path.Combine(Path.GetTempPath(), "fluxknowledge-replay", Guid.NewGuid().ToString("N"));
+        var retainedPath = Path.Combine("sha256", hash[..2], $"{hash}.bin");
+        Directory.CreateDirectory(Path.GetDirectoryName(Path.Combine(artifactRoot, retainedPath))!);
+        await File.WriteAllBytesAsync(Path.Combine(artifactRoot, retainedPath), bytes);
         var now = DateTimeOffset.Parse("2026-08-08T00:00:00+00:00");
         var rootId = Guid.NewGuid();
         var revisionId = Guid.NewGuid();
@@ -73,11 +111,12 @@ public sealed class DeferredActivityReplayTests(NativeSqlServerFixture fixture) 
         await using var context = CreateContext();
         context.SourceRootConfigurations.Add(new SourceRootConfigurationEntity { Id = rootId, CanonicalPath = $"C:\\replay\\{rootId:N}", DisplayName = "Replay", State = 0, Recursive = true, IncludePatternsJson = "[]", ExcludePatternsJson = "[]", AllowedClassificationsJson = "[]", MaximumFileBytes = 16 * 1024 * 1024, ReconciliationCadenceSeconds = 900, ConfigurationRevision = 1, CreatedAtUtc = now, UpdatedAtUtc = now });
         context.SourceRevisions.Add(new SourceRevisionEntity { Id = revisionId, SourceRootId = rootId, StableSourceIdentity = $"replay:{revisionId:N}", Revision = 1, ContentSha256 = hash, CanonicalPath = $"C:\\replay\\{revisionId:N}.txt", Classification = "AcceptedUtf8Text", Extension = ".txt", ByteLength = 4, DiscoveredAtUtc = now, DiscoveryEvidenceJson = "{}" });
-        context.SourceArtifacts.Add(new SourceArtifactEntity { Id = Guid.NewGuid(), SourceRevisionId = revisionId, ContentSha256 = hash, StoreRelativePath = $"sha256\\{hash[..2]}\\{hash}.bin", ByteLength = 4, ChecksumVerifiedAtUtc = now, ReferenceCount = 1 });
+        context.SourceArtifacts.Add(new SourceArtifactEntity { Id = Guid.NewGuid(), SourceRevisionId = revisionId, ContentSha256 = hash, StoreRelativePath = retainedPath, ByteLength = bytes.Length, ChecksumVerifiedAtUtc = now, ReferenceCount = 1 });
         context.SourceActivities.Add(new SourceActivityEntity { Id = activityId, SourceRevisionId = revisionId, ActivityKind = (int)SourceActivityKind.TextExtraction, ExecutionClass = (int)ExecutionClass.DeferredCapability, ProcessorVersion = "phase-3a-v1", InputFingerprint = hash, RequiredCapability = "text-metadata", State = (int)SourceActivityState.DeferredUnsupported, Reason = "missing", CreatedAtUtc = now, UpdatedAtUtc = now });
+        context.DeferredCapabilities.Add(new DeferredCapabilityEntity { Id = Guid.NewGuid(), SourceRevisionId = revisionId, ArtifactFingerprint = hash, RequiredCapability = "text-metadata", Provenance = "test", CreatedAtUtc = now });
         await context.SaveChangesAsync();
         var activity = SourceActivity.Restore(new SourceActivityId(activityId), new SourceRevisionId(revisionId), SourceActivityKind.TextExtraction, ExecutionClass.DeferredCapability, "phase-3a-v1", hash, "text-metadata", SourceActivityState.DeferredUnsupported, "missing");
-        return new Seed(revisionId, activityId, capabilityId, hash, activity.IdempotencyKey);
+        return new Seed(revisionId, activityId, capabilityId, hash, activity.IdempotencyKey, artifactRoot);
     }
 
     private FluxKnowledgeDbContext CreateContext() => new(new DbContextOptionsBuilder<FluxKnowledgeDbContext>().UseSqlServer(_fixture.ConnectionString).Options);
@@ -86,5 +125,20 @@ public sealed class DeferredActivityReplayTests(NativeSqlServerFixture fixture) 
         public FluxKnowledgeDbContext CreateDbContext() => new(new DbContextOptionsBuilder<FluxKnowledgeDbContext>().UseSqlServer(connectionString, sql => sql.EnableRetryOnFailure()).Options);
         public Task<FluxKnowledgeDbContext> CreateDbContextAsync(CancellationToken cancellationToken = default) => Task.FromResult(CreateDbContext());
     }
-    private sealed record Seed(Guid RevisionId, Guid ActivityId, Guid CapabilityId, string Hash, string IdempotencyKey);
+    private sealed record Seed(
+        Guid RevisionId,
+        Guid ActivityId,
+        Guid CapabilityId,
+        string Hash,
+        string IdempotencyKey,
+        string ArtifactRoot) : IDisposable
+    {
+        public void Dispose()
+        {
+            if (Directory.Exists(ArtifactRoot))
+            {
+                Directory.Delete(ArtifactRoot, recursive: true);
+            }
+        }
+    }
 }

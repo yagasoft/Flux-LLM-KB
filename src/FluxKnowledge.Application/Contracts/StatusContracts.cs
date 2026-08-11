@@ -22,6 +22,19 @@ public sealed record OverviewProjection(
         GpuSchedulerStatusProjection.Empty;
 
     public SourceIndexingSummary SourceIndexing { get; init; } = SourceIndexingSummary.Empty;
+
+    public OutlookCaptureSummary OutlookCapture { get; init; } = OutlookCaptureSummary.Empty;
+}
+
+public sealed record OutlookCaptureSummary(
+    int ProfileCount,
+    int EnabledProfileCount,
+    int FolderCount,
+    int IngestedCount,
+    int DeferredCount,
+    int BlockedCount)
+{
+    public static OutlookCaptureSummary Empty { get; } = new(0, 0, 0, 0, 0, 0);
 }
 
 public sealed record SourceIndexingSummary(

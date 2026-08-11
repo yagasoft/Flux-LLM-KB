@@ -37,7 +37,26 @@ $Phase3BMigrationTargetId = "20260809110000_AddPhase3BWatcherCorpusEvents"
 $Phase3BMigrationIds = @($Phase3BMigrationTargetId)
 $NativeWorkerSupervisionMigrationTargetId = "20260810185641_AddNativeWorkerSupervision"
 $NativeWorkerSupervisionMigrationIds = @($NativeWorkerSupervisionMigrationTargetId)
-$RequiredDeploymentMigrationIds = @($SchedulerMigrationIds + $Phase3AMigrationIds + $Phase3BMigrationIds + $NativeWorkerSupervisionMigrationIds)
+$NativeOutlookIngressBaselineMigrationId = "20260811093501_AddNativeOutlookIngress"
+$NativeOutlookIngressMigrationIds = @(
+    $NativeOutlookIngressBaselineMigrationId,
+    "20260811094729_HardenNativeOutlookIngress",
+    "20260811100247_FixOutlookPrivateIdentityColumns",
+    "20260811101550_EnforceOutlookCaptureIdentityFences",
+    "20260811105928_HardenOutlookCaptureReplay",
+    "20260811112742_BindOutlookExportClaimIdentity",
+    "20260811132655_BindOutlookProfileSourceRoot",
+    "20260811133300_AlignDeferredCapabilityFingerprintCollation",
+    "20260811143122_RecordOutlookExportBlockedReason",
+    "20260811152249_AllowIdentitylessBlockedOutlookExports"
+)
+$NativeOutlookIngressMigrationTargetId = $NativeOutlookIngressMigrationIds[-1]
+$RequiredDeploymentMigrationIds = @(
+    $SchedulerMigrationIds +
+    $Phase3AMigrationIds +
+    $Phase3BMigrationIds +
+    $NativeWorkerSupervisionMigrationIds +
+    $NativeOutlookIngressMigrationIds)
 $RequiredBaselineMigrationIds = @(
     "20260726215521_InitialPhase1",
     "20260726221653_EnforceCanonicalSqlSafety",
@@ -64,7 +83,12 @@ if ($PlanOnly) {
         phase3a_migration_ids = $Phase3AMigrationIds
         phase3b_migration_ids = $Phase3BMigrationIds
         native_worker_supervision_migration_ids = $NativeWorkerSupervisionMigrationIds
-        deployment_migration_target = $NativeWorkerSupervisionMigrationTargetId
+        native_outlook_ingress_migration_ids = $NativeOutlookIngressMigrationIds
+        native_outlook_ingress_baseline_migration = $NativeOutlookIngressBaselineMigrationId
+        deployment_migration_target = $NativeOutlookIngressMigrationTargetId
+        post_deploy_validator = "validate-native-outlook-ingress.ps1"
+        outlook_host_activation = $false
+        windows_service_registration = $false
         source_artifact_store_requires_app_pool_modify_access = $true
         source_artifact_store_acl_rejects_protected_root_overlap = $true
         required_endpoints = @(
@@ -421,7 +445,8 @@ if ($PreflightOnly) {
         phase3a_migrations_expected = $Phase3AMigrationIds
         phase3b_migrations_expected = $Phase3BMigrationIds
         native_worker_supervision_migrations_expected = $NativeWorkerSupervisionMigrationIds
-        deployment_migration_target = $NativeWorkerSupervisionMigrationTargetId
+        native_outlook_ingress_migrations_expected = $NativeOutlookIngressMigrationIds
+        deployment_migration_target = $NativeOutlookIngressMigrationTargetId
         migration_update_requested = [bool]$ApplyMigrations
         baseline_migrations_present = @($RequiredBaselineMigrationIds | Where-Object { $_ -in $preflightMigrationIds })
     } | ConvertTo-Json -Depth 5
@@ -483,7 +508,7 @@ try {
         $previousConnection = $env:ConnectionStrings__FluxKnowledge
         try {
             $env:ConnectionStrings__FluxKnowledge = $productionConnection.ConnectionString
-        & dotnet tool run dotnet-ef -- database update $NativeWorkerSupervisionMigrationTargetId --project "src/FluxKnowledge.Infrastructure.SqlServer/FluxKnowledge.Infrastructure.SqlServer.csproj" --configuration Release --no-build --connection $productionConnection.ConnectionString
+        & dotnet tool run dotnet-ef -- database update $NativeOutlookIngressMigrationTargetId --project "src/FluxKnowledge.Infrastructure.SqlServer/FluxKnowledge.Infrastructure.SqlServer.csproj" --configuration Release --no-build --connection $productionConnection.ConnectionString
             if ($LASTEXITCODE -ne 0) {
                 throw "The explicitly confirmed native SQL migration update failed with exit code $LASTEXITCODE."
             }
@@ -553,7 +578,8 @@ try {
         phase3a_migrations_applied = @($Phase3AMigrationIds | Where-Object { $_ -in $migrationIdsAfter })
         phase3b_migrations_applied = @($Phase3BMigrationIds | Where-Object { $_ -in $migrationIdsAfter })
         native_worker_supervision_migrations_applied = @($NativeWorkerSupervisionMigrationIds | Where-Object { $_ -in $migrationIdsAfter })
-        deployment_migration_target = $NativeWorkerSupervisionMigrationTargetId
+        native_outlook_ingress_migrations_applied = @($NativeOutlookIngressMigrationIds | Where-Object { $_ -in $migrationIdsAfter })
+        deployment_migration_target = $NativeOutlookIngressMigrationTargetId
         deployed_assembly_sha256 = $deployedAssemblyHash
         endpoint_status = "200"
     } | ConvertTo-Json -Depth 5

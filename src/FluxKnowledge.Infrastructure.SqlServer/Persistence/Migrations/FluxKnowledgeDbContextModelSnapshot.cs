@@ -144,6 +144,59 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Migrations
                     b.ToTable("AuditEvents", (string)null);
                 });
 
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.DeferredCapabilityEntity", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("ArtifactFingerprint")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .IsUnicode(false)
+                        .HasColumnType("char(64)")
+                        .IsFixedLength()
+                        .UseCollation("Latin1_General_100_BIN2");
+
+                    b.Property<DateTimeOffset?>("ClaimedAtUtc")
+                        .HasColumnType("datetimeoffset(7)");
+
+                    b.Property<string>("ClaimedProcessorVersion")
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)")
+                        .UseCollation("Latin1_General_100_BIN2");
+
+                    b.Property<DateTimeOffset>("CreatedAtUtc")
+                        .HasColumnType("datetimeoffset(7)");
+
+                    b.Property<string>("Provenance")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)")
+                        .UseCollation("Latin1_General_100_BIN2");
+
+                    b.Property<string>("RequiredCapability")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)")
+                        .UseCollation("Latin1_General_100_BIN2");
+
+                    b.Property<byte[]>("RowVersion")
+                        .IsConcurrencyToken()
+                        .IsRequired()
+                        .ValueGeneratedOnAddOrUpdate()
+                        .HasColumnType("rowversion");
+
+                    b.Property<Guid>("SourceRevisionId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("SourceRevisionId", "ArtifactFingerprint", "RequiredCapability")
+                        .IsUnique();
+
+                    b.ToTable("DeferredCapabilities", (string)null);
+                });
+
             modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.GpuBatchEntity", b =>
                 {
                     b.Property<Guid>("Id")
@@ -271,26 +324,6 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Migrations
                     b.Property<DateTimeOffset?>("AcknowledgedAtUtc")
                         .HasColumnType("datetimeoffset(7)");
 
-                    b.Property<Guid?>("NativeWorkerBindOperationId")
-                        .HasColumnType("uniqueidentifier");
-
-                    b.Property<string>("NativeWorkerBindRequestFingerprint")
-                        .IsUnicode(false)
-                        .IsFixedLength()
-                        .HasMaxLength(64)
-                        .HasColumnType("char(64)")
-                        .UseCollation("Latin1_General_100_BIN2");
-
-                    b.Property<Guid?>("NativeWorkerClearOperationId")
-                        .HasColumnType("uniqueidentifier");
-
-                    b.Property<string>("NativeWorkerClearRequestFingerprint")
-                        .IsUnicode(false)
-                        .IsFixedLength()
-                        .HasMaxLength(64)
-                        .HasColumnType("char(64)")
-                        .UseCollation("Latin1_General_100_BIN2");
-
                     b.Property<long>("AdmissionGeneration")
                         .HasColumnType("bigint");
 
@@ -307,6 +340,26 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Migrations
                         .IsRequired()
                         .HasMaxLength(256)
                         .HasColumnType("nvarchar(256)")
+                        .UseCollation("Latin1_General_100_BIN2");
+
+                    b.Property<Guid?>("NativeWorkerBindOperationId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("NativeWorkerBindRequestFingerprint")
+                        .HasMaxLength(64)
+                        .IsUnicode(false)
+                        .HasColumnType("char(64)")
+                        .IsFixedLength()
+                        .UseCollation("Latin1_General_100_BIN2");
+
+                    b.Property<Guid?>("NativeWorkerClearOperationId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("NativeWorkerClearRequestFingerprint")
+                        .HasMaxLength(64)
+                        .IsUnicode(false)
+                        .HasColumnType("char(64)")
+                        .IsFixedLength()
                         .UseCollation("Latin1_General_100_BIN2");
 
                     b.Property<string>("OwnerKey")
@@ -1098,6 +1151,385 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Migrations
                     b.HasIndex("PipelineRecordId", "SourceRevision");
 
                     b.ToTable("OutboxMessages", (string)null);
+                });
+
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.OutlookBrowseRequestEntity", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<long>("ConfigurationRevision")
+                        .HasColumnType("bigint");
+
+                    b.Property<Guid>("CorrelationId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTimeOffset>("ExpiresAtUtc")
+                        .HasColumnType("datetimeoffset(7)");
+
+                    b.Property<int?>("FailureCode")
+                        .HasColumnType("int");
+
+                    b.Property<long>("FencingToken")
+                        .HasColumnType("bigint");
+
+                    b.Property<DateTimeOffset?>("LeaseExpiresAtUtc")
+                        .HasColumnType("datetimeoffset(7)");
+
+                    b.Property<string>("LeaseOwner")
+                        .HasMaxLength(768)
+                        .HasColumnType("nvarchar(768)")
+                        .UseCollation("Latin1_General_100_BIN2");
+
+                    b.Property<Guid>("ProfileId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<byte[]>("RowVersion")
+                        .IsConcurrencyToken()
+                        .IsRequired()
+                        .ValueGeneratedOnAddOrUpdate()
+                        .HasColumnType("rowversion");
+
+                    b.Property<int>("State")
+                        .HasColumnType("int");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ProfileId");
+
+                    b.HasIndex("State", "ExpiresAtUtc");
+
+                    b.ToTable("OutlookBrowseRequests", (string)null);
+                });
+
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.OutlookBrowseResultEntity", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("BrowseRequestId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("DisplayName")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)");
+
+                    b.Property<Guid>("FolderId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("FolderId");
+
+                    b.HasIndex("BrowseRequestId", "FolderId")
+                        .IsUnique();
+
+                    b.ToTable("OutlookBrowseResults", (string)null);
+                });
+
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.OutlookCaptureExportEntity", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("BlockedReasonCode")
+                        .HasMaxLength(64)
+                        .IsUnicode(false)
+                        .HasColumnType("varchar(64)")
+                        .UseCollation("Latin1_General_100_BIN2");
+
+                    b.Property<Guid?>("CatchUpId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("EntryId")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)")
+                        .UseCollation("Latin1_General_100_BIN2");
+
+                    b.Property<string>("EntryIdFingerprint")
+                        .IsRequired()
+                        .ValueGeneratedOnAddOrUpdate()
+                        .HasMaxLength(64)
+                        .IsUnicode(false)
+                        .HasColumnType("char(64)")
+                        .HasComputedColumnSql("CONVERT(char(64), HASHBYTES('SHA2_256', [EntryId]), 2)", true)
+                        .IsFixedLength()
+                        .UseCollation("Latin1_General_100_BIN2");
+
+                    b.Property<long>("FencingToken")
+                        .HasColumnType("bigint");
+
+                    b.Property<Guid?>("FolderId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("ManifestHash")
+                        .HasMaxLength(64)
+                        .IsUnicode(false)
+                        .HasColumnType("char(64)")
+                        .IsFixedLength();
+
+                    b.Property<Guid?>("ProfileId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("RelativeSpoolPath")
+                        .HasMaxLength(2048)
+                        .HasColumnType("nvarchar(2048)")
+                        .UseCollation("Latin1_General_100_BIN2");
+
+                    b.Property<byte[]>("RowVersion")
+                        .IsConcurrencyToken()
+                        .IsRequired()
+                        .ValueGeneratedOnAddOrUpdate()
+                        .HasColumnType("rowversion");
+
+                    b.Property<string>("SourceFingerprint")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .IsUnicode(false)
+                        .HasColumnType("char(64)")
+                        .IsFixedLength();
+
+                    b.Property<Guid?>("SourceRevisionId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<int>("State")
+                        .HasColumnType("int");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("CatchUpId");
+
+                    b.HasIndex("ProfileId");
+
+                    b.HasIndex("FolderId", "EntryIdFingerprint")
+                        .IsUnique()
+                        .HasFilter("[State] <> 4");
+
+                    b.ToTable("OutlookCaptureExports", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_OutlookCaptureExports_IdentityRequiredUnlessBlocked", "([State] = 4 AND [ProfileId] IS NULL AND [FolderId] IS NULL) OR ([ProfileId] IS NOT NULL AND [FolderId] IS NOT NULL)");
+                        });
+                });
+
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.OutlookCaptureFolderEntity", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<int>("Basis")
+                        .HasColumnType("int");
+
+                    b.Property<string>("CanonicalIdentityFingerprint")
+                        .IsRequired()
+                        .ValueGeneratedOnAddOrUpdate()
+                        .HasMaxLength(64)
+                        .IsUnicode(false)
+                        .HasColumnType("char(64)")
+                        .HasComputedColumnSql("CONVERT(char(64), HASHBYTES('SHA2_256', CONCAT(CONVERT(nvarchar(20), DATALENGTH([StoreId])), N':', [StoreId], CONVERT(nvarchar(20), DATALENGTH([FolderEntryId])), N':', [FolderEntryId])), 2)", true)
+                        .IsFixedLength()
+                        .UseCollation("Latin1_General_100_BIN2");
+
+                    b.Property<string>("CursorFingerprint")
+                        .HasMaxLength(64)
+                        .IsUnicode(false)
+                        .HasColumnType("char(64)")
+                        .IsFixedLength();
+
+                    b.Property<DateTimeOffset?>("CursorUtc")
+                        .HasColumnType("datetimeoffset(7)");
+
+                    b.Property<string>("DisplayName")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)");
+
+                    b.Property<string>("FolderEntryId")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)")
+                        .UseCollation("Latin1_General_100_BIN2");
+
+                    b.Property<Guid>("ProfileId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<byte[]>("RowVersion")
+                        .IsConcurrencyToken()
+                        .IsRequired()
+                        .ValueGeneratedOnAddOrUpdate()
+                        .HasColumnType("rowversion");
+
+                    b.Property<int>("State")
+                        .HasColumnType("int");
+
+                    b.Property<string>("StoreId")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)")
+                        .UseCollation("Latin1_General_100_BIN2");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ProfileId", "CanonicalIdentityFingerprint")
+                        .IsUnique();
+
+                    b.ToTable("OutlookCaptureFolders", (string)null);
+                });
+
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.OutlookCaptureOperationEntity", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<bool>("Accepted")
+                        .HasColumnType("bit");
+
+                    b.Property<DateTimeOffset>("CompletedAtUtc")
+                        .HasColumnType("datetimeoffset(7)");
+
+                    b.Property<string>("Kind")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("nvarchar(64)");
+
+                    b.Property<Guid>("OperationId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid?>("ProfileId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("RequestFingerprint")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .IsUnicode(false)
+                        .HasColumnType("char(64)")
+                        .IsFixedLength();
+
+                    b.Property<Guid?>("ResourceId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("OperationId")
+                        .IsUnique();
+
+                    b.ToTable("OutlookCaptureOperations", (string)null);
+                });
+
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.OutlookCaptureProfileEntity", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<long>("CadenceTicks")
+                        .HasColumnType("bigint");
+
+                    b.Property<long>("ConfigurationRevision")
+                        .HasColumnType("bigint");
+
+                    b.Property<DateTimeOffset>("CreatedAtUtc")
+                        .HasColumnType("datetimeoffset(7)");
+
+                    b.Property<string>("DisplayName")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)");
+
+                    b.Property<int>("IncrementalBasis")
+                        .HasColumnType("int");
+
+                    b.Property<bool>("IsEnabled")
+                        .HasColumnType("bit");
+
+                    b.Property<long>("MaximumOverlapTicks")
+                        .HasColumnType("bigint");
+
+                    b.Property<byte[]>("RowVersion")
+                        .IsConcurrencyToken()
+                        .IsRequired()
+                        .ValueGeneratedOnAddOrUpdate()
+                        .HasColumnType("rowversion");
+
+                    b.Property<Guid>("SourceRootId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("SpoolRoot")
+                        .IsRequired()
+                        .HasMaxLength(2048)
+                        .HasColumnType("nvarchar(2048)")
+                        .UseCollation("Latin1_General_100_BIN2");
+
+                    b.Property<int>("State")
+                        .HasColumnType("int");
+
+                    b.Property<DateTimeOffset>("UpdatedAtUtc")
+                        .HasColumnType("datetimeoffset(7)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("SourceRootId")
+                        .IsUnique();
+
+                    b.ToTable("OutlookCaptureProfiles", (string)null);
+                });
+
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.OutlookCatchUpEntity", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("CoalescingKey")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)")
+                        .UseCollation("Latin1_General_100_BIN2");
+
+                    b.Property<long>("FencingToken")
+                        .HasColumnType("bigint");
+
+                    b.Property<DateTimeOffset?>("LastHeartbeatAtUtc")
+                        .HasColumnType("datetimeoffset(7)");
+
+                    b.Property<DateTimeOffset?>("LeaseExpiresAtUtc")
+                        .HasColumnType("datetimeoffset(7)");
+
+                    b.Property<string>("LeaseOwner")
+                        .HasMaxLength(768)
+                        .HasColumnType("nvarchar(768)")
+                        .UseCollation("Latin1_General_100_BIN2");
+
+                    b.Property<DateTimeOffset?>("NotBeforeUtc")
+                        .HasColumnType("datetimeoffset(7)");
+
+                    b.Property<Guid>("ProfileId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<int>("Provenance")
+                        .HasColumnType("int");
+
+                    b.Property<string>("Reason")
+                        .HasMaxLength(1024)
+                        .HasColumnType("nvarchar(1024)");
+
+                    b.Property<int>("RetryCount")
+                        .HasColumnType("int");
+
+                    b.Property<byte[]>("RowVersion")
+                        .IsConcurrencyToken()
+                        .IsRequired()
+                        .ValueGeneratedOnAddOrUpdate()
+                        .HasColumnType("rowversion");
+
+                    b.Property<int>("State")
+                        .HasColumnType("int");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ProfileId", "CoalescingKey")
+                        .IsUnique()
+                        .HasFilter("[State] IN (0, 1)");
+
+                    b.HasIndex("State", "NotBeforeUtc", "LeaseExpiresAtUtc");
+
+                    b.ToTable("OutlookCatchUps", (string)null);
                 });
 
             modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.PipelineRecordEntity", b =>
@@ -1993,6 +2425,15 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Migrations
                     b.Navigation("SourceScanRequest");
                 });
 
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.DeferredCapabilityEntity", b =>
+                {
+                    b.HasOne("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.SourceRevisionEntity", null)
+                        .WithMany()
+                        .HasForeignKey("SourceRevisionId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
             modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.GpuBatchEntity", b =>
                 {
                     b.HasOne("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.GpuCapacitySlotEntity", "CapacitySlot")
@@ -2189,6 +2630,75 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Migrations
                         .IsRequired();
 
                     b.Navigation("PipelineRecord");
+                });
+
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.OutlookBrowseRequestEntity", b =>
+                {
+                    b.HasOne("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.OutlookCaptureProfileEntity", null)
+                        .WithMany()
+                        .HasForeignKey("ProfileId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.OutlookBrowseResultEntity", b =>
+                {
+                    b.HasOne("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.OutlookBrowseRequestEntity", null)
+                        .WithMany()
+                        .HasForeignKey("BrowseRequestId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.OutlookCaptureFolderEntity", null)
+                        .WithMany()
+                        .HasForeignKey("FolderId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.OutlookCaptureExportEntity", b =>
+                {
+                    b.HasOne("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.OutlookCatchUpEntity", null)
+                        .WithMany()
+                        .HasForeignKey("CatchUpId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.OutlookCaptureFolderEntity", null)
+                        .WithMany()
+                        .HasForeignKey("FolderId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.OutlookCaptureProfileEntity", null)
+                        .WithMany()
+                        .HasForeignKey("ProfileId")
+                        .OnDelete(DeleteBehavior.Restrict);
+                });
+
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.OutlookCaptureFolderEntity", b =>
+                {
+                    b.HasOne("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.OutlookCaptureProfileEntity", null)
+                        .WithMany()
+                        .HasForeignKey("ProfileId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.OutlookCaptureProfileEntity", b =>
+                {
+                    b.HasOne("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.SourceRootConfigurationEntity", null)
+                        .WithMany()
+                        .HasForeignKey("SourceRootId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.OutlookCatchUpEntity", b =>
+                {
+                    b.HasOne("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.OutlookCaptureProfileEntity", null)
+                        .WithMany()
+                        .HasForeignKey("ProfileId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
                 });
 
             modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.PipelineRecordEntity", b =>

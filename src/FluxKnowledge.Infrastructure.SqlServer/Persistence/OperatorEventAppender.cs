@@ -138,6 +138,37 @@ public sealed record OperatorEventDraft(
             Details: new { kind, reasonCode = reasonCode?.ToString(System.Globalization.CultureInfo.InvariantCulture) });
     }
 
+    /// <summary>Creates bounded, metadata-only evidence for a durable Outlook control-plane mutation.</summary>
+    public static OperatorEventDraft OutlookMutation(
+        string mutationKind,
+        Guid operationId,
+        bool accepted,
+        DateTimeOffset occurredAtUtc)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(mutationKind);
+        if (operationId == Guid.Empty)
+        {
+            throw new ArgumentException("An Outlook operation correlation is required.", nameof(operationId));
+        }
+        if (occurredAtUtc.Offset != TimeSpan.Zero)
+        {
+            throw new ArgumentException("Outlook audit timestamps must be UTC.", nameof(occurredAtUtc));
+        }
+
+        var kind = new string(mutationKind
+            .Select(character => char.IsLetterOrDigit(character) ? char.ToLowerInvariant(character) : '_')
+            .Take(64)
+            .ToArray());
+        return new OperatorEventDraft(
+            $"outlook.{kind}",
+            "outlook",
+            "information",
+            "outlook-control-plane",
+            occurredAtUtc,
+            CorrelationId: $"outlook-operation:{operationId:N}",
+            Details: new { kind, reasonCode = accepted ? "accepted" : "rejected" });
+    }
+
     private static string ToNativeWorkerEventSuffix(NativeWorkerLifecycleClass lifecycleClass) =>
         string.Concat(lifecycleClass.ToString().Select((character, index) =>
             index > 0 && char.IsUpper(character) ? $"_{char.ToLowerInvariant(character)}" : char.ToLowerInvariant(character).ToString()));

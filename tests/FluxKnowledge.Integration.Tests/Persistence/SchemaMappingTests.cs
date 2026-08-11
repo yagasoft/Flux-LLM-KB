@@ -835,6 +835,175 @@ public sealed class NativeSchemaMigrationTests(NativeSqlServerFixture fixture)
     : IClassFixture<NativeSqlServerFixture>
 {
     [NativeSqlServerFact]
+    public async Task Outlook_identityless_export_downgrade_removes_only_unsupported_receipts_and_their_operations()
+    {
+        await using var database = await fixture.CreateIdentitylessOutlookExportPreviousMigrationDatabaseAsync();
+        var now = DateTimeOffset.Parse("2026-08-11T15:30:00+00:00");
+        var sourceRootId = Guid.NewGuid();
+        var profileId = Guid.NewGuid();
+        var folderId = Guid.NewGuid();
+        var identifiedExportId = Guid.NewGuid();
+        var identitylessExportId = Guid.NewGuid();
+        var identifiedOperationId = Guid.NewGuid();
+        var identitylessOperationId = Guid.NewGuid();
+        var collidingCatchUpOperationId = Guid.NewGuid();
+
+        await using (var context = database.CreateContext())
+        {
+            await context.GetService<IMigrator>()
+                .MigrateAsync("20260811152249_AllowIdentitylessBlockedOutlookExports");
+            context.SourceRootConfigurations.Add(new SourceRootConfigurationEntity
+            {
+                Id = sourceRootId,
+                CanonicalPath = $"C:\\migration-test\\{sourceRootId:N}",
+                DisplayName = "Outlook migration source",
+                State = 1,
+                IncludePatternsJson = "[]",
+                ExcludePatternsJson = "[]",
+                MaximumFileBytes = 1,
+                AllowedClassificationsJson = "[]",
+                ReconciliationCadenceSeconds = 60,
+                ConfigurationRevision = 1,
+                CreatedAtUtc = now,
+                UpdatedAtUtc = now
+            });
+            context.OutlookCaptureProfiles.Add(new OutlookCaptureProfileEntity
+            {
+                Id = profileId,
+                SourceRootId = sourceRootId,
+                DisplayName = "Migration profile",
+                SpoolRoot = $"C:\\migration-test\\spool-{profileId:N}",
+                State = 1,
+                IsEnabled = true,
+                ConfigurationRevision = 1,
+                CadenceTicks = TimeSpan.FromMinutes(1).Ticks,
+                MaximumOverlapTicks = TimeSpan.FromMinutes(1).Ticks,
+                CreatedAtUtc = now,
+                UpdatedAtUtc = now
+            });
+            context.OutlookCaptureFolders.Add(new OutlookCaptureFolderEntity
+            {
+                Id = folderId,
+                ProfileId = profileId,
+                StoreId = "migration-store",
+                FolderEntryId = "migration-folder",
+                DisplayName = "Migration folder",
+                State = 1
+            });
+            context.OutlookCaptureExports.AddRange(
+                new OutlookCaptureExportEntity
+                {
+                    Id = identifiedExportId,
+                    ProfileId = profileId,
+                    FolderId = folderId,
+                    EntryId = "identified-entry",
+                    SourceFingerprint = new string('1', 64),
+                    ManifestHash = new string('2', 64),
+                    RelativeSpoolPath = $"ready\\{identifiedExportId:N}",
+                    State = 4,
+                    BlockedReasonCode = "migration-test-blocked",
+                    FencingToken = 1
+                },
+                new OutlookCaptureExportEntity
+                {
+                    Id = identitylessExportId,
+                    ProfileId = null,
+                    FolderId = null,
+                    EntryId = "identityless-entry",
+                    SourceFingerprint = new string('3', 64),
+                    ManifestHash = new string('4', 64),
+                    RelativeSpoolPath = $"ready\\{identitylessExportId:N}",
+                    State = 4,
+                    BlockedReasonCode = "ready-manifest-identity-mismatch",
+                    FencingToken = 1
+                });
+            context.OutlookCaptureOperations.AddRange(
+                new OutlookCaptureOperationEntity
+                {
+                    Id = Guid.NewGuid(),
+                    ProfileId = profileId,
+                    Kind = "ingest-ready-export",
+                    OperationId = identifiedOperationId,
+                    RequestFingerprint = new string('5', 64),
+                    ResourceId = identifiedExportId,
+                    CompletedAtUtc = now
+                },
+                new OutlookCaptureOperationEntity
+                {
+                    Id = Guid.NewGuid(),
+                    ProfileId = null,
+                    Kind = "ingest-ready-export",
+                    OperationId = identitylessOperationId,
+                    RequestFingerprint = new string('6', 64),
+                    ResourceId = identitylessExportId,
+                    CompletedAtUtc = now
+                },
+                new OutlookCaptureOperationEntity
+                {
+                    Id = Guid.NewGuid(),
+                    ProfileId = null,
+                    Kind = "claim-catchup",
+                    OperationId = collidingCatchUpOperationId,
+                    RequestFingerprint = new string('7', 64),
+                    ResourceId = identitylessExportId,
+                    CompletedAtUtc = now
+                });
+            await context.SaveChangesAsync();
+        }
+
+        await using (var context = database.CreateContext())
+        {
+            Assert.Equal(2, await context.OutlookCaptureExports.CountAsync());
+            Assert.Equal(3, await context.OutlookCaptureOperations.CountAsync());
+            await context.GetService<IMigrator>()
+                .MigrateAsync("20260811143122_RecordOutlookExportBlockedReason");
+        }
+
+        await using var connection = new SqlConnection(database.ConnectionString);
+        await connection.OpenAsync();
+        await using var command = new SqlCommand(
+            """
+            SELECT
+                (SELECT COUNT(*) FROM [OutlookCaptureExports] WHERE [Id] = @identitylessExportId),
+                (SELECT COUNT(*) FROM [OutlookCaptureOperations]
+                 WHERE [OperationId] = @identitylessOperationId),
+                (SELECT COUNT(*) FROM [OutlookCaptureOperations]
+                 WHERE [OperationId] = @collidingCatchUpOperationId),
+                (SELECT COUNT(*) FROM [OutlookCaptureExports] WHERE [Id] = @identifiedExportId),
+                (SELECT COUNT(*) FROM [OutlookCaptureOperations] WHERE [ResourceId] = @identifiedExportId),
+                (SELECT COUNT(*) FROM sys.columns
+                 WHERE [object_id] = OBJECT_ID(N'[OutlookCaptureExports]')
+                   AND [name] IN (N'ProfileId', N'FolderId')
+                   AND [is_nullable] = 0),
+                (SELECT COUNT(*) FROM sys.foreign_keys
+                 WHERE [name] IN (
+                    N'FK_OutlookCaptureExports_OutlookCaptureProfiles_ProfileId',
+                    N'FK_OutlookCaptureExports_OutlookCaptureFolders_FolderId')
+                   AND [is_disabled] = 0
+                   AND [is_not_trusted] = 0),
+                (SELECT COUNT(*) FROM [OutlookCaptureExports]
+                 WHERE [ProfileId] = '00000000-0000-0000-0000-000000000000'
+                    OR [FolderId] = '00000000-0000-0000-0000-000000000000');
+            """,
+            connection);
+        command.Parameters.AddWithValue("@identitylessExportId", identitylessExportId);
+        command.Parameters.AddWithValue("@identitylessOperationId", identitylessOperationId);
+        command.Parameters.AddWithValue("@collidingCatchUpOperationId", collidingCatchUpOperationId);
+        command.Parameters.AddWithValue("@identifiedExportId", identifiedExportId);
+        await using var reader = await command.ExecuteReaderAsync();
+
+        Assert.True(await reader.ReadAsync());
+        Assert.Equal(0, reader.GetInt32(0));
+        Assert.Equal(0, reader.GetInt32(1));
+        Assert.Equal(1, reader.GetInt32(2));
+        Assert.Equal(1, reader.GetInt32(3));
+        Assert.Equal(1, reader.GetInt32(4));
+        Assert.Equal(2, reader.GetInt32(5));
+        Assert.Equal(2, reader.GetInt32(6));
+        Assert.Equal(0, reader.GetInt32(7));
+    }
+
+    [NativeSqlServerFact]
     public async Task Native_migration_creates_only_the_generated_scheduler_catalog()
     {
         Assert.StartsWith(

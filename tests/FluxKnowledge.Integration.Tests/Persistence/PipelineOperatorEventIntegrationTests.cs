@@ -83,7 +83,9 @@ public sealed class PipelineOperatorEventIntegrationTests(NativeSqlServerFixture
     {
         var now = DateTimeOffset.Parse("2026-08-11T09:00:00+00:00");
         var instanceId = Guid.NewGuid();
-        var store = new SqlNativeWorkerInstanceStore(new ContextFactory(_fixture.ConnectionString));
+        var store = new SqlNativeWorkerInstanceStore(
+            new ContextFactory(_fixture.ConnectionString),
+            new FixedTimeProvider(now));
         await store.CreateAsync(
             Guid.NewGuid(),
             new NativeWorkerLaunchRequest(
@@ -125,10 +127,16 @@ public sealed class PipelineOperatorEventIntegrationTests(NativeSqlServerFixture
             Assert.All(details.RootElement.EnumerateObject(), property =>
                 Assert.Contains(property.Name, new[] { "kind", "reasonCode" }));
         });
+        Assert.Equal(now.AddMinutes(1), events[^1].OccurredAtUtc);
         Assert.Equal("{\"kind\":\"unresponsive\",\"reasonCode\":\"7\"}", events[^1].DetailsJson);
     }
 
     private FluxKnowledgeDbContext CreateContext() => new(new DbContextOptionsBuilder<FluxKnowledgeDbContext>().UseSqlServer(_fixture.ConnectionString).Options);
+    private sealed class FixedTimeProvider(DateTimeOffset now) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => now;
+    }
+
     private sealed class ContextFactory(string connectionString) : IDbContextFactory<FluxKnowledgeDbContext>
     {
         private readonly DbContextOptions<FluxKnowledgeDbContext> _options = new DbContextOptionsBuilder<FluxKnowledgeDbContext>().UseSqlServer(connectionString, sql => sql.EnableRetryOnFailure()).Options;

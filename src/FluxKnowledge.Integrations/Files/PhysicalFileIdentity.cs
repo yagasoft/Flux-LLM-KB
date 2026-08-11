@@ -66,9 +66,14 @@ public static class PhysicalFileIdentity
             IntPtr.Zero);
         if (handle.IsInvalid)
         {
+            var errorCode = Marshal.GetLastPInvokeError();
             handle.Dispose();
+            if (errorCode is 2 or 3)
+            {
+                throw new FileNotFoundException("The retained artifact does not exist.", path);
+            }
             throw new IOException("The retained artifact cannot be opened without following links.",
-                new Win32Exception(Marshal.GetLastPInvokeError()));
+                new Win32Exception(errorCode));
         }
 
         if (!GetFileInformationByHandle(handle, out var information))
@@ -127,14 +132,42 @@ public static class PhysicalFileIdentity
 
         const uint fileReadAttributes = 0x80;
         const uint fileDeleteChild = 0x40;
-        var handle = CreateFile(canonicalPath, fileReadAttributes | fileDeleteChild, 0x3, IntPtr.Zero, 3, 0x02000000, IntPtr.Zero);
+        const uint fileFlagBackupSemantics = 0x02000000;
+        const uint fileFlagOpenReparsePoint = 0x00200000;
+        var handle = CreateFile(
+            canonicalPath,
+            fileReadAttributes | fileDeleteChild,
+            0x3,
+            IntPtr.Zero,
+            3,
+            fileFlagBackupSemantics | fileFlagOpenReparsePoint,
+            IntPtr.Zero);
         if (handle.IsInvalid)
         {
             handle.Dispose();
             throw new UnauthorizedAccessException("The artifact directory cannot be held by the application identity.", new Win32Exception(Marshal.GetLastPInvokeError()));
         }
 
-        return new PhysicalDirectoryLease(handle, new PhysicalDirectoryIdentity(GetFinalPath(handle), Fingerprint(Get(handle))));
+        if (!GetFileInformationByHandle(handle, out var information))
+        {
+            handle.Dispose();
+            throw new IOException("The artifact directory attributes cannot be read.", new Win32Exception(Marshal.GetLastPInvokeError()));
+        }
+
+        if (((FileAttributes)information.FileAttributes & FileAttributes.ReparsePoint) != 0)
+        {
+            handle.Dispose();
+            throw new UnauthorizedAccessException("The artifact directory is a reparse point.");
+        }
+
+        var finalPath = GetFinalPath(handle);
+        if (!string.Equals(finalPath, canonicalPath, StringComparison.OrdinalIgnoreCase))
+        {
+            handle.Dispose();
+            throw new UnauthorizedAccessException("The artifact directory resolves outside its configured path.");
+        }
+
+        return new PhysicalDirectoryLease(handle, new PhysicalDirectoryIdentity(finalPath, Fingerprint(Get(handle))));
     }
 
     public static void EnsureNoReparsePointTraversal(string canonicalPath)

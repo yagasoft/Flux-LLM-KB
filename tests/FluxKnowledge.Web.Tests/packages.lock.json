@@ -650,6 +650,11 @@
         "resolved": "10.0.10",
         "contentHash": "OvGz3PrzuAI/Sj7LTcXcCe3FClRI1IyRMZjNONcZtFh+Ww7nAtSh4kh08r8KVe/xxkXJPjR0Y1jF7H+N42d4xQ=="
       },
+      "System.DirectoryServices.Protocols": {
+        "type": "Transitive",
+        "resolved": "10.0.10",
+        "contentHash": "VQdfESaky3eXlvEuvtBndmZjOt65g+Ah6/0j39MPgPJ3gkbGuURlTFDRq0Y2uX64z5qVEVe1Ln6B4a06+vIzTQ=="
+      },
       "System.IdentityModel.Tokens.Jwt": {
         "type": "Transitive",
         "resolved": "7.7.1",
@@ -776,6 +781,7 @@
           "FluxKnowledge.Infrastructure.SqlServer": "[1.0.0, )",
           "FluxKnowledge.Infrastructure.Usearch": "[1.0.0, )",
           "FluxKnowledge.Integrations": "[1.0.0, )",
+          "Microsoft.AspNetCore.Authentication.Negotiate": "[10.0.10, )",
           "ModelContextProtocol.AspNetCore": "[1.4.0, )"
         }
       },
@@ -784,6 +790,17 @@
         "requested": "[2.19.3, )",
         "resolved": "2.19.3",
         "contentHash": "xbIOMMcR3HVMWgwy4t9/vmXIyZ672cSxk2JEhLkJjJntnEmeIMCrVOtr3fEC/BtOB2fNGeyGM0Mumgrm9SdHyQ=="
+      },
+      "Microsoft.AspNetCore.Authentication.Negotiate": {
+        "type": "CentralTransitive",
+        "requested": "[10.0.10, )",
+        "resolved": "10.0.10",
+        "contentHash": "OWroK6dgXRKygJ95IlYVkZdH/HBcLSO6MyeSe8ZkFco+kUQlOndfHsWE1tjWjPFHnh5cPT6T7vE5kU7QOiqQxQ==",
+        "dependencies": {
+          "Microsoft.AspNetCore.Connections.Abstractions": "10.0.10",
+          "Microsoft.Extensions.Caching.Memory": "10.0.10",
+          "System.DirectoryServices.Protocols": "10.0.10"
+        }
       },
       "Microsoft.EntityFrameworkCore.SqlServer": {
         "type": "CentralTransitive",

@@ -16,89 +16,29 @@ public sealed class SqlSourceActivityStore(
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(draft);
-        var activity = SourceActivity.Create(
-            draft.SourceRevisionId,
-            draft.ActivityKind,
-            draft.ExecutionClass,
-            draft.ProcessorVersion,
-            draft.InputFingerprint,
-            draft.RequiredCapability,
-            draft.Reason,
-            draft.InitialState);
         await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
-        var existing = await FindExistingAsync(context, draft, cancellationToken).ConfigureAwait(false);
-        if (existing is not null)
+        var writer = new SqlSourceActivityWriter(timeProvider);
+        var activity = await writer.FindOrCreateAsync(context, draft, cancellationToken).ConfigureAwait(false);
+        if (context.ChangeTracker.HasChanges())
         {
-            return Restore(existing);
-        }
-
-        var now = timeProvider.GetUtcNow();
-        context.SourceActivities.Add(new SourceActivityEntity
-        {
-            Id = activity.Id.Value,
-            SourceRevisionId = activity.SourceRevisionId.Value,
-            ActivityKind = (int)activity.Kind,
-            ExecutionClass = (int)activity.ExecutionClass,
-            ProcessorVersion = activity.ProcessorVersion,
-            InputFingerprint = activity.InputFingerprint,
-            RequiredCapability = activity.RequiredCapability,
-            State = (int)activity.State,
-            Reason = activity.Reason,
-            CreatedAtUtc = now,
-            UpdatedAtUtc = now
-        });
-        var rootId = await context.SourceRevisions
-            .Where(value => value.Id == activity.SourceRevisionId.Value)
-            .Select(value => value.SourceRootId)
-            .SingleAsync(cancellationToken).ConfigureAwait(false);
-        OperatorEventAppender.Add(context, OperatorEventDraft.ActivityPlanned(
-            activity.Id.Value,
-            activity.SourceRevisionId.Value,
-            rootId,
-            new { kind = activity.Kind.ToString(), executionClass = activity.ExecutionClass.ToString() },
-            activity.State == SourceActivityState.DeferredUnsupported));
-        try
-        {
-            await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
-        }
-        catch (DbUpdateException)
-        {
-            context.ChangeTracker.Clear();
-            var concurrent = await FindExistingAsync(context, draft, cancellationToken).ConfigureAwait(false);
-            if (concurrent is null)
+            try
             {
-                throw;
+                await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
             }
+            catch (DbUpdateException)
+            {
+                context.ChangeTracker.Clear();
+                var concurrent = await SqlSourceActivityWriter.FindExistingAsync(context, draft, cancellationToken).ConfigureAwait(false);
+                if (concurrent is null)
+                {
+                    throw;
+                }
 
-            return Restore(concurrent);
+                return SqlSourceActivityWriter.Restore(concurrent);
+            }
         }
-
         return activity;
     }
-
-    private static Task<SourceActivityEntity?> FindExistingAsync(
-        FluxKnowledgeDbContext context,
-        SourceActivityDraft draft,
-        CancellationToken cancellationToken) =>
-        context.SourceActivities.SingleOrDefaultAsync(
-            value => value.SourceRevisionId == draft.SourceRevisionId.Value &&
-                value.ActivityKind == (int)draft.ActivityKind &&
-                value.ProcessorVersion == draft.ProcessorVersion &&
-                value.InputFingerprint == draft.InputFingerprint,
-            cancellationToken);
-
-    private static SourceActivity Restore(SourceActivityEntity existing) =>
-        SourceActivity.Restore(
-            new SourceActivityId(existing.Id),
-            new SourceRevisionId(existing.SourceRevisionId),
-            (SourceActivityKind)existing.ActivityKind,
-            (ExecutionClass)existing.ExecutionClass,
-            existing.ProcessorVersion,
-            existing.InputFingerprint,
-            existing.RequiredCapability,
-            (SourceActivityState)existing.State,
-            existing.Reason,
-            existing.ResultingPipelineRecordId is not null && existing.ResultingPipelineRecordRevision is not null);
 
     public async ValueTask<RegisteredSourceCapability> RegisterAsync(
         RegisteredSourceCapability capability,
