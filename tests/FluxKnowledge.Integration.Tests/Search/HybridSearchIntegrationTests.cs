@@ -14,6 +14,7 @@ using Xunit;
 
 namespace FluxKnowledge.Integration.Tests.Search;
 
+[Collection("sql-full-text")]
 public sealed class HybridSearchIntegrationTests : IClassFixture<NativeSqlServerFixture>
 {
     private readonly NativeSqlServerFixture _fixture;
