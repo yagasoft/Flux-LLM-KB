@@ -38,22 +38,17 @@ public sealed class LocalOutlookConnectionContext(IHttpContextAccessor httpConte
     public bool IsLoopback { get; } = httpContextAccessor.HttpContext?.Connection.RemoteIpAddress is { } remoteAddress &&
         IPAddress.IsLoopback(remoteAddress);
 
-    public bool IsWindowsAuthenticated { get; } = httpContextAccessor.HttpContext?.User.Identity is
-    {
-        IsAuthenticated: true,
-        AuthenticationType: "Negotiate" or "NTLM" or "Windows"
-    };
 }
 
-/// <summary>Allows mutations only for a Windows-authenticated loopback circuit.</summary>
+/// <summary>Allows mutations only for an anonymous direct-loopback circuit.</summary>
 public sealed class LocalOutlookOperatorPolicy(LocalOutlookConnectionContext connection) : IOutlookOperatorPolicy
 {
     public ValueTask EnsureMutationAllowedAsync(CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        if (!connection.IsLoopback || !connection.IsWindowsAuthenticated)
+        if (!connection.IsLoopback)
         {
-            throw new UnauthorizedAccessException("A Windows-authenticated local operator is required for Outlook configuration changes.");
+            throw new UnauthorizedAccessException("A direct loopback connection is required for Outlook configuration changes.");
         }
 
         return ValueTask.CompletedTask;
@@ -291,7 +286,7 @@ public sealed class OutlookPageState(
 
     public static string ToSafeOperatorMessage(Exception exception) => exception switch
     {
-        UnauthorizedAccessException => "A Windows-authenticated local operator is required for Outlook configuration changes.",
+        UnauthorizedAccessException => "A direct loopback connection is required for Outlook configuration changes.",
         IOException or DirectoryNotFoundException => "The Outlook spool could not be validated. Check its configured access and capacity.",
         ArgumentOutOfRangeException => "The Outlook schedule, overlap or selected configuration is outside the supported bounds.",
         ArgumentException => "The Outlook configuration is invalid. Check the selected values.",

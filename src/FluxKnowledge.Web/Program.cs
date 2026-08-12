@@ -3,8 +3,6 @@ using FluxKnowledge.Web.Components;
 using FluxKnowledge.Web.Components.Status;
 using FluxKnowledge.Web.Endpoints;
 using FluxKnowledge.Web.Mcp;
-using Microsoft.AspNetCore.Authentication.Negotiate;
-using Microsoft.AspNetCore.Components.Authorization;
 using Microsoft.AspNetCore.Components.Server.Circuits;
 using System.Text.Json;
 
@@ -24,10 +22,6 @@ if (projectOutlookConfiguration)
     return;
 }
 
-builder.Services.AddAuthentication(NegotiateDefaults.AuthenticationScheme)
-    .AddNegotiate();
-builder.Services.AddAuthorization();
-builder.Services.AddCascadingAuthenticationState();
 WebHostComposition.AddFluxKnowledgeServices(builder.Services, builder.Configuration);
 builder.Services.AddRazorComponents()
     .AddInteractiveServerComponents();
@@ -43,7 +37,7 @@ builder.Services
     .WithTools<KnowledgeMcpTools>();
 var app = builder.Build();
 
-app.UseOutlookOperatorAuthentication();
+app.UseOutlookOperatorLoopbackGate();
 app.UseAntiforgery();
 app.MapStaticAssets();
 app.MapRazorComponents<App>()

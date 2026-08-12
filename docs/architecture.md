@@ -231,8 +231,10 @@ records are authoritative for profiles, canonical folders, configuration
 revisions, browse requests/results, coalesced catch-up work, host/session leases,
 operation receipts, exports and deferred capabilities. Events are wake hints;
 reconciliation and claims come from SQL. Configuration mutations exist only in
-the authenticated loopback `/outlook` UI. REST, MCP and CLI remain read-only for
-this capability.
+the anonymous direct-loopback `/outlook` UI on the approved private PC. The
+2026-08-12 access-boundary amendment requires rejection of non-loopback and
+forwarded/proxied requests, retained antiforgery, and no Windows/Negotiate
+authentication. REST, MCP and CLI remain read-only for this capability.
 
 Classic Outlook access is isolated in a `net10.0-windows` STA executable. Its
 factory checks the Windows interactive user/session, one-instance ownership and

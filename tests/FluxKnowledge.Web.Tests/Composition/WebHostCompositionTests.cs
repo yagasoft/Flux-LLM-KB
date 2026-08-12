@@ -21,7 +21,9 @@ using FluxKnowledge.Web.Components.Outlook;
 using FluxKnowledge.Web.Endpoints;
 using FluxKnowledge.Web.Mcp;
 using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.EntityFrameworkCore;
@@ -311,7 +313,7 @@ public sealed class WebHostCompositionTests : IDisposable
     }
 
     [Fact]
-    public void Actual_program_entrypoint_registers_the_pump_reader_and_workers_without_sql_io()
+    public async Task Actual_program_entrypoint_registers_no_authentication_surface_and_rejects_remote_Outlook_requests()
     {
         using var factory = new ConfiguredWebApplicationFactory(_ingressRoot);
 
@@ -332,6 +334,44 @@ public sealed class WebHostCompositionTests : IDisposable
             worker => Assert.IsType<ExtractUtf8StageWorker>(worker),
             worker => Assert.IsType<NormaliseTextStageWorker>(worker),
             worker => Assert.IsType<PublishStageWorker>(worker));
+
+        Assert.Null(scope.ServiceProvider.GetService<IAuthenticationService>());
+        Assert.Null(scope.ServiceProvider.GetService<IAuthenticationSchemeProvider>());
+        Assert.False(services.GetRequiredService<AuthenticationMiddlewareProbe>().WasConfigured);
+
+        foreach (var path in new[] { "/outlook", "/_blazor" })
+        {
+            var remote = await factory.Server.SendAsync(context =>
+            {
+                context.Request.Path = path;
+                context.Request.Headers["Forwarded"] = "for=127.0.0.1";
+                context.Request.Headers["X-Forwarded-For"] = "127.0.0.1";
+                context.Connection.RemoteIpAddress = IPAddress.Parse("192.0.2.10");
+            });
+
+            Assert.Equal(StatusCodes.Status403Forbidden, remote.Response.StatusCode);
+        }
+
+        var loopback = await factory.Server.SendAsync(context =>
+        {
+            context.Request.Path = "/_blazor";
+            context.Request.Headers["Forwarded"] = "for=198.51.100.50";
+            context.Request.Headers["X-Forwarded-For"] = "198.51.100.50";
+            context.Connection.RemoteIpAddress = IPAddress.Loopback;
+        });
+
+        Assert.NotEqual(StatusCodes.Status403Forbidden, loopback.Response.StatusCode);
+    }
+
+    [Fact]
+    public void Web_assembly_has_no_Negotiate_authentication_dependency()
+    {
+        Assert.DoesNotContain(
+            typeof(Program).Assembly.GetReferencedAssemblies(),
+            reference => string.Equals(
+                reference.Name,
+                "Microsoft.AspNetCore.Authentication.Negotiate",
+                StringComparison.Ordinal));
     }
 
     [Theory]
@@ -480,8 +520,26 @@ public sealed class WebHostCompositionTests : IDisposable
                             ["Usearch:RootPath"] = Path.Combine(Path.GetTempPath(), $"FluxKnowledgeIndexes_{Guid.NewGuid():N}")
                         }));
             builder.ConfigureTestServices(
-                services => services.AddSingleton<IOutboxStore, EmptyOutboxStore>());
+                services =>
+                {
+                    services.AddSingleton<IOutboxStore, EmptyOutboxStore>();
+                    services.AddSingleton<AuthenticationMiddlewareProbe>();
+                    services.AddSingleton<IStartupFilter>(provider =>
+                        provider.GetRequiredService<AuthenticationMiddlewareProbe>());
+                });
         }
+    }
+
+    private sealed class AuthenticationMiddlewareProbe : IStartupFilter
+    {
+        public bool WasConfigured { get; private set; }
+
+        public Action<IApplicationBuilder> Configure(Action<IApplicationBuilder> next) =>
+            builder =>
+            {
+                next(builder);
+                WasConfigured = builder.Properties.ContainsKey("__AuthenticationMiddlewareSet");
+            };
     }
 
     private sealed class EmptyOutboxStore : IOutboxStore

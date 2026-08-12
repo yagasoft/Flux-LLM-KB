@@ -89,6 +89,8 @@ if ($PlanOnly) {
         post_deploy_validator = "validate-native-outlook-ingress.ps1"
         outlook_host_activation = $false
         windows_service_registration = $false
+        iis_anonymous_authentication_required = $true
+        iis_windows_authentication_prohibited = $true
         source_artifact_store_requires_app_pool_modify_access = $true
         source_artifact_store_acl_rejects_protected_root_overlap = $true
         required_endpoints = @(
@@ -161,24 +163,25 @@ function Get-SourceArtifactStoreRoot {
     return [System.IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($configuredRoot))
 }
 
-function Enable-LocalOutlookOperatorAuthentication {
+function Assert-AnonymousIisAuthentication {
     param([string]$ApplicationName)
 
     $appCmd = Join-Path $env:windir "System32\inetsrv\appcmd.exe"
     if (-not (Test-Path -LiteralPath $appCmd -PathType Leaf)) {
-        throw "IIS appcmd.exe is required to configure local Outlook operator authentication."
+        throw "IIS appcmd.exe is required to validate local Outlook operator authentication."
     }
 
-    # Windows authentication lets the Negotiate handler defer to IIS for the
-    # local /outlook challenge. Anonymous access remains enabled so existing
-    # read-only REST, MCP and CLI-facing HTTP routes stay public.
-    & $appCmd set config $ApplicationName /section:windowsAuthentication /enabled:true /commit:apphost
-    if ($LASTEXITCODE -ne 0) {
-        throw "Could not enable IIS Windows authentication for the local Outlook operator route."
-    }
-    & $appCmd set config $ApplicationName /section:anonymousAuthentication /enabled:true /commit:apphost
-    if ($LASTEXITCODE -ne 0) {
-        throw "Could not preserve IIS anonymous access for public read-only routes."
+    foreach ($path in @("", "/outlook", "/_blazor")) {
+        $target = "$ApplicationName$path"
+        $anonymous = (& $appCmd list config $target /section:anonymousAuthentication /config:apphost 2>&1 | Out-String)
+        if ($LASTEXITCODE -ne 0 -or $anonymous -notmatch 'enabled="true"') {
+            throw "IIS anonymous authentication must remain enabled for $target."
+        }
+
+        $windows = (& $appCmd list config $target /section:windowsAuthentication /config:apphost 2>&1 | Out-String)
+        if ($LASTEXITCODE -ne 0 -or $windows -match 'enabled="true"') {
+            throw "IIS Windows authentication must remain disabled for $target."
+        }
     }
 }
 
@@ -559,7 +562,7 @@ try {
         throw
     }
 
-    Enable-LocalOutlookOperatorAuthentication -ApplicationName $SiteName
+    Assert-AnonymousIisAuthentication -ApplicationName $SiteName
     Start-WebAppPool -Name $SiteName -ErrorAction Stop
     Wait-ForAppPoolState -Name $SiteName -ExpectedState "Started"
     $poolStopped = $false

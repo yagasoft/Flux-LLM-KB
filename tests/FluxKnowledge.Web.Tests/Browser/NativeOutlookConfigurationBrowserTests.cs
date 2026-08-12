@@ -1,15 +1,9 @@
-using System.Security.Claims;
-using System.Text.Encodings.Web;
 using FluxKnowledge.Domain.Outlook;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
 using FluxKnowledge.Integration.Tests.Support;
-using Microsoft.AspNetCore.Authentication;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Options;
 using Microsoft.Playwright;
 using Xunit;
 
@@ -19,7 +13,7 @@ namespace FluxKnowledge.Web.Tests.Browser;
 public sealed class NativeOutlookConfigurationBrowserTests
 {
     [BrowserFact]
-    public async Task Anonymous_request_is_rejected_before_the_Outlook_operator_page_renders()
+    public async Task Anonymous_loopback_request_can_render_the_Outlook_operator_page()
     {
         await using var sql = new NativeSqlServerFixture();
         await sql.InitializeAsync();
@@ -32,16 +26,12 @@ public sealed class NativeOutlookConfigurationBrowserTests
             await using var host = await PhaseOneVerticalSliceBrowserTests.BrowserHost.StartAsync(
                 sql.ConnectionString,
                 ingressRoot,
-                indexRoot,
-                services => services.AddAuthentication(TestAnonymousAuthenticationHandler.SchemeName)
-                    .AddScheme<AuthenticationSchemeOptions, TestAnonymousAuthenticationHandler>(
-                        TestAnonymousAuthenticationHandler.SchemeName,
-                        _ => { }));
+                indexRoot);
             using var client = new HttpClient { BaseAddress = host.BaseAddress };
 
             using var response = await client.GetAsync("/outlook");
 
-            Assert.Equal(System.Net.HttpStatusCode.Unauthorized, response.StatusCode);
+            Assert.Equal(System.Net.HttpStatusCode.OK, response.StatusCode);
         }
         finally
         {
@@ -51,7 +41,7 @@ public sealed class NativeOutlookConfigurationBrowserTests
     }
 
     [BrowserFact]
-    public async Task Authenticated_loopback_operator_can_create_a_disabled_profile_without_sending_a_spool_path_over_SignalR()
+    public async Task Anonymous_loopback_operator_can_create_a_disabled_profile_without_sending_a_spool_path_over_SignalR()
     {
         await using var sql = new NativeSqlServerFixture();
         await sql.InitializeAsync();
@@ -64,11 +54,7 @@ public sealed class NativeOutlookConfigurationBrowserTests
             await using var host = await PhaseOneVerticalSliceBrowserTests.BrowserHost.StartAsync(
                 sql.ConnectionString,
                 ingressRoot,
-                indexRoot,
-                services => services.AddAuthentication(TestWindowsAuthenticationHandler.SchemeName)
-                    .AddScheme<AuthenticationSchemeOptions, TestWindowsAuthenticationHandler>(
-                        TestWindowsAuthenticationHandler.SchemeName,
-                        _ => { }));
+                indexRoot);
             using var playwright = await Playwright.CreateAsync();
             await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
             var page = await browser.NewPageAsync();
@@ -161,11 +147,7 @@ public sealed class NativeOutlookConfigurationBrowserTests
             await using var host = await PhaseOneVerticalSliceBrowserTests.BrowserHost.StartAsync(
                 sql.ConnectionString,
                 ingressRoot,
-                indexRoot,
-                services => services.AddAuthentication(TestWindowsAuthenticationHandler.SchemeName)
-                    .AddScheme<AuthenticationSchemeOptions, TestWindowsAuthenticationHandler>(
-                        TestWindowsAuthenticationHandler.SchemeName,
-                        _ => { }));
+                indexRoot);
             using var playwright = await Playwright.CreateAsync();
             await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
             var page = await browser.NewPageAsync();
@@ -190,37 +172,4 @@ public sealed class NativeOutlookConfigurationBrowserTests
         }
     }
 
-    private sealed class TestWindowsAuthenticationHandler(
-        IOptionsMonitor<AuthenticationSchemeOptions> options,
-        ILoggerFactory logger,
-        UrlEncoder encoder) : AuthenticationHandler<AuthenticationSchemeOptions>(options, logger, encoder)
-    {
-        public const string SchemeName = "TestWindows";
-
-        protected override Task<AuthenticateResult> HandleAuthenticateAsync()
-        {
-            var identity = new ClaimsIdentity(
-                [new Claim(ClaimTypes.Name, "browser-operator")],
-                "Negotiate");
-            return Task.FromResult(AuthenticateResult.Success(
-                new AuthenticationTicket(new ClaimsPrincipal(identity), SchemeName)));
-        }
-    }
-
-    private sealed class TestAnonymousAuthenticationHandler(
-        IOptionsMonitor<AuthenticationSchemeOptions> options,
-        ILoggerFactory logger,
-        UrlEncoder encoder) : AuthenticationHandler<AuthenticationSchemeOptions>(options, logger, encoder)
-    {
-        public const string SchemeName = "TestAnonymous";
-
-        protected override Task<AuthenticateResult> HandleAuthenticateAsync() =>
-            Task.FromResult(AuthenticateResult.NoResult());
-
-        protected override Task HandleChallengeAsync(AuthenticationProperties properties)
-        {
-            Response.StatusCode = StatusCodes.Status401Unauthorized;
-            return Task.CompletedTask;
-        }
-    }
 }

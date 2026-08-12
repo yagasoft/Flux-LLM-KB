@@ -1,15 +1,6 @@
-@using Microsoft.AspNetCore.Components.Authorization
-
 <Router AppAssembly="typeof(Program).Assembly">
     <Found Context="routeData">
-        <AuthorizeRouteView RouteData="routeData" DefaultLayout="typeof(Layout.MainLayout)">
-            <NotAuthorized>
-                <LayoutView Layout="typeof(Layout.MainLayout)">
-                    <h1>Windows authentication required</h1>
-                    <p>This operator page is available only to an authenticated local Windows user.</p>
-                </LayoutView>
-            </NotAuthorized>
-        </AuthorizeRouteView>
+        <RouteView RouteData="routeData" DefaultLayout="typeof(Layout.MainLayout)" />
         <FocusOnNavigate RouteData="routeData" Selector="h1" />
     </Found>
     <NotFound>

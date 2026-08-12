@@ -16,6 +16,12 @@
 - The host is separate from IIS, Docker and the Phase 2 deterministic worker. It is never a model, GPU, driver/runtime, RabbitMQ, Vespa, Docker, network-client or legacy worker.
 - Raw body text, attachments, Outlook identifiers, credentials and COM diagnostics stay in ignored private spool/host paths. SQL and outward surfaces contain only sanitised metadata, hashes and private relative references.
 - The local Blazor UI may configure profiles, folders and spools. Native REST, MCP and CLI remain read-only.
+- The `/outlook` configuration UI is anonymous on the approved private PC, but
+  accepts mutations only from direct `127.0.0.1` or `::1` connections. Reject
+  all non-loopback and forwarded/proxied requests. Do not register Windows,
+  Negotiate, cookie or token authentication, and do not configure IIS Windows
+  authentication for Outlook; preserve anonymous access for the existing public
+  read-only routes. Retain antiforgery and sanitised append-only audit evidence.
 - COM notifications are hints only. SQL cursor, export receipt, source activity and deferred-replay state are authoritative and idempotent.
 - Profiles and hosted integration default disabled. No test, deployment or validation touches a real mailbox unless later explicitly authorised for a non-production Outlook profile/folder.
 - Preserve existing source/revision/artifact/activity, SQL authority and fenced executor contracts. Do not activate a model, GPU, processor, external source, legacy action or Windows Service.
@@ -364,6 +370,12 @@ git commit -m "feat: add read-only Outlook COM host"
 public async Task Page_rejects_save_when_the_folder_browse_result_is_stale() { }
 
 [Fact]
+public async Task Direct_loopback_operator_can_mutate_without_an_authenticated_identity() { }
+
+[Fact]
+public async Task Non_loopback_or_forwarded_request_cannot_create_outlook_control_plane_work() { }
+
+[Fact]
 public async Task Projection_shows_folder_and_spool_status_but_not_entry_ids_or_raw_diagnostics() { }
 
 [Fact]
@@ -380,13 +392,23 @@ Expected: FAIL because the page/state/projection does not exist.
 
 Follow SourceRootPageState semantics: a configuration change invalidates the prior browse result; save requires a current result. Browse folders creates a durable host-mediated request and accepts only bounded folder display metadata plus canonical identity. Catch up records durable work; it never starts a process or calls COM in the Web host. Enabling a profile makes it eligible for a later host claim, not an immediate source connection.
 
+Remove the `[Authorize]` route requirement and every Windows/Negotiate
+authentication dependency from this page's composition. The operator policy
+must accept a direct socket peer address of `127.0.0.1` or `::1` without an
+identity, reject every other peer address, and never treat `Forwarded` or
+`X-Forwarded-For` as local. Preserve antiforgery on every form. IIS deployment
+keeps anonymous authentication enabled; no page-specific Windows-authentication
+configuration is added.
+
 Display profile/folder display name, configured spool location, capacity/health, capture state, timestamps and aggregate export/deferred/blocked counts. Do not display messages, subjects, bodies, attachment bytes, EntryID, StoreId, credentials, process IDs or raw COM diagnostics. Add no MapPost endpoint, MCP tool or CLI command; update read-only status projections only with sanitised aggregate state.
 
 - [ ] **Step 4: Run GREEN evidence.**
 
 Run: dotnet test tests/FluxKnowledge.Web.Tests/FluxKnowledge.Web.Tests.csproj --filter "FullyQualifiedName~OutlookPageStateTests|FullyQualifiedName~OutlookProjectionReaderIntegrationTests|FullyQualifiedName~NativeOutlookConfigurationBrowserTests|FullyQualifiedName~WebHostCompositionTests"
 
-Expected: PASS; UI-only configuration works, safe fields render and disabled composition registers no COM host.
+Expected: PASS; direct-loopback UI-only configuration works without an
+authenticated identity, non-loopback/forwarded requests are rejected, safe
+fields render and disabled composition registers no COM host.
 
 - [ ] **Step 5: Commit.**
 
@@ -402,6 +424,9 @@ git commit -m "feat: configure Outlook capture in the local UI"
 - Create: src/FluxKnowledge.Integrations/Outlook/OutlookCaptureRecoveryService.cs
 - Modify: src/FluxKnowledge.Web/appsettings.json
 - Modify: src/FluxKnowledge.Web/WebHostComposition.cs
+- Modify: src/FluxKnowledge.Web/Program.cs
+- Modify: src/FluxKnowledge.Web/OutlookOperatorAuthentication.cs
+- Modify: src/FluxKnowledge.Web/FluxKnowledge.Web.csproj
 - Modify: scripts/deploy/update-native-windows.ps1
 - Create: scripts/deploy/validate-native-outlook-ingress.ps1
 - Modify: scripts/dev/complete-feature.ps1
@@ -422,6 +447,9 @@ public async Task Restart_releases_only_stale_catch_up_leases_and_replays_pendin
 
 [Fact]
 public void Disabled_options_register_no_com_host_or_external_capture_service() { }
+
+[Fact]
+public void Outlook_configuration_composition_registers_no_authentication_scheme() { }
 ~~~
 
 ~~~powershell
@@ -442,6 +470,15 @@ Expected: FAIL because options, recovery and deployment target/validator are abs
 - [ ] **Step 3: Implement the safe default.**
 
 Add OutlookCapture:Enabled=false, bounded debounce/cadence and stale-lease defaults. The recovery service may reconcile durable hints/leases only when explicitly enabled; it cannot create a host, access COM, advance a cursor or activate a deferred processor.
+
+Keep the local `/outlook` UI anonymous: remove Windows/Negotiate registration,
+authentication middleware, route authorisation and its package reference.
+Retain only a direct-loopback policy for configuration mutations and
+antiforgery. The deployment script must preserve IIS anonymous authentication
+and must neither enable nor configure Windows authentication for `/outlook` or
+`/_blazor`. Add the native deployment contract assertion that rejects any
+Windows/Negotiate authentication configuration introduced by the deployment
+script.
 
 Update the native migration target to the latest generated Outlook migration,
 including `AddNativeOutlookIngress` and every later Outlook hardening migration
@@ -558,8 +595,10 @@ independent review findings without widening the approved Outlook-only scope.
    create/edit/pause/remove profile commands, basis selection, bounded
    schedule/overlap validation, and a `received_time` warning with a manual
    reconciliation path. Save-time spool validation must check local path, ACL,
-   capacity and writability. Add tests for local policy, antiforgery and
-   sanitised append-only audit evidence; REST/MCP/CLI stay read-only.
+   capacity and writability. Replace the prior local-authentication policy with
+   an anonymous direct-loopback-only policy that rejects forwarded/proxied and
+   non-loopback callers. Retain antiforgery and sanitised append-only audit
+   evidence; REST/MCP/CLI stay read-only.
 
 4. **Deferred and export recovery invariants (Tasks 2 and 3).** Persist a
    `DeferredCapability` record with immutable provenance, artifact fingerprint

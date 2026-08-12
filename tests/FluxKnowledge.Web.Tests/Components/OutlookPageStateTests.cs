@@ -1,5 +1,4 @@
 using System.Net;
-using System.Security.Claims;
 using FluxKnowledge.Application.Contracts;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Domain.Outlook;
@@ -145,27 +144,73 @@ public sealed class OutlookPageStateTests
     }
 
     [Fact]
-    public async Task Local_policy_requires_both_loopback_and_an_authenticated_identity()
+    public async Task Anonymous_direct_loopback_operator_can_submit_an_Outlook_mutation()
     {
         var context = new DefaultHttpContext();
         context.Connection.RemoteIpAddress = IPAddress.Loopback;
-        context.User = new ClaimsPrincipal(new ClaimsIdentity([new Claim(ClaimTypes.Name, "operator")], "Negotiate"));
         var accessor = new HttpContextAccessor { HttpContext = context };
-        var connection = new LocalOutlookConnectionContext(accessor);
-        var policy = new LocalOutlookOperatorPolicy(connection);
+        var store = new RecordingStore();
+        var state = CreateState(store, new LocalOutlookOperatorPolicy(new LocalOutlookConnectionContext(accessor)));
 
-        await policy.EnsureMutationAllowedAsync(CancellationToken.None);
+        await state.RequestCatchUpAsync(Draft(enable: true).ProfileId!, manualReconciliation: false, CancellationToken.None);
 
+        Assert.Equal(1, store.CatchUpRequestCount);
         accessor.HttpContext = null;
-        await policy.EnsureMutationAllowedAsync(CancellationToken.None);
+        await state.RequestCatchUpAsync(Draft(enable: true).ProfileId!, manualReconciliation: false, CancellationToken.None);
+        Assert.Equal(2, store.CatchUpRequestCount);
+    }
 
+    [Fact]
+    public async Task Non_loopback_operator_cannot_submit_an_Outlook_mutation()
+    {
         var remoteContext = new DefaultHttpContext();
         remoteContext.Connection.RemoteIpAddress = IPAddress.Parse("192.0.2.10");
-        remoteContext.User = context.User;
-        var remotePolicy = new LocalOutlookOperatorPolicy(
-            new LocalOutlookConnectionContext(new HttpContextAccessor { HttpContext = remoteContext }));
+        var store = new RecordingStore();
+        var state = CreateState(
+            store,
+            new LocalOutlookOperatorPolicy(
+                new LocalOutlookConnectionContext(new HttpContextAccessor { HttpContext = remoteContext })));
+
         await Assert.ThrowsAsync<UnauthorizedAccessException>(
-            () => remotePolicy.EnsureMutationAllowedAsync(CancellationToken.None).AsTask());
+            () => state.RequestCatchUpAsync(Draft(enable: true).ProfileId!, manualReconciliation: false, CancellationToken.None).AsTask());
+
+        Assert.Equal(0, store.CatchUpRequestCount);
+    }
+
+    [Theory]
+    [InlineData("127.0.0.1", "198.51.100.50", false)]
+    [InlineData("192.0.2.10", "127.0.0.1", true)]
+    public async Task Outlook_mutation_uses_the_actual_peer_and_ignores_forwarded_identity(
+        string peerAddress,
+        string forwardedAddress,
+        bool rejected)
+    {
+        var context = new DefaultHttpContext();
+        context.Connection.RemoteIpAddress = IPAddress.Parse(peerAddress);
+        context.Request.Headers["Forwarded"] = $"for={forwardedAddress}";
+        context.Request.Headers["X-Forwarded-For"] = forwardedAddress;
+        var policy = new LocalOutlookOperatorPolicy(
+            new LocalOutlookConnectionContext(new HttpContextAccessor { HttpContext = context }));
+
+        if (rejected)
+        {
+            await Assert.ThrowsAsync<UnauthorizedAccessException>(
+                () => policy.EnsureMutationAllowedAsync(CancellationToken.None).AsTask());
+            return;
+        }
+
+        await policy.EnsureMutationAllowedAsync(CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task IPv6_loopback_operator_is_allowed_without_an_authenticated_identity()
+    {
+        var context = new DefaultHttpContext();
+        context.Connection.RemoteIpAddress = IPAddress.IPv6Loopback;
+        var policy = new LocalOutlookOperatorPolicy(
+            new LocalOutlookConnectionContext(new HttpContextAccessor { HttpContext = context }));
+
+        await policy.EnsureMutationAllowedAsync(CancellationToken.None);
     }
 
     [Fact]

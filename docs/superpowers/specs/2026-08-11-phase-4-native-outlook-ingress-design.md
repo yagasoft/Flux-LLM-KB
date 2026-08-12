@@ -14,6 +14,16 @@ unchanged; they are outside this native Phase 4 scope.
 This design does not authorise a live Outlook connection, a COM process launch,
 mailbox access, source migration, deployment or any mailbox mutation.
 
+**2026-08-12 access-boundary amendment:** The user approved removal of local
+operator authentication for this private-PC deployment. Outlook configuration
+uses an anonymous, direct-loopback-only UI: it accepts mutation traffic only
+from `127.0.0.1` or `::1`, rejects non-loopback and forwarded/proxied traffic,
+and must not configure Windows, Negotiate, cookie or token authentication for
+this capability. Antiforgery, the explicit UI-only mutation boundary, append-only
+sanitised audit evidence, default-disabled capture and all COM/session/fencing
+checks remain required. This is a deployment-topology decision, not permission
+to expose `/outlook` on a LAN, through a reverse proxy or on any shared host.
+
 ## Goals
 
 1. Let a trusted local operator configure read-only classic Outlook COM capture
@@ -50,6 +60,10 @@ mailbox access, source migration, deployment or any mailbox mutation.
 - No model, GPU, runtime/driver probe, network connector beyond Outlook COM,
   RabbitMQ, Docker, Vespa, processor activation or legacy migration belongs to
   this design checkpoint.
+- The native `/outlook` configuration surface is anonymous only on a private,
+  direct loopback IIS binding. It does not use a Windows identity or another
+  application authentication scheme. IIS keeps anonymous access enabled, and
+  deployment must not enable Windows/Negotiate authentication for this feature.
 
 ## Architecture
 
@@ -171,7 +185,8 @@ render raw attachment or mail content merely because it is retained.
 ## Local operator experience
 
 The native Blazor UI is the supported local configuration surface, modelled on
-the existing watched-folder flow. It lets an authorised local operator:
+the existing watched-folder flow. On the approved private PC it lets the local
+interactive user:
 
 - create, edit, pause and remove Outlook capture profiles;
 - invoke a host-mediated browser to select canonical classic-Outlook folders;
@@ -184,10 +199,10 @@ the existing watched-folder flow. It lets an authorised local operator:
 
 The folder browser returns canonical folder identity and display metadata only;
 it never previews, searches or exports message contents to the UI. Profile
-changes are local-operator mutations protected by the existing local policy,
+changes are direct-loopback-only mutations protected by topology enforcement,
 antiforgery and append-only sanitised audit conventions. They create durable
 configuration/catch-up state but do not themselves instantiate COM or mutate a
-mailbox.
+mailbox. They do not require or record a Windows user identity.
 
 The Outlook-host status UI may display configured folder display names and the
 configured spool location because these are needed for local operation. It may
@@ -213,6 +228,9 @@ their later retirement or consolidation requires a separate decision.
   than duplicate an export or audit entry.
 - A manual catch-up is a durable, profile-scoped request and is safe to repeat.
   It does not broaden folder scope or override a disabled profile.
+- A configuration request that is not a direct loopback request is rejected
+  before it can create browse, profile or catch-up work. Forwarded-address
+  headers never satisfy this boundary.
 - Configuration changes apply only to future catch-up claims. They neither
   silently reinterpret existing export provenance nor migrate legacy Gmail
   profiles.
@@ -223,8 +241,9 @@ Implementation is acceptable only when fresh tests prove all of the following:
 
 1. The host cannot use COM when not in the logged-in Windows user context, and
    no IIS/Docker/Phase 2 worker process can instantiate it.
-2. The UI can configure an Outlook-only profile, canonical folder and private
-   spool using local operator authorisation, while native REST/MCP/CLI remain
+2. The anonymous direct-loopback UI can configure an Outlook-only profile,
+   canonical folder and private spool without a Windows identity, while every
+   non-loopback or forwarded request is rejected and native REST/MCP/CLI remain
    read-only.
 3. A full message with multiple attachments becomes one complete atomic private
    export with immutable provenance; a partial export is never visible to the
@@ -256,6 +275,7 @@ Implementation is acceptable only when fresh tests prove all of the following:
 | COM events are lossy | Treat every event as a hint and make the SQL-backed cursor catch-up authoritative. |
 | Older mail is moved into a capture folder | Use `last_modification_time` by default and resurvey a bounded overlap. |
 | Raw mail and attachments are sensitive | Retain them only in ignored private spools/sidecars; expose only authorised local metadata and sanitised evidence. |
+| A local configuration route is unauthenticated | Bind IIS and the UI to direct loopback only, reject forwarded/proxied addresses, retain antiforgery and never expose the route on a LAN, reverse proxy or shared host. |
 | Future processor is absent | Retain artifact plus `DeferredCapability`; do not fail capture or invent extracted content. |
 | Legacy Gmail behaviour is still needed | Preserve it untouched and outside native Phase 4; do not merge it into this design. |
 | User accidentally configures a broad folder | Require explicit folder selection, show status in the local UI and support pause before a catch-up claim; no unbounded profile discovery. |
