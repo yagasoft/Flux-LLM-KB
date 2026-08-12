@@ -204,6 +204,12 @@ if ($deploymentScriptText -notmatch 'Assert-AnonymousIisAuthentication' -or
     $deploymentScriptText -notmatch 'anonymousAuthentication') {
     throw "The native deployment executable does not enforce anonymous IIS authentication for the local Outlook operator route."
 }
+if ($deploymentScriptText -match 'list config .*/config:apphost') {
+    throw "The native deployment executable must use a valid appcmd list-config invocation when verifying IIS authentication."
+}
+if (-not $deploymentScriptText.Contains('$windows -notmatch ''enabled="false"''')) {
+    throw "The native deployment executable must positively require disabled IIS Windows authentication."
+}
 if ($deploymentScriptText -match 'set config .*/section:windowsAuthentication') {
     throw "The native deployment executable must not configure IIS Windows authentication."
 }

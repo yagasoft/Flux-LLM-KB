@@ -173,13 +173,13 @@ function Assert-AnonymousIisAuthentication {
 
     foreach ($path in @("", "/outlook", "/_blazor")) {
         $target = "$ApplicationName$path"
-        $anonymous = (& $appCmd list config $target /section:anonymousAuthentication /config:apphost 2>&1 | Out-String)
+        $anonymous = (& $appCmd list config $target /section:anonymousAuthentication 2>&1 | Out-String)
         if ($LASTEXITCODE -ne 0 -or $anonymous -notmatch 'enabled="true"') {
             throw "IIS anonymous authentication must remain enabled for $target."
         }
 
-        $windows = (& $appCmd list config $target /section:windowsAuthentication /config:apphost 2>&1 | Out-String)
-        if ($LASTEXITCODE -ne 0 -or $windows -match 'enabled="true"') {
+        $windows = (& $appCmd list config $target /section:windowsAuthentication 2>&1 | Out-String)
+        if ($LASTEXITCODE -ne 0 -or $windows -notmatch 'enabled="false"') {
             throw "IIS Windows authentication must remain disabled for $target."
         }
     }
