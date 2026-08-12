@@ -27,10 +27,12 @@ internal sealed class OutlookFolderBrowser(
     IOutlookSessionSingletonFactory singletonFactory,
     IOutlookFolderBrowseControlPlane controlPlane,
     IClassicOutlookAdapterFactory adapterFactory,
-    TimeProvider? timeProvider = null)
+    TimeProvider? timeProvider = null,
+    IOutlookComDiagnosticSink? diagnostics = null)
 {
     private static readonly TimeSpan FailureCleanupTimeout = TimeSpan.FromSeconds(10);
     private readonly TimeProvider _clock = timeProvider ?? TimeProvider.System;
+    private readonly IOutlookComDiagnosticSink _diagnostics = diagnostics ?? NoOpOutlookComDiagnosticSink.Instance;
 
     public async ValueTask<OutlookHostRunResult> RunOnceAsync(CancellationToken cancellationToken)
     {
@@ -82,14 +84,14 @@ internal sealed class OutlookFolderBrowser(
         }
         catch (OutlookComHostException exception)
         {
+            await RecordDiagnosticAsync(exception).ConfigureAwait(false);
             return await FailAsync(claim, exception.Reason, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
         {
-            return await FailAsync(
-                claim,
-                OutlookComFailureClassifier.Classify(exception).Reason,
-                cancellationToken).ConfigureAwait(false);
+            var classified = OutlookComFailureClassifier.Classify(exception);
+            await RecordDiagnosticAsync(classified).ConfigureAwait(false);
+            return await FailAsync(claim, classified.Reason, cancellationToken).ConfigureAwait(false);
         }
 
         await using (adapter.ConfigureAwait(false))
@@ -105,14 +107,14 @@ internal sealed class OutlookFolderBrowser(
             }
             catch (OutlookComHostException exception)
             {
+                await RecordDiagnosticAsync(exception).ConfigureAwait(false);
                 return await FailAsync(claim, exception.Reason, cancellationToken).ConfigureAwait(false);
             }
             catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
             {
-                return await FailAsync(
-                    claim,
-                    OutlookComFailureClassifier.Classify(exception).Reason,
-                    cancellationToken).ConfigureAwait(false);
+                var classified = OutlookComFailureClassifier.Classify(exception);
+                await RecordDiagnosticAsync(classified).ConfigureAwait(false);
+                return await FailAsync(claim, classified.Reason, cancellationToken).ConfigureAwait(false);
             }
 
             if (folders.Count != 1)
@@ -124,6 +126,18 @@ internal sealed class OutlookFolderBrowser(
 
             await controlPlane.CompleteBrowseAsync(claim, folders, cancellationToken).ConfigureAwait(false);
             return new OutlookHostRunResult(OutlookHostExitReason.Completed);
+        }
+    }
+
+    private async ValueTask RecordDiagnosticAsync(OutlookComHostException failure)
+    {
+        try
+        {
+            await _diagnostics.WriteAsync(failure, CancellationToken.None).ConfigureAwait(false);
+        }
+        catch
+        {
+            // The opt-in private diagnostic channel must not alter a fenced host outcome.
         }
     }
 

@@ -255,6 +255,57 @@ their later retirement or consolidation requires a separate decision.
   silently reinterpret existing export provenance nor migrate legacy Gmail
   profiles.
 
+### Opt-in private host diagnostics
+
+The bounded non-production validation exposed that a single catch-up terminal
+reason of `AccessDenied` is too coarse: it does not prove that Outlook
+programmatic access was denied. The correction is a smallest host-only verbose
+error switch, not a diagnostic subsystem or an application-data feature. It is
+disabled by default and has the grammar
+`--run-once [--verbose-com-errors [--verbose-com-errors-output <absolute-private-path>]]`.
+Diagnostic flags alone never activate COM; an output argument without verbose
+mode is rejected. With no output argument, raw diagnostics go only to the
+directly attached interactive console error stream and are suppressed when that
+stream is redirected or unattached; they are never sent through the ordinary
+logger. With an output argument, the host writes a single new file below that explicit existing
+application-owned private directory, or writes to the explicit private file.
+The only accepted root is the existing per-user local path
+`%LocalAppData%\FluxKnowledge\OutlookDiagnostics`; the resolved directory chain
+must contain no reparse point, every existing segment must be owned by the
+interactive user without broad read or write access, and the output must remain
+below that root. An output file is always created fresh and atomically; an
+existing file, hard-link or reparse destination is rejected. It
+rejects repository, temporary, broad local, relative, absent-parent,
+non-private and non-local targets. It creates no SQL
+entity, migration, profile/configuration/UI field, API, SignalR payload, audit
+record, operation receipt, background service or additional recovery worker.
+
+When explicitly enabled, the host emits the actual COM stage, HRESULT/error
+code, exception type and message only to this private local diagnostic channel.
+The channel is outside the repository, SQL, spool manifests, source artifacts,
+normal host logs and public application surfaces. REST, MCP, CLI status,
+SignalR, UI projections, validation records and audit details continue to
+exclude it. If an output location is supplied it must be an explicit
+application-owned private location; the host does not infer one or persist an
+otherwise normal diagnostic record.
+
+Every COM-boundary failure has one canonical stage token:
+`activation_session`, `folder_subscription`, `enumeration`, `message_open`,
+`message_body`, `attachment_enumeration` or `attachment_byte_property`. A
+permission or programmatic-access denial is reported only when Outlook or
+Windows supplies explicit denial evidence. A generic programmatic-access prompt,
+guard or approval message is not a denial. Any other `COMException` retains its
+exact stage and is classified as a generic staged COM failure, not as
+`AccessDenied`.
+
+Already committed exports remain committed. This correction deliberately adds
+no per-item continuation, synthetic blocked/deferred receipt or cursor-skip
+behaviour: a staged COM failure follows the existing safe catch-up failure path
+and cannot advance a cursor over an unrepresented item. The diagnostic pass
+must keep the profile paused until focused RED/GREEN evidence and an independent
+review pass, followed by separate explicit authority for a new bounded
+read-only claim.
+
 ## Acceptance evidence
 
 Implementation is acceptable only when fresh tests prove all of the following:

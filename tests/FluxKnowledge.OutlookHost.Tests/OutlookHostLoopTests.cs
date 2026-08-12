@@ -51,6 +51,82 @@ public sealed class OutlookHostLoopTests
     }
 
     [Fact]
+    public async Task Verbose_COM_errors_require_an_explicit_opt_in_switch_without_changing_default_output()
+    {
+        var application = new FakeHostApplication(new OutlookHostRunResult(OutlookHostExitReason.Disabled));
+        var factory = new FakeHostApplicationFactory(application);
+
+        var exitCode = await Program.RunAsync(["--run-once", "--verbose-com-errors"], factory, CancellationToken.None);
+
+        Assert.Equal(0, exitCode);
+        Assert.Equal(1, factory.CreateCount);
+        Assert.True(factory.Options!.Enabled);
+    }
+
+    [Theory]
+    [InlineData("--verbose-com-errors")]
+    [InlineData("--verbose-com-errors-output")]
+    public async Task Verbose_diagnostic_flags_without_run_once_do_not_create_or_run_the_host(string flag)
+    {
+        var application = new FakeHostApplication(new OutlookHostRunResult(OutlookHostExitReason.Completed));
+        var factory = new FakeHostApplicationFactory(application);
+
+        var exitCode = await Program.RunAsync([flag], factory, CancellationToken.None);
+
+        Assert.Equal(2, exitCode);
+        Assert.Equal(0, factory.CreateCount);
+        Assert.Equal(0, application.RunCount);
+    }
+
+    [Fact]
+    public async Task Verbose_diagnostic_output_without_the_verbose_switch_is_rejected_before_host_creation()
+    {
+        var application = new FakeHostApplication(new OutlookHostRunResult(OutlookHostExitReason.Completed));
+        var factory = new FakeHostApplicationFactory(application);
+
+        var exitCode = await Program.RunAsync(
+            ["--run-once", "--verbose-com-errors-output", Path.GetTempPath()],
+            factory,
+            CancellationToken.None);
+
+        Assert.Equal(2, exitCode);
+        Assert.Equal(0, factory.CreateCount);
+        Assert.Equal(0, application.RunCount);
+    }
+
+    [Fact]
+    public async Task Verbose_diagnostic_output_rejects_a_broad_temporary_parent()
+    {
+        var application = new FakeHostApplication(new OutlookHostRunResult(OutlookHostExitReason.Disabled));
+        var factory = new FakeHostApplicationFactory(application);
+
+        var exitCode = await Program.RunAsync(
+            ["--run-once", "--verbose-com-errors", "--verbose-com-errors-output", Path.GetTempPath()],
+            factory,
+            CancellationToken.None);
+
+        Assert.Equal(2, exitCode);
+        Assert.Equal(0, factory.CreateCount);
+        Assert.Equal(0, application.RunCount);
+    }
+
+    [Fact]
+    public async Task Verbose_diagnostic_switches_must_follow_the_run_once_grammar()
+    {
+        var application = new FakeHostApplication(new OutlookHostRunResult(OutlookHostExitReason.Completed));
+        var factory = new FakeHostApplicationFactory(application);
+
+        var exitCode = await Program.RunAsync(
+            ["--verbose-com-errors", "--run-once"],
+            factory,
+            CancellationToken.None);
+
+        Assert.Equal(2, exitCode);
+        Assert.Equal(0, factory.CreateCount);
+        Assert.Equal(0, application.RunCount);
+    }
+
+    [Fact]
     public async Task Disabled_startup_never_activates_COM()
     {
         var fixture = Fixture.Create(enabled: false);
@@ -346,6 +422,49 @@ public sealed class OutlookHostLoopTests
         Assert.Empty(ingestion.IngestedEntryIds);
         Assert.Equal(CursorUtc, Assert.Single(work.Folders).CursorUtc);
         Assert.Equal(new string('b', 64), Assert.Single(work.Folders).CursorFingerprint);
+    }
+
+    [Fact]
+    public async Task Generic_item_stage_COM_failure_keeps_already_exported_work_and_does_not_advance_the_cursor()
+    {
+        var work = CreateWork();
+        var first = Item("first", CursorUtc.AddMinutes(1), CursorUtc);
+        var unexported = Item("unexported", CursorUtc.AddMinutes(2), CursorUtc);
+        var diagnostics = new RecordingComDiagnostics();
+        var fixture = Fixture.Create(
+            work: work,
+            adapterFactory: new ItemStageFailingAdapterFactory(first, unexported),
+            diagnostics: diagnostics);
+
+        var result = await fixture.Loop.RunOnceAsync(CancellationToken.None);
+
+        Assert.Equal(OutlookHostExitReason.OutlookUnavailable, result.Reason);
+        Assert.Equal(["first"], fixture.Ingestion.IngestedEntryIds);
+        Assert.Equal([OutlookCatchUpFailureReason.RetryableHostFailure], fixture.ControlPlane.Requeues.Select(entry => entry.Reason));
+        Assert.Empty(fixture.ControlPlane.Failures);
+        Assert.Equal(0, fixture.ControlPlane.CompletionCount);
+        Assert.Equal(CursorUtc, Assert.Single(work.Folders).CursorUtc);
+        Assert.Equal(new string('b', 64), Assert.Single(work.Folders).CursorFingerprint);
+        var failure = Assert.Single(diagnostics.Failures);
+        Assert.Equal(OutlookComFailureStage.MessageBody, failure.Stage);
+        Assert.IsType<System.Runtime.InteropServices.COMException>(failure.InnerException);
+    }
+
+    [Fact]
+    public async Task Subscription_teardown_COM_failure_reaches_the_private_diagnostic_sink_and_fails_safely()
+    {
+        var diagnostics = new RecordingComDiagnostics();
+        var fixture = Fixture.Create(
+            adapterFactory: new TeardownFailingAdapterFactory(),
+            diagnostics: diagnostics);
+
+        var result = await fixture.Loop.RunOnceAsync(CancellationToken.None);
+
+        Assert.Equal(OutlookHostExitReason.OutlookUnavailable, result.Reason);
+        Assert.Equal([OutlookCatchUpFailureReason.RetryableHostFailure], fixture.ControlPlane.Requeues.Select(entry => entry.Reason));
+        var failure = Assert.Single(diagnostics.Failures);
+        Assert.Equal(OutlookComFailureStage.FolderSubscription, failure.Stage);
+        Assert.IsType<System.Runtime.InteropServices.COMException>(failure.InnerException);
     }
 
     [Fact]
@@ -783,7 +902,8 @@ public sealed class OutlookHostLoopTests
             FakeIngestionBridge? ingestion = null,
             IClassicOutlookAdapterFactory? adapterFactory = null,
             IOutlookSessionSingletonFactory? singletonFactory = null,
-            bool rejectCancelledFailureToken = false)
+            bool rejectCancelledFailureToken = false,
+            IOutlookComDiagnosticSink? diagnostics = null)
         {
             var events = new List<string>();
             adapter ??= new FakeClassicOutlookAdapter();
@@ -807,7 +927,8 @@ public sealed class OutlookHostLoopTests
                 control,
                 adapterFactory ?? factory,
                 ingestion,
-                timeProvider ?? new FixedTimeProvider(CursorUtc));
+                timeProvider ?? new FixedTimeProvider(CursorUtc),
+                diagnostics);
             return new Fixture(loop, factory, control, ingestion, events);
         }
     }
@@ -1024,6 +1145,106 @@ public sealed class OutlookHostLoopTests
         public ValueTask<IClassicOutlookAdapter> CreateAsync(
             OutlookComActivationContext context,
             CancellationToken cancellationToken) => ValueTask.FromException<IClassicOutlookAdapter>(exception);
+    }
+
+    private sealed class ItemStageFailingAdapterFactory(
+        OutlookItemEnvelope first,
+        OutlookItemEnvelope unexported) : IClassicOutlookAdapterFactory
+    {
+        public ValueTask<IClassicOutlookAdapter> CreateAsync(
+            OutlookComActivationContext context,
+            CancellationToken cancellationToken) =>
+            ValueTask.FromResult<IClassicOutlookAdapter>(new ItemStageFailingAdapter(first, unexported));
+    }
+
+    private sealed class TeardownFailingAdapterFactory : IClassicOutlookAdapterFactory
+    {
+        public ValueTask<IClassicOutlookAdapter> CreateAsync(
+            OutlookComActivationContext context,
+            CancellationToken cancellationToken) =>
+            ValueTask.FromResult<IClassicOutlookAdapter>(new TeardownFailingAdapter());
+    }
+
+    private sealed class TeardownFailingAdapter : IClassicOutlookAdapter
+    {
+        public ValueTask<IReadOnlyList<OutlookFolderDescriptor>> BrowseFoldersAsync(string targetPath, CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+
+        public ValueTask<IAsyncDisposable> SubscribeHintsAsync(
+            OutlookFolderIdentity folder,
+            Func<OutlookHint, ValueTask> onHint,
+            CancellationToken cancellationToken) =>
+            ValueTask.FromResult<IAsyncDisposable>(new TeardownFailingSubscription());
+
+        public async IAsyncEnumerable<OutlookItemEnvelope> EnumerateAsync(
+            OutlookFolderIdentity folder,
+            OutlookCursor cursor,
+            [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
+        {
+            await Task.Yield();
+            yield break;
+        }
+
+        public ValueTask<OutlookMessagePayload> ReadForExportAsync(OutlookItemEnvelope item, CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+
+        private sealed class TeardownFailingSubscription : IAsyncDisposable
+        {
+            public ValueTask DisposeAsync() => ValueTask.FromException(OutlookComFailureClassifier.ClassifyCom(
+                new System.Runtime.InteropServices.COMException("private unsubscribe failure", -2147467259),
+                OutlookComFailureStage.FolderSubscription));
+        }
+    }
+
+    private sealed class ItemStageFailingAdapter(
+        OutlookItemEnvelope first,
+        OutlookItemEnvelope unexported) : IClassicOutlookAdapter
+    {
+        public ValueTask<IReadOnlyList<OutlookFolderDescriptor>> BrowseFoldersAsync(string targetPath, CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+
+        public ValueTask<IAsyncDisposable> SubscribeHintsAsync(
+            OutlookFolderIdentity folder,
+            Func<OutlookHint, ValueTask> onHint,
+            CancellationToken cancellationToken) =>
+            ValueTask.FromResult<IAsyncDisposable>(new NoOpAsyncDisposable());
+
+        public async IAsyncEnumerable<OutlookItemEnvelope> EnumerateAsync(
+            OutlookFolderIdentity folder,
+            OutlookCursor cursor,
+            [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
+        {
+            yield return first;
+            await Task.Yield();
+            yield return unexported;
+        }
+
+        public ValueTask<OutlookMessagePayload> ReadForExportAsync(OutlookItemEnvelope item, CancellationToken cancellationToken) =>
+            item == unexported
+                ? ValueTask.FromException<OutlookMessagePayload>(OutlookComFailureClassifier.ClassifyCom(
+                    new System.Runtime.InteropServices.COMException("private item body failure", -2147467259),
+                    OutlookComFailureStage.MessageBody))
+                : ValueTask.FromResult(new OutlookMessagePayload("body"u8.ToArray(), "text/plain", []));
+
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
+    private sealed class RecordingComDiagnostics : IOutlookComDiagnosticSink
+    {
+        public List<OutlookComHostException> Failures { get; } = [];
+
+        public ValueTask WriteAsync(OutlookComHostException failure, CancellationToken cancellationToken)
+        {
+            Failures.Add(failure);
+            return ValueTask.CompletedTask;
+        }
+    }
+
+    private sealed class NoOpAsyncDisposable : IAsyncDisposable
+    {
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 
     private sealed class ThrowingBrowseAdapterFactory : IClassicOutlookAdapterFactory

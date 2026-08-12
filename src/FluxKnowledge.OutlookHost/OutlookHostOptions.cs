@@ -6,6 +6,8 @@ namespace FluxKnowledge.OutlookHost;
 internal sealed class OutlookHostOptions
 {
     public bool Enabled { get; init; }
+    public bool VerboseComErrors { get; init; }
+    public string? VerboseComErrorsOutputPath { get; init; }
     public TimeSpan CatchUpLeaseDuration { get; init; } = TimeSpan.FromMinutes(5);
     public TimeSpan HeartbeatCadence { get; init; } = TimeSpan.FromMinutes(1);
 }
@@ -84,12 +86,25 @@ internal enum OutlookComFailureReason
     LeaseStale
 }
 
+internal enum OutlookComFailureStage
+{
+    ActivationSession,
+    FolderSubscription,
+    Enumeration,
+    MessageOpen,
+    MessageBody,
+    AttachmentEnumeration,
+    AttachmentByteProperty
+}
+
 internal sealed class OutlookComHostException(
     OutlookComFailureReason reason,
-    Exception? innerException = null)
+    Exception? innerException = null,
+    OutlookComFailureStage? stage = null)
     : Exception("Classic Outlook access failed.", innerException)
 {
     public OutlookComFailureReason Reason { get; } = reason;
+    public OutlookComFailureStage? Stage { get; } = stage;
 }
 
 /// <summary>Maps binding failures and other raw COM-boundary exceptions to public-safe host categories.</summary>
@@ -98,11 +113,45 @@ internal static class OutlookComFailureClassifier
     public static OutlookComHostException Classify(Exception exception)
     {
         ArgumentNullException.ThrowIfNull(exception);
+        if (exception is System.Runtime.InteropServices.COMException comException)
+        {
+            return ClassifyCom(comException, OutlookComFailureStage.ActivationSession);
+        }
+
         return new OutlookComHostException(
             HasMissingInteropDependency(exception)
                 ? OutlookComFailureReason.DependencyMissing
                 : OutlookComFailureReason.OutlookUnavailable,
             exception);
+    }
+
+    public static OutlookComHostException ClassifyCom(
+        System.Runtime.InteropServices.COMException exception,
+        OutlookComFailureStage stage)
+    {
+        ArgumentNullException.ThrowIfNull(exception);
+        return new OutlookComHostException(
+            HasExplicitPermissionEvidence(exception)
+                ? OutlookComFailureReason.FolderAccessDenied
+                : OutlookComFailureReason.OutlookUnavailable,
+            exception,
+            stage);
+    }
+
+    private static bool HasExplicitPermissionEvidence(System.Runtime.InteropServices.COMException exception)
+    {
+        if (exception.HResult == unchecked((int)0x80070005))
+        {
+            return true;
+        }
+
+        return exception.Message.Contains("access is denied", StringComparison.OrdinalIgnoreCase) ||
+            exception.Message.Contains("permission denied", StringComparison.OrdinalIgnoreCase) ||
+            exception.Message.Contains("not authorized", StringComparison.OrdinalIgnoreCase) ||
+            exception.Message.Contains("not authorised", StringComparison.OrdinalIgnoreCase) ||
+            exception.Message.Contains("programmatic access was denied", StringComparison.OrdinalIgnoreCase) ||
+            exception.Message.Contains("programmatic access is denied", StringComparison.OrdinalIgnoreCase) ||
+            exception.Message.Contains("Outlook denied programmatic access", StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool HasMissingInteropDependency(Exception exception)

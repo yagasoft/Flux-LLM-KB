@@ -24,17 +24,61 @@ internal static class Program
     {
         ArgumentNullException.ThrowIfNull(args);
         ArgumentNullException.ThrowIfNull(factory);
-        if (args.Length > 1 || args is [not "--run-once"] && args.Length != 0)
+        if (!TryParseOptions(args, out var options))
         {
             return 2;
         }
 
-        var options = new OutlookHostOptions { Enabled = args.Length == 1 };
         await using var application = factory.Create(options);
         var result = await application.RunOnceAsync(cancellationToken).ConfigureAwait(false);
         return result.Reason is OutlookHostExitReason.Disabled or
             OutlookHostExitReason.NoDurableWork or
             OutlookHostExitReason.Completed ? 0 : 1;
+    }
+
+    private static bool TryParseOptions(string[] args, out OutlookHostOptions options)
+    {
+        options = new OutlookHostOptions();
+        if (args.Length == 0)
+        {
+            return true;
+        }
+
+        if (args[0] != "--run-once")
+        {
+            return false;
+        }
+
+        if (args.Length == 1)
+        {
+            options = new OutlookHostOptions { Enabled = true };
+            return true;
+        }
+
+        if (args[1] != "--verbose-com-errors")
+        {
+            return false;
+        }
+
+        if (args.Length == 2)
+        {
+            options = new OutlookHostOptions { Enabled = true, VerboseComErrors = true };
+            return true;
+        }
+
+        if (args.Length != 4 || args[2] != "--verbose-com-errors-output" ||
+            !OutlookComDiagnosticWriter.IsValidExplicitPrivateLocalPath(args[3]))
+        {
+            return false;
+        }
+
+        options = new OutlookHostOptions
+        {
+            Enabled = true,
+            VerboseComErrors = true,
+            VerboseComErrorsOutputPath = args[3]
+        };
+        return true;
     }
 }
 
@@ -74,6 +118,9 @@ internal sealed class DefaultOutlookHostApplicationFactory : IOutlookHostApplica
         var environment = new WindowsOutlookHostEnvironment();
         var singleton = new StaOutlookSessionSingletonFactory(new WindowsSessionSingletonFactory(), dispatcher);
         var adapterFactory = new GatedClassicOutlookAdapterFactory(new ClassicOutlookComActivator(), dispatcher);
+        var diagnostics = OutlookComDiagnosticWriter.Create(
+            options.VerboseComErrors,
+            options.VerboseComErrorsOutputPath);
         var ingestion = new OutlookExportIngestionBridge(
             new SqlOutlookReadyExportIngestionService(new SqlOutlookExportIngestionService(contextFactory)));
         var catchUp = new OutlookHostLoop(
@@ -82,13 +129,15 @@ internal sealed class DefaultOutlookHostApplicationFactory : IOutlookHostApplica
             singleton,
             controlPlane,
             adapterFactory,
-            ingestion);
+            ingestion,
+            diagnostics: diagnostics);
         var browse = new OutlookFolderBrowser(
             options,
             environment,
             singleton,
             controlPlane,
-            adapterFactory);
+            adapterFactory,
+            diagnostics: diagnostics);
         return new ComposedOutlookHostApplication(catchUp, browse, dispatcher);
     }
 

@@ -69,11 +69,13 @@ internal sealed class OutlookHostLoop(
     IOutlookHostControlPlane controlPlane,
     IClassicOutlookAdapterFactory adapterFactory,
     IOutlookExportIngestionBridge ingestionBridge,
-    TimeProvider? timeProvider = null)
+    TimeProvider? timeProvider = null,
+    IOutlookComDiagnosticSink? diagnostics = null)
 {
     private static readonly TimeSpan FailureCleanupTimeout = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan ComAvailabilityRetryDelay = TimeSpan.FromMinutes(1);
     private readonly TimeProvider _clock = timeProvider ?? TimeProvider.System;
+    private readonly IOutlookComDiagnosticSink _diagnostics = diagnostics ?? NoOpOutlookComDiagnosticSink.Instance;
 
     public async ValueTask<OutlookHostRunResult> RunOnceAsync(CancellationToken cancellationToken)
     {
@@ -160,11 +162,13 @@ internal sealed class OutlookHostLoop(
         }
         catch (OutlookComHostException exception)
         {
+            await RecordDiagnosticAsync(exception).ConfigureAwait(false);
             return await HandleComFailureAsync(work.Claim, exception.Reason).ConfigureAwait(false);
         }
         catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
         {
             var classified = OutlookComFailureClassifier.Classify(exception);
+            await RecordDiagnosticAsync(classified).ConfigureAwait(false);
             return await HandleComFailureAsync(work.Claim, classified.Reason).ConfigureAwait(false);
         }
 
@@ -200,6 +204,7 @@ internal sealed class OutlookHostLoop(
             }
             catch (OutlookComHostException exception)
             {
+                await RecordDiagnosticAsync(exception).ConfigureAwait(false);
                 return await HandleComFailureAsync(work.Claim, exception.Reason).ConfigureAwait(false);
             }
             catch (OutlookReadyExportLeaseException)
@@ -214,6 +219,18 @@ internal sealed class OutlookHostLoop(
                     OutlookCatchUpFailureReason.RetryableHostFailure).ConfigureAwait(false);
                 return new OutlookHostRunResult(OutlookHostExitReason.IngestionFailed);
             }
+        }
+    }
+
+    private async ValueTask RecordDiagnosticAsync(OutlookComHostException failure)
+    {
+        try
+        {
+            await _diagnostics.WriteAsync(failure, CancellationToken.None).ConfigureAwait(false);
+        }
+        catch
+        {
+            // The opt-in private diagnostic channel must not alter a fenced host outcome.
         }
     }
 

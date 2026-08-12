@@ -160,7 +160,7 @@ internal sealed class ClassicOutlookComActivator : IClassicOutlookComActivator
         }
         catch (COMException exception)
         {
-            throw new OutlookComHostException(OutlookComFailureReason.OutlookUnavailable, exception);
+            throw OutlookComFailureClassifier.ClassifyCom(exception, OutlookComFailureStage.ActivationSession);
         }
         catch (Exception exception) when (exception is TypeLoadException or FileNotFoundException)
         {
@@ -197,7 +197,7 @@ internal sealed class ClassicOutlookComAdapter : IClassicOutlookAdapter
         }
         catch (COMException exception)
         {
-            throw new OutlookComHostException(OutlookComFailureReason.OutlookUnavailable, exception);
+            throw OutlookComFailureClassifier.ClassifyCom(exception, OutlookComFailureStage.ActivationSession);
         }
     }
 
@@ -231,7 +231,7 @@ internal sealed class ClassicOutlookComAdapter : IClassicOutlookAdapter
         }
         catch (COMException exception)
         {
-            throw new OutlookComHostException(OutlookComFailureReason.FolderAccessDenied, exception);
+            throw OutlookComFailureClassifier.ClassifyCom(exception, OutlookComFailureStage.FolderSubscription);
         }
         finally
         {
@@ -266,7 +266,7 @@ internal sealed class ClassicOutlookComAdapter : IClassicOutlookAdapter
         }
         catch (COMException exception)
         {
-            throw new OutlookComHostException(OutlookComFailureReason.FolderAccessDenied, exception);
+            throw OutlookComFailureClassifier.ClassifyCom(exception, OutlookComFailureStage.FolderSubscription);
         }
         finally
         {
@@ -328,7 +328,7 @@ internal sealed class ClassicOutlookComAdapter : IClassicOutlookAdapter
         }
         catch (COMException exception)
         {
-            throw new OutlookComHostException(OutlookComFailureReason.FolderAccessDenied, exception);
+            throw OutlookComFailureClassifier.ClassifyCom(exception, OutlookComFailureStage.Enumeration);
         }
         finally
         {
@@ -347,42 +347,92 @@ internal sealed class ClassicOutlookComAdapter : IClassicOutlookAdapter
         object? candidate = null;
         try
         {
-            candidate = _session.GetItemFromID(item.EntryId, item.StoreId);
+            try
+            {
+                candidate = _session.GetItemFromID(item.EntryId, item.StoreId);
+            }
+            catch (COMException exception)
+            {
+                throw OutlookComFailureClassifier.ClassifyCom(exception, OutlookComFailureStage.MessageOpen);
+            }
+
             if (candidate is not Outlook.MailItem mail)
             {
-                throw new OutlookComHostException(OutlookComFailureReason.FolderAccessDenied);
+                throw new OutlookComHostException(
+                    OutlookComFailureReason.OutlookUnavailable,
+                    stage: OutlookComFailureStage.MessageOpen);
+            }
+
+            byte[] body;
+            try
+            {
+                body = Encoding.UTF8.GetBytes(mail.Body ?? string.Empty);
+            }
+            catch (COMException exception)
+            {
+                throw OutlookComFailureClassifier.ClassifyCom(exception, OutlookComFailureStage.MessageBody);
             }
 
             Outlook.Attachments? attachmentCollection = null;
             try
             {
-                attachmentCollection = mail.Attachments;
-                var attachments = new List<OutlookAttachmentPayload>(attachmentCollection.Count);
-                for (var index = 1; index <= attachmentCollection.Count; index++)
+                int attachmentCount;
+                try
+                {
+                    attachmentCollection = mail.Attachments;
+                    attachmentCount = attachmentCollection.Count;
+                }
+                catch (COMException exception)
+                {
+                    throw OutlookComFailureClassifier.ClassifyCom(exception, OutlookComFailureStage.AttachmentEnumeration);
+                }
+
+                var attachments = new List<OutlookAttachmentPayload>(attachmentCount);
+                for (var index = 1; index <= attachmentCount; index++)
                 {
                     Outlook.Attachment? attachment = null;
-                    Outlook.PropertyAccessor? accessor = null;
                     try
                     {
-                        attachment = attachmentCollection[index];
-                        accessor = attachment.PropertyAccessor;
-                        var bytes = accessor.GetProperty(AttachmentBytesSchema) as byte[]
-                            ?? throw new OutlookComHostException(OutlookComFailureReason.FolderAccessDenied);
-                        var contentType = accessor.GetProperty(AttachmentMimeSchema) as string;
-                        attachments.Add(new OutlookAttachmentPayload(
-                            attachment.FileName,
-                            string.IsNullOrWhiteSpace(contentType) ? "application/octet-stream" : contentType,
-                            bytes));
+                        try
+                        {
+                            attachment = attachmentCollection[index];
+                        }
+                        catch (COMException exception)
+                        {
+                            throw OutlookComFailureClassifier.ClassifyCom(exception, OutlookComFailureStage.AttachmentEnumeration);
+                        }
+
+                        Outlook.PropertyAccessor? accessor = null;
+                        try
+                        {
+                            accessor = attachment.PropertyAccessor;
+                            var bytes = accessor.GetProperty(AttachmentBytesSchema) as byte[]
+                                ?? throw new OutlookComHostException(
+                                    OutlookComFailureReason.OutlookUnavailable,
+                                    stage: OutlookComFailureStage.AttachmentByteProperty);
+                            var contentType = accessor.GetProperty(AttachmentMimeSchema) as string;
+                            attachments.Add(new OutlookAttachmentPayload(
+                                attachment.FileName,
+                                string.IsNullOrWhiteSpace(contentType) ? "application/octet-stream" : contentType,
+                                bytes));
+                        }
+                        catch (COMException exception)
+                        {
+                            throw OutlookComFailureClassifier.ClassifyCom(exception, OutlookComFailureStage.AttachmentByteProperty);
+                        }
+                        finally
+                        {
+                            Release(accessor);
+                        }
                     }
                     finally
                     {
-                        Release(accessor);
                         Release(attachment);
                     }
                 }
 
                 return ValueTask.FromResult(new OutlookMessagePayload(
-                    Encoding.UTF8.GetBytes(mail.Body ?? string.Empty),
+                    body,
                     "text/plain",
                     attachments));
             }
@@ -390,10 +440,6 @@ internal sealed class ClassicOutlookComAdapter : IClassicOutlookAdapter
             {
                 Release(attachmentCollection);
             }
-        }
-        catch (COMException exception)
-        {
-            throw new OutlookComHostException(OutlookComFailureReason.FolderAccessDenied, exception);
         }
         finally
         {
@@ -464,6 +510,51 @@ internal sealed class ClassicOutlookComAdapter : IClassicOutlookAdapter
 
     internal sealed record BrowseFolderIdentity(string StoreId, string EntryId, string DisplayName);
 
+    internal static ValueTask DisposeHintSubscriptionAsync(
+        Action removeItemAdd,
+        Action removeItemChange,
+        Action<object?> release,
+        object? items,
+        object? folder)
+    {
+        ArgumentNullException.ThrowIfNull(removeItemAdd);
+        ArgumentNullException.ThrowIfNull(removeItemChange);
+        ArgumentNullException.ThrowIfNull(release);
+        COMException? failure = null;
+        try
+        {
+            try
+            {
+                removeItemAdd();
+            }
+            catch (COMException exception)
+            {
+                failure = exception;
+            }
+
+            try
+            {
+                removeItemChange();
+            }
+            catch (COMException exception)
+            {
+                failure ??= exception;
+            }
+        }
+        finally
+        {
+            release(items);
+            release(folder);
+        }
+
+        if (failure is not null)
+        {
+            throw OutlookComFailureClassifier.ClassifyCom(failure, OutlookComFailureStage.FolderSubscription);
+        }
+
+        return ValueTask.CompletedTask;
+    }
+
     private static string Sha256(string value) =>
         Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(value)));
 
@@ -481,20 +572,12 @@ internal sealed class ClassicOutlookComAdapter : IClassicOutlookAdapter
         Outlook.ItemsEvents_ItemAddEventHandler itemAdd,
         Outlook.ItemsEvents_ItemChangeEventHandler itemChange) : IAsyncDisposable
     {
-        public ValueTask DisposeAsync()
-        {
-            try
-            {
-                items.ItemAdd -= itemAdd;
-                items.ItemChange -= itemChange;
-            }
-            finally
-            {
-                Release(items);
-                Release(folder);
-            }
-            return ValueTask.CompletedTask;
-        }
+        public ValueTask DisposeAsync() => DisposeHintSubscriptionAsync(
+            () => items.ItemAdd -= itemAdd,
+            () => items.ItemChange -= itemChange,
+            Release,
+            items,
+            folder);
     }
 }
 

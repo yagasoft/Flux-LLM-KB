@@ -675,9 +675,70 @@ independent review findings without widening the approved Outlook-only scope.
    separate approval. Add these checks to the Task 7 offline verification
    matrix.
 
+7. **Non-production staged COM diagnosis and recovery (post-live correction).**
+   Keep this smallest host-only and opt-in: add no SQL entity, migration,
+   profile/configuration/UI field, Web page, REST/MCP/CLI status field, SignalR
+   payload, audit record or diagnostics subsystem. Add
+   `--run-once [--verbose-com-errors [--verbose-com-errors-output <absolute-private-path>]]`.
+   Diagnostic flags alone never activate COM and the output argument without
+   verbose mode is rejected. Without an output argument, write raw diagnostics
+   only to the directly attached interactive console error stream; suppress it
+   when that stream is redirected or unattached, and never use the normal
+   logger. With it, create one new file
+   below the existing explicit private directory or use the explicit private
+   file beneath the existing `%LocalAppData%\FluxKnowledge\OutlookDiagnostics`
+   root. Every existing segment must have an interactive-user-owned private ACL
+   with no broad read/write access; create a fresh output file atomically and
+   reject existing, hard-link or reparse destinations, repository, temporary,
+   broad local, relative, missing-parent, non-private and non-local targets.
+   Only with the switch, emit actual stage/HRESULT/error, exception type and
+   message to that private local channel. It must never enter the repository,
+   SQL, spool manifest, source artifact, normal host log, public/read-only
+   surface or validation record.
+
+   Replace the coarse `COMException` mapping with the stages
+   `activation_session`, `folder_subscription`, `enumeration`, `message_open`,
+   `message_body`, `attachment_enumeration` and
+   `attachment_byte_property`. Classify a permission/programmatic-access denial
+   only with explicit Outlook/Windows permission evidence. Other COM failures
+   retain their stage and produce a sanitised generic staged-COM terminal
+   outcome, not `AccessDenied`. Preserve already committed exports and the
+   existing cursor-last/idempotency rules. Do not add per-item continuation,
+   synthetic blocked/deferred receipts or cursor-skip semantics in this
+   diagnostic correction; generic staged COM failure remains fail-safe.
+
+   **Focused TDD matrix:**
+
+   - RED/GREEN host tests for each stage/HRESULT combination, explicit
+     permission evidence versus generic COM failure, and absence of raw
+     diagnostic data from normal host output.
+   - RED/GREEN fake-COM tests that generic item-stage failure leaves prior
+     committed exports intact and does not move the cursor past the unexported
+     item; no synthetic blocked/deferred receipt is created.
+   - RED/GREEN host/fake-control-plane tests proving unchanged cursor-last and
+     replay behaviour under this host failure. Existing disposable-SQL coverage
+     is regression evidence only; this task adds no SQL/EF test, schema or
+     migration scope.
+   - RED/GREEN command/composition tests proving diagnostics require the
+     explicit switch, default execution emits no raw output, optional output is
+     explicit/private, and no non-host project references the writer.
+   - RED/GREEN command tests proving diagnostic flags without `--run-once`
+     cannot activate COM, `--verbose-com-errors-output` without verbose mode is
+     rejected, and redirected or unattached stderr receives no raw diagnostic
+     output.
+
+   Run:
+   `dotnet test tests/FluxKnowledge.OutlookHost.Tests/FluxKnowledge.OutlookHost.Tests.csproj --filter "FullyQualifiedName~OutlookHostLoopTests|FullyQualifiedName~ClassicOutlookComAdapterTests"`,
+   and `dotnet build src/FluxKnowledge.OutlookHost/FluxKnowledge.OutlookHost.csproj -c Release -warnaserror`.
+
+   An independent reviewer must inspect the classifier evidence, private-report
+   containment, stage classification and cursor invariants before any new live
+   run. Keep the test profile paused until that review and separate explicit
+   live-run authority.
+
 ## Plan self-review
 
-- **Spec coverage:** Task 1 defines closed/read-only contracts; Task 2 SQL authority/replay; Task 3 complete export plus shared deferred retention; Task 4 isolated COM/event/catch-up; Task 5 UI configuration/safe projection; Task 6 disabled hosting/deployment safety; Task 7 verification/review/operational handoff.
+- **Spec coverage:** Task 1 defines closed/read-only contracts; Task 2 SQL authority/replay; Task 3 complete export plus shared deferred retention; Task 4 isolated COM/event/catch-up; Task 5 UI configuration/safe projection; Task 6 disabled hosting/deployment safety; Task 7 verification/review/operational handoff; Correction 7 adds the host-only non-production staged COM diagnostic and item-recovery boundary without application-data expansion.
 - **Scope:** Gmail is preserved legacy only. No task adds Graph, IMAP, mailbox mutation, model/GPU work, processor activation, Windows Service or a real mailbox test.
 - **Ambiguity resolved:** last-modification-time is the default moved-item detector; events are hints; local UI is the only native mutation surface; a later processor reads retained artifacts rather than reopening Outlook or watched originals.
 - **Placeholder scan:** Every implementation task has files, interfaces, RED/GREEN commands and a commit. The SQL fixture is the already-approved process-scoped environment variable, and a future Outlook profile/folder remains a separately authorised operational input rather than a plan omission.
