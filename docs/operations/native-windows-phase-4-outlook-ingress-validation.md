@@ -16,3 +16,10 @@
 - Host result: completed successfully (exit code 0); no private COM diagnostic file was created.
 - Aggregate result: exports increased from 16 to 18; deferred and blocked counts remained 0; the SQL-authoritative folder cursor advanced.
 - Post-run safety: the profile was paused immediately after verification, leaving no further host claim eligible.
+
+## Downstream processing check
+
+- Date (UTC): 2026-08-12
+- SQL-authoritative aggregate evidence: 18 Outlook exports have source revisions; 28 private retained artifacts and 28 source activities exist.
+- Processing evidence: 18 text activities are linked to pipeline records. Ten unsupported attachment activities remain durable deferred capability work; none is blocked or discarded.
+- Public-surface check: the deployed configuration projection reports Outlook disabled; loopback live and ready probes returned HTTP 200.
