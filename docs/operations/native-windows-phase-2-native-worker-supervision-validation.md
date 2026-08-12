@@ -1,6 +1,6 @@
 ﻿# Native worker supervision validation
 
-- Validated at (UTC): 2026-08-12T08:22:25.3930031Z
+- Validated at (UTC): 2026-08-12T09:19:18.0260784Z
 - Site: loopback
 - Required migration: 20260810185641_AddNativeWorkerSupervision
 - Loopback endpoints: /health/live, /health/ready, /api/gpu-status returned 200
