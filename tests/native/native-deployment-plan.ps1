@@ -10,14 +10,20 @@ if ([string]::IsNullOrWhiteSpace($SourceRoot)) {
 $SourceRoot = (Resolve-Path -LiteralPath $SourceRoot).Path
 $deploymentScript = Join-Path $SourceRoot "scripts\deploy\update-native-windows.ps1"
 $outlookValidator = Join-Path $SourceRoot "scripts\deploy\validate-native-outlook-ingress.ps1"
+$workerValidator = Join-Path $SourceRoot "scripts\deploy\validate-native-worker-supervision.ps1"
+$phase5Validator = Join-Path $SourceRoot "scripts\deploy\validate-phase-5-deployment.ps1"
+$loopbackProbeHelper = Join-Path $SourceRoot "scripts\deploy\loopback-deployment-safety.ps1"
 if (-not (Test-Path -LiteralPath $deploymentScript)) {
     throw "The native deployment script is missing."
 }
-if (-not (Test-Path -LiteralPath $outlookValidator)) {
-    throw "The native Outlook validator is missing."
+foreach ($requiredScript in @($outlookValidator, $workerValidator, $phase5Validator, $loopbackProbeHelper)) {
+    if (-not (Test-Path -LiteralPath $requiredScript -PathType Leaf)) {
+        throw "A required native deployment validator or safety helper is missing: $requiredScript"
+    }
 }
 
-$output = & powershell -NoProfile -ExecutionPolicy Bypass -File $deploymentScript -PlanOnly 2>&1 | Out-String
+$output = & powershell -NoProfile -ExecutionPolicy Bypass -File $deploymentScript `
+    -PlanOnly 2>&1 | Out-String
 if ($LASTEXITCODE -ne 0) {
     throw "The native deployment plan failed: $output"
 }
@@ -29,8 +35,25 @@ if ($plan.mode -ne "plan-only" -or -not $plan.loopback_only -or -not $plan.requi
 if ($plan.required_site -ne "FluxKnowledge") {
     throw "The native deployment plan is not fixed to the FluxKnowledge IIS site."
 }
-if ($plan.outlook_host_activation -ne $false -or $plan.windows_service_registration -ne $false) {
+if (-not $plan.keep_outlook_host_disabled -or
+    $plan.outlook_host_activation -ne $false -or
+    $plan.windows_service_registration -ne $false) {
     throw "The native deployment plan may not activate the Outlook host or register a Windows Service."
+}
+
+$explicitFalseCommand = "& '$($deploymentScript.Replace("'", "''"))' -PlanOnly -KeepOutlookHostDisabled:`$false"
+$explicitFalseEncoded = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($explicitFalseCommand))
+$previousErrorActionPreference = $ErrorActionPreference
+try {
+    $ErrorActionPreference = "Continue"
+    $explicitFalseOutput = & powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand $explicitFalseEncoded 2>&1 | Out-String
+    $explicitFalseExitCode = $LASTEXITCODE
+}
+finally {
+    $ErrorActionPreference = $previousErrorActionPreference
+}
+if ($explicitFalseExitCode -eq 0 -or $explicitFalseOutput -notmatch "Outlook host activation is not authorised") {
+    throw "The native deployment executable accepts an explicit request to activate the Outlook host."
 }
 if ($plan.outlook_host_scheduler.task_name -ne 'FluxKnowledge.OutlookHost' -or
     -not $plan.outlook_host_scheduler.interactive_only -or
@@ -117,13 +140,17 @@ if ((@($plan.native_worker_supervision_migration_ids) -join "|") -ne $nativeWork
     throw "The native deployment plan does not require the generated native-worker supervision migration."
 }
 $expectedOutlookMigrations = @(
-    Get-ChildItem -LiteralPath $nativeWorkerMigrationDirectory -File -Filter "*.cs" |
-        Where-Object {
-            $_.BaseName -match '^\d{14}_[A-Za-z0-9]+$' -and
-            [string]::CompareOrdinal($_.BaseName, $nativeWorkerMigrationId) -gt 0
-        } |
-        Sort-Object BaseName |
-        Select-Object -ExpandProperty BaseName
+    "20260811093501_AddNativeOutlookIngress",
+    "20260811094729_HardenNativeOutlookIngress",
+    "20260811100247_FixOutlookPrivateIdentityColumns",
+    "20260811101550_EnforceOutlookCaptureIdentityFences",
+    "20260811105928_HardenOutlookCaptureReplay",
+    "20260811112742_BindOutlookExportClaimIdentity",
+    "20260811132655_BindOutlookProfileSourceRoot",
+    "20260811133300_AlignDeferredCapabilityFingerprintCollation",
+    "20260811143122_RecordOutlookExportBlockedReason",
+    "20260811152249_AllowIdentitylessBlockedOutlookExports",
+    "20260812102333_AddOutlookBrowseTargetPath"
 )
 if ($expectedOutlookMigrations.Count -eq 0 -or $expectedOutlookMigrations[0] -ne "20260811093501_AddNativeOutlookIngress") {
     throw "The generated Outlook migration sequence does not start with AddNativeOutlookIngress."
@@ -141,11 +168,38 @@ if ($targetedBrowseMigration -notin @($plan.native_outlook_ingress_migration_ids
 if ($plan.native_outlook_ingress_baseline_migration -ne $expectedOutlookMigrations[0]) {
     throw "The native deployment plan does not identify AddNativeOutlookIngress as the Outlook baseline."
 }
-if ($plan.deployment_migration_target -ne $expectedOutlookMigrations[-1]) {
-    throw "The native deployment plan does not target the latest compiled-model Outlook migration."
+if ($plan.native_outlook_ingress_migration_target -ne $expectedOutlookMigrations[-1]) {
+    throw "The native deployment plan does not keep the Outlook migration target within the Outlook family."
 }
-if ($plan.post_deploy_validator -ne "validate-native-outlook-ingress.ps1") {
-    throw "The native deployment plan does not require the Outlook post-deploy validator."
+if ($plan.native_outlook_ingress_post_deploy_validator -ne "validate-native-outlook-ingress.ps1") {
+    throw "The native deployment plan does not retain the Outlook post-deploy validator."
+}
+
+$expectedPhase5Migrations = @(
+    "20260813103233_AddRetainedZipProcessorBranches",
+    "20260813125157_AddRetainedProcessorBranchMemberChildForeignKeys",
+    "20260814144818_AddSourceProcessorForceRequests",
+    "20260814161559_AddOperatorActionCapabilityFoundation",
+    "20260814162746_EnforceOperatorActionCapabilityInvariants",
+    "20260814170852_EnforceOperatorActionRequestPolicies",
+    "20260820062157_AddRetainedCsharpCodeFacts",
+    "20260820070404_HardenRetainedCsharpLifecycle",
+    "20260820101021_CloseRetainedCsharpMixedOutcomes"
+)
+if ((@($plan.phase5_migration_ids) -join "|") -ne ($expectedPhase5Migrations -join "|")) {
+    throw "The native deployment plan does not expose exactly the nine generated Phase 5 migrations."
+}
+foreach ($migrationId in $expectedPhase5Migrations) {
+    if (-not (Test-Path -LiteralPath (Join-Path $nativeWorkerMigrationDirectory "$migrationId.cs") -PathType Leaf)) {
+        throw "The Phase 5 deployment migration source is missing: $migrationId."
+    }
+}
+if ($plan.phase5_migration_target -ne $expectedPhase5Migrations[-1] -or
+    $plan.deployment_migration_target -ne $expectedPhase5Migrations[-1]) {
+    throw "The native deployment target is not pinned to CloseRetainedCsharpMixedOutcomes."
+}
+if ($plan.post_deploy_validator -ne "validate-phase-5-deployment.ps1") {
+    throw "The native deployment plan does not require the Phase 5 post-deploy validator."
 }
 
 $validatorOutput = & powershell -NoProfile -ExecutionPolicy Bypass -File $outlookValidator -PlanOnly 2>&1 | Out-String
@@ -159,7 +213,7 @@ if ($validatorPlan.mode -ne "plan-only" -or -not $validatorPlan.loopback_only -o
     throw "The native Outlook validator lost its disabled loopback-only boundary."
 }
 if ($validatorPlan.native_outlook_ingress_baseline_migration -ne $plan.native_outlook_ingress_baseline_migration -or
-    $validatorPlan.native_outlook_ingress_migration_target -ne $plan.deployment_migration_target) {
+    $validatorPlan.native_outlook_ingress_migration_target -ne $plan.native_outlook_ingress_migration_target) {
     throw "The native Outlook validator does not derive the authoritative deployed Outlook migration contract."
 }
 
@@ -252,8 +306,25 @@ if (Get-Command Get-FileHash -ErrorAction SilentlyContinue) {
 }
 
 $deploymentScriptText = Get-Content -LiteralPath $deploymentScript -Raw
-if ($deploymentScriptText -notmatch 'Invoke-WebRequest\s+-UseBasicParsing') {
-    throw "The native deployment probe is not compatible with Windows PowerShell's basic parsing mode."
+foreach ($probeScript in @($deploymentScript, $workerValidator, $outlookValidator, $phase5Validator)) {
+    $probeScriptText = Get-Content -LiteralPath $probeScript -Raw
+    if ($probeScriptText -notmatch '\bInvoke-FixedLoopbackProbe\b' -or
+        $probeScriptText -match '\bInvoke-WebRequest\b') {
+        throw "A native deployment probe bypasses the shared no-proxy/no-redirect fixed-loopback helper: $probeScript"
+    }
+}
+$loopbackProbeHelperText = Get-Content -LiteralPath $loopbackProbeHelper -Raw
+if ($loopbackProbeHelperText -notmatch '\bInvoke-FixedLoopbackProbe\b' -or
+    $loopbackProbeHelperText -notmatch 'UseProxy\s*=\s*\$false' -or
+    $loopbackProbeHelperText -notmatch 'AllowAutoRedirect\s*=\s*\$false') {
+    throw "The shared native health-probe helper does not prohibit proxy use and redirects."
+}
+foreach ($activationCommand in @(
+    'Register-ScheduledTask', 'Enable-ScheduledTask', 'Start-ScheduledTask',
+    'Register-OutlookHostTask', 'Install-OutlookHostTask')) {
+    if ($deploymentScriptText -match ("\b{0}\b" -f [regex]::Escape($activationCommand))) {
+        throw "The native deployment executable retains an Outlook activation command: $activationCommand"
+    }
 }
 if ($deploymentScriptText -notmatch 'Assert-AnonymousIisAuthentication' -or
     $deploymentScriptText -notmatch 'anonymousAuthentication') {

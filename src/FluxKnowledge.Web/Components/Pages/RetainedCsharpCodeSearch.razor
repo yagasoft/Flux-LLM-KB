@@ -1,0 +1,71 @@
+@page "/search/csharp-code"
+@using System.ComponentModel.DataAnnotations
+@using FluxKnowledge.Web.Components.Sources
+@inject RetainedCsharpCodeSearchPageState PageState
+
+<PageTitle>Search retained C# facts | Flux Knowledge</PageTitle>
+
+<section aria-labelledby="retained-csharp-search-heading">
+    <h1 id="retained-csharp-search-heading">Search retained C# facts</h1>
+    <EditForm Model="this" OnValidSubmit="SearchAsync">
+        <DataAnnotationsValidator />
+        <div class="search-form">
+            <label for="csharp-code-query">Symbol, qualified name or signature</label>
+            <InputText id="csharp-code-query" @bind-Value="Query" autocomplete="off" />
+            <ValidationMessage For="@(() => Query)" />
+            <button type="submit">Search retained C# facts</button>
+        </div>
+    </EditForm>
+    @if (PageState.Error is { } error)
+    {
+        <p role="alert">@error</p>
+    }
+    else if (_searched && PageState.Results.Count == 0 && !PageState.HasMore)
+    {
+        <p>No matching retained C# facts were found.</p>
+    }
+    else if (PageState.Results.Count > 0)
+    {
+        <ol class="search-results" aria-label="Retained C# fact search results">
+        @foreach (var result in PageState.Results)
+        {
+            <li>
+                <article>
+                    <p class="diagnostic-value">@result.LocalPath</p>
+                    <p class="diagnostic-value">@result.ArtifactHash</p>
+                    @if (result.Symbols.Count > 0)
+                    {
+                        <ul>@foreach (var symbol in result.Symbols) { <li><span class="diagnostic-value">@symbol.QualifiedName</span> — <span class="diagnostic-value">@symbol.RenderedSignature</span></li> }</ul>
+                    }
+                    @if (result.References.Count > 0)
+                    {
+                        <h2>Matching references</h2>
+                        <ul>@foreach (var reference in result.References) { <li><span class="diagnostic-value">@reference.TargetDisplay</span></li> }</ul>
+                    }
+                    <a href="@($"/sources/retained/{result.BranchId:D}/csharp-code")">View retained C# facts</a>
+                </article>
+            </li>
+        }
+        </ol>
+    }
+    @if (PageState.HasMore)
+    {
+        <p><button type="button" @onclick="LoadMoreAsync">Load more matching facts</button></p>
+    }
+</section>
+
+@code {
+    [Required(ErrorMessage = "Enter a symbol, qualified name or signature.")]
+    public string Query { get; set; } = string.Empty;
+
+    private bool _searched;
+
+    private async Task SearchAsync()
+    {
+        await PageState.SearchAsync(Query, CancellationToken.None);
+        _searched = true;
+    }
+
+    private async Task LoadMoreAsync() =>
+        await PageState.LoadMoreAsync(CancellationToken.None);
+}

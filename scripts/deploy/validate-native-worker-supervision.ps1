@@ -10,6 +10,8 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "loopback-deployment-safety.ps1")
+$siteOrigin = (Get-FixedLoopbackOrigin -SiteUrl $SiteUrl).Origin
 
 if ([string]::IsNullOrWhiteSpace($SourceRoot)) {
     $SourceRoot = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSCommandPath))
@@ -20,11 +22,6 @@ $recordPath = [System.IO.Path]::GetFullPath((Join-Path $SourceRoot $ValidationRe
 $operationsRoot = [System.IO.Path]::GetFullPath((Join-Path $SourceRoot "docs\operations"))
 if (-not $recordPath.StartsWith($operationsRoot + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)) {
     throw "The validation record must remain under docs\\operations."
-}
-
-$siteUri = [Uri]$SiteUrl
-if (-not $siteUri.IsLoopback) {
-    throw "Native worker validation is restricted to a loopback site URL."
 }
 
 $settingsPath = Join-Path $DeployRoot "appsettings.Production.json"
@@ -82,9 +79,14 @@ IF EXISTS (
 }
 
 foreach ($path in @("/health/live", "/health/ready", "/api/gpu-status")) {
-    $response = Invoke-WebRequest -UseBasicParsing -Uri ("{0}{1}" -f $siteUri.GetLeftPart([System.UriPartial]::Authority), $path) -TimeoutSec 30
-    if ($response.StatusCode -ne 200) {
-        throw "The loopback endpoint $path did not return 200."
+    $response = Invoke-FixedLoopbackProbe -Uri ("{0}{1}" -f $siteOrigin, $path) -TimeoutSeconds 30
+    try {
+        if ([int]$response.StatusCode -ne 200) {
+            throw "The loopback endpoint $path did not return 200."
+        }
+    }
+    finally {
+        $response.Dispose()
     }
 }
 

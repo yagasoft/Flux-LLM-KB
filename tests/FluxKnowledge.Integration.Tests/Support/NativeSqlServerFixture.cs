@@ -1,4 +1,7 @@
 using System.Data.Common;
+using System.Diagnostics;
+using System.Net;
+using System.Net.Sockets;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
 using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
@@ -13,8 +16,7 @@ public sealed class NativeSqlServerFixture : IAsyncLifetime
     public const string ConnectionEnvironmentVariable = "FLUXKNOWLEDGE_TEST_SQL_CONNECTION";
     private const string TestCatalogPrefix = "FluxKnowledge_Phase1Tests_";
 
-    private readonly string? _serverConnectionString =
-        Environment.GetEnvironmentVariable(ConnectionEnvironmentVariable);
+    private string? _serverConnectionString;
     private bool _databaseCreateAttempted;
 
     public string DatabaseName { get; } = $"{TestCatalogPrefix}{Guid.NewGuid():N}";
@@ -41,10 +43,7 @@ public sealed class NativeSqlServerFixture : IAsyncLifetime
 
     public async Task InitializeAsync()
     {
-        if (string.IsNullOrWhiteSpace(_serverConnectionString))
-        {
-            return;
-        }
+        _serverConnectionString = await ResolveDisposableServerConnectionStringAsync().ConfigureAwait(false);
 
         ValidateServerConnectionString(_serverConnectionString);
         ValidateGeneratedCatalog(DatabaseName);
@@ -97,6 +96,18 @@ public sealed class NativeSqlServerFixture : IAsyncLifetime
     internal async Task<PreviousMigrationDatabase> CreateIdentitylessOutlookExportPreviousMigrationDatabaseAsync()
         => await CreateMigrationDatabaseAsync("20260811143122_RecordOutlookExportBlockedReason").ConfigureAwait(false);
 
+    internal async Task<PreviousMigrationDatabase> CreateRetainedProcessorForceRequestPreviousMigrationDatabaseAsync()
+        => await CreateMigrationDatabaseAsync("20260813125157_AddRetainedProcessorBranchMemberChildForeignKeys").ConfigureAwait(false);
+
+    internal async Task<PreviousMigrationDatabase> CreateOperatorActionCapabilityPreviousMigrationDatabaseAsync()
+        => await CreateMigrationDatabaseAsync("20260814144818_AddSourceProcessorForceRequests").ConfigureAwait(false);
+
+    internal async Task<PreviousMigrationDatabase> CreateRetainedCsharpPreviousMigrationDatabaseAsync()
+        => await CreateMigrationDatabaseAsync("20260814170852_EnforceOperatorActionRequestPolicies").ConfigureAwait(false);
+
+    internal async Task<PreviousMigrationDatabase> CreateRetainedCsharpLifecyclePreviousMigrationDatabaseAsync()
+        => await CreateMigrationDatabaseAsync("20260820070404_HardenRetainedCsharpLifecycle").ConfigureAwait(false);
+
     private async Task<PreviousMigrationDatabase> CreateMigrationDatabaseAsync(string targetMigration)
     {
         if (string.IsNullOrWhiteSpace(_serverConnectionString))
@@ -148,6 +159,8 @@ public sealed class NativeSqlServerFixture : IAsyncLifetime
                     "Native SQL tests require a server-level connection without catalog, " +
                     "user-instance or file-attachment keys.");
             }
+
+            ValidateLoopbackServer(parsed.DataSource);
         }
         catch (ArgumentException exception)
         {
@@ -155,6 +168,126 @@ public sealed class NativeSqlServerFixture : IAsyncLifetime
                 "The native SQL test connection is not a valid server-level connection string.",
                 exception);
         }
+    }
+
+    private static void ValidateLoopbackServer(string dataSource)
+    {
+        var host = dataSource.Trim();
+        if (host.StartsWith("(localdb)\\", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!string.Equals(host, "(localdb)\\MSSQLLocalDB", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException("Native SQL tests allow only the (localdb)\\MSSQLLocalDB LocalDB instance.");
+            }
+
+            return;
+        }
+
+        if (host.StartsWith("tcp:", StringComparison.OrdinalIgnoreCase))
+        {
+            host = host[4..];
+        }
+
+        if (host.StartsWith("[", StringComparison.Ordinal))
+        {
+            var closingBracket = host.IndexOf(']');
+            if (closingBracket <= 1)
+            {
+                throw new InvalidOperationException("Native SQL tests require a resolvable loopback-only SQL Server target.");
+            }
+
+            host = host[1..closingBracket];
+        }
+        else
+        {
+            var separator = host.LastIndexOf(',');
+            if (separator >= 0)
+            {
+                host = host[..separator];
+            }
+        }
+
+        if (IPAddress.TryParse(host, out var address))
+        {
+            if (IPAddress.IsLoopback(address))
+            {
+                return;
+            }
+
+            throw new InvalidOperationException("Native SQL tests require a loopback-only SQL Server target.");
+        }
+
+        if (string.Equals(host, "localhost", StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        IPAddress[] addresses;
+        try
+        {
+            addresses = Dns.GetHostAddresses(host);
+        }
+        catch (Exception exception) when (exception is SocketException or ArgumentException)
+        {
+            throw new InvalidOperationException("Native SQL tests require a resolvable loopback-only SQL Server target.", exception);
+        }
+
+        if (addresses.Length == 0 || addresses.Any(address => !IPAddress.IsLoopback(address)))
+        {
+            throw new InvalidOperationException("Native SQL tests require a loopback-only SQL Server target.");
+        }
+    }
+
+    private static async Task<string> ResolveDisposableServerConnectionStringAsync()
+    {
+        var configured = Environment.GetEnvironmentVariable(ConnectionEnvironmentVariable);
+        var repositoryRoot = FindRepositoryRoot();
+        var script = Path.Combine(repositoryRoot, "scripts", "dev", "ensure-disposable-sql.ps1");
+        var start = new ProcessStartInfo("pwsh")
+        {
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true
+        };
+        start.ArgumentList.Add("-NoLogo");
+        start.ArgumentList.Add("-NoProfile");
+        start.ArgumentList.Add("-NonInteractive");
+        start.ArgumentList.Add("-ExecutionPolicy");
+        start.ArgumentList.Add("Bypass");
+        start.ArgumentList.Add("-File");
+        start.ArgumentList.Add(script);
+        if (!string.IsNullOrWhiteSpace(configured))
+        {
+            start.ArgumentList.Add("-ServerConnectionString");
+            start.ArgumentList.Add(configured);
+        }
+
+        using var process = Process.Start(start) ?? throw new InvalidOperationException("Could not start the disposable SQL prerequisite helper.");
+        var output = await process.StandardOutput.ReadToEndAsync().ConfigureAwait(false);
+        var error = await process.StandardError.ReadToEndAsync().ConfigureAwait(false);
+        await process.WaitForExitAsync().ConfigureAwait(false);
+        if (process.ExitCode != 0)
+        {
+            throw new InvalidOperationException($"Disposable SQL prerequisite helper failed: {error.Trim()}");
+        }
+
+        var connectionString = output.Trim();
+        ValidateServerConnectionString(connectionString);
+        return connectionString;
+    }
+
+    private static string FindRepositoryRoot()
+    {
+        for (var directory = new DirectoryInfo(AppContext.BaseDirectory); directory is not null; directory = directory.Parent)
+        {
+            if (File.Exists(Path.Combine(directory.FullName, "FluxKnowledge.slnx")))
+            {
+                return directory.FullName;
+            }
+        }
+
+        throw new InvalidOperationException("Could not locate the repository root for the disposable SQL prerequisite helper.");
     }
 
     internal static async Task RunCreateSequenceAsync(

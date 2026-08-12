@@ -233,6 +233,13 @@ public sealed class StageWorkerTests
     private sealed class RetainedSourceReader(SourceRevisionId revisionId, string contentHash, string text)
         : IRetainedSourceReader
     {
+        public ValueTask<RetainedSourceBytes> ReadBytesAsync(SourceRevisionId sourceRevisionId, CancellationToken cancellationToken)
+        {
+            Assert.Equal(revisionId, sourceRevisionId);
+            var bytes = System.Text.Encoding.UTF8.GetBytes(text);
+            return ValueTask.FromResult(new RetainedSourceBytes(sourceRevisionId, bytes, contentHash, bytes.Length));
+        }
+
         public ValueTask<Utf8FileSource> ReadUtf8Async(SourceRevisionId sourceRevisionId, CancellationToken cancellationToken)
         {
             Assert.Equal(revisionId, sourceRevisionId);
@@ -242,6 +249,12 @@ public sealed class StageWorkerTests
 
     private sealed class ThrowingRetainedSourceReader(SourceRevisionId revisionId) : IRetainedSourceReader
     {
+        public ValueTask<RetainedSourceBytes> ReadBytesAsync(SourceRevisionId sourceRevisionId, CancellationToken cancellationToken)
+        {
+            Assert.Equal(revisionId, sourceRevisionId);
+            return ValueTask.FromException<RetainedSourceBytes>(new InvalidDataException("checksum mismatch"));
+        }
+
         public ValueTask<Utf8FileSource> ReadUtf8Async(SourceRevisionId sourceRevisionId, CancellationToken cancellationToken)
         {
             Assert.Equal(revisionId, sourceRevisionId);

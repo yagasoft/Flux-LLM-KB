@@ -54,7 +54,7 @@ public static class OperatorEventAppender
         return json.Length <= 2048 ? json : "{\"truncated\":true}";
     }
 
-    private static readonly string[] AllowedDetailKeys = ["revision", "classification", "kind", "executionClass", "stage", "sourceActivity", "reasonCode"];
+    private static readonly string[] AllowedDetailKeys = ["revision", "classification", "kind", "executionClass", "stage", "sourceActivity", "reasonCode", "descriptor", "action", "state"];
 
     private static bool TrySanitiseScalar(string key, JsonValue value, out JsonNode? sanitised)
     {

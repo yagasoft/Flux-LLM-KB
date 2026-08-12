@@ -56,7 +56,7 @@ public sealed class NativeOutlookConfigurationBrowserTests
                 ingressRoot,
                 indexRoot);
             using var playwright = await Playwright.CreateAsync();
-            await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+            await using var browser = await playwright.Chromium.LaunchAsync(BrowserLaunchOptions.Create());
             var page = await browser.NewPageAsync();
 
             await page.GotoAsync(new Uri(host.BaseAddress, "/outlook").ToString(), new PageGotoOptions { WaitUntil = WaitUntilState.NetworkIdle });
@@ -95,7 +95,7 @@ public sealed class NativeOutlookConfigurationBrowserTests
         {
             await using var host = await PhaseOneVerticalSliceBrowserTests.BrowserHost.StartAsync(sql.ConnectionString, ingressRoot, indexRoot);
             using var playwright = await Playwright.CreateAsync();
-            await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+            await using var browser = await playwright.Chromium.LaunchAsync(BrowserLaunchOptions.Create());
             var page = await browser.NewPageAsync();
 
             await page.GotoAsync(new Uri(host.BaseAddress, "/outlook").ToString(), new PageGotoOptions { WaitUntil = WaitUntilState.NetworkIdle });
@@ -136,7 +136,7 @@ public sealed class NativeOutlookConfigurationBrowserTests
         {
             await using var host = await PhaseOneVerticalSliceBrowserTests.BrowserHost.StartAsync(sql.ConnectionString, ingressRoot, indexRoot);
             using var playwright = await Playwright.CreateAsync();
-            await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+            await using var browser = await playwright.Chromium.LaunchAsync(BrowserLaunchOptions.Create());
             var page = await browser.NewPageAsync();
             await page.GotoAsync(new Uri(host.BaseAddress, "/outlook").ToString(), new PageGotoOptions { WaitUntil = WaitUntilState.NetworkIdle });
             foreach (var name in new[] { "First target profile", "Second target profile" })
@@ -227,7 +227,7 @@ public sealed class NativeOutlookConfigurationBrowserTests
                 ingressRoot,
                 indexRoot);
             using var playwright = await Playwright.CreateAsync();
-            await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+            await using var browser = await playwright.Chromium.LaunchAsync(BrowserLaunchOptions.Create());
             var page = await browser.NewPageAsync();
 
             await page.GotoAsync(new Uri(host.BaseAddress, "/outlook").ToString(), new PageGotoOptions { WaitUntil = WaitUntilState.NetworkIdle });

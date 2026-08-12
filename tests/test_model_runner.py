@@ -707,7 +707,7 @@ def test_rerank_endpoint_reports_canonical_quantization_metadata(monkeypatch):
 
     monkeypatch.setattr(model_runner, "_rerank_with_transformers", fake_rerank)
 
-    response = TestClient(app).post(
+    response = TestClient(app, client=("127.0.0.1", 50100)).post(
         "/v1/rerank",
         json={
             "model": model_runner.DEFAULT_RERANKER_MODEL,

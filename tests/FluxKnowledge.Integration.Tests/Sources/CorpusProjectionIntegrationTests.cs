@@ -81,20 +81,23 @@ public sealed class CorpusProjectionIntegrationTests(NativeSqlServerFixture fixt
     [NativeSqlServerFact]
     public async Task Full_text_candidates_remain_subject_to_filters_and_cursor_keyset()
     {
-        var now = DateTimeOffset.UtcNow; var first = Guid.NewGuid(); var second = Guid.NewGuid(); var excluded = Guid.NewGuid();
+        var now = DateTimeOffset.UtcNow; var first = Guid.NewGuid(); var second = Guid.NewGuid(); var excluded = Guid.NewGuid(); var retainedRoot = Guid.NewGuid(); var retainedIdentity = Guid.NewGuid(); var retainedRevision = Guid.NewGuid(); var retainedRecord = Guid.NewGuid();
         await using (var db = Context())
         {
-            db.SourceIdentities.AddRange(Identity(first, "first"), Identity(second, "second"), Identity(excluded, "excluded"));
+            db.SourceRootConfigurations.Add(Root(retainedRoot, now));
+            db.SourceIdentities.AddRange(Identity(first, "first"), Identity(second, "second"), Identity(excluded, "excluded"), Identity(retainedIdentity, "retained"));
             var deleted = Record(excluded, excluded, now); deleted.IsDeleted = true;
-            db.PipelineRecords.AddRange(Record(first, first, now), Record(second, second, now), deleted);
-            db.Artifacts.AddRange(Artifact(first, now, "needle one"), Artifact(second, now, "needle two"), Artifact(excluded, now, "needle excluded"));
+            db.SourceRevisions.Add(new SourceRevisionEntity { Id = retainedRevision, SourceRootId = retainedRoot, StableSourceIdentity = "retained", Revision = 1, ContentSha256 = new string('a', 64), CanonicalPath = "C:\\corpus\\retained.docx", Classification = "OoxmlDocumentContainer", Extension = ".docx", OriginKind = 2, DiscoveredAtUtc = now });
+            var retained = Record(retainedRecord, retainedIdentity, now); retained.SourceRevisionId = retainedRevision;
+            db.PipelineRecords.AddRange(Record(first, first, now), Record(second, second, now), deleted, retained);
+            db.Artifacts.AddRange(Artifact(first, now, "needle one"), Artifact(second, now, "needle two"), Artifact(excluded, now, "needle excluded"), Artifact(retainedRecord, now, "needle retained"));
             db.AuditEvents.AddRange(new AuditEventEntity { PipelineRecordId = first, EventType = "pipeline.created", Actor = "test", DetailsJson = "{}", OccurredAtUtc = now }, new AuditEventEntity { PipelineRecordId = second, EventType = "pipeline.created", Actor = "test", DetailsJson = "{}", OccurredAtUtc = now });
             await db.SaveChangesAsync();
         }
         var reader = new SqlCorpusProjectionReader(Factory()); var firstPage = await reader.ReadPageAsync(new CorpusQuery(new CorpusFilters(Search: "needle"), PageSize: 1), CancellationToken.None);
-        Assert.Single(firstPage.Items); Assert.NotNull(firstPage.NextCursor); Assert.DoesNotContain(firstPage.Items, item => item.PipelineRecordId == excluded);
+        Assert.Single(firstPage.Items); Assert.NotNull(firstPage.NextCursor); Assert.DoesNotContain(firstPage.Items, item => item.PipelineRecordId == excluded || item.PipelineRecordId == retainedRecord);
         var secondPage = await reader.ReadPageAsync(new CorpusQuery(new CorpusFilters(Search: "needle"), PageSize: 1, Cursor: firstPage.NextCursor), CancellationToken.None);
-        Assert.Single(secondPage.Items); Assert.NotEqual(firstPage.Items[0].PipelineRecordId, secondPage.Items[0].PipelineRecordId);
+        Assert.Single(secondPage.Items); Assert.NotEqual(firstPage.Items[0].PipelineRecordId, secondPage.Items[0].PipelineRecordId); Assert.DoesNotContain(secondPage.Items, item => item.PipelineRecordId == excluded || item.PipelineRecordId == retainedRecord);
     }
 
     [NativeSqlServerFact]

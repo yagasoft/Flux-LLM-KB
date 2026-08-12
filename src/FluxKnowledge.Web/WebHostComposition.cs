@@ -4,11 +4,13 @@ using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Sources;
 using FluxKnowledge.Application.Indexing;
 using FluxKnowledge.Application.Workers;
+using FluxKnowledge.Application.Visibility;
 using FluxKnowledge.Application.Search;
 using FluxKnowledge.Infrastructure.Inference;
 using FluxKnowledge.Infrastructure.SqlServer;
 using FluxKnowledge.Infrastructure.SqlServer.Configuration;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
+using FluxKnowledge.Infrastructure.SqlServer.Visibility;
 using FluxKnowledge.Infrastructure.SqlServer.Workers;
 using FluxKnowledge.Infrastructure.Usearch;
 using FluxKnowledge.Integrations.Files;
@@ -16,6 +18,7 @@ using FluxKnowledge.Integrations.Outlook;
 using FluxKnowledge.Web.Components.Status;
 using FluxKnowledge.Web.Components.Sources;
 using FluxKnowledge.Web.Components.Outlook;
+using FluxKnowledge.Web.Components.OperatorActions;
 using Microsoft.EntityFrameworkCore;
 
 namespace FluxKnowledge.Web;
@@ -38,8 +41,11 @@ public static class WebHostComposition
             .ToArray();
         var ingressOptions = new LocalIngressOptions(allowedRoots);
         _ = LocalIngressOptionsValidator.ValidateAndCanonicalise(ingressOptions);
+        var operatorOrigin = configuration["LocalOperator:CanonicalOrigin"] ?? "http://127.0.0.1:5137";
 
         services.AddFluxKnowledgeSqlServer(configuration);
+        services.AddSingleton(new LocalOperatorOriginPolicy(operatorOrigin));
+        services.AddSingleton<ILocalPrivateContentDisclosure, LocalPrivateContentDisclosure>();
         services.AddHttpContextAccessor();
         services.AddFluxKnowledgeUsearch(configuration);
         var sqlDataRoot = Path.GetDirectoryName(SqlServerOptions.ProductionDataFilePath)!;
@@ -60,6 +66,8 @@ public static class WebHostComposition
             configuredArtifactRoot,
             protectedRoots);
         services.AddSingleton(ingressOptions);
+        services.AddSingleton(_ => PrivatePcDataProtectionProviderFactory.CreateCursorCodec(
+            configuration[PrivatePcDataProtectionProviderFactory.LocalApplicationDataRootConfigurationKey]));
         services.AddSingleton<ISourceRootPathPolicy>(provider =>
         {
             var sqlOptions = provider.GetRequiredService<SqlServerOptions>();
@@ -80,9 +88,23 @@ public static class WebHostComposition
         services.AddScoped<IRetainedSourceReader>(provider => new SqlRetainedSourceReader(
             provider.GetRequiredService<IDbContextFactory<FluxKnowledgeDbContext>>(),
             artifactRoot));
+        services.AddScoped<ILocalRetainedDetailReader>(provider => new SqlLocalRetainedDetailReader(
+            provider.GetRequiredService<IDbContextFactory<FluxKnowledgeDbContext>>(),
+            provider.GetRequiredService<IRetainedSourceReader>(),
+            provider.GetRequiredService<ILocalPrivateContentDisclosure>()));
+        services.AddScoped<ILocalRetainedCsharpCodeReader>(provider => new SqlLocalRetainedCsharpCodeReader(
+            provider.GetRequiredService<IDbContextFactory<FluxKnowledgeDbContext>>(),
+            provider.GetRequiredService<ILocalRetainedDetailReader>(),
+            provider.GetRequiredService<ILocalPrivateContentDisclosure>(),
+            provider.GetRequiredService<LocalRetainedCsharpCodeSearchCursorCodec>()));
         services.AddSingleton<ISourceArtifactStore>(_ => new ContentAddressedSourceArtifactStore(
             artifactRoot,
             protectedRoots));
+        services.AddScoped<IRetainedArtifactWriter>(provider => new SqlRetainedArtifactWriter(
+            provider.GetRequiredService<IDbContextFactory<FluxKnowledgeDbContext>>(),
+            artifactRoot,
+            protectedRoots));
+        services.AddSingleton(ReadRetainedProcessorOptions(configuration));
         services.AddSingleton<IEmbeddingProvider, DeterministicTokenHashEmbeddingProvider>();
         services.AddScoped<ISearchService, HybridSearchService>();
         services.AddFluxKnowledgeOutboxWorkers();
@@ -112,6 +134,9 @@ public static class WebHostComposition
             provider.GetRequiredService<ISourceRootProjectionReader>(),
             provider.GetService<IDeferredContentReprocessor>(),
             provider.GetRequiredService<IOperatorEventProjectionReader>()));
+        services.AddScoped<RetainedBranchDetailPageState>();
+        services.AddScoped<RetainedCsharpCodeDetailPageState>();
+        services.AddScoped<RetainedCsharpCodeSearchPageState>();
         services.AddScoped<SqlOutlookCaptureStore>();
         services.AddScoped<IOutlookCaptureStore>(provider => provider.GetRequiredService<SqlOutlookCaptureStore>());
         services.AddScoped<IOutlookCaptureRecoveryStore>(provider => provider.GetRequiredService<SqlOutlookCaptureStore>());
@@ -131,6 +156,11 @@ public static class WebHostComposition
         services.AddScoped<LocalOutlookConnectionContext>();
         services.AddScoped<IOutlookProjectionReader, SqlOutlookProjectionReader>();
         services.AddScoped<OutlookPageState>();
+        services.AddScoped<IOperatorActionStore, SqlOperatorActionStore>();
+        services.AddScoped<OperatorActionService>();
+        services.AddScoped<LocalOperatorConnectionContext>();
+        services.AddScoped<ILocalOperatorPolicy, LocalOperatorPolicy>();
+        services.AddScoped<OperatorActionPageState>();
         services.AddFluxKnowledgeGpuScheduler();
         services.AddScoped<IProjectionReader, SqlProjectionReader>();
         services.AddScoped<ICorpusProjectionReader, SqlCorpusProjectionReader>();
@@ -162,6 +192,33 @@ public static class WebHostComposition
         long.TryParse(configured, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var value) && value > 0
             ? value
             : defaultValue;
+
+    internal static RetainedProcessorOptions ReadRetainedProcessorOptions(IConfiguration configuration)
+    {
+        var section = RetainedProcessorOptions.ConfigurationSectionName;
+        var configuredBatchSize = configuration[$"{section}:AutomaticReplayBatchSize"];
+        var batchSize = RetainedProcessorOptions.MaximumAutomaticReplayBatchSize;
+        if (configuredBatchSize is not null &&
+            (!int.TryParse(
+                configuredBatchSize,
+                System.Globalization.NumberStyles.None,
+                System.Globalization.CultureInfo.InvariantCulture,
+                out batchSize) ||
+             batchSize is < 1 or > RetainedProcessorOptions.MaximumAutomaticReplayBatchSize))
+        {
+            throw new InvalidOperationException(
+                $"{section}:AutomaticReplayBatchSize must be between 1 and {RetainedProcessorOptions.MaximumAutomaticReplayBatchSize}.");
+        }
+
+        return new RetainedProcessorOptions
+        {
+            ArchiveZipExpandEnabled = bool.TryParse(configuration[$"{section}:ArchiveZipExpandEnabled"], out var zipEnabled) && zipEnabled,
+            ArchiveTarExpandEnabled = bool.TryParse(configuration[$"{section}:ArchiveTarExpandEnabled"], out var tarEnabled) && tarEnabled,
+            OoxmlDocumentStructuralExtractEnabled = bool.TryParse(configuration[$"{section}:OoxmlDocumentStructuralExtractEnabled"], out var ooxmlEnabled) && ooxmlEnabled,
+            CsharpCodeEnabled = !bool.TryParse(configuration[$"{section}:CsharpCodeEnabled"], out var csharpEnabled) || csharpEnabled,
+            AutomaticReplayBatchSize = batchSize
+        };
+    }
 
     internal static OutlookCaptureRecoveryOptions ReadOutlookRecoveryOptions(IConfiguration configuration)
     {

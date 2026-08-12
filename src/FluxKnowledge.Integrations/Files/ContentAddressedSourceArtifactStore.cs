@@ -5,7 +5,7 @@ using FluxKnowledge.Domain.Sources;
 
 namespace FluxKnowledge.Integrations.Files;
 
-public sealed class ContentAddressedSourceArtifactStore : ISourceArtifactStore
+public sealed class ContentAddressedSourceArtifactStore : ISourceArtifactStore, IDisposable
 {
     private readonly string _root;
     private readonly PhysicalDirectoryIdentity _rootIdentity;
@@ -164,6 +164,60 @@ public sealed class ContentAddressedSourceArtifactStore : ISourceArtifactStore
         }
     }
 
+    /// <summary>Streams untrusted retained content to a temporary file before atomically binding it to its computed SHA-256 path.</summary>
+    public async ValueTask<SourceArtifactReceipt> PutStreamAsync(
+        Stream content,
+        long maximumByteLength,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(content);
+        if (!content.CanRead)
+        {
+            throw new InvalidDataException("The retained artifact stream is not readable.");
+        }
+        if (maximumByteLength < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maximumByteLength));
+        }
+
+        EnsureRootCurrent();
+        var temporaryPath = Path.Combine(_root, $".stream.{Guid.NewGuid():N}.tmp");
+        try
+        {
+            var streamed = await CopyStreamAndHashAsync(content, temporaryPath, maximumByteLength, cancellationToken).ConfigureAwait(false);
+            var metadata = new SourceArtifactMetadata(streamed.Hash, "application/octet-stream", streamed.Length);
+            var relativePath = Path.Combine("sha256", streamed.Hash[..2], $"{streamed.Hash}.bin");
+            using var destination = EnsureArtifactDestinationDirectory(streamed.Hash);
+            var finalPath = Path.Combine(destination.Path, $"{streamed.Hash}.bin");
+            await RunBeforeArtifactWriteAsync(destination, cancellationToken).ConfigureAwait(false);
+            if (File.Exists(finalPath))
+            {
+                await VerifyExistingAsync(finalPath, streamed.Hash, streamed.Length, cancellationToken).ConfigureAwait(false);
+                return Receipt(metadata, streamed.Hash, relativePath, existing: true);
+            }
+
+            await VerifyExistingAsync(temporaryPath, streamed.Hash, streamed.Length, cancellationToken).ConfigureAwait(false);
+            try
+            {
+                EnsureRootCurrent();
+                File.Move(temporaryPath, finalPath, overwrite: false);
+                return Receipt(metadata, streamed.Hash, relativePath, existing: false);
+            }
+            catch (IOException) when (File.Exists(finalPath))
+            {
+                await VerifyExistingAsync(finalPath, streamed.Hash, streamed.Length, cancellationToken).ConfigureAwait(false);
+                return Receipt(metadata, streamed.Hash, relativePath, existing: true);
+            }
+        }
+        finally
+        {
+            if (File.Exists(temporaryPath))
+            {
+                File.Delete(temporaryPath);
+            }
+        }
+    }
+
     private static SourceArtifactReceipt Receipt(
         SourceArtifactMetadata metadata,
         string hash,
@@ -299,6 +353,39 @@ public sealed class ContentAddressedSourceArtifactStore : ISourceArtifactStore
         return (Convert.ToHexStringLower(hash.GetHashAndReset()), length);
     }
 
+    private static async Task<(string Hash, long Length)> CopyStreamAndHashAsync(
+        Stream content,
+        string temporaryPath,
+        long maximumByteLength,
+        CancellationToken cancellationToken)
+    {
+        var buffer = new byte[128 * 1024];
+        var length = 0L;
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        await using var output = new FileStream(
+            temporaryPath,
+            FileMode.CreateNew,
+            FileAccess.Write,
+            FileShare.None,
+            buffer.Length,
+            FileOptions.Asynchronous | FileOptions.SequentialScan | FileOptions.WriteThrough);
+        int read;
+        while ((read = await content.ReadAsync(buffer, cancellationToken).ConfigureAwait(false)) != 0)
+        {
+            if (read > maximumByteLength - length)
+            {
+                throw new InvalidDataException("The retained artifact stream exceeds its configured byte limit.");
+            }
+
+            hash.AppendData(buffer, 0, read);
+            await output.WriteAsync(buffer.AsMemory(0, read), cancellationToken).ConfigureAwait(false);
+            length += read;
+        }
+        await output.FlushAsync(cancellationToken).ConfigureAwait(false);
+        output.Flush(flushToDisk: true);
+        return (Convert.ToHexStringLower(hash.GetHashAndReset()), length);
+    }
+
     private static async Task VerifyExistingAsync(
         string path,
         string expectedHash,
@@ -379,4 +466,6 @@ public sealed class ContentAddressedSourceArtifactStore : ISourceArtifactStore
             sha256Lease.Dispose();
         }
     }
+
+    public void Dispose() => _rootLease.Dispose();
 }

@@ -59,6 +59,17 @@ public sealed class SqlSourceActivityStore(
                 throw new InvalidOperationException("A source capability id cannot be rebound to a different descriptor.");
             }
 
+            var acceptedClassifications = ToAcceptedClassificationsJson(capability.AcceptedClassification);
+            if (!string.Equals(existing.AcceptedClassificationsJson, acceptedClassifications, StringComparison.Ordinal) ||
+                existing.IsRunnable != runnable)
+            {
+                // Capability registration is the owner of runtime availability.  Keeping this
+                // current repairs pre-force registrations that predate explicit OOXML classification.
+                existing.AcceptedClassificationsJson = acceptedClassifications;
+                existing.IsRunnable = runnable;
+                await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+            }
+
             return ToCapability(existing);
         }
 
@@ -69,7 +80,7 @@ public sealed class SqlSourceActivityStore(
             ProcessorKind = capability.ProcessorKind,
             ProcessorVersion = capability.ProcessorVersion,
             ExecutionClass = (int)capability.ExecutionClass,
-            AcceptedClassificationsJson = capability.AcceptedClassification == "AcceptedUtf8Text" ? "[\"text/plain\"]" : "[]",
+            AcceptedClassificationsJson = ToAcceptedClassificationsJson(capability.AcceptedClassification),
             OutputContract = capability.OutputContract,
             ProcessorFingerprint = capability.ProcessorFingerprint,
             IsRunnable = runnable,
@@ -87,6 +98,10 @@ public sealed class SqlSourceActivityStore(
         return capability is null ? null : ToCapability(capability);
     }
 
+    private static string ToAcceptedClassificationsJson(string acceptedClassification) =>
+        acceptedClassification == "AcceptedUtf8Text" ? "[\"text/plain\"]" :
+        $"[\"{acceptedClassification}\"]";
+
     private static RegisteredSourceCapability ToCapability(SourceCapabilityEntity value) => new(
         value.Id,
         value.ProcessorKind,
@@ -95,6 +110,8 @@ public sealed class SqlSourceActivityStore(
         value.ProcessorFingerprint,
         value.IsRunnable,
         SourceActivityKind.TextExtraction,
-        value.AcceptedClassificationsJson == "[\"text/plain\"]" ? "AcceptedUtf8Text" : "",
+        value.AcceptedClassificationsJson == "[\"text/plain\"]" ? "AcceptedUtf8Text" :
+        value.AcceptedClassificationsJson.StartsWith("[\"", StringComparison.Ordinal) && value.AcceptedClassificationsJson.EndsWith("\"]", StringComparison.Ordinal)
+            ? value.AcceptedClassificationsJson[2..^2] : "",
         value.OutputContract);
 }

@@ -43,7 +43,7 @@ public sealed class Phase3BCorpusAndEventsBrowserTests
                 await setup.SaveChangesAsync();
             }
             await using var host = await PhaseOneVerticalSliceBrowserTests.BrowserHost.StartAsync(sql.ConnectionString, ingressRoot, indexRoot);
-            using var playwright = await Playwright.CreateAsync(); await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true }); var page = await browser.NewPageAsync();
+            using var playwright = await Playwright.CreateAsync(); await using var browser = await playwright.Chromium.LaunchAsync(BrowserLaunchOptions.Create()); var page = await browser.NewPageAsync();
             await page.GotoAsync(new Uri(host.BaseAddress, "corpus").ToString(), new PageGotoOptions { WaitUntil = WaitUntilState.NetworkIdle });
             await page.GetByRole(AriaRole.Heading, new() { Name = "Corpus" }).WaitForAsync();
             await page.GetByText("direct-browser", new PageGetByTextOptions { Exact = false }).WaitForAsync();

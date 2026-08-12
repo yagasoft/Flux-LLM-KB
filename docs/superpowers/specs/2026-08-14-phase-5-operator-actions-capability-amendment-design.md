@@ -1,0 +1,31 @@
+# Phase 5 Operator Actions capability amendment design
+
+## Decision
+
+Supersede the OOXML-only Task 4B-B objective with a local, deny-by-default Operator Actions surface. It operates on one immutable retained-processor blocked action-version at a time and exposes three distinct actions: policy override, ordinary retry and reversible ignore. It does not create parser capability, reread an original source or relax retained-binding, integrity, hostile-input, provenance, scheduler-fence, cancellation or privacy controls.
+
+## Capability registration and eligibility
+
+The database owns a closed `OperatorActionHardDenials` table (unique ReasonCode). Exact retained rows are `retained-artifact-missing`, `retained-artifact-path-invalid`, `retained-artifact-checksum-invalid`, `retained-artifact-root-unavailable`, `retained-artifact-transient`; exact OOXML rows are `office-document-container-invalid`, `office-document-depth-limit`, `office-document-element-limit`, `office-document-encrypted`, `office-document-expanded-xml-limit`, `office-document-input-too-large`, `office-document-part-unsupported`, `office-document-text-limit`, `office-document-xml-invalid`; exact archive rows are `archive-input-too-large`, `archive-entry-count-limit`, `archive-expanded-total-limit`, `archive-member-size-limit`, `archive-member-size-invalid`, `archive-compression-ratio-limit`, `archive-entry-path-invalid`, `archive-entry-unsupported`, `archive-entry-encrypted`, `archive-entry-compression-unsupported`, `archive-signature-invalid`, `archive-member-identity-conflict`, `archive-member-not-utf8`, `archive-entry-link-invalid`, `nested-archive-depth-limit`; exact lifecycle rows are `legacy-office-binary-parser-unavailable`, `processor-parser-unavailable`, `processor-provenance-invalid`, `source-activity-cancelled`, `source-activity-superseded`, `lease-expired-reconciled`, `processor-fence-invalid`. An AFTER INSERT/UPDATE trigger on policy membership rejects every hard-denial row; tests prove every value.
+
+`ActionId` remains SHA-256 of the domain-separated branch/descriptor/fingerprint/blocked-row-version tuple. Each mutation supplies stable `OperationId`, expected blocked row-version token and request fingerprint. Operation lookup precedes action lookup and live eligibility; exact replay returns its original receipt, collision returns `operator-operation-conflict`, and an existing action receipt returns before re-evaluation. Unknown stale state returns `operator-action-stale` with no mutation.
+
+## Durable state
+
+`OperatorActionCapabilityPolicies` has immutable `(PolicyId,PolicyRevision,DescriptorId,DescriptorFingerprint,DescriptorVersion,SafetyContractId,HandlerId,ActionKind,ReasonCode)` as its primary tuple. Every runnable request has that restrictive composite FK. `OperatorActionActionLedger` has unique ActionId and action-version location; `OperatorActionOperationLedger` has unique OperationId plus request fingerprint and receipt location. Every POST locks/resolves operation ledger, then action ledger, before current eligibility; legacy migration populates both atomically. Thus one action supports multiple operations while global replay/conflict is preserved.
+
+Ignore/unignore first locks and resolves `OperatorActionOperationLedger`; replay or conflict returns before head access. Only a new operation then uses serialisable key-range lock/upsert for `SourceProcessorActionIgnoreHeads`, allocates/increments sequence and writes both ledgers and receipt using `SYSUTCDATETIME()` atomically.
+
+## Projection, transports and audit
+
+`IOperatorActionStore` is a read-only public projection plus entry contract; all durable mutation remains in the retained branch store. GET returns opaque action/request IDs, opaque row-version token, descriptor capability, fixed blocked/public action states, fixed reason/action codes, timestamps, `overrideAvailable`, `retryAvailable` and `ignored`. Default list excludes ignored actions; `includeIgnored=true` adds them. POST endpoints are `/api/operator-actions/{actionId}/override`, `/retry`, `/ignore` and `/unignore`, each with operation ID, request fingerprint and expected row-version; creation is 201, replay is 200. Errors are fixed 400 malformed, 403 authority, 404 unlisted, 409 conflict/stale/not-eligible and 503 descriptor-disabled.
+
+Only the direct-loopback UI, endpoint group and `/_blazor` circuit may mutate. The existing gate rejects non-loopback peers and forwarded/proxy headers; mutations require antiforgery and absent-or-same-origin Origin/Referer. The fixed audit actor is `anonymous-direct-loopback`. Local audit/status detail may include useful retained-derived fields under the private-PC policy; external/public/export status remains bounded and sanitised. A status refresh is emitted once after a committed transaction, never for replay, conflict or rollback. MCP and CLI have no mutation route.
+
+## State and recovery rules
+
+Open override/retry requests prevent ordinary claim of their exact branch. Disabled descriptors prevent new requests and reconciliation terminalises open requests without changing binding. Cancellation, supersession, binding invalidation, requested expiry and claimed-lease expiry close only the exact force request/attempt with existing fenced reconciliation rules. Ignore survives those outcomes solely as a triage receipt for its original action-version and never alters recovery. Trusted local list/detail, REST, UI, audit and SignalR may expose useful retained-derived paths, hashes, locators and diagnostics; credentials, headers, tokens, secret literals and external/public/export projections remain excluded.
+
+## Verification and scope
+
+Use generated disposable SQL for this matrix; configure the safe fixture when absent. Required coverage includes capability authority and each non-eligibility, operation/action replay and races, all three action state machines, ignore filtering/reversal/new generation, claim isolation, cancellation/supersession/disabled reconciliation, exact schema/upgrade, loopback/antiforgery, REST/UI and local-versus-external projection boundaries. Excludes Office automation, model download/activation, OCR/vision/transcription/embeddings, Outlook activation, deployment, non-disposable database work and live validation. Deterministic parser package changes require their own approved processor design.

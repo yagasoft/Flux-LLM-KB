@@ -14,6 +14,23 @@ internal static class SqlTestData
         NativeSqlServerFixture fixture) =>
         new TestDbContextFactory(fixture.ConnectionString);
 
+    /// <summary>Clears only the retained OOXML/operator-action lifecycle tables between class-fixture tests.</summary>
+    public static async Task ClearOoxmlOperatorActionDataAsync(NativeSqlServerFixture fixture)
+    {
+        await using var context = new FluxKnowledgeDbContext(
+            new DbContextOptionsBuilder<FluxKnowledgeDbContext>()
+                .UseSqlServer(fixture.ConnectionString)
+                .Options);
+        await context.AuditEvents.ExecuteDeleteAsync();
+        await context.OperatorActionOperationLedger.ExecuteDeleteAsync();
+        await context.SourceProcessorActionIgnoreHeads.ExecuteDeleteAsync();
+        await context.OperatorActionActionLedger.ExecuteDeleteAsync();
+        await context.SourceProcessorForceRequests.ExecuteDeleteAsync();
+        await context.SourceProcessorAttempts.ExecuteDeleteAsync();
+        await context.SourceProcessorBranchMembers.ExecuteDeleteAsync();
+        await context.SourceProcessorBranches.ExecuteDeleteAsync();
+    }
+
     public static async Task ClearPipelineAsync(NativeSqlServerFixture fixture)
     {
         await using var context = new FluxKnowledgeDbContext(

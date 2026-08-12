@@ -10,6 +10,8 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "loopback-deployment-safety.ps1")
+$siteOrigin = (Get-FixedLoopbackOrigin -SiteUrl $SiteUrl).Origin
 
 if ([string]::IsNullOrWhiteSpace($SourceRoot)) {
     $SourceRoot = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSCommandPath))
@@ -24,7 +26,9 @@ function Get-NativeOutlookIngressMigrationContract {
         throw "The authoritative native deployment plan is missing."
     }
 
-    $planOutput = & powershell -NoProfile -ExecutionPolicy Bypass -File $deploymentScript -SourceRoot $SourceRoot -PlanOnly 2>&1 | Out-String
+    $planOutput = & powershell -NoProfile -ExecutionPolicy Bypass -File $deploymentScript `
+        -SourceRoot $SourceRoot `
+        -PlanOnly 2>&1 | Out-String
     if ($LASTEXITCODE -ne 0) {
         throw "The authoritative native deployment plan could not be read."
     }
@@ -39,8 +43,10 @@ function Get-NativeOutlookIngressMigrationContract {
 
     if ($migrationIds.Count -eq 0 -or
         $plan.native_outlook_ingress_baseline_migration -cne $migrationIds[0] -or
-        $plan.deployment_migration_target -cne $migrationIds[-1] -or
-        $plan.post_deploy_validator -cne (Split-Path -Leaf $PSCommandPath)) {
+        $plan.native_outlook_ingress_migration_target -cne $migrationIds[-1] -or
+        $plan.native_outlook_ingress_post_deploy_validator -cne (Split-Path -Leaf $PSCommandPath) -or
+        -not [bool]$plan.keep_outlook_host_disabled -or
+        [bool]$plan.outlook_host_activation) {
         throw "The authoritative native deployment plan returned an inconsistent Outlook migration contract."
     }
 
@@ -98,11 +104,6 @@ $recordPath = [System.IO.Path]::GetFullPath((Join-Path $SourceRoot $ValidationRe
 $operationsRoot = [System.IO.Path]::GetFullPath((Join-Path $SourceRoot "docs\operations"))
 if (-not $recordPath.StartsWith($operationsRoot + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)) {
     throw "The validation record must remain under docs\operations."
-}
-
-$siteUri = [Uri]$SiteUrl
-if (-not $siteUri.IsLoopback) {
-    throw "Native Outlook validation is restricted to a loopback site URL."
 }
 
 $productionSettingsPath = Join-Path $DeployRoot "appsettings.Production.json"
@@ -266,11 +267,16 @@ SELECT
 
 $statusCodes = [ordered]@{}
 foreach ($path in @("/health/live", "/health/ready", "/api/index-health")) {
-    $response = Invoke-WebRequest -UseBasicParsing -Uri ("{0}{1}" -f $siteUri.GetLeftPart([System.UriPartial]::Authority), $path) -TimeoutSec 30
-    if ($response.StatusCode -ne 200) {
-        throw "A required loopback endpoint did not return 200."
+    $response = Invoke-FixedLoopbackProbe -Uri ("{0}{1}" -f $siteOrigin, $path) -TimeoutSeconds 30
+    try {
+        if ([int]$response.StatusCode -ne 200) {
+            throw "A required loopback endpoint did not return 200."
+        }
+        $statusCodes[$path] = [int]$response.StatusCode
     }
-    $statusCodes[$path] = [int]$response.StatusCode
+    finally {
+        $response.Dispose()
+    }
 }
 
 $completedAt = [DateTime]::UtcNow

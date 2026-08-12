@@ -1,0 +1,32 @@
+@page "/sources/retained/{BranchId:guid}"
+@using FluxKnowledge.Web.Components.Sources
+@inject RetainedBranchDetailPageState PageState
+
+<PageTitle>Retained branch detail | Flux Knowledge</PageTitle>
+@if (PageState.Detail is null)
+{
+    <p role="status">@(PageState.Error ?? "Loading retained branch detail…")</p>
+}
+else
+{
+    <section aria-labelledby="retained-branch-heading">
+        <h1 id="retained-branch-heading">Retained branch detail</h1>
+        <dl class="metadata">
+            <dt>Branch ID</dt><dd class="diagnostic-value">@PageState.Detail.BranchId</dd>
+            <dt>Source revision ID</dt><dd class="diagnostic-value">@PageState.Detail.SourceRevisionId</dd>
+            <dt>Local path</dt><dd class="diagnostic-value">@PageState.Detail.LocalPath</dd>
+            <dt>Verified artifact hash</dt><dd class="diagnostic-value">@PageState.Detail.ArtifactHash</dd>
+            <dt>Input hash</dt><dd class="diagnostic-value">@PageState.Detail.InputHash</dd>
+            <dt>Bytes</dt><dd>@PageState.Detail.ArtifactByteLength</dd>
+        </dl>
+        <h2>Verified retained excerpt</h2>
+        @if (PageState.Excerpt?.Withheld == true) { <p>@PageState.Excerpt.ReasonCode</p> }
+        else if (PageState.Excerpt?.Value is { } excerpt) { <pre class="indexed-preview">@excerpt</pre> }
+        <h2>Members</h2>
+        <ul>@foreach (var member in PageState.Detail.Members) { <li>@member.Disposition — @member.ChildSourceRevisionId</li> }</ul>
+        <h2>Attempts</h2>
+        <ul>@foreach (var attempt in PageState.Detail.Attempts) { <li>@attempt.OutcomeCode: @(attempt.DiagnosticWithheld ? attempt.DiagnosticReasonCode : attempt.Diagnostic)</li> }</ul>
+        <p><a href="/sources">Back to sources</a></p>
+    </section>
+}
+@code { [Parameter] public Guid BranchId { get; set; } protected override async Task OnParametersSetAsync() => await PageState.LoadAsync(BranchId, CancellationToken.None); }

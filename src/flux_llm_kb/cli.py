@@ -217,6 +217,30 @@ def main(argv: list[str] | None = None) -> int:
     semantic_list.add_argument("--root-name")
     semantic_list.add_argument("--limit", type=int, default=50)
 
+    local_detail_parser = subparsers.add_parser("local-detail", help="Read explicit trusted-local source, corpus, code, diagnostics, and audit detail")
+    local_detail_subparsers = local_detail_parser.add_subparsers(dest="local_detail_command", required=True)
+    local_source_detail = local_detail_subparsers.add_parser("source", help="Read local source path, hash, parser diagnostics, and excerpt")
+    local_source_detail.add_argument("asset_id")
+    local_corpus_detail = local_detail_subparsers.add_parser("corpus", help="Read local corpus path, hash, parser diagnostics, and excerpt")
+    local_corpus_detail.add_argument("chunk_id")
+    local_code_detail = local_detail_subparsers.add_parser("code", help="Search local raw code facts")
+    local_code_detail.add_argument("query")
+    local_code_detail.add_argument("--root", dest="root_name")
+    local_code_detail.add_argument("--cwd")
+    local_code_detail.add_argument("--language")
+    local_code_detail.add_argument("--relationship")
+    local_code_detail.add_argument("--limit", type=int, default=20)
+    local_diagnostics_detail = local_detail_subparsers.add_parser("diagnostics", help="Read bounded trusted-local diagnostic evidence")
+    local_diagnostics_detail.add_argument("section", choices=["all", "retrieval", "watcher", "workers", "jobs", "mail"])
+    local_diagnostics_detail.add_argument("--limit", type=int, default=25)
+    local_diagnostics_detail.add_argument("--root", dest="root_name")
+    local_diagnostics_detail.add_argument("--status")
+    local_diagnostics_detail.add_argument("--family")
+    local_diagnostics_detail.add_argument("--since-hours", type=int)
+    local_diagnostics_detail.add_argument("--include-details", action="store_true")
+    local_audit_detail = local_detail_subparsers.add_parser("audit", help="Read bounded trusted-local audit evidence")
+    local_audit_detail.add_argument("--limit", type=int, default=50)
+
     code_parser = subparsers.add_parser("code", help="Inspect code-aware retrieval diagnostics")
     code_subparsers = code_parser.add_subparsers(dest="code_command", required=True)
     code_status = code_subparsers.add_parser("status", help="Show code index coverage and parser status")
@@ -687,6 +711,7 @@ def main(argv: list[str] | None = None) -> int:
         "capture": _capture,
         "retention": _retention,
         "semantic-duplicates": _semantic_duplicates,
+        "local-detail": _local_detail,
         "forget": _forget,
         "audit": _audit,
         "backfill-codex": _backfill_codex,
@@ -1008,6 +1033,41 @@ def _code(args: argparse.Namespace) -> int:
             raise ValueError(args.code_feedback_command)
     else:  # pragma: no cover - argparse prevents this
         raise ValueError(args.code_command)
+    print(json.dumps(payload, indent=2, sort_keys=True))
+    return 0
+
+
+def _local_detail(args: argparse.Namespace) -> int:
+    from .service import KnowledgeService
+
+    service = KnowledgeService()
+    if args.local_detail_command == "source":
+        payload = service.local_source_detail(args.asset_id)
+    elif args.local_detail_command == "corpus":
+        payload = service.local_corpus_detail(args.chunk_id)
+    elif args.local_detail_command == "code":
+        payload = service.local_code_search(
+            args.query,
+            root_name=args.root_name,
+            cwd=args.cwd,
+            language=args.language,
+            relationship=args.relationship,
+            limit=args.limit,
+        )
+    elif args.local_detail_command == "diagnostics":
+        payload = service.local_operational_diagnostics(
+            section=args.section,
+            limit=args.limit,
+            root_name=args.root_name,
+            status=args.status,
+            family=args.family,
+            since_hours=args.since_hours,
+            include_details=args.include_details,
+        )
+    elif args.local_detail_command == "audit":
+        payload = service.local_audit(limit=args.limit)
+    else:  # pragma: no cover - argparse prevents this
+        raise ValueError(args.local_detail_command)
     print(json.dumps(payload, indent=2, sort_keys=True))
     return 0
 

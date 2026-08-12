@@ -15,6 +15,7 @@ using Xunit;
 
 namespace FluxKnowledge.Integration.Tests.Workers;
 
+[Collection("sql-hosted-recovery")]
 public sealed class SqlGpuExecutorDispatchRecoveryServiceTests(NativeSqlServerFixture fixture) : IClassFixture<NativeSqlServerFixture>
 {
     private const string PendingExecutorKey = "test-executor";

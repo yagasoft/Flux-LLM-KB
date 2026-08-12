@@ -71,6 +71,23 @@ public sealed class SourceScanWorker(
             var acceptedByRootPolicy = file.Classification.IsAccepted &&
                 (sourceRoot.AllowedClassifications.Count == 0 ||
                     sourceRoot.AllowedClassifications.Contains("text/plain", StringComparer.OrdinalIgnoreCase));
+            if (acceptedByRootPolicy &&
+                file.RelativePath.EndsWith(".cs", StringComparison.OrdinalIgnoreCase))
+            {
+                await activityStore.FindOrCreateAsync(
+                    new SourceActivityDraft(
+                        revisionId,
+                        SourceActivityKind.DocumentParsing,
+                        ExecutionClass.DeferredCapability,
+                        RetainedCsharpCodeProcessor.ProcessorVersion,
+                        file.ContentSha256,
+                        RetainedCsharpCodeProcessor.ProcessorKind,
+                        "csharp-code-writer-not-ready",
+                        SourceActivityState.DeferredUnsupported),
+                    cancellationToken).ConfigureAwait(false);
+                deferred++;
+                continue;
+            }
             if (acceptedByRootPolicy)
             {
                 var activity = await activityStore.FindOrCreateAsync(

@@ -12,6 +12,7 @@ public sealed class SourceRevisionEntity
     public Guid? ParentSourceRevisionId { get; set; }
     public string Classification { get; set; } = string.Empty;
     public string Extension { get; set; } = string.Empty;
+    public int OriginKind { get; set; }
     public long ByteLength { get; set; }
     public DateTimeOffset? FileCreatedAtUtc { get; set; }
     public DateTimeOffset? FileLastWriteAtUtc { get; set; }

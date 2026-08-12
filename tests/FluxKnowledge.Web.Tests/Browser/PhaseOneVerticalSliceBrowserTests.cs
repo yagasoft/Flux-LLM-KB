@@ -9,6 +9,8 @@ using FluxKnowledge.Web.Components;
 using FluxKnowledge.Web.Components.Status;
 using FluxKnowledge.Web.Endpoints;
 using FluxKnowledge.Web.Mcp;
+using FluxKnowledge.Application.Visibility;
+using FluxKnowledge.Infrastructure.SqlServer.Visibility;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Components.Server.Circuits;
 using Microsoft.AspNetCore.Hosting;
@@ -28,10 +30,6 @@ public sealed class BrowserFactAttribute : FactAttribute
         if (!string.Equals(Environment.GetEnvironmentVariable("FLUXKNOWLEDGE_BROWSER_TESTS"), "1", StringComparison.Ordinal))
         {
             Skip = "Set FLUXKNOWLEDGE_BROWSER_TESTS=1 to run browser tests.";
-        }
-        else if (string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("FLUXKNOWLEDGE_TEST_SQL_CONNECTION")))
-        {
-            Skip = "Set FLUXKNOWLEDGE_TEST_SQL_CONNECTION to a disposable SQL test server to run browser tests.";
         }
     }
 }
@@ -65,7 +63,7 @@ public sealed class PhaseOneVerticalSliceBrowserTests
             Assert.Contains("Pipeline overview", overviewMarkup, StringComparison.Ordinal);
             Assert.Contains("Index status", overviewMarkup, StringComparison.Ordinal);
             using var playwright = await Playwright.CreateAsync();
-            await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+            await using var browser = await playwright.Chromium.LaunchAsync(BrowserLaunchOptions.Create());
             var page = await browser.NewPageAsync();
             await page.GotoAsync(host.BaseAddress.ToString(), new PageGotoOptions { WaitUntil = WaitUntilState.NetworkIdle });
             await page.GetByRole(AriaRole.Heading, new() { Name = "Pipeline overview" }).WaitForAsync();
@@ -166,10 +164,12 @@ public sealed class PhaseOneVerticalSliceBrowserTests
             builder.Services.AddScoped<OverviewProjectionState>();
             builder.Services.AddScoped<CircuitHandler, StatusEventCircuitHandler>();
             builder.Services.AddFluxKnowledgeMcp();
+            builder.Services.AddSingleton<ILocalPrivateContentDisclosure, LocalPrivateContentDisclosure>();
             builder.Services.AddMcpServer().WithHttpTransport(options => options.Stateless = true).WithTools<KnowledgeMcpTools>();
             configureServices?.Invoke(builder.Services);
 
             var application = builder.Build();
+            application.UseLocalOperatorLoopbackGate();
             application.UseAntiforgery();
             application.MapStaticAssets();
             application.MapRazorComponents<App>().AddInteractiveServerRenderMode();
@@ -177,6 +177,8 @@ public sealed class PhaseOneVerticalSliceBrowserTests
             application.MapFluxKnowledgeIndexHealth();
             application.MapFluxKnowledgeSearch();
             application.MapFluxKnowledgePipelineRecords();
+            application.MapFluxKnowledgeLocalRetainedDetails();
+            application.MapFluxKnowledgeLocalRetainedCsharpCode();
             application.MapMcp("/mcp");
             await application.StartAsync();
             return new BrowserHost(application, new Uri(application.Urls.Single()));

@@ -45,6 +45,22 @@ public sealed class FluxKnowledgeDbContext(DbContextOptions<FluxKnowledgeDbConte
     public DbSet<OutlookBrowseResultEntity> OutlookBrowseResults => Set<OutlookBrowseResultEntity>();
     public DbSet<OutlookCatchUpEntity> OutlookCatchUps => Set<OutlookCatchUpEntity>();
     public DbSet<DeferredCapabilityEntity> DeferredCapabilities => Set<DeferredCapabilityEntity>();
+    public DbSet<SourceProcessorBranchEntity> SourceProcessorBranches => Set<SourceProcessorBranchEntity>();
+    public DbSet<SourceProcessorAttemptEntity> SourceProcessorAttempts => Set<SourceProcessorAttemptEntity>();
+    public DbSet<SourceProcessorForceRequestEntity> SourceProcessorForceRequests => Set<SourceProcessorForceRequestEntity>();
+    public DbSet<OperatorActionHardDenialEntity> OperatorActionHardDenials => Set<OperatorActionHardDenialEntity>();
+    public DbSet<OperatorActionCapabilityPolicyEntity> OperatorActionCapabilityPolicies => Set<OperatorActionCapabilityPolicyEntity>();
+    public DbSet<OperatorActionActionLedgerEntity> OperatorActionActionLedger => Set<OperatorActionActionLedgerEntity>();
+    public DbSet<OperatorActionOperationLedgerEntity> OperatorActionOperationLedger => Set<OperatorActionOperationLedgerEntity>();
+    public DbSet<SourceProcessorActionIgnoreHeadEntity> SourceProcessorActionIgnoreHeads => Set<SourceProcessorActionIgnoreHeadEntity>();
+    public DbSet<SourceProcessorBranchMemberEntity> SourceProcessorBranchMembers => Set<SourceProcessorBranchMemberEntity>();
+    public DbSet<SourceActivityRelationEntity> SourceActivityRelations => Set<SourceActivityRelationEntity>();
+    public DbSet<SourceProcessorCodeDocumentEntity> SourceProcessorCodeDocuments => Set<SourceProcessorCodeDocumentEntity>();
+    public DbSet<SourceProcessorCodeSymbolEntity> SourceProcessorCodeSymbols => Set<SourceProcessorCodeSymbolEntity>();
+    public DbSet<SourceProcessorCodeReferenceEntity> SourceProcessorCodeReferences => Set<SourceProcessorCodeReferenceEntity>();
+    public DbSet<SourceProcessorCodeDiagnosticEntity> SourceProcessorCodeDiagnostics => Set<SourceProcessorCodeDiagnosticEntity>();
+    public DbSet<SourceProcessorCodeCompletionReceiptEntity> SourceProcessorCodeCompletionReceipts => Set<SourceProcessorCodeCompletionReceiptEntity>();
+    public DbSet<SourceProcessorCodeBlockedDiagnosticEntity> SourceProcessorCodeBlockedDiagnostics => Set<SourceProcessorCodeBlockedDiagnosticEntity>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {

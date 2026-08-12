@@ -30,7 +30,8 @@ public sealed class SqlSourceActivityWriter(TimeProvider timeProvider)
             draft.InputFingerprint,
             draft.RequiredCapability,
             draft.Reason,
-            draft.InitialState);
+            draft.InitialState,
+            draft.DescriptorFingerprint);
         var now = timeProvider.GetUtcNow();
         context.SourceActivities.Add(new SourceActivityEntity
         {
@@ -40,6 +41,7 @@ public sealed class SqlSourceActivityWriter(TimeProvider timeProvider)
             ExecutionClass = (int)activity.ExecutionClass,
             ProcessorVersion = activity.ProcessorVersion,
             InputFingerprint = activity.InputFingerprint,
+            DescriptorFingerprint = activity.DescriptorFingerprint,
             RequiredCapability = activity.RequiredCapability,
             State = (int)activity.State,
             Reason = activity.Reason,
@@ -71,6 +73,7 @@ public sealed class SqlSourceActivityWriter(TimeProvider timeProvider)
             value => value.SourceRevisionId == draft.SourceRevisionId.Value &&
                 value.ActivityKind == (int)draft.ActivityKind &&
                 value.ProcessorVersion == draft.ProcessorVersion &&
+                value.DescriptorFingerprint == (draft.DescriptorFingerprint ?? SourceActivityEntity.LegacyDescriptorFingerprint) &&
                 value.InputFingerprint == draft.InputFingerprint,
             cancellationToken);
 
@@ -85,5 +88,6 @@ public sealed class SqlSourceActivityWriter(TimeProvider timeProvider)
             existing.RequiredCapability,
             (SourceActivityState)existing.State,
             existing.Reason,
-            existing.ResultingPipelineRecordId is not null && existing.ResultingPipelineRecordRevision is not null);
+            existing.ResultingPipelineRecordId is not null && existing.ResultingPipelineRecordRevision is not null,
+            existing.DescriptorFingerprint);
 }

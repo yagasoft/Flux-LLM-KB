@@ -21,7 +21,7 @@ def test_remember_endpoint_passes_workspace_scope(monkeypatch):
 
     monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: FakeService())
 
-    client = fastapi_testclient.TestClient(create_app())
+    client = fastapi_testclient.TestClient(create_app(), client=("127.0.0.1", 50100))
     response = client.post(
         "/api/remember",
         json={"title": "Scoped", "body": "Memory", "cwd": "E:/Repo", "root_name": "repo"},
@@ -60,7 +60,7 @@ def test_audit_endpoint_does_not_expose_raw_cas_identifiers(monkeypatch):
 
     monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: FakeService())
 
-    response = fastapi_testclient.TestClient(create_app()).get("/api/audit")
+    response = fastapi_testclient.TestClient(create_app(), client=("127.0.0.1", 50100)).get("/api/audit")
 
     assert response.status_code == 200
     assert response.json()[0]["details"]["stage"] == "claim"
@@ -96,7 +96,7 @@ def test_crawl_root_create_endpoint_validates_and_adds_root(tmp_path, monkeypatc
     monkeypatch.setattr(database, "add_monitored_root", fake_add_monitored_root)
     monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: FakeService())
 
-    client = fastapi_testclient.TestClient(create_app())
+    client = fastapi_testclient.TestClient(create_app(), client=("127.0.0.1", 50100))
     response = client.post(
         "/api/crawl/roots",
         json={
@@ -161,7 +161,7 @@ def test_crawl_root_create_accepts_windows_host_path_via_host_agent(monkeypatch)
     )
     monkeypatch.setattr("flux_llm_kb.rest_api.path_requires_host_agent", lambda _path: True)
 
-    client = fastapi_testclient.TestClient(create_app())
+    client = fastapi_testclient.TestClient(create_app(), client=("127.0.0.1", 50100))
     response = client.post(
         "/api/crawl/roots",
         json={
@@ -209,7 +209,7 @@ def test_acceleration_reliability_endpoints_forward_to_service(monkeypatch):
 
     monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: FakeService())
 
-    client = fastapi_testclient.TestClient(create_app())
+    client = fastapi_testclient.TestClient(create_app(), client=("127.0.0.1", 50100))
     status_response = client.get(
         "/api/acceleration/reliability",
         params={"root_name": "docs", "label": "nightly", "freshness_hours": 12},
@@ -286,7 +286,7 @@ def test_code_feedback_and_diagnostics_filter_routes_forward_to_service(monkeypa
             return {"settings_mutated": False, "items": [{"section": "jobs"}]}
 
     monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: FakeService())
-    client = fastapi_testclient.TestClient(create_app())
+    client = fastapi_testclient.TestClient(create_app(), client=("127.0.0.1", 50100))
 
     feedback_response = client.post(
         "/api/code/feedback",
@@ -338,7 +338,7 @@ def test_diagnostics_action_route_forwards_to_service(monkeypatch):
             return {"settings_mutated": False, "action": kwargs["action"], "result": {"status": "pending"}}
 
     monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: FakeService())
-    client = fastapi_testclient.TestClient(create_app())
+    client = fastapi_testclient.TestClient(create_app(), client=("127.0.0.1", 50100))
 
     response = client.post(
         "/api/diagnostics/actions",
@@ -391,7 +391,7 @@ def test_code_and_operational_diagnostic_routes_forward_to_service(monkeypatch):
 
     monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: FakeService())
 
-    client = fastapi_testclient.TestClient(create_app())
+    client = fastapi_testclient.TestClient(create_app(), client=("127.0.0.1", 50100))
 
     assert client.get("/api/code/status", params={"root_name": "app", "cwd": "E:/LLM KB"}).json()["totals"]["symbol_count"] == 1
     assert (
@@ -449,7 +449,7 @@ def test_host_routes_are_exposed(monkeypatch):
     from flux_llm_kb.rest_api import create_app
 
     monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: object())
-    client = fastapi_testclient.TestClient(create_app())
+    client = fastapi_testclient.TestClient(create_app(), client=("127.0.0.1", 50100))
 
     response = client.get("/api/host/status")
 
@@ -470,7 +470,7 @@ def test_acceleration_status_route_is_exposed(monkeypatch):
         },
     )
 
-    client = fastapi_testclient.TestClient(create_app())
+    client = fastapi_testclient.TestClient(create_app(), client=("127.0.0.1", 50100))
     response = client.get("/api/acceleration/status")
 
     assert response.status_code == 200
@@ -522,7 +522,7 @@ def test_dashboard_model_activity_route_is_bounded_and_safe(monkeypatch):
 
     monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: object())
     monkeypatch.setattr("flux_llm_kb.rest_api.collect_model_activity_payload", fake_collect_model_activity_payload)
-    client = fastapi_testclient.TestClient(create_app())
+    client = fastapi_testclient.TestClient(create_app(), client=("127.0.0.1", 50100))
 
     response = client.get("/api/dashboard/model-activity", params={"window_minutes": 9999, "limit": 9999})
 
@@ -571,7 +571,7 @@ def test_watcher_worker_and_benchmark_routes_are_exposed(monkeypatch):
             return {"fixture": kwargs["fixture"], "runs": [{"id": "run-1"}]}
 
     monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: FakeService())
-    client = fastapi_testclient.TestClient(create_app())
+    client = fastapi_testclient.TestClient(create_app(), client=("127.0.0.1", 50100))
 
     probe = client.post("/api/crawl/watch/probe", json={"timeout_seconds": 1.5})
     workers = client.get("/api/crawl/workers", params={"family": "media"})
@@ -670,7 +670,7 @@ def test_benchmark_route_proxies_host_agent_roots(monkeypatch):
         lambda root_name: {"name": root_name, "root_path": "E:\\Docs", "metadata": {"host_access": "host_agent"}},
     )
     monkeypatch.setattr("flux_llm_kb.rest_api.host_agent_benchmark", lambda **kwargs: calls.append(kwargs) or {"status": "host_agent", "runs": []})
-    client = fastapi_testclient.TestClient(create_app())
+    client = fastapi_testclient.TestClient(create_app(), client=("127.0.0.1", 50100))
 
     response = client.post(
         "/api/acceleration/benchmarks/run",
@@ -721,7 +721,7 @@ def test_reliability_run_proxies_host_agent_root_benchmark_slices(monkeypatch):
         lambda root_name: {"name": root_name, "root_path": "E:\\Docs", "metadata": {"host_access": "host_agent"}},
     )
     monkeypatch.setattr("flux_llm_kb.rest_api.host_agent_benchmark", lambda **kwargs: host_calls.append(kwargs) or {"status": "host_agent", "runs": []})
-    client = fastapi_testclient.TestClient(create_app())
+    client = fastapi_testclient.TestClient(create_app(), client=("127.0.0.1", 50100))
 
     response = client.post(
         "/api/acceleration/reliability/run",
@@ -787,7 +787,7 @@ def test_retrieval_benchmark_routes_are_exposed(monkeypatch):
             }
 
     monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: FakeService())
-    client = fastapi_testclient.TestClient(create_app())
+    client = fastapi_testclient.TestClient(create_app(), client=("127.0.0.1", 50100))
 
     response = client.post(
         "/api/retrieval/benchmarks/run",
@@ -859,7 +859,7 @@ def test_governance_routes_are_exposed(monkeypatch):
             return {"policy": {"min_shadow_precision": 0.8}, "settings_mutated": False}
 
     monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: FakeService())
-    client = fastapi_testclient.TestClient(create_app())
+    client = fastapi_testclient.TestClient(create_app(), client=("127.0.0.1", 50100))
 
     assert client.get("/api/governance/runs", params={"limit": 3}).json()["runs"][0]["id"] == "run-1"
     run_response = client.post("/api/governance/run", json={"mode": "shadow", "limit": 4})
@@ -892,7 +892,7 @@ def test_automation_run_route_enqueues_broker_command(monkeypatch):
             return {"accepted": True, "operation_id": "op-automation", "settings_mutated": False}
 
     monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: FakeService())
-    client = fastapi_testclient.TestClient(create_app())
+    client = fastapi_testclient.TestClient(create_app(), client=("127.0.0.1", 50100))
 
     response = client.post("/api/automation/run", json={"mode": "guarded", "limit": 3, "dry_run": True})
 
@@ -905,7 +905,7 @@ def test_crawl_root_create_endpoint_rejects_missing_directory(monkeypatch, tmp_p
     from flux_llm_kb.rest_api import create_app
 
     monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: object())
-    client = fastapi_testclient.TestClient(create_app())
+    client = fastapi_testclient.TestClient(create_app(), client=("127.0.0.1", 50100))
 
     response = client.post(
         "/api/crawl/roots",
@@ -955,7 +955,7 @@ def test_crawl_root_update_endpoint_validates_and_persists(monkeypatch, tmp_path
     )
     monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: FakeService())
 
-    client = fastapi_testclient.TestClient(create_app())
+    client = fastapi_testclient.TestClient(create_app(), client=("127.0.0.1", 50100))
     response = client.patch(
         "/api/crawl/roots/root-1",
         json={
@@ -995,7 +995,7 @@ def test_crawl_root_delete_endpoint_purges_index(monkeypatch):
     )
     monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: object())
 
-    client = fastapi_testclient.TestClient(create_app())
+    client = fastapi_testclient.TestClient(create_app(), client=("127.0.0.1", 50100))
     response = client.delete("/api/crawl/roots/root-1?purge_index=true")
 
     assert response.status_code == 200
@@ -1011,7 +1011,7 @@ def test_crawl_backfill_endpoint_requires_event_enqueue(monkeypatch):
             raise AssertionError("REST backfill must not process inline")
 
     monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: FakeService())
-    client = fastapi_testclient.TestClient(create_app())
+    client = fastapi_testclient.TestClient(create_app(), client=("127.0.0.1", 50100))
 
     with pytest.raises(RuntimeError, match="enqueue_corpus_backfill"):
         client.post("/api/crawl/backfill", json={"kind": "text", "limit": 3, "workers": 1})
@@ -1035,7 +1035,7 @@ def test_crawl_backfill_endpoint_returns_accepted_event_operation(monkeypatch):
             }
 
     monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: FakeService())
-    client = fastapi_testclient.TestClient(create_app())
+    client = fastapi_testclient.TestClient(create_app(), client=("127.0.0.1", 50100))
 
     response = client.post("/api/crawl/backfill", json={"kind": "text", "limit": 3, "workers": 1})
 
@@ -1053,7 +1053,7 @@ def test_crawl_backfill_endpoint_omits_default_parallelism_knobs(monkeypatch):
             return {"accepted": True, "backfill": kwargs}
 
     monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: FakeService())
-    client = fastapi_testclient.TestClient(create_app())
+    client = fastapi_testclient.TestClient(create_app(), client=("127.0.0.1", 50100))
 
     response = client.post("/api/crawl/backfill", json={"kind": "text"})
 
@@ -1078,7 +1078,7 @@ def test_dashboard_job_cancel_endpoint_reports_running_job_conflict(monkeypatch)
     )
     monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: object())
 
-    client = fastapi_testclient.TestClient(create_app())
+    client = fastapi_testclient.TestClient(create_app(), client=("127.0.0.1", 50100))
     response = client.post("/api/dashboard/jobs/job-running/cancel")
 
     assert response.status_code == 409
@@ -1105,7 +1105,7 @@ def test_dashboard_jobs_endpoint_passes_filters_paging_source_and_updated_range(
     monkeypatch.setattr("flux_llm_kb.rest_api.collect_dashboard_jobs_payload", fake_collect_dashboard_jobs_payload)
     monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: object())
 
-    client = fastapi_testclient.TestClient(create_app())
+    client = fastapi_testclient.TestClient(create_app(), client=("127.0.0.1", 50100))
     response = client.get(
         "/api/dashboard/jobs",
         params=[
@@ -1161,7 +1161,7 @@ def test_crawl_jobs_endpoint_stays_capture_scoped(monkeypatch):
     monkeypatch.setattr("flux_llm_kb.rest_api.collect_jobs_payload", fake_collect_jobs_payload)
     monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: object())
 
-    client = fastapi_testclient.TestClient(create_app())
+    client = fastapi_testclient.TestClient(create_app(), client=("127.0.0.1", 50100))
     response = client.get("/api/crawl/jobs", params={"limit": "5", "offset": "10"})
 
     assert response.status_code == 200
@@ -1203,7 +1203,7 @@ def test_dashboard_job_tool_invocations_endpoint_returns_bounded_history(monkeyp
     monkeypatch.setattr(database, "list_capture_job_tool_invocations", fake_list_capture_job_tool_invocations)
     monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: object())
 
-    client = fastapi_testclient.TestClient(create_app())
+    client = fastapi_testclient.TestClient(create_app(), client=("127.0.0.1", 50100))
     response = client.get("/api/dashboard/jobs/job-1/tool-invocations", params={"limit": "25"})
 
     assert response.status_code == 200
@@ -1224,7 +1224,7 @@ def test_dashboard_job_retry_endpoint_uses_diagnostic_remediation(monkeypatch):
 
     monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: FakeService())
 
-    client = fastapi_testclient.TestClient(create_app())
+    client = fastapi_testclient.TestClient(create_app(), client=("127.0.0.1", 50100))
     response = client.post("/api/dashboard/jobs/job-1/retry")
 
     assert response.status_code == 200
@@ -1249,7 +1249,7 @@ def test_dashboard_job_retry_endpoint_reports_ineligible_job_conflict(monkeypatc
 
     monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: FakeService())
 
-    client = fastapi_testclient.TestClient(create_app())
+    client = fastapi_testclient.TestClient(create_app(), client=("127.0.0.1", 50100))
     response = client.post("/api/dashboard/jobs/job-completed/retry")
 
     assert response.status_code == 409
@@ -1270,7 +1270,7 @@ def test_dashboard_retry_blocked_asr_endpoint_uses_guarded_service_action(monkey
     monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: FakeService())
     monkeypatch.setattr("flux_llm_kb.dashboard_realtime.emit_dashboard_change", lambda **kwargs: emitted.append(kwargs))
 
-    client = fastapi_testclient.TestClient(create_app())
+    client = fastapi_testclient.TestClient(create_app(), client=("127.0.0.1", 50100))
     response = client.post("/api/dashboard/jobs/retry-blocked-asr", json={"limit": 5, "root_name": "media"})
 
     assert response.status_code == 200
@@ -1304,7 +1304,7 @@ def test_dashboard_job_delete_request_endpoint_marks_terminal_job(monkeypatch):
     )
     monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: object())
 
-    client = fastapi_testclient.TestClient(create_app())
+    client = fastapi_testclient.TestClient(create_app(), client=("127.0.0.1", 50100))
     response = client.post("/api/dashboard/jobs/job-failed/delete-request", json={"reason": "operator_cleanup"})
 
     assert response.status_code == 200
@@ -1328,7 +1328,7 @@ def test_dashboard_job_delete_request_endpoint_reports_missing_job(monkeypatch):
     )
     monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: object())
 
-    client = fastapi_testclient.TestClient(create_app())
+    client = fastapi_testclient.TestClient(create_app(), client=("127.0.0.1", 50100))
     response = client.post("/api/dashboard/jobs/job-missing/delete-request")
 
     assert response.status_code == 404
@@ -1350,7 +1350,7 @@ def test_dashboard_job_delete_request_endpoint_reports_active_job_conflict(monke
     )
     monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: object())
 
-    client = fastapi_testclient.TestClient(create_app())
+    client = fastapi_testclient.TestClient(create_app(), client=("127.0.0.1", 50100))
     response = client.post("/api/dashboard/jobs/job-running/delete-request")
 
     assert response.status_code == 409
@@ -1376,7 +1376,7 @@ def test_dashboard_job_delete_request_restore_endpoint_restores_marked_job(monke
     )
     monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: object())
 
-    client = fastapi_testclient.TestClient(create_app())
+    client = fastapi_testclient.TestClient(create_app(), client=("127.0.0.1", 50100))
     response = client.delete("/api/dashboard/jobs/job-obsolete/delete-request")
 
     assert response.status_code == 200
@@ -1406,7 +1406,7 @@ def test_dashboard_job_delete_request_restore_endpoint_reports_conflict_and_miss
     monkeypatch.setattr(database, "restore_capture_job_deletion_request", fake_restore)
     monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: object())
 
-    client = fastapi_testclient.TestClient(create_app())
+    client = fastapi_testclient.TestClient(create_app(), client=("127.0.0.1", 50100))
     conflict = client.delete("/api/dashboard/jobs/job-failed/delete-request")
     missing = client.delete("/api/dashboard/jobs/missing/delete-request")
 
@@ -1426,7 +1426,7 @@ def test_dashboard_job_file_action_endpoint_routes_to_host_agent(monkeypatch):
     )
     monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: object())
 
-    client = fastapi_testclient.TestClient(create_app())
+    client = fastapi_testclient.TestClient(create_app(), client=("127.0.0.1", 50100))
     response = client.post("/api/dashboard/jobs/job-failed/file-actions", json={"action": "reveal"})
 
     assert response.status_code == 200
@@ -1439,7 +1439,7 @@ def test_dashboard_job_file_action_endpoint_rejects_unknown_action(monkeypatch):
 
     monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: object())
 
-    client = fastapi_testclient.TestClient(create_app())
+    client = fastapi_testclient.TestClient(create_app(), client=("127.0.0.1", 50100))
     response = client.post("/api/dashboard/jobs/job-failed/file-actions", json={"action": "delete"})
 
     assert response.status_code == 400
@@ -1451,7 +1451,7 @@ def test_dashboard_job_file_action_endpoint_rejects_browser_supplied_path(monkey
 
     monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: object())
 
-    client = fastapi_testclient.TestClient(create_app())
+    client = fastapi_testclient.TestClient(create_app(), client=("127.0.0.1", 50100))
     response = client.post(
         "/api/dashboard/jobs/job-failed/file-actions",
         json={"action": "open", "path": "E:\\Unsafe\\from-browser.txt"},
@@ -1482,7 +1482,7 @@ def test_crawl_backfill_endpoint_proxies_host_agent_root(monkeypatch):
         lambda **kwargs: {"host_backfill": kwargs, "completed": 4},
     )
 
-    client = fastapi_testclient.TestClient(create_app())
+    client = fastapi_testclient.TestClient(create_app(), client=("127.0.0.1", 50100))
     response = client.post(
         "/api/crawl/backfill",
         json={"kind": "all", "limit": 10, "workers": 1, "root_name": "watch-test"},
@@ -1500,7 +1500,7 @@ def test_crawl_backfill_endpoint_proxies_host_agent_root(monkeypatch):
 def test_embedding_endpoints_are_removed():
     from flux_llm_kb.rest_api import create_app
 
-    client = fastapi_testclient.TestClient(create_app())
+    client = fastapi_testclient.TestClient(create_app(), client=("127.0.0.1", 50100))
 
     status_response = client.get("/api/embeddings/status?root_name=docs")
     assert status_response.status_code == 404
@@ -1526,7 +1526,7 @@ def test_post_body_models_are_bound_from_json(monkeypatch):
             return [{"query": query, "limit": limit}]
 
     monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: FakeService())
-    client = fastapi_testclient.TestClient(create_app())
+    client = fastapi_testclient.TestClient(create_app(), client=("127.0.0.1", 50100))
 
     response = client.post("/api/search", json={"query": "corpus roots", "limit": 7})
 
@@ -1563,7 +1563,7 @@ def test_get_search_and_brief_support_external_consumers(monkeypatch):
             return f"{query}:{token_budget}"
 
     monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: FakeService())
-    client = fastapi_testclient.TestClient(create_app())
+    client = fastapi_testclient.TestClient(create_app(), client=("127.0.0.1", 50100))
 
     search = client.get(
         "/api/search",
@@ -1659,7 +1659,7 @@ def test_get_and_post_explain_support_external_consumers(monkeypatch):
             }
 
     monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: FakeService())
-    client = fastapi_testclient.TestClient(create_app())
+    client = fastapi_testclient.TestClient(create_app(), client=("127.0.0.1", 50100))
 
     get_response = client.get(
         "/api/explain",
@@ -1737,7 +1737,7 @@ def test_semantic_duplicate_routes_are_exposed(monkeypatch):
             return {"clusters": [{"id": "cluster-1", "memory_class": memory_class, "root_name": root_name}]}
 
     monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: FakeService())
-    client = fastapi_testclient.TestClient(create_app())
+    client = fastapi_testclient.TestClient(create_app(), client=("127.0.0.1", 50100))
 
     refresh = client.post(
         "/api/semantic-duplicates/refresh",
@@ -1785,7 +1785,7 @@ def test_post_search_and_brief_accept_scope_fields(monkeypatch):
             return f"{query}:{scope_mode}:{token_budget}"
 
     monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: FakeService())
-    client = fastapi_testclient.TestClient(create_app())
+    client = fastapi_testclient.TestClient(create_app(), client=("127.0.0.1", 50100))
 
     search = client.post(
         "/api/search",
@@ -1830,7 +1830,7 @@ def test_claim_and_graph_routes_are_exposed(monkeypatch):
             return {"start_entity_id": kwargs["entity_id"], "edges": []}
 
     monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: FakeService())
-    client = fastapi_testclient.TestClient(create_app())
+    client = fastapi_testclient.TestClient(create_app(), client=("127.0.0.1", 50100))
 
     created = client.post(
         "/api/claims",
@@ -1939,7 +1939,7 @@ def test_claim_review_and_capture_review_routes_are_exposed(monkeypatch):
             }
 
     monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: FakeService())
-    client = fastapi_testclient.TestClient(create_app())
+    client = fastapi_testclient.TestClient(create_app(), client=("127.0.0.1", 50100))
 
     claims = client.get(
         "/api/claims",
@@ -2015,7 +2015,7 @@ def test_retention_policy_and_quality_routes_are_exposed(monkeypatch):
             }
 
     monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: FakeService())
-    client = fastapi_testclient.TestClient(create_app())
+    client = fastapi_testclient.TestClient(create_app(), client=("127.0.0.1", 50100))
 
     policies = client.get("/api/retention/policies")
     updated = client.put(
@@ -2050,7 +2050,7 @@ def test_retention_policy_route_maps_validation_errors(monkeypatch):
             raise ValueError("action must be one of: review, deprioritize, retire")
 
     monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: FakeService())
-    client = fastapi_testclient.TestClient(create_app())
+    client = fastapi_testclient.TestClient(create_app(), client=("127.0.0.1", 50100))
 
     response = client.put(
         "/api/retention/policies/claim",
@@ -2077,7 +2077,7 @@ def test_capture_review_decision_route_maps_errors(monkeypatch, exc, status_code
             raise exc
 
     monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: FakeService())
-    client = fastapi_testclient.TestClient(create_app())
+    client = fastapi_testclient.TestClient(create_app(), client=("127.0.0.1", 50100))
 
     response = client.post(
         "/api/capture/review/job-1/decision",
@@ -2111,7 +2111,7 @@ def test_corpus_lookup_routes_return_assets_and_chunks(monkeypatch):
         raising=False,
     )
 
-    client = fastapi_testclient.TestClient(create_app())
+    client = fastapi_testclient.TestClient(create_app(), client=("127.0.0.1", 50100))
 
     assets = client.get("/api/corpus/assets", params={"root_name": "docs", "limit": 2})
     asset = client.get("/api/corpus/assets/asset-1")
@@ -2140,7 +2140,7 @@ def test_result_detail_route_returns_logical_payload(monkeypatch):
         raising=False,
     )
 
-    client = fastapi_testclient.TestClient(create_app())
+    client = fastapi_testclient.TestClient(create_app(), client=("127.0.0.1", 50100))
     response = client.get("/api/results/corpus_chunk/chunk-1")
 
     assert response.status_code == 200
@@ -2159,7 +2159,7 @@ def test_file_action_route_proxies_to_host_agent_without_path(monkeypatch):
         raising=False,
     )
 
-    client = fastapi_testclient.TestClient(create_app())
+    client = fastapi_testclient.TestClient(create_app(), client=("127.0.0.1", 50100))
     response = client.post("/api/corpus/assets/asset-1/actions", json={"action": "reveal"})
 
     assert response.status_code == 200
@@ -2171,7 +2171,7 @@ def test_file_action_route_rejects_browser_supplied_path(monkeypatch):
     from flux_llm_kb.rest_api import create_app
 
     monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: object())
-    client = fastapi_testclient.TestClient(create_app())
+    client = fastapi_testclient.TestClient(create_app(), client=("127.0.0.1", 50100))
 
     response = client.post(
         "/api/corpus/assets/asset-1/actions",
@@ -2199,7 +2199,7 @@ def test_lookup_routes_return_structured_error_envelopes(monkeypatch):
         raising=False,
     )
 
-    client = fastapi_testclient.TestClient(create_app())
+    client = fastapi_testclient.TestClient(create_app(), client=("127.0.0.1", 50100))
 
     asset = client.get("/api/corpus/assets/asset-missing")
     chunk = client.get("/api/corpus/chunks/chunk-missing")
@@ -2227,7 +2227,7 @@ def test_result_detail_invalid_kind_returns_structured_bad_request(monkeypatch):
         raising=False,
     )
 
-    client = fastapi_testclient.TestClient(create_app())
+    client = fastapi_testclient.TestClient(create_app(), client=("127.0.0.1", 50100))
     response = client.get("/api/results/unknown/id-1")
 
     assert response.status_code == 400
@@ -2248,7 +2248,7 @@ def test_mail_profile_lookup_failure_returns_structured_error(monkeypatch):
         lambda **_kwargs: (_ for _ in ()).throw(ValueError("mail profile not found: gmail-missing")),
     )
 
-    client = fastapi_testclient.TestClient(create_app())
+    client = fastapi_testclient.TestClient(create_app(), client=("127.0.0.1", 50100))
     response = client.put(
         "/api/mail/profiles/gmail-missing/oauth-client-config",
         json={"client_config_path": "private/client.json"},

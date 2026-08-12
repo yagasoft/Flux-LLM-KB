@@ -40,7 +40,7 @@ public sealed class SqlSearchHydrator(IDbContextFactory<FluxKnowledgeDbContext> 
                       !vector.IsDeleted &&
                       !record.IsDeleted &&
                       (!record.SourceRevisionId.HasValue || context.SourceRevisions.Any(sourceRevision =>
-                          sourceRevision.Id == record.SourceRevisionId.Value && sourceRevision.SuppressedAtUtc == null)) &&
+                          sourceRevision.Id == record.SourceRevisionId.Value && sourceRevision.SuppressedAtUtc == null && sourceRevision.OriginKind != 2)) &&
                       vector.TextChunkContentHash == chunk.ContentHash &&
                       vector.SourceRevision == record.Revision &&
                       (record.SourceRevisionId.HasValue || record.Revision == context.PipelineRecords

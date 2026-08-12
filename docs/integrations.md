@@ -45,6 +45,11 @@ Tools:
 | `kb.code_status` | Return privacy-safe code index coverage, parser/fallback, generated-file, and slow-row summaries; `cwd` can resolve the exact monitored root. |
 | `kb.code_search` | Search code in `literal_symbol` mode for symbols/paths or `full_text` mode over indexed code chunks. |
 | `kb.code_symbol_lookup` | Look up definitions and references for a code symbol. |
+| `kb.local_source_detail` | Read the explicit trusted-local source path, hash, bounded parser diagnostics, and retained/indexed excerpt. |
+| `kb.local_corpus_detail` | Read the explicit trusted-local corpus path, hash, bounded parser diagnostics, and retained/indexed excerpt. |
+| `kb.local_code_search` | Search raw code facts through the explicit trusted-local projection; secret-derived facts are withheld. |
+| `kb.local_operational_diagnostics` | Read bounded trusted-local path, hash, runtime, parser, and retained-provenance diagnostic evidence without changing remediation authority. |
+| `kb.local_audit` | Read bounded trusted-local audit evidence; stored audit events remain immutable. |
 | `kb.code_feedback_record` | Record hashed/sanitized code retrieval miss feedback without raw query, code, or path persistence. |
 | `kb.code_feedback_summary` | Summarize code retrieval feedback by category and root. |
 | `kb.operational_diagnostics` | Return read-only retrieval, watcher, worker, job, and mail diagnostics with optional filters. |
@@ -101,6 +106,7 @@ Endpoints:
 - `GET /api/code/status?root_name=<name>&cwd=<workspace-path>`
 - `GET /api/code/search?query=<q>&mode=<literal_symbol|full_text>&root_name=<name>&cwd=<workspace-path>&language=<language>&symbol_kind=<kind>&relationship=<definition|call|import|route|test|fixture|config|migration|notebook_cell>&path_glob=<glob>&include_generated=<true|false>&limit=<n>`
 - `GET /api/code/symbols?symbol=<name>&root_name=<name>&language=<language>&include_references=<true|false>`
+- `GET /api/local/sources/{asset_id}`, `GET /api/local/corpus/chunks/{chunk_id}`, and `GET /api/local/code/search?query=<q>&root_name=<name>&cwd=<workspace-path>&language=<language>&relationship=<kind>&limit=<n>` are direct-loopback-only named trusted-local detail projections. They do not alter shared/export DTOs and withhold detected secrets.
 - `POST /api/code/feedback` with `query`, optional `root_name`, `result_count`, `surface`, `miss_category`, optional `expected_symbol`, optional `path`, and optional metadata; only hashes/safe leaves are persisted
 - `GET /api/code/feedback/summary?root_name=<name>&limit=<n>`
 - `GET /api/diagnostics/{section}` where `section` is `all`, `retrieval`, `watcher`, `workers`, `jobs`, or `mail`, with optional `root_name`, `status`, `family`, `since_hours`, and `include_details`
@@ -449,6 +455,11 @@ Operational diagnostics are available through `flux-kb diagnostics <section>`,
 aggregate retrieval traces, watcher events, worker state, slow/blocked jobs,
 mail sync runs, and mail post-process events as bounded evidence instead of raw
 log dumps, with optional root/status/family/time/detail filters. Diagnostic
+Trusted-local diagnostic and audit detail is separately available through
+`flux-kb local-detail diagnostics|audit`, `GET /api/local/diagnostics/{section}`,
+`GET /api/local/audit`, `kb.local_operational_diagnostics`, and `kb.local_audit`.
+Those named readers may expose bounded path, hash, runtime, parser, and retained
+provenance evidence after the local secret scan; they do not add a mutation route.
 items may include sanitized `remediation_actions[]` for retrying retryable
 corpus jobs, running scoped backfill, repairing root-scoped asset statuses, or
 clearing stale completed-job errors. Those actions run through `flux-kb

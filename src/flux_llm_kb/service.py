@@ -38,6 +38,14 @@ from .indexer_diagnostics import (
     scenario_recommendation_metadata,
 )
 from .code_diagnostics import build_code_status_report, sanitize_code_lookup, sanitize_code_result
+from .local_detail_projections import (
+    project_local_code_search,
+    project_local_corpus_detail,
+    project_local_audit_events,
+    project_local_operational_diagnostics,
+    project_local_source_detail,
+    project_public_audit_events,
+)
 from .indexer_reliability import build_indexer_reliability_report, build_root_reliability_card, build_roots_reliability_report
 from .operator_evidence import build_operator_evidence_report
 from .operational_diagnostics import summarize_operational_diagnostics
@@ -1694,7 +1702,11 @@ class KnowledgeService:
             raise
 
     def audit(self, limit: int = 50) -> list[dict[str, Any]]:
-        return database.list_audit_events(limit=limit)
+        return project_public_audit_events(database.list_audit_events(limit=limit))
+
+    def local_audit(self, limit: int = 50) -> list[dict[str, Any]]:
+        """Read bounded raw audit evidence through the explicit trusted-local projection."""
+        return project_local_audit_events(database.list_local_audit_events(limit=limit))
 
     def forget(self, memory_id: str, reason: str = "user_request") -> dict[str, Any]:
         deleted = database.forget_episode(memory_id, reason=reason)
@@ -2692,6 +2704,45 @@ class KnowledgeService:
         )
         return sanitize_code_lookup(payload)
 
+    def local_source_detail(self, asset_id: str) -> dict[str, Any]:
+        """Return the explicit trusted-local source detail projection."""
+        row = database.get_local_source_detail(asset_id)
+        if row is None:
+            raise LookupError("source asset not found")
+        return project_local_source_detail(row).as_dict()
+
+    def local_corpus_detail(self, chunk_id: str) -> dict[str, Any]:
+        """Return the explicit trusted-local corpus detail projection."""
+        row = database.get_local_corpus_detail(chunk_id)
+        if row is None:
+            raise LookupError("asset chunk not found")
+        return project_local_corpus_detail(row).as_dict()
+
+    def local_code_search(
+        self,
+        query: str,
+        *,
+        root_name: str | None = None,
+        cwd: str | None = None,
+        language: str | None = None,
+        relationship: str | None = None,
+        path_glob: str | None = None,
+        include_generated: bool = False,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        """Return raw code facts through the named trusted-local adapter only."""
+        effective_root_name = _resolve_code_root_name(root_name=root_name, cwd=cwd)
+        rows = database.search_local_code_details(
+            query=query,
+            root_name=effective_root_name,
+            language=language,
+            relationship=relationship,
+            path_glob=path_glob,
+            include_generated=include_generated,
+            limit=max(1, min(int(limit or 20), 100)),
+        )
+        return project_local_code_search(query, rows).as_dict()
+
     def record_code_feedback(
         self,
         *,
@@ -2737,6 +2788,86 @@ class KnowledgeService:
         since_hours: int | None = None,
         include_details: bool = False,
     ) -> dict[str, Any]:
+        normalized, retrieval, watcher, workers, jobs, mail = self._operational_diagnostic_inputs(
+            section=section,
+            limit=limit,
+            root_name=root_name,
+            family=family,
+        )
+        return summarize_operational_diagnostics(
+            retrieval=retrieval,
+            watcher=watcher,
+            workers=workers,
+            jobs=jobs,
+            mail=mail,
+            section=normalized,
+            root_name=root_name,
+            status=status,
+            family=family,
+            since_hours=since_hours,
+            include_details=include_details,
+        )
+
+    def local_operational_diagnostics(
+        self,
+        *,
+        section: str = "all",
+        limit: int = 25,
+        root_name: str | None = None,
+        status: str | None = None,
+        family: str | None = None,
+        since_hours: int | None = None,
+        include_details: bool = False,
+    ) -> dict[str, Any]:
+        """Read bounded raw diagnostic evidence through the explicit trusted-local projection."""
+        normalized, retrieval, watcher, workers, jobs, mail = self._operational_diagnostic_inputs(
+            section=section,
+            limit=limit,
+            root_name=root_name,
+            family=family,
+        )
+        report = summarize_operational_diagnostics(
+            retrieval=retrieval,
+            watcher=watcher,
+            workers=workers,
+            jobs=jobs,
+            mail=mail,
+            section=normalized,
+            root_name=root_name,
+            status=status,
+            family=family,
+            since_hours=since_hours,
+            include_details=include_details,
+        )
+        local_workers = workers
+        if normalized in {"all", "workers"}:
+            try:
+                local_evictions = dict(workers.get("gpu_evictions") or {})
+                local_evictions["recent"] = database.list_local_gpu_eviction_diagnostics(
+                    limit=max(1, min(int(limit or 25), 100))
+                )
+                local_workers = {**workers, "gpu_evictions": local_evictions}
+            except Exception:
+                # The named local detail read is optional diagnostic enrichment;
+                # the already-sanitised status report remains available.
+                local_workers = workers
+        return project_local_operational_diagnostics(
+            report,
+            retrieval=retrieval,
+            watcher=watcher,
+            workers=local_workers,
+            jobs=jobs,
+            mail=mail,
+        )
+
+    @staticmethod
+    def _operational_diagnostic_inputs(
+        *,
+        section: str,
+        limit: int,
+        root_name: str | None,
+        family: str | None,
+    ) -> tuple[str, dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
         normalized = str(section or "all").strip().lower().replace("-", "_")
         if normalized not in {"all", "retrieval", "watcher", "workers", "jobs", "mail"}:
             raise ValueError("diagnostics section must be all, retrieval, watcher, workers, jobs, or mail")
@@ -2749,8 +2880,7 @@ class KnowledgeService:
                 from .gpu_scheduler import get_gpu_scheduler
 
                 scheduler_status = get_gpu_scheduler().status()
-                evictions = scheduler_status.get("evictions") if isinstance(scheduler_status.get("evictions"), dict) else {}
-                workers["gpu_evictions"] = evictions
+                workers["gpu_evictions"] = scheduler_status.get("evictions") if isinstance(scheduler_status.get("evictions"), dict) else {}
                 workers["gpu_runtime_reconciliation"] = (
                     scheduler_status.get("runtime_reconciliation") if isinstance(scheduler_status.get("runtime_reconciliation"), dict) else None
                 )
@@ -2781,19 +2911,7 @@ class KnowledgeService:
             if normalized in {"all", "mail"}
             else {}
         )
-        return summarize_operational_diagnostics(
-            retrieval=retrieval,
-            watcher=watcher,
-            workers=workers,
-            jobs=jobs,
-            mail=mail,
-            section=normalized,
-            root_name=root_name,
-            status=status,
-            family=family,
-            since_hours=since_hours,
-            include_details=include_details,
-        )
+        return normalized, retrieval, watcher, workers, jobs, mail
 
     def run_benchmark(
         self,

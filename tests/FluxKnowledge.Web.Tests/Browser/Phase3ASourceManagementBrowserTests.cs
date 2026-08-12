@@ -23,8 +23,7 @@ public sealed class Phase3ASourceManagementBrowserTests
                 ingressRoot,
                 indexRoot);
             using var playwright = await Playwright.CreateAsync();
-            await using var browser = await playwright.Chromium.LaunchAsync(
-                new BrowserTypeLaunchOptions { Headless = true });
+            await using var browser = await playwright.Chromium.LaunchAsync(BrowserLaunchOptions.Create());
             var page = await browser.NewPageAsync();
 
             await page.GotoAsync(host.BaseAddress.ToString(), new PageGotoOptions { WaitUntil = WaitUntilState.NetworkIdle });

@@ -361,6 +361,14 @@ type CodeSearchResult = {
   is_generated?: boolean;
   source_symbol?: string;
   target_symbol?: string;
+  source_path?: string;
+  content_hash?: string | null;
+  symbols?: Array<{ name?: string; qualified_name?: string; signature?: string; symbol_kind?: string; language?: string; line_start?: number; line_end?: number }>;
+  signatures?: string[];
+  relationships?: Array<{ source_symbol?: string; target?: string; relationship?: string; language?: string; line_start?: number; line_end?: number }>;
+  parser_diagnostics?: Array<{ code?: string; message?: string; reason_code?: string }>;
+  excerpt?: string | null;
+  reason_code?: string | null;
 };
 
 type CodeSearchResponse = {
@@ -429,6 +437,14 @@ type DiagnosticItem = {
   evidence?: Record<string, unknown>;
   follow_up_command?: string;
   remediation_actions?: DiagnosticAction[];
+  path?: string | null;
+  hash?: string | null;
+  runtime_detail?: unknown;
+  runtime_detail_reason_code?: string;
+  parser_diagnostic?: unknown;
+  parser_diagnostic_reason_code?: string;
+  retained_provenance?: unknown;
+  retained_provenance_reason_code?: string;
 };
 
 type RetrievalBenchmarkCaseResult = {
@@ -862,6 +878,15 @@ type ResultDetail = {
   related_evidence?: EvidenceItem[];
   provenance?: EvidenceItem[];
   actions?: Record<string, ResultAction>;
+  local_detail?: LocalResultDetail;
+};
+
+type LocalResultDetail = {
+  source_path?: string;
+  content_hash?: string | null;
+  parser_diagnostics?: Array<{ code?: string; message?: string; reason_code?: string }>;
+  excerpt?: string | null;
+  reason_code?: string | null;
 };
 
 type FileActionResponse = {
@@ -1122,6 +1147,11 @@ type AuditEvent = {
   target_id?: string | null;
   details?: Record<string, unknown>;
   created_at?: string | null;
+  path?: string | null;
+  hash?: string | null;
+  runtime_detail?: unknown;
+  parser_diagnostic?: unknown;
+  retained_provenance?: unknown;
 };
 
 type AuditPayload = AuditEvent[] | { events?: AuditEvent[] };
@@ -2008,7 +2038,7 @@ export default function App() {
       const [claims, capture, audit, policies, quality, govActions, govDigest, govPolicy] = await Promise.all([
         fetchRequiredJson<ClaimReviewPayload>(`/api/claims?${params.toString()}`),
         getJson<CaptureReviewPayload>(`/api/capture/review?${captureParams.toString()}`, { jobs: [] }),
-        getJson<AuditPayload>("/api/audit?limit=50", []),
+        getJson<AuditPayload>("/api/local/audit?limit=50", []),
         getJson<RetentionPolicyPayload>("/api/retention/policies", { policies: [] }),
         getJson<RetentionQualityPayload>("/api/retention/quality?limit=25", { summary: {}, candidates: [] }),
         getJson<GovernanceActionsPayload>("/api/governance/actions?status=all&limit=50", { actions: [], telemetry: {} }),
@@ -2187,7 +2217,13 @@ export default function App() {
     setResultDetailLoading(true);
     try {
       const detail = await fetchRequiredJson<ResultDetail>(`/api/results/${encodeURIComponent(refKind)}/${encodeURIComponent(refId)}`);
-      setResultDetail(detail);
+      const localDetailUrl = refKind === "corpus_chunk"
+        ? `/api/local/corpus/chunks/${encodeURIComponent(refId)}`
+        : refKind === "asset"
+          ? `/api/local/sources/${encodeURIComponent(refId)}`
+          : null;
+      const local_detail = localDetailUrl ? await fetchRequiredJson<LocalResultDetail>(localDetailUrl) : undefined;
+      setResultDetail({ ...detail, local_detail });
     } catch (error) {
       setToast(`Could not load result detail: ${errorMessage(error)}`);
     } finally {
@@ -3136,7 +3172,7 @@ function CodeDiagnosticsPanel() {
     if (codePathGlob.trim()) params.set("path_glob", codePathGlob.trim());
     setCodeSearchStatus("Searching code...");
     try {
-      const result = await fetchRequiredJson<CodeSearchResponse>(`/api/code/search?${params.toString()}`);
+      const result = await fetchRequiredJson<CodeSearchResponse>(`/api/local/code/search?${params.toString()}`);
       const results = result.results ?? [];
       setCodeSearchResults(results);
       setCodeSearchStatus(`${results.length} code result${results.length === 1 ? "" : "s"}.`);
@@ -3155,9 +3191,29 @@ function CodeDiagnosticsPanel() {
     if (roots[0]?.root_name) params.set("root_name", roots[0].root_name);
     setSymbolLookupStatus("Looking up symbol...");
     try {
-      const result = await fetchRequiredJson<CodeSymbolLookupResponse>(`/api/code/symbols?${params.toString()}`);
-      setSymbolLookup(result);
-      const count = (result.matches?.length ?? 0) + (result.references?.length ?? 0);
+      params.delete("symbol");
+      params.delete("include_references");
+      params.set("query", symbol);
+      const result = await fetchRequiredJson<CodeSearchResponse>(`/api/local/code/search?${params.toString()}`);
+      const matches = (result.results ?? []).flatMap((item) => (item.symbols ?? []).map((candidate) => ({
+        symbol: candidate.qualified_name ?? candidate.name,
+        symbol_kind: candidate.symbol_kind,
+        language: candidate.language,
+        path: item.source_path,
+        line_start: candidate.line_start,
+        line_end: candidate.line_end
+      })));
+      const references = (result.results ?? []).flatMap((item) => (item.relationships ?? []).map((candidate) => ({
+        source_symbol: candidate.source_symbol,
+        target: candidate.target,
+        relationship: candidate.relationship,
+        language: candidate.language,
+        path: item.source_path,
+        line_start: candidate.line_start,
+        line_end: candidate.line_end
+      })));
+      setSymbolLookup({ query: symbol, matches, references });
+      const count = matches.length + references.length;
       setSymbolLookupStatus(`${count} symbol row${count === 1 ? "" : "s"}.`);
     } catch (error) {
       setSymbolLookupStatus(`Symbol lookup failed: ${errorMessage(error)}`);
@@ -3189,12 +3245,32 @@ function CodeDiagnosticsPanel() {
     .flatMap((root) => (root.slow_files ?? []).map((file) => ({ root: root.root_name ?? "root", ...file })))
     .slice(0, 4)
     .map((file) => [file.root, file.path ?? "file", `${file.duration_ms ?? 0}ms`] as [string, string, string]);
-  const codeResultRows = codeSearchResults.slice(0, 5).map((result) => [
-    codeResultLabel(result),
-    humanizeIdentifier(result.relationship ?? result.relationship_kind ?? result.symbol_kind ?? "match"),
-    `${result.language ?? "-"} ${result.path ?? ""}`.trim(),
-    `${lineRangeLabel(result)}${result.is_generated ? " generated" : ""}`.trim() || "-"
-  ] as [string, string, string, string]);
+  const codeResultRows = codeSearchResults.slice(0, 5).flatMap((result) => {
+    const symbols = result.symbols?.length
+      ? result.symbols
+      : [{
+          name: result.symbol,
+          qualified_name: result.target ?? result.symbol,
+          signature: result.signatures?.[0],
+          language: result.language,
+          line_start: result.line_start,
+          line_end: result.line_end
+        }];
+    return symbols.map((symbol) => [
+      symbol.qualified_name ?? symbol.name ?? codeResultLabel(result),
+      symbol.signature ?? result.signatures?.[0] ?? humanizeIdentifier(result.relationship ?? result.relationship_kind ?? result.symbol_kind ?? "match"),
+      result.source_path ?? `${symbol.language ?? result.language ?? "-"} ${result.path ?? ""}`.trim(),
+      `${lineRangeLabel(symbol)}${result.content_hash ? ` ${result.content_hash}` : ""}`.trim() || "-"
+    ] as [string, string, string, string]);
+  });
+  const codeDetailCards = codeSearchResults.slice(0, 5).map((result, index) => (
+    <div className="settings-row" key={`${result.source_path ?? "code"}-${index}`}>
+      <strong>{result.source_path ?? "Code detail"}</strong>
+      <span>{result.relationships?.length ? result.relationships.map((relationship) => `${relationship.source_symbol ? `${relationship.source_symbol} → ` : ""}${relationship.target ?? "target"} (${relationship.relationship ?? "reference"})`).join("; ") : "No indexed relationships."}</span>
+      <span>{result.parser_diagnostics?.length ? result.parser_diagnostics.map((diagnostic) => diagnostic.message ?? `${diagnostic.code ?? "parser-diagnostic"}: ${diagnostic.reason_code ?? "no message"}`).join("; ") : "No parser diagnostics."}</span>
+      <span>{result.excerpt ?? `Excerpt withheld: ${result.reason_code ?? "unavailable"}`}</span>
+    </div>
+  ));
   const lookupRows = [
     ...(symbolLookup?.matches ?? []).map((result) => [
       codeResultLabel(result),
@@ -3244,6 +3320,7 @@ function CodeDiagnosticsPanel() {
           <button className="ghost-action compact" type="submit" aria-label="Run code search"><Search size={15} /> Search</button>
         </form>
         {codeResultRows.length > 0 && <MiniTable rows={codeResultRows} />}
+        {codeDetailCards}
         {codeSearchStatus && <p className="panel-note">{codeSearchStatus}</p>}
         <form className="settings-row" onSubmit={(event) => void runSymbolLookup(event)}>
           <strong>Symbol Lookup</strong>
@@ -3534,7 +3611,7 @@ function OperationalDiagnosticsPanel() {
     if (familyFilter) params.set("family", familyFilter);
     if (includeDetails) params.set("include_details", "true");
     const query = params.toString();
-    return getJson<OperationalDiagnostics>(`/api/diagnostics/all${query ? `?${query}` : ""}`, { section: "all", counts: {}, sections: {}, items: [] }).then((payload) => {
+    return getJson<OperationalDiagnostics>(`/api/local/diagnostics/all${query ? `?${query}` : ""}`, { section: "all", counts: {}, sections: {}, items: [] }).then((payload) => {
       setDiagnostics(payload);
     });
   }, [familyFilter, includeDetails, rootFilter, statusFilter]);
@@ -3551,7 +3628,7 @@ function OperationalDiagnosticsPanel() {
   }, [loadDiagnostics]);
   useEffect(() => {
     let cancelled = false;
-    getJson<OperationalDiagnostics>("/api/diagnostics/all", { section: "all", counts: {}, sections: {}, items: [] }).then((payload) => {
+    getJson<OperationalDiagnostics>("/api/local/diagnostics/all", { section: "all", counts: {}, sections: {}, items: [] }).then((payload) => {
       if (!cancelled) setDiagnostics(payload);
     });
     return () => {
@@ -3601,6 +3678,7 @@ function OperationalDiagnosticsPanel() {
                 {item.family && <span>{item.family}</span>}
               </div>
               {includeDetails && item.evidence && <code>{JSON.stringify(item.evidence)}</code>}
+              {includeDetails && <LocalDiagnosticEvidence item={item} />}
               {item.follow_up_command && <p className="muted">{item.follow_up_command}</p>}
               {(item.remediation_actions ?? []).length > 0 && (
                 <div className="row-actions">
@@ -3623,6 +3701,22 @@ function OperationalDiagnosticsPanel() {
       {actionStatus && <p className="muted">{actionStatus}</p>}
       {workerRows.length > 0 ? <MiniTable rows={workerRows} /> : <p className="muted">No worker diagnostic rows yet.</p>}
     </Panel>
+  );
+}
+
+function LocalDiagnosticEvidence({ item }: { item: DiagnosticItem }) {
+  const rows: Array<[string, unknown]> = [
+    ["Path", item.path],
+    ["Hash", item.hash],
+    ["Runtime", item.runtime_detail ?? item.runtime_detail_reason_code],
+    ["Parser", item.parser_diagnostic ?? item.parser_diagnostic_reason_code],
+    ["Retained provenance", item.retained_provenance ?? item.retained_provenance_reason_code]
+  ].filter(([, value]) => value !== null && value !== undefined && value !== "");
+  if (rows.length === 0) return null;
+  return (
+    <div className="diagnostic-meta local-diagnostic-evidence" aria-label="Trusted local diagnostic evidence">
+      {rows.map(([label, value]) => <span key={label}><strong>{label}:</strong> {typeof value === "string" ? value : JSON.stringify(value)}</span>)}
+    </div>
   );
 }
 
@@ -5609,7 +5703,10 @@ function CaptureReviewAuditList({ events }: { events: AuditEvent[] }) {
             <tr key={event.id ?? `${event.event_type}-${index}`}>
               <td>{event.event_type ?? "-"}</td>
               <td>{event.target_id ?? "-"}</td>
-              <td className="claim-object" title={captureReviewAuditReason(event)}>{captureReviewAuditReason(event)}</td>
+              <td className="claim-object" title={captureReviewAuditReason(event)}>
+                <div>{captureReviewAuditReason(event)}</div>
+                <LocalAuditEvidence event={event} />
+              </td>
               <td>{event.actor ?? "-"}</td>
               <td>{formatDate(event.created_at)}</td>
             </tr>
@@ -5618,6 +5715,18 @@ function CaptureReviewAuditList({ events }: { events: AuditEvent[] }) {
       </table>
     </div>
   );
+}
+
+function LocalAuditEvidence({ event }: { event: AuditEvent }) {
+  const values = [
+    event.path,
+    event.hash,
+    event.runtime_detail,
+    event.parser_diagnostic,
+    event.retained_provenance
+  ].filter((value) => value !== null && value !== undefined && value !== "");
+  if (values.length === 0) return null;
+  return <code aria-label="Trusted local audit evidence">{values.map((value) => typeof value === "string" ? value : JSON.stringify(value)).join("; ")}</code>;
 }
 
 function CaptureDecisionDialog({
@@ -5807,6 +5916,8 @@ function FileResultDetail({
         <DetailField label="Status" value={stringFromUnknown(detail.metadata?.status)} />
         <DetailField label="Asset id" value={detail.asset_id} />
         <DetailField label="Chunk id" value={detail.chunk_id} />
+        <DetailField label="Local path" value={detail.local_detail?.source_path} />
+        <DetailField label="Content hash" value={detail.local_detail?.content_hash} />
       </div>
       <div className="file-action-row">
         <button className="ghost-action compact" type="button" disabled={!copyAvailable} title={actionDisabledReason(detail, "copy_path")} onClick={() => onCopyPath(detail)}>
@@ -5828,6 +5939,18 @@ function FileResultDetail({
           <p className="muted">No extracted text is available.</p>
         )}
       </section>
+      {detail.local_detail?.excerpt ? (
+        <section className="result-section">
+          <h3>Local retained excerpt</h3>
+          <pre className="result-preview">{detail.local_detail.excerpt}</pre>
+        </section>
+      ) : detail.local_detail?.reason_code ? <p className="muted">{detail.local_detail.reason_code}</p> : null}
+      {(detail.local_detail?.parser_diagnostics?.length ?? 0) > 0 && (
+        <section className="result-section">
+          <h3>Parser diagnostics</h3>
+          <pre className="result-preview">{detail.local_detail?.parser_diagnostics?.map((diagnostic) => diagnostic.message ?? `${diagnostic.code ?? "parser-diagnostic"}: ${diagnostic.reason_code ?? ""}`).join("\n")}</pre>
+        </section>
+      )}
       <EvidenceList title="Related Evidence" empty="No related evidence." items={detail.related_evidence ?? []} icon={<Archive size={15} />} />
       <EvidenceList title="Provenance" empty="No provenance rows." items={detail.provenance ?? []} icon={<FileText size={15} />} />
     </div>

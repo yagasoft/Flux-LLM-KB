@@ -49,6 +49,7 @@ public sealed class SourceSchemaMappingTests
                     nameof(SourceActivityEntity.SourceRevisionId),
                     nameof(SourceActivityEntity.ActivityKind),
                     nameof(SourceActivityEntity.ProcessorVersion),
+                    nameof(SourceActivityEntity.DescriptorFingerprint),
                     nameof(SourceActivityEntity.InputFingerprint)
                 ]));
         Assert.Contains(

@@ -32,6 +32,15 @@ internal static class SchemaConfiguration
 
     public static void ConfigureImmutableAfterInsert<TProperty>(PropertyBuilder<TProperty> property) =>
         property.Metadata.SetAfterSaveBehavior(PropertySaveBehavior.Throw);
+
+    public static void ConfigureImmutableAfterInsert<TEntity>(EntityTypeBuilder<TEntity> builder)
+        where TEntity : class
+    {
+        foreach (var property in builder.Metadata.GetProperties())
+        {
+            property.SetAfterSaveBehavior(PropertySaveBehavior.Throw);
+        }
+    }
 }
 
 public sealed class OutlookCaptureProfileConfiguration : IEntityTypeConfiguration<OutlookCaptureProfileEntity>
@@ -975,6 +984,7 @@ public sealed class SourceRevisionConfiguration : IEntityTypeConfiguration<Sourc
             .UseCollation(SchemaConfiguration.SchedulerFenceCollation);
         builder.Property(entity => entity.Classification).HasMaxLength(256).IsRequired();
         builder.Property(entity => entity.Extension).HasMaxLength(32).IsRequired();
+        builder.Property(entity => entity.OriginKind).HasDefaultValue(0);
         builder.Property(entity => entity.FileCreatedAtUtc).HasColumnType("datetimeoffset(7)");
         builder.Property(entity => entity.FileLastWriteAtUtc).HasColumnType("datetimeoffset(7)");
         builder.Property(entity => entity.DiscoveredAtUtc).HasColumnType("datetimeoffset(7)");
@@ -1000,6 +1010,423 @@ public sealed class SourceRevisionConfiguration : IEntityTypeConfiguration<Sourc
         builder.HasIndex(entity => new { entity.SourceRootId, entity.CanonicalPathFingerprint, entity.ContentSha256 }).IsUnique();
         builder.HasOne(entity => entity.SourceRoot).WithMany().HasForeignKey(entity => entity.SourceRootId).OnDelete(DeleteBehavior.Restrict);
         builder.HasOne(entity => entity.ParentSourceRevision).WithMany().HasForeignKey(entity => entity.ParentSourceRevisionId).OnDelete(DeleteBehavior.Restrict);
+    }
+}
+
+public sealed class SourceProcessorBranchConfiguration : IEntityTypeConfiguration<SourceProcessorBranchEntity>
+{
+    public void Configure(EntityTypeBuilder<SourceProcessorBranchEntity> builder)
+    {
+        builder.ToTable("SourceProcessorBranches"); builder.HasKey(value => value.Id); builder.Property(value => value.Id).ValueGeneratedNever();
+        SchemaConfiguration.ConfigureHash(builder.Property(value => value.InputSha256));
+        builder.Property(value => value.ProcessorVersion).HasMaxLength(256).IsRequired().UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(value => value.ProcessorFingerprint).HasMaxLength(256).IsRequired().UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(value => value.LeaseOwner).HasMaxLength(768).UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(value => value.CompletionReceiptFingerprint).HasMaxLength(64).IsUnicode(false).UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(value => value.LeaseExpiresAtUtc).HasColumnType("datetimeoffset(7)"); builder.Property(value => value.CreatedAtUtc).HasColumnType("datetimeoffset(7)"); builder.Property(value => value.UpdatedAtUtc).HasColumnType("datetimeoffset(7)");
+        SchemaConfiguration.ConfigureRowVersion(builder.Property(value => value.RowVersion));
+        builder.HasIndex(value => value.SourceActivityId).IsUnique(); builder.HasIndex(value => new { value.State, value.LeaseExpiresAtUtc });
+        builder.HasOne<SourceActivityEntity>().WithMany().HasForeignKey(value => value.SourceActivityId).OnDelete(DeleteBehavior.Restrict);
+        builder.HasOne<SourceRevisionEntity>().WithMany().HasForeignKey(value => value.SourceRevisionId).OnDelete(DeleteBehavior.Restrict);
+    }
+}
+
+public sealed class SourceProcessorAttemptConfiguration : IEntityTypeConfiguration<SourceProcessorAttemptEntity>
+{
+    public void Configure(EntityTypeBuilder<SourceProcessorAttemptEntity> builder)
+    {
+        builder.ToTable("SourceProcessorAttempts"); builder.HasKey(value => value.Id); builder.Property(value => value.Id).ValueGeneratedNever();
+        builder.Property(value => value.OutcomeCode).HasMaxLength(128).UseCollation(SchemaConfiguration.SchedulerFenceCollation); builder.Property(value => value.EvidenceJson).HasMaxLength(1024);
+        builder.Property(value => value.StartedAtUtc).HasColumnType("datetimeoffset(7)"); builder.Property(value => value.FinishedAtUtc).HasColumnType("datetimeoffset(7)");
+        builder.HasIndex(value => new { value.BranchId, value.LeaseGeneration }).IsUnique();
+        builder.HasAlternateKey(value => new { value.BranchId, value.Id });
+        builder.HasOne<SourceProcessorBranchEntity>().WithMany().HasForeignKey(value => value.BranchId).OnDelete(DeleteBehavior.Restrict);
+    }
+}
+
+public sealed class SourceProcessorCodeDocumentConfiguration : IEntityTypeConfiguration<SourceProcessorCodeDocumentEntity>
+{
+    public void Configure(EntityTypeBuilder<SourceProcessorCodeDocumentEntity> builder)
+    {
+        builder.ToTable("SourceProcessorCodeDocuments", table =>
+        {
+            table.HasCheckConstraint("CK_SourceProcessorCodeDocuments_Counts", "[DecodedCharacterCount] >= 0 AND [LineCount] >= 1 AND [LineCount] <= [DecodedCharacterCount] + 1 AND [SymbolCount] >= 0 AND [ReferenceCount] >= 0 AND [DiagnosticsCount] BETWEEN 0 AND 256 AND [WithheldSymbolCount] >= 0 AND [WithheldReferenceCount] >= 0 AND [WithheldDiagnosticCount] BETWEEN 0 AND 256 AND [ReceiptDiagnosticCodeCount] BETWEEN 0 AND 256 AND [DiagnosticsCount] = [ReceiptDiagnosticCodeCount]");
+            table.HasTrigger("TR_SourceProcessorCodeDocuments_Immutable");
+            table.HasTrigger("TR_SourceProcessorCodeDocuments_InsertFence");
+        });
+        builder.HasKey(value => value.SourceProcessorBranchId);
+        builder.HasAlternateKey(value => new
+        {
+            value.SourceProcessorBranchId,
+            value.SourceRevisionId,
+            value.RetainedArtifactSha256,
+            value.DescriptorFingerprint,
+            value.ParserFingerprint,
+            value.HandlerImplementationId,
+            value.WithheldSymbolCount,
+            value.WithheldReferenceCount,
+            value.WithheldDiagnosticCount,
+            value.ReceiptDiagnosticCodeCount,
+            value.DocumentFingerprint,
+            value.CompletionFingerprint
+        });
+        ConfigureCodeIdentity(builder);
+        builder.Property(value => value.HandlerImplementationId).HasMaxLength(256).IsRequired().UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(value => value.DocumentFingerprint).HasMaxLength(64).IsUnicode(false).IsRequired();
+        builder.Property(value => value.CompletionFingerprint).HasMaxLength(64).IsUnicode(false).IsRequired();
+        builder.HasOne<SourceProcessorBranchEntity>().WithMany().HasForeignKey(value => value.SourceProcessorBranchId).OnDelete(DeleteBehavior.Restrict);
+        builder.HasOne<SourceRevisionEntity>().WithMany().HasForeignKey(value => value.SourceRevisionId).OnDelete(DeleteBehavior.Restrict);
+        SchemaConfiguration.ConfigureImmutableAfterInsert(builder);
+    }
+
+    internal static void ConfigureCodeIdentity<TEntity>(EntityTypeBuilder<TEntity> builder) where TEntity : class
+    {
+        SchemaConfiguration.ConfigureHash(builder.Property<string>("RetainedArtifactSha256"));
+        SchemaConfiguration.ConfigureHash(builder.Property<string>("DescriptorFingerprint"));
+        SchemaConfiguration.ConfigureHash(builder.Property<string>("ParserFingerprint"));
+    }
+}
+
+public sealed class SourceProcessorCodeSymbolConfiguration : IEntityTypeConfiguration<SourceProcessorCodeSymbolEntity>
+{
+    public void Configure(EntityTypeBuilder<SourceProcessorCodeSymbolEntity> builder)
+    {
+        builder.ToTable("SourceProcessorCodeSymbols", table =>
+        {
+            table.HasCheckConstraint("CK_SourceProcessorCodeSymbols_Bounds", "[Ordinal] >= 0 AND [DeclarationKindCode] BETWEEN 1 AND 20 AND [SpanStartUtf16] >= 0 AND [SpanLengthUtf16] >= 0 AND [LexicalParentOrdinal] >= -1 AND [LexicalParentOrdinal] < [Ordinal]");
+            table.HasTrigger("TR_SourceProcessorCodeSymbols_Immutable");
+            table.HasTrigger("TR_SourceProcessorCodeSymbols_InsertFence");
+        });
+        builder.HasKey(value => new { value.DocumentId, value.Ordinal });
+        builder.Property(value => value.LocalName).HasMaxLength(1024).IsRequired(); builder.Property(value => value.QualifiedName).HasMaxLength(4096).IsRequired(); builder.Property(value => value.RenderedSignature).HasMaxLength(4096).IsRequired(); builder.Property(value => value.Modifiers).HasMaxLength(512).IsRequired();
+        builder.Property(value => value.SymbolFingerprint).HasMaxLength(64).IsUnicode(false).IsRequired();
+        builder.HasIndex(value => new { value.DocumentId, value.SymbolFingerprint }).IsUnique();
+        builder.HasOne<SourceProcessorCodeDocumentEntity>().WithMany().HasForeignKey(value => value.DocumentId).OnDelete(DeleteBehavior.Restrict);
+        SchemaConfiguration.ConfigureImmutableAfterInsert(builder);
+    }
+}
+
+public sealed class SourceProcessorCodeReferenceConfiguration : IEntityTypeConfiguration<SourceProcessorCodeReferenceEntity>
+{
+    public void Configure(EntityTypeBuilder<SourceProcessorCodeReferenceEntity> builder)
+    {
+        builder.ToTable("SourceProcessorCodeReferences", table =>
+        {
+            table.HasCheckConstraint("CK_SourceProcessorCodeReferences_Bounds", "[Ordinal] >= 0 AND [RelationshipKindCode] BETWEEN 1 AND 7 AND ([SourceSymbolOrdinal] IS NULL OR [SourceSymbolOrdinal] >= 0) AND [SpanStartUtf16] >= 0 AND [SpanLengthUtf16] >= 0");
+            table.HasTrigger("TR_SourceProcessorCodeReferences_Immutable");
+            table.HasTrigger("TR_SourceProcessorCodeReferences_InsertFence");
+        });
+        builder.HasKey(value => new { value.DocumentId, value.Ordinal }); builder.Property(value => value.TargetDisplay).HasMaxLength(4096).IsRequired(); builder.Property(value => value.ReferenceFingerprint).HasMaxLength(64).IsUnicode(false).IsRequired();
+        builder.HasIndex(value => new { value.DocumentId, value.ReferenceFingerprint }).IsUnique(); builder.HasOne<SourceProcessorCodeDocumentEntity>().WithMany().HasForeignKey(value => value.DocumentId).OnDelete(DeleteBehavior.Restrict);
+        SchemaConfiguration.ConfigureImmutableAfterInsert(builder);
+    }
+}
+
+public sealed class SourceProcessorCodeDiagnosticConfiguration : IEntityTypeConfiguration<SourceProcessorCodeDiagnosticEntity>
+{
+    public void Configure(EntityTypeBuilder<SourceProcessorCodeDiagnosticEntity> builder)
+    {
+        builder.ToTable("SourceProcessorCodeDiagnostics", table =>
+        {
+            table.HasCheckConstraint("CK_SourceProcessorCodeDiagnostics_Representation", "[Ordinal] BETWEEN 0 AND 255 AND [Severity] BETWEEN 0 AND 3 AND [SpanStartUtf16] >= 0 AND [SpanLengthUtf16] >= 0 AND (([Representation] = N'scanned' AND [ScannedMessage] IS NOT NULL AND [WithheldReason] IS NULL) OR ([Representation] = N'withheld' AND [ScannedMessage] IS NULL AND [WithheldReason] = N'secret-content-withheld'))");
+            table.HasTrigger("TR_SourceProcessorCodeDiagnostics_Immutable");
+            table.HasTrigger("TR_SourceProcessorCodeDiagnostics_InsertFence");
+        });
+        builder.HasKey(value => new { value.DocumentId, value.Ordinal }); builder.Property(value => value.DiagnosticId).HasMaxLength(64).IsRequired(); builder.Property(value => value.Representation).HasMaxLength(16).IsRequired(); builder.Property(value => value.ScannedMessage).HasMaxLength(1024); builder.Property(value => value.WithheldReason).HasMaxLength(64); builder.Property(value => value.DiagnosticFingerprint).HasMaxLength(64).IsUnicode(false).IsRequired();
+        builder.HasIndex(value => new { value.DocumentId, value.DiagnosticFingerprint }).IsUnique(); builder.HasIndex(value => new { value.DocumentId, value.Severity, value.Ordinal }); builder.HasOne<SourceProcessorCodeDocumentEntity>().WithMany().HasForeignKey(value => value.DocumentId).OnDelete(DeleteBehavior.Restrict);
+        SchemaConfiguration.ConfigureImmutableAfterInsert(builder);
+    }
+}
+
+public sealed class SourceProcessorCodeCompletionReceiptConfiguration : IEntityTypeConfiguration<SourceProcessorCodeCompletionReceiptEntity>
+{
+    public void Configure(EntityTypeBuilder<SourceProcessorCodeCompletionReceiptEntity> builder)
+    {
+        builder.ToTable("SourceProcessorCodeCompletionReceipts", table =>
+        {
+            table.HasCheckConstraint("CK_SourceProcessorCodeCompletionReceipts_Outcome", "(([OutcomeCode] = N'csharp-code-syntax-invalid' AND [DocumentId] IS NULL AND [DocumentFingerprint] IS NULL AND [BlockedDiagnosticsCount] BETWEEN 0 AND 256 AND [WithheldSymbolCount] = 0 AND [WithheldReferenceCount] = 0) OR ([OutcomeCode] = N'success' AND [DocumentId] IS NOT NULL AND [DocumentFingerprint] IS NOT NULL AND [BlockedDiagnosticsCount] = 0)) AND [ActivityKind] = 5 AND [WithheldSymbolCount] >= 0 AND [WithheldReferenceCount] >= 0 AND [WithheldDiagnosticCount] BETWEEN 0 AND 256 AND [ReceiptDiagnosticCodeCount] BETWEEN 0 AND 256 AND [ReceiptDiagnosticCodesWire] LIKE CONVERT(varchar(3), [ReceiptDiagnosticCodeCount]) + ';%'");
+            table.HasCheckConstraint("CK_SourceProcessorCodeCompletionReceipts_DocumentBranchEquality", "[DocumentId] IS NULL OR [DocumentId] = [SourceProcessorBranchId]");
+            table.HasTrigger("TR_SourceProcessorCodeCompletionReceipts_Immutable");
+            table.HasTrigger("TR_SourceProcessorCodeCompletionReceipts_OutcomeFence");
+        });
+        builder.HasKey(value => value.SourceProcessorBranchId); SourceProcessorCodeDocumentConfiguration.ConfigureCodeIdentity(builder);
+        builder.Property(value => value.ProcessorVersion).HasMaxLength(256).IsRequired(); builder.Property(value => value.HandlerImplementationId).HasMaxLength(256).IsRequired().UseCollation(SchemaConfiguration.SchedulerFenceCollation); builder.Property(value => value.OutcomeCode).HasMaxLength(128).IsRequired(); builder.Property(value => value.DocumentFingerprint).HasMaxLength(64).IsUnicode(false); builder.Property(value => value.CompletionFingerprint).HasMaxLength(64).IsUnicode(false).IsRequired(); builder.Property(value => value.ReceiptDiagnosticCodesWire).HasMaxLength(8192).IsRequired(); builder.Property(value => value.CreatedAtUtc).HasColumnType("datetimeoffset(7)");
+        builder.HasOne<SourceProcessorBranchEntity>().WithMany().HasForeignKey(value => value.SourceProcessorBranchId).OnDelete(DeleteBehavior.Restrict);
+        builder.HasOne<SourceRevisionEntity>().WithMany().HasForeignKey(value => value.SourceRevisionId).OnDelete(DeleteBehavior.Restrict);
+        builder.HasOne<SourceProcessorCodeDocumentEntity>().WithMany()
+            .HasForeignKey(value => new
+            {
+                value.DocumentId,
+                value.SourceRevisionId,
+                value.RetainedArtifactSha256,
+                value.DescriptorFingerprint,
+                value.ParserFingerprint,
+                value.HandlerImplementationId,
+                value.WithheldSymbolCount,
+                value.WithheldReferenceCount,
+                value.WithheldDiagnosticCount,
+                value.ReceiptDiagnosticCodeCount,
+                value.DocumentFingerprint,
+                value.CompletionFingerprint
+            })
+            .HasPrincipalKey(value => new
+            {
+                value.SourceProcessorBranchId,
+                value.SourceRevisionId,
+                value.RetainedArtifactSha256,
+                value.DescriptorFingerprint,
+                value.ParserFingerprint,
+                value.HandlerImplementationId,
+                value.WithheldSymbolCount,
+                value.WithheldReferenceCount,
+                value.WithheldDiagnosticCount,
+                value.ReceiptDiagnosticCodeCount,
+                value.DocumentFingerprint,
+                value.CompletionFingerprint
+            })
+            .OnDelete(DeleteBehavior.Restrict)
+            .HasConstraintName("FK_SourceProcessorCodeCompletionReceipts_SourceProcessorCodeDocuments_SuccessIdentity");
+        builder.HasOne<SourceProcessorAttemptEntity>().WithMany().HasForeignKey(value => new { value.SourceProcessorBranchId, value.SourceProcessorAttemptId }).HasPrincipalKey(value => new { value.BranchId, value.Id }).OnDelete(DeleteBehavior.Restrict);
+        SchemaConfiguration.ConfigureImmutableAfterInsert(builder);
+    }
+}
+
+public sealed class SourceProcessorCodeBlockedDiagnosticConfiguration : IEntityTypeConfiguration<SourceProcessorCodeBlockedDiagnosticEntity>
+{
+    public void Configure(EntityTypeBuilder<SourceProcessorCodeBlockedDiagnosticEntity> builder)
+    {
+        builder.ToTable("SourceProcessorCodeBlockedDiagnostics", table =>
+        {
+            table.HasCheckConstraint("CK_SourceProcessorCodeBlockedDiagnostics_Representation", "[Ordinal] BETWEEN 0 AND 255 AND [Severity] BETWEEN 0 AND 3 AND [SpanStartUtf16] >= 0 AND [SpanLengthUtf16] >= 0 AND (([Representation] = N'scanned' AND [ScannedMessage] IS NOT NULL AND [WithheldReason] IS NULL) OR ([Representation] = N'withheld' AND [ScannedMessage] IS NULL AND [WithheldReason] = N'secret-content-withheld'))");
+            table.HasTrigger("TR_SourceProcessorCodeBlockedDiagnostics_Immutable");
+            table.HasTrigger("TR_SourceProcessorCodeBlockedDiagnostics_InsertFence");
+        });
+        builder.HasKey(value => new { value.SourceProcessorBranchId, value.SourceProcessorAttemptId, value.Ordinal }); builder.Property(value => value.DiagnosticId).HasMaxLength(64).IsRequired(); builder.Property(value => value.Representation).HasMaxLength(16).IsRequired(); builder.Property(value => value.ScannedMessage).HasMaxLength(1024); builder.Property(value => value.WithheldReason).HasMaxLength(64); builder.Property(value => value.BlockedDiagnosticFingerprint).HasMaxLength(64).IsUnicode(false).IsRequired();
+        builder.HasIndex(value => new { value.SourceProcessorBranchId, value.SourceProcessorAttemptId, value.BlockedDiagnosticFingerprint }).IsUnique(); builder.HasIndex(value => new { value.SourceProcessorBranchId, value.SourceProcessorAttemptId, value.Ordinal }); builder.HasOne<SourceProcessorBranchEntity>().WithMany().HasForeignKey(value => value.SourceProcessorBranchId).OnDelete(DeleteBehavior.Restrict); builder.HasOne<SourceProcessorAttemptEntity>().WithMany().HasForeignKey(value => new { value.SourceProcessorBranchId, value.SourceProcessorAttemptId }).HasPrincipalKey(value => new { value.BranchId, value.Id }).OnDelete(DeleteBehavior.Restrict);
+        SchemaConfiguration.ConfigureImmutableAfterInsert(builder);
+    }
+}
+
+public sealed class OperatorActionHardDenialConfiguration : IEntityTypeConfiguration<OperatorActionHardDenialEntity>
+{
+    public void Configure(EntityTypeBuilder<OperatorActionHardDenialEntity> builder)
+    {
+        builder.ToTable("OperatorActionHardDenials");
+        builder.HasKey(value => value.ReasonCode);
+        builder.Property(value => value.ReasonCode).HasMaxLength(128).IsRequired()
+            .UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        SchemaConfiguration.ConfigureImmutableAfterInsert(builder.Property(value => value.ReasonCode));
+        builder.HasData(OperatorActionHardDenialReasons.All.Select(reasonCode => new OperatorActionHardDenialEntity { ReasonCode = reasonCode }));
+    }
+}
+
+public sealed class OperatorActionCapabilityPolicyConfiguration : IEntityTypeConfiguration<OperatorActionCapabilityPolicyEntity>
+{
+    public void Configure(EntityTypeBuilder<OperatorActionCapabilityPolicyEntity> builder)
+    {
+        builder.ToTable("OperatorActionCapabilityPolicies");
+        builder.HasKey(value => new
+        {
+            value.PolicyId, value.PolicyRevision, value.DescriptorId, value.DescriptorFingerprint,
+            value.DescriptorVersion, value.SafetyContractId, value.HandlerId, value.ActionKind, value.ReasonCode
+        });
+        builder.Property(value => value.DescriptorFingerprint).HasMaxLength(256).IsRequired()
+            .UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(value => value.DescriptorVersion).HasMaxLength(256).IsRequired()
+            .UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(value => value.SafetyContractId).HasMaxLength(256).IsRequired()
+            .UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(value => value.HandlerId).HasMaxLength(256).IsRequired()
+            .UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(value => value.ActionKind).HasMaxLength(64).IsRequired()
+            .UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(value => value.ReasonCode).HasMaxLength(128).IsRequired()
+            .UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        foreach (var property in builder.Metadata.GetProperties().Where(property => property.IsPrimaryKey()))
+        {
+            property.SetAfterSaveBehavior(PropertySaveBehavior.Throw);
+        }
+    }
+}
+
+public sealed class OperatorActionActionLedgerConfiguration : IEntityTypeConfiguration<OperatorActionActionLedgerEntity>
+{
+    public void Configure(EntityTypeBuilder<OperatorActionActionLedgerEntity> builder)
+    {
+        builder.ToTable("OperatorActionActionLedger");
+        builder.HasKey(value => value.ActionId);
+        SchemaConfiguration.ConfigureHash(builder.Property(value => value.ActionId));
+        builder.Property(value => value.ActionId).UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(value => value.DescriptorFingerprint).HasMaxLength(256).IsRequired().UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(value => value.DescriptorVersion).HasMaxLength(256).IsRequired().UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(value => value.SafetyContractId).HasMaxLength(256).IsRequired().UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(value => value.HandlerId).HasMaxLength(256).IsRequired().UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(value => value.ActionKind).HasMaxLength(64).IsRequired().UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(value => value.ReasonCode).HasMaxLength(128).IsRequired().UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(value => value.BlockedRowVersion).HasColumnType("binary(8)").IsRequired();
+        builder.Property(value => value.CreatedAtUtc).HasColumnType("datetimeoffset(7)");
+        SchemaConfiguration.ConfigureRowVersion(builder.Property(value => value.RowVersion));
+        foreach (var property in new[]
+                 {
+                     nameof(OperatorActionActionLedgerEntity.ActionId), nameof(OperatorActionActionLedgerEntity.PolicyId),
+                     nameof(OperatorActionActionLedgerEntity.PolicyRevision), nameof(OperatorActionActionLedgerEntity.DescriptorId),
+                     nameof(OperatorActionActionLedgerEntity.DescriptorFingerprint), nameof(OperatorActionActionLedgerEntity.DescriptorVersion),
+                     nameof(OperatorActionActionLedgerEntity.SafetyContractId), nameof(OperatorActionActionLedgerEntity.HandlerId),
+                     nameof(OperatorActionActionLedgerEntity.ActionKind), nameof(OperatorActionActionLedgerEntity.ReasonCode),
+                     nameof(OperatorActionActionLedgerEntity.SourceProcessorBranchId), nameof(OperatorActionActionLedgerEntity.BlockedRowVersion),
+                     nameof(OperatorActionActionLedgerEntity.SourceProcessorForceRequestId), nameof(OperatorActionActionLedgerEntity.CreatedAtUtc)
+                 })
+        {
+            builder.Property(property).Metadata.SetAfterSaveBehavior(PropertySaveBehavior.Throw);
+        }
+        builder.HasIndex(value => value.SourceProcessorForceRequestId).IsUnique().HasFilter("[SourceProcessorForceRequestId] IS NOT NULL");
+        builder.HasOne<OperatorActionCapabilityPolicyEntity>().WithMany()
+            .HasForeignKey(value => new
+            {
+                value.PolicyId, value.PolicyRevision, value.DescriptorId, value.DescriptorFingerprint,
+                value.DescriptorVersion, value.SafetyContractId, value.HandlerId, value.ActionKind, value.ReasonCode
+            })
+            .OnDelete(DeleteBehavior.Restrict);
+        builder.HasOne<SourceProcessorBranchEntity>().WithMany().HasForeignKey(value => value.SourceProcessorBranchId).OnDelete(DeleteBehavior.Restrict);
+        builder.HasOne<SourceProcessorForceRequestEntity>().WithMany().HasForeignKey(value => value.SourceProcessorForceRequestId).OnDelete(DeleteBehavior.Restrict);
+    }
+}
+
+public sealed class OperatorActionOperationLedgerConfiguration : IEntityTypeConfiguration<OperatorActionOperationLedgerEntity>
+{
+    public void Configure(EntityTypeBuilder<OperatorActionOperationLedgerEntity> builder)
+    {
+        builder.ToTable("OperatorActionOperationLedger"); builder.HasKey(value => value.OperationId); builder.Property(value => value.OperationId).ValueGeneratedNever();
+        SchemaConfiguration.ConfigureHash(builder.Property(value => value.RequestFingerprint));
+        builder.Property(value => value.RequestFingerprint).UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        SchemaConfiguration.ConfigureHash(builder.Property(value => value.ActionId));
+        builder.Property(value => value.ActionId).UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(value => value.CreatedAtUtc).HasColumnType("datetimeoffset(7)");
+        builder.Property(value => value.IgnoreState).HasColumnType("bit");
+        SchemaConfiguration.ConfigureRowVersion(builder.Property(value => value.RowVersion));
+        foreach (var property in new[] { nameof(OperatorActionOperationLedgerEntity.OperationId), nameof(OperatorActionOperationLedgerEntity.RequestFingerprint), nameof(OperatorActionOperationLedgerEntity.ActionId), nameof(OperatorActionOperationLedgerEntity.CreatedAtUtc), nameof(OperatorActionOperationLedgerEntity.IgnoreSequence), nameof(OperatorActionOperationLedgerEntity.IgnoreState) })
+        {
+            builder.Property(property).Metadata.SetAfterSaveBehavior(PropertySaveBehavior.Throw);
+        }
+        builder.HasIndex(value => value.OperationId).IsUnique();
+        builder.HasIndex(value => value.ActionId);
+        builder.HasOne<OperatorActionActionLedgerEntity>().WithMany().HasForeignKey(value => value.ActionId).OnDelete(DeleteBehavior.Restrict);
+    }
+}
+
+public sealed class SourceProcessorActionIgnoreHeadConfiguration : IEntityTypeConfiguration<SourceProcessorActionIgnoreHeadEntity>
+{
+    public void Configure(EntityTypeBuilder<SourceProcessorActionIgnoreHeadEntity> builder)
+    {
+        builder.ToTable("SourceProcessorActionIgnoreHeads"); builder.HasKey(value => value.ActionId);
+        SchemaConfiguration.ConfigureHash(builder.Property(value => value.ActionId));
+        builder.Property(value => value.ActionId).UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(value => value.UpdatedAtUtc).HasColumnType("datetimeoffset(7)");
+        SchemaConfiguration.ConfigureRowVersion(builder.Property(value => value.RowVersion));
+        SchemaConfiguration.ConfigureImmutableAfterInsert(builder.Property(value => value.ActionId));
+        builder.HasIndex(value => value.ActionId).IsUnique();
+        builder.HasOne<OperatorActionActionLedgerEntity>().WithMany().HasForeignKey(value => value.ActionId).OnDelete(DeleteBehavior.Restrict);
+    }
+}
+
+public sealed class SourceProcessorForceRequestConfiguration : IEntityTypeConfiguration<SourceProcessorForceRequestEntity>
+{
+    public void Configure(EntityTypeBuilder<SourceProcessorForceRequestEntity> builder)
+    {
+        builder.ToTable("SourceProcessorForceRequests", table =>
+        {
+            table.HasCheckConstraint("CK_SourceProcessorForceRequests_State", "[State] IN (0, 1, 2, 3, 4, 5, 6)");
+            table.HasCheckConstraint("CK_SourceProcessorForceRequests_ActionId", SchemaConfiguration.Sha256CheckFor("ActionId"));
+            table.HasCheckConstraint("CK_SourceProcessorForceRequests_RequestFingerprint", SchemaConfiguration.Sha256CheckFor("RequestFingerprint"));
+            table.HasCheckConstraint("CK_SourceProcessorForceRequests_TerminalReceiptFingerprint", "[TerminalReceiptFingerprint] IS NULL OR (" + SchemaConfiguration.Sha256CheckFor("TerminalReceiptFingerprint") + ")");
+            table.HasCheckConstraint("CK_SourceProcessorForceRequests_ExpectedInputSha256", SchemaConfiguration.Sha256CheckFor("ExpectedInputSha256"));
+            table.HasCheckConstraint("CK_SourceProcessorForceRequests_Timestamps", "[RequestedAtUtc] <= [ClaimExpiresAtUtc] AND ([ClaimedAtUtc] IS NULL OR [ClaimedAtUtc] >= [RequestedAtUtc]) AND ([TerminalAtUtc] IS NULL OR [TerminalAtUtc] >= [RequestedAtUtc]) AND ([TerminalAtUtc] IS NULL OR [ClaimedAtUtc] IS NULL OR [TerminalAtUtc] >= [ClaimedAtUtc])");
+            table.HasCheckConstraint("CK_SourceProcessorForceRequests_AttemptBinding", "([ForceAttemptBranchId] IS NULL AND [ForceAttemptLeaseGeneration] IS NULL) OR ([ForceAttemptBranchId] IS NOT NULL AND [ForceAttemptLeaseGeneration] IS NOT NULL AND [ForceAttemptBranchId] = [SourceProcessorBranchId])");
+            table.HasCheckConstraint("CK_SourceProcessorForceRequests_OriginalOutcome", "[OriginalOutcomeCode] <> N''");
+            table.HasCheckConstraint("CK_SourceProcessorForceRequests_StateShape", $"(" +
+                "([State] = 0 AND [ClaimedAtUtc] IS NULL AND [TerminalAtUtc] IS NULL AND [ForceAttemptBranchId] IS NULL AND [TerminalReceiptFingerprint] IS NULL AND [TerminalReasonCode] IS NULL) OR " +
+                "([State] = 1 AND [ClaimedAtUtc] IS NOT NULL AND [TerminalAtUtc] IS NULL AND [ForceAttemptBranchId] IS NOT NULL AND [TerminalReceiptFingerprint] IS NULL AND [TerminalReasonCode] IS NULL) OR " +
+                $"([State] = 2 AND [ClaimedAtUtc] IS NOT NULL AND [TerminalAtUtc] IS NOT NULL AND [ForceAttemptBranchId] IS NOT NULL AND [TerminalReceiptFingerprint] IS NOT NULL AND [TerminalReasonCode] = N'completed') OR " +
+                "([State] = 3 AND [ClaimedAtUtc] IS NOT NULL AND [TerminalAtUtc] IS NOT NULL AND [ForceAttemptBranchId] IS NOT NULL AND [TerminalReceiptFingerprint] IS NOT NULL AND [TerminalReasonCode] IS NOT NULL) OR " +
+                "([State] = 4 AND [ClaimedAtUtc] IS NOT NULL AND [TerminalAtUtc] IS NOT NULL AND [ForceAttemptBranchId] IS NOT NULL AND [TerminalReceiptFingerprint] IS NOT NULL AND [TerminalReasonCode] = N'force-request-transient') OR " +
+                "([State] = 5 AND [TerminalAtUtc] IS NOT NULL AND [TerminalReceiptFingerprint] IS NOT NULL AND [TerminalReasonCode] IN (N'force-request-cancelled', N'force-request-descriptor-disabled') AND (([ClaimedAtUtc] IS NULL AND [ForceAttemptBranchId] IS NULL) OR ([ClaimedAtUtc] IS NOT NULL AND [ForceAttemptBranchId] IS NOT NULL))) OR " +
+                "([State] = 6 AND [TerminalAtUtc] IS NOT NULL AND [TerminalReceiptFingerprint] IS NOT NULL AND (([ClaimedAtUtc] IS NULL AND [ForceAttemptBranchId] IS NULL AND [TerminalReasonCode] = N'force-request-claim-expired') OR ([ClaimedAtUtc] IS NOT NULL AND [ForceAttemptBranchId] IS NOT NULL AND [TerminalReasonCode] = N'lease-expired-reconciled'))))");
+        });
+        builder.HasKey(value => value.Id); builder.Property(value => value.Id).ValueGeneratedNever();
+        SchemaConfiguration.ConfigureHash(builder.Property(value => value.ActionId));
+        builder.Property(value => value.ActionId).UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        SchemaConfiguration.ConfigureHash(builder.Property(value => value.RequestFingerprint));
+        builder.Property(value => value.RequestFingerprint).UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        SchemaConfiguration.ConfigureHash(builder.Property(value => value.ExpectedInputSha256));
+        builder.Property(value => value.ExpectedInputSha256).UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(value => value.DescriptorFingerprint).HasMaxLength(256).IsRequired().UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(value => value.DescriptorVersion).HasMaxLength(256).IsRequired().UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(value => value.SafetyContractId).HasMaxLength(256).IsRequired().UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(value => value.HandlerId).HasMaxLength(256).IsRequired().UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(value => value.ActionKind).HasMaxLength(64).IsRequired().UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(value => value.PolicyReasonCode).HasMaxLength(128).IsRequired().UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(value => value.OriginalBlockedRowVersion).HasColumnType("binary(8)").IsRequired();
+        builder.Property(value => value.OriginalOutcomeCode).HasMaxLength(128).IsRequired().UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(value => value.RequestedAtUtc).HasColumnType("datetimeoffset(7)"); builder.Property(value => value.ClaimExpiresAtUtc).HasColumnType("datetimeoffset(7)");
+        builder.Property(value => value.ClaimedAtUtc).HasColumnType("datetimeoffset(7)"); builder.Property(value => value.TerminalAtUtc).HasColumnType("datetimeoffset(7)");
+        builder.Property(value => value.TerminalReceiptFingerprint).HasColumnType("char(64)").IsUnicode(false).IsFixedLength().HasMaxLength(64).UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(value => value.TerminalReasonCode).HasMaxLength(128).UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        SchemaConfiguration.ConfigureRowVersion(builder.Property(value => value.RowVersion));
+        foreach (var property in new[] { nameof(SourceProcessorForceRequestEntity.ActionId), nameof(SourceProcessorForceRequestEntity.OperationId), nameof(SourceProcessorForceRequestEntity.RequestFingerprint),
+                     nameof(SourceProcessorForceRequestEntity.PolicyId), nameof(SourceProcessorForceRequestEntity.PolicyRevision),
+                     nameof(SourceProcessorForceRequestEntity.DescriptorVersion), nameof(SourceProcessorForceRequestEntity.SafetyContractId),
+                     nameof(SourceProcessorForceRequestEntity.HandlerId), nameof(SourceProcessorForceRequestEntity.ActionKind), nameof(SourceProcessorForceRequestEntity.PolicyReasonCode),
+                     nameof(SourceProcessorForceRequestEntity.SourceActivityId), nameof(SourceProcessorForceRequestEntity.SourceProcessorBranchId), nameof(SourceProcessorForceRequestEntity.SourceRevisionId),
+                     nameof(SourceProcessorForceRequestEntity.DescriptorId), nameof(SourceProcessorForceRequestEntity.DescriptorFingerprint), nameof(SourceProcessorForceRequestEntity.ExpectedInputSha256),
+                     nameof(SourceProcessorForceRequestEntity.OriginalBlockedLeaseGeneration), nameof(SourceProcessorForceRequestEntity.OriginalBlockedRowVersion), nameof(SourceProcessorForceRequestEntity.OriginalOutcomeCode),
+                     nameof(SourceProcessorForceRequestEntity.RequestedAtUtc), nameof(SourceProcessorForceRequestEntity.ClaimExpiresAtUtc) })
+        {
+            builder.Property(property).Metadata.SetAfterSaveBehavior(PropertySaveBehavior.Throw);
+        }
+        builder.HasIndex(value => value.ActionId).IsUnique(); builder.HasIndex(value => value.OperationId).IsUnique();
+        builder.HasIndex(value => new { value.SourceProcessorBranchId, value.DescriptorId, value.DescriptorFingerprint, value.OriginalBlockedRowVersion })
+            .HasFilter("[State] IN (0, 1)").IsUnique();
+        builder.HasIndex(value => new { value.State, value.ClaimExpiresAtUtc });
+        builder.HasOne<SourceActivityEntity>().WithMany().HasForeignKey(value => value.SourceActivityId).OnDelete(DeleteBehavior.Restrict);
+        builder.HasOne<SourceProcessorBranchEntity>().WithMany().HasForeignKey(value => value.SourceProcessorBranchId).OnDelete(DeleteBehavior.Restrict);
+        builder.HasOne<SourceRevisionEntity>().WithMany().HasForeignKey(value => value.SourceRevisionId).OnDelete(DeleteBehavior.Restrict);
+        builder.HasOne<OperatorActionCapabilityPolicyEntity>().WithMany()
+            .HasForeignKey(value => new
+            {
+                value.PolicyId, value.PolicyRevision, value.DescriptorId, value.DescriptorFingerprint,
+                value.DescriptorVersion, value.SafetyContractId, value.HandlerId, value.ActionKind,
+                ReasonCode = value.PolicyReasonCode
+            })
+            .OnDelete(DeleteBehavior.Restrict);
+        builder.HasOne<SourceProcessorAttemptEntity>().WithMany()
+            .HasForeignKey(value => new { value.ForceAttemptBranchId, value.ForceAttemptLeaseGeneration })
+            .HasPrincipalKey(value => new { value.BranchId, value.LeaseGeneration })
+            .OnDelete(DeleteBehavior.Restrict);
+    }
+}
+
+public sealed class SourceProcessorBranchMemberConfiguration : IEntityTypeConfiguration<SourceProcessorBranchMemberEntity>
+{
+    public void Configure(EntityTypeBuilder<SourceProcessorBranchMemberEntity> builder)
+    {
+        builder.ToTable("SourceProcessorBranchMembers"); builder.HasKey(value => value.Id); builder.Property(value => value.Id).ValueGeneratedNever();
+        SchemaConfiguration.ConfigureHash(builder.Property(value => value.MemberFingerprint)); builder.Property(value => value.Disposition).HasMaxLength(64).IsRequired(); builder.Property(value => value.ReasonCode).HasMaxLength(128);
+        builder.Property(value => value.CreatedAtUtc).HasColumnType("datetimeoffset(7)"); builder.HasIndex(value => new { value.BranchId, value.MemberFingerprint }).IsUnique();
+        builder.HasOne<SourceProcessorBranchEntity>().WithMany().HasForeignKey(value => value.BranchId).OnDelete(DeleteBehavior.Restrict);
+        builder.HasOne<SourceRevisionEntity>().WithMany().HasForeignKey(value => value.ChildSourceRevisionId).OnDelete(DeleteBehavior.Restrict);
+        builder.HasOne<SourceActivityEntity>().WithMany().HasForeignKey(value => value.ChildSourceActivityId).OnDelete(DeleteBehavior.Restrict);
+    }
+}
+
+public sealed class SourceActivityRelationConfiguration : IEntityTypeConfiguration<SourceActivityRelationEntity>
+{
+    public void Configure(EntityTypeBuilder<SourceActivityRelationEntity> builder)
+    {
+        builder.ToTable("SourceActivityRelations"); builder.HasKey(value => value.Id); builder.Property(value => value.Id).ValueGeneratedNever();
+        builder.Property(value => value.RelationshipKind).HasMaxLength(128).IsRequired(); builder.Property(value => value.ReasonCode).HasMaxLength(128).IsRequired(); builder.Property(value => value.CreatedAtUtc).HasColumnType("datetimeoffset(7)");
+        builder.HasIndex(value => value.PredecessorActivityId).IsUnique(); builder.HasIndex(value => value.SuccessorActivityId).IsUnique();
+        builder.HasOne<SourceActivityEntity>().WithMany().HasForeignKey(value => value.PredecessorActivityId).OnDelete(DeleteBehavior.Restrict);
+        builder.HasOne<SourceActivityEntity>().WithMany().HasForeignKey(value => value.SuccessorActivityId).OnDelete(DeleteBehavior.Restrict);
     }
 }
 
@@ -1036,6 +1463,8 @@ public sealed class SourceActivityConfiguration : IEntityTypeConfiguration<Sourc
         builder.Property(entity => entity.Id).ValueGeneratedNever();
         builder.Property(entity => entity.ProcessorVersion).HasMaxLength(256).IsRequired().UseCollation(SchemaConfiguration.SchedulerFenceCollation);
         builder.Property(entity => entity.InputFingerprint).HasMaxLength(256).IsRequired().UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(entity => entity.DescriptorFingerprint).HasMaxLength(64).IsUnicode(false).IsRequired()
+            .HasDefaultValue(SourceActivityEntity.LegacyDescriptorFingerprint).UseCollation(SchemaConfiguration.SchedulerFenceCollation);
         builder.Property(entity => entity.RequiredCapability).HasMaxLength(256).UseCollation(SchemaConfiguration.SchedulerFenceCollation);
         builder.Property(entity => entity.Reason).HasMaxLength(1024);
         builder.Property(entity => entity.LastAttemptAtUtc).HasColumnType("datetimeoffset(7)");
@@ -1043,7 +1472,7 @@ public sealed class SourceActivityConfiguration : IEntityTypeConfiguration<Sourc
         builder.Property(entity => entity.CreatedAtUtc).HasColumnType("datetimeoffset(7)");
         builder.Property(entity => entity.UpdatedAtUtc).HasColumnType("datetimeoffset(7)");
         SchemaConfiguration.ConfigureRowVersion(builder.Property(entity => entity.RowVersion));
-        builder.HasIndex(entity => new { entity.SourceRevisionId, entity.ActivityKind, entity.ProcessorVersion, entity.InputFingerprint }).IsUnique();
+        builder.HasIndex(entity => new { entity.SourceRevisionId, entity.ActivityKind, entity.ProcessorVersion, entity.DescriptorFingerprint, entity.InputFingerprint }).IsUnique();
         builder.HasIndex(entity => new { entity.State, entity.ExecutionClass });
         builder.HasOne(entity => entity.SourceRevision).WithMany().HasForeignKey(entity => entity.SourceRevisionId).OnDelete(DeleteBehavior.Restrict);
         builder.HasOne(entity => entity.ResultingPipelineRecord).WithMany()

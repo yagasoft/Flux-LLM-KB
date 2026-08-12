@@ -275,7 +275,7 @@ public sealed class SqlSourceScanStore(
             $"SELECT [Id] FROM [SourceRootConfigurations] WITH (UPDLOCK, HOLDLOCK) WHERE [Id] = {sourceRootId.Value};",
             cancellationToken).ConfigureAwait(false);
         var active = await context.SourceRevisions
-            .FromSqlInterpolated($"SELECT * FROM [SourceRevisions] WITH (UPDLOCK, HOLDLOCK) WHERE [SourceRootId] = {sourceRootId.Value} AND [SuppressedAtUtc] IS NULL")
+            .FromSqlInterpolated($"SELECT * FROM [SourceRevisions] WITH (UPDLOCK, HOLDLOCK) WHERE [SourceRootId] = {sourceRootId.Value} AND [SuppressedAtUtc] IS NULL AND [OriginKind] = 0")
             .ToListAsync(cancellationToken).ConfigureAwait(false);
         var now = timeProvider.GetUtcNow();
         foreach (var revision in active)

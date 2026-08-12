@@ -651,6 +651,9 @@ export function setupDashboardTest(): void {
           event_type: "capture.review_rejected",
           actor: "dashboard",
           target_id: "job-old",
+          path: "E:/Private/App/review/session.json",
+          hash: "sha256:review-session",
+          retained_provenance: { binding: "retained-v1" },
           details: { decision: "reject", rationale: "duplicate capture", status: "rejected" },
           created_at: "2026-06-23T09:05:00+00:00"
         }
@@ -1112,19 +1115,30 @@ export function setupDashboardTest(): void {
         state.codeFeedbackPayload = JSON.parse(String(init.body));
         return json({ id: "feedback-1", settings_mutated: false });
       }
-      if (url.startsWith("/api/code/search")) {
+      if (url.startsWith("/api/local/code/search")) {
         state.codeSearchRequestUrl = url;
+        if (url.includes("query=OrderService.build_invoice")) {
+          state.codeSymbolRequestUrl = url;
+          return json({
+            settings_mutated: false,
+            results: [{
+              source_path: "E:/Private/App/src/orders.py",
+              symbols: [{ qualified_name: "OrderService.build_invoice", symbol_kind: "method", language: "python", line_start: 5, line_end: 7 }],
+              relationships: [{ source_symbol: "test_build_invoice_returns_ready_status", target: "OrderService.build_invoice", relationship: "test", language: "python" }]
+            }]
+          });
+        }
         return json({
           settings_mutated: false,
           results: [
             {
-              symbol: "OrderService.build_invoice",
-              relationship: "call",
-              language: "python",
-              path: "tests/test_orders.py",
-              line_start: 7,
-              line_end: 9,
-              is_generated: false
+              source_path: "E:/Private/App/src/orders.py",
+              content_hash: "sha256:orders",
+              symbols: [{ qualified_name: "OrderService.build_invoice", signature: "build_invoice(order_id: str) -> Invoice", symbol_kind: "method" }],
+              signatures: ["build_invoice(order_id: str) -> Invoice"],
+              relationships: [{ source_symbol: "OrderService.build_invoice", target: "InvoiceRepository.save", relationship: "call" }],
+              parser_diagnostics: [{ code: "CS0000", message: "parsed without errors" }],
+              excerpt: "public Invoice build_invoice(string orderId) => repository.save(orderId);"
             }
           ]
         });
@@ -1158,7 +1172,7 @@ export function setupDashboardTest(): void {
       if (url === "/api/code/feedback/summary") {
         return json({ settings_mutated: false, totals: { event_count: 2 }, rows: [{ miss_category: "missing_symbol", root_name: "app", event_count: 2 }] });
       }
-      if (url.startsWith("/api/diagnostics/all")) {
+      if (url.startsWith("/api/local/diagnostics/all")) {
         return json({
           section: "all",
           settings_mutated: false,
@@ -1172,6 +1186,11 @@ export function setupDashboardTest(): void {
               root_name: "docs",
               family: "office",
               summary: "Job job-1 is blocked.",
+              path: "E:/Private/App/src/Parser.cs",
+              hash: "sha256:parser",
+              runtime_detail: { worker: "retained-csharp-code", elapsed_ms: 17 },
+              parser_diagnostic: "CS1002 ; expected",
+              retained_provenance: { binding: "retained-v1", member: "src/Parser.cs" },
               follow_up_command: "flux-kb crawl worker status --family office",
               evidence: { status: "blocked_missing_dependency" },
               remediation_actions: [
@@ -1443,7 +1462,7 @@ export function setupDashboardTest(): void {
         state.captureReviewRequestUrl = url;
         return json(state.captureReviewPayload);
       }
-      if (url.startsWith("/api/audit")) return json(state.auditPayload);
+      if (url.startsWith("/api/local/audit")) return json(state.auditPayload);
       if (url.startsWith("/api/graph/traverse")) return json(state.graphPayload);
       if (url === "/api/outlook-host/request-sync") {
         return json({ id: "req-1", status: "pending", profile_name: JSON.parse(String(init?.body)).profile_name });

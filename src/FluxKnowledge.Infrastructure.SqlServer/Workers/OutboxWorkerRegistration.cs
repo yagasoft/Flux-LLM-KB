@@ -2,8 +2,11 @@ using FluxKnowledge.Application.Contracts;
 using FluxKnowledge.Application.Pipeline;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Sources;
+using FluxKnowledge.Application.Visibility;
 using FluxKnowledge.Application.Workers;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
+using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.Diagnostics;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
@@ -47,7 +50,13 @@ public static class OutboxWorkerServiceCollectionExtensions
         ArgumentNullException.ThrowIfNull(services);
         services.AddLogging();
         services.TryAddSingleton(TimeProvider.System);
+        var csharpCompilerServiceRegistrationProbe =
+            new ServiceCollectionRetainedCsharpCompilerServiceRegistrationProbe(services);
         services.TryAddEnumerable(ServiceDescriptor.Singleton<ILocalSourceCapabilityHandler, RetainedUtf8TextLocalHandler>());
+        services.TryAddEnumerable(ServiceDescriptor.Singleton<ILocalSourceCapabilityHandler, ZipArchiveRetainedCapabilityHandler>());
+        services.TryAddEnumerable(ServiceDescriptor.Singleton<ILocalSourceCapabilityHandler, TarArchiveRetainedCapabilityHandler>());
+        services.TryAddEnumerable(ServiceDescriptor.Singleton<ILocalSourceCapabilityHandler, OoxmlStructuralTextCapabilityHandler>());
+        services.TryAddEnumerable(ServiceDescriptor.Singleton<ILocalSourceCapabilityHandler, RetainedCsharpCodeCapabilityHandler>());
         services.TryAddSingleton<ILocalSourceCapabilityHandlerRegistry>(provider => new LocalSourceCapabilityHandlerRegistry(
             provider.GetServices<ILocalSourceCapabilityHandler>()));
         services.TryAddSingleton<ChannelOutboxWakeSignal>();
@@ -73,6 +82,17 @@ public static class OutboxWorkerServiceCollectionExtensions
             provider => provider.GetRequiredService<SqlRetainedTextRegistrationStore>());
         services.TryAddScoped<RetainedTextActivityPlanner>();
         services.TryAddScoped<SourceCapabilityService>();
+        services.TryAddScoped<SqlRetainedProcessorBranchStore>();
+        services.TryAddScoped<IRetainedProcessorBranchStore>(provider => provider.GetRequiredService<SqlRetainedProcessorBranchStore>());
+        services.TryAddScoped<ZipArchiveRetainedProcessor>();
+        services.TryAddScoped<TarArchiveRetainedProcessor>();
+        services.TryAddScoped<OoxmlStructuralTextProcessor>();
+        services.TryAddScoped(provider => new RetainedCsharpCodeProcessor(
+            provider.GetRequiredService<IRetainedSourceReader>(),
+            provider.GetRequiredService<ILocalPrivateContentDisclosure>(),
+            csharpCompilerServiceRegistrationProbe));
+        services.TryAddScoped<RetainedProcessorActivationService>();
+        services.TryAddEnumerable(ServiceDescriptor.Singleton<IHostedService, RetainedProcessorActivationHostedService>());
         services.TryAddScoped<DeferredActivityReplayService>();
         services.TryAddScoped<IDeferredContentReprocessor>(
             provider => provider.GetRequiredService<DeferredActivityReplayService>());
@@ -100,6 +120,69 @@ public static class OutboxWorkerServiceCollectionExtensions
         services.AddSingleton<IHostedService>(
             provider => provider.GetRequiredService<OutboxPumpService>());
         return services;
+    }
+
+    private sealed class ServiceCollectionRetainedCsharpCompilerServiceRegistrationProbe(
+        IServiceCollection services) : IRetainedCsharpCompilerServiceRegistrationProbe
+    {
+        public bool HasForbiddenCompilerServicesRegistered() => services.Any(ContainsForbiddenCompilerService);
+
+        private static bool ContainsForbiddenCompilerService(ServiceDescriptor descriptor)
+        {
+            if (IsForbiddenCompilerType(descriptor.ServiceType))
+            {
+                return true;
+            }
+
+            if (descriptor.IsKeyedService)
+            {
+                return IsForbiddenCompilerType(descriptor.KeyedImplementationType) ||
+                    IsForbiddenCompilerType(descriptor.KeyedImplementationInstance?.GetType());
+            }
+
+            return IsForbiddenCompilerType(descriptor.ImplementationType) ||
+                IsForbiddenCompilerType(descriptor.ImplementationInstance?.GetType());
+        }
+
+        private static bool IsForbiddenCompilerType(Type? type)
+        {
+            if (type is null)
+            {
+                return false;
+            }
+
+            if (typeof(ISourceGenerator).IsAssignableFrom(type) ||
+                typeof(IIncrementalGenerator).IsAssignableFrom(type) ||
+                typeof(DiagnosticAnalyzer).IsAssignableFrom(type))
+            {
+                return true;
+            }
+
+            return EnumerateTypeContractNames(type).Any(static name =>
+                name.StartsWith("Microsoft.CodeAnalysis.", StringComparison.Ordinal) &&
+                (name.Contains("Workspace", StringComparison.Ordinal) ||
+                 name.Contains("Analyzer", StringComparison.Ordinal) ||
+                 name.Contains("Generator", StringComparison.Ordinal)));
+        }
+
+        private static IEnumerable<string> EnumerateTypeContractNames(Type type)
+        {
+            for (var current = type; current is not null; current = current.BaseType)
+            {
+                if (current.FullName is { } name)
+                {
+                    yield return name;
+                }
+            }
+
+            foreach (var contract in type.GetInterfaces())
+            {
+                if (contract.FullName is { } name)
+                {
+                    yield return name;
+                }
+            }
+        }
     }
 
     private sealed class NullStatusEventPublisher : IStatusEventPublisher

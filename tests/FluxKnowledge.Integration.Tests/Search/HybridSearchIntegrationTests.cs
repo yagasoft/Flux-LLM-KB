@@ -70,6 +70,20 @@ public sealed class HybridSearchIntegrationTests : IClassFixture<NativeSqlServer
         Assert.Contains(hit.Explanation, item => item.StartsWith("lexical:", StringComparison.Ordinal));
     }
 
+    [NativeSqlServerFact]
+    public async Task Full_text_search_excludes_private_ooxml_structural_children()
+    {
+        await using var environment = await SearchEnvironment.CreateAsync(_fixture, includePrivateStructuralChild: true);
+        await environment.WaitForLexicalCandidateAsync();
+
+        var response = await environment.Service.SearchAsync(
+            new SearchRequest("private ooxml sentinel", 5, "local_first", null, null, null),
+            CancellationToken.None);
+
+        Assert.DoesNotContain(response.Results, hit => hit.SourceIdentity == "private-ooxml-child" ||
+            hit.Snippet.Contains("private ooxml sentinel", StringComparison.Ordinal));
+    }
+
     private sealed class SearchEnvironment : IAsyncDisposable
     {
         private readonly ServiceProvider _provider;
@@ -104,10 +118,10 @@ public sealed class HybridSearchIntegrationTests : IClassFixture<NativeSqlServer
             throw new TimeoutException("The SQL Server Full-Text index did not publish the current candidate in time.");
         }
 
-        public static async Task<SearchEnvironment> CreateAsync(NativeSqlServerFixture fixture)
+        public static async Task<SearchEnvironment> CreateAsync(NativeSqlServerFixture fixture, bool includePrivateStructuralChild = false)
         {
             await SqlTestData.ClearPipelineAsync(fixture);
-            var candidateIds = await SearchFixtureData.SeedAsync(fixture);
+            var candidateIds = await SearchFixtureData.SeedAsync(fixture, includePrivateStructuralChild);
             var services = new ServiceCollection();
             services.AddSingleton(SqlTestData.CreateFactory(fixture));
             services.AddSingleton<IEmbeddingProvider, DeterministicTokenHashEmbeddingProvider>();
@@ -163,7 +177,7 @@ public sealed class HybridSearchIntegrationTests : IClassFixture<NativeSqlServer
         private const string OldHash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
         private const string ChunkHash = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
 
-        public static async Task<IReadOnlyList<long>> SeedAsync(NativeSqlServerFixture fixture)
+        public static async Task<IReadOnlyList<long>> SeedAsync(NativeSqlServerFixture fixture, bool includePrivateStructuralChild)
         {
             await using var context = await SqlTestData.CreateFactory(fixture).CreateDbContextAsync();
             var now = DateTimeOffset.UtcNow;
@@ -198,6 +212,23 @@ public sealed class HybridSearchIntegrationTests : IClassFixture<NativeSqlServer
 
             context.SourceIdentities.AddRange(guideSource, deletedSource, staleSource);
             context.PipelineRecords.AddRange(guideOld, guideCurrent, deletedRecord, staleRecord, staleCurrent);
+            if (includePrivateStructuralChild)
+            {
+                var privateRoot = new SourceRootConfigurationEntity { Id = Guid.NewGuid(), CanonicalPath = "C:/retained-private", DisplayName = "private", State = 0, Recursive = false,
+                    IncludePatternsJson = "[]", ExcludePatternsJson = "[]", MaximumFileBytes = 1024, AllowedClassificationsJson = "[]", ReconciliationCadenceSeconds = 60, ConfigurationRevision = 1, CreatedAtUtc = now, UpdatedAtUtc = now };
+                var privateRevision = new SourceRevisionEntity { Id = Guid.NewGuid(), SourceRootId = privateRoot.Id, StableSourceIdentity = "private-ooxml-child", Revision = 1,
+                    ContentSha256 = CurrentHash, CanonicalPath = "C:/retained-private/opaque", Classification = "AcceptedUtf8Text", Extension = ".txt", OriginKind = 2, ByteLength = 1, DiscoveredAtUtc = now };
+                var privateSource = new SourceIdentityEntity { Id = Guid.NewGuid(), SourceKind = "local file", StableKey = "private-ooxml-child", CreatedAtUtc = now };
+                var privateRecord = new PipelineRecordEntity { Id = Guid.NewGuid(), SourceIdentityId = privateSource.Id, SourceRevisionId = privateRevision.Id, Revision = 1, ContentHash = CurrentHash, RootLineageRecordId = Guid.Empty, RegisteredAtUtc = now };
+                privateRecord.RootLineageRecordId = privateRecord.Id;
+                var privateVector = AddVector(context, privateRecord, "private ooxml sentinel", generationId, now, isDeleted: false);
+                context.SourceRootConfigurations.Add(privateRoot);
+                context.SourceRevisions.Add(privateRevision);
+                context.SourceIdentities.Add(privateSource);
+                context.PipelineRecords.Add(privateRecord);
+                await context.SaveChangesAsync();
+                return [currentVector.VectorId, privateVector.VectorId];
+            }
             await context.SaveChangesAsync();
             return [currentVector.VectorId, deletedVector.VectorId, staleVector.VectorId, 999999L];
         }

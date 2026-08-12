@@ -1,4 +1,5 @@
 using FluxKnowledge.Application.Gpu;
+using System.Diagnostics;
 using FluxKnowledge.Domain.Gpu;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
@@ -764,6 +765,86 @@ public sealed class SchemaMappingTests
 public sealed class NativeSqlServerFixtureValidationTests
 {
     [Theory]
+    [InlineData("Server=(localdb)\\MSSQLLocalDB;Integrated Security=true")]
+    [InlineData("Server=localhost;Integrated Security=true")]
+    [InlineData("Server=tcp:127.0.0.1,1433;Integrated Security=true")]
+    [InlineData("Server=[::1],1433;Integrated Security=true")]
+    public void Native_fixture_accepts_only_explicit_loopback_server_targets(string connectionString)
+    {
+        NativeSqlServerFixture.ValidateServerConnectionString(connectionString);
+    }
+
+    [Theory]
+    [InlineData("Server=(localdb)\\OtherInstance;Integrated Security=true")]
+    [InlineData("Server=192.0.2.20;Integrated Security=true")]
+    public void Native_fixture_rejects_non_loopback_server_targets(string connectionString)
+    {
+        var error = Assert.Throws<InvalidOperationException>(
+            () => NativeSqlServerFixture.ValidateServerConnectionString(connectionString));
+
+        Assert.False(string.IsNullOrWhiteSpace(error.Message));
+    }
+
+    [Fact]
+    public async Task Disposable_SQL_helper_rejects_conflicting_data_source_aliases_before_connection_probe()
+    {
+        var result = await RunDisposableSqlHelperAsync(
+            "Server=localhost;Network Address=192.0.2.20;Integrated Security=True",
+            validateOnly: true);
+
+        Assert.NotEqual(0, result.ExitCode);
+        Assert.Contains("exactly one data-source alias", result.StandardError, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("could not validate the selected loopback server", result.StandardError, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Disposable_SQL_helper_rejects_non_loopback_failover_target_during_pre_probe_validation()
+    {
+        var result = await RunDisposableSqlHelperAsync(
+            "Server=127.0.0.1,9;Failover Partner=192.0.2.20;Integrated Security=True",
+            validateOnly: true);
+
+        Assert.NotEqual(0, result.ExitCode);
+        Assert.Contains("failover", result.StandardError, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("could not validate the selected loopback server", result.StandardError, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Disposable_SQL_helper_rejects_read_only_application_intent_before_connection_probe()
+    {
+        var result = await RunDisposableSqlHelperAsync(
+            "Server=127.0.0.1,9;ApplicationIntent=ReadOnly;Integrated Security=True",
+            validateOnly: false);
+
+        Assert.NotEqual(0, result.ExitCode);
+        Assert.Contains("read-only routing", result.StandardError, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("could not validate the selected loopback server", result.StandardError, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Disposable_SQL_helper_rejects_multi_subnet_failover_before_connection_probe()
+    {
+        var result = await RunDisposableSqlHelperAsync(
+            "Server=127.0.0.1,9;MultiSubnetFailover=True;Integrated Security=True",
+            validateOnly: false);
+
+        Assert.NotEqual(0, result.ExitCode);
+        Assert.Contains("multi-subnet failover", result.StandardError, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("could not validate the selected loopback server", result.StandardError, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData("Server=(localdb)\\MSSQLLocalDB;Integrated Security=True")]
+    [InlineData("Server=[::1],1433;Integrated Security=True")]
+    public async Task Disposable_SQL_helper_preserves_validated_local_server_connection_for_the_following_probe(string connectionString)
+    {
+        var result = await RunDisposableSqlHelperAsync(connectionString, validateOnly: true);
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.Contains("Data Source", result.StandardOutput, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
     [InlineData("Server=localhost;Initial Catalog=master;Integrated Security=true")]
     [InlineData("Server=localhost;Database=FluxKnowledge;Integrated Security=true")]
     [InlineData("Server=localhost;AttachDbFilename=C:\\temp\\test.mdf;Integrated Security=true")]
@@ -828,6 +909,51 @@ public sealed class NativeSqlServerFixtureValidationTests
                 }));
 
         Assert.True(cleanupCalled);
+    }
+
+    private static string FindRepositoryRoot()
+    {
+        for (var directory = new DirectoryInfo(AppContext.BaseDirectory); directory is not null; directory = directory.Parent)
+        {
+            if (File.Exists(Path.Combine(directory.FullName, "FluxKnowledge.slnx")))
+            {
+                return directory.FullName;
+            }
+        }
+
+        throw new InvalidOperationException("Could not locate the repository root.");
+    }
+
+    private static async Task<(int ExitCode, string StandardOutput, string StandardError)> RunDisposableSqlHelperAsync(
+        string connectionString,
+        bool validateOnly = false)
+    {
+        var start = new ProcessStartInfo("pwsh")
+        {
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true
+        };
+        start.ArgumentList.Add("-NoLogo");
+        start.ArgumentList.Add("-NoProfile");
+        start.ArgumentList.Add("-NonInteractive");
+        start.ArgumentList.Add("-ExecutionPolicy");
+        start.ArgumentList.Add("Bypass");
+        start.ArgumentList.Add("-File");
+        start.ArgumentList.Add(Path.Combine(FindRepositoryRoot(), "scripts", "dev", "ensure-disposable-sql.ps1"));
+        start.ArgumentList.Add("-ServerConnectionString");
+        start.ArgumentList.Add(connectionString);
+        if (validateOnly)
+        {
+            start.ArgumentList.Add("-ValidateOnly");
+        }
+
+        using var process = Process.Start(start) ?? throw new InvalidOperationException("Could not start the disposable SQL helper.");
+        var standardOutput = await process.StandardOutput.ReadToEndAsync();
+        var standardError = await process.StandardError.ReadToEndAsync();
+        await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10));
+        return (process.ExitCode, standardOutput, standardError);
     }
 }
 

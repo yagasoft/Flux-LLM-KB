@@ -1,0 +1,108 @@
+@page "/sources/retained/{BranchId:guid}/csharp-code"
+@using FluxKnowledge.Web.Components.Sources
+@inject RetainedCsharpCodeDetailPageState PageState
+
+<PageTitle>Retained C# code details | Flux Knowledge</PageTitle>
+
+@if (PageState.Detail is null)
+{
+    <p role="status">@(PageState.Error ?? "Loading retained C# code details…")</p>
+}
+else
+{
+    <section aria-labelledby="retained-csharp-code-heading">
+        <h1 id="retained-csharp-code-heading">Retained C# code details</h1>
+        <dl class="metadata">
+            <dt>Branch ID</dt><dd class="diagnostic-value">@PageState.Detail.BranchId</dd>
+            <dt>Local path</dt><dd class="diagnostic-value">@PageState.Detail.LocalPath</dd>
+            <dt>Verified artifact hash</dt><dd class="diagnostic-value">@PageState.Detail.ArtifactHash</dd>
+            <dt>Outcome</dt><dd>@PageState.Detail.OutcomeCode</dd>
+            <dt>Withheld symbols</dt><dd>@PageState.Detail.WithheldSymbolCount</dd>
+            <dt>Withheld references</dt><dd>@PageState.Detail.WithheldReferenceCount</dd>
+            <dt>Withheld diagnostics</dt><dd>@PageState.Detail.WithheldDiagnosticCount</dd>
+        </dl>
+        <h2>Verified retained code excerpt</h2>
+        @if (PageState.Excerpt?.Withheld == true)
+        {
+            <p>@PageState.Excerpt.ReasonCode</p>
+        }
+        else if (PageState.Excerpt?.Value is { } excerpt)
+        {
+            <pre class="indexed-preview">@excerpt</pre>
+        }
+        <h2>Symbols</h2>
+        <p>@PageState.Detail.Symbols.Count of @PageState.Detail.PersistedSymbolCount symbols</p>
+        @if (PageState.Detail.Symbols.Count == 0)
+        {
+            <p>No retained symbols are available.</p>
+        }
+        else
+        {
+            <ul>
+            @foreach (var symbol in PageState.Detail.Symbols)
+            {
+                <li><span class="diagnostic-value">@symbol.QualifiedName</span> — <span class="diagnostic-value">@symbol.RenderedSignature</span> (span @symbol.SpanStartUtf16:@symbol.SpanLengthUtf16)</li>
+            }
+            </ul>
+        }
+        @if (PageState.HasMoreSymbols)
+        {
+            <p><button type="button" @onclick="LoadMoreSymbolsAsync">Load more symbols</button></p>
+        }
+        <h2>References</h2>
+        <p>@PageState.Detail.References.Count of @PageState.Detail.PersistedReferenceCount references</p>
+        @if (PageState.Detail.References.Count == 0)
+        {
+            <p>No retained references are available.</p>
+        }
+        else
+        {
+            <ul>
+            @foreach (var reference in PageState.Detail.References)
+            {
+                <li><span class="diagnostic-value">@reference.TargetDisplay</span> (span @reference.SpanStartUtf16:@reference.SpanLengthUtf16)</li>
+            }
+            </ul>
+        }
+        @if (PageState.HasMoreReferences)
+        {
+            <p><button type="button" @onclick="LoadMoreReferencesAsync">Load more references</button></p>
+        }
+        <h2>Parser diagnostics</h2>
+        <p>@PageState.Detail.Diagnostics.Count of @PageState.Detail.PersistedDiagnosticCount diagnostics</p>
+        @if (PageState.Detail.Diagnostics.Count == 0)
+        {
+            <p>No retained parser diagnostics are available.</p>
+        }
+        else
+        {
+            <ul>
+            @foreach (var diagnostic in PageState.Detail.Diagnostics)
+            {
+                <li><span class="diagnostic-value">@diagnostic.DiagnosticId</span>: @(diagnostic.Withheld ? diagnostic.WithheldReason : diagnostic.Message)</li>
+            }
+            </ul>
+        }
+        @if (PageState.HasMoreDiagnostics)
+        {
+            <p><button type="button" @onclick="LoadMoreDiagnosticsAsync">Load more diagnostics</button></p>
+        }
+        <p><a href="@($"/sources/retained/{BranchId:D}")">Back to retained branch detail</a></p>
+    </section>
+}
+
+@code {
+    [Parameter] public Guid BranchId { get; set; }
+
+    protected override async Task OnParametersSetAsync() =>
+        await PageState.LoadAsync(BranchId, CancellationToken.None);
+
+    private async Task LoadMoreSymbolsAsync() =>
+        await PageState.LoadMoreSymbolsAsync(CancellationToken.None);
+
+    private async Task LoadMoreReferencesAsync() =>
+        await PageState.LoadMoreReferencesAsync(CancellationToken.None);
+
+    private async Task LoadMoreDiagnosticsAsync() =>
+        await PageState.LoadMoreDiagnosticsAsync(CancellationToken.None);
+}

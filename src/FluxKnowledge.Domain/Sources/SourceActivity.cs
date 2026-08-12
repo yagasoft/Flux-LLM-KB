@@ -23,6 +23,8 @@ public sealed record SourceActivity
 
     public string InputFingerprint { get; private init; }
 
+    public string DescriptorFingerprint { get; private init; }
+
     public string? RequiredCapability { get; private init; }
 
     public string IdempotencyKey { get; private init; }
@@ -39,7 +41,8 @@ public sealed record SourceActivity
         string inputFingerprint,
         string? requiredCapability,
         string? reason,
-        SourceActivityState? initialState = null)
+        SourceActivityState? initialState = null,
+        string? descriptorFingerprint = null)
     {
         ArgumentNullException.ThrowIfNull(sourceRevisionId);
         EnsureDefined(kind, nameof(kind));
@@ -50,6 +53,8 @@ public sealed record SourceActivity
         EnsureDefined(effectiveInitialState, nameof(initialState));
         EnsureOpaqueValue(processorVersion, nameof(processorVersion));
         EnsureOpaqueValue(inputFingerprint, nameof(inputFingerprint));
+        var effectiveDescriptorFingerprint = descriptorFingerprint ?? "b0fe7acd8ced58bf9215c12938f5bbc75b722323f3553f2705959467029a4fb5";
+        EnsureOpaqueValue(effectiveDescriptorFingerprint, nameof(descriptorFingerprint));
         EnsureOptionalOpaqueValue(requiredCapability, nameof(requiredCapability));
         EnsureOptionalReason(reason);
 
@@ -66,8 +71,9 @@ public sealed record SourceActivity
             executionClass,
             processorVersion,
             inputFingerprint,
+            effectiveDescriptorFingerprint,
             requiredCapability,
-            CanonicalIdempotencyKey(sourceRevisionId, kind, processorVersion, inputFingerprint),
+            CanonicalIdempotencyKey(sourceRevisionId, kind, processorVersion, effectiveDescriptorFingerprint, inputFingerprint),
             effectiveInitialState,
             reason);
     }
@@ -83,7 +89,8 @@ public sealed record SourceActivity
         string? requiredCapability,
         SourceActivityState state,
         string? reason,
-        bool hasDurablePipelineReceipt = false)
+        bool hasDurablePipelineReceipt = false,
+        string? descriptorFingerprint = null)
     {
         ArgumentNullException.ThrowIfNull(id);
         if (executionClass == ExecutionClass.DeferredCapability && state == SourceActivityState.Running &&
@@ -103,7 +110,8 @@ public sealed record SourceActivity
             inputFingerprint,
             requiredCapability,
             reason,
-            effectiveState);
+            effectiveState,
+            descriptorFingerprint);
         return validated with { Id = id, State = state };
     }
 
@@ -125,9 +133,10 @@ public sealed record SourceActivity
         SourceRevisionId sourceRevisionId,
         SourceActivityKind kind,
         string processorVersion,
+        string descriptorFingerprint,
         string inputFingerprint) =>
         FormattableString.Invariant(
-            $"{sourceRevisionId.Value:N}|{(int)kind}|{processorVersion.Length}:{processorVersion}|{inputFingerprint.Length}:{inputFingerprint}");
+            $"{sourceRevisionId.Value:N}|{(int)kind}|{processorVersion.Length}:{processorVersion}|{descriptorFingerprint.Length}:{descriptorFingerprint}|{inputFingerprint.Length}:{inputFingerprint}");
 
     private static void EnsureDefined<TEnum>(TEnum value, string parameterName)
         where TEnum : struct, Enum
@@ -179,6 +188,7 @@ public sealed record SourceActivity
         ExecutionClass executionClass,
         string processorVersion,
         string inputFingerprint,
+        string descriptorFingerprint,
         string? requiredCapability,
         string idempotencyKey,
         SourceActivityState state,
@@ -190,6 +200,7 @@ public sealed record SourceActivity
         ExecutionClass = executionClass;
         ProcessorVersion = processorVersion;
         InputFingerprint = inputFingerprint;
+        DescriptorFingerprint = descriptorFingerprint;
         RequiredCapability = requiredCapability;
         IdempotencyKey = idempotencyKey;
         State = state;

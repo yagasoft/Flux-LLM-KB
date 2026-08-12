@@ -3,6 +3,7 @@ using FluxKnowledge.Web.Components;
 using FluxKnowledge.Web.Components.Status;
 using FluxKnowledge.Web.Endpoints;
 using FluxKnowledge.Web.Mcp;
+using FluxKnowledge.Infrastructure.SqlServer.Visibility;
 using Microsoft.AspNetCore.Components.Server.Circuits;
 using System.Text.Json;
 
@@ -37,7 +38,7 @@ builder.Services
     .WithTools<KnowledgeMcpTools>();
 var app = builder.Build();
 
-app.UseOutlookOperatorLoopbackGate();
+app.UseLocalOperatorLoopbackGate();
 app.UseAntiforgery();
 app.MapStaticAssets();
 app.MapRazorComponents<App>()
@@ -47,6 +48,9 @@ app.MapFluxKnowledgeIndexHealth();
 app.MapFluxKnowledgeGpuStatus();
 app.MapFluxKnowledgeSearch();
 app.MapFluxKnowledgePipelineRecords();
+app.MapFluxKnowledgeOperatorActions();
+app.MapFluxKnowledgeLocalRetainedDetails();
+app.MapFluxKnowledgeLocalRetainedCsharpCode();
 app.MapMcp("/mcp");
 
 app.Run();

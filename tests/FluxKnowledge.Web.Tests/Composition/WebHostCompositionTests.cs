@@ -29,6 +29,7 @@ using Microsoft.AspNetCore.TestHost;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
 using Xunit;
 
@@ -68,6 +69,48 @@ public sealed class WebHostCompositionTests : IDisposable
                 descriptor.ImplementationType?.Assembly.GetName().Name?.Contains(
                     "OutlookHost",
                     StringComparison.Ordinal) == true);
+    }
+
+    [Theory]
+    [InlineData("0")]
+    [InlineData("17")]
+    [InlineData("invalid")]
+    public void Retained_processor_configuration_rejects_an_out_of_range_automatic_batch(string configured)
+    {
+        var configuration = new ConfigurationBuilder()
+            .AddConfiguration(CreateOutlookRecoveryConfiguration(enabled: null))
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["RetainedProcessors:AutomaticReplayBatchSize"] = configured
+            })
+            .Build();
+
+        Assert.Throws<InvalidOperationException>(() =>
+            WebHostComposition.AddFluxKnowledgeServices(new ServiceCollection(), configuration));
+    }
+
+    [Fact]
+    public void Retained_processor_configuration_defaults_to_sixteen_and_accepts_the_shared_upper_bound()
+    {
+        var defaultServices = new ServiceCollection();
+        WebHostComposition.AddFluxKnowledgeServices(
+            defaultServices,
+            CreateOutlookRecoveryConfiguration(enabled: null));
+        using var defaultProvider = defaultServices.BuildServiceProvider();
+
+        var configuredServices = new ServiceCollection();
+        WebHostComposition.AddFluxKnowledgeServices(
+            configuredServices,
+            new ConfigurationBuilder()
+                .AddConfiguration(CreateOutlookRecoveryConfiguration(enabled: null))
+                .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["RetainedProcessors:AutomaticReplayBatchSize"] = "16"
+            }).Build());
+        using var configuredProvider = configuredServices.BuildServiceProvider();
+
+        Assert.Equal(16, defaultProvider.GetRequiredService<RetainedProcessorOptions>().AutomaticReplayBatchSize);
+        Assert.Equal(16, configuredProvider.GetRequiredService<RetainedProcessorOptions>().AutomaticReplayBatchSize);
     }
 
     [Fact]
@@ -192,6 +235,45 @@ public sealed class WebHostCompositionTests : IDisposable
     }
 
     [Fact]
+    public async Task Force_request_foundation_adds_no_public_endpoint_or_MCP_mutation_surface()
+    {
+        var endpointTypes = typeof(WebHostComposition).Assembly.GetTypes()
+            .Where(type => string.Equals(type.Namespace, "FluxKnowledge.Web.Endpoints", StringComparison.Ordinal))
+            .ToArray();
+
+        Assert.DoesNotContain(endpointTypes, type => type.Name.Contains("OoxmlForce", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(
+            typeof(KnowledgeMcpTools).GetMethods(System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.DeclaredOnly),
+            method => method.Name.Contains("Force", StringComparison.OrdinalIgnoreCase));
+
+        using var factory = new ConfiguredWebApplicationFactory(_ingressRoot);
+        var response = await factory.Server.SendAsync(context =>
+        {
+            context.Request.Method = HttpMethods.Post;
+            context.Request.Path = "/api/operator-actions/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/force-process";
+            context.Connection.RemoteIpAddress = IPAddress.Loopback;
+        });
+
+        Assert.Equal(StatusCodes.Status405MethodNotAllowed, response.Response.StatusCode);
+        Assert.DoesNotContain(HttpMethods.Post, response.Response.Headers.Allow.ToString(), StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Operator_actions_add_no_MCP_mutation_tool()
+    {
+        var publicMethods = typeof(KnowledgeMcpTools).GetMethods(
+            System.Reflection.BindingFlags.Instance |
+            System.Reflection.BindingFlags.Public |
+            System.Reflection.BindingFlags.DeclaredOnly);
+
+        Assert.DoesNotContain(publicMethods, method =>
+            method.Name.Contains("Operator", StringComparison.OrdinalIgnoreCase) ||
+            method.Name.Contains("Override", StringComparison.OrdinalIgnoreCase) ||
+            method.Name.Contains("Retry", StringComparison.OrdinalIgnoreCase) ||
+            method.Name.Contains("Ignore", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
     public void Program_composition_resolves_the_hosted_pump_and_both_stage_workers_without_connecting()
     {
         var configuration = new ConfigurationBuilder()
@@ -245,6 +327,7 @@ public sealed class WebHostCompositionTests : IDisposable
         _ = scope.ServiceProvider.GetRequiredService<RegisterUtf8FileHandler>();
         _ = scope.ServiceProvider.GetRequiredService<
             IDbContextFactory<FluxKnowledgeDbContext>>();
+        _ = scope.ServiceProvider.GetRequiredService<IRetainedArtifactWriter>();
         Assert.IsType<SqlGpuSchedulerStore>(
             scope.ServiceProvider.GetRequiredService<IGpuSchedulerStore>());
         Assert.IsType<SqlGpuSchedulerStore>(
@@ -254,6 +337,10 @@ public sealed class WebHostCompositionTests : IDisposable
         var localHandlers = provider.GetRequiredService<ILocalSourceCapabilityHandlerRegistry>();
         Assert.True(localHandlers.TryResolve(new Guid("9c56d5b2-c931-4c8b-ab66-fd0601e9c1df"), out var localHandler));
         Assert.Equal("pipeline:extract-utf8", localHandler.OutputContract);
+        Assert.True(localHandlers.TryResolve(new Guid("b4a06e5d-6f01-4f73-9722-79b6df4e85c3"), out var zipHandler));
+        Assert.Equal("retained:archive-zip-expand", zipHandler.OutputContract);
+        Assert.True(localHandlers.TryResolve(new Guid("3d8e4b4e-8d16-45c7-aa02-c4e546ba997d"), out var tarHandler));
+        Assert.Equal("retained:archive-tar-expand", tarHandler.OutputContract);
         Assert.IsType<GpuExecutorLifecycleCoordinator>(
             scope.ServiceProvider.GetRequiredService<IGpuExecutorLifecycleSink>());
         Assert.IsType<ChannelGpuExecutorDispatchSignal>(
@@ -339,7 +426,7 @@ public sealed class WebHostCompositionTests : IDisposable
         Assert.Null(scope.ServiceProvider.GetService<IAuthenticationSchemeProvider>());
         Assert.False(services.GetRequiredService<AuthenticationMiddlewareProbe>().WasConfigured);
 
-        foreach (var path in new[] { "/outlook", "/_blazor" })
+        foreach (var path in new[] { "/outlook", "/operator-actions", "/api/operator-actions", "/search/csharp-code", "/_blazor", "/mcp" })
         {
             var remote = await factory.Server.SendAsync(context =>
             {
@@ -360,7 +447,17 @@ public sealed class WebHostCompositionTests : IDisposable
             context.Connection.RemoteIpAddress = IPAddress.Loopback;
         });
 
-        Assert.NotEqual(StatusCodes.Status403Forbidden, loopback.Response.StatusCode);
+        Assert.Equal(StatusCodes.Status403Forbidden, loopback.Response.StatusCode);
+
+        var forwardedMcpReconnect = await factory.Server.SendAsync(context =>
+        {
+            context.Request.Method = HttpMethods.Get;
+            context.Request.Path = "/mcp";
+            context.Request.Headers["Forwarded"] = "for=198.51.100.50";
+            context.Connection.RemoteIpAddress = IPAddress.Loopback;
+        });
+
+        Assert.Equal(StatusCodes.Status403Forbidden, forwardedMcpReconnect.Response.StatusCode);
     }
 
     [Fact]
@@ -522,6 +619,13 @@ public sealed class WebHostCompositionTests : IDisposable
             builder.ConfigureTestServices(
                 services =>
                 {
+                    // The entrypoint authority check needs the real local gate but no background
+                    // SQL activity. Keep only the pump backed by EmptyOutboxStore; all other
+                    // production hosted services would otherwise contact the deliberately
+                    // unreachable placeholder catalogue during this non-SQL test.
+                    services.RemoveAll<IHostedService>();
+                    services.AddSingleton<IHostedService>(provider =>
+                        provider.GetRequiredService<OutboxPumpService>());
                     services.AddSingleton<IOutboxStore, EmptyOutboxStore>();
                     services.AddSingleton<AuthenticationMiddlewareProbe>();
                     services.AddSingleton<IStartupFilter>(provider =>

@@ -1,0 +1,88 @@
+@page "/operator-actions"
+@implements IDisposable
+@using FluxKnowledge.Application.Contracts
+@using FluxKnowledge.Web.Components.OperatorActions
+@inject OperatorActionPageState PageState
+
+<PageTitle>Operator actions | Flux Knowledge</PageTitle>
+
+<section aria-labelledby="operator-actions-heading">
+    <h1 id="operator-actions-heading">Operator actions</h1>
+    <p>Review blocked retained-processing actions without exposing source content or private bindings.</p>
+    <p role="status" aria-live="polite">@_status</p>
+    <label><input type="checkbox" checked="@PageState.IncludeIgnored" @onchange="IncludeIgnoredChangedAsync" /> Include ignored</label>
+
+    @if (PageState.Actions.Count == 0)
+    {
+        <p>No current operator actions.</p>
+    }
+    else
+    {
+        <div class="table-scroll">
+            <table>
+                <caption>Current blocked action versions</caption>
+                <thead><tr><th>Action</th><th>State</th><th>Reason</th><th>Blocked</th><th>Actions</th></tr></thead>
+                <tbody>
+                @foreach (var action in PageState.Actions)
+                {
+                    <tr>
+                        <td><code>@ShortId(action.ActionId)</code></td>
+                        <td>@action.ActionState</td>
+                        <td>@action.ReasonCode</td>
+                        <td>@action.BlockedAtUtc.LocalDateTime</td>
+                        <td>
+                            @if (action.OverrideAvailable) { <button type="button" @onclick="() => OverrideAsync(action)">Override</button> }
+                            @if (action.RetryAvailable) { <button type="button" @onclick="() => RetryAsync(action)">Retry</button> }
+                            @if (action.Ignored) { <button type="button" @onclick="() => UnignoreAsync(action)">Unignore</button> }
+                            else { <button type="button" @onclick="() => IgnoreAsync(action)">Ignore</button> }
+                        </td>
+                    </tr>
+                }
+                </tbody>
+            </table>
+        </div>
+    }
+</section>
+
+@code {
+    private readonly CancellationTokenSource _stopping = new();
+    private string _status = "Loading operator actions from SQL…";
+
+    protected override async Task OnInitializedAsync()
+    {
+        await PageState.ReloadAsync(_stopping.Token);
+        _status = "Operator actions loaded from SQL.";
+    }
+
+    private async Task IncludeIgnoredChangedAsync(ChangeEventArgs args)
+    {
+        await PageState.SetIncludeIgnoredAsync(args.Value is bool value && value, _stopping.Token);
+        _status = "Operator action filter updated.";
+    }
+
+    private async Task ExecuteAsync(OperatorActionProjection action, string actionKind)
+    {
+        try
+        {
+            var receipt = await PageState.ExecuteAsync(action, actionKind, _stopping.Token);
+            _status = receipt.WasReplay ? "Existing durable receipt loaded." : "Operator action committed to SQL.";
+        }
+        catch (OperatorActionRequestRejectedException exception)
+        {
+            _status = $"Operator action was not committed: {exception.ReasonCode}.";
+        }
+    }
+
+    private Task OverrideAsync(OperatorActionProjection action) => ExecuteAsync(action, "policy-override");
+    private Task RetryAsync(OperatorActionProjection action) => ExecuteAsync(action, "retry");
+    private Task IgnoreAsync(OperatorActionProjection action) => ExecuteAsync(action, "ignore");
+    private Task UnignoreAsync(OperatorActionProjection action) => ExecuteAsync(action, "unignore");
+
+    private static string ShortId(string actionId) => actionId[..12];
+
+    public void Dispose()
+    {
+        _stopping.Cancel();
+        _stopping.Dispose();
+    }
+}

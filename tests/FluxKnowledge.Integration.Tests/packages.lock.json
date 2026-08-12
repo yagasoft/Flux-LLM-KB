@@ -59,6 +59,19 @@
         "resolved": "9.0.4",
         "contentHash": "YgZYAWzyNuPVtPq6WNm0bqOWNjYaWgl5mBWTGZyNoXitYBUYSp6iUB9AwK0V1mo793qRJUXz2t6UZrWITZSvuQ=="
       },
+      "Microsoft.CodeAnalysis.Analyzers": {
+        "type": "Transitive",
+        "resolved": "3.11.0",
+        "contentHash": "v/EW3UE8/lbEYHoC2Qq7AR/DnmvpgdtAMndfQNmpuIMx/Mto8L5JnuCfdBYtgvalQOtfNCnxFejxuRrryvUTsg=="
+      },
+      "Microsoft.CodeAnalysis.Common": {
+        "type": "Transitive",
+        "resolved": "5.0.0",
+        "contentHash": "ZXRAdvH6GiDeHRyd3q/km8Z44RoM6FBWHd+gen/la81mVnAdHTEsEkO5J0TCNXBymAcx5UYKt5TvgKBhaLJEow==",
+        "dependencies": {
+          "Microsoft.CodeAnalysis.Analyzers": "3.11.0"
+        }
+      },
       "Microsoft.CodeCoverage": {
         "type": "Transitive",
         "resolved": "18.8.1",
@@ -277,7 +290,15 @@
         "type": "Project",
         "dependencies": {
           "FluxKnowledge.Domain": "[1.0.0, )",
-          "FluxKnowledge.NativeWorker.Protocol": "[1.0.0, )"
+          "FluxKnowledge.NativeWorker.Protocol": "[1.0.0, )",
+          "Microsoft.CodeAnalysis.CSharp": "[5.0.0, )"
+        }
+      },
+      "fluxknowledge.cli": {
+        "type": "Project",
+        "dependencies": {
+          "FluxKnowledge.Application": "[1.0.0, )",
+          "FluxKnowledge.Infrastructure.SqlServer": "[1.0.0, )"
         }
       },
       "fluxknowledge.domain": {
@@ -311,16 +332,23 @@
         }
       },
       "fluxknowledge.nativeworker.protocol": {
-        "type": "Project",
-        "dependencies": {
-          "FluxKnowledge.Domain": "[1.0.0, )"
-        }
+        "type": "Project"
       },
       "Cloud.Unum.USearch": {
         "type": "CentralTransitive",
         "requested": "[2.19.3, )",
         "resolved": "2.19.3",
         "contentHash": "xbIOMMcR3HVMWgwy4t9/vmXIyZ672cSxk2JEhLkJjJntnEmeIMCrVOtr3fEC/BtOB2fNGeyGM0Mumgrm9SdHyQ=="
+      },
+      "Microsoft.CodeAnalysis.CSharp": {
+        "type": "CentralTransitive",
+        "requested": "[5.0.0, )",
+        "resolved": "5.0.0",
+        "contentHash": "5DSyJ9bk+ATuDy7fp2Zt0mJStDVKbBoiz1DyfAwSa+k4H4IwykAUcV3URelw5b8/iVbfSaOwkwmPUZH6opZKCw==",
+        "dependencies": {
+          "Microsoft.CodeAnalysis.Analyzers": "3.11.0",
+          "Microsoft.CodeAnalysis.Common": "[5.0.0]"
+        }
       },
       "Microsoft.EntityFrameworkCore.SqlServer": {
         "type": "CentralTransitive",

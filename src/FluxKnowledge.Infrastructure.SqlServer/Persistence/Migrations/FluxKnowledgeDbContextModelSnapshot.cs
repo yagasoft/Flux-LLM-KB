@@ -1089,6 +1089,386 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Migrations
                         });
                 });
 
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.OperatorActionActionLedgerEntity", b =>
+                {
+                    b.Property<string>("ActionId")
+                        .HasMaxLength(64)
+                        .IsUnicode(false)
+                        .HasColumnType("char(64)")
+                        .IsFixedLength()
+                        .UseCollation("Latin1_General_100_BIN2");
+
+                    b.Property<string>("ActionKind")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("nvarchar(64)")
+                        .UseCollation("Latin1_General_100_BIN2");
+
+                    b.Property<byte[]>("BlockedRowVersion")
+                        .IsRequired()
+                        .HasColumnType("binary(8)");
+
+                    b.Property<DateTimeOffset>("CreatedAtUtc")
+                        .HasColumnType("datetimeoffset(7)");
+
+                    b.Property<string>("DescriptorFingerprint")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)")
+                        .UseCollation("Latin1_General_100_BIN2");
+
+                    b.Property<Guid>("DescriptorId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("DescriptorVersion")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)")
+                        .UseCollation("Latin1_General_100_BIN2");
+
+                    b.Property<string>("HandlerId")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)")
+                        .UseCollation("Latin1_General_100_BIN2");
+
+                    b.Property<Guid>("PolicyId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<long>("PolicyRevision")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("ReasonCode")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("nvarchar(128)")
+                        .UseCollation("Latin1_General_100_BIN2");
+
+                    b.Property<byte[]>("RowVersion")
+                        .IsConcurrencyToken()
+                        .IsRequired()
+                        .ValueGeneratedOnAddOrUpdate()
+                        .HasColumnType("rowversion");
+
+                    b.Property<string>("SafetyContractId")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)")
+                        .UseCollation("Latin1_General_100_BIN2");
+
+                    b.Property<Guid>("SourceProcessorBranchId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid?>("SourceProcessorForceRequestId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.HasKey("ActionId");
+
+                    b.HasIndex("SourceProcessorBranchId");
+
+                    b.HasIndex("SourceProcessorForceRequestId")
+                        .IsUnique()
+                        .HasFilter("[SourceProcessorForceRequestId] IS NOT NULL");
+
+                    b.HasIndex("PolicyId", "PolicyRevision", "DescriptorId", "DescriptorFingerprint", "DescriptorVersion", "SafetyContractId", "HandlerId", "ActionKind", "ReasonCode");
+
+                    b.ToTable("OperatorActionActionLedger", (string)null);
+                });
+
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.OperatorActionCapabilityPolicyEntity", b =>
+                {
+                    b.Property<Guid>("PolicyId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<long>("PolicyRevision")
+                        .HasColumnType("bigint");
+
+                    b.Property<Guid>("DescriptorId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("DescriptorFingerprint")
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)")
+                        .UseCollation("Latin1_General_100_BIN2");
+
+                    b.Property<string>("DescriptorVersion")
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)")
+                        .UseCollation("Latin1_General_100_BIN2");
+
+                    b.Property<string>("SafetyContractId")
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)")
+                        .UseCollation("Latin1_General_100_BIN2");
+
+                    b.Property<string>("HandlerId")
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)")
+                        .UseCollation("Latin1_General_100_BIN2");
+
+                    b.Property<string>("ActionKind")
+                        .HasMaxLength(64)
+                        .HasColumnType("nvarchar(64)")
+                        .UseCollation("Latin1_General_100_BIN2");
+
+                    b.Property<string>("ReasonCode")
+                        .HasMaxLength(128)
+                        .HasColumnType("nvarchar(128)")
+                        .UseCollation("Latin1_General_100_BIN2");
+
+                    b.HasKey("PolicyId", "PolicyRevision", "DescriptorId", "DescriptorFingerprint", "DescriptorVersion", "SafetyContractId", "HandlerId", "ActionKind", "ReasonCode");
+
+                    b.ToTable("OperatorActionCapabilityPolicies", (string)null);
+                });
+
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.OperatorActionHardDenialEntity", b =>
+                {
+                    b.Property<string>("ReasonCode")
+                        .HasMaxLength(128)
+                        .HasColumnType("nvarchar(128)")
+                        .UseCollation("Latin1_General_100_BIN2");
+
+                    b.HasKey("ReasonCode");
+
+                    b.ToTable("OperatorActionHardDenials", (string)null);
+
+                    b.HasData(
+                        new
+                        {
+                            ReasonCode = "retained-artifact-missing"
+                        },
+                        new
+                        {
+                            ReasonCode = "retained-artifact-path-invalid"
+                        },
+                        new
+                        {
+                            ReasonCode = "retained-artifact-checksum-invalid"
+                        },
+                        new
+                        {
+                            ReasonCode = "retained-artifact-root-unavailable"
+                        },
+                        new
+                        {
+                            ReasonCode = "retained-artifact-transient"
+                        },
+                        new
+                        {
+                            ReasonCode = "office-document-container-invalid"
+                        },
+                        new
+                        {
+                            ReasonCode = "office-document-depth-limit"
+                        },
+                        new
+                        {
+                            ReasonCode = "office-document-element-limit"
+                        },
+                        new
+                        {
+                            ReasonCode = "office-document-encrypted"
+                        },
+                        new
+                        {
+                            ReasonCode = "office-document-expanded-xml-limit"
+                        },
+                        new
+                        {
+                            ReasonCode = "office-document-input-too-large"
+                        },
+                        new
+                        {
+                            ReasonCode = "office-document-part-unsupported"
+                        },
+                        new
+                        {
+                            ReasonCode = "office-document-text-limit"
+                        },
+                        new
+                        {
+                            ReasonCode = "office-document-xml-invalid"
+                        },
+                        new
+                        {
+                            ReasonCode = "archive-input-too-large"
+                        },
+                        new
+                        {
+                            ReasonCode = "archive-entry-count-limit"
+                        },
+                        new
+                        {
+                            ReasonCode = "archive-expanded-total-limit"
+                        },
+                        new
+                        {
+                            ReasonCode = "archive-member-size-limit"
+                        },
+                        new
+                        {
+                            ReasonCode = "archive-member-size-invalid"
+                        },
+                        new
+                        {
+                            ReasonCode = "archive-compression-ratio-limit"
+                        },
+                        new
+                        {
+                            ReasonCode = "archive-entry-path-invalid"
+                        },
+                        new
+                        {
+                            ReasonCode = "archive-entry-unsupported"
+                        },
+                        new
+                        {
+                            ReasonCode = "archive-entry-encrypted"
+                        },
+                        new
+                        {
+                            ReasonCode = "archive-entry-compression-unsupported"
+                        },
+                        new
+                        {
+                            ReasonCode = "archive-signature-invalid"
+                        },
+                        new
+                        {
+                            ReasonCode = "archive-member-identity-conflict"
+                        },
+                        new
+                        {
+                            ReasonCode = "archive-member-not-utf8"
+                        },
+                        new
+                        {
+                            ReasonCode = "archive-entry-link-invalid"
+                        },
+                        new
+                        {
+                            ReasonCode = "nested-archive-depth-limit"
+                        },
+                        new
+                        {
+                            ReasonCode = "legacy-office-binary-parser-unavailable"
+                        },
+                        new
+                        {
+                            ReasonCode = "processor-parser-unavailable"
+                        },
+                        new
+                        {
+                            ReasonCode = "processor-provenance-invalid"
+                        },
+                        new
+                        {
+                            ReasonCode = "csharp-code-input-too-large"
+                        },
+                        new
+                        {
+                            ReasonCode = "csharp-code-text-limit"
+                        },
+                        new
+                        {
+                            ReasonCode = "csharp-code-input-not-utf8"
+                        },
+                        new
+                        {
+                            ReasonCode = "csharp-code-node-limit"
+                        },
+                        new
+                        {
+                            ReasonCode = "csharp-code-depth-limit"
+                        },
+                        new
+                        {
+                            ReasonCode = "csharp-code-symbol-limit"
+                        },
+                        new
+                        {
+                            ReasonCode = "csharp-code-reference-limit"
+                        },
+                        new
+                        {
+                            ReasonCode = "csharp-code-identifier-limit"
+                        },
+                        new
+                        {
+                            ReasonCode = "csharp-code-signature-limit"
+                        },
+                        new
+                        {
+                            ReasonCode = "csharp-code-diagnostic-limit"
+                        },
+                        new
+                        {
+                            ReasonCode = "csharp-code-syntax-invalid"
+                        },
+                        new
+                        {
+                            ReasonCode = "source-activity-cancelled"
+                        },
+                        new
+                        {
+                            ReasonCode = "source-activity-superseded"
+                        },
+                        new
+                        {
+                            ReasonCode = "lease-expired-reconciled"
+                        },
+                        new
+                        {
+                            ReasonCode = "processor-fence-invalid"
+                        });
+                });
+
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.OperatorActionOperationLedgerEntity", b =>
+                {
+                    b.Property<Guid>("OperationId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("ActionId")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .IsUnicode(false)
+                        .HasColumnType("char(64)")
+                        .IsFixedLength()
+                        .UseCollation("Latin1_General_100_BIN2");
+
+                    b.Property<DateTimeOffset>("CreatedAtUtc")
+                        .HasColumnType("datetimeoffset(7)");
+
+                    b.Property<long?>("IgnoreSequence")
+                        .HasColumnType("bigint");
+
+                    b.Property<bool?>("IgnoreState")
+                        .HasColumnType("bit");
+
+                    b.Property<string>("RequestFingerprint")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .IsUnicode(false)
+                        .HasColumnType("char(64)")
+                        .IsFixedLength()
+                        .UseCollation("Latin1_General_100_BIN2");
+
+                    b.Property<byte[]>("RowVersion")
+                        .IsConcurrencyToken()
+                        .IsRequired()
+                        .ValueGeneratedOnAddOrUpdate()
+                        .HasColumnType("rowversion");
+
+                    b.HasKey("OperationId");
+
+                    b.HasIndex("ActionId");
+
+                    b.HasIndex("OperationId")
+                        .IsUnique();
+
+                    b.ToTable("OperatorActionOperationLedger", (string)null);
+                });
+
             modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.OutboxMessageEntity", b =>
                 {
                     b.Property<Guid>("Id")
@@ -1623,6 +2003,15 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Migrations
                     b.Property<DateTimeOffset>("CreatedAtUtc")
                         .HasColumnType("datetimeoffset(7)");
 
+                    b.Property<string>("DescriptorFingerprint")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(64)
+                        .IsUnicode(false)
+                        .HasColumnType("varchar(64)")
+                        .HasDefaultValue("b0fe7acd8ced58bf9215c12938f5bbc75b722323f3553f2705959467029a4fb5")
+                        .UseCollation("Latin1_General_100_BIN2");
+
                     b.Property<int>("ExecutionClass")
                         .HasColumnType("int");
 
@@ -1677,10 +2066,45 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Migrations
 
                     b.HasIndex("State", "ExecutionClass");
 
-                    b.HasIndex("SourceRevisionId", "ActivityKind", "ProcessorVersion", "InputFingerprint")
+                    b.HasIndex("SourceRevisionId", "ActivityKind", "ProcessorVersion", "DescriptorFingerprint", "InputFingerprint")
                         .IsUnique();
 
                     b.ToTable("SourceActivities", (string)null);
+                });
+
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.SourceActivityRelationEntity", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTimeOffset>("CreatedAtUtc")
+                        .HasColumnType("datetimeoffset(7)");
+
+                    b.Property<Guid>("PredecessorActivityId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("ReasonCode")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("nvarchar(128)");
+
+                    b.Property<string>("RelationshipKind")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("nvarchar(128)");
+
+                    b.Property<Guid>("SuccessorActivityId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("PredecessorActivityId")
+                        .IsUnique();
+
+                    b.HasIndex("SuccessorActivityId")
+                        .IsUnique();
+
+                    b.ToTable("SourceActivityRelations", (string)null);
                 });
 
             modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.SourceArtifactEntity", b =>
@@ -1847,6 +2271,819 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Migrations
                     b.ToTable("SourceIdentities", (string)null);
                 });
 
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.SourceProcessorActionIgnoreHeadEntity", b =>
+                {
+                    b.Property<string>("ActionId")
+                        .HasMaxLength(64)
+                        .IsUnicode(false)
+                        .HasColumnType("char(64)")
+                        .IsFixedLength()
+                        .UseCollation("Latin1_General_100_BIN2");
+
+                    b.Property<bool>("IsIgnored")
+                        .HasColumnType("bit");
+
+                    b.Property<byte[]>("RowVersion")
+                        .IsConcurrencyToken()
+                        .IsRequired()
+                        .ValueGeneratedOnAddOrUpdate()
+                        .HasColumnType("rowversion");
+
+                    b.Property<long>("Sequence")
+                        .HasColumnType("bigint");
+
+                    b.Property<DateTimeOffset>("UpdatedAtUtc")
+                        .HasColumnType("datetimeoffset(7)");
+
+                    b.HasKey("ActionId");
+
+                    b.HasIndex("ActionId")
+                        .IsUnique();
+
+                    b.ToTable("SourceProcessorActionIgnoreHeads", (string)null);
+                });
+
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.SourceProcessorAttemptEntity", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("BranchId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("EvidenceJson")
+                        .HasMaxLength(1024)
+                        .HasColumnType("nvarchar(1024)");
+
+                    b.Property<DateTimeOffset?>("FinishedAtUtc")
+                        .HasColumnType("datetimeoffset(7)");
+
+                    b.Property<long>("LeaseGeneration")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("OutcomeCode")
+                        .HasMaxLength(128)
+                        .HasColumnType("nvarchar(128)")
+                        .UseCollation("Latin1_General_100_BIN2");
+
+                    b.Property<DateTimeOffset>("StartedAtUtc")
+                        .HasColumnType("datetimeoffset(7)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("BranchId", "LeaseGeneration")
+                        .IsUnique();
+
+                    b.ToTable("SourceProcessorAttempts", (string)null);
+                });
+
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.SourceProcessorBranchEntity", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<int>("AttemptCount")
+                        .HasColumnType("int");
+
+                    b.Property<int>("CompletedMemberCount")
+                        .HasColumnType("int");
+
+                    b.Property<string>("CompletionReceiptFingerprint")
+                        .HasMaxLength(64)
+                        .IsUnicode(false)
+                        .HasColumnType("varchar(64)")
+                        .UseCollation("Latin1_General_100_BIN2");
+
+                    b.Property<DateTimeOffset>("CreatedAtUtc")
+                        .HasColumnType("datetimeoffset(7)");
+
+                    b.Property<string>("InputSha256")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .IsUnicode(false)
+                        .HasColumnType("char(64)")
+                        .IsFixedLength();
+
+                    b.Property<DateTimeOffset?>("LeaseExpiresAtUtc")
+                        .HasColumnType("datetimeoffset(7)");
+
+                    b.Property<long>("LeaseGeneration")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("LeaseOwner")
+                        .HasMaxLength(768)
+                        .HasColumnType("nvarchar(768)")
+                        .UseCollation("Latin1_General_100_BIN2");
+
+                    b.Property<string>("ProcessorFingerprint")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)")
+                        .UseCollation("Latin1_General_100_BIN2");
+
+                    b.Property<string>("ProcessorVersion")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)")
+                        .UseCollation("Latin1_General_100_BIN2");
+
+                    b.Property<byte[]>("RowVersion")
+                        .IsConcurrencyToken()
+                        .IsRequired()
+                        .ValueGeneratedOnAddOrUpdate()
+                        .HasColumnType("rowversion");
+
+                    b.Property<Guid>("SourceActivityId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("SourceRevisionId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<int>("State")
+                        .HasColumnType("int");
+
+                    b.Property<DateTimeOffset>("UpdatedAtUtc")
+                        .HasColumnType("datetimeoffset(7)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("SourceActivityId")
+                        .IsUnique();
+
+                    b.HasIndex("SourceRevisionId");
+
+                    b.HasIndex("State", "LeaseExpiresAtUtc");
+
+                    b.ToTable("SourceProcessorBranches", (string)null);
+                });
+
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.SourceProcessorBranchMemberEntity", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("BranchId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<long>("ByteLength")
+                        .HasColumnType("bigint");
+
+                    b.Property<Guid?>("ChildSourceActivityId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid?>("ChildSourceRevisionId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTimeOffset>("CreatedAtUtc")
+                        .HasColumnType("datetimeoffset(7)");
+
+                    b.Property<string>("Disposition")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("nvarchar(64)");
+
+                    b.Property<string>("MemberFingerprint")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .IsUnicode(false)
+                        .HasColumnType("char(64)")
+                        .IsFixedLength();
+
+                    b.Property<string>("ReasonCode")
+                        .HasMaxLength(128)
+                        .HasColumnType("nvarchar(128)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ChildSourceActivityId");
+
+                    b.HasIndex("ChildSourceRevisionId");
+
+                    b.HasIndex("BranchId", "MemberFingerprint")
+                        .IsUnique();
+
+                    b.ToTable("SourceProcessorBranchMembers", (string)null);
+                });
+
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.SourceProcessorCodeBlockedDiagnosticEntity", b =>
+                {
+                    b.Property<Guid>("SourceProcessorBranchId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("SourceProcessorAttemptId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<int>("Ordinal")
+                        .HasColumnType("int");
+
+                    b.Property<string>("BlockedDiagnosticFingerprint")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .IsUnicode(false)
+                        .HasColumnType("varchar(64)");
+
+                    b.Property<string>("DiagnosticId")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("nvarchar(64)");
+
+                    b.Property<string>("Representation")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("nvarchar(16)");
+
+                    b.Property<string>("ScannedMessage")
+                        .HasMaxLength(1024)
+                        .HasColumnType("nvarchar(1024)");
+
+                    b.Property<byte>("Severity")
+                        .HasColumnType("tinyint");
+
+                    b.Property<int>("SpanLengthUtf16")
+                        .HasColumnType("int");
+
+                    b.Property<int>("SpanStartUtf16")
+                        .HasColumnType("int");
+
+                    b.Property<string>("WithheldReason")
+                        .HasMaxLength(64)
+                        .HasColumnType("nvarchar(64)");
+
+                    b.HasKey("SourceProcessorBranchId", "SourceProcessorAttemptId", "Ordinal");
+
+                    b.HasIndex("SourceProcessorBranchId", "SourceProcessorAttemptId", "BlockedDiagnosticFingerprint")
+                        .IsUnique();
+
+                    b.HasIndex("SourceProcessorBranchId", "SourceProcessorAttemptId", "Ordinal");
+
+                    b.ToTable("SourceProcessorCodeBlockedDiagnostics", null, t =>
+                        {
+                            t.HasTrigger("TR_SourceProcessorCodeBlockedDiagnostics_Immutable");
+
+                            t.HasTrigger("TR_SourceProcessorCodeBlockedDiagnostics_InsertFence");
+
+                            t.HasCheckConstraint("CK_SourceProcessorCodeBlockedDiagnostics_Representation", "[Ordinal] BETWEEN 0 AND 255 AND [Severity] BETWEEN 0 AND 3 AND [SpanStartUtf16] >= 0 AND [SpanLengthUtf16] >= 0 AND (([Representation] = N'scanned' AND [ScannedMessage] IS NOT NULL AND [WithheldReason] IS NULL) OR ([Representation] = N'withheld' AND [ScannedMessage] IS NULL AND [WithheldReason] = N'secret-content-withheld'))");
+                        });
+
+                    b.HasAnnotation("SqlServer:UseSqlOutputClause", false);
+                });
+
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.SourceProcessorCodeCompletionReceiptEntity", b =>
+                {
+                    b.Property<Guid>("SourceProcessorBranchId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<int>("ActivityKind")
+                        .HasColumnType("int");
+
+                    b.Property<int>("BlockedDiagnosticsCount")
+                        .HasColumnType("int");
+
+                    b.Property<string>("CompletionFingerprint")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .IsUnicode(false)
+                        .HasColumnType("varchar(64)");
+
+                    b.Property<DateTimeOffset>("CreatedAtUtc")
+                        .HasColumnType("datetimeoffset(7)");
+
+                    b.Property<string>("DescriptorFingerprint")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .IsUnicode(false)
+                        .HasColumnType("char(64)")
+                        .IsFixedLength();
+
+                    b.Property<string>("DocumentFingerprint")
+                        .HasMaxLength(64)
+                        .IsUnicode(false)
+                        .HasColumnType("varchar(64)");
+
+                    b.Property<Guid?>("DocumentId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("HandlerImplementationId")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)")
+                        .UseCollation("Latin1_General_100_BIN2");
+
+                    b.Property<string>("OutcomeCode")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("nvarchar(128)");
+
+                    b.Property<string>("ParserFingerprint")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .IsUnicode(false)
+                        .HasColumnType("char(64)")
+                        .IsFixedLength();
+
+                    b.Property<string>("ProcessorVersion")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)");
+
+                    b.Property<int>("ReceiptDiagnosticCodeCount")
+                        .HasColumnType("int");
+
+                    b.Property<string>("ReceiptDiagnosticCodesWire")
+                        .IsRequired()
+                        .HasMaxLength(8192)
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("RetainedArtifactSha256")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .IsUnicode(false)
+                        .HasColumnType("char(64)")
+                        .IsFixedLength();
+
+                    b.Property<Guid>("SourceProcessorAttemptId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("SourceRevisionId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<int>("WithheldDiagnosticCount")
+                        .HasColumnType("int");
+
+                    b.Property<int>("WithheldReferenceCount")
+                        .HasColumnType("int");
+
+                    b.Property<int>("WithheldSymbolCount")
+                        .HasColumnType("int");
+
+                    b.HasKey("SourceProcessorBranchId");
+
+                    b.HasIndex("SourceRevisionId");
+
+                    b.HasIndex("SourceProcessorBranchId", "SourceProcessorAttemptId");
+
+                    b.HasIndex("DocumentId", "SourceRevisionId", "RetainedArtifactSha256", "DescriptorFingerprint", "ParserFingerprint", "HandlerImplementationId", "WithheldSymbolCount", "WithheldReferenceCount", "WithheldDiagnosticCount", "ReceiptDiagnosticCodeCount", "DocumentFingerprint", "CompletionFingerprint");
+
+                    b.ToTable("SourceProcessorCodeCompletionReceipts", null, t =>
+                        {
+                            t.HasTrigger("TR_SourceProcessorCodeCompletionReceipts_Immutable");
+
+                            t.HasTrigger("TR_SourceProcessorCodeCompletionReceipts_OutcomeFence");
+
+                            t.HasCheckConstraint("CK_SourceProcessorCodeCompletionReceipts_DocumentBranchEquality", "[DocumentId] IS NULL OR [DocumentId] = [SourceProcessorBranchId]");
+
+                            t.HasCheckConstraint("CK_SourceProcessorCodeCompletionReceipts_Outcome", "(([OutcomeCode] = N'csharp-code-syntax-invalid' AND [DocumentId] IS NULL AND [DocumentFingerprint] IS NULL AND [BlockedDiagnosticsCount] BETWEEN 0 AND 256 AND [WithheldSymbolCount] = 0 AND [WithheldReferenceCount] = 0) OR ([OutcomeCode] = N'success' AND [DocumentId] IS NOT NULL AND [DocumentFingerprint] IS NOT NULL AND [BlockedDiagnosticsCount] = 0)) AND [ActivityKind] = 5 AND [WithheldSymbolCount] >= 0 AND [WithheldReferenceCount] >= 0 AND [WithheldDiagnosticCount] BETWEEN 0 AND 256 AND [ReceiptDiagnosticCodeCount] BETWEEN 0 AND 256 AND [ReceiptDiagnosticCodesWire] LIKE CONVERT(varchar(3), [ReceiptDiagnosticCodeCount]) + ';%'");
+                        });
+
+                    b.HasAnnotation("SqlServer:UseSqlOutputClause", false);
+                });
+
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.SourceProcessorCodeDiagnosticEntity", b =>
+                {
+                    b.Property<Guid>("DocumentId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<int>("Ordinal")
+                        .HasColumnType("int");
+
+                    b.Property<string>("DiagnosticFingerprint")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .IsUnicode(false)
+                        .HasColumnType("varchar(64)");
+
+                    b.Property<string>("DiagnosticId")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("nvarchar(64)");
+
+                    b.Property<string>("Representation")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("nvarchar(16)");
+
+                    b.Property<string>("ScannedMessage")
+                        .HasMaxLength(1024)
+                        .HasColumnType("nvarchar(1024)");
+
+                    b.Property<byte>("Severity")
+                        .HasColumnType("tinyint");
+
+                    b.Property<int>("SpanLengthUtf16")
+                        .HasColumnType("int");
+
+                    b.Property<int>("SpanStartUtf16")
+                        .HasColumnType("int");
+
+                    b.Property<string>("WithheldReason")
+                        .HasMaxLength(64)
+                        .HasColumnType("nvarchar(64)");
+
+                    b.HasKey("DocumentId", "Ordinal");
+
+                    b.HasIndex("DocumentId", "DiagnosticFingerprint")
+                        .IsUnique();
+
+                    b.HasIndex("DocumentId", "Severity", "Ordinal");
+
+                    b.ToTable("SourceProcessorCodeDiagnostics", null, t =>
+                        {
+                            t.HasTrigger("TR_SourceProcessorCodeDiagnostics_Immutable");
+
+                            t.HasTrigger("TR_SourceProcessorCodeDiagnostics_InsertFence");
+
+                            t.HasCheckConstraint("CK_SourceProcessorCodeDiagnostics_Representation", "[Ordinal] BETWEEN 0 AND 255 AND [Severity] BETWEEN 0 AND 3 AND [SpanStartUtf16] >= 0 AND [SpanLengthUtf16] >= 0 AND (([Representation] = N'scanned' AND [ScannedMessage] IS NOT NULL AND [WithheldReason] IS NULL) OR ([Representation] = N'withheld' AND [ScannedMessage] IS NULL AND [WithheldReason] = N'secret-content-withheld'))");
+                        });
+
+                    b.HasAnnotation("SqlServer:UseSqlOutputClause", false);
+                });
+
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.SourceProcessorCodeDocumentEntity", b =>
+                {
+                    b.Property<Guid>("SourceProcessorBranchId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("CompletionFingerprint")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .IsUnicode(false)
+                        .HasColumnType("varchar(64)");
+
+                    b.Property<int>("DecodedCharacterCount")
+                        .HasColumnType("int");
+
+                    b.Property<string>("DescriptorFingerprint")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .IsUnicode(false)
+                        .HasColumnType("char(64)")
+                        .IsFixedLength();
+
+                    b.Property<int>("DiagnosticsCount")
+                        .HasColumnType("int");
+
+                    b.Property<string>("DocumentFingerprint")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .IsUnicode(false)
+                        .HasColumnType("varchar(64)");
+
+                    b.Property<string>("HandlerImplementationId")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)")
+                        .UseCollation("Latin1_General_100_BIN2");
+
+                    b.Property<long>("LeaseGeneration")
+                        .HasColumnType("bigint");
+
+                    b.Property<int>("LineCount")
+                        .HasColumnType("int");
+
+                    b.Property<string>("ParserFingerprint")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .IsUnicode(false)
+                        .HasColumnType("char(64)")
+                        .IsFixedLength();
+
+                    b.Property<int>("ReceiptDiagnosticCodeCount")
+                        .HasColumnType("int");
+
+                    b.Property<int>("ReferenceCount")
+                        .HasColumnType("int");
+
+                    b.Property<string>("RetainedArtifactSha256")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .IsUnicode(false)
+                        .HasColumnType("char(64)")
+                        .IsFixedLength();
+
+                    b.Property<Guid>("SourceRevisionId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<int>("SymbolCount")
+                        .HasColumnType("int");
+
+                    b.Property<int>("WithheldDiagnosticCount")
+                        .HasColumnType("int");
+
+                    b.Property<int>("WithheldReferenceCount")
+                        .HasColumnType("int");
+
+                    b.Property<int>("WithheldSymbolCount")
+                        .HasColumnType("int");
+
+                    b.HasKey("SourceProcessorBranchId");
+
+                    b.HasIndex("SourceRevisionId");
+
+                    b.ToTable("SourceProcessorCodeDocuments", null, t =>
+                        {
+                            t.HasTrigger("TR_SourceProcessorCodeDocuments_Immutable");
+
+                            t.HasTrigger("TR_SourceProcessorCodeDocuments_InsertFence");
+
+                            t.HasCheckConstraint("CK_SourceProcessorCodeDocuments_Counts", "[DecodedCharacterCount] >= 0 AND [LineCount] >= 1 AND [LineCount] <= [DecodedCharacterCount] + 1 AND [SymbolCount] >= 0 AND [ReferenceCount] >= 0 AND [DiagnosticsCount] BETWEEN 0 AND 256 AND [WithheldSymbolCount] >= 0 AND [WithheldReferenceCount] >= 0 AND [WithheldDiagnosticCount] BETWEEN 0 AND 256 AND [ReceiptDiagnosticCodeCount] BETWEEN 0 AND 256 AND [DiagnosticsCount] = [ReceiptDiagnosticCodeCount]");
+                        });
+
+                    b.HasAnnotation("SqlServer:UseSqlOutputClause", false);
+                });
+
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.SourceProcessorCodeReferenceEntity", b =>
+                {
+                    b.Property<Guid>("DocumentId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<int>("Ordinal")
+                        .HasColumnType("int");
+
+                    b.Property<string>("ReferenceFingerprint")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .IsUnicode(false)
+                        .HasColumnType("varchar(64)");
+
+                    b.Property<int>("RelationshipKindCode")
+                        .HasColumnType("int");
+
+                    b.Property<int?>("SourceSymbolOrdinal")
+                        .HasColumnType("int");
+
+                    b.Property<int>("SpanLengthUtf16")
+                        .HasColumnType("int");
+
+                    b.Property<int>("SpanStartUtf16")
+                        .HasColumnType("int");
+
+                    b.Property<string>("TargetDisplay")
+                        .IsRequired()
+                        .HasMaxLength(4096)
+                        .HasColumnType("nvarchar(max)");
+
+                    b.HasKey("DocumentId", "Ordinal");
+
+                    b.HasIndex("DocumentId", "ReferenceFingerprint")
+                        .IsUnique();
+
+                    b.ToTable("SourceProcessorCodeReferences", null, t =>
+                        {
+                            t.HasTrigger("TR_SourceProcessorCodeReferences_Immutable");
+
+                            t.HasTrigger("TR_SourceProcessorCodeReferences_InsertFence");
+
+                            t.HasCheckConstraint("CK_SourceProcessorCodeReferences_Bounds", "[Ordinal] >= 0 AND [RelationshipKindCode] BETWEEN 1 AND 7 AND ([SourceSymbolOrdinal] IS NULL OR [SourceSymbolOrdinal] >= 0) AND [SpanStartUtf16] >= 0 AND [SpanLengthUtf16] >= 0");
+                        });
+
+                    b.HasAnnotation("SqlServer:UseSqlOutputClause", false);
+                });
+
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.SourceProcessorCodeSymbolEntity", b =>
+                {
+                    b.Property<Guid>("DocumentId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<int>("Ordinal")
+                        .HasColumnType("int");
+
+                    b.Property<int>("DeclarationKindCode")
+                        .HasColumnType("int");
+
+                    b.Property<int>("LexicalParentOrdinal")
+                        .HasColumnType("int");
+
+                    b.Property<string>("LocalName")
+                        .IsRequired()
+                        .HasMaxLength(1024)
+                        .HasColumnType("nvarchar(1024)");
+
+                    b.Property<string>("Modifiers")
+                        .IsRequired()
+                        .HasMaxLength(512)
+                        .HasColumnType("nvarchar(512)");
+
+                    b.Property<string>("QualifiedName")
+                        .IsRequired()
+                        .HasMaxLength(4096)
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("RenderedSignature")
+                        .IsRequired()
+                        .HasMaxLength(4096)
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<int>("SpanLengthUtf16")
+                        .HasColumnType("int");
+
+                    b.Property<int>("SpanStartUtf16")
+                        .HasColumnType("int");
+
+                    b.Property<string>("SymbolFingerprint")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .IsUnicode(false)
+                        .HasColumnType("varchar(64)");
+
+                    b.HasKey("DocumentId", "Ordinal");
+
+                    b.HasIndex("DocumentId", "SymbolFingerprint")
+                        .IsUnique();
+
+                    b.ToTable("SourceProcessorCodeSymbols", null, t =>
+                        {
+                            t.HasTrigger("TR_SourceProcessorCodeSymbols_Immutable");
+
+                            t.HasTrigger("TR_SourceProcessorCodeSymbols_InsertFence");
+
+                            t.HasCheckConstraint("CK_SourceProcessorCodeSymbols_Bounds", "[Ordinal] >= 0 AND [DeclarationKindCode] BETWEEN 1 AND 20 AND [SpanStartUtf16] >= 0 AND [SpanLengthUtf16] >= 0 AND [LexicalParentOrdinal] >= -1 AND [LexicalParentOrdinal] < [Ordinal]");
+                        });
+
+                    b.HasAnnotation("SqlServer:UseSqlOutputClause", false);
+                });
+
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.SourceProcessorForceRequestEntity", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("ActionId")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .IsUnicode(false)
+                        .HasColumnType("char(64)")
+                        .IsFixedLength()
+                        .UseCollation("Latin1_General_100_BIN2");
+
+                    b.Property<string>("ActionKind")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("nvarchar(64)")
+                        .UseCollation("Latin1_General_100_BIN2");
+
+                    b.Property<DateTimeOffset>("ClaimExpiresAtUtc")
+                        .HasColumnType("datetimeoffset(7)");
+
+                    b.Property<DateTimeOffset?>("ClaimedAtUtc")
+                        .HasColumnType("datetimeoffset(7)");
+
+                    b.Property<string>("DescriptorFingerprint")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)")
+                        .UseCollation("Latin1_General_100_BIN2");
+
+                    b.Property<Guid>("DescriptorId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("DescriptorVersion")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)")
+                        .UseCollation("Latin1_General_100_BIN2");
+
+                    b.Property<string>("ExpectedInputSha256")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .IsUnicode(false)
+                        .HasColumnType("char(64)")
+                        .IsFixedLength()
+                        .UseCollation("Latin1_General_100_BIN2");
+
+                    b.Property<Guid?>("ForceAttemptBranchId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<long?>("ForceAttemptLeaseGeneration")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("HandlerId")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)")
+                        .UseCollation("Latin1_General_100_BIN2");
+
+                    b.Property<Guid>("OperationId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<long>("OriginalBlockedLeaseGeneration")
+                        .HasColumnType("bigint");
+
+                    b.Property<byte[]>("OriginalBlockedRowVersion")
+                        .IsRequired()
+                        .HasColumnType("binary(8)");
+
+                    b.Property<string>("OriginalOutcomeCode")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("nvarchar(128)")
+                        .UseCollation("Latin1_General_100_BIN2");
+
+                    b.Property<Guid>("PolicyId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("PolicyReasonCode")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("nvarchar(128)")
+                        .UseCollation("Latin1_General_100_BIN2");
+
+                    b.Property<long>("PolicyRevision")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("RequestFingerprint")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .IsUnicode(false)
+                        .HasColumnType("char(64)")
+                        .IsFixedLength()
+                        .UseCollation("Latin1_General_100_BIN2");
+
+                    b.Property<DateTimeOffset>("RequestedAtUtc")
+                        .HasColumnType("datetimeoffset(7)");
+
+                    b.Property<byte[]>("RowVersion")
+                        .IsConcurrencyToken()
+                        .IsRequired()
+                        .ValueGeneratedOnAddOrUpdate()
+                        .HasColumnType("rowversion");
+
+                    b.Property<string>("SafetyContractId")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)")
+                        .UseCollation("Latin1_General_100_BIN2");
+
+                    b.Property<Guid>("SourceActivityId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("SourceProcessorBranchId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("SourceRevisionId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<byte>("State")
+                        .HasColumnType("tinyint");
+
+                    b.Property<DateTimeOffset?>("TerminalAtUtc")
+                        .HasColumnType("datetimeoffset(7)");
+
+                    b.Property<string>("TerminalReasonCode")
+                        .HasMaxLength(128)
+                        .HasColumnType("nvarchar(128)")
+                        .UseCollation("Latin1_General_100_BIN2");
+
+                    b.Property<string>("TerminalReceiptFingerprint")
+                        .HasMaxLength(64)
+                        .IsUnicode(false)
+                        .HasColumnType("char(64)")
+                        .IsFixedLength()
+                        .UseCollation("Latin1_General_100_BIN2");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ActionId")
+                        .IsUnique();
+
+                    b.HasIndex("OperationId")
+                        .IsUnique();
+
+                    b.HasIndex("SourceActivityId");
+
+                    b.HasIndex("SourceRevisionId");
+
+                    b.HasIndex("ForceAttemptBranchId", "ForceAttemptLeaseGeneration");
+
+                    b.HasIndex("State", "ClaimExpiresAtUtc");
+
+                    b.HasIndex("SourceProcessorBranchId", "DescriptorId", "DescriptorFingerprint", "OriginalBlockedRowVersion")
+                        .IsUnique()
+                        .HasFilter("[State] IN (0, 1)");
+
+                    b.HasIndex("PolicyId", "PolicyRevision", "DescriptorId", "DescriptorFingerprint", "DescriptorVersion", "SafetyContractId", "HandlerId", "ActionKind", "PolicyReasonCode");
+
+                    b.ToTable("SourceProcessorForceRequests", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_SourceProcessorForceRequests_ActionId", "LEN([ActionId]) = 64 AND [ActionId] COLLATE Latin1_General_100_BIN2 NOT LIKE '%[^0-9a-f]%'");
+
+                            t.HasCheckConstraint("CK_SourceProcessorForceRequests_AttemptBinding", "([ForceAttemptBranchId] IS NULL AND [ForceAttemptLeaseGeneration] IS NULL) OR ([ForceAttemptBranchId] IS NOT NULL AND [ForceAttemptLeaseGeneration] IS NOT NULL AND [ForceAttemptBranchId] = [SourceProcessorBranchId])");
+
+                            t.HasCheckConstraint("CK_SourceProcessorForceRequests_ExpectedInputSha256", "LEN([ExpectedInputSha256]) = 64 AND [ExpectedInputSha256] COLLATE Latin1_General_100_BIN2 NOT LIKE '%[^0-9a-f]%'");
+
+                            t.HasCheckConstraint("CK_SourceProcessorForceRequests_OriginalOutcome", "[OriginalOutcomeCode] <> N''");
+
+                            t.HasCheckConstraint("CK_SourceProcessorForceRequests_RequestFingerprint", "LEN([RequestFingerprint]) = 64 AND [RequestFingerprint] COLLATE Latin1_General_100_BIN2 NOT LIKE '%[^0-9a-f]%'");
+
+                            t.HasCheckConstraint("CK_SourceProcessorForceRequests_State", "[State] IN (0, 1, 2, 3, 4, 5, 6)");
+
+                            t.HasCheckConstraint("CK_SourceProcessorForceRequests_StateShape", "(([State] = 0 AND [ClaimedAtUtc] IS NULL AND [TerminalAtUtc] IS NULL AND [ForceAttemptBranchId] IS NULL AND [TerminalReceiptFingerprint] IS NULL AND [TerminalReasonCode] IS NULL) OR ([State] = 1 AND [ClaimedAtUtc] IS NOT NULL AND [TerminalAtUtc] IS NULL AND [ForceAttemptBranchId] IS NOT NULL AND [TerminalReceiptFingerprint] IS NULL AND [TerminalReasonCode] IS NULL) OR ([State] = 2 AND [ClaimedAtUtc] IS NOT NULL AND [TerminalAtUtc] IS NOT NULL AND [ForceAttemptBranchId] IS NOT NULL AND [TerminalReceiptFingerprint] IS NOT NULL AND [TerminalReasonCode] = N'completed') OR ([State] = 3 AND [ClaimedAtUtc] IS NOT NULL AND [TerminalAtUtc] IS NOT NULL AND [ForceAttemptBranchId] IS NOT NULL AND [TerminalReceiptFingerprint] IS NOT NULL AND [TerminalReasonCode] IS NOT NULL) OR ([State] = 4 AND [ClaimedAtUtc] IS NOT NULL AND [TerminalAtUtc] IS NOT NULL AND [ForceAttemptBranchId] IS NOT NULL AND [TerminalReceiptFingerprint] IS NOT NULL AND [TerminalReasonCode] = N'force-request-transient') OR ([State] = 5 AND [TerminalAtUtc] IS NOT NULL AND [TerminalReceiptFingerprint] IS NOT NULL AND [TerminalReasonCode] IN (N'force-request-cancelled', N'force-request-descriptor-disabled') AND (([ClaimedAtUtc] IS NULL AND [ForceAttemptBranchId] IS NULL) OR ([ClaimedAtUtc] IS NOT NULL AND [ForceAttemptBranchId] IS NOT NULL))) OR ([State] = 6 AND [TerminalAtUtc] IS NOT NULL AND [TerminalReceiptFingerprint] IS NOT NULL AND (([ClaimedAtUtc] IS NULL AND [ForceAttemptBranchId] IS NULL AND [TerminalReasonCode] = N'force-request-claim-expired') OR ([ClaimedAtUtc] IS NOT NULL AND [ForceAttemptBranchId] IS NOT NULL AND [TerminalReasonCode] = N'lease-expired-reconciled'))))");
+
+                            t.HasCheckConstraint("CK_SourceProcessorForceRequests_TerminalReceiptFingerprint", "[TerminalReceiptFingerprint] IS NULL OR (LEN([TerminalReceiptFingerprint]) = 64 AND [TerminalReceiptFingerprint] COLLATE Latin1_General_100_BIN2 NOT LIKE '%[^0-9a-f]%')");
+
+                            t.HasCheckConstraint("CK_SourceProcessorForceRequests_Timestamps", "[RequestedAtUtc] <= [ClaimExpiresAtUtc] AND ([ClaimedAtUtc] IS NULL OR [ClaimedAtUtc] >= [RequestedAtUtc]) AND ([TerminalAtUtc] IS NULL OR [TerminalAtUtc] >= [RequestedAtUtc]) AND ([TerminalAtUtc] IS NULL OR [ClaimedAtUtc] IS NULL OR [TerminalAtUtc] >= [ClaimedAtUtc])");
+                        });
+                });
+
             modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.SourceRevisionEntity", b =>
                 {
                     b.Property<Guid>("Id")
@@ -1899,6 +3136,11 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Migrations
 
                     b.Property<DateTimeOffset?>("FileLastWriteAtUtc")
                         .HasColumnType("datetimeoffset(7)");
+
+                    b.Property<int>("OriginKind")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("int")
+                        .HasDefaultValue(0);
 
                     b.Property<Guid?>("ParentSourceRevisionId")
                         .HasColumnType("uniqueidentifier");
@@ -2630,6 +3872,35 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Migrations
                     b.Navigation("Instance");
                 });
 
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.OperatorActionActionLedgerEntity", b =>
+                {
+                    b.HasOne("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.SourceProcessorBranchEntity", null)
+                        .WithMany()
+                        .HasForeignKey("SourceProcessorBranchId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.SourceProcessorForceRequestEntity", null)
+                        .WithMany()
+                        .HasForeignKey("SourceProcessorForceRequestId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.OperatorActionCapabilityPolicyEntity", null)
+                        .WithMany()
+                        .HasForeignKey("PolicyId", "PolicyRevision", "DescriptorId", "DescriptorFingerprint", "DescriptorVersion", "SafetyContractId", "HandlerId", "ActionKind", "ReasonCode")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.OperatorActionOperationLedgerEntity", b =>
+                {
+                    b.HasOne("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.OperatorActionActionLedgerEntity", null)
+                        .WithMany()
+                        .HasForeignKey("ActionId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
             modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.OutboxMessageEntity", b =>
                 {
                     b.HasOne("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.PipelineRecordEntity", "PipelineRecord")
@@ -2761,6 +4032,21 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Migrations
                     b.Navigation("SourceRevision");
                 });
 
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.SourceActivityRelationEntity", b =>
+                {
+                    b.HasOne("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.SourceActivityEntity", null)
+                        .WithMany()
+                        .HasForeignKey("PredecessorActivityId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.SourceActivityEntity", null)
+                        .WithMany()
+                        .HasForeignKey("SuccessorActivityId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
             modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.SourceArtifactEntity", b =>
                 {
                     b.HasOne("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.SourceRevisionEntity", "SourceRevision")
@@ -2770,6 +4056,178 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Migrations
                         .IsRequired();
 
                     b.Navigation("SourceRevision");
+                });
+
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.SourceProcessorActionIgnoreHeadEntity", b =>
+                {
+                    b.HasOne("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.OperatorActionActionLedgerEntity", null)
+                        .WithMany()
+                        .HasForeignKey("ActionId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.SourceProcessorAttemptEntity", b =>
+                {
+                    b.HasOne("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.SourceProcessorBranchEntity", null)
+                        .WithMany()
+                        .HasForeignKey("BranchId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.SourceProcessorBranchEntity", b =>
+                {
+                    b.HasOne("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.SourceActivityEntity", null)
+                        .WithMany()
+                        .HasForeignKey("SourceActivityId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.SourceRevisionEntity", null)
+                        .WithMany()
+                        .HasForeignKey("SourceRevisionId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.SourceProcessorBranchMemberEntity", b =>
+                {
+                    b.HasOne("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.SourceProcessorBranchEntity", null)
+                        .WithMany()
+                        .HasForeignKey("BranchId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.SourceActivityEntity", null)
+                        .WithMany()
+                        .HasForeignKey("ChildSourceActivityId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.SourceRevisionEntity", null)
+                        .WithMany()
+                        .HasForeignKey("ChildSourceRevisionId")
+                        .OnDelete(DeleteBehavior.Restrict);
+                });
+
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.SourceProcessorCodeBlockedDiagnosticEntity", b =>
+                {
+                    b.HasOne("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.SourceProcessorBranchEntity", null)
+                        .WithMany()
+                        .HasForeignKey("SourceProcessorBranchId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.SourceProcessorAttemptEntity", null)
+                        .WithMany()
+                        .HasForeignKey("SourceProcessorBranchId", "SourceProcessorAttemptId")
+                        .HasPrincipalKey("BranchId", "Id")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.SourceProcessorCodeCompletionReceiptEntity", b =>
+                {
+                    b.HasOne("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.SourceProcessorBranchEntity", null)
+                        .WithMany()
+                        .HasForeignKey("SourceProcessorBranchId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.SourceRevisionEntity", null)
+                        .WithMany()
+                        .HasForeignKey("SourceRevisionId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.SourceProcessorAttemptEntity", null)
+                        .WithMany()
+                        .HasForeignKey("SourceProcessorBranchId", "SourceProcessorAttemptId")
+                        .HasPrincipalKey("BranchId", "Id")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.SourceProcessorCodeDocumentEntity", null)
+                        .WithMany()
+                        .HasForeignKey("DocumentId", "SourceRevisionId", "RetainedArtifactSha256", "DescriptorFingerprint", "ParserFingerprint", "HandlerImplementationId", "WithheldSymbolCount", "WithheldReferenceCount", "WithheldDiagnosticCount", "ReceiptDiagnosticCodeCount", "DocumentFingerprint", "CompletionFingerprint")
+                        .HasPrincipalKey("SourceProcessorBranchId", "SourceRevisionId", "RetainedArtifactSha256", "DescriptorFingerprint", "ParserFingerprint", "HandlerImplementationId", "WithheldSymbolCount", "WithheldReferenceCount", "WithheldDiagnosticCount", "ReceiptDiagnosticCodeCount", "DocumentFingerprint", "CompletionFingerprint")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .HasConstraintName("FK_SourceProcessorCodeCompletionReceipts_SourceProcessorCodeDocuments_SuccessIdentity");
+                });
+
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.SourceProcessorCodeDiagnosticEntity", b =>
+                {
+                    b.HasOne("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.SourceProcessorCodeDocumentEntity", null)
+                        .WithMany()
+                        .HasForeignKey("DocumentId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.SourceProcessorCodeDocumentEntity", b =>
+                {
+                    b.HasOne("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.SourceProcessorBranchEntity", null)
+                        .WithMany()
+                        .HasForeignKey("SourceProcessorBranchId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.SourceRevisionEntity", null)
+                        .WithMany()
+                        .HasForeignKey("SourceRevisionId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.SourceProcessorCodeReferenceEntity", b =>
+                {
+                    b.HasOne("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.SourceProcessorCodeDocumentEntity", null)
+                        .WithMany()
+                        .HasForeignKey("DocumentId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.SourceProcessorCodeSymbolEntity", b =>
+                {
+                    b.HasOne("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.SourceProcessorCodeDocumentEntity", null)
+                        .WithMany()
+                        .HasForeignKey("DocumentId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.SourceProcessorForceRequestEntity", b =>
+                {
+                    b.HasOne("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.SourceActivityEntity", null)
+                        .WithMany()
+                        .HasForeignKey("SourceActivityId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.SourceProcessorBranchEntity", null)
+                        .WithMany()
+                        .HasForeignKey("SourceProcessorBranchId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.SourceRevisionEntity", null)
+                        .WithMany()
+                        .HasForeignKey("SourceRevisionId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.SourceProcessorAttemptEntity", null)
+                        .WithMany()
+                        .HasForeignKey("ForceAttemptBranchId", "ForceAttemptLeaseGeneration")
+                        .HasPrincipalKey("BranchId", "LeaseGeneration")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.OperatorActionCapabilityPolicyEntity", null)
+                        .WithMany()
+                        .HasForeignKey("PolicyId", "PolicyRevision", "DescriptorId", "DescriptorFingerprint", "DescriptorVersion", "SafetyContractId", "HandlerId", "ActionKind", "PolicyReasonCode")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
                 });
 
             modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.SourceRevisionEntity", b =>

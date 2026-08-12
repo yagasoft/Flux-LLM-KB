@@ -168,6 +168,8 @@ describe("Flux dashboard", () => {
     expect(within(table).getByRole("button", { name: "Reject capture job job-review" })).toBeInTheDocument();
     expect(await screen.findByText("capture.review_rejected")).toBeInTheDocument();
     expect(screen.getByText("duplicate capture")).toBeInTheDocument();
+    expect(screen.getByLabelText("Trusted local audit evidence")).toHaveTextContent("E:/Private/App/review/session.json");
+    expect(screen.getByLabelText("Trusted local audit evidence")).toHaveTextContent("sha256:review-session");
 
     await user.click(within(table).getByRole("button", { name: "Approve capture job job-review" }));
     const dialog = await screen.findByRole("dialog", { name: "Approve capture review" });

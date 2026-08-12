@@ -509,17 +509,21 @@ describe("Flux dashboard", () => {
     await user.clear(screen.getByLabelText("Code path glob"));
     await user.type(screen.getByLabelText("Code path glob"), "src/*.py");
     await user.click(screen.getByRole("button", { name: "Run code search" }));
-    expect(state.codeSearchRequestUrl).toContain("/api/code/search?");
+    expect(state.codeSearchRequestUrl).toContain("/api/local/code/search?");
     expect(state.codeSearchRequestUrl).toContain("query=build_invoice");
     expect(state.codeSearchRequestUrl).toContain("relationship=call");
     expect(state.codeSearchRequestUrl).toContain("path_glob=src%2F*.py");
     expect(state.codeSearchRequestUrl).toContain("include_generated=false");
     expect(await screen.findByText("OrderService.build_invoice")).toBeInTheDocument();
+    expect(screen.getByText("build_invoice(order_id: str) -> Invoice")).toBeInTheDocument();
+    expect(await screen.findByText(/InvoiceRepository\.save/)).toBeInTheDocument();
+    expect(screen.getByText("parsed without errors")).toBeInTheDocument();
+    expect(screen.getByText("public Invoice build_invoice(string orderId) => repository.save(orderId);")).toBeInTheDocument();
     await user.clear(screen.getByLabelText("Symbol lookup query"));
     await user.type(screen.getByLabelText("Symbol lookup query"), "OrderService.build_invoice");
     await user.click(screen.getByRole("button", { name: "Lookup code symbol" }));
-    expect(state.codeSymbolRequestUrl).toContain("/api/code/symbols?");
-    expect(state.codeSymbolRequestUrl).toContain("symbol=OrderService.build_invoice");
+    expect(state.codeSymbolRequestUrl).toContain("/api/local/code/search?");
+    expect(state.codeSymbolRequestUrl).toContain("query=OrderService.build_invoice");
     expect(await screen.findByText("test_build_invoice_returns_ready_status")).toBeInTheDocument();
   });
 
@@ -534,9 +538,12 @@ describe("Flux dashboard", () => {
     expect(screen.getByText("Blocked jobs")).toBeInTheDocument();
     expect(screen.getByText("1 blocked locks")).toBeInTheDocument();
     expect(screen.getByText("Job job-1 is blocked.")).toBeInTheDocument();
+    expect(screen.getByText("E:/Private/App/src/Parser.cs")).toBeInTheDocument();
+    expect(screen.getByText("sha256:parser")).toBeInTheDocument();
+    expect(screen.getByText("CS1002 ; expected")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Retry corpus job" })).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Apply diagnostic filters" }));
-    expect(vi.mocked(fetch).mock.calls.map(([url]) => String(url))).toContain("/api/diagnostics/all?root_name=docs&status=blocked_missing_dependency&family=office&include_details=true");
+    expect(vi.mocked(fetch).mock.calls.map(([url]) => String(url))).toContain("/api/local/diagnostics/all?root_name=docs&status=blocked_missing_dependency&family=office&include_details=true");
     vi.spyOn(window, "confirm").mockReturnValueOnce(true);
     await user.click(screen.getByRole("button", { name: "Retry corpus job" }));
     expect(state.diagnosticsActionPayload).toEqual({

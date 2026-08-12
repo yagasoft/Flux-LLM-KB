@@ -3680,6 +3680,29 @@ def _eviction_status(
     }
 
 
+_SHARED_EVICTION_LOCAL_ONLY_METADATA_KEYS = {
+    "owner_component",
+    "reconciliation_observation_id",
+    "runtime_activity_sequence",
+    "runtime_fingerprint",
+    "runtime_generation",
+}
+
+
+def _shared_eviction_metadata(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            str(key): _shared_eviction_metadata(item)
+            for key, item in value.items()
+            if str(key).strip().lower().replace("-", "_") not in _SHARED_EVICTION_LOCAL_ONLY_METADATA_KEYS
+        }
+    if isinstance(value, list):
+        return [_shared_eviction_metadata(item) for item in value]
+    if isinstance(value, tuple):
+        return [_shared_eviction_metadata(item) for item in value]
+    return value
+
+
 def _eviction_payload(row: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": str(row.get("id") or ""),
@@ -3699,7 +3722,7 @@ def _eviction_payload(row: dict[str, Any]) -> dict[str, Any]:
         "broker_delivery_count": int(row.get("broker_delivery_count") or 0),
         "request_reason": str(row.get("request_reason") or ""),
         "terminal_reason": str(row.get("terminal_reason") or ""),
-        "metadata": dict(row.get("metadata") or {}),
+        "metadata": _shared_eviction_metadata(row.get("metadata") or {}),
     }
 
 

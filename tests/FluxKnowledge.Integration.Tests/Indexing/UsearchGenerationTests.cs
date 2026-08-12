@@ -9,6 +9,7 @@ using Xunit;
 
 namespace FluxKnowledge.Integration.Tests.Indexing;
 
+[Collection("sql-full-text")]
 public sealed class UsearchGenerationTests : IDisposable
 {
     private readonly string _root = Path.Combine(Path.GetTempPath(), $"FluxKnowledgeIndexes_{Guid.NewGuid():N}");

@@ -68,6 +68,26 @@ public static class SourceClassifier
             return DeferredPolicy("File bytes contain binary control values and are not accepted as text.");
         }
 
+        if (string.Equals(extension, ".cs", StringComparison.OrdinalIgnoreCase))
+        {
+            if (declaredByteLength > maximumAcceptedTextBytes)
+            {
+                return DeferredPolicy("File exceeds the effective UTF-8 text ingestion limit.");
+            }
+            if (!hasFullBoundedBuffer || bytes.Length != declaredByteLength)
+            {
+                return DeferredPolicy("Read byte count does not match the discovered file size.");
+            }
+            try
+            {
+                return new SourceClassificationResult(SourceClassification.AcceptedUtf8Text, StrictUtf8.GetString(RemoveUtf8Bom(bytes)), null);
+            }
+            catch (DecoderFallbackException)
+            {
+                return DeferredPolicy("File bytes are not valid UTF-8.");
+            }
+        }
+
         if (CodeExtensions.Contains(extension))
         {
             return DeferredPolicy("Source code ingestion is not enabled for this root.");
@@ -111,7 +131,9 @@ public static class SourceClassifier
     private static bool HasBinarySignature(ReadOnlySpan<byte> bytes) =>
         bytes.StartsWith("%PDF-"u8) ||
         bytes.StartsWith(new byte[] { 0x50, 0x4b, 0x03, 0x04 }) ||
+        TarArchiveRetainedProcessor.IsTarSignature(bytes) ||
         bytes.StartsWith(new byte[] { 0x1f, 0x8b }) ||
+        bytes.StartsWith(new byte[] { 0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1 }) ||
         bytes.StartsWith(new byte[] { 0x89, 0x50, 0x4e, 0x47 }) ||
         bytes.StartsWith(new byte[] { 0xff, 0xd8, 0xff }) ||
         bytes.StartsWith("GIF87a"u8) ||

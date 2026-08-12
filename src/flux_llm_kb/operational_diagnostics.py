@@ -5,6 +5,19 @@ import time
 from typing import Any
 
 
+_PUBLIC_DIAGNOSTIC_LOCAL_ONLY_KEYS = {
+    "commands",
+    "folder",
+    "owner_component",
+    "reconciliation_observation_id",
+    "runtime_activity_sequence",
+    "runtime_fingerprint",
+    "runtime_generation",
+    "uid",
+    "uidvalidity",
+}
+
+
 def summarize_operational_diagnostics(
     *,
     retrieval: dict[str, Any] | None = None,
@@ -58,12 +71,20 @@ def summarize_operational_diagnostics(
 
 def _sanitize_section(value: Any) -> Any:
     if isinstance(value, dict):
-        return {str(key): _sanitize_section(item) for key, item in value.items()}
+        return {
+            str(key): _sanitize_section(item)
+            for key, item in value.items()
+            if _public_diagnostic_key(str(key)) not in _PUBLIC_DIAGNOSTIC_LOCAL_ONLY_KEYS
+        }
     if isinstance(value, list):
         return [_sanitize_section(item) for item in value]
     if isinstance(value, str):
         return _sanitize_text(value)
     return value
+
+
+def _public_diagnostic_key(value: str) -> str:
+    return str(value or "").strip().lower().replace("-", "_")
 
 
 def _sanitize_text(value: str) -> str:
@@ -76,6 +97,10 @@ def _sanitize_text(value: str) -> str:
 
 def _diagnostic_items(sections: dict[str, Any], *, filters: dict[str, Any]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
+    for explain in sections["retrieval"].get("recent_explains", []) or []:
+        if not isinstance(explain, dict):
+            continue
+        rows.append(_item("retrieval", explain, status=str(explain.get("status") or "observed"), family="retrieval"))
     for event in sections["watcher"].get("events", []) or []:
         if not isinstance(event, dict):
             continue
@@ -115,6 +140,12 @@ def _diagnostic_items(sections: dict[str, Any], *, filters: dict[str, Any]) -> l
         run_status = str(run.get("status") or "unknown")
         severity = "warning" if run_status not in {"completed", "queued", "claimed", "running"} else "info"
         rows.append(_item("mail", run, status=run_status, family=None, severity=severity))
+    for event in sections["mail"].get("post_process_events", []) or []:
+        if not isinstance(event, dict):
+            continue
+        event_status = str(event.get("status") or "unknown")
+        severity = "warning" if event_status not in {"completed", "applied", "queued", "claimed", "running"} else "info"
+        rows.append(_item("mail", event, status=event_status, family="post_process", severity=severity))
     return [row for row in rows if _matches_filters(row, filters)][:25]
 
 
@@ -158,7 +189,7 @@ def _item(
     severity: str = "info",
 ) -> dict[str, Any]:
     root_name = row.get("root_name")
-    target_id = row.get("id") or row.get("root_name") or row.get("family") or row.get("profile_name") or section
+    target_id = _diagnostic_target_id(section, row)
     summary = _summary(section=section, status=status, row=row)
     evidence = {
         key: value
@@ -201,6 +232,10 @@ def _item(
             target_id=str(target_id) if target_id is not None else None,
         ),
     }
+
+
+def _diagnostic_target_id(section: str, row: dict[str, Any]) -> Any:
+    return row.get("id") or row.get("root_name") or row.get("family") or row.get("profile_name") or row.get("query_hash") or section
 
 
 def _summary(*, section: str, status: str, row: dict[str, Any]) -> str:

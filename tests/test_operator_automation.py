@@ -243,7 +243,7 @@ def test_operator_automation_rest_cli_and_mcp_contracts(monkeypatch, capsys):
     monkeypatch.setattr("flux_llm_kb.service.KnowledgeService", FakeService)
     monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: FakeService())
 
-    client = fastapi_testclient.TestClient(create_app())
+    client = fastapi_testclient.TestClient(create_app(), client=("127.0.0.1", 50100))
     assert client.get("/api/automation/status").json()["policy"]["enabled"] is False
     automation_response = client.post("/api/automation/run", json={"mode": "guarded", "limit": 5, "dry_run": True})
     assert automation_response.status_code == 202

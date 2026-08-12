@@ -529,6 +529,53 @@ def create_server(
 
         return runtime.call("kb.code_symbol_lookup", operation, readonly=True)
 
+    @mcp.tool(name="kb.local_source_detail")
+    def local_source_detail(asset_id: str):
+        """Read an explicit trusted-local source detail projection; it never reopens a source original."""
+        return runtime.call("kb.local_source_detail", lambda: service.local_source_detail(asset_id), readonly=True)
+
+    @mcp.tool(name="kb.local_corpus_detail")
+    def local_corpus_detail(chunk_id: str):
+        """Read an explicit trusted-local corpus detail projection from indexed retained content only."""
+        return runtime.call("kb.local_corpus_detail", lambda: service.local_corpus_detail(chunk_id), readonly=True)
+
+    @mcp.tool(name="kb.local_code_search")
+    def local_code_search(query: str, root_name: str | None = None, cwd: str | None = None, language: str | None = None, relationship: str | None = None, limit: int = 20):
+        """Search raw code facts only through the explicit trusted-local MCP projection."""
+        def operation():
+            return service.local_code_search(
+                query,
+                root_name=root_name,
+                cwd=cwd,
+                language=language,
+                relationship=relationship,
+                limit=limit,
+            )
+
+        return runtime.call("kb.local_code_search", operation, readonly=True)
+
+    @mcp.tool(name="kb.local_operational_diagnostics")
+    def local_operational_diagnostics(section: str = "all", limit: int = 25, root_name: str | None = None, status: str | None = None, family: str | None = None, since_hours: int | None = None, include_details: bool = False):
+        """Read bounded trusted-local diagnostic evidence without changing remediation authority."""
+        return runtime.call(
+            "kb.local_operational_diagnostics",
+            lambda: service.local_operational_diagnostics(
+                section=section,
+                limit=limit,
+                root_name=root_name,
+                status=status,
+                family=family,
+                since_hours=since_hours,
+                include_details=include_details,
+            ),
+            readonly=True,
+        )
+
+    @mcp.tool(name="kb.local_audit")
+    def local_audit(limit: int = 50):
+        """Read bounded trusted-local audit evidence; audit records remain immutable."""
+        return runtime.call("kb.local_audit", lambda: {"events": service.local_audit(limit=limit)}, readonly=True)
+
     @mcp.tool(name="kb.code_feedback_record")
     def code_feedback_record(query: str, root_name: str | None = None, result_count: int = 0, surface: str = "mcp", miss_category: str = "other", expected_symbol: str | None = None, path: str | None = None):
         """Record privacy-safe code retrieval miss feedback without raw query or code persistence."""
@@ -722,7 +769,7 @@ def create_server(
 
 
 def main() -> None:
-    create_server().run()
+    create_server().run(transport="stdio")
 
 
 if __name__ == "__main__":

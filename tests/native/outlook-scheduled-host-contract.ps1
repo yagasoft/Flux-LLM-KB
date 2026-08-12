@@ -11,17 +11,14 @@ $text = Get-Content -LiteralPath $launcher -Raw
 if ($text -match '(?m)^\s*param\s*\(') {
     throw 'The Outlook launcher must not accept task arguments.'
 }
-
 if ($text -notmatch 'ConnectionStrings__FluxKnowledge' -or
     $text -notmatch '(?s)try\s*\{.*finally\s*\{') {
     throw 'The launcher must scope and clear the SQL connection value.'
 }
-
 if ($text -notmatch '--run-once' -or
     $text -match '--verbose-com-errors|spool|mailbox|credential|https?://') {
     throw 'The launcher action is not the fixed non-diagnostic local host invocation.'
 }
-
 if ($text -notmatch '\$PSScriptRoot' -or
     $text -notmatch 'appsettings\.Production\.json') {
     throw 'The launcher must resolve the local production settings from its installed directory.'
@@ -29,30 +26,29 @@ if ($text -notmatch '\$PSScriptRoot' -or
 
 $deploymentScript = Join-Path $SourceRoot 'scripts\deploy\update-native-windows.ps1'
 $deploymentText = Get-Content -LiteralPath $deploymentScript -Raw
-
-foreach ($helper in @(
-    'New-OutlookHostTaskTriggers',
-    'Get-OutlookHostScheduledTask',
-    'Register-OutlookHostTask',
-    'Install-OutlookHostTask',
-    'DisableAndDrain-OutlookHostTask',
-    'Assert-OutlookHostTask'
-)) {
+foreach ($helper in @('Get-OutlookHostScheduledTask', 'DisableAndDrain-OutlookHostTask')) {
     if ($deploymentText -notmatch ("(?m)^function\s+{0}\b" -f [regex]::Escape($helper))) {
-        throw "The native deployment script must define $helper for the Outlook scheduled-task lifecycle."
+        throw "The native deployment script must define the fail-closed Outlook helper $helper."
     }
 }
-
-if ($deploymentText -notmatch 'New-ScheduledTaskPrincipal[\s\S]*?-LogonType\s+Interactive[\s\S]*?-RunLevel\s+Limited') {
-    throw 'The Outlook task must use the limited interactive user token.'
+foreach ($forbiddenHelper in @(
+    'New-OutlookHostTaskTriggers', 'Register-OutlookHostTask',
+    'Install-OutlookHostTask', 'Assert-OutlookHostTask')) {
+    if ($deploymentText -match ("(?m)^function\s+{0}\b" -f [regex]::Escape($forbiddenHelper))) {
+        throw "The native deployment script retains an Outlook activation helper: $forbiddenHelper"
+    }
 }
-if ($deploymentText -notmatch 'New-ScheduledTaskSettingsSet[\s\S]*?-Hidden[\s\S]*?-MultipleInstances\s+IgnoreNew' -or
-    $deploymentText -notmatch 'ExecutionTimeLimit') {
-    throw 'The Outlook task must be hidden, ignore overlaps and have a bounded execution limit.'
+foreach ($forbiddenCommand in @(
+    'New-ScheduledTaskTrigger', 'New-ScheduledTaskAction', 'New-ScheduledTaskPrincipal',
+    'New-ScheduledTaskSettingsSet', 'Register-ScheduledTask', 'Enable-ScheduledTask',
+    'Start-ScheduledTask')) {
+    if ($deploymentText -match ("\b{0}\b" -f [regex]::Escape($forbiddenCommand))) {
+        throw "The native deployment script retains an Outlook activation command: $forbiddenCommand"
+    }
 }
-
-if ($deploymentText -notmatch '(?s)function\s+DisableAndDrain-OutlookHostTask.*?\$wasEnabled.*?catch\s*\{.*?if\s*\(\$wasEnabled\).*?Enable-ScheduledTask.*?throw') {
-    throw 'A failed Outlook task drain must restore an enabled task before rethrowing.'
+if ($deploymentText -notmatch '\[switch\]\$KeepOutlookHostDisabled\s*=\s*\$true' -or
+    $deploymentText -notmatch 'if\s*\(\s*-not\s+\$KeepOutlookHostDisabled\s*\)\s*\{\s*throw\s+"Outlook host activation is not authorised') {
+    throw 'The native deployment script does not default to and enforce Outlook-disabled mode.'
 }
 
 function Get-DeploymentFunctionText {
@@ -82,42 +78,6 @@ function Get-DeploymentFunctionText {
 
 & {
     $OutlookHostTaskName = 'FluxKnowledge.OutlookHost'
-    $OutlookHostPayloadDirectory = 'outlook-host'
-    $OutlookHostIntervalMinutes = 15
-    $OutlookHostExecutionLimit = New-TimeSpan -Minutes 14
-    Invoke-Expression (Get-DeploymentFunctionText -Name 'Assert-OutlookHostTask')
-
-    $deployRoot = Join-Path ([System.IO.Path]::GetTempPath()) 'FluxKnowledge scheduler identity test'
-    $launcher = Join-Path (Join-Path $deployRoot $OutlookHostPayloadDirectory) 'run-outlook-host.ps1'
-    $powershell = Join-Path $PSHOME 'powershell.exe'
-    $action = New-ScheduledTaskAction -Execute $powershell -Argument (
-        '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}"' -f $launcher)
-    $principal = New-ScheduledTaskPrincipal `
-        -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().User.Value) `
-        -LogonType Interactive `
-        -RunLevel Limited
-    $settings = New-ScheduledTaskSettingsSet -Hidden -MultipleInstances IgnoreNew `
-        -ExecutionTimeLimit $OutlookHostExecutionLimit -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
-    $logon = New-ScheduledTaskTrigger -AtLogOn
-    $repeat = New-ScheduledTaskTrigger -Once -At ([DateTime]::Now.AddMinutes(1)) `
-        -RepetitionInterval (New-TimeSpan -Minutes $OutlookHostIntervalMinutes) `
-        -RepetitionDuration (New-TimeSpan -Days 3650)
-    $script:scheduledTaskFixture = [pscustomobject]@{
-        Actions = @($action)
-        Principal = $principal
-        Settings = $settings
-        Triggers = @($logon, $repeat)
-    }
-    function Get-ScheduledTask {
-        param([string]$TaskName, [object]$ErrorAction)
-        return $script:scheduledTaskFixture
-    }
-
-    Assert-OutlookHostTask -DeployRoot $deployRoot
-}
-
-& {
-    $OutlookHostTaskName = 'FluxKnowledge.OutlookHost'
     Invoke-Expression (Get-DeploymentFunctionText -Name 'Get-OutlookHostScheduledTask')
 
     function Get-ScheduledTask {
@@ -131,7 +91,8 @@ function Get-DeploymentFunctionText {
     $failure = $null
     try {
         Get-OutlookHostScheduledTask | Out-Null
-    } catch {
+    }
+    catch {
         $failure = $_
     }
     if ($null -eq $failure -or
@@ -142,142 +103,68 @@ function Get-DeploymentFunctionText {
 
 & {
     $OutlookHostTaskName = 'FluxKnowledge.OutlookHost'
-    $OutlookHostPayloadDirectory = 'outlook-host'
-    $OutlookHostIntervalMinutes = 15
-    $OutlookHostExecutionLimit = New-TimeSpan -Minutes 14
-    Invoke-Expression (Get-DeploymentFunctionText -Name 'New-OutlookHostTaskTriggers')
-    Invoke-Expression (Get-DeploymentFunctionText -Name 'Register-OutlookHostTask')
-    Invoke-Expression (Get-DeploymentFunctionText -Name 'Assert-OutlookHostTask')
-    Invoke-Expression (Get-DeploymentFunctionText -Name 'Install-OutlookHostTask')
+    Invoke-Expression (Get-DeploymentFunctionText -Name 'Get-OutlookHostScheduledTask')
+    Invoke-Expression (Get-DeploymentFunctionText -Name 'DisableAndDrain-OutlookHostTask')
 
-    $tempParent = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath())
-    $deployRoot = Join-Path $tempParent ("FluxKnowledge-scheduler-install-test-{0}" -f [Guid]::NewGuid().ToString('N'))
-    $payloadRoot = Join-Path $deployRoot $OutlookHostPayloadDirectory
-    New-Item -ItemType Directory -Path $payloadRoot -Force | Out-Null
-    New-Item -ItemType File -Path (Join-Path $payloadRoot 'run-outlook-host.ps1') -Force | Out-Null
-    try {
-        $script:scheduledTaskFixture = $null
-        $script:registeredEnabled = $null
-        $script:enableCount = 0
-        $script:disableCount = 0
-        $script:disableShouldFail = $false
-        $script:invalidateAfterEnable = $false
-        function Register-ScheduledTask {
-            param(
-                [string]$TaskName,
-                [object]$Action,
-                [object[]]$Trigger,
-                [object]$Principal,
-                [object]$Settings,
-                [string]$Description,
-                [switch]$Force)
-            $script:registeredEnabled = [bool]$Settings.Enabled
-            $script:scheduledTaskFixture = [pscustomobject]@{
-                Actions = @($Action)
-                Principal = $Principal
-                Settings = $Settings
-                Triggers = @($Trigger)
+    $script:disableCount = 0
+    $script:activationCount = 0
+    $script:stateReads = 0
+    function Get-ScheduledTask {
+        param([string]$TaskPath, [string]$TaskName, [object]$ErrorAction)
+        if (-not [string]::IsNullOrEmpty($TaskPath)) {
+            return [pscustomobject]@{
+                TaskName = $OutlookHostTaskName
+                Settings = [pscustomobject]@{ Enabled = $true }
             }
         }
-        function Get-ScheduledTask {
-            param([string]$TaskName, [object]$ErrorAction)
-            if ($script:invalidateAfterEnable -and $script:enableCount -gt 0) {
-                $script:scheduledTaskFixture.Principal = [pscustomobject]@{
-                    UserId = 'invalid scheduler identity'
-                    LogonType = 'Interactive'
-                    RunLevel = 'Limited'
-                }
-            }
-            return $script:scheduledTaskFixture
-        }
-        function Enable-ScheduledTask {
-            param([string]$TaskName, [object]$ErrorAction)
-            $script:enableCount++
-            $script:scheduledTaskFixture.Settings = New-ScheduledTaskSettingsSet `
-                -Hidden -MultipleInstances IgnoreNew -ExecutionTimeLimit $OutlookHostExecutionLimit `
-                -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
-        }
-        function Disable-ScheduledTask {
-            param([string]$TaskName, [object]$ErrorAction)
-            $script:disableCount++
-            if ($script:disableShouldFail) {
-                throw 'simulated disable failure'
-            }
-            $script:scheduledTaskFixture.Settings = New-ScheduledTaskSettingsSet `
-                -Disable -Hidden -MultipleInstances IgnoreNew -ExecutionTimeLimit $OutlookHostExecutionLimit `
-                -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
-        }
+        $script:stateReads++
+        return [pscustomobject]@{ State = if ($script:stateReads -eq 1) { 'Running' } else { 'Ready' } }
+    }
+    function Disable-ScheduledTask {
+        param([string]$TaskName, [object]$ErrorAction)
+        $script:disableCount++
+    }
+    function Enable-ScheduledTask { $script:activationCount++; throw 'activation must not run' }
+    function Start-ScheduledTask { $script:activationCount++; throw 'activation must not run' }
+    function Register-ScheduledTask { $script:activationCount++; throw 'activation must not run' }
+    function Start-Sleep { param([int]$Seconds) }
 
-        Install-OutlookHostTask -DeployRoot $deployRoot
-        if ($script:registeredEnabled -ne $false -or
-            $script:enableCount -ne 1 -or
-            $script:disableCount -ne 0 -or
-            -not [bool]$script:scheduledTaskFixture.Settings.Enabled) {
-            throw 'The Outlook task install must validate while disabled and enable exactly once after validation.'
-        }
-
-        $script:enableCount = 0
-        $script:disableCount = 0
-        $script:disableShouldFail = $true
-        $script:invalidateAfterEnable = $true
-        $failure = $null
-        try {
-            Install-OutlookHostTask -DeployRoot $deployRoot
-        } catch {
-            $failure = $_
-        }
-        if ($null -eq $failure -or
-            $failure.Exception.Message -notmatch 'could not be left disabled' -or
-            $script:disableCount -ne 1) {
-            throw 'An invalid Outlook task whose disable operation fails must stop deployment with explicit fail-closed evidence.'
-        }
-    } finally {
-        $resolvedDeployRoot = [System.IO.Path]::GetFullPath($deployRoot)
-        if (-not $resolvedDeployRoot.StartsWith($tempParent, [System.StringComparison]::OrdinalIgnoreCase) -or
-            (Split-Path -Leaf $resolvedDeployRoot) -notmatch '^FluxKnowledge-scheduler-install-test-[0-9a-f]{32}$') {
-            throw 'The scheduler install test temporary directory is outside its expected boundary.'
-        }
-        Remove-Item -LiteralPath $resolvedDeployRoot -Recurse -Force
+    $wasEnabled = DisableAndDrain-OutlookHostTask
+    if (-not $wasEnabled -or $script:disableCount -ne 1 -or $script:activationCount -ne 0 -or $script:stateReads -ne 2) {
+        throw 'The Outlook drain must disable once, wait until quiescent, and never activate the task.'
     }
 }
 
 & {
     $OutlookHostTaskName = 'FluxKnowledge.OutlookHost'
-    $OutlookHostPayloadDirectory = 'outlook-host'
-    $OutlookHostIntervalMinutes = 15
-    $OutlookHostExecutionLimit = New-TimeSpan -Minutes 14
-    Invoke-Expression (Get-DeploymentFunctionText -Name 'New-OutlookHostTaskTriggers')
-    Invoke-Expression (Get-DeploymentFunctionText -Name 'Register-OutlookHostTask')
+    Invoke-Expression (Get-DeploymentFunctionText -Name 'Get-OutlookHostScheduledTask')
+    Invoke-Expression (Get-DeploymentFunctionText -Name 'DisableAndDrain-OutlookHostTask')
 
-    $tempParent = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath())
-    $deployRoot = Join-Path $tempParent ("FluxKnowledge-scheduler-disabled-test-{0}" -f [Guid]::NewGuid().ToString('N'))
-    $payloadRoot = Join-Path $deployRoot $OutlookHostPayloadDirectory
-    New-Item -ItemType Directory -Path $payloadRoot -Force | Out-Null
-    New-Item -ItemType File -Path (Join-Path $payloadRoot 'run-outlook-host.ps1') -Force | Out-Null
+    $script:activationCount = 0
+    function Get-ScheduledTask {
+        param([string]$TaskPath, [string]$TaskName, [object]$ErrorAction)
+        return [pscustomobject]@{
+            TaskName = $OutlookHostTaskName
+            Settings = [pscustomobject]@{ Enabled = $true }
+        }
+    }
+    function Disable-ScheduledTask { throw 'simulated disable failure' }
+    function Enable-ScheduledTask { $script:activationCount++; throw 'activation must not run' }
+    function Start-ScheduledTask { $script:activationCount++; throw 'activation must not run' }
+    function Register-ScheduledTask { $script:activationCount++; throw 'activation must not run' }
+
+    $failure = $null
     try {
-        $script:registeredTaskSettings = $null
-        function Register-ScheduledTask {
-            param(
-                [string]$TaskName,
-                [object]$Action,
-                [object[]]$Trigger,
-                [object]$Principal,
-                [object]$Settings,
-                [string]$Description,
-                [switch]$Force)
-            $script:registeredTaskSettings = $Settings
-        }
-
-        Register-OutlookHostTask -DeployRoot $deployRoot
-        if ($null -eq $script:registeredTaskSettings -or [bool]$script:registeredTaskSettings.Enabled) {
-            throw 'The Outlook scheduled task must be registered disabled until its policy has been validated.'
-        }
-    } finally {
-        $resolvedDeployRoot = [System.IO.Path]::GetFullPath($deployRoot)
-        if (-not $resolvedDeployRoot.StartsWith($tempParent, [System.StringComparison]::OrdinalIgnoreCase) -or
-            (Split-Path -Leaf $resolvedDeployRoot) -notmatch '^FluxKnowledge-scheduler-disabled-test-[0-9a-f]{32}$') {
-            throw 'The scheduler test temporary directory is outside its expected boundary.'
-        }
-        Remove-Item -LiteralPath $resolvedDeployRoot -Recurse -Force
+        DisableAndDrain-OutlookHostTask | Out-Null
+    }
+    catch {
+        $failure = $_
+    }
+    if ($null -eq $failure -or
+        $failure.Exception.Message -notmatch 'simulated disable failure' -or
+        $script:activationCount -ne 0) {
+        throw 'A failed Outlook drain must propagate without activating or restoring the task.'
     }
 }
+
+Write-Output 'Outlook scheduled host disabled-only contract passed.'

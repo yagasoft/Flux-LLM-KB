@@ -153,6 +153,7 @@ public sealed class SqlCorpusProjectionReader(IDbContextFactory<FluxKnowledgeDbC
         from revision in revisions.DefaultIfEmpty()
         join rootValue in context.SourceRootConfigurations.AsNoTracking() on revision.SourceRootId equals rootValue.Id into roots
         from root in roots.DefaultIfEmpty()
+        where revision == null || revision.OriginKind != 2
         let latestEvent = context.AuditEvents.Where(e => e.PipelineRecordId == record.Id || (revision != null && e.SourceRevisionId == revision.Id))
             .Select(e => (DateTimeOffset?)e.OccurredAtUtc).Max()
         let latestActivity = context.SourceActivities.Where(a => revision != null && a.SourceRevisionId == revision.Id &&
@@ -235,6 +236,8 @@ public sealed class SqlCorpusProjectionReader(IDbContextFactory<FluxKnowledgeDbC
             JOIN [Artifacts] AS [artifact] ON [artifact].[Id] = [match].[KEY]
             JOIN [PipelineRecords] AS [record] ON [record].[Id] = [artifact].[PipelineRecordId]
               AND [record].[Revision] = [artifact].[SourceRevision]
+            LEFT JOIN [SourceRevisions] AS [revision] ON [revision].[Id] = [record].[SourceRevisionId]
+            WHERE [record].[SourceRevisionId] IS NULL OR [revision].[OriginKind] <> 2
             """).Select(candidate => candidate.PipelineRecordId).ToArrayAsync(cancellationToken).ConfigureAwait(false);
         if (candidates.Length > 0)
             return candidates;
@@ -244,7 +247,9 @@ public sealed class SqlCorpusProjectionReader(IDbContextFactory<FluxKnowledgeDbC
         // discovery before its full-text population catches up.
         return await context.Artifacts.AsNoTracking()
             .Where(artifact => artifact.SearchText != null && artifact.SearchText.Contains(search))
-            .Join(context.PipelineRecords.AsNoTracking(), artifact => new { artifact.PipelineRecordId, artifact.SourceRevision }, record => new { PipelineRecordId = record.Id, SourceRevision = record.Revision }, (artifact, record) => record.Id)
+            .Join(context.PipelineRecords.AsNoTracking(), artifact => new { artifact.PipelineRecordId, artifact.SourceRevision }, record => new { PipelineRecordId = record.Id, SourceRevision = record.Revision }, (artifact, record) => new { record.Id, record.SourceRevisionId })
+            .Where(record => record.SourceRevisionId == null || context.SourceRevisions.AsNoTracking().Any(revision => revision.Id == record.SourceRevisionId && revision.OriginKind != 2))
+            .Select(record => record.Id)
             .Distinct()
             .ToArrayAsync(cancellationToken)
             .ConfigureAwait(false);

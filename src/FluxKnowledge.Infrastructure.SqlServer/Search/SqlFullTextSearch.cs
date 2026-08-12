@@ -33,6 +33,7 @@ public sealed class SqlFullTextSearch(IDbContextFactory<FluxKnowledgeDbContext> 
                  WHERE [vector].[IsDeleted] = 0
                    AND [record].[IsDeleted] = 0
                    AND ([record].[SourceRevisionId] IS NULL OR [retained].[SuppressedAtUtc] IS NULL)
+                   AND ([record].[SourceRevisionId] IS NULL OR [retained].[OriginKind] <> 2)
                    AND [vector].[TextChunkContentHash] = [chunk].[ContentHash]
                    AND ([record].[SourceRevisionId] IS NOT NULL OR [record].[Revision] = (
                         SELECT MAX([current].[Revision])

@@ -35,6 +35,7 @@ from .health import (
     doctor_payload,
 )
 from .model_activity import bounded_limit, bounded_offset, bounded_window_minutes, caller_surface, collect_model_activity_payload
+from .local_visibility import is_direct_loopback_request
 from .service import KnowledgeService, normalize_retrieval_filters
 
 
@@ -356,6 +357,14 @@ def create_app():
 
     app = FastAPI(title="Flux-LLM-KB")
     service = KnowledgeService()
+
+    @app.middleware("http")
+    async def direct_loopback_only(request: Request, call_next):
+        client_host = request.client.host if request.client is not None else None
+        if not is_direct_loopback_request(client_host, request.headers):
+            return JSONResponse(status_code=403, content={"detail": "Direct loopback authority is required."})
+        return await call_next(request)
+
     dashboard_assets = Path(__file__).resolve().parent / "dashboard_static" / "assets"
     if dashboard_assets.exists():
         app.mount("/dashboard/assets", StaticFiles(directory=str(dashboard_assets)), name="dashboard-assets")
@@ -579,6 +588,58 @@ def create_app():
             limit=limit,
         )
 
+    @app.get("/api/local/sources/{asset_id}")
+    def local_source_detail(asset_id: str):
+        try:
+            return service.local_source_detail(asset_id)
+        except LookupError as exc:
+            raise FluxApiError(
+                code="local_detail.source_not_found",
+                message=str(exc),
+                status_code=404,
+                component="local_detail",
+                retryable=False,
+                user_action="Refresh the local corpus view or sync the source again.",
+                target={"type": "asset", "id": asset_id},
+            ) from exc
+
+    @app.get("/api/local/corpus/chunks/{chunk_id}")
+    def local_corpus_detail(chunk_id: str):
+        try:
+            return service.local_corpus_detail(chunk_id)
+        except LookupError as exc:
+            raise FluxApiError(
+                code="local_detail.chunk_not_found",
+                message=str(exc),
+                status_code=404,
+                component="local_detail",
+                retryable=False,
+                user_action="Refresh the local corpus view or sync the source again.",
+                target={"type": "chunk", "id": chunk_id},
+            ) from exc
+
+    @app.get("/api/local/code/search")
+    def local_code_search(
+        query: str,
+        root_name: str | None = None,
+        cwd: str | None = None,
+        language: str | None = None,
+        relationship: str | None = None,
+        path_glob: str | None = None,
+        include_generated: bool = False,
+        limit: int = 20,
+    ):
+        return service.local_code_search(
+            query=query,
+            root_name=root_name,
+            cwd=cwd,
+            language=language,
+            relationship=relationship,
+            path_glob=path_glob,
+            include_generated=include_generated,
+            limit=limit,
+        )
+
     @app.post("/api/code/feedback")
     def code_feedback(request: CodeFeedbackRequest = Body(...)):
         return service.record_code_feedback(
@@ -619,6 +680,26 @@ def create_app():
         include_details: bool = False,
     ):
         return service.operational_diagnostics(
+            section=section,
+            limit=limit,
+            root_name=root_name,
+            status=status,
+            family=family,
+            since_hours=since_hours,
+            include_details=include_details,
+        )
+
+    @app.get("/api/local/diagnostics/{section}")
+    def local_operational_diagnostics(
+        section: str,
+        limit: int = 25,
+        root_name: str | None = None,
+        status: str | None = None,
+        family: str | None = None,
+        since_hours: int | None = None,
+        include_details: bool = False,
+    ):
+        return service.local_operational_diagnostics(
             section=section,
             limit=limit,
             root_name=root_name,
@@ -672,6 +753,10 @@ def create_app():
 
     @app.websocket("/api/dashboard/stream")
     async def dashboard_stream(websocket: WebSocket):
+        client_host = websocket.client.host if websocket.client is not None else None
+        if not is_direct_loopback_request(client_host, websocket.headers):
+            await websocket.close(code=1008)
+            return
         await websocket.accept()
         send_lock = asyncio.Lock()
         listener_task: asyncio.Task | None = None
@@ -1440,6 +1525,10 @@ def create_app():
     @app.get("/api/audit")
     def audit(limit: int = 50):
         return service.audit(limit=limit)
+
+    @app.get("/api/local/audit")
+    def local_audit(limit: int = 50):
+        return service.local_audit(limit=limit)
 
     @app.post("/api/forget")
     def forget(request: ForgetRequest = Body(...)):

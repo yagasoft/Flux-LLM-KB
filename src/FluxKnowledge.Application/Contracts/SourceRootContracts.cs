@@ -61,7 +61,8 @@ public sealed record SourceActivityDraft(
     string InputFingerprint,
     string? RequiredCapability,
     string? Reason,
-    SourceActivityState? InitialState = null);
+    SourceActivityState? InitialState = null,
+    string? DescriptorFingerprint = null);
 
 public sealed record SourceArtifactMetadata(
     string ContentSha256,

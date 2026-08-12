@@ -33,7 +33,7 @@ def test_dashboard_snapshot_route_returns_full_dashboard_state(monkeypatch):
 
     monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: object())
     monkeypatch.setattr("flux_llm_kb.rest_api.collect_dashboard_snapshot", fake_snapshot)
-    client = fastapi_testclient.TestClient(create_app())
+    client = fastapi_testclient.TestClient(create_app(), client=("127.0.0.1", 50100))
 
     response = client.get(
         "/api/dashboard/snapshot",
@@ -91,7 +91,7 @@ def test_dashboard_stream_subscribe_receives_connected_snapshot_and_sections(mon
     monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: object())
     monkeypatch.setattr("flux_llm_kb.rest_api.collect_dashboard_snapshot", lambda **_kwargs: _snapshot_payload())
     monkeypatch.setattr("flux_llm_kb.dashboard_realtime.stream_broker_status", lambda: {"status": "ok", "rabbitmq": True})
-    client = fastapi_testclient.TestClient(create_app())
+    client = fastapi_testclient.TestClient(create_app(), client=("127.0.0.1", 50100))
 
     with client.websocket_connect("/api/dashboard/stream") as websocket:
         connected = websocket.receive_json()
@@ -118,6 +118,35 @@ def test_dashboard_stream_subscribe_receives_connected_snapshot_and_sections(mon
         assert all("sequence" in message for message in section_messages)
 
 
+@pytest.mark.parametrize(
+    ("client_host", "headers"),
+    [
+        ("192.0.2.20", {}),
+        ("127.0.0.1", {"Forwarded": "for=198.51.100.8"}),
+        ("127.0.0.1", {"Forwarded-Host": "public.example.test"}),
+        ("127.0.0.1", {"X-Forwarded-For": "198.51.100.8"}),
+        ("127.0.0.1", {"X-Original-Host": "public.example.test"}),
+    ],
+)
+def test_dashboard_stream_rejects_remote_or_proxied_peers_before_connected_message(monkeypatch, client_host, headers):
+    """WebSockets bypass HTTP middleware, so the endpoint must apply the same gate itself."""
+    from starlette.websockets import WebSocketDisconnect
+    from flux_llm_kb.rest_api import create_app
+
+    monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: object())
+    monkeypatch.setattr(
+        "flux_llm_kb.dashboard_realtime.connected_message",
+        lambda **_kwargs: pytest.fail("a denied peer must not receive dashboard.connected"),
+    )
+    client = fastapi_testclient.TestClient(create_app(), client=(client_host, 50100))
+
+    with pytest.raises(WebSocketDisconnect) as disconnected:
+        with client.websocket_connect("/api/dashboard/stream", headers=headers):
+            pass
+
+    assert disconnected.value.code == 1008
+
+
 def test_dashboard_stream_reports_degraded_broker_without_polling_fallback(monkeypatch):
     from flux_llm_kb.rest_api import create_app
 
@@ -127,7 +156,7 @@ def test_dashboard_stream_reports_degraded_broker_without_polling_fallback(monke
         "flux_llm_kb.dashboard_realtime.stream_broker_status",
         lambda: {"status": "degraded", "rabbitmq": False, "reason": "rabbitmq unavailable"},
     )
-    client = fastapi_testclient.TestClient(create_app())
+    client = fastapi_testclient.TestClient(create_app(), client=("127.0.0.1", 50100))
 
     with client.websocket_connect("/api/dashboard/stream") as websocket:
         connected = websocket.receive_json()
@@ -193,7 +222,7 @@ def test_dashboard_job_mutation_emits_sanitized_dashboard_event(monkeypatch):
         lambda **_kwargs: {"job_id": "job-1", "status": "cancelled_operator", "cancelled": True},
     )
     monkeypatch.setattr("flux_llm_kb.dashboard_realtime.emit_dashboard_change", lambda **kwargs: emitted.append(kwargs))
-    client = fastapi_testclient.TestClient(create_app())
+    client = fastapi_testclient.TestClient(create_app(), client=("127.0.0.1", 50100))
 
     response = client.post("/api/dashboard/jobs/job-1/cancel")
 

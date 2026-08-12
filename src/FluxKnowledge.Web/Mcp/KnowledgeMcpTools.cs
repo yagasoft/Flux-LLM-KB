@@ -2,6 +2,7 @@ using System.ComponentModel;
 using FluxKnowledge.Application.Contracts;
 using FluxKnowledge.Application.Mcp;
 using FluxKnowledge.Application.Ports;
+using FluxKnowledge.Application.Sources;
 using Microsoft.Extensions.DependencyInjection;
 using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
@@ -50,6 +51,84 @@ public sealed class KnowledgeMcpTools
             new SearchRequest(query, 5, scope_mode, cwd, root_name, filters),
             response => McpResultFactory.Text(CreateBrief(response, token_budget)),
             cancellationToken);
+
+    [McpServerTool(Name = "kb.retained_csharp_detail")]
+    [Description("Read one verified retained C# branch's trusted-local code facts.")]
+    public async Task<CallToolResult> RetainedCsharpDetail(
+        [Description("Retained processor branch identifier.")] Guid branch_id,
+        [Description("Exclusive symbol ordinal continuation.")] int? symbol_after_ordinal = null,
+        [Description("Exclusive relationship ordinal continuation.")] int? reference_after_ordinal = null,
+        [Description("Exclusive diagnostic ordinal continuation.")] int? diagnostic_after_ordinal = null,
+        CancellationToken cancellationToken = default)
+    {
+        var execution = await _retryExecutor.ExecuteAsync(
+            "kb.retained_csharp_detail",
+            async token =>
+            {
+                await using var scope = _scopeFactory.CreateAsyncScope();
+                return await scope.ServiceProvider.GetRequiredService<ILocalRetainedCsharpCodeReader>()
+                    .ReadPageAsync(
+                        branch_id,
+                        new LocalRetainedCsharpCodePageRequest(
+                            symbol_after_ordinal,
+                            reference_after_ordinal,
+                            diagnostic_after_ordinal),
+                        token)
+                    .ConfigureAwait(false);
+            },
+            cancellationToken).ConfigureAwait(false);
+
+        if (!execution.Succeeded)
+        {
+            return McpResultFactory.Failure("kb.retained_csharp_detail", execution.Failure!);
+        }
+
+        return execution.Value is null
+            ? McpResultFactory.Json(new { reasonCode = "retained-csharp-code-unavailable" })
+            : McpResultFactory.Json(execution.Value);
+    }
+
+    // Keeps direct in-process callers source-compatible while the MCP tool accepts paging fields.
+    public Task<CallToolResult> RetainedCsharpDetail(Guid branchId, CancellationToken cancellationToken) =>
+        RetainedCsharpDetail(branchId, null, null, null, cancellationToken);
+
+    [McpServerTool(Name = "kb.retained_csharp_search")]
+    [Description("Search trusted-local facts from checksum-verified retained C# branches.")]
+    public async Task<CallToolResult> RetainedCsharpSearch(
+        [Description("C# symbol or signature text to search.")] string query,
+        [Description("Maximum result count.")] int limit = 10,
+        [Description("Opaque query-bound cursor returned by the preceding matching durable-fact page.")] string? cursor = null,
+        CancellationToken cancellationToken = default)
+    {
+        var execution = await _retryExecutor.ExecuteAsync(
+            "kb.retained_csharp_search",
+            async token =>
+            {
+                await using var scope = _scopeFactory.CreateAsyncScope();
+                return await scope.ServiceProvider.GetRequiredService<ILocalRetainedCsharpCodeReader>()
+                    .SearchPageAsync(
+                        new LocalRetainedCsharpCodeSearchPageRequest(
+                            query,
+                            limit,
+                            cursor is null ? null : new LocalRetainedCsharpCodeSearchCursor(cursor)),
+                        token)
+                    .ConfigureAwait(false);
+            },
+            cancellationToken).ConfigureAwait(false);
+
+        if (execution.Succeeded)
+        {
+            return McpResultFactory.Json(execution.Value!);
+        }
+
+        return execution.Failure is LocalRetainedCsharpCodeSearchCursorException
+            ? McpResultFactory.Json(new { reasonCode = LocalRetainedCsharpCodeSearchCursorException.ReasonCode })
+            : McpResultFactory.Failure("kb.retained_csharp_search", execution.Failure!);
+    }
+
+    // Keeps direct in-process callers source-compatible while the MCP tool accepts paging fields.
+    public Task<CallToolResult> RetainedCsharpSearch(string query, int limit, CancellationToken cancellationToken) =>
+        RetainedCsharpSearch(query, limit, null, cancellationToken);
 
     private async Task<CallToolResult> ExecuteAsync(
         string toolName,

@@ -476,9 +476,88 @@ public sealed class SqlRetainedSourceReader(
 {
     private readonly string _artifactRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(artifactRoot));
     private readonly PhysicalDirectoryLease _rootLease = PhysicalFileIdentity.OpenDirectoryLease(artifactRoot);
-    private const long MaximumAcceptedTextBytes = 16L * 1024 * 1024;
+    private const long MaximumAcceptedBinaryBytes = 128L * 1024 * 1024;
+    private const long MaximumAcceptedUtf8TextBytes = 16L * 1024 * 1024;
+
+    public async ValueTask<RetainedSourceBytes> ReadBytesAsync(SourceRevisionId sourceRevisionId, CancellationToken cancellationToken)
+    {
+        var verified = await ReadVerifiedAsync(sourceRevisionId, cancellationToken).ConfigureAwait(false);
+        if (verified.ByteLength > MaximumAcceptedBinaryBytes)
+        {
+            throw new InvalidDataException("The retained artifact exceeds the accepted binary limit.");
+        }
+        return new RetainedSourceBytes(verified.SourceRevisionId, verified.Bytes, verified.ContentSha256, verified.ByteLength);
+    }
+
+    public async ValueTask<RetainedArtifactInspection> InspectAsync(SourceRevisionId sourceRevisionId, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(sourceRevisionId);
+        await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        var source = await (
+            from revision in context.SourceRevisions.AsNoTracking()
+            join artifact in context.SourceArtifacts.AsNoTracking() on revision.Id equals artifact.SourceRevisionId
+            where revision.Id == sourceRevisionId.Value
+            select new { revision.SourceRootId, revision.ContentSha256, artifact.StoreRelativePath, artifact.ByteLength, ArtifactContentSha256 = artifact.ContentSha256 })
+            .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+        if (source is null) throw new FileNotFoundException("The retained source revision does not have an artifact.");
+        if (!string.Equals(source.ContentSha256, source.ArtifactContentSha256, StringComparison.Ordinal))
+            throw new InvalidDataException("The retained artifact checksum does not match its source revision.");
+        var outlookSpoolRoot = await context.OutlookCaptureProfiles.AsNoTracking().Where(profile => profile.SourceRootId == source.SourceRootId)
+            .Select(profile => profile.SpoolRoot).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+        var selectedArtifactRoot = _artifactRoot;
+        PhysicalDirectoryLease? privateRootLease = null;
+        if (outlookSpoolRoot is not null)
+        {
+            if (string.IsNullOrWhiteSpace(outlookSpoolRoot)) throw new InvalidDataException("The retained Outlook artifact root is invalid.");
+            selectedArtifactRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(outlookSpoolRoot));
+            PhysicalFileIdentity.EnsureNoReparsePointTraversal(selectedArtifactRoot);
+            privateRootLease = PhysicalFileIdentity.OpenDirectoryLease(selectedArtifactRoot);
+        }
+        using (privateRootLease)
+        {
+            var rootLease = privateRootLease ?? _rootLease;
+            var artifactPath = ResolveArtifactPath(source.StoreRelativePath, source.ContentSha256, selectedArtifactRoot, rootLease);
+            if (source.ByteLength < 0) throw new InvalidDataException("The retained artifact has an invalid byte length.");
+            using var sha256Lease = OpenContainedLease(Path.Combine(selectedArtifactRoot, "sha256"), selectedArtifactRoot, rootLease);
+            using var shardLease = OpenContainedLease(Path.GetDirectoryName(artifactPath)!, selectedArtifactRoot, rootLease);
+            using var artifactHandle = PhysicalFileIdentity.OpenReadNoFollow(artifactPath);
+            var finalArtifactPath = PhysicalFileIdentity.GetFinalPath(artifactHandle);
+            var finalShardPath = Path.GetDirectoryName(finalArtifactPath) ?? throw new InvalidDataException("The retained artifact final path has no shard directory.");
+            PhysicalFileIdentity.EnsureNoReparsePointTraversal(finalShardPath);
+            var finalShard = PhysicalFileIdentity.GetDirectory(finalShardPath);
+            if (!IsWithin(shardLease.Identity.CanonicalPath, finalArtifactPath) || !string.Equals(finalShard.IdentityFingerprint, shardLease.Identity.IdentityFingerprint, StringComparison.Ordinal))
+                throw new InvalidDataException("The retained artifact final file does not belong to its leased shard.");
+            await using var stream = new FileStream(artifactHandle, FileAccess.Read, bufferSize: 81920, isAsync: true);
+            if (stream.Length != source.ByteLength) throw new InvalidDataException("The retained artifact has an unexpected byte length.");
+            return new RetainedArtifactInspection(sourceRevisionId, source.ContentSha256, source.ByteLength);
+        }
+    }
 
     public async ValueTask<Utf8FileSource> ReadUtf8Async(SourceRevisionId sourceRevisionId, CancellationToken cancellationToken)
+    {
+        var verified = await ReadVerifiedAsync(sourceRevisionId, cancellationToken).ConfigureAwait(false);
+        if (verified.ByteLength > MaximumAcceptedUtf8TextBytes)
+        {
+            throw new InvalidDataException("The retained artifact exceeds the accepted UTF-8 text limit.");
+        }
+        try
+        {
+            var payload = verified.Bytes.AsSpan();
+            if (payload.StartsWith(new byte[] { 0xef, 0xbb, 0xbf }))
+            {
+                payload = payload[3..];
+            }
+
+            return new Utf8FileSource(verified.CanonicalPath, verified.Bytes,
+                new UTF8Encoding(false, true).GetString(payload), verified.ContentSha256);
+        }
+        catch (DecoderFallbackException exception)
+        {
+            throw new InvalidDataException("The retained artifact is not valid UTF-8.", exception);
+        }
+    }
+
+    private async ValueTask<VerifiedRetainedSource> ReadVerifiedAsync(SourceRevisionId sourceRevisionId, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(sourceRevisionId);
         await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
@@ -534,9 +613,9 @@ public sealed class SqlRetainedSourceReader(
                 source.ContentSha256,
                 selectedArtifactRoot,
                 selectedRootLease);
-            if (source.ByteLength < 0 || source.ByteLength > MaximumAcceptedTextBytes)
+            if (source.ByteLength < 0 || source.ByteLength > MaximumAcceptedBinaryBytes)
             {
-                throw new InvalidDataException("The retained artifact exceeds the accepted UTF-8 text limit.");
+                throw new InvalidDataException("The retained artifact exceeds the accepted retained-byte limit.");
             }
             var bytes = new byte[checked((int)source.ByteLength)];
             using var sha256Lease = OpenContainedLease(
@@ -577,20 +656,7 @@ public sealed class SqlRetainedSourceReader(
                 throw new InvalidDataException("The retained artifact checksum is invalid.");
             }
 
-            try
-            {
-                var payload = bytes.AsSpan();
-                if (payload.StartsWith(new byte[] { 0xef, 0xbb, 0xbf }))
-                {
-                    payload = payload[3..];
-                }
-                var text = new UTF8Encoding(false, true).GetString(payload);
-                return new Utf8FileSource(source.CanonicalPath, bytes, text, source.ContentSha256);
-            }
-            catch (DecoderFallbackException exception)
-            {
-                throw new InvalidDataException("The retained artifact is not valid UTF-8.", exception);
-            }
+            return new VerifiedRetainedSource(sourceRevisionId, source.CanonicalPath, bytes, source.ContentSha256, source.ByteLength);
         }
     }
 
@@ -642,4 +708,11 @@ public sealed class SqlRetainedSourceReader(
         path.StartsWith(Path.EndsInDirectorySeparator(root) ? root : root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
 
     public void Dispose() => _rootLease.Dispose();
+
+    private sealed record VerifiedRetainedSource(
+        SourceRevisionId SourceRevisionId,
+        string CanonicalPath,
+        byte[] Bytes,
+        string ContentSha256,
+        long ByteLength);
 }

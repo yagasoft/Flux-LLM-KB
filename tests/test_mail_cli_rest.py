@@ -181,7 +181,7 @@ def test_rest_mail_profile_add_passes_include_subfolders(monkeypatch, tmp_path):
     captured = {}
     monkeypatch.setattr(database, "check_database", lambda: database.DatabaseStatus(True, "ok"))
     monkeypatch.setattr(mail_ingestion, "add_mail_profile", lambda **kwargs: captured.update(kwargs) or {"name": kwargs["name"]})
-    client = TestClient(create_app())
+    client = TestClient(create_app(), client=("127.0.0.1", 50100))
 
     response = client.post(
         "/api/mail/profiles",
@@ -206,7 +206,7 @@ def test_rest_mail_profile_add_passes_outlook_incremental_basis(monkeypatch, tmp
     captured = {}
     monkeypatch.setattr(database, "check_database", lambda: database.DatabaseStatus(True, "ok"))
     monkeypatch.setattr(mail_ingestion, "add_mail_profile", lambda **kwargs: captured.update(kwargs) or {"name": kwargs["name"]})
-    client = TestClient(create_app())
+    client = TestClient(create_app(), client=("127.0.0.1", 50100))
 
     response = client.post(
         "/api/mail/profiles",
@@ -243,7 +243,7 @@ def test_rest_mail_profile_delete_calls_mail_ingestion(monkeypatch):
             "sidecars": {"deleted": 1},
         },
     )
-    client = TestClient(create_app())
+    client = TestClient(create_app(), client=("127.0.0.1", 50100))
 
     response = client.delete("/api/mail/profiles/gmail-capture")
 
@@ -262,7 +262,7 @@ def test_rest_mail_profile_delete_returns_structured_not_found(monkeypatch):
         "delete_mail_profile",
         lambda **_kwargs: (_ for _ in ()).throw(ValueError("mail profile not found: missing")),
     )
-    client = TestClient(create_app())
+    client = TestClient(create_app(), client=("127.0.0.1", 50100))
 
     response = client.delete("/api/mail/profiles/missing")
 
@@ -287,7 +287,7 @@ def test_rest_outlook_cancel_returns_conflict_for_mid_execution(monkeypatch):
             "error": "Outlook sync request is already claimed and cannot be cancelled mid-execution.",
         },
     )
-    client = TestClient(create_app())
+    client = TestClient(create_app(), client=("127.0.0.1", 50100))
 
     response = client.post("/api/outlook-host/requests/req-1/cancel", json={})
 
@@ -309,7 +309,7 @@ def test_rest_mail_post_process_dry_run_calls_mail_ingestion(monkeypatch):
             "events": [{"profile_name": kwargs["profile_name"], "status": "planned"}],
         },
     )
-    client = TestClient(create_app())
+    client = TestClient(create_app(), client=("127.0.0.1", 50100))
 
     response = client.post("/api/mail/profiles/gmail/post-process/dry-run", json={"limit": 3})
 
@@ -327,7 +327,7 @@ def test_rest_mail_post_process_events_list_database_events(monkeypatch):
         "list_mail_post_process_events",
         lambda **kwargs: captured.update(kwargs) or [{"profile_name": kwargs["profile_name"], "status": "applied"}],
     )
-    client = TestClient(create_app())
+    client = TestClient(create_app(), client=("127.0.0.1", 50100))
 
     response = client.get("/api/mail/post-process/events?profile_name=gmail&limit=4")
 
@@ -367,7 +367,7 @@ def test_rest_mail_oauth_start_reports_missing_client_config_without_internal_er
         "start_gmail_oauth",
         lambda **_kwargs: (_ for _ in ()).throw(FileNotFoundError("missing client json")),
     )
-    client = TestClient(create_app())
+    client = TestClient(create_app(), client=("127.0.0.1", 50100))
 
     response = client.post(
         "/api/mail/oauth/gmail/start",
@@ -392,7 +392,7 @@ def test_rest_mail_oauth_start_aliases_authorization_url_for_dashboard(monkeypat
             "status": "pending_user_authorization",
         },
     )
-    client = TestClient(create_app())
+    client = TestClient(create_app(), client=("127.0.0.1", 50100))
 
     response = client.post(
         "/api/mail/oauth/gmail/start",
@@ -416,7 +416,7 @@ def test_rest_mail_profile_oauth_client_config_path_persists_metadata(monkeypatc
             "metadata": {"gmail_oauth_client_config_path": kwargs["client_config_path"]},
         },
     )
-    client = TestClient(create_app())
+    client = TestClient(create_app(), client=("127.0.0.1", 50100))
 
     response = client.put(
         "/api/mail/profiles/gmail/oauth-client-config",
@@ -438,7 +438,7 @@ def test_root_oauth_callback_completes_gmail_consent(monkeypatch):
         "complete_gmail_oauth",
         lambda **kwargs: captured.update(kwargs) or {"profile_name": "gmail", "provider": "gmail", "status": "configured"},
     )
-    client = TestClient(create_app())
+    client = TestClient(create_app(), client=("127.0.0.1", 50100))
 
     response = client.get("/?state=state-1&code=code-1&scope=https%3A%2F%2Fmail.google.com%2F")
 
@@ -459,7 +459,7 @@ def test_root_oauth_callback_reports_provider_error_without_iis(monkeypatch):
         called = True
 
     monkeypatch.setattr(mail_oauth, "complete_gmail_oauth", fake_complete)
-    client = TestClient(create_app())
+    client = TestClient(create_app(), client=("127.0.0.1", 50100))
 
     response = client.get("/?state=state-1&error=access_denied")
 
@@ -589,7 +589,7 @@ def test_rest_mail_sync_enqueues_imap_command(monkeypatch):
         raising=False,
     )
 
-    client = TestClient(create_app())
+    client = TestClient(create_app(), client=("127.0.0.1", 50100))
     response = client.post("/api/mail/sync", json={"profile_name": "gmail"})
 
     assert response.status_code == 202

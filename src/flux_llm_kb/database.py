@@ -30,6 +30,7 @@ from .embeddings import (
 )
 from . import acceleration, mail_content_store
 from .migrations import load_migrations
+from .local_visibility import LocalDisclosureKind, evaluate_local_disclosure, exceeds_local_disclosure_scan_bound
 from .redaction import redactions_enabled
 from .scoring import LifecycleScoreInput, RankedItem, lifecycle_score, reciprocal_rank_fusion
 from .text_safety import sanitize_postgres_text_value, strip_postgres_nul
@@ -2591,6 +2592,11 @@ def list_audit_events(*, limit: int = 50, url: str | None = None) -> list[dict[s
             ]
 
 
+def list_local_audit_events(*, limit: int = 50, url: str | None = None) -> list[dict[str, Any]]:
+    """Named read-only local audit source; projections decide what may be rendered."""
+    return list_audit_events(limit=limit, url=url)
+
+
 def backfill_episode_workspace_scope(
     *,
     episode_ids: list[str],
@@ -4697,6 +4703,23 @@ def list_gpu_eviction_jobs(*, limit: int = 50, url: str | None = None) -> list[d
             ]
 
 
+def list_local_gpu_eviction_diagnostics(*, limit: int = 50, url: str | None = None) -> list[dict[str, Any]]:
+    """Read fenced GPU identity only for the named trusted-local diagnostic projection."""
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT """ + _GPU_EVICTION_ROW_COLUMNS + """
+                  FROM gpu_evictions
+                 ORDER BY COALESCE(status_changed_at, heartbeat_at) DESC, id DESC
+                 LIMIT %s
+                """,
+                (_dashboard_job_limit(limit),),
+            )
+            return [_gpu_eviction_request_from_row(row) for row in cur.fetchall()]
+
+
 def _enqueue_gpu_eviction_event_with_cursor(
     cur: Any,
     *,
@@ -5651,7 +5674,16 @@ def persist_crawl_plan(
                         or (existing_chunk_count is not None and existing_chunk_count <= 0)
                     )
                 )
-                source_metadata = {"source": "corpus_crawler", **asset.metadata}
+                raw_source_metadata = {"source": "corpus_crawler", **asset.metadata}
+                try:
+                    source_metadata = _sanitize_code_metadata_for_persistence(raw_source_metadata)
+                    for chunk in tuple(asset.chunks or ()):
+                        _sanitize_code_metadata_for_persistence(getattr(chunk, "metadata", {}) or {})
+                    code_scan_blocked = False
+                except CodeFactPersistenceScanError:
+                    source_metadata = _code_fact_blocked_metadata(raw_source_metadata)
+                    code_scan_blocked = True
+                    status = "blocked_by_policy"
                 if legacy_metadata_requeue or recovered_deferred_asset:
                     source_metadata[_DEFERRED_REQUEUE_IDENTITY_KEY] = deferred_requeue_identity
                 cur.execute(
@@ -5676,6 +5708,9 @@ def persist_crawl_plan(
                         content_hash = EXCLUDED.content_hash,
                         canonical_asset_id = EXCLUDED.canonical_asset_id,
                         extraction_status = CASE
+                            WHEN EXCLUDED.extraction_status = 'blocked_by_policy'
+                                 AND EXCLUDED.metadata->'code'->>'reason_code' = 'code-fact-scan-failed'
+                                THEN EXCLUDED.extraction_status
                             WHEN EXCLUDED.extraction_status = 'duplicate_suppressed'
                                 THEN EXCLUDED.extraction_status
                             WHEN EXCLUDED.extraction_status LIKE 'blocked_%%'
@@ -5708,6 +5743,9 @@ def persist_crawl_plan(
                         extraction_tier = EXCLUDED.extraction_tier,
                         last_seen_at = now(),
                         indexed_at = CASE
+                            WHEN EXCLUDED.extraction_status = 'blocked_by_policy'
+                                 AND EXCLUDED.metadata->'code'->>'reason_code' = 'code-fact-scan-failed'
+                                THEN NULL
                             WHEN (
                                     source_assets.content_hash IS NOT NULL
                                     AND EXCLUDED.content_hash IS NOT NULL
@@ -5726,6 +5764,14 @@ def persist_crawl_plan(
                         END,
                         deleted_at = NULL,
                         metadata = CASE
+                            WHEN EXCLUDED.extraction_status = 'blocked_by_policy'
+                                 AND EXCLUDED.metadata->'code'->>'reason_code' = 'code-fact-scan-failed'
+                                THEN (
+                                    source_assets.metadata
+                                    - 'code_symbols'
+                                    - 'code_references'
+                                    - 'code'
+                                ) || EXCLUDED.metadata
                             WHEN source_assets.content_hash IS NOT NULL
                                  AND EXCLUDED.content_hash IS NOT NULL
                                  AND source_assets.content_hash IS DISTINCT FROM EXCLUDED.content_hash
@@ -5787,7 +5833,17 @@ def persist_crawl_plan(
                         mtime_ns = EXCLUDED.mtime_ns,
                         quick_hash = EXCLUDED.quick_hash,
                         content_hash = EXCLUDED.content_hash,
-                        metadata = crawl_path_manifests.metadata || EXCLUDED.metadata,
+                        metadata = CASE
+                            WHEN EXCLUDED.metadata->'code'->>'scan_status' = 'blocked'
+                                 AND EXCLUDED.metadata->'code'->>'reason_code' = 'code-fact-scan-failed'
+                                THEN (
+                                    crawl_path_manifests.metadata
+                                    - 'code_symbols'
+                                    - 'code_references'
+                                    - 'code'
+                                ) || EXCLUDED.metadata
+                            ELSE crawl_path_manifests.metadata || EXCLUDED.metadata
+                        END,
                         updated_at = now()
                     """,
                     (
@@ -5797,12 +5853,15 @@ def persist_crawl_plan(
                         asset.mtime_ns,
                         asset.quick_hash,
                         asset.content_hash,
-                        _json({"source": "corpus_crawler", **_sanitize_operational_metadata(dict(asset.metadata))}),
+                        _json(_sanitize_operational_metadata(source_metadata)),
                     ),
                 )
-                if changed_asset or legacy_metadata_requeue or recovered_indexed_asset or recovered_deferred_asset or repaired_missing_chunks:
-                    chunks_indexed += _replace_asset_chunks(cur, asset_id, () if canonical_id else asset.chunks)
-                    if asset.extraction_tier == "deferred" and not canonical_id:
+                if code_scan_blocked:
+                    chunks_indexed += _replace_asset_chunks(cur, asset_id, ())
+                    _retract_container_child_assets_for_code_scan_failure(cur, parent_asset_id=asset_id)
+                elif changed_asset or legacy_metadata_requeue or recovered_indexed_asset or recovered_deferred_asset or repaired_missing_chunks:
+                    chunks_indexed += _replace_asset_chunks(cur, asset_id, () if canonical_id or code_scan_blocked else asset.chunks)
+                    if asset.extraction_tier == "deferred" and not canonical_id and not code_scan_blocked:
                         job_type = f"corpus_extract_{asset.file_kind}"
                         schedule = _job_schedule_metadata(job_type)
                         queued = _enqueue_unique_capture_job_with_cursor(
@@ -5817,7 +5876,7 @@ def persist_crawl_plan(
                             audit_details={"job_type": job_type, "root_name": root_name, "path": asset.relative_path},
                         )
                         jobs_queued += 0 if queued["deduped"] else 1
-                    elif asset.extraction_status == "retrying_locked" and not canonical_id:
+                    elif asset.extraction_status == "retrying_locked" and not canonical_id and not code_scan_blocked:
                         job_type = f"corpus_extract_{asset.file_kind}"
                         schedule = _job_schedule_metadata(job_type)
                         queued = _enqueue_unique_capture_job_with_cursor(
@@ -10176,23 +10235,34 @@ def apply_staged_extraction_plan_for_job(
                 )
             except ValueError:
                 return False
-            status = "duplicate_suppressed" if canonical_asset_id else "processing_staged"
-            metadata_json = _json(result.metadata or {})
+            code_scan_blocked = _result_has_code_fact_scan_failure(result)
+            status = "blocked_by_policy" if code_scan_blocked else "duplicate_suppressed" if canonical_asset_id else "processing_staged"
+            metadata = _code_fact_blocked_metadata(result.metadata or {}) if code_scan_blocked else _sanitize_code_metadata_for_persistence(result.metadata or {})
+            metadata_json = _json(metadata)
             cur.execute(
                 """
                 UPDATE source_assets
                 SET extraction_status = %s,
-                    metadata = metadata || %s::jsonb,
+                    metadata = CASE
+                        WHEN %s
+                            THEN (metadata - 'code_symbols' - 'code_references' - 'code') || %s::jsonb
+                        ELSE metadata || %s::jsonb
+                    END,
+                    indexed_at = CASE WHEN %s THEN NULL ELSE indexed_at END,
                     updated_at = now()
                 WHERE id = %s
                   AND deleted_at IS NULL
                 RETURNING id::text
                 """,
-                (status, metadata_json, asset_id),
+                (status, code_scan_blocked, metadata_json, metadata_json, code_scan_blocked, asset_id),
             )
             if cur.fetchone() is None:
                 return False
-            if not canonical_asset_id:
+            if code_scan_blocked:
+                _retract_crawl_manifest_code_fact_metadata(cur, asset_ids=(asset_id,))
+                _replace_asset_chunks(cur, asset_id, ())
+                _retract_container_child_assets_for_code_scan_failure(cur, parent_asset_id=asset_id)
+            elif not canonical_asset_id:
                 _replace_asset_chunks(cur, asset_id, ())
                 _append_or_upsert_asset_chunks(cur, asset_id, tuple(getattr(result, "chunks", ()) or ()))
                 _enqueue_staged_jobs_with_cursor(
@@ -10236,32 +10306,51 @@ def apply_staged_extraction_piece_for_job(
                 )
             except ValueError:
                 return False
+            code_scan_blocked = _result_has_code_fact_scan_failure(result)
             result_status = str(getattr(result, "status", "") or "metadata_only")
-            status = "processing_staged" if result_status == "staged" else result_status
+            status = "blocked_by_policy" if code_scan_blocked else "processing_staged" if result_status == "staged" else result_status
             if canonical_asset_id and status == "indexed":
                 status = "duplicate_suppressed"
-            metadata_json = _json(getattr(result, "metadata", {}) or {})
+            metadata = _code_fact_blocked_metadata(getattr(result, "metadata", {}) or {}) if code_scan_blocked else _sanitize_code_metadata_for_persistence(getattr(result, "metadata", {}) or {})
+            metadata_json = _json(metadata)
             cur.execute(
                 """
                 UPDATE source_assets
                 SET extraction_status = %s,
                     metadata = CASE
+                        WHEN %s
+                            THEN (metadata - 'code_symbols' - 'code_references' - 'code') || %s::jsonb
                         WHEN %s::jsonb ? 'strict_indexing'
                              AND COALESCE(%s::jsonb->>'readiness_status', '') NOT LIKE 'blocked_%%'
                         THEN (metadata - 'metadata_only_blocked' - 'readiness_reason') || %s::jsonb
                         ELSE metadata || %s::jsonb
                     END,
-                    indexed_at = CASE WHEN %s = 'indexed' THEN now() ELSE indexed_at END,
+                    indexed_at = CASE WHEN %s THEN NULL WHEN %s = 'indexed' THEN now() ELSE indexed_at END,
                     updated_at = now()
                 WHERE id = %s
                   AND deleted_at IS NULL
                 RETURNING id::text
                 """,
-                (status, metadata_json, metadata_json, metadata_json, metadata_json, status, asset_id),
+                (
+                    status,
+                    code_scan_blocked,
+                    metadata_json,
+                    metadata_json,
+                    metadata_json,
+                    metadata_json,
+                    metadata_json,
+                    code_scan_blocked,
+                    status,
+                    asset_id,
+                ),
             )
             if cur.fetchone() is None:
                 return False
-            if not canonical_asset_id:
+            if code_scan_blocked:
+                _retract_crawl_manifest_code_fact_metadata(cur, asset_ids=(asset_id,))
+                _replace_asset_chunks(cur, asset_id, ())
+                _retract_container_child_assets_for_code_scan_failure(cur, parent_asset_id=asset_id)
+            elif not canonical_asset_id:
                 _append_or_upsert_asset_chunks(cur, asset_id, tuple(getattr(result, "chunks", ()) or ()))
                 _enqueue_staged_jobs_with_cursor(
                     cur,
@@ -10365,30 +10454,52 @@ def _apply_extraction_result_with_cursor(
     status = result.status
     if canonical_asset_id and status == "indexed":
         status = "duplicate_suppressed"
-    metadata_json = _json(result.metadata or {})
+    code_scan_blocked = _result_has_code_fact_scan_failure(result)
+    if code_scan_blocked:
+        status = "blocked_by_policy"
+        metadata = _code_fact_blocked_metadata(result.metadata or {})
+    else:
+        metadata = _sanitize_code_metadata_for_persistence(result.metadata or {})
+    metadata_json = _json(metadata)
     cur.execute(
         """
         UPDATE source_assets
         SET extraction_status = %s,
             metadata = CASE
+                WHEN %s
+                    THEN (metadata - 'code_symbols' - 'code_references' - 'code') || %s::jsonb
                 WHEN %s::jsonb ? 'strict_indexing'
                      AND COALESCE(%s::jsonb->>'readiness_status', '') NOT LIKE 'blocked_%%'
                 THEN (metadata - 'metadata_only_blocked' - 'readiness_reason') || %s::jsonb
                 ELSE metadata || %s::jsonb
             END,
-            indexed_at = CASE WHEN %s = 'indexed' THEN now() ELSE indexed_at END,
+            indexed_at = CASE WHEN %s THEN NULL WHEN %s = 'indexed' THEN now() ELSE indexed_at END,
             updated_at = now()
         WHERE id = %s
           AND deleted_at IS NULL
         RETURNING id::text
         """,
-        (status, metadata_json, metadata_json, metadata_json, metadata_json, status, asset_id),
+        (
+            status,
+            code_scan_blocked,
+            metadata_json,
+            metadata_json,
+            metadata_json,
+            metadata_json,
+            metadata_json,
+            code_scan_blocked,
+            status,
+            asset_id,
+        ),
     )
     if cur.fetchone() is None:
         raise ValueError(f"source asset not active: {root_name}:{relative_path}")
-    _replace_asset_chunks(cur, asset_id, () if canonical_asset_id else result.chunks)
+    _replace_asset_chunks(cur, asset_id, () if canonical_asset_id or code_scan_blocked else result.chunks)
+    if code_scan_blocked:
+        _retract_crawl_manifest_code_fact_metadata(cur, asset_ids=(asset_id,))
+        _retract_container_child_assets_for_code_scan_failure(cur, parent_asset_id=asset_id)
     child_assets = tuple(getattr(result, "child_assets", ()) or ())
-    if not canonical_asset_id and (child_assets or (result.metadata or {}).get("extractor") == "container"):
+    if not canonical_asset_id and not code_scan_blocked and (child_assets or (result.metadata or {}).get("extractor") == "container"):
         _replace_container_child_assets(
             cur,
             root_id=root_id,
@@ -10580,6 +10691,156 @@ def get_asset_chunk_detail(chunk_id: str, *, url: str | None = None) -> dict[str
                 "root_name": row[12],
                 "root_path": row[13],
             }
+
+
+def get_local_source_detail(asset_id: str, *, url: str | None = None) -> dict[str, Any] | None:
+    """Read bounded retained/indexed source detail for the explicit local-only projection."""
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT a.id::text, r.root_path, a.path, a.content_hash,
+                       (
+                           SELECT c.body
+                           FROM asset_chunks c
+                           WHERE c.asset_id = a.id
+                           ORDER BY c.chunk_index
+                           LIMIT 1
+                       ),
+                       a.metadata
+                FROM source_assets a
+                JOIN monitored_roots r ON r.id = a.root_id
+                WHERE a.id = %s
+                """,
+                (asset_id,),
+            )
+            row = cur.fetchone()
+            return _local_detail_row(row) if row else None
+
+
+def get_local_corpus_detail(chunk_id: str, *, url: str | None = None) -> dict[str, Any] | None:
+    """Read bounded indexed corpus detail without reopening a source original."""
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT c.id::text, r.root_path, a.path, a.content_hash, c.body, a.metadata
+                FROM asset_chunks c
+                JOIN source_assets a ON a.id = c.asset_id
+                JOIN monitored_roots r ON r.id = a.root_id
+                WHERE c.id = %s
+                """,
+                (chunk_id,),
+            )
+            row = cur.fetchone()
+            return _local_detail_row(row) if row else None
+
+
+def search_local_code_details(
+    *,
+    query: str,
+    root_name: str | None = None,
+    language: str | None = None,
+    relationship: str | None = None,
+    path_glob: str | None = None,
+    include_generated: bool = False,
+    limit: int = 20,
+    url: str | None = None,
+) -> list[dict[str, Any]]:
+    """Return raw indexed code facts only for the named trusted-local adapter."""
+    psycopg = _load_psycopg()
+    filters = ["a.deleted_at IS NULL", "(cs.name ILIKE %s OR cs.qualified_name ILIKE %s OR a.path ILIKE %s)"]
+    needle = f"%{query}%"
+    params: list[Any] = [needle, needle, needle]
+    if root_name:
+        filters.append("r.name = %s")
+        params.append(root_name)
+    if language:
+        filters.append("cs.language = %s")
+        params.append(language)
+    if relationship:
+        filters.append(
+            "EXISTS (SELECT 1 FROM code_references cr_filter WHERE cr_filter.source_asset_id = cs.source_asset_id AND cr_filter.relationship_kind = %s)"
+        )
+        params.append(relationship)
+    if path_glob:
+        filters.append("a.path LIKE %s ESCAPE '\\'")
+        params.append(_glob_to_sql_like(path_glob))
+    if not include_generated:
+        filters.append("COALESCE(cs.metadata->>'generated', 'false') <> 'true'")
+    capped_limit = max(1, min(int(limit or 20), 100))
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT cs.source_asset_id::text, r.root_path, a.path, a.content_hash,
+                       cs.name, cs.qualified_name, cs.signature, cs.symbol_kind, cs.language,
+                       cs.parent_symbol, cs.line_start, cs.line_end, c.body, a.metadata
+                FROM code_symbols cs
+                JOIN source_assets a ON a.id = cs.source_asset_id
+                JOIN monitored_roots r ON r.id = a.root_id
+                LEFT JOIN asset_chunks c ON c.id = cs.asset_chunk_id
+                WHERE {' AND '.join(filters)}
+                ORDER BY cs.qualified_name
+                LIMIT %s
+                """,
+                tuple([*params, capped_limit]),
+            )
+            rows = cur.fetchall()
+            if not rows:
+                return []
+            asset_ids = list(dict.fromkeys(str(row[0]) for row in rows))
+            cur.execute(
+                """
+                SELECT source_asset_id::text, source_symbol, target, relationship_kind,
+                       language, line_start, line_end
+                FROM code_references
+                WHERE source_asset_id = ANY(%s::uuid[])
+                ORDER BY source_asset_id, line_start, target
+                """,
+                (asset_ids,),
+            )
+            references: dict[str, list[dict[str, Any]]] = {}
+            for reference in cur.fetchall():
+                references.setdefault(str(reference[0]), []).append(
+                    {
+                        "source_symbol": reference[1],
+                        "target": reference[2],
+                        "relationship": reference[3],
+                        "language": reference[4],
+                        "line_start": reference[5],
+                        "line_end": reference[6],
+                    }
+                )
+    grouped: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        asset_id = str(row[0])
+        item = grouped.setdefault(
+            asset_id,
+            {
+                "source_path": _local_source_path(row[1], row[2]),
+                "content_hash": row[3],
+                "symbols": [],
+                "relationships": references.get(asset_id, []),
+                "parser_diagnostics": _source_parser_diagnostics(row[13]),
+                "excerpt": row[12],
+            },
+        )
+        item["symbols"].append(
+            {
+                "name": row[4],
+                "qualified_name": row[5],
+                "signature": row[6],
+                "symbol_kind": row[7],
+                "language": row[8],
+                "parent_symbol": row[9],
+                "line_start": row[10],
+                "line_end": row[11],
+            }
+        )
+    return list(grouped.values())
 
 
 def get_source_asset_detail(asset_id: str, *, url: str | None = None) -> dict[str, Any] | None:
@@ -16699,6 +16960,42 @@ def _source_asset_detail_row(row: tuple[Any, ...]) -> dict[str, Any]:
     }
 
 
+def _local_detail_row(row: tuple[Any, ...]) -> dict[str, Any]:
+    metadata = row[5] if isinstance(row[5], dict) else {}
+    return {
+        "id": row[0],
+        "source_path": _local_source_path(row[1], row[2]),
+        "content_hash": row[3],
+        "excerpt": row[4],
+        "parser_diagnostics": _source_parser_diagnostics(metadata),
+    }
+
+
+def _local_source_path(root_path: Any, path: Any) -> str:
+    root = str(root_path or "").rstrip("/\\")
+    relative = str(path or "").lstrip("/\\")
+    if not root:
+        return relative
+    return root if not relative else f"{root}/{relative}"
+
+
+def _source_parser_diagnostics(metadata: Any) -> list[dict[str, Any]]:
+    """Read parser diagnostics from the persisted extraction-result/source schema."""
+    if not isinstance(metadata, dict):
+        return []
+    code = metadata.get("code")
+    return _parser_diagnostics(code) if isinstance(code, dict) else []
+
+
+def _parser_diagnostics(metadata: Any) -> list[dict[str, Any]]:
+    if not isinstance(metadata, dict):
+        return []
+    diagnostics = metadata.get("parser_diagnostics")
+    if isinstance(diagnostics, dict):
+        return [diagnostics]
+    return [item for item in diagnostics if isinstance(item, dict)] if isinstance(diagnostics, list) else []
+
+
 def _asset_chunk_details(cur: Any, asset_id: str) -> list[dict[str, Any]]:
     cur.execute(
         """
@@ -17355,13 +17652,20 @@ def _replace_container_child_assets(
         status = str(getattr(child, "extraction_status", "metadata_only") or "metadata_only")
         if canonical_id and status == "indexed":
             status = "duplicate_suppressed"
-        metadata = {
+        child_metadata = {
             "source": "container_extractor",
             "container_asset_id": parent_asset_id,
             "parent_asset_id": parent_asset_id,
             "container_member_path": member_path,
             **(getattr(child, "metadata", {}) or {}),
         }
+        try:
+            metadata = _sanitize_code_metadata_for_persistence(child_metadata)
+            child_scan_blocked = False
+        except CodeFactPersistenceScanError:
+            metadata = _code_fact_blocked_metadata(child_metadata)
+            child_scan_blocked = True
+            status = "blocked_by_policy"
         cur.execute(
             """
             INSERT INTO source_assets (
@@ -17386,7 +17690,7 @@ def _replace_container_child_assets(
                 extraction_status = EXCLUDED.extraction_status,
                 extraction_tier = EXCLUDED.extraction_tier,
                 last_seen_at = now(),
-                indexed_at = CASE WHEN EXCLUDED.extraction_status = 'indexed' THEN now() ELSE source_assets.indexed_at END,
+                indexed_at = CASE WHEN %s THEN NULL WHEN EXCLUDED.extraction_status = 'indexed' THEN now() ELSE source_assets.indexed_at END,
                 deleted_at = NULL,
                 metadata = source_assets.metadata || EXCLUDED.metadata,
                 updated_at = now()
@@ -17408,10 +17712,228 @@ def _replace_container_child_assets(
                 getattr(child, "extraction_tier", "metadata_only"),
                 status,
                 _json(metadata),
+                child_scan_blocked,
             ),
         )
         child_id = cur.fetchone()[0]
-        _replace_asset_chunks(cur, child_id, () if canonical_id else tuple(getattr(child, "chunks", ()) or ()))
+        _replace_asset_chunks(
+            cur,
+            child_id,
+            () if canonical_id or child_scan_blocked else tuple(getattr(child, "chunks", ()) or ()),
+        )
+
+
+def _retract_container_child_assets_for_code_scan_failure(cur: Any, *, parent_asset_id: str) -> None:
+    """Fail closed across a container aggregate when its completion cannot be safely scanned."""
+    cur.execute(
+        """
+        SELECT id::text
+        FROM source_assets
+        WHERE metadata->>'container_asset_id' = %s
+          AND deleted_at IS NULL
+        FOR UPDATE
+        """,
+        (parent_asset_id,),
+    )
+    child_ids = [row[0] for row in cur.fetchall()]
+    if not child_ids:
+        return
+    cur.execute("DELETE FROM code_references WHERE source_asset_id = ANY(%s::uuid[])", (child_ids,))
+    cur.execute("DELETE FROM code_symbols WHERE source_asset_id = ANY(%s::uuid[])", (child_ids,))
+    cur.execute("DELETE FROM asset_chunks WHERE asset_id = ANY(%s::uuid[])", (child_ids,))
+    cur.execute(
+        """
+        UPDATE source_assets
+        SET extraction_status = 'blocked_by_policy',
+            indexed_at = NULL,
+            metadata = (metadata - 'code_symbols' - 'code_references' - 'code') || %s::jsonb,
+            updated_at = now()
+        WHERE id = ANY(%s::uuid[])
+        """,
+        (_json({"code": {"scan_status": "blocked", "reason_code": _CODE_FACT_SCAN_FAILURE_REASON}}), child_ids),
+    )
+    _retract_crawl_manifest_code_fact_metadata(cur, asset_ids=tuple(child_ids))
+
+
+def _retract_crawl_manifest_code_fact_metadata(cur: Any, *, asset_ids: tuple[str, ...]) -> None:
+    """Retract schema-owned code-fact JSON while preserving unrelated manifest metadata."""
+    if not asset_ids:
+        return
+    cur.execute(
+        """
+        UPDATE crawl_path_manifests AS manifest
+        SET metadata = (
+                manifest.metadata
+                - 'code_symbols'
+                - 'code_references'
+                - 'code'
+            ) || %s::jsonb,
+            updated_at = now()
+        FROM source_assets AS asset
+        WHERE asset.id = ANY(%s::uuid[])
+          AND manifest.root_id = asset.root_id
+          AND manifest.path = asset.path
+        """,
+        (
+            _json({"code": {"scan_status": "blocked", "reason_code": _CODE_FACT_SCAN_FAILURE_REASON}}),
+            list(asset_ids),
+        ),
+    )
+
+
+_CODE_FACT_SCAN_FAILURE_REASON = "code-fact-scan-failed"
+_WITHHELD_CODE_FACT_REASON = "secret-content-withheld"
+_MAX_CODE_FACT_SCAN_DEPTH = 32
+_MAX_CODE_FACT_COLLECTION = 256
+
+
+class CodeFactPersistenceScanError(ValueError):
+    """A code fact exceeded a bounded durable secret scan.
+
+    The exception carries only a stable outcome code.  It must never include the
+    retained-derived value which triggered the failure.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(_CODE_FACT_SCAN_FAILURE_REASON)
+
+
+def _sanitize_code_metadata_for_persistence(metadata: Any) -> dict[str, Any]:
+    """Apply the durable code-fact boundary and retain bounded withholding evidence.
+
+    A detected secret withholds exactly its fact.  A value that cannot be fully
+    scanned within the fixed bounds aborts the caller's completion instead of
+    allowing a partial set of code facts to be written.
+    """
+    safe = dict(metadata) if isinstance(metadata, dict) else {}
+    withheld = {"symbol_count": 0, "reference_count": 0, "diagnostic_count": 0}
+    if "code_symbols" in safe:
+        safe["code_symbols"], count = _safe_code_facts(safe.get("code_symbols"), LocalDisclosureKind.SYMBOL)
+        withheld["symbol_count"] += count
+    if "code_references" in safe:
+        safe["code_references"], count = _safe_code_facts(safe.get("code_references"), LocalDisclosureKind.REFERENCE)
+        withheld["reference_count"] += count
+    code = safe.get("code")
+    if code is None:
+        if any(withheld.values()):
+            safe["code"] = {"withheld": {"reason_code": _WITHHELD_CODE_FACT_REASON, **withheld}}
+        return safe
+    if not isinstance(code, dict):
+        raise CodeFactPersistenceScanError()
+
+    safe_code = dict(code)
+    if "symbols" in safe_code:
+        safe_code["symbols"], count = _safe_code_facts(safe_code.get("symbols"), LocalDisclosureKind.SYMBOL)
+        withheld["symbol_count"] += count
+    if "references" in safe_code:
+        safe_code["references"], count = _safe_code_facts(safe_code.get("references"), LocalDisclosureKind.REFERENCE)
+        withheld["reference_count"] += count
+    if "parser_diagnostics" in safe_code:
+        safe_code["parser_diagnostics"], count = _safe_parser_diagnostics(safe_code.get("parser_diagnostics"))
+        withheld["diagnostic_count"] += count
+    if _value_contains_withheld_code_text(safe_code.get("primary_symbol"), LocalDisclosureKind.SYMBOL):
+        safe_code.pop("primary_symbol", None)
+        withheld["symbol_count"] += 1
+    if any(withheld.values()):
+        safe_code["withheld"] = {"reason_code": _WITHHELD_CODE_FACT_REASON, **withheld}
+    safe["code"] = safe_code
+    return safe
+
+
+def _safe_code_facts(value: Any, kind: LocalDisclosureKind) -> tuple[list[dict[str, Any]], int]:
+    if value is None:
+        return [], 0
+    if not isinstance(value, list) or len(value) > _MAX_CODE_FACT_COLLECTION:
+        raise CodeFactPersistenceScanError()
+    safe: list[dict[str, Any]] = []
+    withheld = 0
+    for item in value:
+        if not isinstance(item, dict):
+            raise CodeFactPersistenceScanError()
+        if _value_contains_withheld_code_text(item, kind):
+            withheld += 1
+        else:
+            safe.append(dict(item))
+    return safe, withheld
+
+
+def _safe_parser_diagnostics(value: Any) -> tuple[list[dict[str, Any]], int]:
+    if value is None:
+        return [], 0
+    values = [value] if isinstance(value, dict) else value if isinstance(value, list) else None
+    if values is None or len(values) > _MAX_CODE_FACT_COLLECTION:
+        raise CodeFactPersistenceScanError()
+    safe: list[dict[str, Any]] = []
+    withheld = 0
+    for item in values:
+        if not isinstance(item, dict):
+            raise CodeFactPersistenceScanError()
+        if _value_contains_withheld_code_text(item, LocalDisclosureKind.DIAGNOSTIC):
+            code = item.get("code") or item.get("error_type") or "parser-diagnostic"
+            safe_code = "parser-diagnostic" if _value_contains_withheld_code_text(code, LocalDisclosureKind.DIAGNOSTIC) else str(code)[:128]
+            safe.append({"code": safe_code, "reason_code": _WITHHELD_CODE_FACT_REASON})
+            withheld += 1
+        else:
+            safe.append(dict(item))
+    return safe, withheld
+
+
+def _value_contains_withheld_code_text(
+    value: Any,
+    kind: LocalDisclosureKind,
+    *,
+    depth: int = 0,
+    ancestors: set[int] | None = None,
+) -> bool:
+    if depth > _MAX_CODE_FACT_SCAN_DEPTH:
+        raise CodeFactPersistenceScanError()
+    if isinstance(value, str):
+        if exceeds_local_disclosure_scan_bound(value):
+            raise CodeFactPersistenceScanError()
+        return evaluate_local_disclosure(value, kind).withheld
+    if value is None or isinstance(value, (bool, int, float)):
+        return False
+    if not isinstance(value, (dict, list, tuple)):
+        raise CodeFactPersistenceScanError()
+    if len(value) > _MAX_CODE_FACT_COLLECTION:
+        raise CodeFactPersistenceScanError()
+    seen = ancestors if ancestors is not None else set()
+    identity = id(value)
+    if identity in seen:
+        raise CodeFactPersistenceScanError()
+    seen.add(identity)
+    try:
+        items = value.values() if isinstance(value, dict) else value
+        return any(_value_contains_withheld_code_text(item, kind, depth=depth + 1, ancestors=seen) for item in items)
+    finally:
+        seen.remove(identity)
+
+
+def _code_fact_blocked_metadata(metadata: Any) -> dict[str, Any]:
+    """Persist outcome evidence without retaining any scanned code facts."""
+    safe = dict(metadata) if isinstance(metadata, dict) else {}
+    safe.pop("code_symbols", None)
+    safe.pop("code_references", None)
+    safe["code"] = {
+        "scan_status": "blocked",
+        "reason_code": _CODE_FACT_SCAN_FAILURE_REASON,
+    }
+    return safe
+
+
+def _result_has_code_fact_scan_failure(result: Any) -> bool:
+    """Preflight every result member before its transaction can write any code fact."""
+    try:
+        _sanitize_code_metadata_for_persistence(getattr(result, "metadata", {}) or {})
+        for chunk in tuple(getattr(result, "chunks", ()) or ()):
+            _sanitize_code_metadata_for_persistence(getattr(chunk, "metadata", {}) or {})
+        for child in tuple(getattr(result, "child_assets", ()) or ()):
+            _sanitize_code_metadata_for_persistence(getattr(child, "metadata", {}) or {})
+            for chunk in tuple(getattr(child, "chunks", ()) or ()):
+                _sanitize_code_metadata_for_persistence(getattr(chunk, "metadata", {}) or {})
+    except CodeFactPersistenceScanError:
+        return True
+    return False
 
 
 def _replace_asset_chunks(cur: Any, asset_id: str, chunks: tuple[Any, ...]) -> int:
@@ -17425,7 +17947,9 @@ def _replace_asset_chunks(cur: Any, asset_id: str, chunks: tuple[Any, ...]) -> i
         chunk_body = strip_postgres_nul(str(chunk.body))
         chunk_modality = strip_postgres_nul(str(chunk.modality))
         chunk_locator = _postgres_text_or_none(chunk.locator)
-        chunk_metadata = sanitize_postgres_text_value(dict(getattr(chunk, "metadata", {}) or {}))
+        chunk_metadata = sanitize_postgres_text_value(
+            _sanitize_code_metadata_for_persistence(dict(getattr(chunk, "metadata", {}) or {}))
+        )
         db_body = chunk_body
         if mail_context is not None:
             content_ref = mail_content_store.write_mail_content(
@@ -17458,7 +17982,7 @@ def _replace_asset_chunks(cur: Any, asset_id: str, chunks: tuple[Any, ...]) -> i
             ),
         )
         chunk_id = cur.fetchone()[0]
-        _insert_code_metadata_for_chunk(cur, asset_id=asset_id, chunk_id=chunk_id, chunk=chunk)
+        _insert_code_metadata_for_chunk(cur, asset_id=asset_id, chunk_id=chunk_id, metadata=chunk_metadata)
         inserted += 1
     if inserted:
         _enqueue_corpus_search_index_sync_for_asset(cur, asset_id=asset_id)
@@ -17487,7 +18011,9 @@ def _append_or_upsert_asset_chunks(cur: Any, asset_id: str, chunks: tuple[Any, .
         chunk_body = strip_postgres_nul(str(chunk.body))
         chunk_modality = strip_postgres_nul(str(chunk.modality))
         chunk_locator = _postgres_text_or_none(chunk.locator)
-        chunk_metadata = sanitize_postgres_text_value(dict(getattr(chunk, "metadata", {}) or {}))
+        chunk_metadata = sanitize_postgres_text_value(
+            _sanitize_code_metadata_for_persistence(dict(getattr(chunk, "metadata", {}) or {}))
+        )
         db_body = chunk_body
         if mail_context is not None:
             content_ref = mail_content_store.write_mail_content(
@@ -17520,7 +18046,7 @@ def _append_or_upsert_asset_chunks(cur: Any, asset_id: str, chunks: tuple[Any, .
             ),
         )
         chunk_id = cur.fetchone()[0]
-        _insert_code_metadata_for_chunk(cur, asset_id=asset_id, chunk_id=chunk_id, chunk=chunk)
+        _insert_code_metadata_for_chunk(cur, asset_id=asset_id, chunk_id=chunk_id, metadata=chunk_metadata)
         inserted += 1
     if inserted:
         _enqueue_corpus_search_index_sync_for_asset(cur, asset_id=asset_id)
@@ -17553,8 +18079,9 @@ def _managed_mail_asset_context(cur: Any, asset_id: str) -> dict[str, str] | Non
     }
 
 
-def _insert_code_metadata_for_chunk(cur: Any, *, asset_id: str, chunk_id: str, chunk: Any) -> None:
-    metadata = dict(getattr(chunk, "metadata", {}) or {})
+def _insert_code_metadata_for_chunk(cur: Any, *, asset_id: str, chunk_id: str, metadata: dict[str, Any]) -> None:
+    """Write only code facts that have passed the pre-persistence secret boundary."""
+    metadata = _sanitize_code_metadata_for_persistence(metadata)
     symbols = metadata.get("code_symbols") if isinstance(metadata.get("code_symbols"), list) else []
     references = metadata.get("code_references") if isinstance(metadata.get("code_references"), list) else []
     for symbol in symbols:

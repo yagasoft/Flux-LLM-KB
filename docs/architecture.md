@@ -70,8 +70,10 @@ durable SQL state.
   the same durable catalogue: an unacknowledged pending handle redelivers, while
   receipt-recorded and delivery-uncertain state remains unchanged and is not
   redelivered. The
-  public-status test seeds private executor, dispatch, receipt, verifier and
-  digest values and proves the read-only aggregate response excludes them.
+  public/export-status test seeds private executor, dispatch, receipt, verifier
+  and digest values and proves the shared aggregate response excludes them. A
+  trusted local detail contract may expose useful bounded values under the
+  private-PC local visibility policy.
   By itself, this boundary does not create, supervise, terminate or activate a
   process, runtime, model or GPU. The separately implemented deterministic
   supervisor is described below; real model/GPU activation, runtime/driver
@@ -279,15 +281,51 @@ or moves the folder cursor.
 
 Canonical Outlook identifiers and the configured spool root are restricted to
 private SQL reconciliation fields. Exports retain only private relative sidecar
-references. Local/public projections, audit details, REST/MCP/CLI, SignalR,
-logs and future validation records must not expose those values, raw mail,
-credentials or raw COM diagnostics.
+references. Trusted local projections, audit details, REST/MCP/CLI, SignalR and
+diagnostics may show useful retained-derived identifiers, paths, mail content and
+bounded COM evidence; they never expose credentials, headers, tokens, private
+keys or connection strings. Public/export/shared projections remain sanitised.
 
 Fresh offline/disposable verification has exercised the implemented boundary,
 but it is not deployment evidence. The host and recovery options remain disabled,
 no real Outlook profile has been contacted and no Phase 4 validation record
 exists. Deployment, migrations, COM activation and a bounded non-production
 profile/folder run remain separate written approval gates.
+
+## Phase 5 retained C# local processor
+
+The retained C# processor is a deterministic syntax-only Roslyn 5.0.0
+capability. It accepts only verified retained `.cs` bytes and never loads a
+solution, project, analyser, source generator or reference graph, executes user
+code, calls a network service, or reopens a source original. The descriptor,
+strict UTF-8 and resource limits are checked before a retained-only C# claim is
+materialised with its persisted attempt identity.
+
+The SQL completion path is receipt-first and fenced by the retained binding,
+attempt, owner, lease generation and current time. A success atomically stores
+one code document and its secret-scanned facts; a syntax-invalid outcome stores
+only the immutable no-document receipt and attempt-owned blocked diagnostics.
+Generated database constraints and migration readiness prevent mixed outcomes,
+receipt/fact mutation and generic claims from consuming C# work. Replay returns
+only the exact immutable receipt; a conflicting shape has no write.
+
+Trusted-local projections are named read models, rather than expanded
+public/export DTOs. They expose bounded paths, artifact hashes, symbols,
+signatures, relationships and parser diagnostics through the local UI,
+direct-loopback REST, native HTTP MCP and a read-only CLI. Each reader
+re-establishes the exact retained C# receipt/document binding before generic
+retained-byte disclosure, scans returned facts for secrets and withholds detected
+content. Native HTTP transport remains anonymous only in the direct-loopback
+case and rejects forwarded/proxy requests; this adds no C# force, MCP mutation
+or CLI mutation operation.
+
+The 2026-08-20 synthetic matrix used only generated loopback SQL catalogues and
+the pre-existing cached Chromium executable. It passed the C# parser/classifier
+suite, retained lifecycle/replay/read suite, local endpoint/MCP/CLI composition
+suite and browser search/detail suite. It is pre-deployment evidence only; it
+does not activate Outlook, read a source original, contact a cloud parser,
+download or activate a model, apply a production migration or validate a live
+site.
 
 Legacy architecture below remains a compatibility reference only. It is not the
 target architecture for this branch and must not be deleted until local
@@ -322,10 +360,10 @@ system rather than a large prompt-injected memory file.
 - `code_symbols` and `code_references`: parser-derived code definitions,
   imports, calls, routes, SQL objects, and configuration facts tied back to
   `source_assets` and `asset_chunks`.
-- `code_retrieval_feedback_events`: privacy-safe code retrieval miss evidence
-  with root names, stable scope/query/symbol hashes, safe filename leaves,
-  categories, counts, and timestamps; raw queries, paths, snippets, code, and
-  embeddings are not persisted.
+- `code_retrieval_feedback_events`: local code-retrieval miss evidence with root
+  names, exact local scope/query/symbol/path/snippet evidence where useful,
+  categories, counts and timestamps. Export/public history uses a separately
+  sanitised projection; neither form stores credentials or secret material.
 - `crawl_runs`, `crawl_path_manifests`, `watcher_state`, and `watcher_events`:
   crawler statistics, per-root/path scan fingerprints, watcher heartbeat,
   event counters, sanitized event rows, and error state for dashboard
@@ -337,14 +375,14 @@ system rather than a large prompt-injected memory file.
   parallelism, worker counts, manifest skip counts, timings, throughput, cache
   counters, warm/cold state, worker-family breakdowns, watcher probe summaries,
   and previous-run deltas.
-- `retrieval_benchmark_runs`: metadata-only retrieval-quality benchmark history
-  for synthetic suite names, labels, comparison labels, query counts,
-  passed/failed case counts, aggregate metrics, sanitized case ids, stable query
-  hashes, ranks, result ids, stream/kind labels, reasons, case categories,
-  confidence bands, score evidence, calibration summaries, advisory threshold
-  candidates, governance-shadow proposal counts, guardrail summaries, and
-  previous-run metrics/deltas. It must not store raw query text, snippets,
-  private content, credentials, embeddings, or private watched roots.
+- `retrieval_benchmark_runs`: local retrieval-quality history for synthetic suite
+  names, labels, comparison labels, query counts, passed/failed case counts,
+  aggregate metrics, case ids, local query/path/snippet evidence when useful,
+  ranks, result ids, stream/kind labels, reasons, case categories, confidence
+  bands, score evidence, calibration summaries, advisory threshold candidates,
+  governance-shadow proposal counts, guardrail summaries, and previous-run
+  metrics/deltas. Export/public history is metadata-only. Neither form stores
+  credentials, secret material, embeddings, or database dumps.
 - `memory_governance_runs`, `memory_governance_actions`,
   `memory_governance_digests`, and `memory_governance_policy_snapshots`:
   sanitized governance proposal runs, reversible action records, local digest
@@ -951,14 +989,14 @@ explicit `vss_snapshot` and `provider_acceleration` gates. Gate states are
 provider acceleration, worker caps, hash parallelism, or any setting
 automatically.
 
-Code diagnostics are read-only and privacy-safe. They aggregate coverage from
-`source_assets`, `asset_chunks`, `code_symbols`, and `code_references`, reporting
-per-root language counts, parser status/fallback counts, generated-file counts,
-definition/reference coverage, and slow/problematic code-index rows without raw
-code content or private root paths. Dedicated code status/search/symbol lookup
-surfaces sanitize path output, and `code_status` / `code_search` accept `cwd`
-so callers can resolve the configured monitored root instead of guessing
-`root_name` from a folder label.
+Code diagnostics are read-only. Trusted local diagnostics aggregate coverage from
+`source_assets`, `asset_chunks`, `code_symbols`, and `code_references`, and may
+show exact paths, code excerpts, symbols, signatures, relationships, parser
+status/diagnostics and slow/problematic rows when useful. Dedicated local code
+status/search/symbol lookup surfaces accept `cwd` so callers can resolve the
+configured monitored root instead of guessing `root_name` from a folder label.
+External/public/export diagnostics use a separately sanitised projection and all
+local raw excerpts remain subject to the secret boundary.
 Code and generic corpus search filters accept `relationship`, `path_glob`, and
 `include_generated`; broad search, explain, and brief exclude code by default,
 so callers must include `file_kind=code` / `filters={"file_kinds":["code"]}`
