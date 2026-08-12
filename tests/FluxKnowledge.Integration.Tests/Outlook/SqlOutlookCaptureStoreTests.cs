@@ -38,6 +38,22 @@ public sealed class SqlOutlookCaptureStoreTests(NativeSqlServerFixture fixture) 
     }
 
     [NativeSqlServerFact]
+    public async Task Save_profile_commits_with_the_production_retrying_execution_strategy()
+    {
+        var operationId = Guid.NewGuid();
+
+        var receipt = await CreateStore(useRetryingExecutionStrategy: true)
+            .SaveProfileAsync(Save(operationId, "Retrying strategy profile"), CancellationToken.None);
+
+        Assert.True(receipt.Accepted);
+        Assert.False(receipt.IsReplay);
+        await using var context = await CreateContextAsync();
+        Assert.Single(await context.OutlookCaptureOperations
+            .Where(row => row.OperationId == operationId)
+            .ToListAsync());
+    }
+
+    [NativeSqlServerFact]
     public async Task Concurrent_matching_operations_replay_one_durable_result()
     {
         var barrier = new QueryBarrierInterceptor("OutlookCaptureOperations", 2);
@@ -324,8 +340,10 @@ public sealed class SqlOutlookCaptureStoreTests(NativeSqlServerFixture fixture) 
         Assert.Equal([folder.Id, folder.Id], resultFolderIds.Order().ToArray());
     }
 
-    private SqlOutlookCaptureStore CreateStore(IInterceptor? interceptor = null) =>
-        new(new TestDbContextFactory(_fixture.ConnectionString, interceptor), new ManualTimeProvider(Now));
+    private SqlOutlookCaptureStore CreateStore(
+        IInterceptor? interceptor = null,
+        bool useRetryingExecutionStrategy = false) =>
+        new(new TestDbContextFactory(_fixture.ConnectionString, interceptor, useRetryingExecutionStrategy), new ManualTimeProvider(Now));
 
     private async Task<FluxKnowledgeDbContext> CreateContextAsync() =>
         await SqlTestData.CreateFactory(_fixture).CreateDbContextAsync();
@@ -503,9 +521,21 @@ public sealed class SqlOutlookCaptureStoreTests(NativeSqlServerFixture fixture) 
     {
         private readonly DbContextOptions<FluxKnowledgeDbContext> _options;
 
-        public TestDbContextFactory(string connectionString, IInterceptor? interceptor)
+        public TestDbContextFactory(
+            string connectionString,
+            IInterceptor? interceptor,
+            bool useRetryingExecutionStrategy)
         {
-            var builder = new DbContextOptionsBuilder<FluxKnowledgeDbContext>().UseSqlServer(connectionString);
+            var builder = new DbContextOptionsBuilder<FluxKnowledgeDbContext>();
+            builder.UseSqlServer(
+                connectionString,
+                sqlServer =>
+                {
+                    if (useRetryingExecutionStrategy)
+                    {
+                        sqlServer.EnableRetryOnFailure();
+                    }
+                });
             if (interceptor is not null)
             {
                 builder.AddInterceptors(interceptor);

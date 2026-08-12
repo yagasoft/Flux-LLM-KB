@@ -421,6 +421,10 @@ public sealed class SqlOutlookCaptureStore(IDbContextFactory<FluxKnowledgeDbCont
         Func<FluxKnowledgeDbContext, Task<MutationOutcome>> mutate,
         CancellationToken token)
     {
+        await using var executionContext = await _contextFactory.CreateDbContextAsync(token).ConfigureAwait(false);
+        var strategy = executionContext.Database.CreateExecutionStrategy();
+        return await strategy.ExecuteAsync(async () =>
+        {
         await using var context = await _contextFactory.CreateDbContextAsync(token).ConfigureAwait(false);
         await using var transaction = await context.Database.BeginTransactionAsync(token).ConfigureAwait(false);
         var prior = await context.OutlookCaptureOperations
@@ -459,6 +463,7 @@ public sealed class SqlOutlookCaptureStore(IDbContextFactory<FluxKnowledgeDbCont
         await context.SaveChangesAsync(token).ConfigureAwait(false);
         await transaction.CommitAsync(token).ConfigureAwait(false);
         return new MutationReceipt(outcome.Accepted, outcome.ResourceId, IsOperationReplay: false, outcome.ResourceReused);
+        }).ConfigureAwait(false);
     }
 
     private static bool IsUniqueConstraintViolation(DbUpdateException exception) =>

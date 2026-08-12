@@ -60,6 +60,10 @@ public sealed class SqlOutlookExportIngestionService(
             ?? throw new ArgumentException("Ready-export ingestion requires a bound Outlook observation.", nameof(request));
         observation.Validate();
 
+        await using var executionContext = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        var strategy = executionContext.Database.CreateExecutionStrategy();
+        return await strategy.ExecuteAsync(async () =>
+        {
         await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await context.Database
             .BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken).ConfigureAwait(false);
@@ -348,6 +352,7 @@ public sealed class SqlOutlookExportIngestionService(
         await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
         return new OutlookExportCommitReceipt(request.ExportId, true, true, false);
+        }).ConfigureAwait(false);
     }
 
     private async ValueTask<OutlookExportCommitReceipt> CommitBlockedAsync(
@@ -409,6 +414,10 @@ public sealed class SqlOutlookExportIngestionService(
             : recovery.OperationId;
         var requestFingerprint = envelope.ManifestHash;
 
+        await using var executionContext = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        var strategy = executionContext.Database.CreateExecutionStrategy();
+        return await strategy.ExecuteAsync(async () =>
+        {
         await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await context.Database
             .BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken).ConfigureAwait(false);
@@ -512,6 +521,7 @@ public sealed class SqlOutlookExportIngestionService(
         await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
         return new OutlookExportCommitReceipt(new OutlookCaptureExportId(blockedId), false, true, false);
+        }).ConfigureAwait(false);
     }
 
     private async ValueTask<OutlookExportCommitReceipt> CommitUnresolvedIdentityAsync(

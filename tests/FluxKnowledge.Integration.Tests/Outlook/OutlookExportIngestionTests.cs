@@ -83,6 +83,87 @@ public sealed class OutlookExportIngestionTests(NativeSqlServerFixture fixture) 
     }
 
     [NativeSqlServerFact]
+    public async Task Ready_export_ingestion_commits_with_the_production_retrying_execution_strategy()
+    {
+        var spoolRoot = CreateTemporaryDirectory();
+        try
+        {
+            var seed = await SeedCaptureAsync(spoolRoot);
+            var prepared = await PrepareExportAsync(
+                spoolRoot,
+                seed,
+                "entry-retrying-strategy",
+                Now.AddMinutes(1),
+                "message body",
+                []);
+
+            var receipt = await CreateService(useRetryingExecutionStrategy: true)
+                .IngestReadyAsync(prepared.Request, CancellationToken.None);
+
+            Assert.True(receipt.Accepted);
+            Assert.False(receipt.IsReplay);
+            await using var context = CreateContext();
+            Assert.Single(await context.OutlookCaptureExports
+                .Where(row => row.Id == prepared.ExportId)
+                .ToListAsync());
+            Assert.Equal(Now.AddMinutes(1), await context.OutlookCaptureFolders
+                .Where(row => row.Id == seed.FolderId)
+                .Select(row => row.CursorUtc)
+                .SingleAsync());
+        }
+        finally
+        {
+            Directory.Delete(spoolRoot, recursive: true);
+        }
+    }
+
+    [NativeSqlServerFact]
+    public async Task Malformed_ready_export_ingestion_commits_with_the_production_retrying_execution_strategy()
+    {
+        var spoolRoot = CreateTemporaryDirectory();
+        try
+        {
+            var seed = await SeedCaptureAsync(spoolRoot);
+            var prepared = await PrepareExportAsync(
+                spoolRoot,
+                seed,
+                "entry-retrying-malformed-recovery",
+                Now.AddMinutes(1),
+                "message body",
+                []);
+            var manifestPath = Path.Combine(prepared.ReadyDirectory, "manifest.json");
+            var manifest = JsonSerializer.Deserialize<OutlookExportManifest>(
+                await File.ReadAllTextAsync(manifestPath),
+                new JsonSerializerOptions(JsonSerializerDefaults.Web))!;
+            await File.WriteAllTextAsync(
+                manifestPath,
+                JsonSerializer.Serialize(
+                    manifest with { Recovery = manifest.Recovery with { CursorFingerprint = "not-a-canonical-sha256" } },
+                    new JsonSerializerOptions(JsonSerializerDefaults.Web)),
+                new UTF8Encoding(false));
+
+            var receipt = await CreateService(useRetryingExecutionStrategy: true)
+                .IngestReadyAsync(spoolRoot, prepared.ExportId, CancellationToken.None);
+
+            Assert.False(receipt.Accepted);
+            Assert.True(receipt.Committed);
+            await using var context = CreateContext();
+            Assert.Equal((int)OutlookExportState.Blocked, await context.OutlookCaptureExports
+                .Where(row => row.Id == prepared.ExportId)
+                .Select(row => row.State)
+                .SingleAsync());
+            Assert.Null(await context.OutlookCaptureFolders
+                .Where(row => row.Id == seed.FolderId)
+                .Select(row => row.CursorUtc)
+                .SingleAsync());
+        }
+        finally
+        {
+            Directory.Delete(spoolRoot, recursive: true);
+        }
+    }
+
+    [NativeSqlServerFact]
     public async Task Malformed_json_valid_recovery_is_durably_blocked_and_replays_without_advancing_cursor()
     {
         var spoolRoot = CreateTemporaryDirectory();
@@ -1161,8 +1242,10 @@ public sealed class OutlookExportIngestionTests(NativeSqlServerFixture fixture) 
         }
     }
 
-    private SqlOutlookExportIngestionService CreateService(IInterceptor? interceptor = null) =>
-        new(new ContextFactory(_fixture.ConnectionString, interceptor), new ManualTimeProvider(Now));
+    private SqlOutlookExportIngestionService CreateService(
+        IInterceptor? interceptor = null,
+        bool useRetryingExecutionStrategy = false) =>
+        new(new ContextFactory(_fixture.ConnectionString, interceptor, useRetryingExecutionStrategy), new ManualTimeProvider(Now));
 
     private FluxKnowledgeDbContext CreateContext() => new(
         new DbContextOptionsBuilder<FluxKnowledgeDbContext>()
@@ -1341,12 +1424,23 @@ public sealed class OutlookExportIngestionTests(NativeSqlServerFixture fixture) 
         string ManifestHash,
         OutlookExportCommitRequest Request);
 
-    private sealed class ContextFactory(string connectionString, IInterceptor? interceptor = null) : IDbContextFactory<FluxKnowledgeDbContext>
+    private sealed class ContextFactory(
+        string connectionString,
+        IInterceptor? interceptor = null,
+        bool useRetryingExecutionStrategy = false) : IDbContextFactory<FluxKnowledgeDbContext>
     {
         public FluxKnowledgeDbContext CreateDbContext()
         {
-            var builder = new DbContextOptionsBuilder<FluxKnowledgeDbContext>()
-                .UseSqlServer(connectionString);
+            var builder = new DbContextOptionsBuilder<FluxKnowledgeDbContext>();
+            builder.UseSqlServer(
+                connectionString,
+                sqlServer =>
+                {
+                    if (useRetryingExecutionStrategy)
+                    {
+                        sqlServer.EnableRetryOnFailure();
+                    }
+                });
             if (interceptor is not null)
             {
                 builder.AddInterceptors(interceptor);
