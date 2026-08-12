@@ -254,6 +254,61 @@ public sealed class SqlOutlookCaptureStoreTests(NativeSqlServerFixture fixture) 
     }
 
     [NativeSqlServerFact]
+    public async Task Retryable_host_requeue_defers_then_reclaims_without_advancing_the_folder_cursor()
+    {
+        var seed = await SeedCaptureAsync();
+        var cursorUtc = Now.AddHours(-1);
+        await using (var setup = await CreateContextAsync())
+        {
+            var folder = await setup.OutlookCaptureFolders.SingleAsync(row => row.Id == seed.FolderId);
+            folder.CursorUtc = cursorUtc;
+            folder.CursorFingerprint = CursorFingerprint;
+            await setup.SaveChangesAsync();
+        }
+
+        var claim = new OutlookCatchUpClaim(
+            seed.CatchUpId,
+            new OutlookCaptureProfileId(seed.ProfileId),
+            $"catch-up-{seed.ProfileId:N}",
+            OutlookCatchUpProvenance.Manual,
+            0,
+            null,
+            Host,
+            Now.AddMinutes(10),
+            Now,
+            seed.FencingToken);
+        var retryAtUtc = Now.AddMinutes(1);
+        var requeue = await CreateStore().RequeueCatchUpAsync(
+            new OutlookCatchUpRequeueRequest(
+                Guid.NewGuid(),
+                Fingerprint,
+                claim,
+                OutlookCatchUpFailureReason.RetryableHostFailure,
+                retryAtUtc),
+            CancellationToken.None);
+
+        Assert.True(requeue.Accepted);
+        Assert.False((await CreateStore().ClaimCatchUpAsync(
+            new OutlookCatchUpClaimRequest(Guid.NewGuid(), OtherFingerprint, Host, TimeSpan.FromMinutes(5)),
+            CancellationToken.None)).Accepted);
+
+        var reclaimed = await CreateStore(now: retryAtUtc).ClaimCatchUpAsync(
+            new OutlookCatchUpClaimRequest(Guid.NewGuid(), OtherFingerprint, Host, TimeSpan.FromMinutes(5)),
+            CancellationToken.None);
+
+        Assert.NotNull(reclaimed.Claim);
+        await using var verification = await CreateContextAsync();
+        var catchUp = await verification.OutlookCatchUps.SingleAsync(row => row.Id == seed.CatchUpId);
+        var folderAfter = await verification.OutlookCaptureFolders.SingleAsync(row => row.Id == seed.FolderId);
+        Assert.Equal(1, catchUp.State);
+        Assert.Equal(1, catchUp.RetryCount);
+        Assert.Equal(OutlookCatchUpFailureReason.RetryableHostFailure.ToString(), catchUp.Reason);
+        Assert.Equal(retryAtUtc, catchUp.NotBeforeUtc);
+        Assert.Equal(cursorUtc, folderAfter.CursorUtc);
+        Assert.Equal(CursorFingerprint, folderAfter.CursorFingerprint);
+    }
+
+    [NativeSqlServerFact]
     public async Task Folder_digest_length_prefix_distinguishes_delimiter_collisions()
     {
         var seed = await SeedCaptureAsync(includeFolder: false, includeActiveCatchUp: false);
@@ -342,8 +397,9 @@ public sealed class SqlOutlookCaptureStoreTests(NativeSqlServerFixture fixture) 
 
     private SqlOutlookCaptureStore CreateStore(
         IInterceptor? interceptor = null,
-        bool useRetryingExecutionStrategy = false) =>
-        new(new TestDbContextFactory(_fixture.ConnectionString, interceptor, useRetryingExecutionStrategy), new ManualTimeProvider(Now));
+        bool useRetryingExecutionStrategy = false,
+        DateTimeOffset? now = null) =>
+        new(new TestDbContextFactory(_fixture.ConnectionString, interceptor, useRetryingExecutionStrategy), new ManualTimeProvider(now ?? Now));
 
     private async Task<FluxKnowledgeDbContext> CreateContextAsync() =>
         await SqlTestData.CreateFactory(_fixture).CreateDbContextAsync();

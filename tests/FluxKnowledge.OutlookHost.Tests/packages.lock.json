@@ -392,7 +392,8 @@
           "FluxKnowledge.Application": "[1.0.0, )",
           "FluxKnowledge.Infrastructure.SqlServer": "[1.0.0, )",
           "FluxKnowledge.Integrations": "[1.0.0, )",
-          "Microsoft.Office.Interop.Outlook": "[15.0.4797.1004, )"
+          "Microsoft.Office.Interop.Outlook": "[15.0.4797.1004, )",
+          "MicrosoftOfficeCore": "[15.0.0, )"
         }
       },
       "Microsoft.EntityFrameworkCore.SqlServer": {
@@ -413,6 +414,12 @@
         "requested": "[15.0.4797.1004, )",
         "resolved": "15.0.4797.1004",
         "contentHash": "17tdFXg/TGnbmSC9YNkIrB6P3vTSemOMI/TaUaZWQmRE1dMjHIVmBPffQhXasH/te4weHiFk8EEXUCi/NsGbuA=="
+      },
+      "MicrosoftOfficeCore": {
+        "type": "CentralTransitive",
+        "requested": "[15.0.0, )",
+        "resolved": "15.0.0",
+        "contentHash": "/KgYw8uvv0Ut8FPvyEa1XJ/TrLSRgvTv3JgC2IT0/8NwoICzbEJWfmfwsE6Dwi8WH0jVkTEO7zRvGvaKqUOhqQ=="
       }
     }
   }

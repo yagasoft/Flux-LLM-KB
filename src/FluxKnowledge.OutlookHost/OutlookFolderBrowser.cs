@@ -29,6 +29,7 @@ internal sealed class OutlookFolderBrowser(
     IClassicOutlookAdapterFactory adapterFactory,
     TimeProvider? timeProvider = null)
 {
+    private static readonly TimeSpan FailureCleanupTimeout = TimeSpan.FromSeconds(10);
     private readonly TimeProvider _clock = timeProvider ?? TimeProvider.System;
 
     public async ValueTask<OutlookHostRunResult> RunOnceAsync(CancellationToken cancellationToken)
@@ -73,31 +74,58 @@ internal sealed class OutlookFolderBrowser(
                     _clock.GetUtcNow()),
                 cancellationToken).ConfigureAwait(false);
         }
-        catch (OutlookComHostException)
+        catch (OutlookComHostException exception)
         {
-            await controlPlane.FailBrowseAsync(claim, OutlookBrowseFailureCode.HostUnavailable, cancellationToken).ConfigureAwait(false);
-            return new OutlookHostRunResult(OutlookHostExitReason.OutlookUnavailable);
+            return await FailAsync(claim, exception.Reason, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+        {
+            return await FailAsync(
+                claim,
+                OutlookComFailureClassifier.Classify(exception).Reason,
+                cancellationToken).ConfigureAwait(false);
         }
 
         await using (adapter.ConfigureAwait(false))
         {
+            IReadOnlyList<OutlookFolderDescriptor> folders;
             try
             {
-            var folders = await adapter.BrowseFoldersAsync(cancellationToken).ConfigureAwait(false);
-            await controlPlane.CompleteBrowseAsync(claim, folders, cancellationToken).ConfigureAwait(false);
-                return new OutlookHostRunResult(OutlookHostExitReason.Completed);
+                folders = await adapter.BrowseFoldersAsync(cancellationToken).ConfigureAwait(false);
             }
             catch (OutlookComHostException exception)
             {
-                var failure = exception.Reason == OutlookComFailureReason.FolderAccessDenied
-                    ? OutlookBrowseFailureCode.AccessDenied
-                    : OutlookBrowseFailureCode.HostUnavailable;
-                await controlPlane.FailBrowseAsync(claim, failure, cancellationToken).ConfigureAwait(false);
-                return new OutlookHostRunResult(
-                    failure == OutlookBrowseFailureCode.AccessDenied
-                        ? OutlookHostExitReason.FolderAccessDenied
-                        : OutlookHostExitReason.OutlookUnavailable);
+                return await FailAsync(claim, exception.Reason, cancellationToken).ConfigureAwait(false);
             }
+            catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+            {
+                return await FailAsync(
+                    claim,
+                    OutlookComFailureClassifier.Classify(exception).Reason,
+                    cancellationToken).ConfigureAwait(false);
+            }
+
+            await controlPlane.CompleteBrowseAsync(claim, folders, cancellationToken).ConfigureAwait(false);
+            return new OutlookHostRunResult(OutlookHostExitReason.Completed);
         }
+    }
+
+    private async ValueTask<OutlookHostRunResult> FailAsync(
+        OutlookBrowseClaim claim,
+        OutlookComFailureReason reason,
+        CancellationToken cancellationToken)
+    {
+        var failure = reason == OutlookComFailureReason.FolderAccessDenied
+            ? OutlookBrowseFailureCode.AccessDenied
+            : OutlookBrowseFailureCode.HostUnavailable;
+        using var cleanup = new CancellationTokenSource(FailureCleanupTimeout);
+        await controlPlane.FailBrowseAsync(claim, failure, cleanup.Token).ConfigureAwait(false);
+        return new OutlookHostRunResult(reason switch
+        {
+            OutlookComFailureReason.DependencyMissing => OutlookHostExitReason.ComDependencyMissing,
+            OutlookComFailureReason.FolderAccessDenied => OutlookHostExitReason.FolderAccessDenied,
+            OutlookComFailureReason.LeaseStale => OutlookHostExitReason.LeaseStale,
+            _ => OutlookHostExitReason.OutlookUnavailable
+        });
     }
 }

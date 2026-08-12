@@ -324,6 +324,20 @@ public sealed class OutlookHostLoopTests
     }
 
     [Fact]
+    public async Task Unexpected_ingestion_invariant_fault_is_not_normalised_as_a_COM_failure()
+    {
+        var fixture = Fixture.Create(
+            adapter: new FakeClassicOutlookAdapter([Item("unexpected-ingestion", CursorUtc.AddMinutes(1), CursorUtc)]),
+            ingestion: new FakeIngestionBridge([], new InvalidOperationException("test invariant failure")));
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Loop.RunOnceAsync(CancellationToken.None).AsTask());
+
+        Assert.Empty(fixture.ControlPlane.Failures);
+        Assert.Empty(fixture.ControlPlane.Requeues);
+        Assert.Equal(0, fixture.ControlPlane.CompletionCount);
+    }
+
+    [Fact]
     public async Task Ready_export_fencing_loss_records_lease_lost_without_completing_or_advancing_cursor()
     {
         var work = CreateWork();
@@ -434,6 +448,154 @@ public sealed class OutlookHostLoopTests
     }
 
     [Fact]
+    public async Task Missing_Office_interop_at_activation_is_recorded_without_completing_or_advancing_cursor()
+    {
+        var work = CreateWork();
+        var fixture = Fixture.Create(
+            work: work,
+            adapterFactory: new ThrowingAdapterFactory(new FileNotFoundException("office", "office.dll")));
+
+        var result = await fixture.Loop.RunOnceAsync(CancellationToken.None);
+
+        Assert.Equal(OutlookHostExitReason.ComDependencyMissing, result.Reason);
+        var requeue = Assert.Single(fixture.ControlPlane.Requeues);
+        Assert.Equal(OutlookCatchUpFailureReason.RetryableHostFailure, requeue.Reason);
+        Assert.Equal(CursorUtc.AddMinutes(1), requeue.NotBeforeUtc);
+        Assert.Empty(fixture.ControlPlane.Failures);
+        Assert.Equal(0, fixture.ControlPlane.CompletionCount);
+        Assert.Equal(CursorUtc, Assert.Single(work.Folders).CursorUtc);
+        Assert.Equal(new string('b', 64), Assert.Single(work.Folders).CursorFingerprint);
+    }
+
+    [Fact]
+    public async Task Ordinary_activation_failure_is_sanitised_and_durably_failed()
+    {
+        var fixture = Fixture.Create(
+            adapterFactory: new ThrowingAdapterFactory(new InvalidOperationException("private activation diagnostic")));
+
+        var result = await fixture.Loop.RunOnceAsync(CancellationToken.None);
+
+        Assert.Equal(OutlookHostExitReason.OutlookUnavailable, result.Reason);
+        var requeue = Assert.Single(fixture.ControlPlane.Requeues);
+        Assert.Equal(OutlookCatchUpFailureReason.RetryableHostFailure, requeue.Reason);
+        Assert.Equal(CursorUtc.AddMinutes(1), requeue.NotBeforeUtc);
+        Assert.Empty(fixture.ControlPlane.Failures);
+        Assert.Equal(0, fixture.ControlPlane.CompletionCount);
+    }
+
+    [Fact]
+    public async Task Activation_failure_persists_requeue_when_cancellation_races_the_raw_failure()
+    {
+        var fixture = Fixture.Create(
+            adapterFactory: new ThrowingAdapterFactory(new FileNotFoundException("office", "office.dll")),
+            rejectCancelledFailureToken: true);
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        var result = await fixture.Loop.RunOnceAsync(cancellation.Token);
+
+        Assert.Equal(OutlookHostExitReason.ComDependencyMissing, result.Reason);
+        Assert.Equal([OutlookCatchUpFailureReason.RetryableHostFailure], fixture.ControlPlane.Requeues.Select(entry => entry.Reason));
+    }
+
+    [Fact]
+    public async Task Real_activation_cancellation_propagates_without_terminal_or_requeue_evidence()
+    {
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        var fixture = Fixture.Create(
+            adapterFactory: new ThrowingAdapterFactory(new OperationCanceledException(cancellation.Token)));
+
+        await Assert.ThrowsAsync<OperationCanceledException>(() => fixture.Loop.RunOnceAsync(cancellation.Token).AsTask());
+
+        Assert.Empty(fixture.ControlPlane.Failures);
+        Assert.Empty(fixture.ControlPlane.Requeues);
+    }
+
+    [Fact]
+    public async Task Browse_activation_failure_is_recorded_as_host_unavailable_without_unhandled_exit()
+    {
+        var identity = new OutlookHostIdentity("S-1-5-21-test", 7, "host-test");
+        var claim = new OutlookBrowseClaim(
+            Guid.Parse("44444444-4444-4444-4444-444444444444"),
+            Guid.Parse("55555555-5555-5555-5555-555555555555"),
+            1,
+            identity,
+            1,
+            CursorUtc.AddMinutes(10));
+        var control = new FakeBrowseControlPlane(claim);
+        var browser = new OutlookFolderBrowser(
+            new OutlookHostOptions { Enabled = true },
+            new FakeEnvironment(isWindows: true, isInteractive: true),
+            new FakeSingletonFactory(available: true),
+            control,
+            new ThrowingAdapterFactory(new FileNotFoundException("office", "office.dll")),
+            new FixedTimeProvider(CursorUtc));
+
+        var result = await browser.RunOnceAsync(CancellationToken.None);
+
+        Assert.Equal(OutlookHostExitReason.ComDependencyMissing, result.Reason);
+        Assert.Equal([OutlookBrowseFailureCode.HostUnavailable], control.Failures);
+        Assert.Empty(control.CompletedFolders);
+    }
+
+    [Fact]
+    public async Task Browse_activation_failure_persists_terminal_evidence_when_cancellation_races_the_raw_failure()
+    {
+        var identity = new OutlookHostIdentity("S-1-5-21-test", 7, "host-test");
+        var claim = new OutlookBrowseClaim(
+            Guid.Parse("66666666-6666-6666-6666-666666666666"),
+            Guid.Parse("77777777-7777-7777-7777-777777777777"),
+            1,
+            identity,
+            1,
+            CursorUtc.AddMinutes(10));
+        var control = new FakeBrowseControlPlane(claim) { RejectCancelledFailureToken = true };
+        var browser = new OutlookFolderBrowser(
+            new OutlookHostOptions { Enabled = true },
+            new FakeEnvironment(isWindows: true, isInteractive: true),
+            new FakeSingletonFactory(available: true),
+            control,
+            new ThrowingAdapterFactory(new FileNotFoundException("office", "office.dll")),
+            new FixedTimeProvider(CursorUtc));
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        var result = await browser.RunOnceAsync(cancellation.Token);
+
+        Assert.Equal(OutlookHostExitReason.ComDependencyMissing, result.Reason);
+        Assert.Equal([OutlookBrowseFailureCode.HostUnavailable], control.Failures);
+    }
+
+    [Fact]
+    public async Task Browse_completion_invariant_failure_propagates_without_terminal_failure_evidence()
+    {
+        var identity = new OutlookHostIdentity("S-1-5-21-test", 7, "host-test");
+        var claim = new OutlookBrowseClaim(
+            Guid.Parse("88888888-8888-8888-8888-888888888888"),
+            Guid.Parse("99999999-9999-9999-9999-999999999999"),
+            1,
+            identity,
+            1,
+            CursorUtc.AddMinutes(10));
+        var control = new FakeBrowseControlPlane(claim)
+        {
+            CompletionException = new InvalidOperationException("completion invariant failure")
+        };
+        var browser = new OutlookFolderBrowser(
+            new OutlookHostOptions { Enabled = true },
+            new FakeEnvironment(isWindows: true, isInteractive: true),
+            new FakeSingletonFactory(available: true),
+            control,
+            new CountingAdapterFactory(new FakeClassicOutlookAdapter()),
+            new FixedTimeProvider(CursorUtc));
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => browser.RunOnceAsync(CancellationToken.None).AsTask());
+
+        Assert.Empty(control.Failures);
+    }
+
+    [Fact]
     public async Task COM_activation_use_release_and_singleton_ownership_stay_on_one_STA_thread()
     {
         var calls = new List<(string Operation, int ThreadId, ApartmentState Apartment)>();
@@ -513,7 +675,8 @@ public sealed class OutlookHostLoopTests
             FakeClassicOutlookAdapter? adapter = null,
             FakeIngestionBridge? ingestion = null,
             IClassicOutlookAdapterFactory? adapterFactory = null,
-            IOutlookSessionSingletonFactory? singletonFactory = null)
+            IOutlookSessionSingletonFactory? singletonFactory = null,
+            bool rejectCancelledFailureToken = false)
         {
             var events = new List<string>();
             adapter ??= new FakeClassicOutlookAdapter();
@@ -522,7 +685,8 @@ public sealed class OutlookHostLoopTests
             {
                 LeaseRenewalAccepted = leaseRenewalAccepted,
                 CompletionAccepted = completionAccepted,
-                RenewedLeaseExpiry = renewedLeaseExpiry
+                RenewedLeaseExpiry = renewedLeaseExpiry,
+                RejectCancelledFailureToken = rejectCancelledFailureToken
             };
             ingestion ??= new FakeIngestionBridge(events);
             var loop = new OutlookHostLoop(
@@ -568,6 +732,8 @@ public sealed class OutlookHostLoopTests
         public int ClaimCount { get; private set; }
         public List<OutlookHint> Hints { get; } = [];
         public List<OutlookCatchUpFailureReason> Failures { get; } = [];
+        public List<(OutlookCatchUpFailureReason Reason, DateTimeOffset NotBeforeUtc)> Requeues { get; } = [];
+        public bool RejectCancelledFailureToken { get; init; }
         public bool LeaseRenewalAccepted { get; init; } = true;
         public bool CompletionAccepted { get; init; } = true;
         public DateTimeOffset? RenewedLeaseExpiry { get; init; }
@@ -624,7 +790,25 @@ public sealed class OutlookHostLoopTests
 
         public ValueTask FailCatchUpAsync(OutlookCatchUpClaim claim, OutlookCatchUpFailureReason reason, CancellationToken cancellationToken)
         {
+            if (RejectCancelledFailureToken && cancellationToken.IsCancellationRequested)
+            {
+                throw new OperationCanceledException(cancellationToken);
+            }
             Failures.Add(reason);
+            return ValueTask.CompletedTask;
+        }
+
+        public ValueTask RequeueCatchUpAsync(
+            OutlookCatchUpClaim claim,
+            OutlookCatchUpFailureReason reason,
+            DateTimeOffset notBeforeUtc,
+            CancellationToken cancellationToken)
+        {
+            if (RejectCancelledFailureToken && cancellationToken.IsCancellationRequested)
+            {
+                throw new OperationCanceledException(cancellationToken);
+            }
+            Requeues.Add((reason, notBeforeUtc));
             return ValueTask.CompletedTask;
         }
     }
@@ -692,6 +876,9 @@ public sealed class OutlookHostLoopTests
     private sealed class FakeBrowseControlPlane(OutlookBrowseClaim? claim) : IOutlookFolderBrowseControlPlane
     {
         public List<IReadOnlyList<OutlookFolderDescriptor>> CompletedFolders { get; } = [];
+        public List<OutlookBrowseFailureCode> Failures { get; } = [];
+        public bool RejectCancelledFailureToken { get; init; }
+        public Exception? CompletionException { get; init; }
 
         public ValueTask<OutlookBrowseClaim?> TryClaimBrowseAsync(
             OutlookHostIdentity host,
@@ -703,6 +890,10 @@ public sealed class OutlookHostLoopTests
             IReadOnlyList<OutlookFolderDescriptor> folders,
             CancellationToken cancellationToken)
         {
+            if (CompletionException is not null)
+            {
+                throw CompletionException;
+            }
             CompletedFolders.Add(folders);
             return ValueTask.CompletedTask;
         }
@@ -710,7 +901,22 @@ public sealed class OutlookHostLoopTests
         public ValueTask FailBrowseAsync(
             OutlookBrowseClaim failedClaim,
             OutlookBrowseFailureCode failureCode,
-            CancellationToken cancellationToken) => ValueTask.CompletedTask;
+            CancellationToken cancellationToken)
+        {
+            if (RejectCancelledFailureToken && cancellationToken.IsCancellationRequested)
+            {
+                throw new OperationCanceledException(cancellationToken);
+            }
+            Failures.Add(failureCode);
+            return ValueTask.CompletedTask;
+        }
+    }
+
+    private sealed class ThrowingAdapterFactory(Exception exception) : IClassicOutlookAdapterFactory
+    {
+        public ValueTask<IClassicOutlookAdapter> CreateAsync(
+            OutlookComActivationContext context,
+            CancellationToken cancellationToken) => ValueTask.FromException<IClassicOutlookAdapter>(exception);
     }
 
     private sealed class ThreadRecordingActivator(

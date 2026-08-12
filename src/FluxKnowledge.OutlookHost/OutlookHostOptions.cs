@@ -91,3 +91,30 @@ internal sealed class OutlookComHostException(
 {
     public OutlookComFailureReason Reason { get; } = reason;
 }
+
+/// <summary>Maps binding failures and other raw COM-boundary exceptions to public-safe host categories.</summary>
+internal static class OutlookComFailureClassifier
+{
+    public static OutlookComHostException Classify(Exception exception)
+    {
+        ArgumentNullException.ThrowIfNull(exception);
+        return new OutlookComHostException(
+            HasMissingInteropDependency(exception)
+                ? OutlookComFailureReason.DependencyMissing
+                : OutlookComFailureReason.OutlookUnavailable,
+            exception);
+    }
+
+    private static bool HasMissingInteropDependency(Exception exception)
+    {
+        for (var current = exception; current is not null; current = current.InnerException)
+        {
+            if (current is FileNotFoundException or FileLoadException or TypeLoadException or BadImageFormatException)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+}

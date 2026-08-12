@@ -44,6 +44,12 @@ internal interface IOutlookHostControlPlane
         OutlookCatchUpClaim claim,
         OutlookCatchUpFailureReason reason,
         CancellationToken cancellationToken);
+
+    ValueTask RequeueCatchUpAsync(
+        OutlookCatchUpClaim claim,
+        OutlookCatchUpFailureReason reason,
+        DateTimeOffset notBeforeUtc,
+        CancellationToken cancellationToken);
 }
 
 internal interface IOutlookExportIngestionBridge
@@ -65,6 +71,8 @@ internal sealed class OutlookHostLoop(
     IOutlookExportIngestionBridge ingestionBridge,
     TimeProvider? timeProvider = null)
 {
+    private static readonly TimeSpan FailureCleanupTimeout = TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan ComAvailabilityRetryDelay = TimeSpan.FromMinutes(1);
     private readonly TimeProvider _clock = timeProvider ?? TimeProvider.System;
 
     public async ValueTask<OutlookHostRunResult> RunOnceAsync(CancellationToken cancellationToken)
@@ -152,11 +160,12 @@ internal sealed class OutlookHostLoop(
         }
         catch (OutlookComHostException exception)
         {
-            await controlPlane.FailCatchUpAsync(
-                work.Claim,
-                MapFailure(exception.Reason),
-                cancellationToken).ConfigureAwait(false);
-            return new OutlookHostRunResult(MapExit(exception.Reason));
+            return await HandleComFailureAsync(work.Claim, exception.Reason).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+        {
+            var classified = OutlookComFailureClassifier.Classify(exception);
+            return await HandleComFailureAsync(work.Claim, classified.Reason).ConfigureAwait(false);
         }
 
         await using (adapter.ConfigureAwait(false))
@@ -191,29 +200,50 @@ internal sealed class OutlookHostLoop(
             }
             catch (OutlookComHostException exception)
             {
-                await controlPlane.FailCatchUpAsync(
-                    work.Claim,
-                    MapFailure(exception.Reason),
-                    cancellationToken).ConfigureAwait(false);
-                return new OutlookHostRunResult(MapExit(exception.Reason));
+                return await HandleComFailureAsync(work.Claim, exception.Reason).ConfigureAwait(false);
             }
             catch (OutlookReadyExportLeaseException)
             {
-                await controlPlane.FailCatchUpAsync(
-                    work.Claim,
-                    OutlookCatchUpFailureReason.LeaseLost,
-                    cancellationToken).ConfigureAwait(false);
+                await FailCatchUpWithCleanupAsync(work.Claim, OutlookCatchUpFailureReason.LeaseLost).ConfigureAwait(false);
                 return new OutlookHostRunResult(OutlookHostExitReason.LeaseStale);
             }
             catch (Exception exception) when (IsExpectedIngestionFailure(exception))
             {
-                await controlPlane.FailCatchUpAsync(
+                await FailCatchUpWithCleanupAsync(
                     work.Claim,
-                    OutlookCatchUpFailureReason.RetryableHostFailure,
-                    cancellationToken).ConfigureAwait(false);
+                    OutlookCatchUpFailureReason.RetryableHostFailure).ConfigureAwait(false);
                 return new OutlookHostRunResult(OutlookHostExitReason.IngestionFailed);
             }
         }
+    }
+
+    private async ValueTask<OutlookHostRunResult> HandleComFailureAsync(
+        OutlookCatchUpClaim claim,
+        OutlookComFailureReason reason)
+    {
+        if (reason is OutlookComFailureReason.DependencyMissing or OutlookComFailureReason.OutlookUnavailable)
+        {
+            using var cleanup = new CancellationTokenSource(FailureCleanupTimeout);
+            await controlPlane.RequeueCatchUpAsync(
+                claim,
+                OutlookCatchUpFailureReason.RetryableHostFailure,
+                _clock.GetUtcNow().Add(ComAvailabilityRetryDelay),
+                cleanup.Token).ConfigureAwait(false);
+        }
+        else
+        {
+            await FailCatchUpWithCleanupAsync(claim, MapFailure(reason)).ConfigureAwait(false);
+        }
+
+        return new OutlookHostRunResult(MapExit(reason));
+    }
+
+    private async ValueTask FailCatchUpWithCleanupAsync(
+        OutlookCatchUpClaim claim,
+        OutlookCatchUpFailureReason reason)
+    {
+        using var cleanup = new CancellationTokenSource(FailureCleanupTimeout);
+        await controlPlane.FailCatchUpAsync(claim, reason, cleanup.Token).ConfigureAwait(false);
     }
 
     private async ValueTask<int> CatchUpAsync(

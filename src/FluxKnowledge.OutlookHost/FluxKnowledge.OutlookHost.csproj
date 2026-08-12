@@ -12,5 +12,7 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.Office.Interop.Outlook" />
+    <!-- Office PIA ships only a .NET Framework asset; it is copied beside this Windows-only COM host. -->
+    <PackageReference Include="MicrosoftOfficeCore" NoWarn="NU1701" />
   </ItemGroup>
 </Project>

@@ -131,6 +131,23 @@ internal sealed class SqlOutlookHostControlPlane(
             cancellationToken));
     }
 
+    public ValueTask RequeueCatchUpAsync(
+        OutlookCatchUpClaim claim,
+        OutlookCatchUpFailureReason reason,
+        DateTimeOffset notBeforeUtc,
+        CancellationToken cancellationToken)
+    {
+        var operationId = Guid.NewGuid();
+        return AsValueTask(store.RequeueCatchUpAsync(
+            new OutlookCatchUpRequeueRequest(
+                operationId,
+                Fingerprint("requeue-catchup", operationId, claim.CatchUpId, claim.FencingToken, reason, notBeforeUtc),
+                claim,
+                reason,
+                notBeforeUtc),
+            cancellationToken));
+    }
+
     public async ValueTask<OutlookBrowseClaim?> TryClaimBrowseAsync(
         OutlookHostIdentity host,
         TimeSpan leaseDuration,
