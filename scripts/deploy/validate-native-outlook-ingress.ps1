@@ -3,15 +3,71 @@ param(
     [string]$SourceRoot = "",
     [string]$SiteUrl = "http://127.0.0.1:5137",
     [string]$DeployRoot = "C:\inetpub\FluxKnowledge",
-    [ValidatePattern('^\d{14}_[A-Za-z0-9]+$')]
-    [string]$ExpectedMigrationId = "20260811152249_AllowIdentitylessBlockedOutlookExports",
-    [ValidatePattern('^\d{14}_AddNativeOutlookIngress$')]
-    [string]$BaselineMigrationId = "20260811093501_AddNativeOutlookIngress",
+    [string]$ExpectedMigrationId = "",
+    [string]$BaselineMigrationId = "",
     [string]$ValidationRecordPath = "docs\operations\native-windows-phase-4-outlook-ingress-validation.md",
     [switch]$PlanOnly
 )
 
 $ErrorActionPreference = "Stop"
+
+if ([string]::IsNullOrWhiteSpace($SourceRoot)) {
+    $SourceRoot = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSCommandPath))
+}
+$SourceRoot = (Resolve-Path -LiteralPath $SourceRoot).Path
+
+function Get-NativeOutlookIngressMigrationContract {
+    param([string]$SourceRoot)
+
+    $deploymentScript = Join-Path $SourceRoot "scripts\deploy\update-native-windows.ps1"
+    if (-not (Test-Path -LiteralPath $deploymentScript -PathType Leaf)) {
+        throw "The authoritative native deployment plan is missing."
+    }
+
+    $planOutput = & powershell -NoProfile -ExecutionPolicy Bypass -File $deploymentScript -SourceRoot $SourceRoot -PlanOnly 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) {
+        throw "The authoritative native deployment plan could not be read."
+    }
+
+    try {
+        $plan = $planOutput | ConvertFrom-Json
+        $migrationIds = @($plan.native_outlook_ingress_migration_ids)
+    }
+    catch {
+        throw "The authoritative native deployment plan returned an invalid Outlook migration contract."
+    }
+
+    if ($migrationIds.Count -eq 0 -or
+        $plan.native_outlook_ingress_baseline_migration -cne $migrationIds[0] -or
+        $plan.deployment_migration_target -cne $migrationIds[-1] -or
+        $plan.post_deploy_validator -cne (Split-Path -Leaf $PSCommandPath)) {
+        throw "The authoritative native deployment plan returned an inconsistent Outlook migration contract."
+    }
+
+    foreach ($migrationId in $migrationIds) {
+        if ([string]$migrationId -notmatch '^\d{14}_[A-Za-z0-9]+$') {
+            throw "The authoritative native deployment plan returned an invalid Outlook migration identifier."
+        }
+    }
+    if ([string]$migrationIds[0] -notmatch '^\d{14}_AddNativeOutlookIngress$') {
+        throw "The authoritative native deployment plan returned an invalid Outlook baseline migration."
+    }
+
+    return [pscustomobject]@{
+        BaselineMigrationId = [string]$migrationIds[0]
+        ExpectedMigrationId = [string]$migrationIds[-1]
+    }
+}
+
+$migrationContract = Get-NativeOutlookIngressMigrationContract -SourceRoot $SourceRoot
+if (-not [string]::IsNullOrWhiteSpace($ExpectedMigrationId) -and $ExpectedMigrationId -cne $migrationContract.ExpectedMigrationId) {
+    throw "The requested native Outlook migration target does not match the authoritative deployment plan."
+}
+if (-not [string]::IsNullOrWhiteSpace($BaselineMigrationId) -and $BaselineMigrationId -cne $migrationContract.BaselineMigrationId) {
+    throw "The requested native Outlook baseline migration does not match the authoritative deployment plan."
+}
+$ExpectedMigrationId = $migrationContract.ExpectedMigrationId
+$BaselineMigrationId = $migrationContract.BaselineMigrationId
 
 if ($PlanOnly) {
     [ordered]@{
@@ -21,6 +77,8 @@ if ($PlanOnly) {
         outlook_host_activation = $false
         effective_configuration_projection = $true
         configuration_projection_starts_host = $false
+        native_outlook_ingress_baseline_migration = $BaselineMigrationId
+        native_outlook_ingress_migration_target = $ExpectedMigrationId
         checks = @("migration", "loopback-health-readiness-status", "disabled-configuration", "private-schema-policy", "aggregate-counts")
         validation_record_fields = @(
             "started_at_utc",
@@ -35,10 +93,6 @@ if ($PlanOnly) {
     exit 0
 }
 
-if ([string]::IsNullOrWhiteSpace($SourceRoot)) {
-    $SourceRoot = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSCommandPath))
-}
-$SourceRoot = (Resolve-Path -LiteralPath $SourceRoot).Path
 $DeployRoot = (Resolve-Path -LiteralPath $DeployRoot).Path
 $recordPath = [System.IO.Path]::GetFullPath((Join-Path $SourceRoot $ValidationRecordPath))
 $operationsRoot = [System.IO.Path]::GetFullPath((Join-Path $SourceRoot "docs\operations"))

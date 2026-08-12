@@ -136,9 +136,10 @@ try {
     }
     $outlookValidationCommand = [string]$summary.steps[$outlookValidationIndex].command
     if ($outlookValidationCommand -notmatch 'validate-native-outlook-ingress\.ps1' -or
-        $outlookValidationCommand -notmatch '-ExpectedMigrationId' -or
+        $outlookValidationCommand -match '-ExpectedMigrationId' -or
+        $outlookValidationCommand -match '-BaselineMigrationId' -or
         $outlookValidationCommand -notmatch '-ValidationRecordPath') {
-        throw "The native closeout plan does not invoke the narrowly parameterised Outlook validation hook."
+        throw "The native closeout plan must let the Outlook validator derive its migration contract from the authoritative deployment plan."
     }
 
     $gmailRegressionIndex = [Array]::IndexOf($actualSteps, "legacy-gmail-regression")

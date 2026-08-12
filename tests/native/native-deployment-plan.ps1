@@ -146,6 +146,42 @@ if ($validatorPlan.mode -ne "plan-only" -or -not $validatorPlan.loopback_only -o
     -not $validatorPlan.effective_configuration_projection -or $validatorPlan.configuration_projection_starts_host -ne $false) {
     throw "The native Outlook validator lost its disabled loopback-only boundary."
 }
+if ($validatorPlan.native_outlook_ingress_baseline_migration -ne $plan.native_outlook_ingress_baseline_migration -or
+    $validatorPlan.native_outlook_ingress_migration_target -ne $plan.deployment_migration_target) {
+    throw "The native Outlook validator does not derive the authoritative deployed Outlook migration contract."
+}
+
+function Assert-StaleOutlookMigrationOverrideIsRejected {
+    param(
+        [string]$ParameterName,
+        [string]$MigrationId
+    )
+
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        $overrideOutput = & powershell -NoProfile -ExecutionPolicy Bypass -File $outlookValidator `
+            -SourceRoot $SourceRoot `
+            -PlanOnly `
+            $ParameterName $MigrationId 2>&1 | Out-String
+        $overrideExitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+
+    if ($overrideExitCode -eq 0 -or $overrideOutput -notmatch "does not match the authoritative deployment plan") {
+        throw "The native Outlook validator accepted a stale $ParameterName override or returned an unsafe failure."
+    }
+}
+
+Assert-StaleOutlookMigrationOverrideIsRejected `
+    -ParameterName "-ExpectedMigrationId" `
+    -MigrationId "20260811152249_AllowIdentitylessBlockedOutlookExports"
+Assert-StaleOutlookMigrationOverrideIsRejected `
+    -ParameterName "-BaselineMigrationId" `
+    -MigrationId "20260811094729_HardenNativeOutlookIngress"
+
 $allowedRecordFields = @(
     "started_at_utc", "completed_at_utc", "loopback_status_codes", "migration_ids",
     "outlook_enabled", "aggregate_counts", "private_schema_policy"

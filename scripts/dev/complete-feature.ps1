@@ -347,7 +347,7 @@ $nativeDeployCommand = ".\scripts\deploy\update-native-windows.ps1 -SiteName '$S
 $nativeWorkerValidationRecord = "docs\operations\native-windows-phase-2-native-worker-supervision-validation.md"
 $nativeWorkerValidationCommand = ".\scripts\deploy\validate-native-worker-supervision.ps1 -SiteUrl '$SiteUrl' -DeployRoot '$DeployRoot' -ExpectedMigrationId '20260810185641_AddNativeWorkerSupervision' -ValidationRecordPath '$nativeWorkerValidationRecord'"
 $nativeOutlookValidationRecord = "docs\operations\native-windows-phase-4-outlook-ingress-validation.md"
-$nativeOutlookValidationCommand = ".\scripts\deploy\validate-native-outlook-ingress.ps1 -SiteUrl '$SiteUrl' -DeployRoot '$DeployRoot' -ExpectedMigrationId '20260811152249_AllowIdentitylessBlockedOutlookExports' -BaselineMigrationId '20260811093501_AddNativeOutlookIngress' -ValidationRecordPath '$nativeOutlookValidationRecord'"
+$nativeOutlookValidationCommand = ".\scripts\deploy\validate-native-outlook-ingress.ps1 -SiteUrl '$SiteUrl' -DeployRoot '$DeployRoot' -ValidationRecordPath '$nativeOutlookValidationRecord'"
 if ($ApplyMigrations) {
     $nativeDeployCommand += " -ApplyMigrations -ConfirmApplyMigrations"
 }
