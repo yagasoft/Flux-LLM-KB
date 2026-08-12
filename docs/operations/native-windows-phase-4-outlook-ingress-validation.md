@@ -7,3 +7,12 @@
 - Outlook recovery enabled: false
 - Aggregate counts: profiles=1; folders=1; exports=16; pending catch-ups=1
 - Private schema policy: passed
+
+## Follow-up bounded diagnostic retry
+
+- Date (UTC): 2026-08-12
+- Scope: one manually requested, read-only catch-up for the already configured exact folder.
+- Diagnostic mode: enabled with an explicit application-owned per-user private output path.
+- Host result: completed successfully (exit code 0); no private COM diagnostic file was created.
+- Aggregate result: exports increased from 16 to 18; deferred and blocked counts remained 0; the SQL-authoritative folder cursor advanced.
+- Post-run safety: the profile was paused immediately after verification, leaving no further host claim eligible.
