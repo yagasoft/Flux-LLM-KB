@@ -32,6 +32,18 @@ if ($plan.required_site -ne "FluxKnowledge") {
 if ($plan.outlook_host_activation -ne $false -or $plan.windows_service_registration -ne $false) {
     throw "The native deployment plan may not activate the Outlook host or register a Windows Service."
 }
+if ($plan.outlook_host_scheduler.task_name -ne 'FluxKnowledge.OutlookHost' -or
+    -not $plan.outlook_host_scheduler.interactive_only -or
+    -not $plan.outlook_host_scheduler.hidden -or
+    $plan.outlook_host_scheduler.interval_minutes -ne 15 -or
+    $plan.outlook_host_scheduler.multiple_instances -ne 'IgnoreNew' -or
+    $plan.outlook_host_scheduler.verbose_diagnostics -ne $false) {
+    throw 'The native deployment plan has lost the approved Outlook scheduler boundary.'
+}
+if (-not $plan.outlook_host_payload.published -or
+    $plan.outlook_host_payload.relative_directory -ne 'outlook-host') {
+    throw 'The native deployment plan does not publish the Outlook host payload.'
+}
 if (-not $plan.iis_anonymous_authentication_required -or -not $plan.iis_windows_authentication_prohibited) {
     throw "The native deployment plan must retain anonymous IIS access and prohibit Windows authentication."
 }

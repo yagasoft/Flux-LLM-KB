@@ -359,6 +359,8 @@ try {
     Invoke-FeatureStep -Name "dotnet-build-release" -Cwd $FeatureWorktree -Command 'dotnet build FluxKnowledge.slnx -c Release --no-restore -warnaserror'
     Invoke-FeatureStep -Name "dotnet-test-native" -Cwd $FeatureWorktree -Command 'dotnet test FluxKnowledge.slnx -c Release --no-build --logger "console;verbosity=minimal"' -TimeoutSeconds $TestStepTimeoutSeconds
     Invoke-FeatureStep -Name "native-closeout-contract" -Cwd $FeatureWorktree -Command 'powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\native\complete-feature-dryrun.ps1'
+    Invoke-FeatureStep -Name "native-outlook-scheduled-host-contract" -Cwd $FeatureWorktree -Command 'powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\native\outlook-scheduled-host-contract.ps1'
+    Invoke-FeatureStep -Name "native-outlook-host-composition" -Cwd $FeatureWorktree -Command 'powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\native\outlook-host-composition.ps1'
     Invoke-FeatureStep -Name "native-deployment-contract" -Cwd $FeatureWorktree -Command 'powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\native\native-deployment-plan.ps1'
     Invoke-FeatureStep -Name "legacy-gmail-regression" -Cwd $FeatureWorktree -Command $gmailRegressionCommand -TimeoutSeconds $TestStepTimeoutSeconds
     Invoke-FeatureStep -Name "legacy-gmail-preservation-diff-guard" -Cwd $FeatureWorktree -Command "powershell -NoProfile -ExecutionPolicy Bypass -File '$safeGmailGuardScript' -RepositoryRoot . -BaselineRef main" -RunInDryRun

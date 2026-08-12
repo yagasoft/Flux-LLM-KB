@@ -52,6 +52,10 @@ $NativeOutlookIngressMigrationIds = @(
     "20260812102333_AddOutlookBrowseTargetPath"
 )
 $NativeOutlookIngressMigrationTargetId = $NativeOutlookIngressMigrationIds[-1]
+$OutlookHostTaskName = 'FluxKnowledge.OutlookHost'
+$OutlookHostPayloadDirectory = 'outlook-host'
+$OutlookHostIntervalMinutes = 15
+$OutlookHostExecutionLimit = New-TimeSpan -Minutes 14
 $RequiredDeploymentMigrationIds = @(
     $SchedulerMigrationIds +
     $Phase3AMigrationIds +
@@ -89,6 +93,19 @@ if ($PlanOnly) {
         deployment_migration_target = $NativeOutlookIngressMigrationTargetId
         post_deploy_validator = "validate-native-outlook-ingress.ps1"
         outlook_host_activation = $false
+        outlook_host_payload = [ordered]@{
+            published = $true
+            relative_directory = $OutlookHostPayloadDirectory
+        }
+        outlook_host_scheduler = [ordered]@{
+            task_name = $OutlookHostTaskName
+            interactive_only = $true
+            hidden = $true
+            interval_minutes = $OutlookHostIntervalMinutes
+            multiple_instances = 'IgnoreNew'
+            execution_limit_minutes = [int]$OutlookHostExecutionLimit.TotalMinutes
+            verbose_diagnostics = $false
+        }
         windows_service_registration = $false
         iis_anonymous_authentication_required = $true
         iis_windows_authentication_prohibited = $true
@@ -112,6 +129,162 @@ function Get-NormalisedPath {
     return (Resolve-Path -LiteralPath $Path -ErrorAction Stop).Path.TrimEnd(
         [System.IO.Path]::DirectorySeparatorChar,
         [System.IO.Path]::AltDirectorySeparatorChar)
+}
+
+function New-OutlookHostTaskTriggers {
+    $logon = New-ScheduledTaskTrigger -AtLogOn
+    $repeat = New-ScheduledTaskTrigger -Once -At ([DateTime]::Now.AddMinutes(1)) `
+        -RepetitionInterval (New-TimeSpan -Minutes $OutlookHostIntervalMinutes) `
+        -RepetitionDuration (New-TimeSpan -Days 3650)
+    return @($logon, $repeat)
+}
+
+function Get-OutlookHostScheduledTask {
+    $tasks = @(Get-ScheduledTask -TaskPath '\' -ErrorAction Stop | Where-Object {
+        [string]$_.TaskName -ceq $OutlookHostTaskName
+    })
+    if ($tasks.Count -gt 1) {
+        throw 'The Outlook scheduled task lookup returned an invalid duplicate result.'
+    }
+    return $tasks | Select-Object -First 1
+}
+
+function Register-OutlookHostTask {
+    param([string]$DeployRoot)
+
+    $launcher = Join-Path (Join-Path $DeployRoot $OutlookHostPayloadDirectory) 'run-outlook-host.ps1'
+    if (-not (Test-Path -LiteralPath $launcher -PathType Leaf)) {
+        throw 'The deployed Outlook host launcher is missing.'
+    }
+
+    $powershell = Join-Path $PSHOME 'powershell.exe'
+    $action = New-ScheduledTaskAction -Execute $powershell -Argument (
+        '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}"' -f $launcher)
+    $principal = New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().User.Value) `
+        -LogonType Interactive -RunLevel Limited
+    $settings = New-ScheduledTaskSettingsSet -Disable -Hidden -MultipleInstances IgnoreNew `
+        -ExecutionTimeLimit $OutlookHostExecutionLimit -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+    Register-ScheduledTask -TaskName $OutlookHostTaskName -Action $action -Trigger (New-OutlookHostTaskTriggers) `
+        -Principal $principal -Settings $settings -Description 'FluxKnowledge read-only Outlook COM host' -Force | Out-Null
+}
+
+function DisableAndDrain-OutlookHostTask {
+    $task = Get-OutlookHostScheduledTask
+    if ($null -eq $task) {
+        return $false
+    }
+
+    $wasEnabled = [bool]$task.Settings.Enabled
+    Disable-ScheduledTask -TaskName $OutlookHostTaskName -ErrorAction Stop | Out-Null
+
+    try {
+        $deadline = [DateTime]::UtcNow.AddSeconds(30)
+        do {
+            $task = Get-ScheduledTask -TaskName $OutlookHostTaskName -ErrorAction Stop
+            if ([string]$task.State -ne 'Running') {
+                return $wasEnabled
+            }
+
+            Start-Sleep -Seconds 1
+        } while ([DateTime]::UtcNow -lt $deadline)
+
+        throw 'The Outlook scheduled task did not stop within 30 seconds.'
+    } catch {
+        if ($wasEnabled) {
+            Enable-ScheduledTask -TaskName $OutlookHostTaskName -ErrorAction SilentlyContinue | Out-Null
+        }
+        throw
+    }
+}
+
+function Assert-OutlookHostTask {
+    param(
+        [string]$DeployRoot,
+        [bool]$ExpectedEnabled = $true)
+
+    $task = Get-ScheduledTask -TaskName $OutlookHostTaskName -ErrorAction Stop
+    $expectedLauncher = Join-Path (Join-Path $DeployRoot $OutlookHostPayloadDirectory) 'run-outlook-host.ps1'
+    $expectedPowerShell = Join-Path $PSHOME 'powershell.exe'
+    $expectedArguments = '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}"' -f $expectedLauncher
+    $action = @($task.Actions)
+    if ($action.Count -ne 1 -or
+        -not ([string]$action[0].Execute).Equals($expectedPowerShell, [System.StringComparison]::OrdinalIgnoreCase) -or
+        [string]$action[0].Arguments -ne $expectedArguments -or
+        [string]$action[0].Arguments -match '--verbose-com-errors') {
+        throw 'The Outlook scheduled task action does not match the approved launcher policy.'
+    }
+
+    $principal = $task.Principal
+    if ($null -eq $principal) {
+        throw 'The Outlook scheduled task must use the current limited interactive user token.'
+    }
+    $currentUserSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    try {
+        $registeredUser = [string]$principal.UserId
+        $registeredUserSid = if ($registeredUser -match '^S-\d-') {
+            [Security.Principal.SecurityIdentifier]::new($registeredUser).Value
+        } else {
+            ([Security.Principal.NTAccount]::new($registeredUser)).Translate(
+                [Security.Principal.SecurityIdentifier]).Value
+        }
+    } catch {
+        throw 'The Outlook scheduled task principal identity is invalid.'
+    }
+    if (-not $registeredUserSid.Equals($currentUserSid, [System.StringComparison]::OrdinalIgnoreCase) -or
+        [string]$principal.LogonType -notmatch '^Interactive' -or
+        [string]$principal.RunLevel -ne 'Limited') {
+        throw 'The Outlook scheduled task must use the current limited interactive user token.'
+    }
+
+    $settings = $task.Settings
+    if ($null -eq $settings -or [bool]$settings.Enabled -ne $ExpectedEnabled -or
+        -not [bool]$settings.Hidden -or
+        [string]$settings.MultipleInstances -ne 'IgnoreNew' -or
+        [string]::IsNullOrWhiteSpace([string]$settings.ExecutionTimeLimit)) {
+        throw 'The Outlook scheduled task settings do not enforce the approved hidden bounded overlap policy.'
+    }
+    try {
+        $executionLimit = [System.Xml.XmlConvert]::ToTimeSpan([string]$settings.ExecutionTimeLimit)
+    } catch {
+        throw 'The Outlook scheduled task execution limit is invalid.'
+    }
+    if ($executionLimit -ge (New-TimeSpan -Minutes 15)) {
+        throw 'The Outlook scheduled task execution limit is not bounded below the scheduler interval.'
+    }
+
+    $triggers = @($task.Triggers)
+    $logonTriggers = @($triggers | Where-Object { $_.CimClass.CimClassName -eq 'MSFT_TaskLogonTrigger' })
+    $repeatTriggers = @($triggers | Where-Object { $_.CimClass.CimClassName -eq 'MSFT_TaskTimeTrigger' })
+    if ($logonTriggers.Count -ne 1 -or $repeatTriggers.Count -ne 1) {
+        throw 'The Outlook scheduled task must have one logon trigger and one repeating trigger.'
+    }
+    try {
+        $interval = [System.Xml.XmlConvert]::ToTimeSpan([string]$repeatTriggers[0].Repetition.Interval)
+    } catch {
+        throw 'The Outlook scheduled task repetition interval is invalid.'
+    }
+    if ($interval -ne (New-TimeSpan -Minutes $OutlookHostIntervalMinutes)) {
+        throw 'The Outlook scheduled task repetition interval is not 15 minutes.'
+    }
+}
+
+function Install-OutlookHostTask {
+    param([string]$DeployRoot)
+
+    Register-OutlookHostTask -DeployRoot $DeployRoot
+    try {
+        Assert-OutlookHostTask -DeployRoot $DeployRoot -ExpectedEnabled $false
+        Enable-ScheduledTask -TaskName $OutlookHostTaskName -ErrorAction Stop | Out-Null
+        Assert-OutlookHostTask -DeployRoot $DeployRoot -ExpectedEnabled $true
+    } catch {
+        $installationFailure = $_
+        try {
+            Disable-ScheduledTask -TaskName $OutlookHostTaskName -ErrorAction Stop | Out-Null
+        } catch {
+            throw 'The invalid Outlook scheduled task could not be left disabled.'
+        }
+        throw $installationFailure
+    }
 }
 
 function Test-LoopbackSqlServer {
@@ -432,8 +605,11 @@ $deployParent = Split-Path -Parent $DeployRoot
 $deployLeaf = Split-Path -Leaf $DeployRoot
 $webProject = Join-Path $SourceRoot "src\FluxKnowledge.Web\FluxKnowledge.Web.csproj"
 $cliProject = Join-Path $SourceRoot "src\FluxKnowledge.Cli\FluxKnowledge.Cli.csproj"
-if (-not (Test-Path -LiteralPath $webProject) -or -not (Test-Path -LiteralPath $cliProject)) {
-    throw "The native web and CLI projects must exist under SourceRoot."
+$outlookHostProject = Join-Path $SourceRoot "src\FluxKnowledge.OutlookHost\FluxKnowledge.OutlookHost.csproj"
+$outlookHostLauncher = Join-Path $SourceRoot "scripts\deploy\run-outlook-host.ps1"
+if (-not (Test-Path -LiteralPath $webProject) -or -not (Test-Path -LiteralPath $cliProject) -or
+    -not (Test-Path -LiteralPath $outlookHostProject) -or -not (Test-Path -LiteralPath $outlookHostLauncher)) {
+    throw "The native web, CLI and Outlook host deployment inputs must exist under SourceRoot."
 }
 $sha256Helper = Join-Path $PSScriptRoot "get-sha256.ps1"
 if (-not (Test-Path -LiteralPath $sha256Helper -PathType Leaf)) {
@@ -485,6 +661,8 @@ $backupPath = $null
 $poolStopped = $false
 $payloadSwapped = $false
 $oldPayloadMoved = $false
+$outlookHostTaskWasEnabled = $false
+$outlookHostTaskDrained = $false
 $migrationIdsBefore = @()
 $migrationIdsAfter = @()
 $locationPushed = $false
@@ -504,6 +682,25 @@ try {
     }
     foreach ($settingsFile in $targetSettings) {
         Copy-Item -LiteralPath $settingsFile.FullName -Destination (Join-Path $stagingRoot $settingsFile.Name) -Force
+    }
+
+    $stagedOutlookHostRoot = Join-Path $stagingRoot $OutlookHostPayloadDirectory
+    New-Item -ItemType Directory -Path $stagedOutlookHostRoot -ErrorAction Stop | Out-Null
+    & dotnet publish $outlookHostProject -c Release --no-restore -o $stagedOutlookHostRoot
+    if ($LASTEXITCODE -ne 0) {
+        throw "Native Outlook host publish failed with exit code $LASTEXITCODE."
+    }
+    Copy-Item -LiteralPath $outlookHostLauncher -Destination (Join-Path $stagedOutlookHostRoot 'run-outlook-host.ps1') -Force
+    foreach ($requiredOutlookHostFile in @(
+        'FluxKnowledge.OutlookHost.exe',
+        'FluxKnowledge.OutlookHost.dll',
+        'Microsoft.Office.Interop.Outlook.dll',
+        'office.dll',
+        'run-outlook-host.ps1'
+    )) {
+        if (-not (Test-Path -LiteralPath (Join-Path $stagedOutlookHostRoot $requiredOutlookHostFile) -PathType Leaf)) {
+            throw "The staged Outlook host payload is missing $requiredOutlookHostFile."
+        }
     }
 
     $stagedAssemblyHash = (& $sha256Helper -LiteralPath $stagedAssembly).Trim()
@@ -552,6 +749,9 @@ try {
         }
     }
 
+    $outlookHostTaskWasEnabled = DisableAndDrain-OutlookHostTask
+    $outlookHostTaskDrained = $true
+
     Move-Item -LiteralPath $DeployRoot -Destination $rollbackRoot -ErrorAction Stop
     $oldPayloadMoved = $true
     try {
@@ -594,6 +794,8 @@ try {
         }
     }
 
+    Install-OutlookHostTask -DeployRoot $DeployRoot
+
     [ordered]@{
         ok = $true
         site = $SiteName
@@ -616,6 +818,14 @@ try {
     }
     if ($poolStopped) {
         Start-WebAppPool -Name $SiteName -ErrorAction SilentlyContinue
+    }
+    if ($payloadSwapped) {
+        $installedOutlookTask = Get-OutlookHostScheduledTask
+        if ($null -ne $installedOutlookTask) {
+            Disable-ScheduledTask -TaskName $OutlookHostTaskName -ErrorAction Stop | Out-Null
+        }
+    } elseif ($outlookHostTaskDrained -and $outlookHostTaskWasEnabled) {
+        Enable-ScheduledTask -TaskName $OutlookHostTaskName -ErrorAction SilentlyContinue | Out-Null
     }
     throw
 } finally {

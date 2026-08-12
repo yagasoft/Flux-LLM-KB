@@ -250,8 +250,13 @@ factory checks the Windows interactive user/session, one-instance ownership and
 an enabled, unexpired, fenced durable browse or catch-up claim before constructing
 the COM adapter. The adapter exposes browse, subscribe, enumerate and read-for-
 export operations only. Web startup, profile save, recovery, deployment planning
-and configuration projection cannot construct or start it, and deployment does
-not register an autostart task or Windows Service.
+and configuration projection cannot construct or start it. When separately
+authorised, the native Windows deployment registers a hidden, per-user
+interactive Scheduled Task that invokes the fixed local launcher at logon and
+every 15 minutes with `--run-once`. It is not a Windows Service or persistent
+daemon. Task registration does not override the enabled, unexpired and fenced
+durable-work gate, so a disabled profile with no pending browse exits before COM
+activation.
 
 The private spool uses `_inflight/<export-id>` followed by atomic promotion to
 `ready/<export-id>`. Ingestion reopens only the promoted retained artifacts,

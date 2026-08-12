@@ -12,6 +12,10 @@ $closeoutScript = Join-Path $SourceRoot "scripts\dev\complete-feature.ps1"
 if (-not (Test-Path -LiteralPath $closeoutScript)) {
     throw "The native closeout script is missing."
 }
+$deploymentScript = Join-Path $SourceRoot "scripts\deploy\update-native-windows.ps1"
+if (-not (Test-Path -LiteralPath $deploymentScript)) {
+    throw "The native deployment script is missing."
+}
 
 $temporaryRoot = Join-Path ([System.IO.Path]::GetTempPath()) "FluxKnowledgeCloseout-$([Guid]::NewGuid().ToString('N'))"
 $mainRoot = Join-Path $temporaryRoot "main"
@@ -75,6 +79,8 @@ try {
         "dotnet-build-release",
         "dotnet-test-native",
         "native-closeout-contract",
+        "native-outlook-scheduled-host-contract",
+        "native-outlook-host-composition",
         "native-deployment-contract",
         "legacy-gmail-regression",
         "legacy-gmail-preservation-diff-guard",
@@ -102,6 +108,24 @@ try {
         }
     }
 
+    $scheduledHostContractIndex = [Array]::IndexOf($actualSteps, "native-outlook-scheduled-host-contract")
+    $hostCompositionIndex = [Array]::IndexOf($actualSteps, "native-outlook-host-composition")
+    $deploymentContractIndex = [Array]::IndexOf($actualSteps, "native-deployment-contract")
+    $deployIndex = [Array]::IndexOf($actualSteps, "deploy-native-windows")
+    if ($scheduledHostContractIndex -lt 0 -or $hostCompositionIndex -le $scheduledHostContractIndex -or
+        $deploymentContractIndex -le $hostCompositionIndex -or $deployIndex -le $deploymentContractIndex) {
+        throw "The native Outlook scheduler contracts must run in order before deployment."
+    }
+
+    $scheduledHostContractCommand = [string]$summary.steps[$scheduledHostContractIndex].command
+    $hostCompositionCommand = [string]$summary.steps[$hostCompositionIndex].command
+    $deploymentContractCommand = [string]$summary.steps[$deploymentContractIndex].command
+    if ($scheduledHostContractCommand -notmatch 'tests\\native\\outlook-scheduled-host-contract\.ps1' -or
+        $hostCompositionCommand -notmatch 'tests\\native\\outlook-host-composition\.ps1' -or
+        $deploymentContractCommand -notmatch 'tests\\native\\native-deployment-plan\.ps1') {
+        throw "The native closeout plan is missing the required Outlook scheduler verification commands."
+    }
+
     $commands = @($summary.steps | ForEach-Object { $_.command }) -join "`n"
     $forbiddenCommands = @(
         "docker",
@@ -116,7 +140,6 @@ try {
         throw "The native closeout plan contains forbidden active commands: $($foundForbidden -join ', ')."
     }
 
-    $deployIndex = [Array]::IndexOf($actualSteps, "deploy-native-windows")
     $validationIndex = [Array]::IndexOf($actualSteps, "post-deploy-native-worker-supervision-validation")
     $outlookValidationIndex = [Array]::IndexOf($actualSteps, "post-deploy-native-outlook-ingress-validation")
     $validationCommitIndex = [Array]::IndexOf($actualSteps, "post-deploy-validation-record-commit")
@@ -127,6 +150,21 @@ try {
         $validationCommitIndex -le $outlookValidationIndex -or $validationPushIndex -le $validationCommitIndex -or
         $cleanupIndex -le $validationPushIndex) {
         throw "The native closeout plan must validate, commit and push fresh sanitised evidence only after deployment and before cleanup."
+    }
+
+    $closeoutText = Get-Content -LiteralPath $closeoutScript -Raw
+    $deploymentText = Get-Content -LiteralPath $deploymentScript -Raw
+    $registrationHelper = [regex]::Match(
+        $deploymentText,
+        '(?s)function\s+Register-OutlookHostTask\b.*?(?=\r?\nfunction\s+|\z)').Value
+    if ([string]::IsNullOrWhiteSpace($registrationHelper) -or
+        $closeoutText -match 'Register-ScheduledTask' -or
+        $registrationHelper -match '--verbose-com-errors') {
+        throw "The closeout path must not register a task directly or enable verbose Outlook diagnostics."
+    }
+    if ($closeoutText -notmatch '(?s)if\s*\(\s*-not\s+\$SkipDeploy\s*\)\s*\{.*Invoke-FeatureStep\s+-Name\s+"deploy-native-windows"' -or
+        $closeoutText -match '(?m)Invoke-FeatureStep\s+-Name\s+"deploy-native-windows".*-RunInDryRun') {
+        throw "The native closeout path has lost its explicit deployment gate."
     }
     $validationCommand = [string]$summary.steps[$validationIndex].command
     if ($validationCommand -notmatch 'validate-native-worker-supervision\.ps1' -or

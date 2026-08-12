@@ -11,7 +11,15 @@ dotnet publish (Join-Path $repoRoot 'src\FluxKnowledge.OutlookHost\FluxKnowledge
     --output $publishRoot
 if ($LASTEXITCODE -ne 0) { throw "Outlook host publish failed with exit code $LASTEXITCODE." }
 
-$officeInterop = Join-Path $publishRoot 'office.dll'
-if (-not (Test-Path -LiteralPath $officeInterop -PathType Leaf)) {
-    throw "Published Outlook host is missing office.dll."
+$requiredPayloadFiles = @(
+    'FluxKnowledge.OutlookHost.exe',
+    'Microsoft.Office.Interop.Outlook.dll',
+    'office.dll'
+)
+
+foreach ($requiredPayloadFile in $requiredPayloadFiles) {
+    $payloadPath = Join-Path $publishRoot $requiredPayloadFile
+    if (-not (Test-Path -LiteralPath $payloadPath -PathType Leaf)) {
+        throw "Published Outlook host is missing $requiredPayloadFile."
+    }
 }
