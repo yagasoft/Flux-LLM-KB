@@ -12,6 +12,10 @@ public sealed class OutlookBrowseRequestEntity
     public DateTimeOffset? LeaseExpiresAtUtc { get; set; }
     public long FencingToken { get; set; }
     public int? FailureCode { get; set; }
+    /// <summary>Private root-to-leaf display path; never returned by status or public reads.</summary>
+    public string? TargetPath { get; set; }
+    /// <summary>Private SHA-256 provenance for a completed targeted browse; the raw path is cleared terminally.</summary>
+    public string? TargetPathFingerprint { get; set; }
     public byte[] RowVersion { get; set; } = [];
 }
 

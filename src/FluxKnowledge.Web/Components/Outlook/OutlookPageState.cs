@@ -15,7 +15,8 @@ public sealed record OutlookProfileDraft(
     OutlookIncrementalBasis IncrementalBasis,
     OutlookCaptureSchedule Schedule,
     bool Enable,
-    long ConfigurationRevision)
+    long ConfigurationRevision,
+    string TargetFolderPath = "")
 {
     public static OutlookProfileDraft Empty { get; } = new(
         null,
@@ -24,7 +25,8 @@ public sealed record OutlookProfileDraft(
         OutlookIncrementalBasis.LastModificationTime,
         new OutlookCaptureSchedule(TimeSpan.FromMinutes(15), TimeSpan.FromMinutes(2)),
         false,
-        1);
+        1,
+        string.Empty);
 }
 
 public interface IOutlookOperatorPolicy
@@ -73,6 +75,7 @@ public sealed class OutlookPageState(
 {
     private Guid? _browseCorrelationId;
     private string? _browseDraftFingerprint;
+    private string? _browseTargetPathFingerprint;
 
     public OutlookPageProjection Projection { get; private set; } = OutlookPageProjection.Empty;
     public IReadOnlyList<OutlookBrowseFolderProjection> BrowseFolders { get; private set; } = [];
@@ -100,12 +103,14 @@ public sealed class OutlookPageState(
         var operationId = Guid.NewGuid();
         var request = new OutlookBrowseRequest(
             operationId,
-            RequestFingerprint("request-browse", operationId, draft.ProfileId.Value, draft.ConfigurationRevision),
+            RequestFingerprint("request-browse", operationId, draft.ProfileId.Value, draft.ConfigurationRevision, TargetPathFingerprint(draft.TargetFolderPath)),
             Guid.NewGuid(),
             Guid.NewGuid(),
             draft.ConfigurationRevision,
             timeProvider.GetUtcNow().AddMinutes(5),
-            draft.ProfileId);
+            draft.ProfileId,
+            draft.TargetFolderPath);
+        request.Validate();
         var receipt = await store.RequestBrowseAsync(request, cancellationToken).ConfigureAwait(false);
         if (!receipt.Accepted || !receipt.Committed)
         {
@@ -113,8 +118,9 @@ public sealed class OutlookPageState(
         }
 
         _browseCorrelationId = request.CorrelationId;
-        _browseDraftFingerprint = DraftFingerprint(draft);
-        return request;
+        _browseDraftFingerprint = BrowseDraftFingerprint(draft);
+        _browseTargetPathFingerprint = TargetPathFingerprint(draft.TargetFolderPath);
+        return request with { TargetPath = string.Empty };
     }
 
     public async ValueTask<IReadOnlyList<OutlookBrowseFolderProjection>> RefreshBrowseResultAsync(
@@ -123,7 +129,7 @@ public sealed class OutlookPageState(
     {
         ArgumentNullException.ThrowIfNull(draft);
         if (_browseCorrelationId is not { } correlationId ||
-            !string.Equals(_browseDraftFingerprint, DraftFingerprint(draft), StringComparison.Ordinal))
+            !MatchesBrowseDraft(draft))
         {
             throw new InvalidOperationException("The Outlook folder browse result is stale for the current configuration.");
         }
@@ -253,12 +259,13 @@ public sealed class OutlookPageState(
     public bool HasCurrentBrowseResult(OutlookProfileDraft draft) =>
         _browseCorrelationId is not null &&
         BrowseFolders.Count > 0 &&
-        string.Equals(_browseDraftFingerprint, DraftFingerprint(draft), StringComparison.Ordinal);
+        MatchesBrowseDraft(draft);
 
     public void InvalidateBrowse()
     {
         _browseCorrelationId = null;
         _browseDraftFingerprint = null;
+        _browseTargetPathFingerprint = null;
         BrowseFolders = [];
     }
 
@@ -271,7 +278,19 @@ public sealed class OutlookPageState(
         draft.Schedule.Cadence.Ticks,
         draft.Schedule.MaximumOverlap.Ticks,
         draft.Enable,
-        draft.ConfigurationRevision);
+        draft.ConfigurationRevision,
+        draft.TargetFolderPath);
+
+    private static string BrowseDraftFingerprint(OutlookProfileDraft draft) =>
+        DraftFingerprint(draft with { TargetFolderPath = string.Empty });
+
+    private bool MatchesBrowseDraft(OutlookProfileDraft draft) =>
+        string.Equals(_browseDraftFingerprint, BrowseDraftFingerprint(draft), StringComparison.Ordinal) &&
+        (string.IsNullOrEmpty(draft.TargetFolderPath) ||
+            string.Equals(_browseTargetPathFingerprint, TargetPathFingerprint(draft.TargetFolderPath), StringComparison.Ordinal));
+
+    private static string TargetPathFingerprint(string targetPath) =>
+        Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(targetPath)));
 
     private static string RequestFingerprint(params object?[] values)
     {

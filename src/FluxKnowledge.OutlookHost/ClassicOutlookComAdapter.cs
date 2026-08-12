@@ -29,7 +29,7 @@ internal sealed record OutlookComActivationContext(
 
 internal interface IClassicOutlookAdapter : IAsyncDisposable
 {
-    ValueTask<IReadOnlyList<OutlookFolderDescriptor>> BrowseFoldersAsync(CancellationToken cancellationToken);
+    ValueTask<IReadOnlyList<OutlookFolderDescriptor>> BrowseFoldersAsync(string targetPath, CancellationToken cancellationToken);
 
     ValueTask<IAsyncDisposable> SubscribeHintsAsync(
         OutlookFolderIdentity folder,
@@ -90,9 +90,9 @@ internal sealed class DispatcherClassicOutlookAdapter(
     IClassicOutlookAdapter inner,
     OutlookStaDispatcher dispatcher) : IClassicOutlookAdapter
 {
-    public ValueTask<IReadOnlyList<OutlookFolderDescriptor>> BrowseFoldersAsync(CancellationToken cancellationToken) =>
+    public ValueTask<IReadOnlyList<OutlookFolderDescriptor>> BrowseFoldersAsync(string targetPath, CancellationToken cancellationToken) =>
         dispatcher.InvokeAsync(
-            () => inner.BrowseFoldersAsync(cancellationToken),
+            () => inner.BrowseFoldersAsync(targetPath, cancellationToken),
             cancellationToken);
 
     public async ValueTask<IAsyncDisposable> SubscribeHintsAsync(
@@ -184,6 +184,7 @@ internal sealed class ClassicOutlookComAdapter : IClassicOutlookAdapter
 {
     private const string AttachmentBytesSchema = "http://schemas.microsoft.com/mapi/proptag/0x37010102";
     private const string AttachmentMimeSchema = "http://schemas.microsoft.com/mapi/proptag/0x370E001F";
+    private const int MaximumDirectedFolderCandidates = 500;
     private readonly Outlook.Application _application;
     private readonly Outlook.NameSpace _session;
 
@@ -200,27 +201,33 @@ internal sealed class ClassicOutlookComAdapter : IClassicOutlookAdapter
         }
     }
 
-    public ValueTask<IReadOnlyList<OutlookFolderDescriptor>> BrowseFoldersAsync(CancellationToken cancellationToken)
+    public ValueTask<IReadOnlyList<OutlookFolderDescriptor>> BrowseFoldersAsync(string targetPath, CancellationToken cancellationToken)
     {
+        var segments = ParseTargetPath(targetPath);
         cancellationToken.ThrowIfCancellationRequested();
-        var results = new List<OutlookFolderDescriptor>();
         Outlook.Folders? roots = null;
         try
         {
             roots = _session.Folders;
-            for (var index = 1; index <= roots.Count; index++)
-            {
-                Outlook.MAPIFolder? root = null;
-                try
-                {
-                    root = roots[index];
-                    AppendFolder(root, results, cancellationToken);
-                }
-                finally
-                {
-                    Release(root);
-                }
-            }
+            var target = DirectedOutlookFolderTraversal.Resolve(
+                roots,
+                segments,
+                MaximumDirectedFolderCandidates,
+                static folders => folders.Count,
+                static (folders, index) => folders[index],
+                static folder => folder.Name,
+                static folder => folder.Folders,
+                static folder => new BrowseFolderIdentity(folder.StoreID, folder.EntryID, folder.Name),
+                Release,
+                cancellationToken);
+            return ValueTask.FromResult<IReadOnlyList<OutlookFolderDescriptor>>(
+                [new OutlookFolderDescriptor(
+                    new OutlookCaptureFolderId(StableGuid($"{target.StoreId}\n{target.EntryId}")),
+                    new OutlookFolderIdentity(target.StoreId, target.EntryId, target.DisplayName))]);
+        }
+        catch (OutlookBrowseTargetException)
+        {
+            throw;
         }
         catch (COMException exception)
         {
@@ -231,7 +238,6 @@ internal sealed class ClassicOutlookComAdapter : IClassicOutlookAdapter
             Release(roots);
         }
 
-        return ValueTask.FromResult<IReadOnlyList<OutlookFolderDescriptor>>(results);
     }
 
     public ValueTask<IAsyncDisposable> SubscribeHintsAsync(
@@ -402,40 +408,25 @@ internal sealed class ClassicOutlookComAdapter : IClassicOutlookAdapter
         return ValueTask.CompletedTask;
     }
 
-    private static void AppendFolder(
-        Outlook.MAPIFolder folder,
-        ICollection<OutlookFolderDescriptor> results,
-        CancellationToken cancellationToken)
+    private static string[] ParseTargetPath(string targetPath)
     {
-        cancellationToken.ThrowIfCancellationRequested();
-        var storeId = folder.StoreID;
-        var entryId = folder.EntryID;
-        results.Add(new OutlookFolderDescriptor(
-            new OutlookCaptureFolderId(StableGuid($"{storeId}\n{entryId}")),
-            new OutlookFolderIdentity(storeId, entryId, folder.Name)));
-        Outlook.Folders? children = null;
-        try
+        ArgumentException.ThrowIfNullOrWhiteSpace(targetPath);
+        if (targetPath.Length > 512 ||
+            targetPath.Any(char.IsControl) ||
+            !string.Equals(targetPath, targetPath.Trim(), StringComparison.Ordinal))
         {
-            children = folder.Folders;
-            for (var index = 1; index <= children.Count; index++)
-            {
-                Outlook.MAPIFolder? child = null;
-                try
-                {
-                    child = children[index];
-                    AppendFolder(child, results, cancellationToken);
-                }
-                finally
-                {
-                    Release(child);
-                }
-            }
+            throw new OutlookBrowseTargetException();
         }
-        finally
+
+        var segments = targetPath.Split('/');
+        if (segments.Length < 2 || segments.Any(string.IsNullOrWhiteSpace))
         {
-            Release(children);
+            throw new OutlookBrowseTargetException();
         }
+
+        return segments;
     }
+
 
     private static OutlookItemEnvelope Envelope(Outlook.MailItem mail, string storeId)
     {
@@ -471,6 +462,8 @@ internal sealed class ClassicOutlookComAdapter : IClassicOutlookAdapter
     private static Guid StableGuid(string value) =>
         new(SHA256.HashData(Encoding.UTF8.GetBytes(value)).AsSpan(0, 16));
 
+    internal sealed record BrowseFolderIdentity(string StoreId, string EntryId, string DisplayName);
+
     private static string Sha256(string value) =>
         Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(value)));
 
@@ -501,6 +494,101 @@ internal sealed class ClassicOutlookComAdapter : IClassicOutlookAdapter
                 Release(folder);
             }
             return ValueTask.CompletedTask;
+        }
+    }
+}
+
+/// <summary>Bounded host-only outcome for an absent or ambiguous requested folder path.</summary>
+internal sealed class OutlookBrowseTargetException : Exception
+{
+    public OutlookBrowseTargetException() : base("The exact Outlook browse target is unavailable.")
+    {
+    }
+}
+
+/// <summary>Production-directed traversal extracted from the COM boundary so its bounds and releases are testable without Outlook.</summary>
+internal static class DirectedOutlookFolderTraversal
+{
+    internal static ClassicOutlookComAdapter.BrowseFolderIdentity Resolve<TCollection, TFolder>(
+        TCollection root,
+        IReadOnlyList<string> segments,
+        int maximumCandidates,
+        Func<TCollection, int> count,
+        Func<TCollection, int, TFolder> item,
+        Func<TFolder, string> name,
+        Func<TFolder, TCollection> children,
+        Func<TFolder, ClassicOutlookComAdapter.BrowseFolderIdentity> identity,
+        Action<object?> release,
+        CancellationToken cancellationToken)
+        where TCollection : class
+        where TFolder : class
+    {
+        ArgumentNullException.ThrowIfNull(root);
+        ArgumentNullException.ThrowIfNull(segments);
+        var remaining = maximumCandidates;
+        return ResolveSegment(root, 0);
+
+        ClassicOutlookComAdapter.BrowseFolderIdentity ResolveSegment(TCollection folders, int segmentIndex)
+        {
+            TFolder? match = null;
+            try
+            {
+                for (var index = 1; index <= count(folders); index++)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    if (remaining-- <= 0)
+                    {
+                        throw new OutlookBrowseTargetException();
+                    }
+
+                    TFolder? candidate = null;
+                    try
+                    {
+                        candidate = item(folders, index);
+                        if (!string.Equals(name(candidate), segments[segmentIndex], StringComparison.OrdinalIgnoreCase))
+                        {
+                            continue;
+                        }
+
+                        if (match is not null)
+                        {
+                            throw new OutlookBrowseTargetException();
+                        }
+
+                        match = candidate;
+                        candidate = null;
+                    }
+                    finally
+                    {
+                        release(candidate);
+                    }
+                }
+
+                if (match is null)
+                {
+                    throw new OutlookBrowseTargetException();
+                }
+
+                if (segmentIndex == segments.Count - 1)
+                {
+                    return identity(match);
+                }
+
+                TCollection? childFolders = null;
+                try
+                {
+                    childFolders = children(match);
+                    return ResolveSegment(childFolders, segmentIndex + 1);
+                }
+                finally
+                {
+                    release(childFolders);
+                }
+            }
+            finally
+            {
+                release(match);
+            }
         }
     }
 }

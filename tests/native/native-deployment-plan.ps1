@@ -119,6 +119,13 @@ if ($expectedOutlookMigrations.Count -eq 0 -or $expectedOutlookMigrations[0] -ne
 if ((@($plan.native_outlook_ingress_migration_ids) -join "|") -ne ($expectedOutlookMigrations -join "|")) {
     throw "The native deployment plan does not expose the complete generated Outlook migration sequence."
 }
+$targetedBrowseMigration = "20260812102333_AddOutlookBrowseTargetPath"
+if ($targetedBrowseMigration -notin $expectedOutlookMigrations) {
+    throw "The generated targeted Outlook browse migration is missing."
+}
+if ($targetedBrowseMigration -notin @($plan.native_outlook_ingress_migration_ids)) {
+    throw "The native deployment plan does not require the targeted Outlook browse migration."
+}
 if ($plan.native_outlook_ingress_baseline_migration -ne $expectedOutlookMigrations[0]) {
     throw "The native deployment plan does not identify AddNativeOutlookIngress as the Outlook baseline."
 }

@@ -1,13 +1,19 @@
 using System.Data.Common;
+using System.Reflection;
+using System.Security.Cryptography;
+using System.Text;
 using FluxKnowledge.Application.Contracts;
 using FluxKnowledge.Domain.Outlook;
 using FluxKnowledge.Domain.Sources;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
+using FluxKnowledge.Infrastructure.SqlServer.Persistence.Migrations;
 using FluxKnowledge.Integration.Tests.Support;
 using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
+using Microsoft.EntityFrameworkCore.Migrations;
+using Microsoft.EntityFrameworkCore.Migrations.Operations;
 using Xunit;
 
 namespace FluxKnowledge.Integration.Tests.Outlook;
@@ -312,8 +318,235 @@ public sealed class SqlOutlookCaptureStoreTests(NativeSqlServerFixture fixture) 
     public async Task Folder_digest_length_prefix_distinguishes_delimiter_collisions()
     {
         var seed = await SeedCaptureAsync(includeFolder: false, includeActiveCatchUp: false);
-        var browseId = Guid.NewGuid();
+        var firstBrowseId = Guid.NewGuid();
+        var secondBrowseId = Guid.NewGuid();
         const long fencingToken = 9;
+        await using (var context = await CreateContextAsync())
+        {
+            context.OutlookBrowseRequests.AddRange(
+                ClaimedBrowse(firstBrowseId, seed.ProfileId, fencingToken, "Mailbox/First"),
+                ClaimedBrowse(secondBrowseId, seed.ProfileId, fencingToken, "Mailbox/Second"));
+            await context.SaveChangesAsync();
+        }
+
+        var firstId = OutlookCaptureFolderId.New();
+        var secondId = OutlookCaptureFolderId.New();
+        var store = CreateStore();
+        var firstReceipt = await store.CompleteBrowseAsync(
+            new OutlookBrowseCompletionRequest(Guid.NewGuid(), Fingerprint, firstBrowseId, Host, fencingToken,
+                [new OutlookBrowseFolderProjection(firstId, "First")], 1,
+                [new OutlookBrowseFolderResult(firstId, "alpha|beta", "gamma", "First")]),
+            CancellationToken.None);
+        var secondReceipt = await store.CompleteBrowseAsync(
+            new OutlookBrowseCompletionRequest(Guid.NewGuid(), OtherFingerprint, secondBrowseId, Host, fencingToken,
+                [new OutlookBrowseFolderProjection(secondId, "Second")], 1,
+                [new OutlookBrowseFolderResult(secondId, "alpha", "beta|gamma", "Second")]),
+            CancellationToken.None);
+
+        Assert.True(firstReceipt.Accepted);
+        Assert.True(secondReceipt.Accepted);
+        await using var assertionContext = await CreateContextAsync();
+        var folders = await assertionContext.OutlookCaptureFolders
+            .Where(row => row.ProfileId == seed.ProfileId)
+            .OrderBy(row => row.DisplayName)
+            .ToListAsync();
+        Assert.Equal(2, folders.Count);
+        Assert.NotEqual(folders[0].CanonicalIdentityFingerprint, folders[1].CanonicalIdentityFingerprint);
+    }
+
+    [NativeSqlServerFact]
+    public async Task Targeted_browse_claim_persists_and_returns_only_the_private_exact_path()
+    {
+        var seed = await SeedCaptureAsync(includeFolder: false, includeActiveCatchUp: false);
+        var browseId = Guid.NewGuid();
+        var request = new OutlookBrowseRequest(
+            Guid.NewGuid(),
+            Fingerprint,
+            browseId,
+            Guid.NewGuid(),
+            1,
+            Now.AddMinutes(5),
+            new OutlookCaptureProfileId(seed.ProfileId),
+            "Mailbox/Action");
+        var store = CreateStore();
+
+        await store.RequestBrowseAsync(request, CancellationToken.None);
+        var receipt = await store.ClaimBrowseAsync(
+            new OutlookBrowseClaimRequest(Guid.NewGuid(), OtherFingerprint, browseId, Host, Now.AddMinutes(3)),
+            CancellationToken.None);
+
+        Assert.True(receipt.Accepted);
+        Assert.Equal("Mailbox/Action", receipt.Claim?.TargetPath);
+        await using var context = await CreateContextAsync();
+        Assert.Equal("Mailbox/Action", await context.OutlookBrowseRequests.Where(row => row.Id == browseId).Select(row => row.TargetPath).SingleAsync());
+    }
+
+    [NativeSqlServerFact]
+    public async Task Browse_operation_fingerprint_binds_the_exact_target_without_audit_disclosure()
+    {
+        var seed = await SeedCaptureAsync(includeFolder: false, includeActiveCatchUp: false);
+        var operationId = Guid.NewGuid();
+        var first = new OutlookBrowseRequest(operationId, Fingerprint, Guid.NewGuid(), Guid.NewGuid(), 1, Now.AddMinutes(5), new OutlookCaptureProfileId(seed.ProfileId), "Mailbox/Action");
+        var changedTarget = first with { BrowseRequestId = Guid.NewGuid(), TargetPath = "Mailbox/Private" };
+        var distinctOperation = first with { OperationId = Guid.NewGuid(), BrowseRequestId = Guid.NewGuid(), TargetPath = "Mailbox/Private" };
+        var store = CreateStore();
+
+        await store.RequestBrowseAsync(first, CancellationToken.None);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => store.RequestBrowseAsync(changedTarget, CancellationToken.None).AsTask());
+        await store.RequestBrowseAsync(distinctOperation, CancellationToken.None);
+
+        await using var context = await CreateContextAsync();
+        var receipts = await context.OutlookCaptureOperations
+            .Where(item => item.OperationId == first.OperationId || item.OperationId == distinctOperation.OperationId)
+            .OrderBy(item => item.OperationId)
+            .ToListAsync();
+        Assert.Equal(2, receipts.Count);
+        Assert.NotEqual(receipts[0].RequestFingerprint, receipts[1].RequestFingerprint);
+        Assert.NotEqual(receipts[0].ResourceId, receipts[1].ResourceId);
+        var audits = await context.AuditEvents
+            .Where(item => item.CorrelationId == $"outlook-operation:{first.OperationId:N}" ||
+                item.CorrelationId == $"outlook-operation:{distinctOperation.OperationId:N}")
+            .ToListAsync();
+        Assert.Equal(2, audits.Count);
+        Assert.All(audits, audit =>
+        {
+            Assert.DoesNotContain("Mailbox/Action", audit.DetailsJson, StringComparison.Ordinal);
+            Assert.DoesNotContain("Mailbox/Private", audit.DetailsJson, StringComparison.Ordinal);
+        });
+    }
+
+    [NativeSqlServerFact]
+    public async Task Legacy_untargeted_browse_row_is_terminal_and_unclaimable_without_inference()
+    {
+        var seed = await SeedCaptureAsync(includeFolder: false, includeActiveCatchUp: false);
+        var browseId = Guid.NewGuid();
+        await using (var context = await CreateContextAsync())
+        {
+            context.OutlookBrowseRequests.Add(new OutlookBrowseRequestEntity
+            {
+                Id = browseId,
+                ProfileId = seed.ProfileId,
+                CorrelationId = Guid.NewGuid(),
+                ConfigurationRevision = 1,
+                State = 0,
+                ExpiresAtUtc = Now.AddMinutes(5),
+                TargetPath = null
+            });
+            await context.SaveChangesAsync();
+        }
+
+        var receipt = await CreateStore().ClaimBrowseAsync(
+            new OutlookBrowseClaimRequest(Guid.NewGuid(), Fingerprint, browseId, Host, Now.AddMinutes(3)),
+            CancellationToken.None);
+
+        Assert.False(receipt.Accepted);
+        Assert.Null(receipt.Claim);
+        await using var verification = await CreateContextAsync();
+        var row = await verification.OutlookBrowseRequests.SingleAsync(item => item.Id == browseId);
+        Assert.Equal(3, row.State);
+        Assert.Equal((int)OutlookBrowseFailureCode.Failed, row.FailureCode);
+        Assert.Null(row.TargetPath);
+        Assert.Null(row.LeaseOwner);
+    }
+
+    [NativeSqlServerFact]
+    public async Task Targeted_browse_migration_terminalises_previous_pending_leased_and_completed_broad_rows()
+    {
+        var seed = await SeedCaptureAsync(includeFolder: false, includeActiveCatchUp: false);
+        var rows = Enumerable.Range(0, 3).Select(index => new OutlookBrowseRequestEntity
+        {
+            Id = Guid.NewGuid(),
+            ProfileId = seed.ProfileId,
+            CorrelationId = Guid.NewGuid(),
+            ConfigurationRevision = 1,
+            State = index,
+            ExpiresAtUtc = Now.AddMinutes(5),
+            LeaseOwner = index == 1 ? Owner(Host) : null,
+            LeaseExpiresAtUtc = index == 1 ? Now.AddMinutes(3) : null,
+            TargetPath = null,
+            TargetPathFingerprint = null
+        }).ToArray();
+        await using (var context = await CreateContextAsync())
+        {
+            context.OutlookBrowseRequests.AddRange(rows);
+            await context.SaveChangesAsync();
+        }
+
+        var migration = new AddOutlookBrowseTargetPath();
+        var builder = new MigrationBuilder("Microsoft.EntityFrameworkCore.SqlServer");
+        typeof(AddOutlookBrowseTargetPath).GetMethod("Up", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(migration, [builder]);
+        var terminalisation = Assert.Single(builder.Operations.OfType<SqlOperation>());
+        await using (var context = await CreateContextAsync())
+        {
+            await context.Database.ExecuteSqlRawAsync(terminalisation.Sql);
+        }
+
+        await using var verification = await CreateContextAsync();
+        var terminal = await verification.OutlookBrowseRequests.Where(item => rows.Select(row => row.Id).Contains(item.Id)).ToListAsync();
+        Assert.All(terminal, row =>
+        {
+            Assert.Equal(3, row.State);
+            Assert.Equal((int)OutlookBrowseFailureCode.Failed, row.FailureCode);
+            Assert.Null(row.LeaseOwner);
+            Assert.Null(row.LeaseExpiresAtUtc);
+            Assert.Null(row.TargetPath);
+            Assert.Null(row.TargetPathFingerprint);
+        });
+    }
+
+    [Fact]
+    public void Targeted_browse_migration_down_is_explicitly_non_reversible()
+    {
+        var migration = new AddOutlookBrowseTargetPath();
+        var builder = new MigrationBuilder("Microsoft.EntityFrameworkCore.SqlServer");
+        var exception = Assert.Throws<TargetInvocationException>(() =>
+            typeof(AddOutlookBrowseTargetPath).GetMethod("Down", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(migration, [builder]));
+
+        Assert.IsType<NotSupportedException>(exception.InnerException);
+    }
+
+    [NativeSqlServerFact]
+    public async Task Expired_targeted_browse_is_terminalised_and_discards_its_private_target()
+    {
+        var seed = await SeedCaptureAsync(includeFolder: false, includeActiveCatchUp: false);
+        var browseId = Guid.NewGuid();
+        await using (var context = await CreateContextAsync())
+        {
+            context.OutlookBrowseRequests.Add(new OutlookBrowseRequestEntity
+            {
+                Id = browseId,
+                ProfileId = seed.ProfileId,
+                CorrelationId = Guid.NewGuid(),
+                ConfigurationRevision = 1,
+                State = 0,
+                ExpiresAtUtc = Now.AddMinutes(-1),
+                TargetPath = "Mailbox/Action",
+                TargetPathFingerprint = "will-be-discarded"
+            });
+            await context.SaveChangesAsync();
+        }
+
+        var receipt = await CreateStore().ClaimBrowseAsync(
+            new OutlookBrowseClaimRequest(Guid.NewGuid(), Fingerprint, browseId, Host, Now.AddMinutes(3)),
+            CancellationToken.None);
+
+        Assert.False(receipt.Accepted);
+        await using var verification = await CreateContextAsync();
+        var row = await verification.OutlookBrowseRequests.SingleAsync(item => item.Id == browseId);
+        Assert.Equal(3, row.State);
+        Assert.Equal((int)OutlookBrowseFailureCode.Expired, row.FailureCode);
+        Assert.Null(row.TargetPath);
+        Assert.Null(row.TargetPathFingerprint);
+        Assert.Null(row.LeaseOwner);
+        Assert.Null(row.LeaseExpiresAtUtc);
+    }
+
+
+    [NativeSqlServerFact]
+    public async Task Stale_legacy_browse_claim_is_terminalised_not_requeued()
+    {
+        var seed = await SeedCaptureAsync(includeFolder: false, includeActiveCatchUp: false);
+        var browseId = Guid.NewGuid();
         await using (var context = await CreateContextAsync())
         {
             context.OutlookBrowseRequests.Add(new OutlookBrowseRequestEntity
@@ -323,39 +556,135 @@ public sealed class SqlOutlookCaptureStoreTests(NativeSqlServerFixture fixture) 
                 CorrelationId = Guid.NewGuid(),
                 ConfigurationRevision = 1,
                 State = 1,
-                ExpiresAtUtc = Now.AddHours(1),
+                ExpiresAtUtc = Now.AddMinutes(5),
                 LeaseOwner = Owner(Host),
-                LeaseExpiresAtUtc = Now.AddMinutes(10),
-                FencingToken = fencingToken
+                LeaseExpiresAtUtc = Now.AddMinutes(-1),
+                FencingToken = 3,
+                TargetPath = null
             });
             await context.SaveChangesAsync();
         }
 
-        var firstId = OutlookCaptureFolderId.New();
-        var secondId = OutlookCaptureFolderId.New();
-        var projections = new[]
+        await CreateStore().ReleaseStaleBrowseClaimsAsync(Guid.NewGuid(), Fingerprint, Now, CancellationToken.None);
+
+        await using var verification = await CreateContextAsync();
+        var row = await verification.OutlookBrowseRequests.SingleAsync(item => item.Id == browseId);
+        Assert.Equal(3, row.State);
+        Assert.Equal((int)OutlookBrowseFailureCode.Failed, row.FailureCode);
+        Assert.Null(row.LeaseOwner);
+        Assert.Null(row.LeaseExpiresAtUtc);
+        Assert.Null(row.TargetPath);
+    }
+
+    [NativeSqlServerFact]
+    public async Task Legacy_completed_browse_cannot_enable_a_profile_even_when_it_has_a_result()
+    {
+        var seed = await SeedCaptureAsync(includeFolder: false, includeActiveCatchUp: false);
+        var gate = await SeedCompletedBrowseAsync(seed.ProfileId, targeted: false);
+        var request = Save(Guid.NewGuid(), "Must remain disabled") with
         {
-            new OutlookBrowseFolderProjection(firstId, "First"),
-            new OutlookBrowseFolderProjection(secondId, "Second")
-        };
-        var privateFolders = new[]
-        {
-            new OutlookBrowseFolderResult(firstId, "alpha|beta", "gamma", "First"),
-            new OutlookBrowseFolderResult(secondId, "alpha", "beta|gamma", "Second")
+            ProfileId = new OutlookCaptureProfileId(seed.ProfileId),
+            Enable = true,
+            ExpectedConfigurationRevision = gate.ConfigurationRevision,
+            BrowseCorrelationId = gate.BrowseCorrelationId
         };
 
-        var receipt = await CreateStore().CompleteBrowseAsync(
-            new OutlookBrowseCompletionRequest(Guid.NewGuid(), Fingerprint, browseId, Host, fencingToken, projections, 1, privateFolders),
-            CancellationToken.None);
+        var receipt = await CreateStore().SaveProfileAsync(request, CancellationToken.None);
+
+        Assert.False(receipt.Accepted);
+    }
+
+    [NativeSqlServerFact]
+    public async Task Targeted_completion_discards_the_raw_path_but_retains_private_targeted_provenance()
+    {
+        var seed = await SeedCaptureAsync(includeFolder: false, includeActiveCatchUp: false);
+        var browseId = Guid.NewGuid();
+        await using (var context = await CreateContextAsync())
+        {
+            context.OutlookBrowseRequests.Add(ClaimedBrowse(browseId, seed.ProfileId, 7, "Mailbox/Action"));
+            await context.SaveChangesAsync();
+        }
+
+        var receipt = await CreateStore().CompleteBrowseAsync(BrowseCompletion(browseId, OutlookCaptureFolderId.New(), 7), CancellationToken.None);
 
         Assert.True(receipt.Accepted);
-        await using var assertionContext = await CreateContextAsync();
-        var folders = await assertionContext.OutlookCaptureFolders
-            .Where(row => row.ProfileId == seed.ProfileId)
-            .OrderBy(row => row.DisplayName)
-            .ToListAsync();
-        Assert.Equal(2, folders.Count);
-        Assert.NotEqual(folders[0].CanonicalIdentityFingerprint, folders[1].CanonicalIdentityFingerprint);
+        await using var verification = await CreateContextAsync();
+        var row = await verification.OutlookBrowseRequests.SingleAsync(item => item.Id == browseId);
+        Assert.Null(row.TargetPath);
+        Assert.NotNull(row.TargetPathFingerprint);
+    }
+
+    [NativeSqlServerFact]
+    public async Task Broad_completion_from_a_pre_targeting_host_is_terminalised_without_creating_folders()
+    {
+        var seed = await SeedCaptureAsync(includeFolder: false, includeActiveCatchUp: false);
+        var browseId = Guid.NewGuid();
+        await using (var context = await CreateContextAsync())
+        {
+            context.OutlookBrowseRequests.Add(ClaimedBrowse(browseId, seed.ProfileId, 11, "Mailbox/Action"));
+            await context.SaveChangesAsync();
+        }
+        var firstFolder = OutlookCaptureFolderId.New();
+        var secondFolder = OutlookCaptureFolderId.New();
+        var request = new OutlookBrowseCompletionRequest(
+            Guid.NewGuid(), Fingerprint, browseId, Host, 11,
+            [new OutlookBrowseFolderProjection(firstFolder, "Action"), new OutlookBrowseFolderProjection(secondFolder, "Inbox")],
+            1,
+            [new OutlookBrowseFolderResult(firstFolder, "store", "action", "Action"), new OutlookBrowseFolderResult(secondFolder, "store", "inbox", "Inbox")]);
+
+        var receipt = await CreateStore().CompleteBrowseAsync(request, CancellationToken.None);
+
+        Assert.False(receipt.Accepted);
+        await using var verification = await CreateContextAsync();
+        var row = await verification.OutlookBrowseRequests.SingleAsync(item => item.Id == browseId);
+        Assert.Equal(3, row.State);
+        Assert.Equal((int)OutlookBrowseFailureCode.Failed, row.FailureCode);
+        Assert.Empty(await verification.OutlookCaptureFolders.Where(folder => folder.ProfileId == seed.ProfileId).ToListAsync());
+    }
+
+    [NativeSqlServerFact]
+    public async Task Legacy_leased_untargeted_browse_cannot_complete_or_create_a_folder()
+    {
+        var seed = await SeedCaptureAsync(includeFolder: false, includeActiveCatchUp: false);
+        var browseId = Guid.NewGuid();
+        const long token = 19;
+        await using (var context = await CreateContextAsync())
+        {
+            context.OutlookBrowseRequests.Add(new OutlookBrowseRequestEntity
+            {
+                Id = browseId,
+                ProfileId = seed.ProfileId,
+                CorrelationId = Guid.NewGuid(),
+                ConfigurationRevision = 1,
+                State = 1,
+                ExpiresAtUtc = Now.AddMinutes(5),
+                LeaseOwner = Owner(Host),
+                LeaseExpiresAtUtc = Now.AddMinutes(3),
+                FencingToken = token,
+                TargetPath = null
+            });
+            await context.SaveChangesAsync();
+        }
+
+        var folderId = OutlookCaptureFolderId.New();
+        var receipt = await CreateStore().CompleteBrowseAsync(
+            new OutlookBrowseCompletionRequest(
+                Guid.NewGuid(),
+                Fingerprint,
+                browseId,
+                Host,
+                token,
+                [new OutlookBrowseFolderProjection(folderId, "Action")],
+                1,
+                [new OutlookBrowseFolderResult(folderId, "store", "folder", "Action")]),
+            CancellationToken.None);
+
+        Assert.False(receipt.Accepted);
+        await using var verification = await CreateContextAsync();
+        var row = await verification.OutlookBrowseRequests.SingleAsync(item => item.Id == browseId);
+        Assert.Equal(3, row.State);
+        Assert.Equal((int)OutlookBrowseFailureCode.Failed, row.FailureCode);
+        Assert.Empty(await verification.OutlookCaptureFolders.Where(folder => folder.ProfileId == seed.ProfileId).ToListAsync());
     }
 
     [NativeSqlServerFact]
@@ -475,7 +804,7 @@ public sealed class SqlOutlookCaptureStoreTests(NativeSqlServerFixture fixture) 
         return new CaptureSeed(profileId, folderId, catchUpId, fencingToken);
     }
 
-    private async Task<(long ConfigurationRevision, Guid BrowseCorrelationId)> SeedCompletedBrowseAsync(Guid profileId)
+    private async Task<(long ConfigurationRevision, Guid BrowseCorrelationId)> SeedCompletedBrowseAsync(Guid profileId, bool targeted = true)
     {
         var browseRequestId = Guid.NewGuid();
         var browseCorrelationId = Guid.NewGuid();
@@ -502,7 +831,8 @@ public sealed class SqlOutlookCaptureStoreTests(NativeSqlServerFixture fixture) 
             CorrelationId = browseCorrelationId,
             ConfigurationRevision = configurationRevision,
             State = 2,
-            ExpiresAtUtc = Now.AddHours(1)
+            ExpiresAtUtc = Now.AddHours(1),
+            TargetPathFingerprint = targeted ? new string('a', 64) : null
         });
         context.OutlookBrowseResults.Add(new OutlookBrowseResultEntity
         {
@@ -524,7 +854,7 @@ public sealed class SqlOutlookCaptureStoreTests(NativeSqlServerFixture fixture) 
         new OutlookCaptureSchedule(TimeSpan.FromMinutes(15), TimeSpan.FromMinutes(5)),
         new OutlookSpoolValidation(Fingerprint, true, true, true, true, "C:\\private\\outlook"));
 
-    private static OutlookBrowseRequestEntity ClaimedBrowse(Guid browseId, Guid profileId, long fencingToken) => new()
+    private static OutlookBrowseRequestEntity ClaimedBrowse(Guid browseId, Guid profileId, long fencingToken, string targetPath = "Mailbox/Shared") => new()
     {
         Id = browseId,
         ProfileId = profileId,
@@ -534,7 +864,9 @@ public sealed class SqlOutlookCaptureStoreTests(NativeSqlServerFixture fixture) 
         ExpiresAtUtc = Now.AddHours(1),
         LeaseOwner = Owner(Host),
         LeaseExpiresAtUtc = Now.AddMinutes(10),
-        FencingToken = fencingToken
+        FencingToken = fencingToken,
+        TargetPath = targetPath,
+        TargetPathFingerprint = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(targetPath)))
     };
 
     private static OutlookBrowseCompletionRequest BrowseCompletion(

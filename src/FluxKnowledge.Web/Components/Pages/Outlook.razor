@@ -3,7 +3,9 @@
 @using FluxKnowledge.Application.Contracts
 @using FluxKnowledge.Domain.Outlook
 @using FluxKnowledge.Web.Components.Outlook
+@using Microsoft.JSInterop
 @inject OutlookPageState PageState
+@inject IJSRuntime JavaScriptRuntime
 
 <PageTitle>Outlook capture | Flux Knowledge</PageTitle>
 
@@ -107,6 +109,7 @@
                 }
                 <label>Cadence (minutes) <input type="number" min="5" max="1440" @bind="_cadenceMinutes" @bind:after="DraftChanged" /></label>
                 <label>Overlap (minutes) <input type="number" min="0" max="240" @bind="_overlapMinutes" @bind:after="DraftChanged" /></label>
+                <label>Exact Outlook folder path <input @key="_targetFolderPathInputGeneration" @ref="_targetFolderPathInput" autocomplete="off" /></label>
                 <label><input type="checkbox" @bind="_enable" @bind:after="DraftChanged" /> Enable for a later Outlook host claim</label>
                 @if (_editingProfileId is not null)
                 {
@@ -137,6 +140,8 @@
     private OutlookIncrementalBasis _basis = OutlookIncrementalBasis.LastModificationTime;
     private int _cadenceMinutes = 15;
     private int _overlapMinutes = 2;
+    private ElementReference _targetFolderPathInput;
+    private long _targetFolderPathInputGeneration;
     private bool _enable;
     private string _status = "Loading Outlook capture status from SQL…";
 
@@ -157,6 +162,7 @@
         _cadenceMinutes = 15;
         _overlapMinutes = 2;
         _enable = false;
+        _targetFolderPathInputGeneration++;
         PageState.InvalidateBrowse();
     }
 
@@ -171,6 +177,7 @@
         _cadenceMinutes = checked((int)profile.Cadence.TotalMinutes);
         _overlapMinutes = checked((int)profile.MaximumOverlap.TotalMinutes);
         _enable = profile.State != OutlookCaptureState.Disabled.ToString();
+        _targetFolderPathInputGeneration++;
         PageState.InvalidateBrowse();
     }
 
@@ -182,9 +189,10 @@
 
     private async Task SaveAsync(EditContext _)
     {
+        var targetFolderPath = await ReadAndClearTargetFolderPathAsync();
         await RunMutationAsync(async () =>
         {
-            await PageState.SaveAsync(BuildDraft(), _stopping.Token);
+            await PageState.SaveAsync(BuildDraft(targetFolderPath), _stopping.Token);
             _status = _editingProfileId is null
                 ? "Profile saved disabled. Edit it to browse folders before enabling."
                 : "Profile configuration committed to SQL.";
@@ -192,17 +200,25 @@
         });
     }
 
-    private async Task BrowseAsync() => await RunMutationAsync(async () =>
+    private async Task BrowseAsync()
     {
-        await PageState.RequestBrowseAsync(BuildDraft(), _stopping.Token);
-        _status = "Folder browse requested. Run the local Outlook host, then refresh the result.";
-    });
+        var targetFolderPath = await ReadAndClearTargetFolderPathAsync();
+        await RunMutationAsync(async () =>
+        {
+            await PageState.RequestBrowseAsync(BuildDraft(targetFolderPath), _stopping.Token);
+            _status = "Folder browse requested. Run the local Outlook host, then refresh the result.";
+        });
+    }
 
-    private async Task RefreshBrowseAsync() => await RunMutationAsync(async () =>
+    private async Task RefreshBrowseAsync()
     {
-        var folders = await PageState.RefreshBrowseResultAsync(BuildDraft(), _stopping.Token);
+        var targetFolderPath = await ReadAndClearTargetFolderPathAsync();
+        await RunMutationAsync(async () =>
+        {
+        var folders = await PageState.RefreshBrowseResultAsync(BuildDraft(targetFolderPath), _stopping.Token);
         _status = folders.Count == 0 ? "The Outlook host has not completed this browse request." : "Current folder selection loaded from SQL.";
-    });
+        });
+    }
 
     private async Task PauseAsync(Guid profileId) => await RunMutationAsync(async () =>
     {
@@ -240,14 +256,18 @@
         }
     }
 
-    private OutlookProfileDraft BuildDraft() => new(
+    private OutlookProfileDraft BuildDraft(string targetFolderPath = "") => new(
         _editingProfileId is { } id ? new OutlookCaptureProfileId(id) : null,
         _displayName,
         _spoolConfigurationKey,
         _basis,
         new OutlookCaptureSchedule(TimeSpan.FromMinutes(_cadenceMinutes), TimeSpan.FromMinutes(_overlapMinutes)),
         _enable,
-        _configurationRevision);
+        _configurationRevision,
+        targetFolderPath);
+
+    private ValueTask<string> ReadAndClearTargetFolderPathAsync() =>
+        JavaScriptRuntime.InvokeAsync<string>("fluxKnowledge.outlook.readAndClearTargetPath", _targetFolderPathInput);
 
     private static string FormatBasis(OutlookIncrementalBasis basis) => basis switch
     {

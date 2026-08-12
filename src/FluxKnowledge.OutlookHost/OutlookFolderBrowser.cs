@@ -59,6 +59,12 @@ internal sealed class OutlookFolderBrowser(
             await controlPlane.FailBrowseAsync(claim, OutlookBrowseFailureCode.Expired, cancellationToken).ConfigureAwait(false);
             return new OutlookHostRunResult(OutlookHostExitReason.LeaseStale);
         }
+        if (claim.TargetPath is null)
+        {
+            using var cleanup = new CancellationTokenSource(FailureCleanupTimeout);
+            await controlPlane.FailBrowseAsync(claim, OutlookBrowseFailureCode.Failed, cleanup.Token).ConfigureAwait(false);
+            return new OutlookHostRunResult(OutlookHostExitReason.DurableClaimDisabled);
+        }
 
         IClassicOutlookAdapter adapter;
         try
@@ -91,7 +97,11 @@ internal sealed class OutlookFolderBrowser(
             IReadOnlyList<OutlookFolderDescriptor> folders;
             try
             {
-                folders = await adapter.BrowseFoldersAsync(cancellationToken).ConfigureAwait(false);
+                folders = await adapter.BrowseFoldersAsync(claim.TargetPath, cancellationToken).ConfigureAwait(false);
+            }
+            catch (OutlookBrowseTargetException)
+            {
+                return await FailBrowseTargetAsync(claim).ConfigureAwait(false);
             }
             catch (OutlookComHostException exception)
             {
@@ -103,6 +113,13 @@ internal sealed class OutlookFolderBrowser(
                     claim,
                     OutlookComFailureClassifier.Classify(exception).Reason,
                     cancellationToken).ConfigureAwait(false);
+            }
+
+            if (folders.Count != 1)
+            {
+                using var cleanup = new CancellationTokenSource(FailureCleanupTimeout);
+                await controlPlane.FailBrowseAsync(claim, OutlookBrowseFailureCode.Failed, cleanup.Token).ConfigureAwait(false);
+                return new OutlookHostRunResult(OutlookHostExitReason.DurableClaimDisabled);
             }
 
             await controlPlane.CompleteBrowseAsync(claim, folders, cancellationToken).ConfigureAwait(false);
@@ -128,4 +145,12 @@ internal sealed class OutlookFolderBrowser(
             _ => OutlookHostExitReason.OutlookUnavailable
         });
     }
+
+    private async ValueTask<OutlookHostRunResult> FailBrowseTargetAsync(OutlookBrowseClaim claim)
+    {
+        using var cleanup = new CancellationTokenSource(FailureCleanupTimeout);
+        await controlPlane.FailBrowseAsync(claim, OutlookBrowseFailureCode.Failed, cleanup.Token).ConfigureAwait(false);
+        return new OutlookHostRunResult(OutlookHostExitReason.DurableClaimDisabled);
+    }
+
 }

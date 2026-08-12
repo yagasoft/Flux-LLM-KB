@@ -50,6 +50,83 @@ public sealed class OutlookPageStateTests
     }
 
     [Fact]
+    public async Task Page_records_only_the_operator_selected_exact_folder_path_for_a_browse_request()
+    {
+        var store = new RecordingStore();
+        var state = CreateState(store);
+        var draft = Draft(enable: false) with { TargetFolderPath = "mailbox/Action" };
+
+        var returned = await state.RequestBrowseAsync(draft, CancellationToken.None);
+
+        Assert.Equal("mailbox/Action", store.LastBrowseRequest?.TargetPath);
+        Assert.Equal(string.Empty, returned.TargetPath);
+    }
+
+    [Fact]
+    public async Task Page_rejects_an_empty_target_path_before_creating_durable_browse_work()
+    {
+        var store = new RecordingStore();
+        var state = CreateState(store);
+
+        await Assert.ThrowsAsync<ArgumentException>(() => state.RequestBrowseAsync(Draft(enable: false) with { TargetFolderPath = string.Empty }, CancellationToken.None).AsTask());
+
+        Assert.Equal(0, store.BrowseRequestCount);
+    }
+
+    [Fact]
+    public async Task Page_refreshes_a_browse_result_after_the_private_target_is_discarded()
+    {
+        var store = new RecordingStore
+        {
+            BrowseFolders = [new OutlookBrowseFolderProjection(new OutlookCaptureFolderId(Guid.NewGuid()), "Action")]
+        };
+        var state = CreateState(store);
+        var requestDraft = Draft(enable: false) with { TargetFolderPath = "mailbox/Action" };
+
+        await state.RequestBrowseAsync(requestDraft, CancellationToken.None);
+        var folders = await state.RefreshBrowseResultAsync(requestDraft with { TargetFolderPath = string.Empty }, CancellationToken.None);
+
+        Assert.Collection(folders, folder => Assert.Equal("Action", folder.DisplayName));
+    }
+
+    [Fact]
+    public async Task Page_does_not_accept_a_stale_browse_result_when_a_new_private_target_is_supplied()
+    {
+        var store = new RecordingStore
+        {
+            BrowseFolders = [new OutlookBrowseFolderProjection(new OutlookCaptureFolderId(Guid.NewGuid()), "Action")]
+        };
+        var state = CreateState(store);
+        var draft = Draft(enable: false) with { TargetFolderPath = "Mailbox/Action" };
+
+        await state.RequestBrowseAsync(draft, CancellationToken.None);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => state.RefreshBrowseResultAsync(
+            draft with { TargetFolderPath = "Mailbox/Private" }, CancellationToken.None).AsTask());
+
+        Assert.Empty(state.BrowseFolders);
+    }
+
+    [Fact]
+    public async Task Page_does_not_save_an_enabled_profile_after_a_different_target_replaces_the_one_shot_browse_target()
+    {
+        var store = new RecordingStore
+        {
+            BrowseFolders = [new OutlookBrowseFolderProjection(new OutlookCaptureFolderId(Guid.NewGuid()), "Action")]
+        };
+        var state = CreateState(store);
+        var draft = Draft(enable: true) with { TargetFolderPath = "Mailbox/Action" };
+
+        await state.RequestBrowseAsync(draft, CancellationToken.None);
+        await state.RefreshBrowseResultAsync(draft with { TargetFolderPath = string.Empty }, CancellationToken.None);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => state.SaveAsync(
+            draft with { TargetFolderPath = "Mailbox/Private" }, CancellationToken.None).AsTask());
+
+        Assert.Equal(0, store.SaveCount);
+    }
+
+    [Fact]
     public async Task Enabled_edit_binds_save_to_the_expected_revision_and_completed_browse()
     {
         var store = new RecordingStore
@@ -273,7 +350,8 @@ public sealed class OutlookPageStateTests
         OutlookIncrementalBasis.LastModificationTime,
         new OutlookCaptureSchedule(TimeSpan.FromMinutes(15), TimeSpan.FromMinutes(2)),
         enable,
-        ConfigurationRevision: 7);
+        ConfigurationRevision: 7,
+        TargetFolderPath: "Local mailbox/Inbox");
 
     private sealed class FixedTimeProvider(DateTimeOffset now) : TimeProvider
     {

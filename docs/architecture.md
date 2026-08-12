@@ -236,6 +236,15 @@ the anonymous direct-loopback `/outlook` UI on the approved private PC. The
 forwarded/proxied requests, retained antiforgery, and no Windows/Negotiate
 authentication. REST, MCP and CLI remain read-only for this capability.
 
+A browse request is a private, fenced request to resolve one explicit
+canonical-folder display path. The STA host resolves that path read-only and can
+complete it only with one canonical descriptor. It never returns a folder tree
+to the Web UI, chooses the first of several matches or binds unrequested folders.
+Missing and ambiguous targets become sanitised durable browse failures, with no
+profile enablement, cursor or capture work. The path and resolved COM identities
+remain private; projections and audit use safe display metadata and fixed reason
+codes only.
+
 Classic Outlook access is isolated in a `net10.0-windows` STA executable. Its
 factory checks the Windows interactive user/session, one-instance ownership and
 an enabled, unexpired, fenced durable browse or catch-up claim before constructing

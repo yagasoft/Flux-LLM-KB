@@ -82,6 +82,84 @@ public sealed class NativeOutlookConfigurationBrowserTests
     }
 
     [BrowserFact]
+    public async Task Outlook_target_path_is_submitted_once_then_cleared_from_the_interactive_circuit_page()
+    {
+        await using var sql = new NativeSqlServerFixture();
+        await sql.InitializeAsync();
+        var ingressRoot = BrowserTestRoots.Create($"FluxKnowledgeOutlookTarget_{Guid.NewGuid():N}");
+        var indexRoot = BrowserTestRoots.Create($"FluxKnowledgeOutlookTargetIndexes_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(ingressRoot);
+        Directory.CreateDirectory(indexRoot);
+        const string target = "Mailbox/PrivateAction";
+        try
+        {
+            await using var host = await PhaseOneVerticalSliceBrowserTests.BrowserHost.StartAsync(sql.ConnectionString, ingressRoot, indexRoot);
+            using var playwright = await Playwright.CreateAsync();
+            await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+            var page = await browser.NewPageAsync();
+
+            await page.GotoAsync(new Uri(host.BaseAddress, "/outlook").ToString(), new PageGotoOptions { WaitUntil = WaitUntilState.NetworkIdle });
+            await page.GetByRole(AriaRole.Button, new() { Name = "Add profile" }).ClickAsync();
+            await page.GetByLabel("Profile name").FillAsync("Target privacy profile");
+            await page.GetByRole(AriaRole.Button, new() { Name = "Save profile" }).ClickAsync();
+            await page.GetByText("Profile saved disabled", new PageGetByTextOptions { Exact = false }).WaitForAsync();
+            await page.GetByRole(AriaRole.Button, new() { Name = "Edit" }).ClickAsync();
+            var targetInput = page.GetByLabel("Exact Outlook folder path");
+            await targetInput.FillAsync(target);
+            await page.GetByRole(AriaRole.Button, new() { Name = "Browse folders in Outlook" }).ClickAsync();
+            await page.GetByText("Folder browse requested", new PageGetByTextOptions { Exact = false }).WaitForAsync();
+
+            await targetInput.FillAsync("Mailbox/DifferentTarget");
+            await page.GetByRole(AriaRole.Button, new() { Name = "Refresh browse result" }).ClickAsync();
+            await page.GetByText("Outlook request could not be completed", new PageGetByTextOptions { Exact = false }).WaitForAsync();
+
+            Assert.Equal(string.Empty, await targetInput.InputValueAsync());
+            Assert.DoesNotContain(target, await page.ContentAsync(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (Directory.Exists(ingressRoot)) Directory.Delete(ingressRoot, recursive: true);
+            if (Directory.Exists(indexRoot)) Directory.Delete(indexRoot, recursive: true);
+        }
+    }
+
+    [BrowserFact]
+    public async Task Switching_profiles_recreates_the_one_shot_target_input_without_inheriting_the_prior_profile_value()
+    {
+        await using var sql = new NativeSqlServerFixture();
+        await sql.InitializeAsync();
+        var ingressRoot = BrowserTestRoots.Create($"FluxKnowledgeOutlookSwitch_{Guid.NewGuid():N}");
+        var indexRoot = BrowserTestRoots.Create($"FluxKnowledgeOutlookSwitchIndexes_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(ingressRoot);
+        Directory.CreateDirectory(indexRoot);
+        try
+        {
+            await using var host = await PhaseOneVerticalSliceBrowserTests.BrowserHost.StartAsync(sql.ConnectionString, ingressRoot, indexRoot);
+            using var playwright = await Playwright.CreateAsync();
+            await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+            var page = await browser.NewPageAsync();
+            await page.GotoAsync(new Uri(host.BaseAddress, "/outlook").ToString(), new PageGotoOptions { WaitUntil = WaitUntilState.NetworkIdle });
+            foreach (var name in new[] { "First target profile", "Second target profile" })
+            {
+                await page.GetByRole(AriaRole.Button, new() { Name = "Add profile" }).ClickAsync();
+                await page.GetByLabel("Profile name").FillAsync(name);
+                await page.GetByRole(AriaRole.Button, new() { Name = "Save profile" }).ClickAsync();
+                await page.GetByText("Profile saved disabled", new PageGetByTextOptions { Exact = false }).WaitForAsync();
+            }
+            await page.GetByRole(AriaRole.Button, new() { Name = "Edit" }).First.ClickAsync();
+            await page.GetByLabel("Exact Outlook folder path").FillAsync("Mailbox/FirstOnly");
+            await page.GetByRole(AriaRole.Button, new() { Name = "Edit" }).Nth(1).ClickAsync();
+
+            Assert.Equal(string.Empty, await page.GetByLabel("Exact Outlook folder path").InputValueAsync());
+        }
+        finally
+        {
+            if (Directory.Exists(ingressRoot)) Directory.Delete(ingressRoot, recursive: true);
+            if (Directory.Exists(indexRoot)) Directory.Delete(indexRoot, recursive: true);
+        }
+    }
+
+    [BrowserFact]
     public async Task Outlook_page_renders_safe_SQL_status_without_private_Outlook_identifiers()
     {
         await using var sql = new NativeSqlServerFixture();

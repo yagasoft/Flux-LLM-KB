@@ -5,6 +5,8 @@ using FluxKnowledge.Domain.Sources;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
 using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
+using System.Security.Cryptography;
+using System.Text;
 
 namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
 
@@ -79,7 +81,8 @@ public sealed class SqlOutlookCaptureStore(IDbContextFactory<FluxKnowledgeDbCont
                             browse.CorrelationId == browseCorrelationId &&
                             browse.ConfigurationRevision == row.ConfigurationRevision &&
                             browse.State == 2 &&
-                            context.OutlookBrowseResults.Any(result => result.BrowseRequestId == browse.Id),
+                            browse.TargetPathFingerprint != null &&
+                            context.OutlookBrowseResults.Count(result => result.BrowseRequestId == browse.Id) == 1,
                         cancellationToken).ConfigureAwait(false);
                     if (!hasCurrentBrowse)
                     {
@@ -274,16 +277,18 @@ public sealed class SqlOutlookCaptureStore(IDbContextFactory<FluxKnowledgeDbCont
 
     public ValueTask<OutlookOperationReceipt> RequestBrowseAsync(OutlookBrowseRequest request, CancellationToken cancellationToken)
     {
-        request.Validate(); return MutateAsync("request-browse", request.OperationId, request.RequestFingerprint, request.ProfileId!.Value, context => { context.OutlookBrowseRequests.Add(new OutlookBrowseRequestEntity { Id = request.BrowseRequestId, ProfileId = request.ProfileId!.Value, CorrelationId = request.CorrelationId, ConfigurationRevision = request.ConfigurationRevision, ExpiresAtUtc = request.ExpiresAtUtc, State = 0 }); return Task.FromResult((true, (Guid?)request.BrowseRequestId)); }, cancellationToken);
+        request.Validate();
+        var targetFingerprint = TargetPathFingerprint(request.TargetPath);
+        return MutateAsync("request-browse", request.OperationId, ImmutableBrowseRequestFingerprint(request.RequestFingerprint, targetFingerprint), request.ProfileId!.Value, context => { context.OutlookBrowseRequests.Add(new OutlookBrowseRequestEntity { Id = request.BrowseRequestId, ProfileId = request.ProfileId!.Value, CorrelationId = request.CorrelationId, ConfigurationRevision = request.ConfigurationRevision, ExpiresAtUtc = request.ExpiresAtUtc, State = 0, TargetPath = request.TargetPath, TargetPathFingerprint = targetFingerprint }); return Task.FromResult((true, (Guid?)request.BrowseRequestId)); }, cancellationToken);
     }
 
     public async ValueTask<OutlookBrowseClaimReceipt> ClaimBrowseAsync(OutlookBrowseClaimRequest request, CancellationToken cancellationToken)
     {
         request.Validate(); var receipt = await MutateAsync("claim-browse", request.OperationId, request.RequestFingerprint, null, async context =>
-        { var row = await context.OutlookBrowseRequests.SingleOrDefaultAsync(x => x.Id == request.BrowseRequestId, cancellationToken).ConfigureAwait(false); if (row is null || row.State != 0 || row.ExpiresAtUtc < _clock.GetUtcNow()) return (false, (Guid?)null); row.State = 1; row.FencingToken++; row.LeaseOwner = Owner(request.Host); row.LeaseExpiresAtUtc = request.LeaseExpiresAtUtc; return (true, row.Id); }, cancellationToken);
+        { var row = await context.OutlookBrowseRequests.SingleOrDefaultAsync(x => x.Id == request.BrowseRequestId, cancellationToken).ConfigureAwait(false); if (row is null || row.State != 0) return (false, (Guid?)null); if (row.ExpiresAtUtc <= _clock.GetUtcNow()) { TerminalizeBrowse(row, OutlookBrowseFailureCode.Expired); return (false, (Guid?)null); } if (!HasValidTargetPath(row)) { TerminalizeBrowse(row, OutlookBrowseFailureCode.Failed); return (false, (Guid?)null); } row.State = 1; row.FencingToken++; row.LeaseOwner = Owner(request.Host); row.LeaseExpiresAtUtc = request.LeaseExpiresAtUtc; return (true, row.Id); }, cancellationToken);
         if (!receipt.Accepted) return new OutlookBrowseClaimReceipt(null, false, receipt.Committed, receipt.IsReplay);
         await using var context = await _contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false); var row = await context.OutlookBrowseRequests.SingleAsync(x => x.Id == request.BrowseRequestId, cancellationToken).ConfigureAwait(false);
-        return new OutlookBrowseClaimReceipt(new OutlookBrowseClaim(row.Id, row.CorrelationId, row.ConfigurationRevision, request.Host, row.FencingToken, row.LeaseExpiresAtUtc!.Value), true, true, receipt.IsReplay);
+        return new OutlookBrowseClaimReceipt(new OutlookBrowseClaim(row.Id, row.CorrelationId, row.ConfigurationRevision, request.Host, row.FencingToken, row.LeaseExpiresAtUtc!.Value, row.TargetPath), true, true, receipt.IsReplay);
     }
 
     public ValueTask<OutlookOperationReceipt> CompleteBrowseAsync(OutlookBrowseCompletionRequest request, CancellationToken cancellationToken)
@@ -296,8 +301,16 @@ public sealed class SqlOutlookCaptureStore(IDbContextFactory<FluxKnowledgeDbCont
             {
                 return (false, (Guid?)null);
             }
+            if (request.Folders.Count != 1 || request.PrivateFolders.Count != 1 || !HasValidTargetPath(row))
+            {
+                TerminalizeBrowse(row, OutlookBrowseFailureCode.Failed);
+                return (false, (Guid?)null);
+            }
 
             row.State = 2;
+            row.LeaseOwner = null;
+            row.LeaseExpiresAtUtc = null;
+            row.TargetPath = null;
             var configuredFolders = await context.OutlookCaptureFolders
                 .Where(folder => folder.ProfileId == row.ProfileId)
                 .ToListAsync(cancellationToken).ConfigureAwait(false);
@@ -338,11 +351,11 @@ public sealed class SqlOutlookCaptureStore(IDbContextFactory<FluxKnowledgeDbCont
         }, cancellationToken);
     }
     public ValueTask<OutlookOperationReceipt> FailBrowseAsync(OutlookBrowseFailureRequest request, CancellationToken cancellationToken)
-    { request.Validate(); return MutateAsync("fail-browse", request.OperationId, request.RequestFingerprint, null, async context => { var row = await context.OutlookBrowseRequests.SingleOrDefaultAsync(x => x.Id == request.BrowseRequestId, cancellationToken).ConfigureAwait(false); if (!Matches(row, request.Host, request.FencingToken)) return (false, (Guid?)null); row!.State = 3; row.FailureCode = (int)request.FailureCode; return (true, row.Id); }, cancellationToken); }
+    { request.Validate(); return MutateAsync("fail-browse", request.OperationId, request.RequestFingerprint, null, async context => { var row = await context.OutlookBrowseRequests.SingleOrDefaultAsync(x => x.Id == request.BrowseRequestId, cancellationToken).ConfigureAwait(false); if (row is null || !Matches(row, request.Host, request.FencingToken)) return (false, (Guid?)null); TerminalizeBrowse(row, request.FailureCode); return (true, row.Id); }, cancellationToken); }
     public ValueTask<OutlookOperationReceipt> ReleaseStaleBrowseClaimsAsync(Guid operationId, string requestFingerprint, DateTimeOffset observedAtUtc, CancellationToken cancellationToken)
-    { if (observedAtUtc.Offset != TimeSpan.Zero) throw new ArgumentException("UTC time required.", nameof(observedAtUtc)); return MutateAsync("release-stale-browse", operationId, requestFingerprint, null, async context => { var rows = await context.OutlookBrowseRequests.Where(x => x.State == 1 && x.LeaseExpiresAtUtc <= observedAtUtc).ToListAsync(cancellationToken).ConfigureAwait(false); foreach (var row in rows) { row.State = 0; row.LeaseOwner = null; row.LeaseExpiresAtUtc = null; } return (rows.Count > 0, (Guid?)null); }, cancellationToken); }
+    { if (observedAtUtc.Offset != TimeSpan.Zero) throw new ArgumentException("UTC time required.", nameof(observedAtUtc)); return MutateAsync("release-stale-browse", operationId, requestFingerprint, null, async context => { var rows = await context.OutlookBrowseRequests.Where(x => x.State == 1 && x.LeaseExpiresAtUtc <= observedAtUtc).ToListAsync(cancellationToken).ConfigureAwait(false); foreach (var row in rows) { if (row.ExpiresAtUtc <= observedAtUtc) { TerminalizeBrowse(row, OutlookBrowseFailureCode.Expired); } else if (!HasValidTargetPath(row)) { TerminalizeBrowse(row, OutlookBrowseFailureCode.Failed); } else { row.State = 0; row.LeaseOwner = null; row.LeaseExpiresAtUtc = null; } } return (rows.Count > 0, (Guid?)null); }, cancellationToken); }
     public async ValueTask<IReadOnlyList<OutlookProfileProjection>> ReadLocalProjectionAsync(CancellationToken cancellationToken) { await using var context = await _contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false); return await context.OutlookCaptureProfiles.Where(x => x.State != (int)OutlookCaptureState.Stale).OrderBy(x => x.DisplayName).Select(x => new OutlookProfileProjection(new OutlookCaptureProfileId(x.Id), x.DisplayName, (OutlookCaptureState)x.State, (OutlookIncrementalBasis)x.IncrementalBasis, x.ConfigurationRevision, new OutlookCaptureSchedule(TimeSpan.FromTicks(x.CadenceTicks), TimeSpan.FromTicks(x.MaximumOverlapTicks)), x.IncrementalBasis == (int)OutlookIncrementalBasis.ReceivedTime ? new[] { OutlookConfigurationWarning.ReceivedTimeRequiresManualReconciliation } : Array.Empty<OutlookConfigurationWarning>())).ToListAsync(cancellationToken).ConfigureAwait(false); }
-    public async ValueTask<IReadOnlyList<OutlookBrowseFolderProjection>> ReadBrowseResultAsync(Guid correlationId, CancellationToken cancellationToken) { await using var context = await _contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false); return await (from result in context.OutlookBrowseResults join request in context.OutlookBrowseRequests on result.BrowseRequestId equals request.Id where request.CorrelationId == correlationId && request.State == 2 select new OutlookBrowseFolderProjection(new OutlookCaptureFolderId(result.FolderId), result.DisplayName)).ToListAsync(cancellationToken).ConfigureAwait(false); }
+    public async ValueTask<IReadOnlyList<OutlookBrowseFolderProjection>> ReadBrowseResultAsync(Guid correlationId, CancellationToken cancellationToken) { await using var context = await _contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false); return await (from result in context.OutlookBrowseResults join request in context.OutlookBrowseRequests on result.BrowseRequestId equals request.Id where request.CorrelationId == correlationId && request.State == 2 && request.TargetPathFingerprint != null select new OutlookBrowseFolderProjection(new OutlookCaptureFolderId(result.FolderId), result.DisplayName)).ToListAsync(cancellationToken).ConfigureAwait(false); }
 
     private ValueTask<OutlookOperationReceipt> SetProfileStateAsync(string kind, Guid id, string fingerprint, Guid profileId, OutlookCaptureState state, CancellationToken token) => MutateAsync(kind, id, fingerprint, profileId, async context => { var row = await context.OutlookCaptureProfiles.SingleOrDefaultAsync(x => x.Id == profileId, token).ConfigureAwait(false); if (row is null) return (false, (Guid?)null); row.State = (int)state; row.IsEnabled = false; row.ConfigurationRevision++; row.UpdatedAtUtc = _clock.GetUtcNow(); return (true, profileId); }, token);
     private ValueTask<OutlookOperationReceipt> CatchUpMutationAsync(string kind, Guid id, string fingerprint, OutlookCatchUpClaim claim, Action<OutlookCatchUpEntity> mutation, CancellationToken token) => MutateAsync(kind, id, fingerprint, claim.ProfileId.Value, async context => { var row = await context.OutlookCatchUps.SingleOrDefaultAsync(x => x.Id == claim.CatchUpId && x.ProfileId == claim.ProfileId.Value && x.CoalescingKey == claim.CoalescingKey && x.FencingToken == claim.FencingToken && x.State == 1 && x.LeaseOwner == Owner(claim.LeaseOwner), token).ConfigureAwait(false); if (row is null || row.LeaseExpiresAtUtc is null || row.LeaseExpiresAtUtc < _clock.GetUtcNow()) return (false, (Guid?)null); mutation(row); return (true, row.Id); }, token);
@@ -475,4 +488,32 @@ public sealed class SqlOutlookCaptureStore(IDbContextFactory<FluxKnowledgeDbCont
     private bool Matches(OutlookBrowseRequestEntity? row, OutlookHostIdentity host, long token) => row is not null && row.State == 1 && row.FencingToken == token && row.LeaseOwner == Owner(host) && row.LeaseExpiresAtUtc >= _clock.GetUtcNow();
     private static OutlookCatchUpClaim ToClaim(OutlookCatchUpEntity row) => new(row.Id, new OutlookCaptureProfileId(row.ProfileId), row.CoalescingKey, (OutlookCatchUpProvenance)row.Provenance, row.RetryCount, row.Reason, ParseOwner(row.LeaseOwner!), row.LeaseExpiresAtUtc!.Value, row.LastHeartbeatAtUtc!.Value, row.FencingToken);
     private static OutlookHostIdentity ParseOwner(string value) { var p = value.Split('|'); return new OutlookHostIdentity(p[0], int.Parse(p[1]), p[2]); }
+    private static bool HasValidTargetPath(OutlookBrowseRequestEntity row)
+    {
+        try
+        {
+            new OutlookBrowseRequest(Guid.NewGuid(), new string('a', 64), row.Id, row.CorrelationId, row.ConfigurationRevision, row.ExpiresAtUtc, new OutlookCaptureProfileId(row.ProfileId), row.TargetPath ?? string.Empty).Validate();
+            return row.TargetPathFingerprint is not null && string.Equals(row.TargetPathFingerprint, TargetPathFingerprint(row.TargetPath!), StringComparison.Ordinal);
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+    }
+
+    private static void TerminalizeBrowse(OutlookBrowseRequestEntity row, OutlookBrowseFailureCode failureCode)
+    {
+        row.State = 3;
+        row.FailureCode = (int)failureCode;
+        row.LeaseOwner = null;
+        row.LeaseExpiresAtUtc = null;
+        row.TargetPath = null;
+        row.TargetPathFingerprint = null;
+    }
+
+    private static string TargetPathFingerprint(string targetPath) =>
+        Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(targetPath)));
+
+    private static string ImmutableBrowseRequestFingerprint(string requestFingerprint, string targetFingerprint) =>
+        Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes($"{requestFingerprint}\n{targetFingerprint}")));
 }

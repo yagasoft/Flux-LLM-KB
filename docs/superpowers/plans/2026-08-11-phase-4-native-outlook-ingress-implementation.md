@@ -361,13 +361,16 @@ git commit -m "feat: add read-only Outlook COM host"
 
 **Consumes:** Task 2 local projections/operations and Task 4 host-mediated browsing.
 
-**Produces:** A local /outlook page that creates/edits/pauses native Outlook profiles, selects canonical folders through an available host, displays configured folder/spool health and records a durable manual catch-up.
+**Produces:** A local /outlook page that creates/edits/pauses native Outlook profiles, submits one private canonical-folder display path for exact host resolution, displays configured folder/spool health and records a durable manual catch-up.
 
 - [ ] **Step 1: Write failing page-state and safe-projection tests.**
 
 ~~~csharp
 [Fact]
 public async Task Page_rejects_save_when_the_folder_browse_result_is_stale() { }
+
+[Fact]
+public async Task Page_requires_one_current_targeted_folder_resolution_before_enable() { }
 
 [Fact]
 public async Task Direct_loopback_operator_can_mutate_without_an_authenticated_identity() { }
@@ -390,7 +393,16 @@ Expected: FAIL because the page/state/projection does not exist.
 
 - [ ] **Step 3: Implement the local operator flow.**
 
-Follow SourceRootPageState semantics: a configuration change invalidates the prior browse result; save requires a current result. Browse folders creates a durable host-mediated request and accepts only bounded folder display metadata plus canonical identity. Catch up records durable work; it never starts a process or calls COM in the Web host. Enabling a profile makes it eligible for a later host claim, not an immediate source connection.
+Follow SourceRootPageState semantics: a configuration change invalidates the prior
+browse result; save requires a current result. The UI accepts one private
+canonical-folder display path and creates a durable host-mediated resolution
+request. The host must resolve exactly one matching folder read-only and the
+completion may bind only that descriptor; it must never complete a mailbox-wide
+enumeration, choose a first match or persist unrelated folders. Missing or
+ambiguous targets yield an allow-listed bounded failure with no enabled profile
+or cursor work. Catch up records durable work; it never starts a process or
+calls COM in the Web host. Enabling a profile makes it eligible for a later host
+claim, not an immediate source connection.
 
 Remove the `[Authorize]` route requirement and every Windows/Negotiate
 authentication dependency from this page's composition. The operator policy
@@ -579,6 +591,44 @@ independent review findings without widening the approved Outlook-only scope.
    it cannot reference COM or accept stale/unsolicited results. Test duplicate
    hint coalescing, disabled-profile rejection, stale takeover, non-stale lease
    protection, fenced browse completion and stale browse-result rejection.
+
+   A browse request carries one private canonical-folder display path. The host
+   resolves and completes exactly one descriptor or records an allow-listed
+   missing/ambiguous-target failure. It must not return a mailbox hierarchy or
+   silently select a subset. Test a mailbox with more than the former completion
+   bound of unrelated folders, exact target resolution, missing/ambiguous
+   targets, stale target edits, and that raw target/COM identities stay out of
+   projections and audit details.
+
+6. **Targeted browse remediation (post-live browse-bound correction).** Replace
+   broad browse completion with a private `TargetPath` column and a migration.
+   It is an absolute root-to-leaf `/`-separated path of non-empty display-name
+   segments, compared as complete Windows case-insensitive segments with no
+   trimming, suffix, leaf or first-match fallback. The host follows only the
+   requested segments under a strict traversal bound and completes exactly one
+   descriptor. Malformed, missing, ambiguous or over-limit resolution records a
+   bounded allow-listed failure, never a different descriptor. The raw target
+   is private: it may travel once as direct-loopback Blazor request input, but
+   cannot be echoed, broadcast or retained in circuit state, or reach SignalR
+   projections, logs, REST, MCP, CLI, audit or validation records.
+
+   Existing pre-migration pending or leased browse rows have no target and must
+   never be inferred/backfilled from profile or folder data. The migration and
+   recovery path must make them unclaimable or durably terminal with no
+   folder/cursor/capture side effect. Focused TDD must include: contract grammar
+   RED/GREEN; disposable-SQL migration, claim/recovery and null-target tests;
+   fake-COM exact, missing, ambiguous and more-than-former-bound unrelated-tree
+   tests; Web stale-target/enable/privacy tests; EF pending-model check; and
+   targeted host, SQL and Web commands. Stage the contracts, SQL entities/store,
+   migration, host adapter/control plane, Web page/state and tests together;
+   do not treat the original Task 5 first-implementation RED as current
+   remediation evidence.
+
+   Run:
+   `dotnet test tests/FluxKnowledge.Integration.Tests/FluxKnowledge.Integration.Tests.csproj --filter "FullyQualifiedName~SqlOutlookCaptureStoreTests|FullyQualifiedName~OutlookSchemaMappingTests"`,
+   `dotnet test tests/FluxKnowledge.OutlookHost.Tests/FluxKnowledge.OutlookHost.Tests.csproj --filter "FullyQualifiedName~OutlookHostLoopTests"`,
+   `dotnet test tests/FluxKnowledge.Web.Tests/FluxKnowledge.Web.Tests.csproj --filter "FullyQualifiedName~OutlookPageStateTests|FullyQualifiedName~OutlookProjectionReaderIntegrationTests|FullyQualifiedName~NativeOutlookConfigurationBrowserTests"`,
+   and `dotnet ef migrations has-pending-model-changes --project src/FluxKnowledge.Infrastructure.SqlServer --startup-project src/FluxKnowledge.Infrastructure.SqlServer --no-build`.
 
 2. **COM isolation and fail-closed activation (Task 4 and Task 6).** Add a
    gated COM factory that checks Windows, the interactive signed-in user

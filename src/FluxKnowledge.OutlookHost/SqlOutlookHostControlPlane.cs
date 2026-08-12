@@ -17,6 +17,7 @@ internal sealed class SqlOutlookHostControlPlane(
     IDbContextFactory<FluxKnowledgeDbContext> contextFactory,
     TimeProvider? timeProvider = null) : IOutlookHostControlPlane, IOutlookFolderBrowseControlPlane
 {
+    private const int MaximumBrowseClaimRecoveryAttempts = 32;
     private readonly TimeProvider _clock = timeProvider ?? TimeProvider.System;
 
     public async ValueTask<OutlookHostCatchUpWork?> TryClaimCatchUpAsync(
@@ -155,26 +156,53 @@ internal sealed class SqlOutlookHostControlPlane(
     {
         await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         var now = _clock.GetUtcNow();
-        var browseRequestId = await context.OutlookBrowseRequests.AsNoTracking()
-            .Where(row => row.State == 0 && row.ExpiresAtUtc >= now)
-            .OrderBy(row => row.Id)
-            .Select(row => (Guid?)row.Id)
-            .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
-        if (browseRequestId is null)
+        return await ClaimNextPendingBrowseAsync(
+            async token =>
+            {
+                // Select expired pending work as well: ClaimBrowseAsync is the SQL-authoritative
+                // terminalisation path and clears its private target before considering the next row.
+                return await context.OutlookBrowseRequests.AsNoTracking()
+                    .Where(row => row.State == 0)
+                    .OrderBy(row => row.ExpiresAtUtc)
+                    .ThenBy(row => row.Id)
+                    .Select(row => (Guid?)row.Id)
+                    .FirstOrDefaultAsync(token).ConfigureAwait(false);
+            },
+            async browseRequestId =>
+            {
+                var operationId = Guid.NewGuid();
+                return await store.ClaimBrowseAsync(
+                    new OutlookBrowseClaimRequest(
+                        operationId,
+                        Fingerprint("claim-browse", operationId, browseRequestId, host),
+                        browseRequestId,
+                        host,
+                        now.Add(leaseDuration)),
+                    cancellationToken).ConfigureAwait(false);
+            },
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    internal static async ValueTask<OutlookBrowseClaim?> ClaimNextPendingBrowseAsync(
+        Func<CancellationToken, ValueTask<Guid?>> nextPending,
+        Func<Guid, ValueTask<OutlookBrowseClaimReceipt>> claim,
+        CancellationToken cancellationToken)
+    {
+        for (var attempt = 0; attempt < MaximumBrowseClaimRecoveryAttempts; attempt++)
         {
-            return null;
+            var browseRequestId = await nextPending(cancellationToken).ConfigureAwait(false);
+            if (browseRequestId is null)
+            {
+                return null;
+            }
+            var receipt = await claim(browseRequestId.Value).ConfigureAwait(false);
+            if (receipt.Claim is not null)
+            {
+                return receipt.Claim;
+            }
         }
 
-        var operationId = Guid.NewGuid();
-        var receipt = await store.ClaimBrowseAsync(
-            new OutlookBrowseClaimRequest(
-                operationId,
-                Fingerprint("claim-browse", operationId, browseRequestId.Value, host),
-                browseRequestId.Value,
-                host,
-                now.Add(leaseDuration)),
-            cancellationToken).ConfigureAwait(false);
-        return receipt.Claim;
+        return null;
     }
 
     public ValueTask CompleteBrowseAsync(

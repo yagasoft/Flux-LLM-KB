@@ -112,7 +112,7 @@ public sealed class OutlookBrowseRequestConfiguration : IEntityTypeConfiguration
     {
         builder.ToTable("OutlookBrowseRequests"); builder.HasKey(x => x.Id); builder.Property(x => x.Id).ValueGeneratedNever();
         builder.Property(x => x.ExpiresAtUtc).HasColumnType("datetimeoffset(7)"); builder.Property(x => x.LeaseExpiresAtUtc).HasColumnType("datetimeoffset(7)");
-        builder.Property(x => x.LeaseOwner).HasMaxLength(768).UseCollation(SchemaConfiguration.SchedulerFenceCollation); SchemaConfiguration.ConfigureRowVersion(builder.Property(x => x.RowVersion));
+        builder.Property(x => x.LeaseOwner).HasMaxLength(768).UseCollation(SchemaConfiguration.SchedulerFenceCollation); builder.Property(x => x.TargetPath).HasMaxLength(512).UseCollation(SchemaConfiguration.SchedulerFenceCollation); builder.Property(x => x.TargetPathFingerprint).HasMaxLength(64).UseCollation(SchemaConfiguration.SchedulerFenceCollation); SchemaConfiguration.ConfigureRowVersion(builder.Property(x => x.RowVersion));
         builder.HasIndex(x => new { x.State, x.ExpiresAtUtc });
         builder.HasOne<OutlookCaptureProfileEntity>().WithMany().HasForeignKey(x => x.ProfileId).OnDelete(DeleteBehavior.Restrict);
     }

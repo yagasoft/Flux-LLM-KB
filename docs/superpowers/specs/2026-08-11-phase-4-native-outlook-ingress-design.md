@@ -189,7 +189,8 @@ the existing watched-folder flow. On the approved private PC it lets the local
 interactive user:
 
 - create, edit, pause and remove Outlook capture profiles;
-- invoke a host-mediated browser to select canonical classic-Outlook folders;
+- submit one explicit private canonical-folder display path for host-mediated,
+  read-only resolution to a single canonical classic-Outlook folder;
 - choose a private spool location subject to local path, ACL, capacity and
   writability validation;
 - select `last_modification_time` or `received_time`, configure a bounded
@@ -197,12 +198,31 @@ interactive user:
 - inspect profile, folder and spool status, last successful catch-up, retained
   export counts, deferred-capability counts, blocked reasons and host health.
 
-The folder browser returns canonical folder identity and display metadata only;
-it never previews, searches or exports message contents to the UI. Profile
+The folder resolver accepts one private absolute root-to-leaf display path with
+non-empty segments separated by `/` and returns exactly one resolved canonical
+folder identity and safe display metadata only. It compares complete segments
+using the Windows case-insensitive display-name convention, without trimming,
+leaf/suffix matching or first-match fallback. It uses a bounded directed
+traversal and never previews, searches or returns a mailbox hierarchy to the UI,
+or exports message contents to the UI. A malformed, missing, over-limit or
+ambiguous path is a bounded durable failure and cannot enable a profile, create
+a capture cursor or select a different folder. The submitted path and resolved
+COM identifiers remain private configuration/reconciliation data. The submitted
+path may travel once as the input of the private direct-loopback Blazor circuit,
+but is never echoed, broadcast, retained in circuit state or exposed through
+SignalR projections, logs, REST, MCP, CLI, audit or validation records; those
+surfaces use only allow-listed status/reason codes and safe display metadata.
+Profile
 changes are direct-loopback-only mutations protected by topology enforcement,
 antiforgery and append-only sanitised audit conventions. They create durable
 configuration/catch-up state but do not themselves instantiate COM or mutate a
 mailbox. They do not require or record a Windows user identity.
+
+The private browse-request schema retains the target path only for a current
+request. Existing rows created before this rule, or rows with a null/invalid
+target, are never backfilled or inferred from display names, profiles or folder
+rows. Claim/recovery makes them unclaimable or records a sanitised terminal
+failure, without a folder, cursor or capture side effect.
 
 The Outlook-host status UI may display configured folder display names and the
 configured spool location because these are needed for local operation. It may
@@ -278,7 +298,7 @@ Implementation is acceptable only when fresh tests prove all of the following:
 | A local configuration route is unauthenticated | Bind IIS and the UI to direct loopback only, reject forwarded/proxied addresses, retain antiforgery and never expose the route on a LAN, reverse proxy or shared host. |
 | Future processor is absent | Retain artifact plus `DeferredCapability`; do not fail capture or invent extracted content. |
 | Legacy Gmail behaviour is still needed | Preserve it untouched and outside native Phase 4; do not merge it into this design. |
-| User accidentally configures a broad folder | Require explicit folder selection, show status in the local UI and support pause before a catch-up claim; no unbounded profile discovery. |
+| User accidentally configures a broad folder | Require one explicit canonical-folder path, resolve exactly one folder read-only, show only safe status in the local UI and support pause before a catch-up claim; no mailbox-wide discovery or multi-folder completion. |
 
 ## Review and approval gate
 

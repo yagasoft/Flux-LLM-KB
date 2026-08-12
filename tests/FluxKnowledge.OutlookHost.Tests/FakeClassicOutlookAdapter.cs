@@ -5,6 +5,7 @@ namespace FluxKnowledge.OutlookHost.Tests;
 internal sealed class FakeClassicOutlookAdapter : IClassicOutlookAdapter
 {
     private readonly IReadOnlyList<OutlookItemEnvelope> _items;
+    private readonly IReadOnlyList<OutlookFolderDescriptor> _browseFolders;
     private readonly OutlookHint? _hintOnSubscribe;
     private readonly TimeSpan _enumerationDelay;
     private Func<OutlookHint, ValueTask>? _onHint;
@@ -12,25 +13,30 @@ internal sealed class FakeClassicOutlookAdapter : IClassicOutlookAdapter
     public FakeClassicOutlookAdapter(
         IReadOnlyList<OutlookItemEnvelope>? items = null,
         OutlookHint? hintOnSubscribe = null,
-        TimeSpan? enumerationDelay = null)
+        TimeSpan? enumerationDelay = null,
+        IReadOnlyList<OutlookFolderDescriptor>? browseFolders = null)
     {
         _items = items ?? [];
         _hintOnSubscribe = hintOnSubscribe;
         _enumerationDelay = enumerationDelay ?? TimeSpan.Zero;
+        _browseFolders = browseFolders ??
+            [new(new OutlookCaptureFolderId(Guid.Parse("11111111-1111-1111-1111-111111111111")), new OutlookFolderIdentity("store", "folder", "Inbox"))];
     }
 
     public int BrowseCount { get; private set; }
+    public string? LastBrowseTargetPath { get; private set; }
     public int EnumerateCount { get; private set; }
     public int ReadCount { get; private set; }
     public OutlookCursor? LastCursor { get; private set; }
     public string? LastReadStoreId { get; private set; }
 
-    public ValueTask<IReadOnlyList<OutlookFolderDescriptor>> BrowseFoldersAsync(CancellationToken cancellationToken)
+    public ValueTask<IReadOnlyList<OutlookFolderDescriptor>> BrowseFoldersAsync(string targetPath, CancellationToken cancellationToken)
     {
+        ArgumentException.ThrowIfNullOrWhiteSpace(targetPath);
         cancellationToken.ThrowIfCancellationRequested();
         BrowseCount++;
-        return ValueTask.FromResult<IReadOnlyList<OutlookFolderDescriptor>>(
-            [new(new OutlookCaptureFolderId(Guid.Parse("11111111-1111-1111-1111-111111111111")), new OutlookFolderIdentity("store", "folder", "Inbox"))]);
+        LastBrowseTargetPath = targetPath;
+        return ValueTask.FromResult(_browseFolders);
     }
 
     public async ValueTask<IAsyncDisposable> SubscribeHintsAsync(

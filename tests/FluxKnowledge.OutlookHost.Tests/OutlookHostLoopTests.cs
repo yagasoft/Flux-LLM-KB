@@ -12,6 +12,31 @@ public sealed class OutlookHostLoopTests
     private static readonly DateTimeOffset CursorUtc = new(2026, 8, 11, 8, 0, 0, TimeSpan.Zero);
 
     [Fact]
+    public async Task Browse_control_plane_routes_expired_pending_work_through_SQL_claim_terminalisation_before_claiming_the_next_row()
+    {
+        var expiredId = Guid.NewGuid();
+        var activeId = Guid.NewGuid();
+        var candidates = new Queue<Guid?>([expiredId, activeId]);
+        var claimed = new List<Guid>();
+        var host = new OutlookHostIdentity("S-1-5-21-test", 7, "host-test");
+        var activeClaim = new OutlookBrowseClaim(activeId, Guid.NewGuid(), 1, host, 1, CursorUtc.AddMinutes(3), "Mailbox/Action");
+
+        var result = await SqlOutlookHostControlPlane.ClaimNextPendingBrowseAsync(
+            _ => ValueTask.FromResult(candidates.Count == 0 ? (Guid?)null : candidates.Dequeue()),
+            id =>
+            {
+                claimed.Add(id);
+                return ValueTask.FromResult(id == expiredId
+                    ? new OutlookBrowseClaimReceipt(null, false, true, false)
+                    : new OutlookBrowseClaimReceipt(activeClaim, true, true, false));
+            },
+            CancellationToken.None);
+
+        Assert.Equal(activeId, result?.BrowseRequestId);
+        Assert.Equal([expiredId, activeId], claimed);
+    }
+
+    [Fact]
     public async Task Program_composes_and_runs_default_disabled_host_behavior()
     {
         var application = new FakeHostApplication(new OutlookHostRunResult(OutlookHostExitReason.Disabled));
@@ -428,7 +453,8 @@ public sealed class OutlookHostLoopTests
             1,
             identity,
             1,
-            CursorUtc.AddMinutes(10));
+            CursorUtc.AddMinutes(10),
+            "mailbox/Action");
         var control = new FakeBrowseControlPlane(claim);
         var adapter = new FakeClassicOutlookAdapter();
         var factory = new CountingAdapterFactory(adapter);
@@ -445,6 +471,84 @@ public sealed class OutlookHostLoopTests
         Assert.Equal(OutlookHostExitReason.Completed, result.Reason);
         Assert.Equal(1, factory.ActivationCount);
         Assert.Single(control.CompletedFolders);
+        Assert.Equal("mailbox/Action", adapter.LastBrowseTargetPath);
+    }
+
+    [Fact]
+    public async Task Browse_larger_than_the_SQL_completion_bound_fails_durably_without_completing()
+    {
+        var identity = new OutlookHostIdentity("S-1-5-21-test", 7, "host-test");
+        var claim = new OutlookBrowseClaim(
+            Guid.Parse("12121212-1212-1212-1212-121212121212"),
+            Guid.Parse("34343434-3434-3434-3434-343434343434"),
+            1,
+            identity,
+            1,
+            CursorUtc.AddMinutes(10),
+            "mailbox/Action");
+        var folders = Enumerable.Range(0, 501)
+            .Select(index => new OutlookFolderDescriptor(
+                OutlookCaptureFolderId.New(),
+                new OutlookFolderIdentity("store", $"folder-{index}", $"Folder {index}")))
+            .ToArray();
+        var control = new FakeBrowseControlPlane(claim);
+        var browser = new OutlookFolderBrowser(
+            new OutlookHostOptions { Enabled = true },
+            new FakeEnvironment(isWindows: true, isInteractive: true),
+            new FakeSingletonFactory(available: true),
+            control,
+            new CountingAdapterFactory(new FakeClassicOutlookAdapter(browseFolders: folders)),
+            new FixedTimeProvider(CursorUtc));
+
+        var result = await browser.RunOnceAsync(CancellationToken.None);
+
+        Assert.Equal(OutlookHostExitReason.DurableClaimDisabled, result.Reason);
+        Assert.Equal([OutlookBrowseFailureCode.Failed], control.Failures);
+        Assert.Empty(control.CompletedFolders);
+    }
+
+    [Fact]
+    public void Folder_browse_adapter_requires_an_exact_target_path()
+    {
+        var method = typeof(IClassicOutlookAdapter).GetMethod(nameof(IClassicOutlookAdapter.BrowseFoldersAsync));
+
+        var parameters = method!.GetParameters();
+        Assert.Collection(
+            parameters,
+            parameter =>
+            {
+                Assert.Equal(typeof(string), parameter.ParameterType);
+                Assert.Equal("targetPath", parameter.Name);
+            },
+            parameter => Assert.Equal(typeof(CancellationToken), parameter.ParameterType));
+    }
+
+    [Fact]
+    public async Task Missing_or_ambiguous_target_fails_durably_without_a_completion()
+    {
+        var identity = new OutlookHostIdentity("S-1-5-21-test", 7, "host-test");
+        var claim = new OutlookBrowseClaim(
+            Guid.Parse("56565656-5656-5656-5656-565656565656"),
+            Guid.Parse("78787878-7878-7878-7878-787878787878"),
+            1,
+            identity,
+            1,
+            CursorUtc.AddMinutes(10),
+            "mailbox/Action");
+        var control = new FakeBrowseControlPlane(claim);
+        var browser = new OutlookFolderBrowser(
+            new OutlookHostOptions { Enabled = true },
+            new FakeEnvironment(isWindows: true, isInteractive: true),
+            new FakeSingletonFactory(available: true),
+            control,
+            new ThrowingBrowseAdapterFactory(),
+            new FixedTimeProvider(CursorUtc));
+
+        var result = await browser.RunOnceAsync(CancellationToken.None);
+
+        Assert.Equal(OutlookHostExitReason.DurableClaimDisabled, result.Reason);
+        Assert.Equal([OutlookBrowseFailureCode.Failed], control.Failures);
+        Assert.Empty(control.CompletedFolders);
     }
 
     [Fact]
@@ -522,7 +626,8 @@ public sealed class OutlookHostLoopTests
             1,
             identity,
             1,
-            CursorUtc.AddMinutes(10));
+            CursorUtc.AddMinutes(10),
+            "mailbox/Action");
         var control = new FakeBrowseControlPlane(claim);
         var browser = new OutlookFolderBrowser(
             new OutlookHostOptions { Enabled = true },
@@ -549,7 +654,8 @@ public sealed class OutlookHostLoopTests
             1,
             identity,
             1,
-            CursorUtc.AddMinutes(10));
+            CursorUtc.AddMinutes(10),
+            "mailbox/Action");
         var control = new FakeBrowseControlPlane(claim) { RejectCancelledFailureToken = true };
         var browser = new OutlookFolderBrowser(
             new OutlookHostOptions { Enabled = true },
@@ -577,7 +683,8 @@ public sealed class OutlookHostLoopTests
             1,
             identity,
             1,
-            CursorUtc.AddMinutes(10));
+            CursorUtc.AddMinutes(10),
+            "mailbox/Action");
         var control = new FakeBrowseControlPlane(claim)
         {
             CompletionException = new InvalidOperationException("completion invariant failure")
@@ -919,6 +1026,25 @@ public sealed class OutlookHostLoopTests
             CancellationToken cancellationToken) => ValueTask.FromException<IClassicOutlookAdapter>(exception);
     }
 
+    private sealed class ThrowingBrowseAdapterFactory : IClassicOutlookAdapterFactory
+    {
+        public ValueTask<IClassicOutlookAdapter> CreateAsync(
+            OutlookComActivationContext context,
+            CancellationToken cancellationToken) =>
+            ValueTask.FromResult<IClassicOutlookAdapter>(new ThrowingBrowseAdapter());
+
+        private sealed class ThrowingBrowseAdapter : IClassicOutlookAdapter
+        {
+            public ValueTask<IReadOnlyList<OutlookFolderDescriptor>> BrowseFoldersAsync(string targetPath, CancellationToken cancellationToken) =>
+                ValueTask.FromException<IReadOnlyList<OutlookFolderDescriptor>>(new OutlookBrowseTargetException());
+
+            public ValueTask<IAsyncDisposable> SubscribeHintsAsync(OutlookFolderIdentity folder, Func<OutlookHint, ValueTask> onHint, CancellationToken cancellationToken) => throw new NotSupportedException();
+            public IAsyncEnumerable<OutlookItemEnvelope> EnumerateAsync(OutlookFolderIdentity folder, OutlookCursor cursor, CancellationToken cancellationToken) => throw new NotSupportedException();
+            public ValueTask<OutlookMessagePayload> ReadForExportAsync(OutlookItemEnvelope item, CancellationToken cancellationToken) => throw new NotSupportedException();
+            public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+        }
+    }
+
     private sealed class ThreadRecordingActivator(
         IClassicOutlookAdapter adapter,
         List<(string Operation, int ThreadId, ApartmentState Apartment)> calls) : IClassicOutlookComActivator
@@ -933,7 +1059,7 @@ public sealed class OutlookHostLoopTests
     private sealed class ThreadRecordingAdapter(
         List<(string Operation, int ThreadId, ApartmentState Apartment)> calls) : IClassicOutlookAdapter
     {
-        public ValueTask<IReadOnlyList<OutlookFolderDescriptor>> BrowseFoldersAsync(CancellationToken cancellationToken)
+        public ValueTask<IReadOnlyList<OutlookFolderDescriptor>> BrowseFoldersAsync(string targetPath, CancellationToken cancellationToken)
         {
             Record("browse", calls);
             return ValueTask.FromResult<IReadOnlyList<OutlookFolderDescriptor>>([]);

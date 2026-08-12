@@ -48,7 +48,8 @@ $NativeOutlookIngressMigrationIds = @(
     "20260811132655_BindOutlookProfileSourceRoot",
     "20260811133300_AlignDeferredCapabilityFingerprintCollation",
     "20260811143122_RecordOutlookExportBlockedReason",
-    "20260811152249_AllowIdentitylessBlockedOutlookExports"
+    "20260811152249_AllowIdentitylessBlockedOutlookExports",
+    "20260812102333_AddOutlookBrowseTargetPath"
 )
 $NativeOutlookIngressMigrationTargetId = $NativeOutlookIngressMigrationIds[-1]
 $RequiredDeploymentMigrationIds = @(

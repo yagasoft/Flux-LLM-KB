@@ -85,6 +85,31 @@ public sealed class OutlookCaptureContractTests
     }
 
     [Fact]
+    public void Browse_request_contract_carries_a_private_exact_target_path()
+    {
+        var targetPath = typeof(OutlookBrowseRequest).GetProperty("TargetPath");
+
+        Assert.NotNull(targetPath);
+        Assert.Equal(typeof(string), targetPath.PropertyType);
+    }
+
+    [Fact]
+    public void Browse_request_rejects_a_non_exact_target_path()
+    {
+        var request = new OutlookBrowseRequest(
+            Guid.NewGuid(),
+            new string('a', 64),
+            Guid.NewGuid(),
+            Guid.NewGuid(),
+            1,
+            DateTimeOffset.UtcNow.AddMinutes(5),
+            OutlookCaptureProfileId.New(),
+            "mailbox//Action");
+
+        Assert.Throws<ArgumentException>(request.Validate);
+    }
+
+    [Fact]
     public void Catch_up_lease_rejects_a_non_stale_release()
     {
         var release = new OutlookStaleCatchUpLeaseReleaseRequest(

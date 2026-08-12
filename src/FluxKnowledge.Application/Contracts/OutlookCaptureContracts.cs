@@ -232,7 +232,8 @@ public sealed record OutlookBrowseRequest(
     Guid CorrelationId,
     long ConfigurationRevision,
     DateTimeOffset ExpiresAtUtc,
-    OutlookCaptureProfileId? ProfileId = null)
+    OutlookCaptureProfileId? ProfileId = null,
+    string TargetPath = "")
 {
     public void Validate()
     {
@@ -246,6 +247,7 @@ public sealed record OutlookBrowseRequest(
         }
 
         OutlookCaptureContractValidation.RequireUtc(ExpiresAtUtc, nameof(ExpiresAtUtc));
+        OutlookCaptureContractValidation.RequireFolderPath(TargetPath, nameof(TargetPath));
     }
 }
 
@@ -272,7 +274,8 @@ public sealed record OutlookBrowseClaim(
     long ConfigurationRevision,
     OutlookHostIdentity Host,
     long FencingToken,
-    DateTimeOffset LeaseExpiresAtUtc)
+    DateTimeOffset LeaseExpiresAtUtc,
+    string? TargetPath = null)
 {
     public void Validate()
     {
@@ -286,6 +289,10 @@ public sealed record OutlookBrowseClaim(
         ArgumentNullException.ThrowIfNull(Host);
         Host.Validate();
         OutlookCaptureContractValidation.RequireUtc(LeaseExpiresAtUtc, nameof(LeaseExpiresAtUtc));
+        if (TargetPath is not null)
+        {
+            OutlookCaptureContractValidation.RequireFolderPath(TargetPath, nameof(TargetPath));
+        }
     }
 }
 
@@ -337,9 +344,9 @@ public sealed record OutlookBrowseCompletionRequest(
         }
 
         ArgumentNullException.ThrowIfNull(Folders);
-        if (Folders.Count > 500)
+        if (Folders.Count is < 1 or > 500)
         {
-            throw new ArgumentOutOfRangeException(nameof(Folders), "Outlook browse completion is bounded to 500 folders.");
+            throw new ArgumentOutOfRangeException(nameof(Folders), "Outlook browse completion must be bounded.");
         }
 
         foreach (var folder in Folders)
@@ -670,6 +677,17 @@ internal static class OutlookCaptureContractValidation
         if (value!.Any(char.IsControl))
         {
             throw new ArgumentException("Display names cannot contain control characters.", parameterName);
+        }
+    }
+
+    public static void RequireFolderPath(string? value, string parameterName)
+    {
+        RequireOpaque(value, parameterName, 512);
+        var path = value!;
+        var segments = path.Split('/');
+        if (path.Any(char.IsControl) || segments.Length < 2 || segments.Any(string.IsNullOrWhiteSpace))
+        {
+            throw new ArgumentException("A root-to-leaf slash-separated Outlook folder path is required.", parameterName);
         }
     }
 
