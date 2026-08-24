@@ -1250,11 +1250,15 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
         {
             return [];
         }
-        await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
-        await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken).ConfigureAwait(false);
-        var now = await DatabaseUtcNowAsync(context, cancellationToken).ConfigureAwait(false);
-        var expiry = now.AddMinutes(5);
-        var branches = await context.SourceProcessorBranches.FromSqlInterpolated($"""
+        var executionState = new CsharpClaimExecutionState();
+        await using var strategyContext = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        return await strategyContext.Database.CreateExecutionStrategy().ExecuteAsync(executionState, async (state, retryCancellationToken) =>
+        {
+            await using var context = await contextFactory.CreateDbContextAsync(retryCancellationToken).ConfigureAwait(false);
+            await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, retryCancellationToken).ConfigureAwait(false);
+            var now = await DatabaseUtcNowAsync(context, retryCancellationToken).ConfigureAwait(false);
+            var expiry = now.AddMinutes(5);
+            var branches = await context.SourceProcessorBranches.FromSqlInterpolated($"""
             SELECT * FROM [SourceProcessorBranches] WITH (UPDLOCK, HOLDLOCK)
             WHERE ([State] = {(int)RetainedProcessorBranchState.Pending}
                 OR ([State] = {(int)RetainedProcessorBranchState.Running} AND [LeaseExpiresAtUtc] < TODATETIMEOFFSET(SYSUTCDATETIME(), '+00:00')))
@@ -1283,28 +1287,62 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
             """).OrderBy(value => value.CreatedAtUtc).ThenBy(value => value.Id).Take(Math.Clamp(
                 maximumCount,
                 1,
-                RetainedCsharpCodeProcessor.MaximumClaimBatchSize)).ToListAsync(cancellationToken).ConfigureAwait(false);
-        var attempts = new Dictionary<Guid, Guid>();
-        foreach (var branch in branches)
-        {
-            if (branch.State == (int)RetainedProcessorBranchState.Running && branch.LeaseExpiresAtUtc < now)
+                RetainedCsharpCodeProcessor.MaximumClaimBatchSize)).ToListAsync(retryCancellationToken).ConfigureAwait(false);
+            var attempts = new Dictionary<Guid, Guid>();
+            foreach (var branch in branches)
             {
-                await context.Database.ExecuteSqlInterpolatedAsync($"UPDATE [SourceProcessorAttempts] SET [FinishedAtUtc] = {now}, [OutcomeCode] = {"lease-expired-reconciled"} WHERE [BranchId] = {branch.Id} AND [LeaseGeneration] = {branch.LeaseGeneration} AND [FinishedAtUtc] IS NULL;", cancellationToken).ConfigureAwait(false);
+                if (branch.State == (int)RetainedProcessorBranchState.Running && branch.LeaseExpiresAtUtc < now)
+                {
+                    await context.Database.ExecuteSqlInterpolatedAsync($"UPDATE [SourceProcessorAttempts] SET [FinishedAtUtc] = {now}, [OutcomeCode] = {"lease-expired-reconciled"} WHERE [BranchId] = {branch.Id} AND [LeaseGeneration] = {branch.LeaseGeneration} AND [FinishedAtUtc] IS NULL;", retryCancellationToken).ConfigureAwait(false);
+                }
+                branch.State = (int)RetainedProcessorBranchState.Running;
+                branch.LeaseOwner = leaseOwner;
+                branch.LeaseExpiresAtUtc = expiry;
+                branch.LeaseGeneration++;
+                branch.AttemptCount++;
+                branch.UpdatedAtUtc = now;
+                var attemptId = Guid.NewGuid();
+                attempts.Add(branch.Id, attemptId);
+                context.SourceProcessorAttempts.Add(new SourceProcessorAttemptEntity { Id = attemptId, BranchId = branch.Id, LeaseGeneration = branch.LeaseGeneration, StartedAtUtc = now });
             }
-            branch.State = (int)RetainedProcessorBranchState.Running;
-            branch.LeaseOwner = leaseOwner;
-            branch.LeaseExpiresAtUtc = expiry;
-            branch.LeaseGeneration++;
-            branch.AttemptCount++;
-            branch.UpdatedAtUtc = now;
-            var attemptId = Guid.NewGuid();
-            attempts.Add(branch.Id, attemptId);
-            context.SourceProcessorAttempts.Add(new SourceProcessorAttemptEntity { Id = attemptId, BranchId = branch.Id, LeaseGeneration = branch.LeaseGeneration, StartedAtUtc = now });
-        }
-        await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
-        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-        var identities = await context.SourceRevisions.AsNoTracking().Where(value => branches.Select(branch => branch.SourceRevisionId).Contains(value.Id)).ToDictionaryAsync(value => value.Id, cancellationToken).ConfigureAwait(false);
-        return branches.Select(branch => new RetainedCsharpCodeClaim(branch.Id, new SourceRevisionId(branch.SourceRevisionId), identities[branch.SourceRevisionId].StableSourceIdentity, branch.InputSha256, leaseOwner, branch.LeaseGeneration, expiry, attempts[branch.Id])).ToArray();
+            await context.SaveChangesAsync(retryCancellationToken).ConfigureAwait(false);
+            var identities = await context.SourceRevisions.AsNoTracking().Where(value => branches.Select(branch => branch.SourceRevisionId).Contains(value.Id)).ToDictionaryAsync(value => value.Id, retryCancellationToken).ConfigureAwait(false);
+            state.AttemptedClaims = branches.Select(branch => new RetainedCsharpCodeClaim(branch.Id, new SourceRevisionId(branch.SourceRevisionId), identities[branch.SourceRevisionId].StableSourceIdentity, branch.InputSha256, leaseOwner, branch.LeaseGeneration, expiry, attempts[branch.Id])).ToArray();
+            await transaction.CommitAsync(retryCancellationToken).ConfigureAwait(false);
+            return state.AttemptedClaims;
+        }, async (state, retryCancellationToken) =>
+        {
+            if (state.AttemptedClaims.Count == 0)
+            {
+                return new ExecutionResult<IReadOnlyList<RetainedCsharpCodeClaim>>(true, state.AttemptedClaims);
+            }
+
+            await using var verificationContext = await contextFactory.CreateDbContextAsync(retryCancellationToken).ConfigureAwait(false);
+            var attemptIds = state.AttemptedClaims.Select(value => value.AttemptId).ToArray();
+            var branchIds = state.AttemptedClaims.Select(value => value.BranchId).ToArray();
+            var attempts = await verificationContext.SourceProcessorAttempts.AsNoTracking()
+                .Where(value => attemptIds.Contains(value.Id))
+                .Select(value => new { value.Id, value.BranchId, value.LeaseGeneration })
+                .ToListAsync(retryCancellationToken)
+                .ConfigureAwait(false);
+            var branches = await verificationContext.SourceProcessorBranches.AsNoTracking()
+                .Where(value => branchIds.Contains(value.Id))
+                .Select(value => new { value.Id, value.LeaseOwner, value.LeaseGeneration, value.State })
+                .ToListAsync(retryCancellationToken)
+                .ConfigureAwait(false);
+            var succeeded = attempts.Count == state.AttemptedClaims.Count &&
+                branches.Count == state.AttemptedClaims.Count &&
+                state.AttemptedClaims.All(claim => attempts.Any(attempt =>
+                    attempt.Id == claim.AttemptId &&
+                    attempt.BranchId == claim.BranchId &&
+                    attempt.LeaseGeneration == claim.LeaseGeneration)) &&
+                state.AttemptedClaims.All(claim => branches.Any(branch =>
+                    branch.Id == claim.BranchId &&
+                    branch.LeaseOwner == claim.LeaseOwner &&
+                    branch.LeaseGeneration == claim.LeaseGeneration &&
+                    branch.State == (int)RetainedProcessorBranchState.Running));
+            return new ExecutionResult<IReadOnlyList<RetainedCsharpCodeClaim>>(succeeded, state.AttemptedClaims);
+        }, cancellationToken).ConfigureAwait(false);
     }
 
     public async ValueTask<RetainedCsharpCodeCompletionWriteResult> CompleteRetainedCsharpCodeAsync(
@@ -2144,6 +2182,11 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
         }
 
         return await query.ToListAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private sealed class CsharpClaimExecutionState
+    {
+        public IReadOnlyList<RetainedCsharpCodeClaim> AttemptedClaims { get; set; } = [];
     }
 
     private sealed record ForceCandidate(

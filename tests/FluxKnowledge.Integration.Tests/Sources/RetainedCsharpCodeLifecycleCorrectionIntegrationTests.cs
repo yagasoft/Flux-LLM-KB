@@ -1,5 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
+using System.Data.Common;
+using System.Diagnostics;
 using FluxKnowledge.Application.Pipeline;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Sources;
@@ -11,8 +13,10 @@ using FluxKnowledge.Infrastructure.SqlServer.Visibility;
 using FluxKnowledge.Integration.Tests.Support;
 using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Migrations;
+using Microsoft.EntityFrameworkCore.Storage;
 using Xunit;
 
 namespace FluxKnowledge.Integration.Tests.Sources;
@@ -48,6 +52,103 @@ public sealed class RetainedCsharpCodeLifecycleCorrectionIntegrationTests(
             8,
             await verification.SourceProcessorAttempts.CountAsync(value =>
                 seededBranches.Select(seed => seed.BranchId).Contains(value.BranchId)));
+    }
+
+    [NativeSqlServerFact]
+    public async Task Csharp_claim_runs_its_serialisable_transaction_through_the_retry_execution_strategy()
+    {
+        var seeded = await SeedCsharpBranchAsync(Encoding.UTF8.GetBytes("class RetryingClaim { }"));
+        var store = new SqlRetainedProcessorBranchStore(
+            new RetryingConnectionFactory(fixture.ConnectionString),
+            TimeProvider.System);
+
+        var claim = Assert.Single(await store.ClaimCsharpCodeAsync(
+            "csharp-retrying-claim-owner",
+            1,
+            RetainedCsharpCodeProcessor.Capability.ProcessorFingerprint,
+            CancellationToken.None));
+
+        Assert.Equal(seeded.BranchId, claim.BranchId);
+        await using var verification = Context();
+        Assert.Equal(1, await verification.SourceProcessorAttempts.CountAsync(value => value.BranchId == seeded.BranchId));
+    }
+
+    [NativeSqlServerFact]
+    public async Task Csharp_claim_returns_the_committed_attempt_after_an_ambiguous_commit_retry()
+    {
+        var seeded = await SeedCsharpBranchAsync(Encoding.UTF8.GetBytes("class AmbiguousCommitClaim { }"));
+        var ambiguousCommit = new AmbiguousCommitInterceptor();
+        var store = new SqlRetainedProcessorBranchStore(
+            new RetryingConnectionFactory(fixture.ConnectionString, ambiguousCommit),
+            TimeProvider.System);
+
+        var claim = Assert.Single(await store.ClaimCsharpCodeAsync(
+            "csharp-ambiguous-commit-owner",
+            1,
+            RetainedCsharpCodeProcessor.Capability.ProcessorFingerprint,
+            CancellationToken.None));
+
+        Assert.Equal(1, ambiguousCommit.AmbiguousCommitCount);
+        Assert.Equal(seeded.BranchId, claim.BranchId);
+        await using var verification = Context();
+        var attempt = Assert.Single(await verification.SourceProcessorAttempts
+            .Where(value => value.BranchId == seeded.BranchId)
+            .ToListAsync());
+        var branch = await verification.SourceProcessorBranches.SingleAsync(value => value.Id == seeded.BranchId);
+        Assert.Equal(claim.AttemptId, attempt.Id);
+        Assert.Equal(claim.LeaseGeneration, attempt.LeaseGeneration);
+        Assert.Equal(claim.LeaseOwner, branch.LeaseOwner);
+        Assert.Equal(claim.LeaseGeneration, branch.LeaseGeneration);
+    }
+
+    [NativeSqlServerFact]
+    public async Task Csharp_claim_retries_a_rolled_back_commit_without_retaining_stale_tracking()
+    {
+        var seeded = await SeedCsharpBranchAsync(Encoding.UTF8.GetBytes("class RolledBackCommitClaim { }"));
+        var interceptor = new ThrowBeforeFirstCommitInterceptor();
+        var store = new SqlRetainedProcessorBranchStore(
+            new RetryingConnectionFactory(fixture.ConnectionString, interceptor),
+            TimeProvider.System);
+
+        var claim = Assert.Single(await store.ClaimCsharpCodeAsync(
+            "csharp-rolled-back-commit-owner",
+            1,
+            RetainedCsharpCodeProcessor.Capability.ProcessorFingerprint,
+            CancellationToken.None));
+
+        await using var verification = Context();
+        var branch = await verification.SourceProcessorBranches.SingleAsync(value => value.Id == seeded.BranchId);
+        var attempt = Assert.Single(await verification.SourceProcessorAttempts
+            .Where(value => value.BranchId == seeded.BranchId)
+            .ToListAsync());
+        Assert.Equal(1, branch.LeaseGeneration);
+        Assert.Equal(1, branch.AttemptCount);
+        Assert.Equal(1, attempt.LeaseGeneration);
+        Assert.Equal(claim.AttemptId, attempt.Id);
+        Assert.Equal(claim.BranchId, attempt.BranchId);
+    }
+
+    [NativeSqlServerFact]
+    public async Task Csharp_claim_cancels_a_retry_delay_using_the_callers_cancellation_token()
+    {
+        await SeedCsharpBranchAsync(Encoding.UTF8.GetBytes("class CancellationRetryClaim { }"));
+        var interceptor = new ThrowBeforeFirstCommitInterceptor();
+        var store = new SqlRetainedProcessorBranchStore(
+            new DelayedRetryingConnectionFactory(fixture.ConnectionString, interceptor),
+            TimeProvider.System);
+        using var cancellation = new CancellationTokenSource();
+
+        var claimTask = store.ClaimCsharpCodeAsync(
+            "csharp-cancelled-retry-owner",
+            1,
+            RetainedCsharpCodeProcessor.Capability.ProcessorFingerprint,
+            cancellation.Token).AsTask();
+        await interceptor.FirstFailure;
+        var stopwatch = Stopwatch.StartNew();
+        cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => claimTask);
+        Assert.True(stopwatch.Elapsed < TimeSpan.FromSeconds(1));
     }
 
     [NativeSqlServerFact]
@@ -1467,6 +1568,100 @@ public sealed class RetainedCsharpCodeLifecycleCorrectionIntegrationTests(
 
         public FluxKnowledgeDbContext CreateDbContext() => new(_options);
     }
+
+    private sealed class RetryingConnectionFactory(
+        string connectionString,
+        params IInterceptor[] interceptors)
+        : IDbContextFactory<FluxKnowledgeDbContext>
+    {
+        private readonly DbContextOptions<FluxKnowledgeDbContext> _options =
+            new DbContextOptionsBuilder<FluxKnowledgeDbContext>()
+                .AddInterceptors(interceptors)
+                .UseSqlServer(connectionString, sqlServer => sqlServer.ExecutionStrategy(
+                    dependencies => new RetryExecutionStrategy(dependencies)))
+                .Options;
+
+        public FluxKnowledgeDbContext CreateDbContext() => new(_options);
+    }
+
+    private sealed class DelayedRetryingConnectionFactory(
+        string connectionString,
+        DbTransactionInterceptor interceptor)
+        : IDbContextFactory<FluxKnowledgeDbContext>
+    {
+        private readonly DbContextOptions<FluxKnowledgeDbContext> _options =
+            new DbContextOptionsBuilder<FluxKnowledgeDbContext>()
+                .AddInterceptors(interceptor)
+                .UseSqlServer(connectionString, sqlServer => sqlServer.ExecutionStrategy(
+                    dependencies => new DelayedRetryExecutionStrategy(dependencies)))
+                .Options;
+
+        public FluxKnowledgeDbContext CreateDbContext() => new(_options);
+    }
+
+    private sealed class RetryExecutionStrategy(ExecutionStrategyDependencies dependencies)
+        : ExecutionStrategy(dependencies, 1, TimeSpan.Zero)
+    {
+        protected override bool ShouldRetryOn(Exception exception) => exception is SyntheticTransientException;
+
+        protected override bool ShouldVerifySuccessOn(Exception exception) => exception is SyntheticTransientException;
+    }
+
+    private sealed class DelayedRetryExecutionStrategy(ExecutionStrategyDependencies dependencies)
+        : ExecutionStrategy(dependencies, 1, TimeSpan.FromSeconds(3))
+    {
+        protected override bool ShouldRetryOn(Exception exception) => exception is SyntheticTransientException;
+
+        protected override TimeSpan? GetNextDelay(Exception lastException) =>
+            lastException is SyntheticTransientException ? TimeSpan.FromSeconds(3) : null;
+    }
+
+    private sealed class AmbiguousCommitInterceptor : DbTransactionInterceptor
+    {
+        private int ambiguousCommitCount;
+
+        public int AmbiguousCommitCount => ambiguousCommitCount;
+
+        public override ValueTask<InterceptionResult> TransactionCommittingAsync(
+            DbTransaction transaction,
+            TransactionEventData eventData,
+            InterceptionResult result,
+            CancellationToken cancellationToken = default)
+        {
+            if (Interlocked.Increment(ref ambiguousCommitCount) == 1)
+            {
+                transaction.Commit();
+                throw new SyntheticTransientException();
+            }
+
+            return ValueTask.FromResult(result);
+        }
+    }
+
+    private sealed class ThrowBeforeFirstCommitInterceptor : DbTransactionInterceptor
+    {
+        private readonly TaskCompletionSource firstFailure = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int commitFailureCount;
+
+        public Task FirstFailure => firstFailure.Task;
+
+        public override ValueTask<InterceptionResult> TransactionCommittingAsync(
+            DbTransaction transaction,
+            TransactionEventData eventData,
+            InterceptionResult result,
+            CancellationToken cancellationToken = default)
+        {
+            if (Interlocked.Increment(ref commitFailureCount) == 1)
+            {
+                firstFailure.TrySetResult();
+                throw new SyntheticTransientException();
+            }
+
+            return ValueTask.FromResult(result);
+        }
+    }
+
+    private sealed class SyntheticTransientException : Exception;
 
     private sealed class FailingDisclosure : ILocalPrivateContentDisclosure
     {

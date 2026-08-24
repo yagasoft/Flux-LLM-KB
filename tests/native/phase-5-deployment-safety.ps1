@@ -261,6 +261,82 @@ finally {
     }
 }
 
+function Invoke-FreshWindowsPowerShellFixedLoopbackProbe {
+    $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+    $childScriptPath = Join-Path ([System.IO.Path]::GetTempPath()) ("loopback-probe-{0}.ps1" -f [Guid]::NewGuid().ToString("N"))
+    $childJob = $null
+    $listener.Start()
+    $port = ([System.Net.IPEndPoint]$listener.LocalEndpoint).Port
+    try {
+        @'
+param(
+    [Parameter(Mandatory)]
+    [string]$HelperPath,
+    [Parameter(Mandatory)]
+    [string]$ProbeUri
+)
+
+$ErrorActionPreference = "Stop"
+. $HelperPath
+$response = Invoke-FixedLoopbackProbe -Uri $ProbeUri -TimeoutSeconds 5
+try {
+    [int]$response.StatusCode
+}
+finally {
+    $response.Dispose()
+}
+'@ | Set-Content -LiteralPath $childScriptPath -Encoding UTF8
+
+        $childJob = Start-Job -ScriptBlock {
+            param($WindowsPowerShell, $ScriptPath, $HelperPath, $ProbeUri)
+
+            $output = & $WindowsPowerShell -NoProfile -ExecutionPolicy Bypass -File $ScriptPath `
+                -HelperPath $HelperPath -ProbeUri $ProbeUri 2>&1 | Out-String
+            [pscustomobject]@{
+                ExitCode = $LASTEXITCODE
+                Output = $output
+            }
+        } -ArgumentList (Get-Command powershell -CommandType Application).Source, $childScriptPath, `
+            $loopbackSafetyScript, "http://127.0.0.1:$port/probe"
+
+        $accepted = $listener.AcceptTcpClientAsync()
+        if (-not $accepted.Wait(5000)) {
+            $childResult = Receive-Job -Job $childJob -Wait
+            throw "A fresh Windows PowerShell loopback probe did not connect to the synthetic listener: $($childResult.Output)"
+        }
+        $client = $accepted.GetAwaiter().GetResult()
+        try {
+            $stream = $client.GetStream()
+            $reader = [System.IO.StreamReader]::new($stream, [System.Text.Encoding]::ASCII, $false, 1024, $true)
+            while ($reader.ReadLine() -ne "") { }
+            $responseBytes = [System.Text.Encoding]::ASCII.GetBytes("HTTP/1.1 200 OK`r`nContent-Length: 0`r`nConnection: close`r`n`r`n")
+            $stream.Write($responseBytes, 0, $responseBytes.Length)
+            $stream.Flush()
+        }
+        finally {
+            $client.Dispose()
+        }
+
+        $childResult = Receive-Job -Job $childJob -Wait
+        if ($childResult.ExitCode -ne 0) {
+            throw "A fresh Windows PowerShell loopback probe failed: $($childResult.Output)"
+        }
+        if ($childResult.Output.Trim() -ne "200") {
+            throw "A fresh Windows PowerShell loopback probe did not preserve the synthetic HTTP 200 response: $($childResult.Output)"
+        }
+    }
+    finally {
+        if ($null -ne $childJob) {
+            Remove-Job -Job $childJob -Force -ErrorAction SilentlyContinue
+        }
+        if (Test-Path -LiteralPath $childScriptPath) {
+            Remove-Item -LiteralPath $childScriptPath -Force
+        }
+        $listener.Stop()
+    }
+}
+
+$freshWindowsPowerShellProbe = Invoke-FreshWindowsPowerShellFixedLoopbackProbe
 $okProbe = Invoke-SyntheticFixedLoopbackProbe -StatusCode 200 -ReasonPhrase "OK"
 if ($okProbe.HadErrors -or (@($okProbe.Output) -join "").Trim() -ne "200") {
     throw "The shared fixed-loopback probe did not preserve an exact loopback 200 response."

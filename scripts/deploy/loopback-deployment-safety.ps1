@@ -1,3 +1,5 @@
+Add-Type -AssemblyName System.Net.Http -ErrorAction Stop
+
 function Get-FixedLoopbackOrigin {
     [OutputType([pscustomobject])]
     param(
@@ -47,7 +49,6 @@ function New-FixedLoopbackProbeClient {
         [int]$TimeoutSeconds = 30
     )
 
-    Add-Type -AssemblyName System.Net.Http -ErrorAction Stop
     $handler = [System.Net.Http.HttpClientHandler]::new()
     $handler.UseProxy = $false
     $handler.AllowAutoRedirect = $false
