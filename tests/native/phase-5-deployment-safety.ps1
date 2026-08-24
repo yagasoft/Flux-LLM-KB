@@ -157,6 +157,9 @@ Assert-ValidatorSchemaFencingContract -ValidatorText $validatorText
 if (-not $validatorText.Contains("Invoke-FixedLoopbackProbe")) {
     throw "The Phase 5 validator does not use the shared exact-200 fixed-loopback probe."
 }
+if (-not $validatorText.Contains("Invoke-FixedLoopbackHeaderProbe")) {
+    throw "The Phase 5 validator does not use the explicit fixed-loopback transport for every forwarded/proxy header."
+}
 $disabledTriggerMutation = $validatorText.Replace("AND [trigger].[is_disabled] = 0", "")
 $disabledTriggerMutationRejected = $false
 try {
@@ -336,7 +339,243 @@ finally {
     }
 }
 
+function Invoke-FreshWindowsPowerShellExplicitHeaderProbe {
+    param(
+        [Parameter(Mandatory)]
+        [string]$HeaderName,
+        [Parameter(Mandatory)]
+        [string]$HeaderValue,
+        [Parameter(Mandatory)]
+        [int]$StatusCode,
+        [string]$ResponseText = ""
+    )
+
+    $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+    $childScriptPath = Join-Path ([System.IO.Path]::GetTempPath()) ("loopback-explicit-header-probe-{0}.ps1" -f [Guid]::NewGuid().ToString("N"))
+    $childJob = $null
+    $listener.Start()
+    $port = ([System.Net.IPEndPoint]$listener.LocalEndpoint).Port
+    try {
+        @'
+param(
+    [Parameter(Mandatory)]
+    [string]$HelperPath,
+    [Parameter(Mandatory)]
+    [string]$ProbeUri,
+    [Parameter(Mandatory)]
+    [string]$HeaderName,
+    [Parameter(Mandatory)]
+    [string]$HeaderValue
+)
+
+$ErrorActionPreference = "Stop"
+. $HelperPath
+$headers = @{}
+$headers[$HeaderName] = $HeaderValue
+$response = Invoke-FixedLoopbackHeaderProbe -Uri $ProbeUri -Headers $headers -TimeoutSeconds 5
+[int]$response.StatusCode
+'@ | Set-Content -LiteralPath $childScriptPath -Encoding UTF8
+
+        $childJob = Start-Job -ScriptBlock {
+            param($WindowsPowerShell, $ScriptPath, $HelperPath, $ProbeUri, $HeaderName, $HeaderValue)
+
+            $output = & $WindowsPowerShell -NoProfile -ExecutionPolicy Bypass -File $ScriptPath `
+                -HelperPath $HelperPath -ProbeUri $ProbeUri -HeaderName $HeaderName -HeaderValue $HeaderValue 2>&1 | Out-String
+            [pscustomobject]@{
+                ExitCode = $LASTEXITCODE
+                Output = $output
+            }
+        } -ArgumentList (Get-Command powershell -CommandType Application).Source, $childScriptPath, `
+            $loopbackSafetyScript, "http://127.0.0.1:$port/probe", $HeaderName, $HeaderValue
+
+        $accepted = $listener.AcceptTcpClientAsync()
+        if (-not $accepted.Wait(5000)) {
+            $childResult = Receive-Job -Job $childJob -Wait
+            throw "A fresh Windows PowerShell explicit-header probe did not connect to the synthetic listener: $($childResult.Output)"
+        }
+        $client = $accepted.GetAwaiter().GetResult()
+        try {
+            $stream = $client.GetStream()
+            $reader = [System.IO.StreamReader]::new($stream, [System.Text.Encoding]::ASCII, $false, 1024, $true)
+            $requestLines = @()
+            do {
+                $requestLine = $reader.ReadLine()
+                $requestLines += $requestLine
+            } while ($requestLine -ne "")
+            if ([string]::IsNullOrEmpty($ResponseText)) {
+                $ResponseText = "HTTP/1.1 $StatusCode Test`r`nContent-Length: 0`r`nConnection: close`r`n`r`n"
+            }
+            $responseBytes = [System.Text.Encoding]::ASCII.GetBytes($ResponseText)
+            $stream.Write($responseBytes, 0, $responseBytes.Length)
+            $stream.Flush()
+        }
+        finally {
+            $client.Dispose()
+        }
+
+        $childResult = Receive-Job -Job $childJob -Wait
+        return [pscustomobject]@{
+            ExitCode = $childResult.ExitCode
+            Output = $childResult.Output
+            RequestLines = $requestLines
+        }
+    }
+    finally {
+        if ($null -ne $childJob) {
+            Remove-Job -Job $childJob -Force -ErrorAction SilentlyContinue
+        }
+        if (Test-Path -LiteralPath $childScriptPath) {
+            Remove-Item -LiteralPath $childScriptPath -Force
+        }
+        $listener.Stop()
+    }
+}
+
+function Invoke-FreshWindowsPowerShellHttpClientHeaderProbe {
+    $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+    $childScriptPath = Join-Path ([System.IO.Path]::GetTempPath()) ("loopback-httpclient-header-probe-{0}.ps1" -f [Guid]::NewGuid().ToString("N"))
+    $childJob = $null
+    $listener.Start()
+    $port = ([System.Net.IPEndPoint]$listener.LocalEndpoint).Port
+    try {
+        @'
+param(
+    [Parameter(Mandatory)]
+    [string]$HelperPath,
+    [Parameter(Mandatory)]
+    [string]$ProbeUri
+)
+
+$ErrorActionPreference = "Stop"
+. $HelperPath
+$probe = New-FixedLoopbackProbeClient -TimeoutSeconds 5
+$request = [System.Net.Http.HttpRequestMessage]::new([System.Net.Http.HttpMethod]::Get, $ProbeUri)
+try {
+    $added = $request.Headers.TryAddWithoutValidation("Proxy-Connection", "203.0.113.7")
+    $response = $probe.Client.SendAsync($request).GetAwaiter().GetResult()
+    try {
+        "{0}|{1}" -f $added, [int]$response.StatusCode
+    }
+    finally {
+        $response.Dispose()
+    }
+}
+finally {
+    $request.Dispose()
+    $probe.Client.Dispose()
+    $probe.Handler.Dispose()
+}
+'@ | Set-Content -LiteralPath $childScriptPath -Encoding UTF8
+
+        $childJob = Start-Job -ScriptBlock {
+            param($WindowsPowerShell, $ScriptPath, $HelperPath, $ProbeUri)
+
+            $output = & $WindowsPowerShell -NoProfile -ExecutionPolicy Bypass -File $ScriptPath `
+                -HelperPath $HelperPath -ProbeUri $ProbeUri 2>&1 | Out-String
+            [pscustomobject]@{
+                ExitCode = $LASTEXITCODE
+                Output = $output
+            }
+        } -ArgumentList (Get-Command powershell -CommandType Application).Source, $childScriptPath, `
+            $loopbackSafetyScript, "http://127.0.0.1:$port/probe"
+
+        $accepted = $listener.AcceptTcpClientAsync()
+        if (-not $accepted.Wait(5000)) {
+            $childResult = Receive-Job -Job $childJob -Wait
+            throw "A fresh Windows PowerShell HttpClient header probe did not connect to the synthetic listener: $($childResult.Output)"
+        }
+        $client = $accepted.GetAwaiter().GetResult()
+        try {
+            $stream = $client.GetStream()
+            $reader = [System.IO.StreamReader]::new($stream, [System.Text.Encoding]::ASCII, $false, 1024, $true)
+            $requestLines = @()
+            do {
+                $requestLine = $reader.ReadLine()
+                $requestLines += $requestLine
+            } while ($requestLine -ne "")
+            $responseBytes = [System.Text.Encoding]::ASCII.GetBytes("HTTP/1.1 403 Forbidden`r`nContent-Length: 0`r`nConnection: close`r`n`r`n")
+            $stream.Write($responseBytes, 0, $responseBytes.Length)
+            $stream.Flush()
+        }
+        finally {
+            $client.Dispose()
+        }
+
+        $childResult = Receive-Job -Job $childJob -Wait
+        return [pscustomobject]@{
+            ExitCode = $childResult.ExitCode
+            Output = $childResult.Output
+            RequestLines = $requestLines
+        }
+    }
+    finally {
+        if ($null -ne $childJob) {
+            Remove-Job -Job $childJob -Force -ErrorAction SilentlyContinue
+        }
+        if (Test-Path -LiteralPath $childScriptPath) {
+            Remove-Item -LiteralPath $childScriptPath -Force
+        }
+        $listener.Stop()
+    }
+}
+
 $freshWindowsPowerShellProbe = Invoke-FreshWindowsPowerShellFixedLoopbackProbe
+$httpClientProxyConnectionProbe = Invoke-FreshWindowsPowerShellHttpClientHeaderProbe
+if ($httpClientProxyConnectionProbe.ExitCode -ne 0 -or $httpClientProxyConnectionProbe.Output.Trim() -ne "True|403") {
+    throw "The Windows PowerShell HttpClient characterization probe did not receive the synthetic HTTP 403 response: $($httpClientProxyConnectionProbe.Output)"
+}
+$proxyConnectionProbe = Invoke-FreshWindowsPowerShellExplicitHeaderProbe `
+    -HeaderName "Proxy-Connection" `
+    -HeaderValue "203.0.113.7" `
+    -StatusCode 403
+if ($proxyConnectionProbe.ExitCode -ne 0 -or $proxyConnectionProbe.Output.Trim() -ne "403") {
+    throw "The explicit loopback transport did not require a forwarded/proxy HTTP 403 response: $($proxyConnectionProbe.Output)"
+}
+if ("Proxy-Connection: 203.0.113.7" -notin @($proxyConnectionProbe.RequestLines)) {
+    throw "The explicit Windows PowerShell loopback transport did not transmit Proxy-Connection to the listener."
+}
+$oversizedResponseHeader = "HTTP/1.1 403 Forbidden`r`nX-Oversized: " + ("a" * 4097) + "`r`n`r`n"
+$oversizedHeaderProbe = Invoke-FreshWindowsPowerShellExplicitHeaderProbe `
+    -HeaderName "Proxy-Connection" `
+    -HeaderValue "203.0.113.7" `
+    -StatusCode 403 `
+    -ResponseText $oversizedResponseHeader
+if ($oversizedHeaderProbe.ExitCode -eq 0 -or $oversizedHeaderProbe.Output -notmatch "maximum line length") {
+    throw "The explicit loopback transport did not reject an oversized response header before accepting it."
+}
+$unterminatedResponseHeader = "HTTP/1.1 403 Forbidden`r`nX-Unterminated: partial"
+$unterminatedHeaderProbe = Invoke-FreshWindowsPowerShellExplicitHeaderProbe `
+    -HeaderName "Proxy-Connection" `
+    -HeaderValue "203.0.113.7" `
+    -StatusCode 403 `
+    -ResponseText $unterminatedResponseHeader
+if ($unterminatedHeaderProbe.ExitCode -eq 0 -or $unterminatedHeaderProbe.Output -notmatch "unterminated response line") {
+    throw "The explicit loopback transport did not reject an unterminated response header."
+}
+$nonForbiddenForwardedProbe = Invoke-FreshWindowsPowerShellExplicitHeaderProbe `
+    -HeaderName "Proxy-Connection" `
+    -HeaderValue "203.0.113.7" `
+    -StatusCode 200
+if ($nonForbiddenForwardedProbe.ExitCode -eq 0 -or $nonForbiddenForwardedProbe.Output -notmatch "HTTP 200") {
+    throw "The explicit loopback transport did not reject a forwarded/proxy response other than HTTP 403."
+}
+foreach ($invalidHeader in @(
+    @{ Name = "Bad`r`nHeader"; Value = "203.0.113.7" },
+    @{ Name = "Proxy-Connection"; Value = "203.0.113.7`r`nX-Injected: true" }
+)) {
+    $invalidHeaderRejected = $false
+    $invalidHeaders = @{}
+    $invalidHeaders[[string]$invalidHeader.Name] = [string]$invalidHeader.Value
+    try {
+        Invoke-FixedLoopbackHeaderProbe -Uri "http://127.0.0.1:1/probe" -Headers $invalidHeaders -TimeoutSeconds 5 | Out-Null
+    }
+    catch {
+        $invalidHeaderRejected = $_.Exception.Message -match "header"
+    }
+    if (-not $invalidHeaderRejected) {
+        throw "The explicit loopback transport accepted an invalid forwarded/proxy header."
+    }
+}
 $okProbe = Invoke-SyntheticFixedLoopbackProbe -StatusCode 200 -ReasonPhrase "OK"
 if ($okProbe.HadErrors -or (@($okProbe.Output) -join "").Trim() -ne "200") {
     throw "The shared fixed-loopback probe did not preserve an exact loopback 200 response."

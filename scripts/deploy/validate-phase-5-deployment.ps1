@@ -127,15 +127,11 @@ finally {
     $connection.Dispose()
 }
 
-$probe = New-FixedLoopbackProbeClient
-$handler = $probe.Handler
-$client = $probe.Client
 $origin = $siteOrigin
 $directStatuses = [ordered]@{}
 $forwardedStatuses = [ordered]@{}
 $noMatchToken = "phase5-validation-$([Guid]::NewGuid().ToString('N'))"
-try {
-    foreach ($endpointTemplate in @($plan.direct_get_endpoints)) {
+foreach ($endpointTemplate in @($plan.direct_get_endpoints)) {
         $endpoint = ([string]$endpointTemplate).Replace("{no-match-token}", $noMatchToken)
         $uri = [Uri]("{0}{1}" -f $origin, $endpoint)
         $response = Invoke-FixedLoopbackProbe -Uri $uri.AbsoluteUri
@@ -162,33 +158,19 @@ try {
 
         $headerStatuses = [ordered]@{}
         foreach ($header in @($plan.forwarded_proxy_headers)) {
-            $request = [System.Net.Http.HttpRequestMessage]::new([System.Net.Http.HttpMethod]::Get, $uri)
-            try {
-                [void]$request.Headers.TryAddWithoutValidation([string]$header, "203.0.113.7")
-                $blockedResponse = $client.SendAsync($request).GetAwaiter().GetResult()
-                try {
-                    if ([int]$blockedResponse.StatusCode -ne 403) {
-                        throw "A forwarded/proxy loopback request was not rejected with 403."
-                    }
-                    $headerStatuses[[string]$header] = [int]$blockedResponse.StatusCode
-                }
-                finally {
-                    $blockedResponse.Dispose()
-                }
+            $headers = @{}
+            $headers[[string]$header] = "203.0.113.7"
+            $blockedResponse = Invoke-FixedLoopbackHeaderProbe -Uri $uri.AbsoluteUri -Headers $headers
+            if ([int]$blockedResponse.StatusCode -ne 403) {
+                throw "A forwarded/proxy loopback request was not rejected with 403."
             }
-            finally {
-                $request.Dispose()
-            }
+            $headerStatuses[[string]$header] = [int]$blockedResponse.StatusCode
         }
         $forwardedStatuses[[string]$endpointTemplate] = $headerStatuses
-    }
-}
-finally {
-    $client.Dispose()
-    $handler.Dispose()
 }
 
 $validatedAt = [DateTime]::UtcNow.ToString("o")
+$forwardedStatusRecord = $forwardedStatuses | ConvertTo-Json -Compress -Depth 5
 $recordDirectory = Split-Path -Parent $recordPath
 New-Item -ItemType Directory -Force -Path $recordDirectory | Out-Null
 @(
@@ -199,6 +181,7 @@ New-Item -ItemType Directory -Force -Path $recordDirectory | Out-Null
     "- Schema contract: required tables and fencing triggers present",
     "- Direct loopback GET probes: all returned 200",
     "- Forwarded/proxy GET probes: all returned 403",
+    "- Forwarded/proxy status codes: $forwardedStatusRecord",
     "- Outlook host activation: false",
     "- Validation operations: SQL metadata SELECT and HTTP GET only"
 ) | Set-Content -LiteralPath $recordPath -Encoding utf8
