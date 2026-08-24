@@ -555,6 +555,15 @@ public sealed class LocalRetainedCsharpCodeReaderIntegrationTests(NativeSqlServe
                 marker,
                 new LocalRetainedCsharpCodeSearchCursor(tamperedToken));
 
+            var nonCanonicalAlias = CreateNonCanonicalBase64UrlAlias(cursor.Token);
+            Assert.NotEqual(cursor.Token, nonCanonicalAlias);
+            Assert.Equal(DecodeBase64Url(cursor.Token), DecodeBase64Url(nonCanonicalAlias));
+            await AssertCursorRejectedWithoutRetainedReadAsync(
+                reader,
+                detailReader,
+                marker,
+                new LocalRetainedCsharpCodeSearchCursor(nonCanonicalAlias));
+
             var oldPayload = Encoding.UTF8.GetBytes("{\"version\":1,\"queryFingerprint\":\"recomputed-old-sha-envelope\"}");
             var recomputedOldSha = new LocalRetainedCsharpCodeSearchCursor(
                 $"{EncodeBase64Url(oldPayload)}.{EncodeBase64Url(SHA256.HashData(oldPayload))}");
@@ -618,6 +627,35 @@ public sealed class LocalRetainedCsharpCodeReaderIntegrationTests(NativeSqlServe
 
             static string EncodeBase64Url(byte[] value) =>
                 Convert.ToBase64String(value).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+
+            static byte[] DecodeBase64Url(string value)
+            {
+                var padded = value.Replace('-', '+').Replace('_', '/');
+                padded += (padded.Length % 4) switch
+                {
+                    0 => string.Empty,
+                    2 => "==",
+                    3 => "=",
+                    _ => throw new InvalidOperationException("The issued cursor token cannot have an invalid base64url length.")
+                };
+                return Convert.FromBase64String(padded);
+            }
+
+            static string CreateNonCanonicalBase64UrlAlias(string canonicalToken)
+            {
+                const string alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+                var ignoredPaddingBitMask = (canonicalToken.Length % 4) switch
+                {
+                    2 => 0b000011,
+                    3 => 0b001111,
+                    _ => throw new InvalidOperationException("The issued cursor token has no base64url padding bits to alias.")
+                };
+                var finalValue = alphabet.IndexOf(canonicalToken[^1]);
+                Assert.InRange(finalValue, 0, alphabet.Length - 1);
+                var aliasValue = (finalValue & ~ignoredPaddingBitMask) |
+                                 ((finalValue + 1) & ignoredPaddingBitMask);
+                return canonicalToken[..^1] + alphabet[aliasValue];
+            }
         }
         finally
         {

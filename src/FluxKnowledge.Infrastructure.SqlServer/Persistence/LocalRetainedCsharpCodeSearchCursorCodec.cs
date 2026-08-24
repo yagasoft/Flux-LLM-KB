@@ -193,7 +193,12 @@ public sealed class LocalRetainedCsharpCodeSearchCursorCodec
             3 => "=",
             _ => throw new FormatException("Invalid base64url length.")
         };
-        return Convert.FromBase64String(padded);
+        var decoded = Convert.FromBase64String(padded);
+        if (!string.Equals(Base64UrlEncode(decoded), value, StringComparison.Ordinal))
+        {
+            throw new FormatException("Non-canonical base64url encoding.");
+        }
+        return decoded;
     }
 
     private static bool IsProtectionFailure(Exception exception) =>

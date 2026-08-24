@@ -2,48 +2,11 @@
 param(
     [string]$RepositoryRoot = (Get-Location).Path,
     [string]$BaselineRef = "main",
-    [switch]$ConfirmApprovedLegacyLocalSurfaceChanges,
-    [switch]$ResumeBoundary,
-    [string]$ExpectedOriginUrl = "",
-    [string]$ExpectedHead = "",
-    [string]$ExpectedBranch = ""
+    [switch]$ConfirmApprovedLegacyLocalSurfaceChanges
 )
 
 $ErrorActionPreference = "Stop"
 $RepositoryRoot = (Resolve-Path -LiteralPath $RepositoryRoot).Path
-$resumeBoundaryObject = $null
-if ($ResumeBoundary) {
-    if ($ExpectedOriginUrl -cne 'https://github.com/yagasoft/Flux-LLM-KB.git' -or $ExpectedHead -cnotmatch '^[0-9a-f]{40}$' -or [string]::IsNullOrWhiteSpace($ExpectedBranch)) {
-        throw 'Resume Gmail guard requires the exact expected origin and canonical authenticated head/branch.'
-    }
-    $boundaryModule = Join-Path $PSScriptRoot 'ResumeGitBoundary.psm1'
-    Import-Module $boundaryModule -Force
-    $resumeBoundaryObject = New-ResumeGitBoundary -Worktree $RepositoryRoot -ExpectedOriginUrl $ExpectedOriginUrl -ExpectedHead $ExpectedHead -ExpectedBranch $ExpectedBranch
-}
-function Invoke-GmailGit {
-    param([string[]]$Arguments)
-    if ($null -ne $resumeBoundaryObject) {
-        $result = Invoke-ResumeGit -Boundary $resumeBoundaryObject -Arguments $Arguments
-        if ($result.ExitCode -ne 0) { throw "Authenticated Gmail guard Git $($Arguments[0]) operation failed." }
-        return $result.StdOut
-    }
-    $nativeErrorPreference = Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue
-    $previousNativeErrorPreference = if ($null -ne $nativeErrorPreference) { [bool]$nativeErrorPreference.Value } else { $null }
-    $previousErrorActionPreference = $ErrorActionPreference
-    try {
-        # A user PowerShell profile can opt native stderr into the error stream
-        # even when Git succeeds (for example harmless autocrlf warnings).
-        if ($null -ne $nativeErrorPreference) { $PSNativeCommandUseErrorActionPreference = $false }
-        $ErrorActionPreference = 'Continue'
-        $raw = & git -C $RepositoryRoot @Arguments 2>$null | Out-String
-        if ($LASTEXITCODE -ne 0) { throw "Legacy Gmail guard Git $($Arguments[0]) operation failed." }
-        return $raw
-    } finally {
-        $ErrorActionPreference = $previousErrorActionPreference
-        if ($null -ne $nativeErrorPreference) { $PSNativeCommandUseErrorActionPreference = $previousNativeErrorPreference }
-    }
-}
-try {
 $protectedPaths = @(
     "src/flux_llm_kb/mail_content_store.py",
     "src/flux_llm_kb/mail_ingestion.py",
@@ -100,20 +63,26 @@ function Get-WorktreeBlobIdentity {
         return "<absent>"
     }
 
-    $identity = (Invoke-GmailGit -Arguments @('hash-object', ('--path=' + $RelativePath), '--', $RelativePath)).Trim()
-    if ($identity -notmatch '^[0-9a-f]{40,64}$') {
+    $identity = (& git -C $RepositoryRoot hash-object --path=$RelativePath -- $RelativePath 2>$null | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or $identity -notmatch '^[0-9a-f]{40,64}$') {
         throw "Unable to calculate an approved local-surface blob identity."
     }
     return $identity
 }
 
-$mergeBase = (Invoke-GmailGit -Arguments @('merge-base', $BaselineRef, 'HEAD')).Trim()
-if ([string]::IsNullOrWhiteSpace($mergeBase)) {
+$mergeBase = (& git -C $RepositoryRoot merge-base $BaselineRef HEAD 2>$null | Out-String).Trim()
+if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($mergeBase)) {
     throw "Unable to determine the legacy Gmail preservation baseline."
 }
 
-$trackedChanges = @((Invoke-GmailGit -Arguments (@('diff', '--name-only', $mergeBase, '--') + $protectedPaths)) -split "`r?`n" | Where-Object { $_ })
-$statusLines = @((Invoke-GmailGit -Arguments (@('status', '--porcelain', '--untracked-files=all', '--') + $protectedPaths)) -split "`r?`n" | Where-Object { $_ })
+$trackedChanges = @(& git -C $RepositoryRoot diff --name-only $mergeBase -- $protectedPaths)
+if ($LASTEXITCODE -ne 0) {
+    throw "Unable to inspect legacy Gmail-owned tracked paths."
+}
+$statusLines = @(& git -C $RepositoryRoot status --porcelain --untracked-files=all -- $protectedPaths)
+if ($LASTEXITCODE -ne 0) {
+    throw "Unable to inspect legacy Gmail-owned worktree paths."
+}
 $statusChanges = @($statusLines | ForEach-Object {
     if ($_.Length -gt 3) { $_.Substring(3).Trim('"') }
 })
@@ -142,6 +111,3 @@ if ($changes.Count -gt 0) {
 }
 
 Write-Output "Legacy Gmail preservation diff guard passed."
-} finally {
-    if ($null -ne $resumeBoundaryObject) { Remove-ResumeGitBoundary -Boundary $resumeBoundaryObject }
-}
