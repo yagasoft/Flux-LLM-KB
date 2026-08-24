@@ -15,6 +15,7 @@ public sealed class RetainedProcessorOptions
     public bool ArchiveTarExpandEnabled { get; init; }
     public bool OoxmlDocumentStructuralExtractEnabled { get; init; }
     public bool CsharpCodeEnabled { get; init; } = true;
+    public bool MediaMetadataEnabled { get; init; }
     public int AutomaticReplayBatchSize { get; init; } = MaximumAutomaticReplayBatchSize;
     public long MaximumCompressedInputBytes { get; init; } = 64L * 1024 * 1024;
     public int MaximumEntryCount { get; init; } = 256;

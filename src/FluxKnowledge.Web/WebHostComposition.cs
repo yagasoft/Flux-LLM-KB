@@ -216,6 +216,7 @@ public static class WebHostComposition
             ArchiveTarExpandEnabled = bool.TryParse(configuration[$"{section}:ArchiveTarExpandEnabled"], out var tarEnabled) && tarEnabled,
             OoxmlDocumentStructuralExtractEnabled = bool.TryParse(configuration[$"{section}:OoxmlDocumentStructuralExtractEnabled"], out var ooxmlEnabled) && ooxmlEnabled,
             CsharpCodeEnabled = !bool.TryParse(configuration[$"{section}:CsharpCodeEnabled"], out var csharpEnabled) || csharpEnabled,
+            MediaMetadataEnabled = bool.TryParse(configuration[$"{section}:MediaMetadataEnabled"], out var mediaMetadataEnabled) && mediaMetadataEnabled,
             AutomaticReplayBatchSize = batchSize
         };
     }

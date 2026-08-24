@@ -68,6 +68,11 @@ public interface IRetainedProcessorBranchStore
         SourceCapabilityDescriptor capability,
         CancellationToken cancellationToken) => ReadPromotionCandidatesAsync(maximumCount, cancellationToken);
 
+    /// <summary>Lists only known unsupported media extensions; this is not a broad deferred-work selector.</summary>
+    ValueTask<IReadOnlyList<RetainedProcessorPromotionCandidate>> ReadRecognisedUnsupportedMediaCandidatesAsync(
+        int maximumCount,
+        CancellationToken cancellationToken) => ValueTask.FromResult<IReadOnlyList<RetainedProcessorPromotionCandidate>>([]);
+
     ValueTask<bool> PromoteAsync(
         RetainedProcessorPromotionCandidate candidate,
         SourceCapabilityDescriptor capability,
@@ -77,6 +82,12 @@ public interface IRetainedProcessorBranchStore
         RetainedProcessorPromotionCandidate candidate,
         string outcomeCode,
         CancellationToken cancellationToken);
+
+    /// <summary>Keeps retained promotion work replay-eligible while recording a transient capability preflight outcome.</summary>
+    ValueTask<bool> DeferPromotionAsync(
+        RetainedProcessorPromotionCandidate candidate,
+        string outcomeCode,
+        CancellationToken cancellationToken) => ValueTask.FromResult(false);
 
     /// <summary>
     /// Returns generic deferred rows which may be safely redesignated as legacy Office

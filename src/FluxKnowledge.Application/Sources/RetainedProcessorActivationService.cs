@@ -14,6 +14,7 @@ public sealed class RetainedProcessorActivationService
     private readonly TarArchiveRetainedProcessor? _tarProcessor;
     private readonly OoxmlStructuralTextProcessor? _ooxmlProcessor;
     private readonly RetainedCsharpCodeProcessor? _csharpProcessor;
+    private readonly MediaMetadataRetainedProcessor? _mediaMetadataProcessor;
     private readonly RetainedProcessorOptions _options;
     private readonly IStatusEventPublisher? _statusEvents;
 
@@ -35,7 +36,8 @@ public sealed class RetainedProcessorActivationService
         TarArchiveRetainedProcessor? tarProcessor = null,
         IStatusEventPublisher? statusEvents = null,
         OoxmlStructuralTextProcessor? ooxmlProcessor = null,
-        RetainedCsharpCodeProcessor? csharpProcessor = null)
+        RetainedCsharpCodeProcessor? csharpProcessor = null,
+        MediaMetadataRetainedProcessor? mediaMetadataProcessor = null)
     {
         _ = timeProvider;
         _capabilityService = capabilityService;
@@ -45,6 +47,7 @@ public sealed class RetainedProcessorActivationService
         _tarProcessor = tarProcessor;
         _ooxmlProcessor = ooxmlProcessor;
         _csharpProcessor = csharpProcessor;
+        _mediaMetadataProcessor = mediaMetadataProcessor;
         _options = options;
         _statusEvents = statusEvents;
     }
@@ -71,6 +74,23 @@ public sealed class RetainedProcessorActivationService
             var ooxml = _ooxmlProcessor ?? throw new InvalidOperationException("The explicitly enabled OOXML processor is not registered.");
             runs.Add(await RunProcessorAsync(OoxmlStructuralTextProcessor.Capability, OoxmlStructuralTextProcessor.IsLikelyOoxml,
                 ooxml.ProcessAsync, "ooxml", cancellationToken).ConfigureAwait(false));
+        }
+        if (_options.MediaMetadataEnabled)
+        {
+            var media = _mediaMetadataProcessor ?? throw new InvalidOperationException("The explicitly enabled media metadata processor is not registered.");
+            await BlockRecognisedUnsupportedMediaAsync(cancellationToken).ConfigureAwait(false);
+            var preflight = media.Preflight(cancellationToken);
+            if (!preflight.IsAvailable)
+            {
+                await DeferUnavailableMediaMetadataAsync("media-metadata-parser-unavailable", cancellationToken).ConfigureAwait(false);
+                runs.Add(new RetainedProcessorActivationResult(MediaMetadataRetainedProcessor.Capability.ProcessorKind, 0, 0, 0, 0, false));
+            }
+            else
+            {
+                runs.Add(await RunProcessorAsync(MediaMetadataRetainedProcessor.Capability,
+                    static (candidate, bytes) => MediaMetadataRetainedProcessor.HasMatchingSupportedSignature(candidate.Extension, bytes, out _),
+                    (claim, retained, _, token) => media.ProcessAsync(claim, retained, token), "media-metadata", cancellationToken).ConfigureAwait(false));
+            }
         }
         if (_options.CsharpCodeEnabled)
         {
@@ -133,7 +153,91 @@ public sealed class RetainedProcessorActivationService
         (extension.Equals(".doc", StringComparison.OrdinalIgnoreCase) ||
          extension.Equals(".xls", StringComparison.OrdinalIgnoreCase) ||
          extension.Equals(".ppt", StringComparison.OrdinalIgnoreCase)) &&
-        bytes.StartsWith(new byte[] { 0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1 });
+         bytes.StartsWith(new byte[] { 0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1 });
+
+    private async ValueTask DeferUnavailableMediaMetadataAsync(string outcomeCode, CancellationToken cancellationToken)
+    {
+        var candidates = await _branchStore.ReadPromotionCandidatesAsync(
+            EffectiveAutomaticReplayBatchSize, MediaMetadataRetainedProcessor.Capability, cancellationToken).ConfigureAwait(false);
+        foreach (var candidate in candidates)
+        {
+            try
+            {
+                var inspection = await _retainedSourceReader.InspectAsync(candidate.SourceRevisionId, cancellationToken).ConfigureAwait(false);
+                if (!string.Equals(inspection.ContentSha256, candidate.InputSha256, StringComparison.Ordinal))
+                {
+                    await _branchStore.BlockPromotionAsync(candidate, "retained-artifact-checksum-invalid", cancellationToken).ConfigureAwait(false);
+                    continue;
+                }
+                if (inspection.ByteLength > MediaMetadataRetainedProcessor.MaximumInputBytes)
+                {
+                    await _branchStore.BlockPromotionAsync(candidate, "media-metadata-input-too-large", cancellationToken).ConfigureAwait(false);
+                    continue;
+                }
+                var retained = await _retainedSourceReader.ReadBytesAsync(candidate.SourceRevisionId, cancellationToken).ConfigureAwait(false);
+                if (retained.SourceRevisionId != candidate.SourceRevisionId ||
+                    !string.Equals(retained.ContentSha256, candidate.InputSha256, StringComparison.Ordinal))
+                {
+                    await _branchStore.BlockPromotionAsync(candidate, "retained-artifact-checksum-invalid", cancellationToken).ConfigureAwait(false);
+                    continue;
+                }
+                if (!MediaMetadataRetainedProcessor.HasMatchingSupportedSignature(candidate.Extension, retained.Bytes, out var signatureOutcome))
+                {
+                    await _branchStore.BlockPromotionAsync(candidate, signatureOutcome!, cancellationToken).ConfigureAwait(false);
+                    continue;
+                }
+                await _branchStore.DeferPromotionAsync(candidate, outcomeCode, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception exception) when (exception is FileNotFoundException or DirectoryNotFoundException)
+            {
+                await _branchStore.BlockPromotionAsync(candidate, "retained-artifact-missing", cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception exception) when (exception is InvalidDataException or UnauthorizedAccessException)
+            {
+                await _branchStore.BlockPromotionAsync(candidate, "retained-artifact-checksum-invalid", cancellationToken).ConfigureAwait(false);
+            }
+        }
+    }
+
+    private async ValueTask BlockRecognisedUnsupportedMediaAsync(CancellationToken cancellationToken)
+    {
+        var candidates = await _branchStore.ReadRecognisedUnsupportedMediaCandidatesAsync(
+            EffectiveAutomaticReplayBatchSize, cancellationToken).ConfigureAwait(false);
+        foreach (var candidate in candidates)
+        {
+            try
+            {
+                var inspection = await _retainedSourceReader.InspectAsync(candidate.SourceRevisionId, cancellationToken).ConfigureAwait(false);
+                if (!string.Equals(inspection.ContentSha256, candidate.InputSha256, StringComparison.Ordinal))
+                {
+                    await _branchStore.BlockPromotionAsync(candidate, "retained-artifact-checksum-invalid", cancellationToken).ConfigureAwait(false);
+                    continue;
+                }
+                if (inspection.ByteLength > MediaMetadataRetainedProcessor.MaximumInputBytes)
+                {
+                    await _branchStore.BlockPromotionAsync(candidate, "media-metadata-input-too-large", cancellationToken).ConfigureAwait(false);
+                    continue;
+                }
+                var retained = await _retainedSourceReader.ReadBytesAsync(candidate.SourceRevisionId, cancellationToken).ConfigureAwait(false);
+                if (retained.SourceRevisionId != candidate.SourceRevisionId ||
+                    !string.Equals(retained.ContentSha256, candidate.InputSha256, StringComparison.Ordinal))
+                {
+                    await _branchStore.BlockPromotionAsync(candidate, "retained-artifact-checksum-invalid", cancellationToken).ConfigureAwait(false);
+                    continue;
+                }
+                _ = MediaMetadataRetainedProcessor.HasMatchingSupportedSignature(candidate.Extension, retained.Bytes, out var outcomeCode);
+                await _branchStore.BlockPromotionAsync(candidate, outcomeCode!, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception exception) when (exception is FileNotFoundException or DirectoryNotFoundException)
+            {
+                await _branchStore.BlockPromotionAsync(candidate, "retained-artifact-missing", cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception exception) when (exception is InvalidDataException or UnauthorizedAccessException)
+            {
+                await _branchStore.BlockPromotionAsync(candidate, "retained-artifact-checksum-invalid", cancellationToken).ConfigureAwait(false);
+            }
+        }
+    }
 
     private async ValueTask<RetainedProcessorActivationResult> RunProcessorAsync(
         SourceCapabilityDescriptor descriptor,
@@ -173,6 +277,12 @@ public sealed class RetainedProcessorActivationService
                 await _branchStore.BlockPromotionAsync(candidate, "retained-artifact-checksum-invalid", cancellationToken).ConfigureAwait(false);
                 continue;
             }
+            if (descriptor.Id == MediaMetadataRetainedProcessor.Capability.Id &&
+                inspection.ByteLength > MediaMetadataRetainedProcessor.MaximumInputBytes)
+            {
+                await _branchStore.BlockPromotionAsync(candidate, "media-metadata-input-too-large", cancellationToken).ConfigureAwait(false);
+                continue;
+            }
             if (descriptor.Id == OoxmlStructuralTextProcessor.Capability.Id && inspection.ByteLength > 128L * 1024 * 1024)
             {
                 if (await _branchStore.PromoteAsync(candidate, descriptor, cancellationToken).ConfigureAwait(false))
@@ -194,6 +304,12 @@ public sealed class RetainedProcessorActivationService
             catch (Exception exception) when (exception is InvalidDataException or UnauthorizedAccessException)
             {
                 await _branchStore.BlockPromotionAsync(candidate, "retained-artifact-checksum-invalid", cancellationToken).ConfigureAwait(false);
+                continue;
+            }
+            if (descriptor.Id == MediaMetadataRetainedProcessor.Capability.Id &&
+                !MediaMetadataRetainedProcessor.HasMatchingSupportedSignature(candidate.Extension, retained.Bytes, out var mediaSignatureOutcome))
+            {
+                await _branchStore.BlockPromotionAsync(candidate, mediaSignatureOutcome!, cancellationToken).ConfigureAwait(false);
                 continue;
             }
             if (hasSignature(candidate, retained.Bytes) &&
@@ -223,6 +339,11 @@ public sealed class RetainedProcessorActivationService
                 var inspection = await _retainedSourceReader.InspectAsync(claim.SourceRevisionId, cancellationToken).ConfigureAwait(false);
                 if (!string.Equals(inspection.ContentSha256, claim.InputSha256, StringComparison.Ordinal))
                     throw new RetainedProcessorException("retained-artifact-checksum-invalid");
+                if (descriptor.Id == MediaMetadataRetainedProcessor.Capability.Id &&
+                    inspection.ByteLength > MediaMetadataRetainedProcessor.MaximumInputBytes)
+                {
+                    throw new RetainedProcessorException("media-metadata-input-too-large");
+                }
                 if (descriptor.Id == OoxmlStructuralTextProcessor.Capability.Id && inspection.ByteLength > 128L * 1024 * 1024)
                     throw new RetainedProcessorException("office-document-input-too-large");
                 var retained = await _retainedSourceReader.ReadBytesAsync(claim.SourceRevisionId, cancellationToken).ConfigureAwait(false);

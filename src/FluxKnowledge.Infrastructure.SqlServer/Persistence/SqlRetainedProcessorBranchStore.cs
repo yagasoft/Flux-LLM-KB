@@ -950,6 +950,7 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
         {
             "document-ooxml-structural-extract" => new[] { ".docx", ".xlsx", ".pptx" },
             "retained-csharp-code" => new[] { ".cs" },
+            "media-metadata" => new[] { ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tif", ".tiff", ".webp", ".mp3", ".wav", ".mov", ".mp4", ".m4v" },
             "archive-zip-expand" => Array.Empty<string>(),
             "archive-tar-expand" => Array.Empty<string>(),
             _ => Array.Empty<string>()
@@ -968,6 +969,8 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
                       select new { activity, revision, artifact };
         if (capability.ProcessorKind == "document-ooxml-structural-extract")
             candidates = candidates.Where(value => extensions.Contains(value.revision.Extension.ToLower()));
+        else if (capability.ProcessorKind == "media-metadata")
+            candidates = candidates.Where(value => extensions.Contains(value.revision.Extension.ToLower()));
         else if (capability.ProcessorKind == "retained-csharp-code")
             candidates = candidates.Where(value =>
                 value.revision.Extension.ToLower() == ".cs" &&
@@ -981,6 +984,28 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
             candidates = candidates.Where(value => !new[] { ".docx", ".xlsx", ".pptx", ".doc", ".xls", ".ppt" }.Contains(value.revision.Extension.ToLower()));
         return await candidates.OrderBy(value => value.activity.CreatedAtUtc).ThenBy(value => value.activity.Id)
             .Select(value => new RetainedProcessorPromotionCandidate(value.activity.Id, new SourceRevisionId(value.activity.SourceRevisionId), value.activity.InputFingerprint, value.revision.Extension))
+            .Take(Math.Clamp(maximumCount, 1, RetainedProcessorOptions.MaximumAutomaticReplayBatchSize)).ToListAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    public async ValueTask<IReadOnlyList<RetainedProcessorPromotionCandidate>> ReadRecognisedUnsupportedMediaCandidatesAsync(
+        int maximumCount,
+        CancellationToken cancellationToken)
+    {
+        var extensions = new[] { ".avif", ".heic", ".heif", ".avi", ".mkv", ".webm", ".ogg", ".flac", ".aac", ".m4a", ".wma" };
+        await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        return await (from activity in context.SourceActivities.AsNoTracking()
+                      join revision in context.SourceRevisions.AsNoTracking() on activity.SourceRevisionId equals revision.Id
+                      join artifact in context.SourceArtifacts.AsNoTracking() on revision.Id equals artifact.SourceRevisionId
+                      where activity.State == (int)SourceActivityState.DeferredUnsupported &&
+                            activity.ExecutionClass == (int)ExecutionClass.DeferredCapability &&
+                            extensions.Contains(revision.Extension.ToLower()) &&
+                            EF.Functions.Collate(artifact.ContentSha256, SchemaConfiguration.SchedulerFenceCollation) ==
+                                EF.Functions.Collate(activity.InputFingerprint, SchemaConfiguration.SchedulerFenceCollation) &&
+                            EF.Functions.Collate(revision.ContentSha256, SchemaConfiguration.SchedulerFenceCollation) ==
+                                EF.Functions.Collate(activity.InputFingerprint, SchemaConfiguration.SchedulerFenceCollation) &&
+                            !context.SourceProcessorBranches.Any(branch => branch.SourceActivityId == activity.Id)
+                      orderby activity.CreatedAtUtc, activity.Id
+                      select new RetainedProcessorPromotionCandidate(activity.Id, new SourceRevisionId(activity.SourceRevisionId), activity.InputFingerprint, revision.Extension))
             .Take(Math.Clamp(maximumCount, 1, RetainedProcessorOptions.MaximumAutomaticReplayBatchSize)).ToListAsync(cancellationToken).ConfigureAwait(false);
     }
 
@@ -1231,6 +1256,20 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
         if (legacy is null || legacy.State != (int)SourceActivityState.DeferredUnsupported ||
             await context.SourceProcessorBranches.AnyAsync(value => value.SourceActivityId == legacy.Id, cancellationToken).ConfigureAwait(false)) return false;
         legacy.State = (int)SourceActivityState.DeferredPolicy;
+        legacy.Reason = outcomeCode;
+        legacy.UpdatedAtUtc = timeProvider.GetUtcNow();
+        await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        return true;
+    }
+
+    public async ValueTask<bool> DeferPromotionAsync(RetainedProcessorPromotionCandidate candidate, string outcomeCode, CancellationToken cancellationToken)
+    {
+        await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken).ConfigureAwait(false);
+        var legacy = await context.SourceActivities.SingleOrDefaultAsync(value => value.Id == candidate.LegacyActivityId, cancellationToken).ConfigureAwait(false);
+        if (legacy is null || legacy.State != (int)SourceActivityState.DeferredUnsupported ||
+            await context.SourceProcessorBranches.AnyAsync(value => value.SourceActivityId == legacy.Id, cancellationToken).ConfigureAwait(false)) return false;
         legacy.Reason = outcomeCode;
         legacy.UpdatedAtUtc = timeProvider.GetUtcNow();
         await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
@@ -1970,6 +2009,7 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
         "phase-5-zip-retained-archive-v1" => "archive_zip",
         "phase-5-tar-retained-archive-v1" => "archive_tar",
         "phase-5-ooxml-retained-structural-v1" => "document_ooxml",
+        "phase-5-media-metadata-retained-v1" => "media_metadata",
         _ => "retained_processor"
     };
 

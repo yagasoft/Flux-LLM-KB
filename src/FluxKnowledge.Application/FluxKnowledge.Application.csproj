@@ -10,5 +10,6 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.CodeAnalysis.CSharp" />
+    <PackageReference Include="MetadataExtractor" />
   </ItemGroup>
 </Project>

@@ -57,6 +57,7 @@ public static class OutboxWorkerServiceCollectionExtensions
         services.TryAddEnumerable(ServiceDescriptor.Singleton<ILocalSourceCapabilityHandler, TarArchiveRetainedCapabilityHandler>());
         services.TryAddEnumerable(ServiceDescriptor.Singleton<ILocalSourceCapabilityHandler, OoxmlStructuralTextCapabilityHandler>());
         services.TryAddEnumerable(ServiceDescriptor.Singleton<ILocalSourceCapabilityHandler, RetainedCsharpCodeCapabilityHandler>());
+        services.TryAddEnumerable(ServiceDescriptor.Singleton<ILocalSourceCapabilityHandler, MediaMetadataCapabilityHandler>());
         services.TryAddSingleton<ILocalSourceCapabilityHandlerRegistry>(provider => new LocalSourceCapabilityHandlerRegistry(
             provider.GetServices<ILocalSourceCapabilityHandler>()));
         services.TryAddSingleton<ChannelOutboxWakeSignal>();
@@ -87,6 +88,7 @@ public static class OutboxWorkerServiceCollectionExtensions
         services.TryAddScoped<ZipArchiveRetainedProcessor>();
         services.TryAddScoped<TarArchiveRetainedProcessor>();
         services.TryAddScoped<OoxmlStructuralTextProcessor>();
+        services.TryAddScoped<MediaMetadataRetainedProcessor>();
         services.TryAddScoped(provider => new RetainedCsharpCodeProcessor(
             provider.GetRequiredService<IRetainedSourceReader>(),
             provider.GetRequiredService<ILocalPrivateContentDisclosure>(),

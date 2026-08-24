@@ -103,14 +103,17 @@ public sealed class WebHostCompositionTests : IDisposable
             configuredServices,
             new ConfigurationBuilder()
                 .AddConfiguration(CreateOutlookRecoveryConfiguration(enabled: null))
-                .AddInMemoryCollection(new Dictionary<string, string?>
+            .AddInMemoryCollection(new Dictionary<string, string?>
             {
-                ["RetainedProcessors:AutomaticReplayBatchSize"] = "16"
+                ["RetainedProcessors:AutomaticReplayBatchSize"] = "16",
+                ["RetainedProcessors:MediaMetadataEnabled"] = "true"
             }).Build());
         using var configuredProvider = configuredServices.BuildServiceProvider();
 
         Assert.Equal(16, defaultProvider.GetRequiredService<RetainedProcessorOptions>().AutomaticReplayBatchSize);
         Assert.Equal(16, configuredProvider.GetRequiredService<RetainedProcessorOptions>().AutomaticReplayBatchSize);
+        Assert.False(defaultProvider.GetRequiredService<RetainedProcessorOptions>().MediaMetadataEnabled);
+        Assert.True(configuredProvider.GetRequiredService<RetainedProcessorOptions>().MediaMetadataEnabled);
     }
 
     [Fact]
@@ -341,6 +344,8 @@ public sealed class WebHostCompositionTests : IDisposable
         Assert.Equal("retained:archive-zip-expand", zipHandler.OutputContract);
         Assert.True(localHandlers.TryResolve(new Guid("3d8e4b4e-8d16-45c7-aa02-c4e546ba997d"), out var tarHandler));
         Assert.Equal("retained:archive-tar-expand", tarHandler.OutputContract);
+        Assert.True(localHandlers.TryResolve(MediaMetadataRetainedProcessor.Capability.Id, out var mediaMetadataHandler));
+        Assert.Equal("retained:media-metadata-v1", mediaMetadataHandler.OutputContract);
         Assert.IsType<GpuExecutorLifecycleCoordinator>(
             scope.ServiceProvider.GetRequiredService<IGpuExecutorLifecycleSink>());
         Assert.IsType<ChannelGpuExecutorDispatchSignal>(

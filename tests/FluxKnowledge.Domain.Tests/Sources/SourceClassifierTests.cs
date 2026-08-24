@@ -63,6 +63,47 @@ public sealed class SourceClassifierTests
         Assert.Null(result.Text);
     }
 
+    [Theory]
+    [MemberData(nameof(SupportedMediaBinarySignatures))]
+    public void Classify_defers_each_supported_media_signature_to_a_capability(string fileName, byte[] bytes)
+    {
+        var result = SourceClassifier.Classify(fileName, bytes, bytes.Length);
+
+        Assert.Equal(SourceClassification.DeferredCapability, result.Classification);
+        Assert.Null(result.Text);
+    }
+
+    [Theory]
+    [MemberData(nameof(RecognisedUnsupportedMediaSignatures))]
+    public void Classify_defers_recognised_unsupported_media_signatures_to_the_capability_path(string fileName, byte[] bytes)
+    {
+        var result = SourceClassifier.Classify(fileName, bytes, bytes.Length);
+
+        Assert.Equal(SourceClassification.DeferredCapability, result.Classification);
+        Assert.Null(result.Text);
+    }
+
+    public static TheoryData<string, byte[]> RecognisedUnsupportedMediaSignatures() => new()
+    {
+        { "audio.aac", new byte[] { 0xff, 0xf1, 0x50, 0x80, 0x00, 0xe0, 0xfc } },
+        { "audio.wma", new byte[] { 0x30, 0x26, 0xb2, 0x75, 0x8e, 0x66, 0xcf, 0x11, 0xa6, 0xd9, 0x00, 0xaa, 0x00, 0x62, 0xce, 0x6c, 0x1e, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x02 } }
+    };
+
+    public static TheoryData<string, byte[]> SupportedMediaBinarySignatures() => new()
+    {
+        { "photo.jpg", new byte[] { 0xff, 0xd8, 0xff, 0xe0 } },
+        { "photo.png", new byte[] { 0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a } },
+        { "animation.gif", "GIF89a"u8.ToArray() },
+        { "photo.bmp", "BM\0\0\0\0"u8.ToArray() },
+        { "photo.tiff", new byte[] { (byte)'I', (byte)'I', 0x2a, 0x00 } },
+        { "photo.webp", "RIFF\0\0\0\0WEBP"u8.ToArray() },
+        { "audio.mp3", "ID3\x04\0\0"u8.ToArray() },
+        { "audio.wav", "RIFF\0\0\0\0WAVE"u8.ToArray() },
+        { "video.mov", new byte[] { 0x00, 0x00, 0x00, 0x18, (byte)'f', (byte)'t', (byte)'y', (byte)'p', (byte)'q', (byte)'t', (byte)' ', (byte)' ' } },
+        { "video.mp4", new byte[] { 0x00, 0x00, 0x00, 0x18, (byte)'f', (byte)'t', (byte)'y', (byte)'p', (byte)'i', (byte)'s', (byte)'o', (byte)'m' } },
+        { "video.m4v", new byte[] { 0x00, 0x00, 0x00, 0x18, (byte)'f', (byte)'t', (byte)'y', (byte)'p', (byte)'M', (byte)'4', (byte)'V', (byte)' ' } }
+    };
+
     [Fact]
     public void Classify_accepts_utf8_text_with_a_bom()
     {

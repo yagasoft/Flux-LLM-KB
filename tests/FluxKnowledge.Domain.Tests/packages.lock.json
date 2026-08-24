@@ -246,6 +246,11 @@
         "resolved": "9.0.4",
         "contentHash": "o94k2RKuAce3GeDMlUvIXlhVa1kWpJw95E6C9LwW0KlG0nj5+SgCiIxJ2Eroqb9sLtG1mEMbFttZIBZ13EJPvQ=="
       },
+      "XmpCore": {
+        "type": "Transitive",
+        "resolved": "6.1.10.1",
+        "contentHash": "/Tp2/e39e7z8hLtS4TXt0FNNZHbf5yNFfHS0/59soXlgOzZlyRZivvzWpvujyaWkTWWgecp/1nHxkuc5vntn7A=="
+      },
       "xunit.abstractions": {
         "type": "Transitive",
         "resolved": "2.0.3",
@@ -291,6 +296,7 @@
         "dependencies": {
           "FluxKnowledge.Domain": "[1.0.0, )",
           "FluxKnowledge.NativeWorker.Protocol": "[1.0.0, )",
+          "MetadataExtractor": "[2.9.3, )",
           "Microsoft.CodeAnalysis.CSharp": "[5.0.0, )"
         }
       },
@@ -319,6 +325,15 @@
       },
       "fluxknowledge.nativeworker.protocol": {
         "type": "Project"
+      },
+      "MetadataExtractor": {
+        "type": "CentralTransitive",
+        "requested": "[2.9.3, )",
+        "resolved": "2.9.3",
+        "contentHash": "7dBcqlPC2Zc/bsZtXnv8nCWe5h5WsLHszzHtxnpcsVy4MwlD3KQ3wVNoiYBm0a3rzt5hRwAosPvLPhlXrV5lyg==",
+        "dependencies": {
+          "XmpCore": "6.1.10.1"
+        }
       },
       "Microsoft.CodeAnalysis.CSharp": {
         "type": "CentralTransitive",

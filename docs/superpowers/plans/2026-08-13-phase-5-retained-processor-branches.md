@@ -415,23 +415,23 @@ Obtain independent slice approval.
 
 **Files:**
 
-- Create: src/FluxKnowledge.Application/Sources/RetainedMediaMetadataProcessor.cs
-- Create: tests/FluxKnowledge.Domain.Tests/Sources/RetainedMediaMetadataProcessorTests.cs
-- Create: tests/FluxKnowledge.Integration.Tests/Sources/RetainedMediaMetadataReplayIntegrationTests.cs
+- Create: src/FluxKnowledge.Application/Sources/MediaMetadataRetainedProcessor.cs
+- Create: tests/FluxKnowledge.Domain.Tests/Sources/MediaMetadataRetainedProcessorTests.cs
+- Create: tests/FluxKnowledge.Integration.Tests/Sources/MediaMetadataReplayIntegrationTests.cs
 
 **Consumes:** Retained branch execution and a verified already-present parser.
 
 **Produces:** Deterministic metadata only, otherwise durable deferred evidence.
 
-- [ ] **Step 1: Write and run RED tests**
+- [x] **Step 1: Write and run RED tests**
 
 Cover signature, retained-only success, idempotency, disabled capability, bounds, missing/corrupt artifact and public privacy. Capture the missing-processor failure.
 
-- [ ] **Step 2: Implement only safe local metadata**
+- [x] **Step 2: Implement only safe local metadata**
 
 Persist dimensions, duration or container values only where a safe present parser needs no model, download or network client. OCR, descriptions, transcript, ASR, frame extraction and embeddings remain excluded.
 
-- [ ] **Step 3: Capture GREEN, commit and review**
+- [x] **Step 3: Capture GREEN, commit and review**
 
 Run focused tests and accurate SQL-gate reporting. Commit:
 
@@ -440,7 +440,9 @@ git add src tests
 git commit -m "feat: add retained media metadata processor"
 ~~~
 
-Obtain independent slice approval.
+Independent whole-slice approval completed after remediation. The delivered processor is disabled by default and uses only checksum-verified app-owned retained bytes with `MetadataExtractor` 2.9.3. It writes one bounded, canonical, secret-scanned structural metadata child through the existing generic branch path; OCR, frames, vision, ASR, embeddings, FFmpeg, models and GPU work remain Phase 6.
+
+Final evidence: locked restore; zero-warning Release build; focused Domain/Classifier 78, disposable-SQL Integration 23 and Web 23; EF reported no pending model changes; full non-browser native Release suite passed Domain 565, Integration 744, Web 173 and Outlook 71. The final independent whole-slice review was clean.
 
 ## Milestone verification
 

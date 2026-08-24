@@ -141,7 +141,9 @@ public static class SourceClassifier
         bytes.StartsWith("RIFF"u8) ||
         bytes.StartsWith("ID3"u8) ||
         bytes.StartsWith("OggS"u8) ||
-        bytes.StartsWith(new byte[] { 0x1a, 0x45, 0xdf, 0xa3 });
+        bytes.StartsWith(new byte[] { 0x1a, 0x45, 0xdf, 0xa3 }) ||
+        MediaMetadataSignature.IsRecognisedUnsupportedMediaSignature(bytes) ||
+        MediaMetadataSignature.TryDetect(bytes, out _);
 
     private static bool HasBinaryControlBytes(ReadOnlySpan<byte> bytes)
     {
