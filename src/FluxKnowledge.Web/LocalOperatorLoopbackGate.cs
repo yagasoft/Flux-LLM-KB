@@ -42,11 +42,13 @@ public static class LocalOperatorLoopbackGate
     {
         ArgumentNullException.ThrowIfNull(application);
         return application.UseWhen(
-            static context => context.Request.Path.StartsWithSegments("/outlook") ||
+            static context => context.Request.Path.StartsWithSegments("/health") ||
+                context.Request.Path.StartsWithSegments("/outlook") ||
                 context.Request.Path.StartsWithSegments("/operator-actions") ||
                 context.Request.Path.StartsWithSegments("/api/operator-actions") ||
                 context.Request.Path.StartsWithSegments("/api/local/retained-branches") ||
                 context.Request.Path.StartsWithSegments("/api/local/retained-csharp-code") ||
+                context.Request.Path.StartsWithSegments("/api/v1") ||
                 context.Request.Path.StartsWithSegments("/sources/retained") ||
                 context.Request.Path.StartsWithSegments("/search/csharp-code") ||
                 context.Request.Path.StartsWithSegments("/mcp") ||

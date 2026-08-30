@@ -21,6 +21,32 @@ public sealed class DerivedIndexRecoveryIntegrationTests(NativeSqlServerFixture 
 {
     private readonly NativeSqlServerFixture _fixture = fixture;
 
+    [Fact]
+    public async Task Validated_empty_catalogue_is_healthy_without_resolving_filesystem_or_usearch_services()
+    {
+        var services = new ServiceCollection();
+        var store = new RecordingRecoveryStore(new DerivedIndexRecoverySqlSnapshot(
+            ActiveGenerationId: null,
+            Generation: null,
+            Membership: [],
+            ReferencedGenerationIds: ImmutableHashSet<Guid>.Empty,
+            ReferencedIndexPaths: ImmutableHashSet<string>.Empty,
+            IsValidatedEmptyCatalogue: true));
+        services.AddSingleton<IDerivedIndexRecoveryStore>(store);
+        using var provider = services.BuildServiceProvider();
+        var coordinator = new DerivedIndexRecoveryCoordinator(
+            provider.GetRequiredService<IServiceScopeFactory>(),
+            UsearchIndexConfiguration.FromConfiguredRoot(Path.GetTempPath()),
+            TimeProvider.System);
+
+        await coordinator.RunOnceAsync(CancellationToken.None);
+
+        Assert.Equal(DerivedIndexRecoveryState.Healthy, coordinator.Snapshot.State);
+        Assert.True(coordinator.Snapshot.IsValidatedEmptyCatalogue);
+        Assert.Equal(1, store.ReadCount);
+        Assert.Equal(1, store.LeaseAcquisitions);
+    }
+
     [NativeSqlServerFact]
     public async Task Missing_active_directory_recovers_to_a_unique_path_without_changing_the_active_pointer()
     {
@@ -1304,13 +1330,21 @@ public sealed class DerivedIndexRecoveryIntegrationTests(NativeSqlServerFixture 
     private sealed class RecordingRecoveryStore(DerivedIndexRecoverySqlSnapshot snapshot) : IDerivedIndexRecoveryStore
     {
         public int PathUpdateAttempts { get; private set; }
+        public int ReadCount { get; private set; }
+        public int LeaseAcquisitions { get; private set; }
 
-        public ValueTask<DerivedIndexRecoverySqlSnapshot> ReadActiveAsync(CancellationToken cancellationToken) =>
-            ValueTask.FromResult(snapshot);
+        public ValueTask<DerivedIndexRecoverySqlSnapshot> ReadActiveAsync(CancellationToken cancellationToken)
+        {
+            ReadCount++;
+            return ValueTask.FromResult(snapshot);
+        }
 
         public ValueTask<IDerivedIndexRecoveryLease?> TryAcquireExclusiveLeaseAsync(
-            TimeSpan lockTimeout, CancellationToken cancellationToken) =>
-            ValueTask.FromResult<IDerivedIndexRecoveryLease?>(new NoopRecoveryLease());
+            TimeSpan lockTimeout, CancellationToken cancellationToken)
+        {
+            LeaseAcquisitions++;
+            return ValueTask.FromResult<IDerivedIndexRecoveryLease?>(new NoopRecoveryLease());
+        }
 
         public ValueTask<bool> TryUpdateRecoveryPathAsync(Guid expectedActiveGenerationId, string expectedIndexPath,
             string replacementIndexPath, DateTimeOffset validatedAtUtc, CancellationToken cancellationToken)

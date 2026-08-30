@@ -1,3 +1,5 @@
+using FluxKnowledge.Application.Operations;
+using FluxKnowledge.Integrations.Windows.NativeGoLive;
 using FluxKnowledge.Infrastructure.SqlServer.Configuration;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
 using Microsoft.Data.SqlClient;
@@ -7,20 +9,59 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Provisioning;
 
 public sealed class SqlServerProvisioner
 {
-    private const string CreateDatabaseSql =
-        """
+    private readonly LiveRootLayout _layout;
+    private readonly ILiveRootPathInspector _pathInspector;
+    private readonly ISqlProvisioningFileSystem _fileSystem;
+    private readonly ISqlProvisioningDatabase _database;
+
+    private static readonly string CreateDatabaseSql =
+        $$"""
         CREATE DATABASE [FluxKnowledge]
         ON PRIMARY
         (
             NAME = N'FluxKnowledge',
-            FILENAME = N'I:\FluxKnowledge\Sql\Data\FluxKnowledge.mdf'
+            FILENAME = N'{{SqlServerOptions.ProductionDataFilePath}}'
         )
         LOG ON
         (
             NAME = N'FluxKnowledge_log',
-            FILENAME = N'I:\FluxKnowledge\Sql\Log\FluxKnowledge_log.ldf'
+            FILENAME = N'{{SqlServerOptions.ProductionLogFilePath}}'
         );
         """;
+
+    public static SqlServerProvisioner CreateForClaimedGoLive(
+        NativeGoLiveProvisioningCapability capability)
+    {
+        ArgumentNullException.ThrowIfNull(capability);
+        capability.EnsureClaimed();
+
+        return new SqlServerProvisioner(
+            LiveRootLayout.Production,
+            FileSystemLiveRootPathInspector.Instance,
+            new SqlProvisioningFileSystem(),
+            new SqlProvisioningDatabase());
+    }
+
+    private SqlServerProvisioner(
+        LiveRootLayout layout,
+        ILiveRootPathInspector pathInspector,
+        ISqlProvisioningFileSystem fileSystem,
+        ISqlProvisioningDatabase database)
+    {
+        ArgumentNullException.ThrowIfNull(layout);
+        ArgumentNullException.ThrowIfNull(pathInspector);
+        ArgumentNullException.ThrowIfNull(fileSystem);
+        ArgumentNullException.ThrowIfNull(database);
+        if (!ReferenceEquals(layout, LiveRootLayout.Production))
+        {
+            throw new ArgumentException("SQL provisioning requires the production live-root layout.", nameof(layout));
+        }
+
+        _layout = layout;
+        _pathInspector = pathInspector;
+        _fileSystem = fileSystem;
+        _database = database;
+    }
 
     public async Task<SqlServerProvisioningResult> ProvisionAsync(
         SqlServerProvisioningRequest request,
@@ -32,51 +73,71 @@ public sealed class SqlServerProvisioner
             throw new InvalidOperationException(
                 string.Join(Environment.NewLine, validation.Failures));
         }
-        var backupTarget = validation.CanonicalBackupTarget
-            ?? throw new InvalidOperationException(
-                "The validated backup target has no canonical file-system path.");
-
-        Directory.CreateDirectory(Path.GetDirectoryName(request.DataFilePath)!);
-        Directory.CreateDirectory(Path.GetDirectoryName(request.LogFilePath)!);
-        Directory.CreateDirectory(backupTarget);
-
-        await using var administratorConnection = new SqlConnection(request.AdministratorConnectionString);
-        await administratorConnection.OpenAsync(cancellationToken).ConfigureAwait(false);
-        await EnsureServerCanProvisionAsync(administratorConnection, cancellationToken).ConfigureAwait(false);
-
-        await using (var createCommand = new SqlCommand(CreateDatabaseSql, administratorConnection))
-        {
-            await createCommand.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-        }
-
-        var applicationConnection = new SqlConnectionStringBuilder(request.AdministratorConnectionString)
-        {
-            InitialCatalog = SqlServerOptions.CatalogName,
-            AttachDBFilename = string.Empty,
-            UserInstance = false
-        }.ConnectionString;
-        var contextOptions = new DbContextOptionsBuilder<FluxKnowledgeDbContext>()
-            .UseSqlServer(applicationConnection)
-            .Options;
-        await using (var context = new FluxKnowledgeDbContext(contextOptions))
-        {
-            await context.Database.MigrateAsync(cancellationToken).ConfigureAwait(false);
-        }
+        ValidatePathStateBeforeIo(request);
+        _fileSystem.CreateDirectory(Path.GetDirectoryName(request.DataFilePath)!);
+        ValidatePathStateBeforeIo(request);
+        _fileSystem.CreateDirectory(Path.GetDirectoryName(request.LogFilePath)!);
+        ValidatePathStateBeforeIo(request);
+        await _database.ProvisionAsync(request.AdministratorConnectionString, cancellationToken).ConfigureAwait(false);
 
         return new SqlServerProvisioningResult(
             SqlServerOptions.CatalogName,
             request.DataFilePath,
             request.LogFilePath,
-            backupTarget,
             [
                 $"Grant the SQL Server service identity full control of {Path.GetDirectoryName(request.DataFilePath)}.",
-                $"Grant the SQL Server service identity full control of {Path.GetDirectoryName(request.LogFilePath)}.",
-                $"Grant the SQL Server service identity write access to {backupTarget}."
+                $"Grant the SQL Server service identity full control of {Path.GetDirectoryName(request.LogFilePath)}."
             ]);
     }
 
     public static IReadOnlyList<string> Validate(SqlServerProvisioningRequest request) =>
         ValidateAndCanonicalise(request).Failures;
+
+    private void ValidatePathStateBeforeIo(SqlServerProvisioningRequest request)
+    {
+        LiveRootPathInspection root;
+        try
+        {
+            root = _pathInspector.Inspect(_layout.Root);
+        }
+        catch (Exception exception) when (
+            exception is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+        {
+            throw new InvalidOperationException("The canonical SQL root could not be inspected safely.", exception);
+        }
+
+        if (!root.Exists || root.IsReparsePoint || !SamePath(root.ResolvedPath, _layout.Root))
+        {
+            throw new InvalidOperationException("The canonical SQL root is missing, ambiguous or a reparse point.");
+        }
+
+        foreach (var path in new[] { request.DataFilePath, request.LogFilePath })
+        {
+            var validation = _layout.ValidateOwnedPath(path, _pathInspector);
+            if (!validation.IsValid)
+            {
+                throw new InvalidOperationException(
+                    $"The canonical SQL path failed safe inspection: {validation.Reason}.");
+            }
+        }
+    }
+
+    private static bool SamePath(string? left, string right)
+    {
+        if (string.IsNullOrWhiteSpace(left)) return false;
+        try
+        {
+            return string.Equals(
+                Path.TrimEndingDirectorySeparator(Path.GetFullPath(left)),
+                Path.TrimEndingDirectorySeparator(Path.GetFullPath(right)),
+                StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception exception) when (
+            exception is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return false;
+        }
+    }
 
     private static ProvisioningValidation ValidateAndCanonicalise(
         SqlServerProvisioningRequest request)
@@ -102,8 +163,7 @@ public sealed class SqlServerProvisioner
         }
 
         ValidateAdministratorConnection(request.AdministratorConnectionString, failures);
-        var canonicalBackupTarget = ValidateBackupTarget(request.BackupTarget, failures);
-        return new ProvisioningValidation(failures, canonicalBackupTarget);
+        return new ProvisioningValidation(failures);
     }
 
     private static void ValidateAdministratorConnection(string connectionString, List<string> failures)
@@ -134,72 +194,6 @@ public sealed class SqlServerProvisioner
         }
     }
 
-    private static string? ValidateBackupTarget(
-        string backupTarget,
-        List<string> failures)
-    {
-        if (!TryCanonicaliseBackupTarget(backupTarget, out var canonicalTarget))
-        {
-            failures.Add("An absolute --backup-target outside I: is required.");
-            return null;
-        }
-
-        var root = Path.GetPathRoot(canonicalTarget);
-        if (string.Equals(root, "I:\\", StringComparison.OrdinalIgnoreCase))
-        {
-            failures.Add("The backup target must be outside I:.");
-            return null;
-        }
-
-        return canonicalTarget;
-    }
-
-    private static bool TryCanonicaliseBackupTarget(
-        string backupTarget,
-        out string canonicalTarget)
-    {
-        canonicalTarget = string.Empty;
-        if (string.IsNullOrWhiteSpace(backupTarget))
-        {
-            return false;
-        }
-
-        var normalised = backupTarget.Replace('/', '\\');
-        if (normalised.StartsWith(@"\\?\UNC\", StringComparison.OrdinalIgnoreCase) ||
-            normalised.StartsWith(@"\\.\UNC\", StringComparison.OrdinalIgnoreCase))
-        {
-            normalised = @"\\" + normalised[8..];
-        }
-        else if (normalised.StartsWith(@"\\?\", StringComparison.Ordinal) ||
-                 normalised.StartsWith(@"\\.\", StringComparison.Ordinal))
-        {
-            normalised = normalised[4..];
-            if (normalised.Length < 3 ||
-                !char.IsAsciiLetter(normalised[0]) ||
-                normalised[1] != ':' ||
-                normalised[2] != '\\')
-            {
-                return false;
-            }
-        }
-
-        if (!Path.IsPathFullyQualified(normalised))
-        {
-            return false;
-        }
-
-        try
-        {
-            canonicalTarget = Path.GetFullPath(normalised).Replace('/', '\\');
-            return true;
-        }
-        catch (Exception exception) when (
-            exception is ArgumentException or NotSupportedException or PathTooLongException)
-        {
-            return false;
-        }
-    }
-
     private static async Task EnsureServerCanProvisionAsync(
         SqlConnection connection,
         CancellationToken cancellationToken)
@@ -227,21 +221,61 @@ public sealed class SqlServerProvisioner
         }
     }
 
-    private sealed record ProvisioningValidation(
-        IReadOnlyList<string> Failures,
-        string? CanonicalBackupTarget);
+    private sealed record ProvisioningValidation(IReadOnlyList<string> Failures);
+
+    private sealed class SqlProvisioningFileSystem : ISqlProvisioningFileSystem
+    {
+        public void CreateDirectory(string path) => Directory.CreateDirectory(path);
+    }
+
+    private sealed class SqlProvisioningDatabase : ISqlProvisioningDatabase
+    {
+        public async Task ProvisionAsync(
+            string administratorConnectionString,
+            CancellationToken cancellationToken)
+        {
+            await using var administratorConnection = new SqlConnection(administratorConnectionString);
+            await administratorConnection.OpenAsync(cancellationToken).ConfigureAwait(false);
+            await EnsureServerCanProvisionAsync(administratorConnection, cancellationToken).ConfigureAwait(false);
+
+            await using (var createCommand = new SqlCommand(CreateDatabaseSql, administratorConnection))
+            {
+                await createCommand.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            var applicationConnection = new SqlConnectionStringBuilder(administratorConnectionString)
+            {
+                InitialCatalog = SqlServerOptions.CatalogName,
+                AttachDBFilename = string.Empty,
+                UserInstance = false
+            }.ConnectionString;
+            var contextOptions = new DbContextOptionsBuilder<FluxKnowledgeDbContext>()
+                .UseSqlServer(applicationConnection)
+                .Options;
+            await using var context = new FluxKnowledgeDbContext(contextOptions);
+            await context.Database.MigrateAsync(cancellationToken).ConfigureAwait(false);
+        }
+    }
+}
+
+internal interface ISqlProvisioningFileSystem
+{
+    void CreateDirectory(string path);
+}
+
+internal interface ISqlProvisioningDatabase
+{
+    Task ProvisionAsync(string administratorConnectionString, CancellationToken cancellationToken);
 }
 
 public sealed record SqlServerProvisioningRequest(
     string AdministratorConnectionString,
     string DataFilePath,
     string LogFilePath,
-    string BackupTarget,
     bool ConfirmProvision);
 
 public sealed record SqlServerProvisioningResult(
     string CatalogName,
     string DataFilePath,
     string LogFilePath,
-    string BackupTarget,
     IReadOnlyList<string> AclInstructions);

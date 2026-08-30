@@ -68,8 +68,14 @@ public sealed class SqlSourceRootWatchStore(IDbContextFactory<FluxKnowledgeDbCon
     {
         await ExecuteAsync(async context =>
         {
+            var root = await context.SourceRootConfigurations.FromSqlInterpolated($"SELECT * FROM [SourceRootConfigurations] WITH (UPDLOCK, HOLDLOCK) WHERE [Id] = {batch.SourceRootId.Value}").SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
             var state = await context.SourceRootWatchStates.FromSqlInterpolated($"SELECT * FROM [SourceRootWatchStates] WITH (UPDLOCK, HOLDLOCK) WHERE [SourceRootId] = {batch.SourceRootId.Value}").SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
             if (state is null || state.LeaseGeneration != batch.LeaseGeneration || !string.Equals(state.LeaseOwner, batch.LeaseOwner, StringComparison.Ordinal)) throw new InvalidOperationException("The watch batch lease is no longer owned by this coordinator.");
+            if (root is null || root.State != (int)SourceRootState.Enabled)
+            {
+                context.SourceRootWatchStates.Remove(state);
+                return;
+            }
             var now = timeProvider.GetUtcNow();
             // A running control is fenced to an earlier reconciliation snapshot.  A later watcher
             // generation must remain as a follow-up durable request rather than being folded into it.

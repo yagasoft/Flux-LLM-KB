@@ -1208,15 +1208,53 @@ explicit:
 `host_offline`, `blocked_not_windows`, `blocked_missing_dependency`, or
 `blocked_outlook_unavailable`.
 
-## Integration Surfaces
+## Native v1 integration surfaces
 
-- MCP exposes memory tools to Codex and other MCP-capable agents.
-- CLI supports local automation, diagnostics, migration, and export.
-- REST mirrors the MCP operations for clients that do not support MCP.
-- Codex hooks enforce preflight retrieval and post-turn capture across workspaces.
-- Docker hosts the normal Flux API/dashboard processes, RabbitMQ, the
-  transactional outbox relay, event scheduler, RabbitMQ workers, and callback
-  dispatcher. The Outlook COM bridge is deliberately outside Docker because COM
-  requires the logged-in Windows user session and classic Outlook.
-- The generic host-agent bridge is also outside Docker when direct access to
-  arbitrary host filesystem paths or native folder browsing is required.
+The native application has one direct-loopback integration contract. ASP.NET
+Core hosts REST beneath `/api/v1` and HTTP MCP at `/mcp`; the CLI is a thin
+client of the same Application-owned facade. There is no legacy runtime,
+translation layer, remote listener, credential bridge or compatibility
+contract.
+
+The closed surface has nine tools: `knowledge.search`, `knowledge.write`,
+`knowledge.graph`, `code.query`, `code.write`, `corpus.query`, `corpus.write`,
+`operations.status` and `operations.audit`. Query responses are bounded,
+cursor-aware retained projections. Mutations use the shared preview-then-commit
+protocol: a short-lived, target-version-bound confirmation intent and a
+caller-provided idempotency key protect every durable change; corpus lease and
+fencing rules remain authoritative.
+
+The application owns the production hierarchy beneath `I:\FluxKnowledge`,
+including `Data\Sql\Data\FluxKnowledge.mdf`,
+`Data\Sql\Log\FluxKnowledge_log.ldf`, retained data, runtime directories and
+the local Codex marketplace. Storage boundaries fail closed on paths outside
+that root, reparse points and ambiguous resolutions. The VSS component produces
+only an unencrypted, OS-managed 10%-of-`I:` policy plan; it does not execute a
+VSS command or restore data.
+
+Codex plugin material is generated at `I:\FluxKnowledge\CodexPlugin` and
+references only `http://127.0.0.1:5137/mcp`. The status command is
+non-mutating; normal startup cannot register or repair the plugin. Fresh-start is likewise an
+unexecuted, disposable-test-proven plan. The sole guarded mutation boundary is
+`scripts/dev/complete-feature.ps1 -GoLive` with all four named clean-slate,
+VSS, SQL-destruction and Codex-registration acknowledgements. It is a one-shot,
+fail-closed clean-slate flow: the canonical root and target catalogue must be
+absent, or that same confirmed invocation wipes both before it proceeds. It
+never inspects ownership, adopts historic state, or uses a deployment journal,
+marker, recovery, resume, repair or replay path. An interrupted or failed run
+requires a new explicitly confirmed invocation and clean wipe.
+
+After the reviewed squash merge, merged-main restore/build/test and main
+commit, closeout stages one immutable published payload and enters the private
+Task 6 CLR bridge in the same PowerShell process; SQL bootstrap material is
+neither forwarded to a child process nor logged. Successful host completion
+precedes the one final `main` push. Normal CLI, Web and MCP composition expose
+no SQL provisioning route.
+
+This boundary is implemented and contract-verified, but no live authority has
+been granted: no clean-slate execution, production SQL change, VSS configuration,
+IIS mutation, Codex marketplace registration, merge, push or cutover is recorded
+by this work. Outlook and all Phase 6 model, GPU, OCR, media and network parsing
+capabilities remain disabled.
+See [native v1 integrations](integrations.md) and
+[native setup](setup.md).

@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using FluxKnowledge.Application.Ports;
+using FluxKnowledge.Application.Operations;
 using FluxKnowledge.Application.Sources;
 using FluxKnowledge.Domain.Sources;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
@@ -278,7 +279,7 @@ public sealed class ZipArchiveReplayIntegrationTests(NativeSqlServerFixture fixt
             var childHash = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes("private child")));
             var childRelativePath = Path.Combine("sha256", childHash[..2], $"{childHash}.bin");
 
-            var result = await CreateActivation(globalRoot).RunOnceAsync(CancellationToken.None);
+            var result = await CreateActivation(globalRoot, privateRoot).RunOnceAsync(CancellationToken.None);
 
             Assert.Equal(1, result.CompletedBranches);
             Assert.True(File.Exists(Path.Combine(privateRoot, childRelativePath)));
@@ -576,16 +577,19 @@ public sealed class ZipArchiveReplayIntegrationTests(NativeSqlServerFixture fixt
         }
     }
 
-    private RetainedProcessorActivationService CreateActivation(string root)
+    private RetainedProcessorActivationService CreateActivation(string root, string? outlookSpoolRoot = null)
     {
         var factory = new ContextFactory(_fixture.ConnectionString);
-        var artifactWriter = new SqlRetainedArtifactWriter(factory, root);
+        var policy = outlookSpoolRoot is null
+            ? null
+            : PersistedOutlookSpoolRootPolicy.CreateForIsolatedTests(outlookSpoolRoot);
+        var artifactWriter = new SqlRetainedArtifactWriter(factory, root, outlookSpoolPolicy: policy);
         var processor = new ZipArchiveRetainedProcessor(artifactWriter);
         var registry = new LocalSourceCapabilityHandlerRegistry([processor]);
         return new RetainedProcessorActivationService(
             new SourceCapabilityService(new SqlSourceActivityStore(factory, TimeProvider.System), registry),
             new SqlRetainedProcessorBranchStore(factory, TimeProvider.System),
-            new SqlRetainedSourceReader(factory, root),
+            new SqlRetainedSourceReader(factory, root, policy),
             processor,
             new RetainedProcessorOptions { ArchiveZipExpandEnabled = true },
             TimeProvider.System);

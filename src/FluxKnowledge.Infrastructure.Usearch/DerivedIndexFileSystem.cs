@@ -1,3 +1,5 @@
+using FluxKnowledge.Application.Operations;
+
 namespace FluxKnowledge.Infrastructure.Usearch;
 
 public sealed class DerivedIndexFileSystem
@@ -5,12 +7,31 @@ public sealed class DerivedIndexFileSystem
     private static readonly HashSet<string> RecoveryAreas = new(StringComparer.OrdinalIgnoreCase) { "staging", "quarantine" };
     private readonly string _root;
     private readonly Func<string, bool> _existingComponentsSafetyCheck;
+    private readonly LiveRootStorageSafety? _storageSafety;
+    private readonly IUsearchDirectoryCreator _directoryCreator;
 
     public DerivedIndexFileSystem(UsearchIndexOptions options,
         Func<string, bool>? existingComponentsSafetyCheck = null)
+        : this(
+            options,
+            existingComponentsSafetyCheck,
+            storageSafety: null,
+            FileSystemUsearchDirectoryCreator.Instance)
     {
+    }
+
+    internal DerivedIndexFileSystem(
+        UsearchIndexOptions options,
+        Func<string, bool>? existingComponentsSafetyCheck,
+        LiveRootStorageSafety? storageSafety,
+        IUsearchDirectoryCreator directoryCreator)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(directoryCreator);
         _root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(options.RootPath));
         _existingComponentsSafetyCheck = existingComponentsSafetyCheck ?? ExistingComponentsAreSafe;
+        _storageSafety = storageSafety;
+        _directoryCreator = directoryCreator;
     }
 
     public bool IsValidDirectory(string path) => TryCanonicalInRoot(path, out var canonical) &&
@@ -27,6 +48,7 @@ public sealed class DerivedIndexFileSystem
         canonical = string.Empty;
         if (!TryCanonicalInRootLexically(path, out var candidate) ||
             !IsIntendedGenerationPathLexically(candidate) ||
+            !IsStorageSafe(candidate) ||
             !_existingComponentsSafetyCheck(candidate))
         {
             return false;
@@ -38,7 +60,9 @@ public sealed class DerivedIndexFileSystem
     public bool TryCanonicalInRoot(string path, out string canonical)
     {
         canonical = string.Empty;
-        if (!TryCanonicalInRootLexically(path, out var candidate) || !_existingComponentsSafetyCheck(candidate))
+        if (!TryCanonicalInRootLexically(path, out var candidate) ||
+            !IsStorageSafe(candidate) ||
+            !_existingComponentsSafetyCheck(candidate))
         {
             return false;
         }
@@ -86,7 +110,7 @@ public sealed class DerivedIndexFileSystem
     {
         stagingDirectory = Path.Combine(_root, "staging", Guid.NewGuid().ToString("N"));
         if (!TryCanonicalInRoot(stagingDirectory, out var canonical)) return false;
-        Directory.CreateDirectory(canonical);
+        _directoryCreator.CreateDirectory(canonical);
         if (!IsValidDirectory(canonical)) return false;
         stagingDirectory = canonical;
         return true;
@@ -125,8 +149,14 @@ public sealed class DerivedIndexFileSystem
 
     private bool EnsureSafeDirectory(string path)
     {
-        Directory.CreateDirectory(path);
+        _directoryCreator.CreateDirectory(path);
         return IsValidDirectory(path);
+    }
+
+    private bool IsStorageSafe(string path)
+    {
+        _storageSafety?.ValidateBeforeIo(path);
+        return true;
     }
 
     private static bool IsSameOrUnder(string path, string root) =>
@@ -182,4 +212,20 @@ public sealed class DerivedIndexFileSystem
         catch (UnauthorizedAccessException) { throw; }
         catch (IOException) { return false; }
     }
+}
+
+internal interface IUsearchDirectoryCreator
+{
+    void CreateDirectory(string path);
+}
+
+internal sealed class FileSystemUsearchDirectoryCreator : IUsearchDirectoryCreator
+{
+    public static FileSystemUsearchDirectoryCreator Instance { get; } = new();
+
+    private FileSystemUsearchDirectoryCreator()
+    {
+    }
+
+    public void CreateDirectory(string path) => Directory.CreateDirectory(path);
 }

@@ -1,5 +1,6 @@
 using System.Text.Json;
 using FluxKnowledge.Application.Indexing;
+using FluxKnowledge.Application.Operations;
 using FluxKnowledge.Domain.Outlook;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
@@ -188,7 +189,10 @@ public sealed class OutlookProjectionReaderIntegrationTests
             await context.SaveChangesAsync();
         }
 
-        var projection = await new SqlOutlookProjectionReader(factory, new SafeSpoolHealthReader())
+        var projection = await new SqlOutlookProjectionReader(
+                factory,
+                new SafeSpoolHealthReader(),
+                PersistedOutlookSpoolRootPolicy.CreateForIsolatedTests(privateSpool))
             .ReadAsync(CancellationToken.None);
         var json = JsonSerializer.Serialize(projection);
 

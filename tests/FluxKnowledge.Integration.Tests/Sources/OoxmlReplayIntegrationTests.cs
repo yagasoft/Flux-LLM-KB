@@ -2,6 +2,7 @@ using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Text;
 using FluxKnowledge.Application.Ports;
+using FluxKnowledge.Application.Operations;
 using FluxKnowledge.Application.Sources;
 using FluxKnowledge.Domain.Sources;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
@@ -51,8 +52,8 @@ public sealed class OoxmlReplayIntegrationTests(NativeSqlServerFixture fixture) 
                 seeds.Add((seeded.ActivityId, seeded.RevisionId, text));
             }
 
-            var first = await CreateActivation(privateRoot, ooxmlEnabled: true).RunOnceAsync(CancellationToken.None);
-            var repeat = await CreateActivation(privateRoot, ooxmlEnabled: true).RunOnceAsync(CancellationToken.None);
+            var first = await CreateActivation(privateRoot, ooxmlEnabled: true, outlookSpoolRoot: outlookPrivateRoot).RunOnceAsync(CancellationToken.None);
+            var repeat = await CreateActivation(privateRoot, ooxmlEnabled: true, outlookSpoolRoot: outlookPrivateRoot).RunOnceAsync(CancellationToken.None);
 
             Assert.Equal("document-ooxml-structural-extract", first.Capability);
             Assert.Equal(4, first.CompletedBranches);
@@ -461,16 +462,23 @@ public sealed class OoxmlReplayIntegrationTests(NativeSqlServerFixture fixture) 
         await verifyRestart.SaveChangesAsync();
     }
 
-    private RetainedProcessorActivationService CreateActivation(string privateRoot, bool ooxmlEnabled, bool zipEnabled = false,
-        IRetainedSourceReader? retainedReader = null)
+    private RetainedProcessorActivationService CreateActivation(
+        string privateRoot,
+        bool ooxmlEnabled,
+        bool zipEnabled = false,
+        IRetainedSourceReader? retainedReader = null,
+        string? outlookSpoolRoot = null)
     {
         var factory = new ContextFactory(_fixture.ConnectionString);
-        var writer = new SqlRetainedArtifactWriter(factory, privateRoot);
+        var policy = outlookSpoolRoot is null
+            ? null
+            : PersistedOutlookSpoolRootPolicy.CreateForIsolatedTests(outlookSpoolRoot);
+        var writer = new SqlRetainedArtifactWriter(factory, privateRoot, outlookSpoolPolicy: policy);
         var zip = new ZipArchiveRetainedProcessor(writer);
         var ooxml = new OoxmlStructuralTextProcessor(writer);
         return new RetainedProcessorActivationService(
             new SourceCapabilityService(new SqlSourceActivityStore(factory, TimeProvider.System), new LocalSourceCapabilityHandlerRegistry([zip, new OoxmlStructuralTextCapabilityHandler()])),
-            new SqlRetainedProcessorBranchStore(factory, TimeProvider.System), retainedReader ?? new SqlRetainedSourceReader(factory, privateRoot), zip,
+            new SqlRetainedProcessorBranchStore(factory, TimeProvider.System), retainedReader ?? new SqlRetainedSourceReader(factory, privateRoot, policy), zip,
             new RetainedProcessorOptions { OoxmlDocumentStructuralExtractEnabled = ooxmlEnabled, ArchiveZipExpandEnabled = zipEnabled }, TimeProvider.System,
             ooxmlProcessor: ooxml);
     }

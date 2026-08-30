@@ -32,6 +32,7 @@ public sealed class UsearchAnnIndex(
         ThrowIfDisposed();
         using var scope = scopeFactory.CreateScope();
         var store = scope.ServiceProvider.GetRequiredService<IIndexGenerationStore>();
+        var validator = scope.ServiceProvider.GetService<UsearchGenerationValidator>() ?? new UsearchGenerationValidator();
         while (true)
         {
             var activeId = await store.GetActiveGenerationIdAsync(cancellationToken);
@@ -40,7 +41,7 @@ public sealed class UsearchAnnIndex(
                 return [];
             }
 
-            if (!await EnsureOpenAsync(activeId.Value, store, cancellationToken))
+            if (!await EnsureOpenAsync(activeId.Value, store, validator, cancellationToken))
             {
                 continue;
             }
@@ -97,6 +98,7 @@ public sealed class UsearchAnnIndex(
     private async ValueTask<bool> EnsureOpenAsync(
         Guid activeId,
         IIndexGenerationStore store,
+        UsearchGenerationValidator validator,
         CancellationToken cancellationToken)
     {
         ThrowIfDisposed();
@@ -122,7 +124,7 @@ public sealed class UsearchAnnIndex(
         var vectors = await store.ReadVectorsAsync(activeId, cancellationToken);
         try
         {
-            new UsearchGenerationValidator().Validate(generation.IndexPath, generation, vectors);
+            validator.Validate(generation.IndexPath, generation, vectors);
         }
         catch (Exception exception) when (exception is DirectoryNotFoundException or FileNotFoundException or
             IndexGenerationValidationException or IOException or UnauthorizedAccessException)

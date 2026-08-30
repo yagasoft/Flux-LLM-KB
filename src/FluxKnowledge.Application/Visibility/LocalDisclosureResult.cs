@@ -11,5 +11,9 @@ public enum LocalDisclosureKind
     Symbol,
     Reference,
     Diagnostic,
-    AuditEvidence
+    AuditEvidence,
+    CodeFeedbackWrite,
+    CorpusMetadata,
+    KnowledgeWrite,
+    KnowledgeRead
 }

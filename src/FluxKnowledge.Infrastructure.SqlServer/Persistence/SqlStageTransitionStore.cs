@@ -277,6 +277,7 @@ public sealed class SqlStageTransitionStore : IStageTransitionStore
             var state = await context.IndexState.SingleAsync(state => state.Id == 1, cancellationToken)
                 .ConfigureAwait(false);
             state.ActiveIndexGenerationId = activeGeneration.Id;
+            state.EmptyCatalogueValidatedAtUtc = null;
             state.UpdatedAtUtc = _timeProvider.GetUtcNow();
         SkipActivation: ;
         }

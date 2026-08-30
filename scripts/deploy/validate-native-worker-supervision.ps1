@@ -2,7 +2,7 @@
 param(
     [string]$SourceRoot = "",
     [string]$SiteUrl = "http://127.0.0.1:5137",
-    [string]$DeployRoot = "C:\inetpub\FluxKnowledge",
+    [string]$DeployRoot = "I:\FluxKnowledge\App",
     [Parameter(Mandatory = $true)]
     [ValidatePattern('^\d{14}_AddNativeWorkerSupervision$')]
     [string]$ExpectedMigrationId,
@@ -10,6 +10,22 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$CanonicalDeployRoot = "I:\FluxKnowledge\App"
+$deploySegments = @($DeployRoot -split '[\\/]')
+if ($deploySegments -contains '.' -or $deploySegments -contains '..') {
+    throw "Native deployment validation requires the canonical I:\FluxKnowledge\App root without traversal."
+}
+try {
+    $canonicalRequestedDeployRoot = [System.IO.Path]::GetFullPath($DeployRoot).TrimEnd(
+        [System.IO.Path]::DirectorySeparatorChar,
+        [System.IO.Path]::AltDirectorySeparatorChar)
+}
+catch {
+    throw "Native deployment validation requires the canonical I:\FluxKnowledge\App root."
+}
+if (-not [string]::Equals($canonicalRequestedDeployRoot, $CanonicalDeployRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw "Native deployment validation requires the canonical I:\FluxKnowledge\App root."
+}
 . (Join-Path $PSScriptRoot "loopback-deployment-safety.ps1")
 $siteOrigin = (Get-FixedLoopbackOrigin -SiteUrl $SiteUrl).Origin
 

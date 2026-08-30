@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using FluxKnowledge.Application.Visibility;
@@ -41,13 +42,36 @@ public sealed partial class LocalPrivateContentDisclosure : ILocalPrivateContent
         return new LocalDisclosureResult(value, false, null);
     }
 
-    private static bool ContainsSecret(string value) =>
+    private static bool ContainsSecret(string value, int encodedDepth = 0) =>
         value.Contains("secret-content-sentinel", StringComparison.Ordinal) ||
         PrivateKeyEnvelopePattern().IsMatch(value) ||
         CredentialUriPattern().IsMatch(value) ||
         SecretAssignmentPattern().IsMatch(value) ||
         CredentialHeaderPattern().IsMatch(value) ||
-        ContainsJsonCredential(value);
+        ContainsJsonCredential(value) ||
+        ContainsEncodedCredential(value, encodedDepth);
+
+    private static bool ContainsEncodedCredential(string value, int encodedDepth)
+    {
+        var normalised = string.Concat(value.Where(character => !char.IsWhiteSpace(character)));
+        if (normalised.Length < 12 ||
+            !normalised.All(character => char.IsLetterOrDigit(character) || character is '+' or '/' or '-' or '_' or '='))
+        {
+            return false;
+        }
+
+        normalised = normalised.Replace('-', '+').Replace('_', '/');
+        normalised = normalised.PadRight(normalised.Length + (4 - normalised.Length % 4) % 4, '=');
+        try
+        {
+            var decoded = new UTF8Encoding(false, true).GetString(Convert.FromBase64String(normalised));
+            return encodedDepth >= 2 || ContainsSecret(decoded, encodedDepth + 1);
+        }
+        catch (Exception exception) when (exception is FormatException or DecoderFallbackException)
+        {
+            return false;
+        }
+    }
 
     private static bool ContainsJsonCredential(string value, int encodedJsonStringDepth = 0)
     {

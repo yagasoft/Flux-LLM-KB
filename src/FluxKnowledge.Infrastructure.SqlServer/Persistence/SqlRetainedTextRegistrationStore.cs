@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using FluxKnowledge.Application.Pipeline;
+using FluxKnowledge.Application.Operations;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Sources;
 using FluxKnowledge.Application.Workers;
@@ -19,7 +20,8 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
 public sealed class SqlRetainedTextRegistrationStore(
     IDbContextFactory<FluxKnowledgeDbContext> contextFactory,
     TimeProvider timeProvider,
-    string? retainedArtifactRoot = null) : IRetainedTextRegistrationStore, IDeferredActivityReplayStore, ISourceActivityRestartStore
+    string? retainedArtifactRoot = null,
+    PersistedOutlookSpoolRootPolicy? outlookSpoolPolicy = null) : IRetainedTextRegistrationStore, IDeferredActivityReplayStore, ISourceActivityRestartStore
 {
     private const string RetainedSourceKind = "retained local source";
     private const string AcceptedUtf8Classification = "AcceptedUtf8Text";
@@ -432,7 +434,18 @@ public sealed class SqlRetainedTextRegistrationStore(
             .Where(profile => profile.SourceRootId == sourceRevision.SourceRootId)
             .Select(profile => profile.SpoolRoot)
             .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
-        var artifactRoot = outlookSpoolRoot ?? _retainedArtifactRoot;
+        string? artifactRoot;
+        try
+        {
+            artifactRoot = outlookSpoolRoot is null
+                ? _retainedArtifactRoot
+                : outlookSpoolPolicy?.RequireCanonicalBeforeIo(outlookSpoolRoot)
+                    ?? throw new InvalidDataException("The persisted Outlook spool root is unavailable.");
+        }
+        catch (InvalidDataException)
+        {
+            return "retained-artifact-root-unavailable";
+        }
         if (artifactRoot is null)
         {
             return "retained-artifact-root-unavailable";
@@ -472,7 +485,8 @@ public sealed class SqlRetainedTextRegistrationStore(
 /// <summary>Reads only the source artifact bound to an immutable revision and verifies it before decoding.</summary>
 public sealed class SqlRetainedSourceReader(
     IDbContextFactory<FluxKnowledgeDbContext> contextFactory,
-    string artifactRoot) : IRetainedSourceReader, IDisposable
+    string artifactRoot,
+    PersistedOutlookSpoolRootPolicy? outlookSpoolPolicy = null) : IRetainedSourceReader, IDisposable
 {
     private readonly string _artifactRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(artifactRoot));
     private readonly PhysicalDirectoryLease _rootLease = PhysicalFileIdentity.OpenDirectoryLease(artifactRoot);
@@ -508,8 +522,8 @@ public sealed class SqlRetainedSourceReader(
         PhysicalDirectoryLease? privateRootLease = null;
         if (outlookSpoolRoot is not null)
         {
-            if (string.IsNullOrWhiteSpace(outlookSpoolRoot)) throw new InvalidDataException("The retained Outlook artifact root is invalid.");
-            selectedArtifactRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(outlookSpoolRoot));
+            selectedArtifactRoot = outlookSpoolPolicy?.RequireCanonicalBeforeIo(outlookSpoolRoot)
+                ?? throw new InvalidDataException("The persisted Outlook spool root is unavailable.");
             PhysicalFileIdentity.EnsureNoReparsePointTraversal(selectedArtifactRoot);
             privateRootLease = PhysicalFileIdentity.OpenDirectoryLease(selectedArtifactRoot);
         }
@@ -595,12 +609,8 @@ public sealed class SqlRetainedSourceReader(
         PhysicalDirectoryLease? privateRootLease = null;
         if (outlookSpoolRoot is not null)
         {
-            if (string.IsNullOrWhiteSpace(outlookSpoolRoot))
-            {
-                throw new InvalidDataException("The retained Outlook artifact root is invalid.");
-            }
-
-            selectedArtifactRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(outlookSpoolRoot));
+            selectedArtifactRoot = outlookSpoolPolicy?.RequireCanonicalBeforeIo(outlookSpoolRoot)
+                ?? throw new InvalidDataException("The persisted Outlook spool root is unavailable.");
             PhysicalFileIdentity.EnsureNoReparsePointTraversal(selectedArtifactRoot);
             privateRootLease = PhysicalFileIdentity.OpenDirectoryLease(selectedArtifactRoot);
         }

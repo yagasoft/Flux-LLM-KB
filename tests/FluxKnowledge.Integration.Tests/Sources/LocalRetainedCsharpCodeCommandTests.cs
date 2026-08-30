@@ -3,6 +3,7 @@ using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Sources;
 using FluxKnowledge.Application.Visibility;
 using FluxKnowledge.Cli.Commands;
+using FluxKnowledge.Application.Operations;
 using FluxKnowledge.Domain.Sources;
 using Xunit;
 
@@ -10,6 +11,27 @@ namespace FluxKnowledge.Integration.Tests.Sources;
 
 public sealed class LocalRetainedCsharpCodeCommandTests
 {
+    [Theory]
+    [InlineData(@"C:\ProgramData\FluxKnowledge\Retained", null)]
+    [InlineData(null, @"C:\Users\operator\AppData\Local\FluxKnowledge")]
+    [InlineData(@"I:\FluxKnowledge\Data\Retained\..\Retained", null)]
+    public void Production_reader_rejects_environment_path_overrides(
+        string? retainedRoot,
+        string? privateConfigRoot)
+    {
+        Assert.Throws<InvalidOperationException>(() =>
+            LocalRetainedCsharpCodeCommand.ValidateProductionStorageOverrides(retainedRoot, privateConfigRoot));
+    }
+
+    [Fact]
+    public void Production_reader_accepts_only_absent_or_exact_live_layout_environment_paths()
+    {
+        var layout = LiveRootLayout.Production;
+
+        LocalRetainedCsharpCodeCommand.ValidateProductionStorageOverrides(null, null);
+        LocalRetainedCsharpCodeCommand.ValidateProductionStorageOverrides(layout.RetainedRoot, layout.ConfigRoot);
+    }
+
     [Fact]
     public async Task Read_only_detail_diagnostics_and_search_commands_return_the_named_local_projection()
     {

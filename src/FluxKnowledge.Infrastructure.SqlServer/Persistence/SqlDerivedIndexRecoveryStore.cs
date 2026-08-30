@@ -52,11 +52,22 @@ public sealed class SqlDerivedIndexRecoveryStore(
         await using var transaction = await context.Database
             .BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken)
             .ConfigureAwait(false);
-        var activeGenerationId = await context.IndexState.AsNoTracking()
+        var indexState = await context.IndexState.AsNoTracking()
             .Where(state => state.Id == 1)
-            .Select(state => state.ActiveIndexGenerationId)
+            .Select(state => new { state.ActiveIndexGenerationId, state.EmptyCatalogueValidatedAtUtc })
             .SingleAsync(cancellationToken)
             .ConfigureAwait(false);
+        var activeGenerationId = indexState.ActiveIndexGenerationId;
+        var hasVectors = await context.Vectors.AnyAsync(cancellationToken).ConfigureAwait(false);
+        var hasGenerations = await context.IndexGenerations.AnyAsync(cancellationToken).ConfigureAwait(false);
+        var hasMembership = await context.IndexGenerationVectors.AnyAsync(cancellationToken).ConfigureAwait(false);
+        var isValidatedEmptyCatalogue = activeGenerationId is null &&
+            indexState.EmptyCatalogueValidatedAtUtc is not null &&
+            !hasVectors && !hasGenerations && !hasMembership;
+        if (indexState.EmptyCatalogueValidatedAtUtc is not null && !isValidatedEmptyCatalogue)
+        {
+            throw new InvalidOperationException("empty-catalogue-state-not-empty");
+        }
         var generations = await context.IndexGenerations.AsNoTracking()
             .Select(candidate => new GenerationRow(
                 candidate.Id,
@@ -119,7 +130,8 @@ public sealed class SqlDerivedIndexRecoveryStore(
             generation,
             [.. membership],
             referencedGenerationIds.ToImmutableHashSet(),
-            referencedIndexPaths);
+            referencedIndexPaths,
+            isValidatedEmptyCatalogue);
     }
 
     private static async Task<ImmutableHashSet<Guid>> ReadRecognisedUnplacedDraftIdsAsync(

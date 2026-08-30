@@ -1,5 +1,6 @@
 using System.Text;
 using FluxKnowledge.Application.Ports;
+using FluxKnowledge.Application.Operations;
 using FluxKnowledge.Application.Sources;
 using FluxKnowledge.Domain.Sources;
 using FluxKnowledge.Integrations.Files;
@@ -11,7 +12,8 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
 public sealed class SqlRetainedArtifactWriter(
     IDbContextFactory<FluxKnowledgeDbContext> contextFactory,
     string artifactRoot,
-    IEnumerable<string>? protectedRoots = null) : IRetainedArtifactWriter
+    IEnumerable<string>? protectedRoots = null,
+    PersistedOutlookSpoolRootPolicy? outlookSpoolPolicy = null) : IRetainedArtifactWriter
 {
     private readonly string _artifactRoot = ContentAddressedSourceArtifactStore.ValidateRoot(artifactRoot, protectedRoots);
     private readonly string[] _protectedRoots = protectedRoots?.ToArray() ?? [];
@@ -39,7 +41,10 @@ public sealed class SqlRetainedArtifactWriter(
             throw new InvalidDataException("The parent private artifact root is invalid.");
         }
 
-        var selectedRoot = privateRoot ?? _artifactRoot;
+        var selectedRoot = privateRoot is null
+            ? _artifactRoot
+            : outlookSpoolPolicy?.RequireCanonicalBeforeIo(privateRoot)
+                ?? throw new InvalidDataException("The persisted Outlook spool root is unavailable.");
         var selectedProtectedRoots = privateRoot is null
             ? _protectedRoots
             : [.. _protectedRoots, _artifactRoot];

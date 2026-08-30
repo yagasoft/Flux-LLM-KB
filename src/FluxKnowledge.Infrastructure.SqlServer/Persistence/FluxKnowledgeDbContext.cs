@@ -61,6 +61,14 @@ public sealed class FluxKnowledgeDbContext(DbContextOptions<FluxKnowledgeDbConte
     public DbSet<SourceProcessorCodeDiagnosticEntity> SourceProcessorCodeDiagnostics => Set<SourceProcessorCodeDiagnosticEntity>();
     public DbSet<SourceProcessorCodeCompletionReceiptEntity> SourceProcessorCodeCompletionReceipts => Set<SourceProcessorCodeCompletionReceiptEntity>();
     public DbSet<SourceProcessorCodeBlockedDiagnosticEntity> SourceProcessorCodeBlockedDiagnostics => Set<SourceProcessorCodeBlockedDiagnosticEntity>();
+    public DbSet<NativeOperationIntentEntity> NativeOperationIntents => Set<NativeOperationIntentEntity>();
+    public DbSet<NativeOperationReceiptEntity> NativeOperationReceipts => Set<NativeOperationReceiptEntity>();
+    public DbSet<NativeOperationFenceTargetEntity> NativeOperationFenceTargets => Set<NativeOperationFenceTargetEntity>();
+    public DbSet<KnowledgeItemEntity> KnowledgeItems => Set<KnowledgeItemEntity>();
+    public DbSet<KnowledgeClaimEntity> KnowledgeClaims => Set<KnowledgeClaimEntity>();
+    public DbSet<KnowledgeClaimHistoryEntity> KnowledgeClaimHistory => Set<KnowledgeClaimHistoryEntity>();
+    public DbSet<KnowledgeRelationEntity> KnowledgeRelations => Set<KnowledgeRelationEntity>();
+    public DbSet<KnowledgeTombstoneEntity> KnowledgeTombstones => Set<KnowledgeTombstoneEntity>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {

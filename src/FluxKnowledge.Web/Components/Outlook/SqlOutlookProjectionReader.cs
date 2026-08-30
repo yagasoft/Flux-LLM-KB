@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using FluxKnowledge.Application.Contracts;
+using FluxKnowledge.Application.Operations;
 using FluxKnowledge.Domain.Outlook;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
 using Microsoft.EntityFrameworkCore;
@@ -224,7 +225,8 @@ public sealed class LocalOutlookSpoolValidator(OutlookSpoolPolicyOptions options
 
 public sealed class SqlOutlookProjectionReader(
     IDbContextFactory<FluxKnowledgeDbContext> contextFactory,
-    IOutlookSpoolHealthReader spoolHealthReader) : IOutlookProjectionReader
+    IOutlookSpoolHealthReader spoolHealthReader,
+    PersistedOutlookSpoolRootPolicy? spoolRootPolicy = null) : IOutlookProjectionReader
 {
     public async ValueTask<OutlookPageProjection> ReadAsync(CancellationToken cancellationToken)
     {
@@ -255,7 +257,17 @@ public sealed class SqlOutlookProjectionReader(
         var results = new List<OutlookProfileStatusProjection>(profiles.Count);
         foreach (var profile in profiles)
         {
-            var spool = await spoolHealthReader.ReadAsync(profile.SpoolRoot, cancellationToken).ConfigureAwait(false);
+            OutlookSpoolStatus spool;
+            try
+            {
+                var canonicalSpoolRoot = spoolRootPolicy?.RequireCanonicalBeforeIo(profile.SpoolRoot)
+                    ?? throw new InvalidDataException("The persisted Outlook spool root is unavailable.");
+                spool = await spoolHealthReader.ReadAsync(canonicalSpoolRoot, cancellationToken).ConfigureAwait(false);
+            }
+            catch (InvalidDataException)
+            {
+                spool = new OutlookSpoolStatus("Configured", "Blocked", "Unknown");
+            }
             var folderResults = folders.Where(folder => folder.ProfileId == profile.Id)
                 .Select(folder => new OutlookFolderStatusProjection(
                     folder.Id,

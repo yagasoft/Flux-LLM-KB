@@ -1,11 +1,13 @@
+using FluxKnowledge.Application.Operations;
+
 namespace FluxKnowledge.Infrastructure.SqlServer.Configuration;
 
 public sealed class SqlServerOptions
 {
     public const string SectionName = "SqlServer";
     public const string CatalogName = "FluxKnowledge";
-    public const string ProductionDataFilePath = "I:/FluxKnowledge/Sql/Data/FluxKnowledge.mdf";
-    public const string ProductionLogFilePath = "I:/FluxKnowledge/Sql/Log/FluxKnowledge_log.ldf";
+    public static string ProductionDataFilePath => LiveRootLayout.Production.SqlDataFilePath;
+    public static string ProductionLogFilePath => LiveRootLayout.Production.SqlLogFilePath;
 
     public string ConnectionString { get; init; } = string.Empty;
 

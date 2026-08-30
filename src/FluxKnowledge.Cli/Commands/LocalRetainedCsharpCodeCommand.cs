@@ -1,4 +1,5 @@
 using System.Text.Json;
+using FluxKnowledge.Application.Operations;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Sources;
 using FluxKnowledge.Application.Visibility;
@@ -16,6 +17,21 @@ public static class LocalRetainedCsharpCodeCommand
     {
         WriteIndented = true
     };
+
+    internal static void ValidateProductionStorageOverrides(
+        string? retainedRoot,
+        string? privateConfigRoot)
+    {
+        var layout = LiveRootLayout.Production;
+        _ = LiveRootLayout.RequireExactProductionPathOverride(
+            retainedRoot,
+            layout.RetainedRoot,
+            "FLUXKNOWLEDGE_SOURCE_ARTIFACT_ROOT");
+        _ = LiveRootLayout.RequireExactProductionPathOverride(
+            privateConfigRoot,
+            layout.ConfigRoot,
+            PrivatePcDataProtectionProviderFactory.LocalApplicationDataRootEnvironmentVariable);
+    }
 
     public static async Task<int> ExecuteFromEnvironmentAsync(
         string[] args,
@@ -235,8 +251,12 @@ public static class LocalRetainedCsharpCodeCommand
         public static ReaderLease CreateFromEnvironment()
         {
             var connectionString = Environment.GetEnvironmentVariable("ConnectionStrings__FluxKnowledge");
-            var artifactRoot = Environment.GetEnvironmentVariable("FLUXKNOWLEDGE_SOURCE_ARTIFACT_ROOT");
-            if (string.IsNullOrWhiteSpace(connectionString) || string.IsNullOrWhiteSpace(artifactRoot) || !Directory.Exists(artifactRoot))
+            var configuredArtifactRoot = Environment.GetEnvironmentVariable("FLUXKNOWLEDGE_SOURCE_ARTIFACT_ROOT");
+            var configuredPrivateRoot = Environment.GetEnvironmentVariable(
+                PrivatePcDataProtectionProviderFactory.LocalApplicationDataRootEnvironmentVariable);
+            ValidateProductionStorageOverrides(configuredArtifactRoot, configuredPrivateRoot);
+            var artifactRoot = LiveRootLayout.Production.RetainedRoot;
+            if (string.IsNullOrWhiteSpace(connectionString) || !Directory.Exists(artifactRoot))
             {
                 throw new InvalidOperationException("Trusted-local retained C# code configuration is unavailable.");
             }
@@ -245,9 +265,7 @@ public static class LocalRetainedCsharpCodeCommand
             var disclosure = new LocalPrivateContentDisclosure();
             var retainedSourceReader = new SqlRetainedSourceReader(factory, artifactRoot);
             var retainedDetailReader = new SqlLocalRetainedDetailReader(factory, retainedSourceReader, disclosure);
-            var localApplicationDataRoot = Environment.GetEnvironmentVariable(
-                PrivatePcDataProtectionProviderFactory.LocalApplicationDataRootEnvironmentVariable);
-            var cursorCodec = PrivatePcDataProtectionProviderFactory.CreateCursorCodec(localApplicationDataRoot);
+            var cursorCodec = PrivatePcDataProtectionProviderFactory.CreateCursorCodec();
             return new ReaderLease(
                 new SqlLocalRetainedCsharpCodeReader(factory, retainedDetailReader, disclosure, cursorCodec),
                 retainedSourceReader);

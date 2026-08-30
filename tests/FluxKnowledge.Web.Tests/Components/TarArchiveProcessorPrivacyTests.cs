@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using FluxKnowledge.Application.Contracts;
 using FluxKnowledge.Application.Indexing;
+using FluxKnowledge.Application.Operations;
 using FluxKnowledge.Application.Pipeline;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Sources;
@@ -43,14 +44,15 @@ public sealed class TarArchiveProcessorPrivacyTests(NativeSqlServerFixture fixtu
             var (rootId, revisionId) = await SeedDeferredTarAsync(hash, tar.Length, relativePath, privateRoot);
 
             var factory = new TestDbContextFactory(fixture.ConnectionString);
-            var writer = new SqlRetainedArtifactWriter(factory, fallbackRoot);
+            var policy = PersistedOutlookSpoolRootPolicy.CreateForIsolatedTests(privateRoot);
+            var writer = new SqlRetainedArtifactWriter(factory, fallbackRoot, outlookSpoolPolicy: policy);
             var zip = new ZipArchiveRetainedProcessor(writer);
             var processor = new TarArchiveRetainedProcessor(writer);
             var statusFeed = new StatusEventFeed();
             await using var statusSubscription = statusFeed.Subscribe();
             var activation = new RetainedProcessorActivationService(
                 new SourceCapabilityService(new SqlSourceActivityStore(factory, TimeProvider.System), new LocalSourceCapabilityHandlerRegistry([zip, processor])),
-                new SqlRetainedProcessorBranchStore(factory, TimeProvider.System), new SqlRetainedSourceReader(factory, privateRoot), zip,
+                new SqlRetainedProcessorBranchStore(factory, TimeProvider.System), new SqlRetainedSourceReader(factory, privateRoot, policy), zip,
                 new RetainedProcessorOptions { ArchiveTarExpandEnabled = true }, TimeProvider.System, processor, statusFeed);
 
             Assert.Equal(1, (await activation.RunOnceAsync(CancellationToken.None)).CompletedBranches);

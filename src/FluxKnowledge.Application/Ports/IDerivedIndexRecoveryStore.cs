@@ -8,7 +8,8 @@ public sealed record DerivedIndexRecoverySqlSnapshot(
     IndexGenerationDescriptor? Generation,
     ImmutableArray<CanonicalVector> Membership,
     ImmutableHashSet<Guid> ReferencedGenerationIds,
-    ImmutableHashSet<string> ReferencedIndexPaths);
+    ImmutableHashSet<string> ReferencedIndexPaths,
+    bool IsValidatedEmptyCatalogue = false);
 
 public interface IDerivedIndexRecoveryLease : IAsyncDisposable;
 

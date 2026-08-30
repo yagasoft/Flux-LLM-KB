@@ -28,7 +28,8 @@ public sealed record DerivedIndexRecoverySnapshot(
     DateTimeOffset? LastCompletedAtUtc,
     DateTimeOffset? NextRetryAtUtc,
     DerivedIndexRecoveryFailureCategory? FailureCategory,
-    int CleanedCandidateCount);
+    int CleanedCandidateCount,
+    bool IsValidatedEmptyCatalogue = false);
 
 public sealed record DerivedIndexRecoveryFault(
     DerivedIndexRecoveryFailureCategory Category,

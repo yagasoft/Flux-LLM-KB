@@ -1,4 +1,5 @@
 using FluxKnowledge.Application.Contracts;
+using FluxKnowledge.Application.Operations;
 using FluxKnowledge.Domain.Outlook;
 using FluxKnowledge.Integrations.Outlook;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
@@ -15,7 +16,9 @@ public sealed class OutlookExportIngestionBridgeTests
     {
         using var spool = new TemporaryDirectory();
         var ingestion = new FakeReadyIngestionService { RejectedFencingToken = 1 };
-        var bridge = new OutlookExportIngestionBridge(ingestion);
+        var bridge = new OutlookExportIngestionBridge(
+            ingestion,
+            PersistedOutlookSpoolRootPolicy.CreateForIsolatedTests(spool.Path));
         var item = Item();
         var first = Work(spool.Path, Guid.Parse("11111111-1111-1111-1111-111111111111"), 1);
         var second = Work(spool.Path, Guid.Parse("22222222-2222-2222-2222-222222222222"), 2);
@@ -43,7 +46,9 @@ public sealed class OutlookExportIngestionBridgeTests
     {
         using var spool = new TemporaryDirectory();
         var ingestion = new FakeReadyIngestionService();
-        var bridge = new OutlookExportIngestionBridge(ingestion);
+        var bridge = new OutlookExportIngestionBridge(
+            ingestion,
+            PersistedOutlookSpoolRootPolicy.CreateForIsolatedTests(spool.Path));
         var item = Item();
         var work = Work(spool.Path, Guid.Parse("33333333-3333-3333-3333-333333333333"), 3);
         var exportId = OutlookExportIngestionBridge.ExportIdFor(work.Folder, item);

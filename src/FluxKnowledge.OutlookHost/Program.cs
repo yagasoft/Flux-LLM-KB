@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Security.Principal;
 using System.Text;
 using FluxKnowledge.Application.Contracts;
+using FluxKnowledge.Application.Operations;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
 using Microsoft.EntityFrameworkCore;
@@ -112,6 +113,11 @@ internal sealed class DefaultOutlookHostApplicationFactory : IOutlookHostApplica
             .UseSqlServer(connectionString, sql => sql.EnableRetryOnFailure())
             .Options;
         IDbContextFactory<FluxKnowledgeDbContext> contextFactory = new OutlookDbContextFactory(dbOptions);
+        var liveRoot = LiveRootLayout.Production;
+        var spoolRootPolicy = new PersistedOutlookSpoolRootPolicy(
+            liveRoot,
+            new LiveRootStorageSafety(liveRoot, FileSystemLiveRootPathInspector.Instance));
+        var spoolRootPreflight = new SqlOutlookSpoolRootPreflight(contextFactory, spoolRootPolicy);
         IOutlookCaptureStore store = new SqlOutlookCaptureStore(contextFactory);
         var controlPlane = new SqlOutlookHostControlPlane(store, contextFactory);
         var dispatcher = new OutlookStaDispatcher();
@@ -122,7 +128,10 @@ internal sealed class DefaultOutlookHostApplicationFactory : IOutlookHostApplica
             options.VerboseComErrors,
             options.VerboseComErrorsOutputPath);
         var ingestion = new OutlookExportIngestionBridge(
-            new SqlOutlookReadyExportIngestionService(new SqlOutlookExportIngestionService(contextFactory)));
+            new SqlOutlookReadyExportIngestionService(new SqlOutlookExportIngestionService(
+                contextFactory,
+                outlookSpoolPolicy: spoolRootPolicy)),
+            spoolRootPolicy);
         var catchUp = new OutlookHostLoop(
             options,
             environment,
@@ -138,7 +147,7 @@ internal sealed class DefaultOutlookHostApplicationFactory : IOutlookHostApplica
             controlPlane,
             adapterFactory,
             diagnostics: diagnostics);
-        return new ComposedOutlookHostApplication(catchUp, browse, dispatcher);
+        return new ComposedOutlookHostApplication(catchUp, browse, dispatcher, spoolRootPreflight);
     }
 
     private sealed class OutlookDbContextFactory(DbContextOptions<FluxKnowledgeDbContext> options)
@@ -157,10 +166,12 @@ internal sealed class DefaultOutlookHostApplicationFactory : IOutlookHostApplica
 internal sealed class ComposedOutlookHostApplication(
     OutlookHostLoop catchUp,
     OutlookFolderBrowser browse,
-    OutlookStaDispatcher dispatcher) : IOutlookHostApplication
+    OutlookStaDispatcher dispatcher,
+    SqlOutlookSpoolRootPreflight spoolRootPreflight) : IOutlookHostApplication
 {
     public async ValueTask<OutlookHostRunResult> RunOnceAsync(CancellationToken cancellationToken)
     {
+        await spoolRootPreflight.ValidateAsync(cancellationToken).ConfigureAwait(false);
         var catchUpResult = await catchUp.RunOnceAsync(cancellationToken).ConfigureAwait(false);
         return catchUpResult.Reason == OutlookHostExitReason.NoDurableWork
             ? await browse.RunOnceAsync(cancellationToken).ConfigureAwait(false)

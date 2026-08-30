@@ -40,20 +40,76 @@ public sealed class SqlServerReadinessValidator : ISqlServerReadinessValidator
                         AND [column].[name] = N'SearchText'
                 )
             THEN 1 ELSE 0 END) AS [HasExpectedArtifactSearchTextFullTextIndex],
-            CONVERT(bit, CASE WHEN EXISTS (
-                SELECT 1
-                FROM [dbo].[IndexState] AS [state]
-                INNER JOIN [dbo].[IndexGenerations] AS [generation]
-                    ON [generation].[Id] = [state].[ActiveIndexGenerationId]
-                WHERE [state].[Id] = 1
-                    AND [generation].[ValidatedAtUtc] IS NOT NULL
-                    AND LEN([generation].[IndexPath]) > 0
-            ) THEN 1 ELSE 0 END) AS [HasValidatedActiveIndex];
+            CONVERT(bit, CASE WHEN
+                EXISTS (
+                    SELECT 1
+                    FROM [dbo].[IndexState] AS [state]
+                    INNER JOIN [dbo].[IndexGenerations] AS [generation]
+                        ON [generation].[Id] = [state].[ActiveIndexGenerationId]
+                    WHERE [state].[Id] = 1
+                        AND [state].[EmptyCatalogueValidatedAtUtc] IS NULL
+                        AND [generation].[ValidatedAtUtc] IS NOT NULL
+                        AND LEN([generation].[IndexPath]) > 0
+                )
+                OR EXISTS (
+                    SELECT 1
+                    FROM [dbo].[IndexState] AS [state]
+                    WHERE [state].[Id] = 1
+                        AND [state].[ActiveIndexGenerationId] IS NULL
+                        AND [state].[EmptyCatalogueValidatedAtUtc] IS NOT NULL
+                        AND NOT EXISTS (SELECT 1 FROM [dbo].[Vectors])
+                        AND NOT EXISTS (SELECT 1 FROM [dbo].[IndexGenerations])
+                        AND NOT EXISTS (SELECT 1 FROM [dbo].[IndexGenerationVectors])
+                )
+            THEN 1 ELSE 0 END) AS [HasValidatedActiveIndex];
 
         SELECT [type_desc], [physical_name]
         FROM sys.database_files
         ORDER BY [file_id];
         """;
+
+    public string BuildIndexStateValidationSql() =>
+        """
+        SELECT CONVERT(bit, CASE WHEN
+            EXISTS (
+                SELECT 1
+                FROM [dbo].[IndexState] AS [state]
+                INNER JOIN [dbo].[IndexGenerations] AS [generation]
+                    ON [generation].[Id] = [state].[ActiveIndexGenerationId]
+                WHERE [state].[Id] = 1
+                    AND [state].[EmptyCatalogueValidatedAtUtc] IS NULL
+                    AND [generation].[ValidatedAtUtc] IS NOT NULL
+                    AND LEN([generation].[IndexPath]) > 0
+            )
+            OR EXISTS (
+                SELECT 1
+                FROM [dbo].[IndexState] AS [state]
+                WHERE [state].[Id] = 1
+                    AND [state].[ActiveIndexGenerationId] IS NULL
+                    AND [state].[EmptyCatalogueValidatedAtUtc] IS NOT NULL
+                    AND NOT EXISTS (SELECT 1 FROM [dbo].[Vectors])
+                    AND NOT EXISTS (SELECT 1 FROM [dbo].[IndexGenerations])
+                    AND NOT EXISTS (SELECT 1 FROM [dbo].[IndexGenerationVectors])
+            )
+        THEN 1 ELSE 0 END) AS [HasValidatedIndexState];
+        """;
+
+    public async Task<SqlServerReadinessResult> ValidateAsync(
+        SqlConnection connection,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+        await using var command = new SqlCommand(BuildIndexStateValidationSql(), connection);
+        var result = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+        if (result is not bool isReady || !isReady)
+        {
+            return new SqlServerReadinessResult(
+                false,
+                ["IndexState must point to a validated active index generation or a validated empty catalogue."]);
+        }
+
+        return new SqlServerReadinessResult(true, []);
+    }
 
     public async Task<SqlServerReadinessResult> ValidateAsync(
         SqlServerOptions options,

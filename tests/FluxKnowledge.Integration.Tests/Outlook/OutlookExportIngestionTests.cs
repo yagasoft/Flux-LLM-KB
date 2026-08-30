@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using FluxKnowledge.Application.Contracts;
+using FluxKnowledge.Application.Operations;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Sources;
 using FluxKnowledge.Domain.Outlook;
@@ -58,7 +59,7 @@ public sealed class OutlookExportIngestionTests(NativeSqlServerFixture fixture) 
                 CancellationToken.None);
             _ = await layout.PromoteAsync(exportId, CancellationToken.None);
 
-            var receipt = await CreateService().IngestReadyAsync(spoolRoot, exportId, CancellationToken.None);
+            var receipt = await CreateService(spoolRoot).IngestReadyAsync(spoolRoot, exportId, CancellationToken.None);
 
             Assert.True(receipt.Accepted);
             Assert.Equal(exportId, receipt.ExportId.Value);
@@ -97,7 +98,7 @@ public sealed class OutlookExportIngestionTests(NativeSqlServerFixture fixture) 
                 "message body",
                 []);
 
-            var receipt = await CreateService(useRetryingExecutionStrategy: true)
+            var receipt = await CreateService(spoolRoot, useRetryingExecutionStrategy: true)
                 .IngestReadyAsync(prepared.Request, CancellationToken.None);
 
             Assert.True(receipt.Accepted);
@@ -142,7 +143,7 @@ public sealed class OutlookExportIngestionTests(NativeSqlServerFixture fixture) 
                     new JsonSerializerOptions(JsonSerializerDefaults.Web)),
                 new UTF8Encoding(false));
 
-            var receipt = await CreateService(useRetryingExecutionStrategy: true)
+            var receipt = await CreateService(spoolRoot, useRetryingExecutionStrategy: true)
                 .IngestReadyAsync(spoolRoot, prepared.ExportId, CancellationToken.None);
 
             Assert.False(receipt.Accepted);
@@ -190,7 +191,7 @@ public sealed class OutlookExportIngestionTests(NativeSqlServerFixture fixture) 
                 JsonSerializer.Serialize(malformed, new JsonSerializerOptions(JsonSerializerDefaults.Web)),
                 new UTF8Encoding(false));
 
-            var receipt = await CreateService().IngestReadyAsync(spoolRoot, prepared.ExportId, CancellationToken.None);
+            var receipt = await CreateService(spoolRoot).IngestReadyAsync(spoolRoot, prepared.ExportId, CancellationToken.None);
 
             Assert.False(receipt.Accepted);
             Assert.True(receipt.Committed);
@@ -215,7 +216,7 @@ public sealed class OutlookExportIngestionTests(NativeSqlServerFixture fixture) 
                 Assert.DoesNotContain("not-a-canonical", audit.DetailsJson, StringComparison.OrdinalIgnoreCase);
             }
 
-            var replay = await CreateService().IngestReadyAsync(spoolRoot, prepared.ExportId, CancellationToken.None);
+            var replay = await CreateService(spoolRoot).IngestReadyAsync(spoolRoot, prepared.ExportId, CancellationToken.None);
             Assert.True(replay.IsReplay);
             Assert.False(replay.Accepted);
             Assert.Equal(receipt.ExportId, replay.ExportId);
@@ -270,7 +271,7 @@ public sealed class OutlookExportIngestionTests(NativeSqlServerFixture fixture) 
                     new JsonSerializerOptions(JsonSerializerDefaults.Web)),
                 new UTF8Encoding(false));
 
-            var receipt = await CreateService().IngestReadyAsync(spoolRoot, prepared.ExportId, CancellationToken.None);
+            var receipt = await CreateService(spoolRoot).IngestReadyAsync(spoolRoot, prepared.ExportId, CancellationToken.None);
 
             Assert.False(receipt.Accepted);
             Assert.True(receipt.Committed);
@@ -308,7 +309,7 @@ public sealed class OutlookExportIngestionTests(NativeSqlServerFixture fixture) 
                 }
             }
 
-            var replay = await CreateService().IngestReadyAsync(spoolRoot, prepared.ExportId, CancellationToken.None);
+            var replay = await CreateService(spoolRoot).IngestReadyAsync(spoolRoot, prepared.ExportId, CancellationToken.None);
             Assert.True(replay.IsReplay);
             Assert.False(replay.Accepted);
             Assert.Equal(receipt.ExportId, replay.ExportId);
@@ -349,7 +350,7 @@ public sealed class OutlookExportIngestionTests(NativeSqlServerFixture fixture) 
             var request = recovery.ToCommitRequest(exportId, manifestHash);
             var observation = request.Observation!;
 
-            var receipt = await CreateService().IngestReadyAsync(
+            var receipt = await CreateService(spoolRoot).IngestReadyAsync(
                 request,
                 CancellationToken.None);
 
@@ -425,7 +426,7 @@ public sealed class OutlookExportIngestionTests(NativeSqlServerFixture fixture) 
                 "private Outlook text",
                 []);
 
-            var receipt = await CreateService().IngestReadyAsync(
+            var receipt = await CreateService(spoolRoot).IngestReadyAsync(
                 prepared.Request,
                 CancellationToken.None);
 
@@ -447,7 +448,8 @@ public sealed class OutlookExportIngestionTests(NativeSqlServerFixture fixture) 
             Assert.False(File.Exists(Path.Combine(sharedArtifactRoot, relativePath)));
             using var reader = new SqlRetainedSourceReader(
                 new ContextFactory(_fixture.ConnectionString),
-                sharedArtifactRoot);
+                sharedArtifactRoot,
+                PersistedOutlookSpoolRootPolicy.CreateForIsolatedTests(spoolRoot));
 
             var source = await reader.ReadUtf8Async(
                 new SourceRevisionId(bodyRevisionId),
@@ -477,7 +479,7 @@ public sealed class OutlookExportIngestionTests(NativeSqlServerFixture fixture) 
                 "tampered body",
                 new UTF8Encoding(false));
             var request = prepared.Request;
-            var receipt = await CreateService().IngestReadyAsync(spoolRoot, prepared.ExportId, CancellationToken.None);
+            var receipt = await CreateService(spoolRoot).IngestReadyAsync(spoolRoot, prepared.ExportId, CancellationToken.None);
 
             Assert.False(receipt.Accepted);
             Assert.True(receipt.Committed);
@@ -531,7 +533,7 @@ public sealed class OutlookExportIngestionTests(NativeSqlServerFixture fixture) 
                 "conflicting bytes",
                 new UTF8Encoding(false));
             var request = prepared.Request;
-            var receipt = await CreateService().IngestReadyAsync(request, CancellationToken.None);
+            var receipt = await CreateService(spoolRoot).IngestReadyAsync(request, CancellationToken.None);
 
             Assert.False(receipt.Accepted);
             Assert.True(receipt.Committed);
@@ -572,7 +574,7 @@ public sealed class OutlookExportIngestionTests(NativeSqlServerFixture fixture) 
             await File.WriteAllTextAsync(outsidePath, "linked body", new UTF8Encoding(false));
             File.CreateSymbolicLink(Path.Combine(retainedDirectory, $"{bodyHash}.bin"), outsidePath);
 
-            var receipt = await CreateService().IngestReadyAsync(prepared.Request, CancellationToken.None);
+            var receipt = await CreateService(spoolRoot).IngestReadyAsync(prepared.Request, CancellationToken.None);
 
             Assert.False(receipt.Accepted);
             Assert.Equal("linked body", await File.ReadAllTextAsync(outsidePath));
@@ -607,7 +609,7 @@ public sealed class OutlookExportIngestionTests(NativeSqlServerFixture fixture) 
             var observation = request.Observation!;
 
             await Assert.ThrowsAsync<InvalidOperationException>(() =>
-                CreateService(new ThrowOnSecondSaveChangesInterceptor())
+                CreateService(spoolRoot, new ThrowOnSecondSaveChangesInterceptor())
                     .IngestReadyAsync(request, CancellationToken.None)
                     .AsTask());
 
@@ -627,7 +629,7 @@ public sealed class OutlookExportIngestionTests(NativeSqlServerFixture fixture) 
                     .SingleAsync());
             }
 
-            var retry = await CreateService().IngestReadyAsync(request, CancellationToken.None);
+            var retry = await CreateService(spoolRoot).IngestReadyAsync(request, CancellationToken.None);
 
             Assert.True(retry.Accepted);
             await using var succeeded = CreateContext();
@@ -663,7 +665,7 @@ public sealed class OutlookExportIngestionTests(NativeSqlServerFixture fixture) 
                 "supported body",
                 [("future-format.txt", "future text", contentType)]);
 
-            var receipt = await CreateService().IngestReadyAsync(
+            var receipt = await CreateService(spoolRoot).IngestReadyAsync(
                 prepared.Request,
                 CancellationToken.None);
 
@@ -701,7 +703,10 @@ public sealed class OutlookExportIngestionTests(NativeSqlServerFixture fixture) 
             await new SqlSourceActivityStore(factory, new ManualTimeProvider(Now))
                 .RegisterAsync(capability, CancellationToken.None);
 
-            Assert.Equal(1, await new SqlRetainedTextRegistrationStore(factory, new ManualTimeProvider(Now))
+            Assert.Equal(1, await new SqlRetainedTextRegistrationStore(
+                    factory,
+                    new ManualTimeProvider(Now),
+                    outlookSpoolPolicy: PersistedOutlookSpoolRootPolicy.CreateForIsolatedTests(spoolRoot))
                 .ReplayAsync(capability, seed.SourceRootId, CancellationToken.None));
             await using var replayed = CreateContext();
             var replayedActivity = await replayed.SourceActivities
@@ -743,7 +748,7 @@ public sealed class OutlookExportIngestionTests(NativeSqlServerFixture fixture) 
                 CancellationToken.None);
             _ = await layout.PromoteAsync(exportId, CancellationToken.None);
 
-            Assert.True((await CreateService().IngestReadyAsync(spoolRoot, exportId, CancellationToken.None)).Accepted);
+            Assert.True((await CreateService(spoolRoot).IngestReadyAsync(spoolRoot, exportId, CancellationToken.None)).Accepted);
 
             Guid activityId;
             Guid revisionId;
@@ -777,7 +782,10 @@ public sealed class OutlookExportIngestionTests(NativeSqlServerFixture fixture) 
             await new SqlSourceActivityStore(factory, new ManualTimeProvider(Now))
                 .RegisterAsync(capability, CancellationToken.None);
 
-            Assert.Equal(0, await new SqlRetainedTextRegistrationStore(factory, new ManualTimeProvider(Now))
+            Assert.Equal(0, await new SqlRetainedTextRegistrationStore(
+                    factory,
+                    new ManualTimeProvider(Now),
+                    outlookSpoolPolicy: PersistedOutlookSpoolRootPolicy.CreateForIsolatedTests(spoolRoot))
                 .ReplayAsync(capability, seed.SourceRootId, CancellationToken.None));
             await using var verification = CreateContext();
             Assert.Null((await verification.SourceActivities.SingleAsync(row => row.Id == activityId)).ResultingPipelineRecordId);
@@ -807,7 +815,7 @@ public sealed class OutlookExportIngestionTests(NativeSqlServerFixture fixture) 
                 Now.AddMinutes(3),
                 "supported body",
                 [("future-format.txt", "future text", contentType)]);
-            Assert.True((await CreateService().IngestReadyAsync(prepared.Request, CancellationToken.None)).Accepted);
+            Assert.True((await CreateService(spoolRoot).IngestReadyAsync(prepared.Request, CancellationToken.None)).Accepted);
 
             Guid deferredActivityId;
             string retainedPath;
@@ -834,7 +842,10 @@ public sealed class OutlookExportIngestionTests(NativeSqlServerFixture fixture) 
             await new SqlSourceActivityStore(factory, new ManualTimeProvider(Now))
                 .RegisterAsync(capability, CancellationToken.None);
 
-            Assert.Equal(0, await new SqlRetainedTextRegistrationStore(factory, new ManualTimeProvider(Now))
+            Assert.Equal(0, await new SqlRetainedTextRegistrationStore(
+                    factory,
+                    new ManualTimeProvider(Now),
+                    outlookSpoolPolicy: PersistedOutlookSpoolRootPolicy.CreateForIsolatedTests(spoolRoot))
                 .ReplayAsync(capability, seed.SourceRootId, CancellationToken.None));
             await using var verification = CreateContext();
             var activity = await verification.SourceActivities.SingleAsync(row => row.Id == deferredActivityId);
@@ -871,7 +882,7 @@ public sealed class OutlookExportIngestionTests(NativeSqlServerFixture fixture) 
                 Now.AddMinutes(3),
                 "supported body",
                 [("future-format.txt", "future text", contentType)]);
-            Assert.True((await CreateService().IngestReadyAsync(prepared.Request, CancellationToken.None)).Accepted);
+            Assert.True((await CreateService(spoolRoot).IngestReadyAsync(prepared.Request, CancellationToken.None)).Accepted);
 
             Guid deferredActivityId;
             string retainedPath;
@@ -898,7 +909,10 @@ public sealed class OutlookExportIngestionTests(NativeSqlServerFixture fixture) 
             await new SqlSourceActivityStore(factory, new ManualTimeProvider(Now))
                 .RegisterAsync(capability, CancellationToken.None);
 
-            Assert.Equal(0, await new SqlRetainedTextRegistrationStore(factory, new ManualTimeProvider(Now))
+            Assert.Equal(0, await new SqlRetainedTextRegistrationStore(
+                    factory,
+                    new ManualTimeProvider(Now),
+                    outlookSpoolPolicy: PersistedOutlookSpoolRootPolicy.CreateForIsolatedTests(spoolRoot))
                 .ReplayAsync(capability, seed.SourceRootId, CancellationToken.None));
             await using var verification = CreateContext();
             var activity = await verification.SourceActivities.SingleAsync(row => row.Id == deferredActivityId);
@@ -930,7 +944,7 @@ public sealed class OutlookExportIngestionTests(NativeSqlServerFixture fixture) 
                 Now.AddMinutes(3),
                 "supported body",
                 [("future-format.txt", "future text", contentType)]);
-            Assert.True((await CreateService().IngestReadyAsync(prepared.Request, CancellationToken.None)).Accepted);
+            Assert.True((await CreateService(spoolRoot).IngestReadyAsync(prepared.Request, CancellationToken.None)).Accepted);
 
             Guid deferredActivityId;
             string retainedPath;
@@ -961,7 +975,10 @@ public sealed class OutlookExportIngestionTests(NativeSqlServerFixture fixture) 
             await new SqlSourceActivityStore(factory, new ManualTimeProvider(Now))
                 .RegisterAsync(capability, CancellationToken.None);
 
-            Assert.Equal(0, await new SqlRetainedTextRegistrationStore(factory, new ManualTimeProvider(Now))
+            Assert.Equal(0, await new SqlRetainedTextRegistrationStore(
+                    factory,
+                    new ManualTimeProvider(Now),
+                    outlookSpoolPolicy: PersistedOutlookSpoolRootPolicy.CreateForIsolatedTests(spoolRoot))
                 .ReplayAsync(capability, seed.SourceRootId, CancellationToken.None));
             Assert.Equal("future text", await File.ReadAllTextAsync(outsidePath));
             await using var verification = CreateContext();
@@ -998,7 +1015,7 @@ public sealed class OutlookExportIngestionTests(NativeSqlServerFixture fixture) 
             var prepared = await PrepareExportAsync(
                 spoolRoot, seed, "entry-replay", Now.AddMinutes(4), "replay body", []);
             var request = prepared.Request;
-            var service = CreateService();
+            var service = CreateService(spoolRoot);
 
             var first = await service.IngestReadyAsync(request, CancellationToken.None);
             var replay = await service.IngestReadyAsync(request, CancellationToken.None);
@@ -1035,7 +1052,7 @@ public sealed class OutlookExportIngestionTests(NativeSqlServerFixture fixture) 
             var firstReady = await PrepareExportAsync(
                 spoolRoot, seed, "entry-conflict", Now.AddMinutes(5), "accepted body", []);
             var firstObservation = firstReady.Request.Observation!;
-            var service = CreateService();
+            var service = CreateService(spoolRoot);
             var accepted = await service.IngestReadyAsync(
                 firstReady.Request,
                 CancellationToken.None);
@@ -1243,9 +1260,13 @@ public sealed class OutlookExportIngestionTests(NativeSqlServerFixture fixture) 
     }
 
     private SqlOutlookExportIngestionService CreateService(
+        string spoolRoot,
         IInterceptor? interceptor = null,
         bool useRetryingExecutionStrategy = false) =>
-        new(new ContextFactory(_fixture.ConnectionString, interceptor, useRetryingExecutionStrategy), new ManualTimeProvider(Now));
+        new(
+            new ContextFactory(_fixture.ConnectionString, interceptor, useRetryingExecutionStrategy),
+            new ManualTimeProvider(Now),
+            PersistedOutlookSpoolRootPolicy.CreateForIsolatedTests(spoolRoot));
 
     private FluxKnowledgeDbContext CreateContext() => new(
         new DbContextOptionsBuilder<FluxKnowledgeDbContext>()

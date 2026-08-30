@@ -159,6 +159,19 @@ public sealed class SchemaMappingTests
     }
 
     [Fact]
+    public void Index_state_maps_the_empty_catalogue_marker_and_excludes_an_active_generation()
+    {
+        using var context = CreateContext();
+        var indexState = FindTable(context.GetService<IDesignTimeModel>().Model, "IndexState");
+
+        AssertProperty<DateTimeOffset?>(indexState, "EmptyCatalogueValidatedAtUtc");
+        Assert.Contains(
+            indexState.GetCheckConstraints(),
+            constraint => constraint.Name == "CK_IndexState_ActiveGenerationOrEmptyCatalogue" &&
+                          constraint.Sql == "[ActiveIndexGenerationId] IS NULL OR [EmptyCatalogueValidatedAtUtc] IS NULL");
+    }
+
+    [Fact]
     public void Gpu_mini_task_mapping_preserves_future_lane_fields()
     {
         using var context = CreateContext();
@@ -1322,9 +1335,14 @@ public sealed class NativeSchemaMigrationTests(NativeSqlServerFixture fixture)
                 GenerationId = snapshotOnlyGenerationId,
                 VectorId = vectorId
             });
-            var activeState = await context.IndexState.SingleAsync(state => state.Id == 1);
-            activeState.ActiveIndexGenerationId = snapshotOnlyGenerationId;
             await context.SaveChangesAsync();
+
+            await context.Database.ExecuteSqlInterpolatedAsync(
+                $"""
+                 UPDATE [IndexState]
+                 SET [ActiveIndexGenerationId] = {snapshotOnlyGenerationId}
+                 WHERE [Id] = {1};
+                 """);
 
             var failure = await Assert.ThrowsAsync<SqlException>(
                 async () => await context.GetService<IMigrator>()

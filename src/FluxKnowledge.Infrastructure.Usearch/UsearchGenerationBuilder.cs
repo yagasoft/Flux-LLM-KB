@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Cloud.Unum.USearch;
 using FluxKnowledge.Application.Ports;
+using FluxKnowledge.Application.Operations;
 
 namespace FluxKnowledge.Infrastructure.Usearch;
 
@@ -10,18 +11,52 @@ public sealed class RecoveryCandidatePlacementException(string path, Exception i
     public string Path { get; } = path;
 }
 
-public sealed class UsearchGenerationBuilder(
-    IIndexGenerationStore store,
-    UsearchIndexOptions options,
-    UsearchGenerationValidator validator) : IIndexGenerationPublisher
+public sealed class UsearchGenerationBuilder : IIndexGenerationPublisher
 {
+    private readonly IIndexGenerationStore store;
+    private readonly UsearchIndexOptions options;
+    private readonly UsearchGenerationValidator validator;
+    private readonly LiveRootStorageSafety? _storageSafety;
+    private readonly IUsearchDirectoryCreator _directoryCreator;
+
+    public UsearchGenerationBuilder(
+        IIndexGenerationStore store,
+        UsearchIndexOptions options,
+        UsearchGenerationValidator validator)
+        : this(
+            store,
+            options,
+            validator,
+            storageSafety: null,
+            FileSystemUsearchDirectoryCreator.Instance)
+    {
+    }
+
+    internal UsearchGenerationBuilder(
+        IIndexGenerationStore store,
+        UsearchIndexOptions options,
+        UsearchGenerationValidator validator,
+        LiveRootStorageSafety? storageSafety,
+        IUsearchDirectoryCreator directoryCreator)
+    {
+        ArgumentNullException.ThrowIfNull(store);
+        ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(validator);
+        ArgumentNullException.ThrowIfNull(directoryCreator);
+        this.store = store;
+        this.options = options;
+        this.validator = validator;
+        _storageSafety = storageSafety;
+        _directoryCreator = directoryCreator;
+    }
+
     public ValueTask<IndexGenerationDescriptor> BuildRecoveryCandidateAsync(
         IndexGenerationDescriptor generation,
         IReadOnlyList<CanonicalVector> membership,
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        var fileSystem = new DerivedIndexFileSystem(options);
+        var fileSystem = new DerivedIndexFileSystem(options, null, _storageSafety, _directoryCreator);
         if (!fileSystem.TryCreateRecoveryStagingDirectory(out var staging))
         {
             throw new InvalidOperationException("The recovery staging directory cannot be created safely.");
@@ -31,7 +66,12 @@ public sealed class UsearchGenerationBuilder(
         {
             SaveCandidate(staging, generation, membership);
             validator.Validate(staging, generation, membership);
-            var path = AtomicGenerationPlacement.PlaceRecovery(options, generation.Id, staging);
+            var path = AtomicGenerationPlacement.PlaceRecovery(
+                options,
+                generation.Id,
+                staging,
+                _storageSafety,
+                _directoryCreator);
             placedPath = path;
             validator.Validate(path, generation with { IndexPath = path }, membership);
             return ValueTask.FromResult(generation with { IndexPath = path });
@@ -62,13 +102,14 @@ public sealed class UsearchGenerationBuilder(
             throw new IndexGenerationValidationException("The immutable SQL generation membership cannot be rebuilt safely.");
         }
 
+        EnsureStorageSafe(existing.IndexPath);
         if (Directory.Exists(existing.IndexPath))
         {
             validator.Validate(existing.IndexPath, existing, vectors);
             return existing;
         }
 
-        var fileSystem = new DerivedIndexFileSystem(options);
+        var fileSystem = new DerivedIndexFileSystem(options, null, _storageSafety, _directoryCreator);
         if (!fileSystem.TryCreateRecoveryStagingDirectory(out var staging))
         {
             throw new InvalidOperationException("The recovery staging directory cannot be created safely.");
@@ -77,7 +118,12 @@ public sealed class UsearchGenerationBuilder(
         {
             SaveCandidate(staging, existing, vectors);
             validator.Validate(staging, existing, vectors);
-            var finalPath = AtomicGenerationPlacement.Place(options, existing.Id, staging);
+            var finalPath = AtomicGenerationPlacement.Place(
+                options,
+                existing.Id,
+                staging,
+                _storageSafety,
+                _directoryCreator);
             var rebuilt = existing with { IndexPath = finalPath };
             await store.UpdateGenerationMetadataAsync(rebuilt, cancellationToken);
             return rebuilt;
@@ -116,6 +162,7 @@ public sealed class UsearchGenerationBuilder(
         var finalDirectory = Path.Combine(options.RootPath, "generations", candidateId.ToString("N"));
         var candidate = new IndexGenerationDescriptor(candidateId, fingerprint, dimensions,
             finalDirectory, membershipChecksum, vectors.Count);
+        EnsureStorageSafe(finalDirectory);
         if (Directory.Exists(finalDirectory))
         {
             validator.Validate(finalDirectory, candidate, vectors);
@@ -123,14 +170,20 @@ public sealed class UsearchGenerationBuilder(
         }
 
         var staging = Path.Combine(options.RootPath, "staging", candidateId.ToString("N"), Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(staging);
+        EnsureStorageSafe(staging);
+        _directoryCreator.CreateDirectory(staging);
         try
         {
             SaveCandidate(staging, candidate, vectors);
             validator.Validate(staging, candidate, vectors);
             try
             {
-                var finalPath = AtomicGenerationPlacement.Place(options, candidateId, staging);
+                var finalPath = AtomicGenerationPlacement.Place(
+                    options,
+                    candidateId,
+                    staging,
+                    _storageSafety,
+                    _directoryCreator);
                 candidate = candidate with { IndexPath = finalPath };
                 return new IndexGenerationCandidateSnapshot(candidate, vectors);
             }
@@ -152,11 +205,12 @@ public sealed class UsearchGenerationBuilder(
         }
     }
 
-    private static void SaveCandidate(
+    private void SaveCandidate(
         string staging,
         IndexGenerationDescriptor candidate,
         IReadOnlyList<CanonicalVector> vectors)
     {
+        EnsureStorageSafe(staging);
         using (var index = new USearchIndex(MetricKind.Cos, ScalarKind.Float32, (ulong)candidate.Dimensions, 0, 0, 0, false))
         {
             foreach (var vector in vectors)
@@ -172,4 +226,6 @@ public sealed class UsearchGenerationBuilder(
                 candidate.Id, candidate.ModelFingerprint, "cos", candidate.Dimensions,
                 candidate.VectorCount, candidate.MetadataChecksum)));
     }
+
+    private void EnsureStorageSafe(string path) => _storageSafety?.ValidateBeforeIo(path);
 }

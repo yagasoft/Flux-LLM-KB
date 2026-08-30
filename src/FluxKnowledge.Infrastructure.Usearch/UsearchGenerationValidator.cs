@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using Cloud.Unum.USearch;
 using FluxKnowledge.Application.Ports;
+using FluxKnowledge.Application.Operations;
 
 namespace FluxKnowledge.Infrastructure.Usearch;
 
@@ -10,6 +11,13 @@ public sealed class IndexGenerationValidationException(string message) : Excepti
 
 public class UsearchGenerationValidator
 {
+    private readonly LiveRootStorageSafety? _storageSafety;
+
+    public UsearchGenerationValidator(LiveRootStorageSafety? storageSafety = null)
+    {
+        _storageSafety = storageSafety;
+    }
+
     public const string IndexFileName = "index.usearch";
     public const string MetadataFileName = "metadata.json";
 
@@ -27,6 +35,7 @@ public class UsearchGenerationValidator
 
     public virtual void Validate(string directory, IndexGenerationDescriptor expected, IReadOnlyList<CanonicalVector> vectors)
     {
+        _storageSafety?.ValidateBeforeIo(directory);
         try
         {
             ValidateCore(directory, expected, vectors);

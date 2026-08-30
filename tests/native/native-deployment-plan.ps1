@@ -9,14 +9,34 @@ if ([string]::IsNullOrWhiteSpace($SourceRoot)) {
 }
 $SourceRoot = (Resolve-Path -LiteralPath $SourceRoot).Path
 $deploymentScript = Join-Path $SourceRoot "scripts\deploy\update-native-windows.ps1"
+$goLiveModule = Join-Path $SourceRoot "scripts\deploy\native-go-live.psm1"
+$cliProgram = Join-Path $SourceRoot "src\FluxKnowledge.Cli\Program.cs"
 $outlookValidator = Join-Path $SourceRoot "scripts\deploy\validate-native-outlook-ingress.ps1"
 $workerValidator = Join-Path $SourceRoot "scripts\deploy\validate-native-worker-supervision.ps1"
 $phase5Validator = Join-Path $SourceRoot "scripts\deploy\validate-phase-5-deployment.ps1"
 $loopbackProbeHelper = Join-Path $SourceRoot "scripts\deploy\loopback-deployment-safety.ps1"
-if (-not (Test-Path -LiteralPath $deploymentScript)) {
+$bootstrapManifestTest = Join-Path $SourceRoot "tests\native\native-go-live-bootstrap-manifest.ps1"
+if (-not (Test-Path -LiteralPath $deploymentScript) -or -not (Test-Path -LiteralPath $goLiveModule -PathType Leaf)) {
     throw "The native deployment script is missing."
 }
-foreach ($requiredScript in @($outlookValidator, $workerValidator, $phase5Validator, $loopbackProbeHelper)) {
+if (-not (Test-Path -LiteralPath $cliProgram -PathType Leaf)) {
+    throw "The normal CLI dispatch source is missing."
+}
+
+function Assert-False {
+    param([bool]$Condition, [string]$Message)
+    if ($Condition) { throw $Message }
+}
+
+function Test-CliContainsCommand {
+    param([Parameter(Mandatory)][string]$Name)
+
+    $cliText = Get-Content -LiteralPath $cliProgram -Raw
+    return $cliText -match ('(?m)^\s*"{0}"\s*=>' -f [regex]::Escape($Name))
+}
+
+Assert-False (Test-CliContainsCommand -Name 'provision-sql') 'Normal CLI cannot initialise SQL.'
+foreach ($requiredScript in @($outlookValidator, $workerValidator, $phase5Validator, $loopbackProbeHelper, $bootstrapManifestTest)) {
     if (-not (Test-Path -LiteralPath $requiredScript -PathType Leaf)) {
         throw "A required native deployment validator or safety helper is missing: $requiredScript"
     }
@@ -31,6 +51,28 @@ if ($LASTEXITCODE -ne 0) {
 $plan = $output | ConvertFrom-Json
 if ($plan.mode -ne "plan-only" -or -not $plan.loopback_only -or -not $plan.requires_explicit_migration_confirmation) {
     throw "The native deployment plan has lost its loopback or migration-confirmation gate."
+}
+if ($plan.migration_update_available -ne $false) {
+    throw "The native deployment plan must keep non-disposable migration unavailable until guarded VSS go-live authority exists."
+}
+if ($plan.execution_available -ne $false -or
+    $plan.executionAvailable -ne $false -or
+    $plan.root -ne 'I:\FluxKnowledge' -or
+    $plan.siteName -ne 'FluxKnowledge' -or
+    $plan.loopbackPort -ne 5137 -or
+    $plan.live_root -ne 'I:\FluxKnowledge' -or
+    $plan.application_root -ne 'I:\FluxKnowledge\App' -or
+    $plan.config_root -ne 'I:\FluxKnowledge\Config' -or
+    $plan.sql_data_file -ne 'I:\FluxKnowledge\Data\Sql\Data\FluxKnowledge.mdf' -or
+    $plan.sql_log_file -ne 'I:\FluxKnowledge\Data\Sql\Log\FluxKnowledge_log.ldf' -or
+    $plan.index_root -ne 'I:\FluxKnowledge\Data\Index' -or
+    $plan.retained_root -ne 'I:\FluxKnowledge\Data\Retained' -or
+    $plan.spool_root -ne 'I:\FluxKnowledge\Runtime\Spool' -or
+    $plan.temp_root -ne 'I:\FluxKnowledge\Runtime\Temp' -or
+    $plan.logs_root -ne 'I:\FluxKnowledge\Runtime\Logs' -or
+    $plan.codex_plugin_root -ne 'I:\FluxKnowledge\CodexPlugin' -or
+    $plan.recovery_root -ne 'I:\FluxKnowledge\Recovery') {
+    throw "The native deployment plan is not bound to the complete canonical live-root layout."
 }
 if ($plan.required_site -ne "FluxKnowledge") {
     throw "The native deployment plan is not fixed to the FluxKnowledge IIS site."
@@ -85,6 +127,62 @@ finally {
 }
 if ($wrongSiteExitCode -eq 0 -or $wrongSiteOutput -notmatch "fixed FluxKnowledge IIS site") {
     throw "The native deployment executable does not reject a non-FluxKnowledge IIS target before preflight."
+}
+
+$deploymentScriptText = Get-Content -LiteralPath $deploymentScript -Raw
+$publicHostEffectPattern = '\b(?:Get-Website|Get-WebBinding|Stop-WebAppPool|Start-WebAppPool|Invoke-Sqlcmd|SqlConnection|codex\.exe|dotnet\s+(?:publish|run))\b'
+if ($deploymentScriptText -match $publicHostEffectPattern) {
+    throw "The public native deployment façade contains a production host operation."
+}
+
+function Invoke-ExpectedNativeRejection {
+    param(
+        [string]$Script,
+        [string[]]$Arguments = @()
+    )
+
+    $previousPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $commandArguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $Script) + $Arguments
+        $rejectedOutput = & powershell @commandArguments 2>&1 | Out-String
+        return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = $rejectedOutput }
+    }
+    finally {
+        $ErrorActionPreference = $previousPreference
+    }
+}
+
+$ordinary = Invoke-ExpectedNativeRejection -Script $deploymentScript
+if ($ordinary.ExitCode -eq 0 -or
+    $ordinary.Output -notmatch 'Native deployment execution is unavailable until guarded go-live authority is implemented') {
+    throw "An ordinary native deployment invocation can pass the preparation-only execution fence."
+}
+
+$directGoLive = Invoke-ExpectedNativeRejection `
+    -Script $deploymentScript `
+    -Arguments @('-GoLive', '-ConfirmCleanSlate', '-ConfirmConfigureVss', '-ConfirmDestroySql', '-ConfirmRegisterCodex')
+if ($directGoLive.ExitCode -eq 0 -or $directGoLive.Output -notmatch 'claimed in-process authority') {
+    throw 'Direct native go-live execution is not fenced behind the in-process authority.'
+}
+
+$alternateRoot = Invoke-ExpectedNativeRejection `
+    -Script $deploymentScript `
+    -Arguments @('-PlanOnly', '-DeployRoot', 'C:\alternate-flux-app')
+if ($alternateRoot.ExitCode -eq 0 -or $alternateRoot.Output -notmatch 'canonical I:\\FluxKnowledge\\App root') {
+    throw "The native deployment plan accepts a non-canonical application root."
+}
+
+foreach ($validatorCase in @(
+    @{ Script = $outlookValidator; Arguments = @('-PlanOnly') },
+    @{ Script = $phase5Validator; Arguments = @('-PlanOnly') },
+    @{ Script = $workerValidator; Arguments = @('-ExpectedMigrationId', '20260101000000_AddNativeWorkerSupervision') }
+)) {
+    $validatorArguments = @('-SourceRoot', $SourceRoot, '-DeployRoot', 'C:\alternate-flux-app') + @($validatorCase.Arguments)
+    $validator = Invoke-ExpectedNativeRejection -Script $validatorCase.Script -Arguments $validatorArguments
+    if ($validator.ExitCode -eq 0 -or $validator.Output -notmatch 'canonical I:\\FluxKnowledge\\App root') {
+        throw "A native deployment validator accepts or inspects a non-canonical application root: $($validatorCase.Script)"
+    }
 }
 
 $expectedBaselineMigrations = @(
@@ -268,11 +366,24 @@ if (-not $plan.source_artifact_store_acl_rejects_protected_root_overlap) {
     throw "The native deployment plan does not fence retained-source storage permissions from protected roots."
 }
 
-$requiredEndpoints = @("/health/live", "/health/ready", "/api/index-health", "/api/gpu-status")
+$requiredEndpoints = @(
+    "/health/live", "/health/ready", "/api/index-health", "/api/gpu-status",
+    "POST /api/v1/knowledge/search", "POST /mcp initialize", "POST /mcp tools/list")
 foreach ($endpoint in $requiredEndpoints) {
     if ($endpoint -notin @($plan.required_endpoints)) {
         throw "The native deployment plan is missing required endpoint $endpoint."
     }
+}
+
+$goLiveModuleInstance = Import-Module $goLiveModule -Force -PassThru
+try {
+    if ('Invoke-NativeGoLive' -in @($goLiveModuleInstance.ExportedCommands.Keys) -or
+        @($goLiveModuleInstance.ExportedCommands.Keys) -notcontains 'Get-NativeGoLivePlan') {
+        throw 'The native go-live executor is exported or the read-only plan surface is unavailable.'
+    }
+}
+finally {
+    Remove-Module $goLiveModuleInstance -Force -ErrorAction SilentlyContinue
 }
 
 $hashHelper = Join-Path $SourceRoot "scripts\deploy\get-sha256.ps1"
@@ -305,8 +416,13 @@ if (Get-Command Get-FileHash -ErrorAction SilentlyContinue) {
     }
 }
 
-$deploymentScriptText = Get-Content -LiteralPath $deploymentScript -Raw
-foreach ($probeScript in @($deploymentScript, $workerValidator, $outlookValidator, $phase5Validator)) {
+if ($deploymentScriptText -match '(?i)\bBackupRoot\b|BACKUP\s+DATABASE|RESTORE\s+(?:VERIFYONLY|DATABASE)|backup_path') {
+    throw "The native deployment executable retains a file-copy backup or restore path instead of the VSS-only recovery policy."
+}
+if ($deploymentScriptText -notmatch 'Native SQL migration is unavailable until the guarded VSS go-live workflow is authorised') {
+    throw "The native deployment executable does not refuse non-disposable migration while go-live execution is unavailable."
+}
+foreach ($probeScript in @($workerValidator, $outlookValidator, $phase5Validator)) {
     $probeScriptText = Get-Content -LiteralPath $probeScript -Raw
     if ($probeScriptText -notmatch '\bInvoke-FixedLoopbackProbe\b' -or
         $probeScriptText -match '\bInvoke-WebRequest\b') {
@@ -326,21 +442,21 @@ foreach ($activationCommand in @(
         throw "The native deployment executable retains an Outlook activation command: $activationCommand"
     }
 }
-if ($deploymentScriptText -notmatch 'Assert-AnonymousIisAuthentication' -or
-    $deploymentScriptText -notmatch 'anonymousAuthentication') {
-    throw "The native deployment executable does not enforce anonymous IIS authentication for the local Outlook operator route."
+$goLiveModuleText = Get-Content -LiteralPath $goLiveModule -Raw
+$guardedHostText = Get-Content -LiteralPath (Join-Path $sourceRoot 'src\FluxKnowledge.Integrations\Windows\NativeGoLive\GuardedNativeGoLiveHost.cs') -Raw
+if ($guardedHostText -notmatch 'NativeGoLiveIisObservation' -or
+    $guardedHostText -notmatch 'AnonymousAuthentication' -or
+    $guardedHostText -notmatch 'WindowsAuthentication' -or
+    $guardedHostText -notmatch '127\.0\.0\.1') {
+    throw "The private native go-live module does not enforce the fixed IIS authentication contract."
 }
-if ($deploymentScriptText -match 'list config .*/config:apphost') {
-    throw "The native deployment executable must use a valid appcmd list-config invocation when verifying IIS authentication."
+if ($goLiveModuleText -match '\bGet-FileHash\b') {
+    throw "The private native go-live module uses the unavailable Windows PowerShell hash cmdlet."
 }
-if (-not $deploymentScriptText.Contains('$windows -notmatch ''enabled="false"''')) {
-    throw "The native deployment executable must positively require disabled IIS Windows authentication."
-}
-if ($deploymentScriptText -match 'set config .*/section:windowsAuthentication') {
-    throw "The native deployment executable must not configure IIS Windows authentication."
-}
-if ($deploymentScriptText -match '\bGet-FileHash\b' -or $deploymentScriptText -notmatch 'get-sha256\.ps1') {
-    throw "The native deployment executable is not wired to the compatible SHA-256 helper."
+
+$bootstrapManifestOutput = & pwsh -NoProfile -File $bootstrapManifestTest -SourceRoot $SourceRoot 2>&1 | Out-String
+if ($LASTEXITCODE -ne 0) {
+    throw "The reviewed native go-live SQL bootstrap manifest is not reproducible: $bootstrapManifestOutput"
 }
 
 Write-Output "Native deployment plan contract passed."

@@ -43,6 +43,87 @@ internal static class SchemaConfiguration
     }
 }
 
+public sealed class NativeOperationIntentConfiguration : IEntityTypeConfiguration<NativeOperationIntentEntity>
+{
+    public void Configure(EntityTypeBuilder<NativeOperationIntentEntity> builder)
+    {
+        builder.ToTable("NativeOperationIntents", table =>
+        {
+            table.HasCheckConstraint("CK_NativeOperationIntents_RequestFingerprint", SchemaConfiguration.Sha256CheckFor("RequestFingerprint"));
+            table.HasCheckConstraint("CK_NativeOperationIntents_ConfirmationHash", SchemaConfiguration.Sha256CheckFor("ConfirmationHash"));
+            table.HasCheckConstraint("CK_NativeOperationIntents_Expiry", "[ExpiresAtUtc] > [CreatedAtUtc]");
+            table.HasCheckConstraint("CK_NativeOperationIntents_TargetMetadataBounded", "DATALENGTH([TargetMetadataJson]) <= 32768");
+        });
+        builder.HasKey(entity => entity.Id);
+        builder.Property(entity => entity.Id).ValueGeneratedNever();
+        builder.Property(entity => entity.Action).HasMaxLength(128).IsRequired().UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(entity => entity.ActorSurface).HasMaxLength(64).IsRequired().UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        SchemaConfiguration.ConfigureHash(builder.Property(entity => entity.RequestFingerprint));
+        builder.Property(entity => entity.RequestFingerprint).UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        SchemaConfiguration.ConfigureHash(builder.Property(entity => entity.ConfirmationHash));
+        builder.Property(entity => entity.ConfirmationHash).UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(entity => entity.TargetMetadataJson).HasColumnType("nvarchar(max)").IsRequired();
+        builder.Property(entity => entity.CreatedAtUtc).HasColumnType("datetimeoffset(7)");
+        builder.Property(entity => entity.ExpiresAtUtc).HasColumnType("datetimeoffset(7)");
+        builder.Property(entity => entity.ConsumedAtUtc).HasColumnType("datetimeoffset(7)");
+        SchemaConfiguration.ConfigureRowVersion(builder.Property(entity => entity.RowVersion));
+        foreach (var property in new[]
+        {
+            nameof(NativeOperationIntentEntity.Id), nameof(NativeOperationIntentEntity.Action),
+            nameof(NativeOperationIntentEntity.ActorSurface), nameof(NativeOperationIntentEntity.RequestFingerprint),
+            nameof(NativeOperationIntentEntity.ConfirmationHash), nameof(NativeOperationIntentEntity.TargetMetadataJson),
+            nameof(NativeOperationIntentEntity.CreatedAtUtc),
+            nameof(NativeOperationIntentEntity.ExpiresAtUtc)
+        })
+        {
+            builder.Property(property).Metadata.SetAfterSaveBehavior(PropertySaveBehavior.Throw);
+        }
+        builder.HasIndex(entity => entity.ConfirmationHash).IsUnique();
+        builder.HasIndex(entity => new { entity.ExpiresAtUtc, entity.ConsumedAtUtc });
+    }
+}
+
+public sealed class NativeOperationReceiptConfiguration : IEntityTypeConfiguration<NativeOperationReceiptEntity>
+{
+    public void Configure(EntityTypeBuilder<NativeOperationReceiptEntity> builder)
+    {
+        builder.ToTable("NativeOperationReceipts", table =>
+        {
+            table.HasCheckConstraint("CK_NativeOperationReceipts_RequestFingerprint", SchemaConfiguration.Sha256CheckFor("RequestFingerprint"));
+            table.HasCheckConstraint("CK_NativeOperationReceipts_IdempotencyKey", "DATALENGTH([IdempotencyKey]) > 0 AND DATALENGTH([IdempotencyKey]) <= 128");
+        });
+        builder.HasKey(entity => entity.OperationId);
+        builder.Property(entity => entity.OperationId).ValueGeneratedNever();
+        builder.Property(entity => entity.IntentId).ValueGeneratedNever();
+        builder.Property(entity => entity.Action).HasMaxLength(128).IsRequired().UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(entity => entity.ActorSurface).HasMaxLength(64).IsRequired().UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(entity => entity.IdempotencyKey).HasMaxLength(128).IsUnicode(false).IsRequired().UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        SchemaConfiguration.ConfigureHash(builder.Property(entity => entity.RequestFingerprint));
+        builder.Property(entity => entity.RequestFingerprint).UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(entity => entity.Outcome).HasMaxLength(64).IsRequired().UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(entity => entity.ReasonCode).HasMaxLength(128).UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(entity => entity.CompletedAtUtc).HasColumnType("datetimeoffset(7)");
+        SchemaConfiguration.ConfigureRowVersion(builder.Property(entity => entity.RowVersion));
+        SchemaConfiguration.ConfigureImmutableAfterInsert(builder);
+        builder.HasIndex(entity => entity.IntentId).IsUnique();
+        builder.HasIndex(entity => new { entity.ActorSurface, entity.IdempotencyKey }).IsUnique();
+        builder.HasOne<NativeOperationIntentEntity>().WithMany().HasForeignKey(entity => entity.IntentId).OnDelete(DeleteBehavior.Restrict);
+    }
+}
+
+public sealed class NativeOperationFenceTargetConfiguration : IEntityTypeConfiguration<NativeOperationFenceTargetEntity>
+{
+    public void Configure(EntityTypeBuilder<NativeOperationFenceTargetEntity> builder)
+    {
+        builder.ToTable("NativeOperationFenceTargets");
+        builder.HasKey(entity => entity.TargetId);
+        builder.Property(entity => entity.TargetId).HasMaxLength(256).IsRequired().UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(entity => entity.Value).HasMaxLength(512).IsRequired();
+        SchemaConfiguration.ConfigureRowVersion(builder.Property(entity => entity.RowVersion));
+        SchemaConfiguration.ConfigureImmutableAfterInsert(builder.Property(entity => entity.TargetId));
+    }
+}
+
 public sealed class OutlookCaptureProfileConfiguration : IEntityTypeConfiguration<OutlookCaptureProfileEntity>
 {
     public void Configure(EntityTypeBuilder<OutlookCaptureProfileEntity> builder)
@@ -408,10 +489,17 @@ public sealed class IndexStateConfiguration : IEntityTypeConfiguration<IndexStat
     {
         builder.ToTable(
             "IndexState",
-            table => table.HasCheckConstraint("CK_IndexState_Singleton", "[Id] = 1"));
+            table =>
+            {
+                table.HasCheckConstraint("CK_IndexState_Singleton", "[Id] = 1");
+                table.HasCheckConstraint(
+                    "CK_IndexState_ActiveGenerationOrEmptyCatalogue",
+                    "[ActiveIndexGenerationId] IS NULL OR [EmptyCatalogueValidatedAtUtc] IS NULL");
+            });
         builder.HasKey(entity => entity.Id);
         builder.Property(entity => entity.Id).ValueGeneratedNever();
         builder.Property(entity => entity.UpdatedAtUtc).HasColumnType("datetimeoffset(7)");
+        builder.Property(entity => entity.EmptyCatalogueValidatedAtUtc).HasColumnType("datetimeoffset(7)");
         SchemaConfiguration.ConfigureRowVersion(builder.Property(entity => entity.RowVersion));
         builder.HasOne(entity => entity.ActiveIndexGeneration)
             .WithMany()
@@ -1427,6 +1515,83 @@ public sealed class SourceActivityRelationConfiguration : IEntityTypeConfigurati
         builder.HasIndex(value => value.PredecessorActivityId).IsUnique(); builder.HasIndex(value => value.SuccessorActivityId).IsUnique();
         builder.HasOne<SourceActivityEntity>().WithMany().HasForeignKey(value => value.PredecessorActivityId).OnDelete(DeleteBehavior.Restrict);
         builder.HasOne<SourceActivityEntity>().WithMany().HasForeignKey(value => value.SuccessorActivityId).OnDelete(DeleteBehavior.Restrict);
+    }
+}
+
+public sealed class KnowledgeItemConfiguration : IEntityTypeConfiguration<KnowledgeItemEntity>
+{
+    public void Configure(EntityTypeBuilder<KnowledgeItemEntity> builder)
+    {
+        builder.ToTable("KnowledgeItems", table => table.HasCheckConstraint("CK_KnowledgeItems_ContentShape", "([ForgottenAtUtc] IS NULL AND LEN([Title]) > 0 AND LEN([SafeBody]) > 0 AND LEN([SafeSearchText]) > 0) OR ([ForgottenAtUtc] IS NOT NULL AND [Title] = N'' AND [SafeBody] = N'' AND [SafeSearchText] = N'')"));
+        builder.HasKey(value => value.Id); builder.Property(value => value.Id).ValueGeneratedNever();
+        builder.Property(value => value.Title).HasMaxLength(256).IsRequired();
+        builder.Property(value => value.SafeBody).HasMaxLength(16384).IsRequired();
+        builder.Property(value => value.SafeSearchText).HasMaxLength(16384).IsRequired();
+        builder.Property(value => value.CreatedAtUtc).HasColumnType("datetimeoffset(7)");
+        builder.Property(value => value.ForgottenAtUtc).HasColumnType("datetimeoffset(7)");
+        SchemaConfiguration.ConfigureRowVersion(builder.Property(value => value.RowVersion));
+        builder.HasIndex(value => new { value.ForgottenAtUtc, value.Title });
+    }
+}
+
+public sealed class KnowledgeClaimConfiguration : IEntityTypeConfiguration<KnowledgeClaimEntity>
+{
+    public void Configure(EntityTypeBuilder<KnowledgeClaimEntity> builder)
+    {
+        builder.ToTable("KnowledgeClaims", table =>
+        {
+            table.HasCheckConstraint("CK_KnowledgeClaims_Confidence", "[Confidence] >= 0 AND [Confidence] <= 1");
+            table.HasCheckConstraint("CK_KnowledgeClaims_Lifecycle", "[LifecycleState] IN (N'active', N'superseded', N'retracted')");
+            table.HasCheckConstraint("CK_KnowledgeClaims_Revision", "[Revision] > 0");
+            table.HasCheckConstraint("CK_KnowledgeClaims_ContentShape", "([ForgottenAtUtc] IS NULL AND LEN([CanonicalIdentity]) > 0 AND LEN([Subject]) > 0 AND LEN([Predicate]) > 0 AND LEN([ObjectText]) > 0 AND LEN([SafeSearchText]) > 0) OR ([ForgottenAtUtc] IS NOT NULL AND [CanonicalIdentity] = N'' AND [Subject] = N'' AND [Predicate] = N'' AND [ObjectText] = N'' AND [SafeSearchText] = N'')");
+        });
+        builder.HasKey(value => value.Id); builder.Property(value => value.Id).ValueGeneratedNever();
+        builder.Property(value => value.CanonicalIdentity).HasMaxLength(4096).IsRequired();
+        builder.Property(value => value.CanonicalIdentityHash).HasColumnType("char(64)").IsUnicode(false).IsFixedLength().HasMaxLength(64).IsRequired().UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(value => value.Subject).HasMaxLength(512).IsRequired();
+        builder.Property(value => value.Predicate).HasMaxLength(128).IsRequired();
+        builder.Property(value => value.ObjectText).HasMaxLength(2048).IsRequired();
+        builder.Property(value => value.SafeSearchText).HasMaxLength(4096).IsRequired();
+        builder.Property(value => value.Confidence).HasColumnType("decimal(5,4)");
+        builder.Property(value => value.LifecycleState).HasMaxLength(64).IsRequired();
+        builder.Property(value => value.CreatedAtUtc).HasColumnType("datetimeoffset(7)"); builder.Property(value => value.UpdatedAtUtc).HasColumnType("datetimeoffset(7)"); builder.Property(value => value.ForgottenAtUtc).HasColumnType("datetimeoffset(7)");
+        SchemaConfiguration.ConfigureRowVersion(builder.Property(value => value.RowVersion));
+        builder.HasIndex(value => value.CanonicalIdentityHash).IsUnique().HasFilter("[ForgottenAtUtc] IS NULL");
+        builder.HasIndex(value => new { value.ForgottenAtUtc, value.LifecycleState });
+        builder.HasIndex(value => new { value.ForgottenAtUtc, value.LifecycleState, value.Subject });
+    }
+}
+
+public sealed class KnowledgeClaimHistoryConfiguration : IEntityTypeConfiguration<KnowledgeClaimHistoryEntity>
+{
+    public void Configure(EntityTypeBuilder<KnowledgeClaimHistoryEntity> builder)
+    {
+        builder.ToTable("KnowledgeClaimHistory", table => table.HasCheckConstraint("CK_KnowledgeClaimHistory_Confidence", "[Confidence] >= 0 AND [Confidence] <= 1"));
+        builder.HasKey(value => value.Id); builder.Property(value => value.Id).ValueGeneratedNever();
+        builder.Property(value => value.LifecycleState).HasMaxLength(64).IsRequired(); builder.Property(value => value.Confidence).HasColumnType("decimal(5,4)"); builder.Property(value => value.RecordedAtUtc).HasColumnType("datetimeoffset(7)");
+        builder.HasIndex(value => new { value.ClaimId, value.Revision }).IsUnique();
+        builder.HasOne<KnowledgeClaimEntity>().WithMany().HasForeignKey(value => value.ClaimId).OnDelete(DeleteBehavior.Restrict);
+    }
+}
+
+public sealed class KnowledgeRelationConfiguration : IEntityTypeConfiguration<KnowledgeRelationEntity>
+{
+    public void Configure(EntityTypeBuilder<KnowledgeRelationEntity> builder)
+    {
+        builder.ToTable("KnowledgeRelations"); builder.HasKey(value => value.ClaimId);
+        builder.Property(value => value.Subject).HasMaxLength(512).IsRequired(); builder.Property(value => value.Predicate).HasMaxLength(128).IsRequired(); builder.Property(value => value.ObjectText).HasMaxLength(2048).IsRequired();
+        builder.HasIndex(value => value.Subject); builder.HasIndex(value => value.ObjectText);
+        builder.HasOne<KnowledgeClaimEntity>().WithMany().HasForeignKey(value => value.ClaimId).OnDelete(DeleteBehavior.Cascade);
+    }
+}
+
+public sealed class KnowledgeTombstoneConfiguration : IEntityTypeConfiguration<KnowledgeTombstoneEntity>
+{
+    public void Configure(EntityTypeBuilder<KnowledgeTombstoneEntity> builder)
+    {
+        builder.ToTable("KnowledgeTombstones"); builder.HasKey(value => value.Id); builder.Property(value => value.Id).ValueGeneratedNever();
+        builder.Property(value => value.TargetKind).HasMaxLength(16).IsRequired(); builder.Property(value => value.ForgottenAtUtc).HasColumnType("datetimeoffset(7)");
+        builder.HasIndex(value => new { value.TargetKind, value.TargetId }).IsUnique();
     }
 }
 

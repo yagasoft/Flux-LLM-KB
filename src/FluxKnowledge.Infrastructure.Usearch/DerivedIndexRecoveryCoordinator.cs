@@ -95,9 +95,6 @@ public sealed class DerivedIndexRecoveryCoordinator : IDerivedIndexRecoveryStatu
         {
             await using var scope = _scopeFactory.CreateAsyncScope();
             recoveryStore = scope.ServiceProvider.GetRequiredService<IDerivedIndexRecoveryStore>();
-            fileSystem = _fileSystem ?? scope.ServiceProvider.GetRequiredService<DerivedIndexFileSystem>();
-            var builder = scope.ServiceProvider.GetRequiredService<UsearchGenerationBuilder>();
-            var validator = scope.ServiceProvider.GetRequiredService<UsearchGenerationValidator>();
             var started = _timeProvider.GetUtcNow();
             if (recoveryEpisode)
             {
@@ -118,6 +115,28 @@ public sealed class DerivedIndexRecoveryCoordinator : IDerivedIndexRecoveryStatu
 
             var sql = await recoveryStore.ReadActiveAsync(cancellationToken);
             activeId = sql.ActiveGenerationId;
+            if (sql.IsValidatedEmptyCatalogue)
+            {
+                ValidateValidatedEmptyCatalogue(sql);
+                if (recoveryEpisode)
+                {
+                    await recoveryStore.AppendAuditAsync(new("recovery_attempt", null, null, _attempts + 1,
+                        TimeSpan.Zero, null, 0), cancellationToken);
+                    await recoveryStore.AppendAuditAsync(new("recovery_validation_succeeded", null, null, _attempts + 1,
+                        _timeProvider.GetUtcNow() - started, null, 0), cancellationToken);
+                    await CompleteAsync(recoveryStore, null, started, 0, cancellationToken, isValidatedEmptyCatalogue: true);
+                }
+                else
+                {
+                    await CompleteProbeAsync(beforeAttempt, null, cancellationToken, isValidatedEmptyCatalogue: true);
+                }
+
+                return;
+            }
+
+            fileSystem = _fileSystem ?? scope.ServiceProvider.GetRequiredService<DerivedIndexFileSystem>();
+            var builder = scope.ServiceProvider.GetRequiredService<UsearchGenerationBuilder>();
+            var validator = scope.ServiceProvider.GetRequiredService<UsearchGenerationValidator>();
             ValidateSql(sql);
             if (!fileSystem.AreAllReferencedGenerationPathsSafe(sql.ReferencedIndexPaths) ||
                 !fileSystem.TryCanonicalIntendedGenerationPath(sql.Generation!.IndexPath, out var activePath))
@@ -308,7 +327,7 @@ public sealed class DerivedIndexRecoveryCoordinator : IDerivedIndexRecoveryStatu
 
     private void ValidateSql(DerivedIndexRecoverySqlSnapshot sql)
     {
-        if (sql.ActiveGenerationId is null || sql.Generation is null || sql.Generation.Id != sql.ActiveGenerationId ||
+        if (sql.IsValidatedEmptyCatalogue || sql.ActiveGenerationId is null || sql.Generation is null || sql.Generation.Id != sql.ActiveGenerationId ||
             sql.Membership.IsDefaultOrEmpty || sql.Generation.VectorCount != sql.Membership.Length ||
             sql.Membership.Any(vector => vector.Dimensions != sql.Generation.Dimensions || vector.Values.Length != vector.Dimensions * sizeof(float) ||
                 !string.Equals(vector.ModelFingerprint, sql.Generation.ModelFingerprint, StringComparison.Ordinal) ||
@@ -319,21 +338,33 @@ public sealed class DerivedIndexRecoveryCoordinator : IDerivedIndexRecoveryStatu
         }
     }
 
-    private async ValueTask CompleteAsync(IDerivedIndexRecoveryStore recoveryStore, Guid? activeId, DateTimeOffset started, int cleaned, CancellationToken cancellationToken)
+    private static void ValidateValidatedEmptyCatalogue(DerivedIndexRecoverySqlSnapshot sql)
+    {
+        if (sql.ActiveGenerationId is not null || sql.Generation is not null ||
+            !sql.Membership.IsDefaultOrEmpty || sql.ReferencedGenerationIds.Count != 0 ||
+            sql.ReferencedIndexPaths.Count != 0)
+        {
+            throw new SqlMembershipValidationException();
+        }
+    }
+
+    private async ValueTask CompleteAsync(IDerivedIndexRecoveryStore recoveryStore, Guid? activeId, DateTimeOffset started, int cleaned,
+        CancellationToken cancellationToken, bool isValidatedEmptyCatalogue = false)
     {
         await recoveryStore.AppendAuditAsync(new("recovery_healthy", activeId, null, 0,
             _timeProvider.GetUtcNow() - started, null, cleaned), cancellationToken);
         Volatile.Write(ref _episodeDetectionRecorded, 0);
         _attempts = 0;
-        Volatile.Write(ref _snapshot, new(DerivedIndexRecoveryState.Healthy, activeId, _timeProvider.GetUtcNow(), null, null, cleaned));
+        Volatile.Write(ref _snapshot, new(DerivedIndexRecoveryState.Healthy, activeId, _timeProvider.GetUtcNow(), null, null, cleaned,
+            isValidatedEmptyCatalogue));
         await PublishAsync(cancellationToken);
     }
 
     private async ValueTask CompleteProbeAsync(DerivedIndexRecoverySnapshot expectedSnapshot, Guid? activeId,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, bool isValidatedEmptyCatalogue = false)
     {
         var completed = new DerivedIndexRecoverySnapshot(DerivedIndexRecoveryState.Healthy, activeId,
-            _timeProvider.GetUtcNow(), null, null, 0);
+            _timeProvider.GetUtcNow(), null, null, 0, isValidatedEmptyCatalogue);
         if (!ReferenceEquals(Interlocked.CompareExchange(ref _snapshot, completed, expectedSnapshot), expectedSnapshot))
         {
             return;

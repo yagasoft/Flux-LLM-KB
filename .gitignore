@@ -60,3 +60,4 @@ appsettings.Local.json
 *.ldf
 FluxKnowledgeData/
 FluxKnowledgeIndexes/
+native-go-live.lock

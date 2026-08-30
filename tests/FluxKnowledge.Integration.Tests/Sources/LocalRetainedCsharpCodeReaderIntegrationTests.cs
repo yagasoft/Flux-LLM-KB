@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using System.Xml.Linq;
 using System.Text;
 using System.Text.Json;
 using FluxKnowledge.Application.Pipeline;
@@ -667,8 +668,66 @@ public sealed class LocalRetainedCsharpCodeReaderIntegrationTests(NativeSqlServe
     private static LocalRetainedCsharpCodeSearchCursorCodec CreateEphemeralCursorCodec() =>
         new(new EphemeralDataProtectionProvider());
 
+    [Fact]
+    public void Shared_key_ring_round_trips_between_app_pool_writer_and_cli_reader()
+    {
+        var keyRingRoot = Path.Combine(Path.GetTempPath(), $"FluxKnowledgeSharedKeyRing_{Guid.NewGuid():N}");
+        try
+        {
+            var writer = PrivatePcDataProtectionProviderFactory.CreateProviderForIsolatedTests(
+                keyRingRoot,
+                createIfMissing: true);
+            var protectedValue = writer.CreateProtector("native-go-live-cross-token").Protect("cursor-token");
+
+            var reader = PrivatePcDataProtectionProviderFactory.CreateProviderForIsolatedTests(
+                keyRingRoot,
+                createIfMissing: false);
+
+            Assert.Equal("cursor-token", reader.CreateProtector("native-go-live-cross-token").Unprotect(protectedValue));
+            var keyFile = Assert.Single(Directory.EnumerateFiles(keyRingRoot, "key-*.xml"));
+            Assert.DoesNotContain("encryptedSecret", File.ReadAllText(keyFile), StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            if (Directory.Exists(keyRingRoot)) Directory.Delete(keyRingRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Cli_reader_does_not_generate_a_replacement_key_for_an_expired_ring()
+    {
+        var keyRingRoot = Path.Combine(Path.GetTempPath(), $"FluxKnowledgeReadOnlyKeyRing_{Guid.NewGuid():N}");
+        try
+        {
+            var writer = PrivatePcDataProtectionProviderFactory.CreateProviderForIsolatedTests(
+                keyRingRoot,
+                createIfMissing: true);
+            _ = writer.CreateProtector("native-go-live-read-only").Protect("seed");
+            var keyFile = Assert.Single(Directory.EnumerateFiles(keyRingRoot, "key-*.xml"));
+            var key = XDocument.Load(keyFile);
+            foreach (var element in key.Descendants().Where(element =>
+                         element.Name.LocalName is "creationDate" or "activationDate" or "expirationDate"))
+            {
+                element.Value = DateTimeOffset.UtcNow.AddDays(-180).ToString("O");
+            }
+            key.Save(keyFile);
+
+            var reader = PrivatePcDataProtectionProviderFactory.CreateProviderForIsolatedTests(
+                keyRingRoot,
+                createIfMissing: false);
+            Assert.Throws<CryptographicException>(() =>
+                reader.CreateProtector("native-go-live-read-only").Protect("reader-must-not-rotate"));
+
+            Assert.Single(Directory.EnumerateFiles(keyRingRoot, "key-*.xml"));
+        }
+        finally
+        {
+            if (Directory.Exists(keyRingRoot)) Directory.Delete(keyRingRoot, recursive: true);
+        }
+    }
+
     private static LocalRetainedCsharpCodeSearchCursorCodec CreateCursorCodec(string keyRingRoot) =>
-        PrivatePcDataProtectionProviderFactory.CreateCursorCodec(keyRingRoot);
+        PrivatePcDataProtectionProviderFactory.CreateCursorCodecForIsolatedTests(keyRingRoot);
 
     private static async Task AssertCursorRejectedWithoutRetainedReadAsync(
         SqlLocalRetainedCsharpCodeReader reader,
@@ -726,7 +785,7 @@ public sealed class LocalRetainedCsharpCodeReaderIntegrationTests(NativeSqlServe
                 SqlTestData.CreateFactory(fixture),
                 detailReader,
                 new LocalPrivateContentDisclosure(),
-                PrivatePcDataProtectionProviderFactory.CreateCursorCodec(blockingPath));
+                PrivatePcDataProtectionProviderFactory.CreateCursorCodecForIsolatedTests(blockingPath));
 
             var failure = await Assert.ThrowsAsync<LocalRetainedCsharpCodeSearchCursorException>(() =>
                 reader.SearchPageAsync(

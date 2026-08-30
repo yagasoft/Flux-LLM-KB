@@ -1,6 +1,7 @@
 using System.Security.AccessControl;
 using System.Security.Principal;
 using System.Text;
+using FluxKnowledge.Application.Operations;
 
 namespace FluxKnowledge.OutlookHost;
 
@@ -15,13 +16,10 @@ internal sealed class OutlookComDiagnosticWriter(string? outputPath) : IOutlookC
     private readonly string? _outputPath = outputPath;
     private readonly SemaphoreSlim _writeGate = new(1, 1);
     private bool _created;
-    private static readonly string ApplicationPrivateRoot = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-        "FluxKnowledge",
-        "OutlookDiagnostics");
+    internal static string ProductionRoot => LiveRootLayout.Production.LogsRoot;
 
     public static IOutlookComDiagnosticSink Create(bool enabled, string? outputPath) =>
-        Create(enabled, outputPath, ApplicationPrivateRoot);
+        Create(enabled, outputPath, ProductionRoot);
 
     internal static IOutlookComDiagnosticSink Create(bool enabled, string? outputPath, string privateRoot) =>
         !enabled ? NoOpOutlookComDiagnosticSink.Instance :
@@ -84,7 +82,7 @@ internal sealed class OutlookComDiagnosticWriter(string? outputPath) : IOutlookC
     }
 
     internal static bool IsValidExplicitPrivateLocalPath(string outputPath) =>
-        IsValidExplicitPrivateLocalPath(outputPath, ApplicationPrivateRoot);
+        IsValidExplicitPrivateLocalPath(outputPath, ProductionRoot);
 
     internal static bool IsValidExplicitPrivateLocalPath(string outputPath, string privateRoot)
     {

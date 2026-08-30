@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using FluxKnowledge.Application.Sources;
+using FluxKnowledge.Domain.Outlook;
 using FluxKnowledge.Domain.Sources;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
@@ -90,6 +91,59 @@ public sealed class RetainedTextPipelineIntegrationTests(NativeSqlServerFixture 
             {
                 Directory.Delete(root, recursive: true);
             }
+        }
+    }
+
+    [NativeSqlServerFact]
+    public async Task Disabled_persisted_Outlook_profile_cannot_redirect_a_retained_read_to_an_external_root()
+    {
+        var bytes = "external retained text"u8.ToArray();
+        var hash = Convert.ToHexStringLower(SHA256.HashData(bytes));
+        var fallbackRoot = Path.Combine(Path.GetTempPath(), $"flux-retained-canonical-{Guid.NewGuid():N}");
+        var externalRoot = Path.Combine(Path.GetTempPath(), $"flux-retained-external-{Guid.NewGuid():N}");
+        var relative = Path.Combine("sha256", hash[..2], $"{hash}.bin");
+        Directory.CreateDirectory(fallbackRoot);
+        Directory.CreateDirectory(Path.Combine(externalRoot, "sha256", hash[..2]));
+        await File.WriteAllBytesAsync(Path.Combine(externalRoot, relative), bytes);
+        try
+        {
+            var revisionId = await SeedRevisionAsync(hash, bytes.Length, relative);
+            await using (var context = CreateContext())
+            {
+                var sourceRootId = await context.SourceRevisions
+                    .Where(value => value.Id == revisionId)
+                    .Select(value => value.SourceRootId)
+                    .SingleAsync();
+                var now = DateTimeOffset.UtcNow;
+                context.OutlookCaptureProfiles.Add(new OutlookCaptureProfileEntity
+                {
+                    Id = Guid.NewGuid(),
+                    SourceRootId = sourceRootId,
+                    DisplayName = "Disabled stale Outlook profile",
+                    SpoolRoot = externalRoot,
+                    IncrementalBasis = (int)OutlookIncrementalBasis.LastModificationTime,
+                    State = (int)OutlookCaptureState.Disabled,
+                    IsEnabled = false,
+                    ConfigurationRevision = 1,
+                    CadenceTicks = TimeSpan.FromMinutes(15).Ticks,
+                    MaximumOverlapTicks = TimeSpan.FromMinutes(5).Ticks,
+                    CreatedAtUtc = now,
+                    UpdatedAtUtc = now
+                });
+                await context.SaveChangesAsync();
+            }
+
+            using var reader = new SqlRetainedSourceReader(
+                new ContextFactory(_fixture.ConnectionString),
+                fallbackRoot);
+            await Assert.ThrowsAsync<InvalidDataException>(() => reader
+                .ReadUtf8Async(new SourceRevisionId(revisionId), CancellationToken.None)
+                .AsTask());
+        }
+        finally
+        {
+            if (Directory.Exists(fallbackRoot)) Directory.Delete(fallbackRoot, recursive: true);
+            if (Directory.Exists(externalRoot)) Directory.Delete(externalRoot, recursive: true);
         }
     }
 

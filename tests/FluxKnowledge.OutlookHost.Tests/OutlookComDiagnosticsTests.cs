@@ -1,12 +1,19 @@
 using System.Runtime.InteropServices;
 using System.Security.AccessControl;
 using System.Security.Principal;
+using FluxKnowledge.Application.Operations;
 using Xunit;
 
 namespace FluxKnowledge.OutlookHost.Tests;
 
 public sealed class OutlookComDiagnosticsTests
 {
+    [Fact]
+    public void Production_diagnostic_root_is_the_canonical_runtime_logs_root()
+    {
+        Assert.Equal(LiveRootLayout.Production.LogsRoot, OutlookComDiagnosticWriter.ProductionRoot);
+    }
+
     [Theory]
     [InlineData(-2147024891, true)]
     [InlineData(-2147467259, false)]

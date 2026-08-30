@@ -11,13 +11,14 @@ $SourceRoot = (Resolve-Path -LiteralPath $SourceRoot).Path
 $planScript = Join-Path $SourceRoot "scripts\deploy\phase-5-deployment-plan.ps1"
 $validatorScript = Join-Path $SourceRoot "scripts\deploy\validate-phase-5-deployment.ps1"
 $deploymentScript = Join-Path $SourceRoot "scripts\deploy\update-native-windows.ps1"
+$goLiveModule = Join-Path $SourceRoot "scripts\deploy\native-go-live.psm1"
 $loopbackSafetyScript = Join-Path $SourceRoot "scripts\deploy\loopback-deployment-safety.ps1"
 $workerValidatorScript = Join-Path $SourceRoot "scripts\deploy\validate-native-worker-supervision.ps1"
 $outlookValidatorScript = Join-Path $SourceRoot "scripts\deploy\validate-native-outlook-ingress.ps1"
 $deploymentDesign = Join-Path $SourceRoot "docs\superpowers\specs\2026-08-03-native-closeout-and-loopback-deployment.md"
 $deploymentPlanDocument = Join-Path $SourceRoot "docs\superpowers\plans\2026-08-03-native-closeout-and-loopback-deployment.md"
 
-foreach ($requiredScript in @($planScript, $validatorScript, $deploymentScript, $loopbackSafetyScript, $workerValidatorScript, $outlookValidatorScript, $deploymentDesign, $deploymentPlanDocument)) {
+foreach ($requiredScript in @($planScript, $validatorScript, $deploymentScript, $goLiveModule, $loopbackSafetyScript, $workerValidatorScript, $outlookValidatorScript, $deploymentDesign, $deploymentPlanDocument)) {
     if (-not (Test-Path -LiteralPath $requiredScript -PathType Leaf)) {
         throw "A required Phase 5 deployment-safety script is missing: $requiredScript"
     }
@@ -654,26 +655,21 @@ foreach ($documentText in @($deploymentDesignText, $deploymentPlanText)) {
 }
 
 $deploymentText = Get-Content -LiteralPath $deploymentScript -Raw
-if ($deploymentText -notmatch '(?m)^\s*\[void\]\(DisableAndDrain-OutlookHostTask\)\s*$') {
-    throw "The deployment executable can leak the Outlook drain helper result into its JSON output."
+$goLiveModuleText = Get-Content -LiteralPath $goLiveModule -Raw
+$guardedHostText = Get-Content -LiteralPath (Join-Path $sourceRoot 'src\FluxKnowledge.Integrations\Windows\NativeGoLive\GuardedNativeGoLiveHost.cs') -Raw
+if ($deploymentText -match '(?i)vssadmin' -or $goLiveModuleText -match '(?i)vssadmin') {
+    throw 'The native go-live boundary contains a locale-dependent VSS command path.'
 }
-$outlookDrainIndex = $deploymentText.LastIndexOf('DisableAndDrain-OutlookHostTask', [System.StringComparison]::Ordinal)
-$poolStopIndex = $deploymentText.IndexOf('Stop-WebAppPool -Name $SiteName', [System.StringComparison]::Ordinal)
-$backupIndex = $deploymentText.IndexOf('BACKUP DATABASE [FluxKnowledge]', [System.StringComparison]::Ordinal)
-$verifyIndex = $deploymentText.IndexOf('RESTORE VERIFYONLY', [System.StringComparison]::Ordinal)
-if ($outlookDrainIndex -lt 0 -or $poolStopIndex -lt 0 -or $backupIndex -lt 0 -or $verifyIndex -lt 0 -or
-    $outlookDrainIndex -gt $backupIndex -or $poolStopIndex -gt $backupIndex -or $verifyIndex -lt $backupIndex) {
-    throw "The deployment executable does not stop/drain IIS and application writers before the verified COPY_ONLY backup."
+if ($guardedHostText -notmatch 'NativeGoLiveSqlBootstrap\.ClearProcessEnvironment' -or
+    $guardedHostText.IndexOf('NativeGoLiveSqlBootstrap.ClearProcessEnvironment', [StringComparison]::Ordinal) -gt
+        $guardedHostText.IndexOf('PublishAndStartAsync', [StringComparison]::Ordinal)) {
+    throw 'The native go-live lifecycle does not clear bootstrap SQL state before publish.'
 }
-if ($deploymentText -match '(?i)RESTORE\s+DATABASE') {
-    throw "The deployment executable must never restore the production database automatically."
+if ($deploymentText -match '(?i)\bBackupRoot\b|BACKUP\s+DATABASE|RESTORE\s+(?:VERIFYONLY|DATABASE)|backup_path') {
+    throw "The deployment executable retains a file-copy backup or restore path instead of the VSS-only recovery policy."
 }
-$drainHelper = [regex]::Match(
-    $deploymentText,
-    '(?s)function\s+DisableAndDrain-OutlookHostTask\b.*?(?=\r?\nfunction\s+|\z)').Value
-if ($drainHelper -match 'RestoreEnabledOnFailure' -or
-    $deploymentText -match '\bEnable-ScheduledTask\b') {
-    throw "The Outlook-disabled deployment path can re-enable a pre-existing task."
+if ($deploymentText -notmatch 'Native SQL migration is unavailable until the guarded VSS go-live workflow is authorised') {
+    throw "The deployment executable does not refuse non-disposable migration while go-live execution is unavailable."
 }
 foreach ($activationCommand in @('Register-ScheduledTask', 'Start-ScheduledTask', 'Install-OutlookHostTask')) {
     if ($deploymentText -match ("\b{0}\b" -f [regex]::Escape($activationCommand))) {

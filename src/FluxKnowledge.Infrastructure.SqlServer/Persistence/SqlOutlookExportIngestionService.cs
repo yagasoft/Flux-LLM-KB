@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using FluxKnowledge.Application.Contracts;
+using FluxKnowledge.Application.Operations;
 using FluxKnowledge.Domain.Outlook;
 using FluxKnowledge.Domain.Sources;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
@@ -20,7 +21,8 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
 /// </summary>
 public sealed class SqlOutlookExportIngestionService(
     IDbContextFactory<FluxKnowledgeDbContext> contextFactory,
-    TimeProvider? timeProvider = null)
+    TimeProvider? timeProvider = null,
+    PersistedOutlookSpoolRootPolicy? outlookSpoolPolicy = null)
 {
     private const string TextProcessorVersion = "phase-3a-v1";
     private const string DeferredContentProcessorVersion = "phase-4-outlook-content-v1";
@@ -32,7 +34,9 @@ public sealed class SqlOutlookExportIngestionService(
         Guid exportId,
         CancellationToken cancellationToken)
     {
-        var envelope = await new OutlookSpoolLayout(spoolRoot)
+        var canonicalSpoolRoot = outlookSpoolPolicy?.RequireCanonicalBeforeIo(spoolRoot)
+            ?? throw new InvalidDataException("The persisted Outlook spool root is unavailable.");
+        var envelope = await new OutlookSpoolLayout(canonicalSpoolRoot)
             .ReadReadyRecoveryEnvelopeAsync(exportId, cancellationToken).ConfigureAwait(false);
         OutlookExportCommitRequest request;
         try
@@ -42,7 +46,7 @@ public sealed class SqlOutlookExportIngestionService(
         catch (ArgumentException)
         {
             return await CommitMalformedRecoveryAsync(
-                spoolRoot,
+                canonicalSpoolRoot,
                 exportId,
                 envelope,
                 cancellationToken).ConfigureAwait(false);
@@ -139,6 +143,7 @@ public sealed class SqlOutlookExportIngestionService(
         string readyDirectory;
         string manifestHash;
         long manifestByteLength;
+        string canonicalSpoolRoot;
         try
         {
             var expectedRelativePath = Path.Combine("ready", request.ExportId.Value.ToString("N"));
@@ -147,7 +152,9 @@ public sealed class SqlOutlookExportIngestionService(
                 throw new OutlookIngestionBlockedException("ready-path-invalid");
             }
 
-            var layout = new OutlookSpoolLayout(profile.SpoolRoot);
+            canonicalSpoolRoot = outlookSpoolPolicy?.RequireCanonicalBeforeIo(profile.SpoolRoot)
+                ?? throw new InvalidDataException("The persisted Outlook spool root is unavailable.");
+            var layout = new OutlookSpoolLayout(canonicalSpoolRoot);
             var manifestEnvelope = await layout.ReadReadyManifestEnvelopeAsync(request.ExportId.Value, cancellationToken).ConfigureAwait(false);
             manifest = manifestEnvelope.Manifest;
             readyDirectory = layout.GetReadyExportDirectory(request.ExportId.Value);
@@ -256,7 +263,7 @@ public sealed class SqlOutlookExportIngestionService(
                 var isText = IsTextContent(sidecar.ContentType);
                 var isSupportedText = string.Equals(sidecar.ContentType, "text/plain", StringComparison.OrdinalIgnoreCase);
                 var retainedRelativePath = await RetainSidecarAsync(
-                    profile.SpoolRoot,
+                    canonicalSpoolRoot,
                     readyDirectory,
                     sidecar,
                     cancellationToken).ConfigureAwait(false);
@@ -454,10 +461,14 @@ public sealed class SqlOutlookExportIngestionService(
         var folder = await context.OutlookCaptureFolders
             .FromSqlInterpolated($"SELECT * FROM [OutlookCaptureFolders] WITH (UPDLOCK, HOLDLOCK) WHERE [Id] = {recovery.FolderId}")
             .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+        var profileSpoolRoot = profile is null
+            ? null
+            : outlookSpoolPolicy?.RequireCanonicalBeforeIo(profile.SpoolRoot)
+                ?? throw new InvalidDataException("The persisted Outlook spool root is unavailable.");
         if (profile is null || folder is null || folder.ProfileId != profile.Id || profile.SourceRootId == Guid.Empty ||
             !string.Equals(
-                Path.TrimEndingDirectorySeparator(Path.GetFullPath(profile.SpoolRoot)),
-                Path.TrimEndingDirectorySeparator(Path.GetFullPath(spoolRoot)),
+                profileSpoolRoot,
+                spoolRoot,
                 StringComparison.OrdinalIgnoreCase))
         {
             return await CommitUnresolvedIdentityAsync(

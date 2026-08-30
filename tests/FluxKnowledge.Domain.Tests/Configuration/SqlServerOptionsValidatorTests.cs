@@ -7,6 +7,13 @@ namespace FluxKnowledge.Domain.Tests.Configuration;
 
 public sealed class SqlServerOptionsValidatorTests
 {
+    [Fact]
+    public void Production_options_use_the_canonical_live_root_layout()
+    {
+        Assert.Equal(@"I:\FluxKnowledge\Data\Sql\Data\FluxKnowledge.mdf", SqlServerOptions.ProductionDataFilePath);
+        Assert.Equal(@"I:\FluxKnowledge\Data\Sql\Log\FluxKnowledge_log.ldf", SqlServerOptions.ProductionLogFilePath);
+    }
+
     [Theory]
     [InlineData("Server=.;AttachDbFilename=C:\\temp\\FluxKnowledge.mdf;Integrated Security=true")]
     [InlineData("Data Source=.;Initial Catalog=FluxKnowledge;User Instance=true;Integrated Security=true")]
@@ -69,7 +76,7 @@ public sealed class SqlServerOptionsValidatorTests
             DatabaseFiles =
             [
                 new("ROWS", SqlServerOptions.ProductionDataFilePath),
-                new("ROWS", "I:/FluxKnowledge/Sql/Data/Unexpected.ndf"),
+                new("ROWS", "I:/FluxKnowledge/Data/Sql/Data/Unexpected.ndf"),
                 new("LOG", SqlServerOptions.ProductionLogFilePath)
             ]
         };

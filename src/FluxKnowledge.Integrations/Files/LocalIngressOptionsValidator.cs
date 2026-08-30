@@ -1,5 +1,7 @@
 namespace FluxKnowledge.Integrations.Files;
 
+using FluxKnowledge.Application.Operations;
+
 public static class LocalIngressOptionsValidator
 {
     public static IReadOnlyList<string> ValidateAndCanonicalise(LocalIngressOptions options)
@@ -25,7 +27,9 @@ public static class LocalIngressOptionsValidator
 
             var canonicalRoot = Path.TrimEndingDirectorySeparator(
                 Path.GetFullPath(configuredRoot));
-            if (!Directory.Exists(canonicalRoot))
+            if (!Directory.Exists(canonicalRoot) &&
+                !string.Equals(canonicalRoot, LiveRootLayout.Production.RetainedRoot,
+                    StringComparison.OrdinalIgnoreCase))
             {
                 throw new DirectoryNotFoundException(
                     $"The local ingress root does not exist: {canonicalRoot}");

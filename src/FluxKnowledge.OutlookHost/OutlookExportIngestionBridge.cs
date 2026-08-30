@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using FluxKnowledge.Application.Contracts;
+using FluxKnowledge.Application.Operations;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
 using FluxKnowledge.Integrations.Outlook;
 
@@ -27,7 +28,9 @@ internal sealed class SqlOutlookReadyExportIngestionService(SqlOutlookExportInge
         CancellationToken cancellationToken) => inner.IngestReadyAsync(spoolRoot, exportId, cancellationToken);
 }
 
-internal sealed class OutlookExportIngestionBridge(IOutlookReadyExportIngestionService ingestionService)
+internal sealed class OutlookExportIngestionBridge(
+    IOutlookReadyExportIngestionService ingestionService,
+    PersistedOutlookSpoolRootPolicy spoolRootPolicy)
     : IOutlookExportIngestionBridge
 {
     public async ValueTask<bool> ExportAndIngestAsync(
@@ -37,8 +40,9 @@ internal sealed class OutlookExportIngestionBridge(IOutlookReadyExportIngestionS
         OutlookMessagePayload payload,
         CancellationToken cancellationToken)
     {
+        var canonicalSpoolRoot = spoolRootPolicy.RequireCanonicalBeforeIo(folder.SpoolRoot);
         var exportId = ExportIdFor(folder, item);
-        var layout = new OutlookSpoolLayout(folder.SpoolRoot);
+        var layout = new OutlookSpoolLayout(canonicalSpoolRoot);
         var readyDirectory = layout.GetReadyExportDirectory(exportId);
         var operationId = StableGuid($"ingest|{exportId:N}|{work.Claim.CatchUpId:N}|{work.Claim.FencingToken}");
         var cursorUtc = item.Timestamp(folder.Basis);

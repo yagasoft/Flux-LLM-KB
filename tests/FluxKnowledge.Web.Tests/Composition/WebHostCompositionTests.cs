@@ -1,4 +1,6 @@
 using System.Net;
+using System.Security.Cryptography;
+using System.Collections.Immutable;
 using FluxKnowledge.Application.Gpu;
 using FluxKnowledge.Application.Contracts;
 using FluxKnowledge.Application.Pipeline;
@@ -6,6 +8,7 @@ using FluxKnowledge.Application.Sources;
 using FluxKnowledge.Application.Indexing;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Workers;
+using FluxKnowledge.Application.Operations;
 using FluxKnowledge.Domain.Jobs;
 using FluxKnowledge.Infrastructure.SqlServer.Configuration;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
@@ -22,6 +25,7 @@ using FluxKnowledge.Web.Endpoints;
 using FluxKnowledge.Web.Mcp;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Authentication;
+using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc.Testing;
@@ -46,6 +50,201 @@ public sealed class WebHostCompositionTests : IDisposable
     }
 
     [Fact]
+    public void Production_options_have_empty_catalogue_and_inert_retained_ingress()
+    {
+        var options = WebHostComposition.ReadNativeGoLiveRuntimeOptions(CreateProductionConfiguration());
+
+        Assert.Empty(options.SourceRoots);
+        Assert.Equal([@"I:\FluxKnowledge\Data\Retained"], options.LocalIngress.AllowedRoots);
+    }
+
+    [Theory]
+    [InlineData("Outlook:Enabled", "outlook-active")]
+    [InlineData("OutlookCapture:Enabled", "outlook-active")]
+    [InlineData("Worker:Enabled", "phase-6-runtime-active")]
+    [InlineData("NativeWorker:Enabled", "phase-6-runtime-active")]
+    [InlineData("Runtime:ModelRuntimeEnabled", "phase-6-runtime-active")]
+    [InlineData("Runtime:GpuEnabled", "phase-6-runtime-active")]
+    [InlineData("Runtime:OcrEnabled", "media-runtime-active")]
+    [InlineData("Runtime:VisionEnabled", "media-runtime-active")]
+    [InlineData("Runtime:AsrEnabled", "media-runtime-active")]
+    [InlineData("Runtime:FfmpegEnabled", "media-runtime-active")]
+    [InlineData("Runtime:NetworkParsingEnabled", "network-parsing-active")]
+    public void Go_live_options_reject_disabled_capability_activation(string key, string reason)
+    {
+        var configuration = new ConfigurationBuilder()
+            .AddConfiguration(CreateProductionConfiguration())
+            .AddInMemoryCollection(new Dictionary<string, string?> { [key] = "true" })
+            .Build();
+
+        var exception = Assert.Throws<InvalidOperationException>(() =>
+            WebHostComposition.ReadNativeGoLiveRuntimeOptions(configuration));
+
+        Assert.Contains(reason, exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Production_composition_registers_no_background_service()
+    {
+        var services = new ServiceCollection();
+
+        WebHostComposition.AddProductionFluxKnowledgeServicesForTests(services, CreateProductionConfiguration());
+
+        Assert.DoesNotContain(services, descriptor => descriptor.ServiceType == typeof(IHostedService));
+        Assert.Contains(services, descriptor =>
+            descriptor.ServiceType == typeof(IDerivedIndexRecoveryStatus));
+    }
+
+    [Fact]
+    public void Production_composition_proof_accepts_only_the_inert_no_hosted_service_graph()
+    {
+        var services = new ServiceCollection();
+        var configuration = CreateProductionConfiguration();
+
+        WebHostComposition.AddProductionFluxKnowledgeServicesForTests(services, configuration);
+
+        WebHostComposition.ValidateNativeGoLiveComposition(services, configuration);
+    }
+
+    [Fact]
+    public async Task Strict_production_initialisation_makes_a_validated_empty_catalogue_HTTP_ready_without_hosted_service()
+    {
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseTestServer();
+        WebHostComposition.AddProductionFluxKnowledgeServicesForTests(
+            builder.Services,
+            CreateProductionConfiguration());
+        builder.Services.AddSingleton<IDerivedIndexRecoveryStore>(new ValidatedEmptyCatalogueRecoveryStore());
+        builder.Services.AddSingleton<ISqlServerReadinessValidator>(new ReadyReadinessValidator());
+        Assert.DoesNotContain(builder.Services, descriptor => descriptor.ServiceType == typeof(IHostedService));
+        await using var application = builder.Build();
+        application.MapFluxKnowledgeHealth();
+
+        await WebHostComposition.InitialiseStrictProductionRecoveryAsync(
+            application.Services,
+            CancellationToken.None);
+        await application.StartAsync();
+
+        Assert.Equal(DerivedIndexRecoveryState.Healthy,
+            application.Services.GetRequiredService<IDerivedIndexRecoveryStatus>().Snapshot.State);
+        Assert.Equal(HttpStatusCode.OK,
+            (await application.GetTestClient().GetAsync("/health/ready")).StatusCode);
+    }
+
+    [Theory]
+    [InlineData("Usearch:RootPath", @"C:\ProgramData\FluxKnowledge\Index")]
+    [InlineData("SourceArtifactStore:Root", @"C:\Users\operator\AppData\Local\FluxKnowledge\Retained")]
+    [InlineData("PrivatePc:LocalApplicationDataRoot", @"C:\Users\operator\AppData\Local\FluxKnowledge")]
+    [InlineData("SqlServer:DataFilePath", @"I:\FluxKnowledge\Data\Sql\Data\..\Data\FluxKnowledge.mdf")]
+    [InlineData("SqlServer:LogFilePath", @"D:\FluxKnowledge_log.ldf")]
+    [InlineData("Outlook:AllowedSpoolRoots:0", @"C:\Temp\FluxKnowledgeSpool")]
+    public void Production_composition_rejects_app_owned_path_overrides_before_service_resolution(
+        string key,
+        string value)
+    {
+        var configuration = new ConfigurationBuilder()
+            .AddConfiguration(CreateProductionConfiguration())
+            .AddInMemoryCollection(new Dictionary<string, string?> { [key] = value })
+            .Build();
+
+        Assert.Throws<InvalidOperationException>(() =>
+            WebHostComposition.AddProductionFluxKnowledgeServicesForTests(new ServiceCollection(), configuration));
+    }
+
+    [Fact]
+    public void Production_composition_binds_SQL_index_spool_and_private_keys_to_the_live_layout()
+    {
+        var services = new ServiceCollection();
+
+        WebHostComposition.AddProductionFluxKnowledgeServicesForTests(services, CreateProductionConfiguration());
+        using var provider = services.BuildServiceProvider();
+        var layout = provider.GetRequiredService<LiveRootLayout>();
+
+        Assert.Same(LiveRootLayout.Production, layout);
+        Assert.Equal(layout.SqlDataFilePath, provider.GetRequiredService<SqlServerOptions>().DataFilePath);
+        Assert.Equal(layout.SqlLogFilePath, provider.GetRequiredService<SqlServerOptions>().LogFilePath);
+        Assert.Equal(layout.IndexRoot, provider.GetRequiredService<UsearchIndexOptions>().RootPath);
+        Assert.Equal([layout.SpoolRoot], provider.GetRequiredService<OutlookSpoolPolicyOptions>().AllowedRoots);
+        Assert.Equal(Path.Combine(layout.ConfigRoot, "data-protection"),
+            PrivatePcDataProtectionProviderFactory.ProductionKeyRingRoot);
+    }
+
+    [Fact]
+    public void Production_composition_captures_the_validated_index_root_before_configuration_can_mutate()
+    {
+        var configuration = CreateProductionConfiguration();
+        var indexIo = new RecordingUsearchDirectoryCreator();
+        var keyRingIo = new RecordingDataProtectionStore();
+        var services = new ServiceCollection();
+        WebHostComposition.AddProductionFluxKnowledgeServicesForTests(
+            services,
+            configuration,
+            new ProductionStorageTestBindings(new RecordingProductionPathInspector(), indexIo, keyRingIo));
+
+        configuration[$"{UsearchIndexOptions.ConfigurationSectionName}:RootPath"] =
+            Path.Combine(Path.GetTempPath(), $"mutated-index-{Guid.NewGuid():N}");
+        using var provider = services.BuildServiceProvider();
+
+        Assert.Equal(
+            LiveRootLayout.Production.IndexRoot,
+            provider.GetRequiredService<UsearchIndexOptions>().RootPath);
+        Assert.Equal(0, indexIo.CreateDirectoryCalls);
+        Assert.Equal(0, keyRingIo.CreateProviderCalls);
+    }
+
+    [Theory]
+    [InlineData(UnsafeProductionPathState.AncestorReparse)]
+    [InlineData(UnsafeProductionPathState.AncestorForeignResolution)]
+    public async Task Production_USearch_rejects_unsafe_existing_ancestry_before_directory_IO(
+        UnsafeProductionPathState unsafeState)
+    {
+        var indexIo = new RecordingUsearchDirectoryCreator();
+        var keyRingIo = new RecordingDataProtectionStore();
+        var services = new ServiceCollection();
+        WebHostComposition.AddProductionFluxKnowledgeServicesForTests(
+            services,
+            CreateProductionConfiguration(),
+            new ProductionStorageTestBindings(
+                new RecordingProductionPathInspector(unsafeState, LiveRootLayout.Production.DataRoot),
+                indexIo,
+                keyRingIo));
+        services.RemoveAll<IIndexGenerationStore>();
+        services.AddScoped<IIndexGenerationStore, OneVectorIndexGenerationStore>();
+        using var provider = services.BuildServiceProvider();
+        using var scope = provider.CreateScope();
+        var builder = scope.ServiceProvider.GetRequiredService<UsearchGenerationBuilder>();
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            builder.BuildAndPlaceAsync(Guid.NewGuid(), CancellationToken.None).AsTask());
+        Assert.Equal(0, indexIo.CreateDirectoryCalls);
+        Assert.Equal(0, keyRingIo.CreateProviderCalls);
+    }
+
+    [Theory]
+    [InlineData(UnsafeProductionPathState.AncestorReparse)]
+    [InlineData(UnsafeProductionPathState.AncestorForeignResolution)]
+    public void Production_key_ring_rejects_unsafe_existing_ancestry_before_provider_IO(
+        UnsafeProductionPathState unsafeState)
+    {
+        var indexIo = new RecordingUsearchDirectoryCreator();
+        var keyRingIo = new RecordingDataProtectionStore();
+        var services = new ServiceCollection();
+        WebHostComposition.AddProductionFluxKnowledgeServicesForTests(
+            services,
+            CreateProductionConfiguration(),
+            new ProductionStorageTestBindings(
+                new RecordingProductionPathInspector(unsafeState, LiveRootLayout.Production.ConfigRoot),
+                indexIo,
+                keyRingIo));
+        using var provider = services.BuildServiceProvider();
+
+        Assert.Throws<InvalidOperationException>(() =>
+            provider.GetRequiredService<LocalRetainedCsharpCodeSearchCursorCodec>());
+        Assert.Equal(0, indexIo.CreateDirectoryCalls);
+        Assert.Equal(0, keyRingIo.CreateProviderCalls);
+    }
+
+    [Fact]
     public void Disabled_options_register_no_com_host_or_external_capture_service()
     {
         var configuration = CreateOutlookRecoveryConfiguration(enabled: null);
@@ -67,8 +266,27 @@ public sealed class WebHostCompositionTests : IDisposable
                 "OutlookHost",
                 StringComparison.Ordinal) == true ||
                 descriptor.ImplementationType?.Assembly.GetName().Name?.Contains(
-                    "OutlookHost",
-                    StringComparison.Ordinal) == true);
+                "OutlookHost",
+                StringComparison.Ordinal) == true);
+    }
+
+    [Fact]
+    public void Application_composition_registers_no_go_live_authority_fresh_start_or_Codex_repair_service()
+    {
+        var services = new ServiceCollection();
+        services.AddLogging();
+
+        WebHostComposition.AddProductionFluxKnowledgeServicesForTests(services, CreateProductionConfiguration());
+
+        Assert.DoesNotContain(services, descriptor =>
+            descriptor.ServiceType.FullName?.Contains("CodexMarketplace", StringComparison.Ordinal) == true ||
+            descriptor.ServiceType.FullName?.Contains("CodexPlugin", StringComparison.Ordinal) == true ||
+            descriptor.ServiceType.FullName?.Contains("GoLiveAuthority", StringComparison.Ordinal) == true ||
+            descriptor.ServiceType.FullName?.Contains("FreshStart", StringComparison.Ordinal) == true ||
+            descriptor.ImplementationType?.FullName?.Contains("CodexMarketplace", StringComparison.Ordinal) == true ||
+            descriptor.ImplementationType?.FullName?.Contains("CodexPlugin", StringComparison.Ordinal) == true ||
+            descriptor.ImplementationType?.FullName?.Contains("GoLiveAuthority", StringComparison.Ordinal) == true ||
+            descriptor.ImplementationType?.FullName?.Contains("FreshStart", StringComparison.Ordinal) == true);
     }
 
     [Theory]
@@ -599,6 +817,14 @@ public sealed class WebHostCompositionTests : IDisposable
         return new ConfigurationBuilder().AddInMemoryCollection(values).Build();
     }
 
+    private IConfiguration CreateProductionConfiguration() =>
+        new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["ConnectionStrings:FluxKnowledge"] =
+                "Server=unreachable.invalid;Initial Catalog=FluxKnowledge;Integrated Security=true;Encrypt=true;TrustServerCertificate=true",
+            ["LocalIngress:AllowedRoots:0"] = @"I:\FluxKnowledge\Data\Retained"
+        }).Build();
+
     private sealed class ConfiguredWebApplicationFactory(string ingressRoot)
         : WebApplicationFactory<Program>
     {
@@ -738,6 +964,138 @@ public sealed class WebHostCompositionTests : IDisposable
         {
             AuditEvents.Add(auditEvent);
             return ValueTask.CompletedTask;
+        }
+    }
+
+    private sealed class ValidatedEmptyCatalogueRecoveryStore : IDerivedIndexRecoveryStore
+    {
+        private static readonly DerivedIndexRecoverySqlSnapshot Snapshot = new(
+            null,
+            null,
+            ImmutableArray<CanonicalVector>.Empty,
+            ImmutableHashSet<Guid>.Empty,
+            ImmutableHashSet<string>.Empty,
+            IsValidatedEmptyCatalogue: true);
+
+        public ValueTask<DerivedIndexRecoverySqlSnapshot> ReadActiveAsync(CancellationToken cancellationToken) =>
+            ValueTask.FromResult(Snapshot);
+
+        public ValueTask<IDerivedIndexRecoveryLease?> TryAcquireExclusiveLeaseAsync(
+            TimeSpan lockTimeout,
+            CancellationToken cancellationToken) =>
+            ValueTask.FromResult<IDerivedIndexRecoveryLease?>(new Lease());
+
+        public ValueTask<bool> TryUpdateRecoveryPathAsync(
+            Guid expectedActiveGenerationId,
+            string expectedIndexPath,
+            string replacementIndexPath,
+            DateTimeOffset validatedAtUtc,
+            CancellationToken cancellationToken) =>
+            throw new InvalidOperationException("A validated empty catalogue cannot update an index path.");
+
+        public ValueTask AppendAuditAsync(
+            DerivedIndexRecoveryAuditEvent auditEvent,
+            CancellationToken cancellationToken) =>
+            ValueTask.CompletedTask;
+
+        private sealed class Lease : IDerivedIndexRecoveryLease
+        {
+            public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+        }
+    }
+
+    public enum UnsafeProductionPathState
+    {
+        Safe,
+        AncestorReparse,
+        AncestorForeignResolution
+    }
+
+    private sealed class RecordingProductionPathInspector(
+        UnsafeProductionPathState state = UnsafeProductionPathState.Safe,
+        string? unsafePath = null) : ILiveRootPathInspector
+    {
+        public LiveRootPathInspection Inspect(string path)
+        {
+            if (unsafePath is not null &&
+                string.Equals(Path.GetFullPath(path), Path.GetFullPath(unsafePath), StringComparison.OrdinalIgnoreCase))
+            {
+                return state switch
+                {
+                    UnsafeProductionPathState.AncestorReparse => new(true, true, path),
+                    UnsafeProductionPathState.AncestorForeignResolution => new(true, false, @"C:\foreign-live-root"),
+                    _ => new(true, false, path)
+                };
+            }
+
+            return new(true, false, path);
+        }
+    }
+
+    private sealed class RecordingUsearchDirectoryCreator : IUsearchDirectoryCreator
+    {
+        public int CreateDirectoryCalls { get; private set; }
+
+        public void CreateDirectory(string path) => CreateDirectoryCalls++;
+    }
+
+    private sealed class RecordingDataProtectionStore : IPrivatePcDataProtectionStore
+    {
+        public int CreateProviderCalls { get; private set; }
+
+        public IDataProtectionProvider CreateProvider(string keyRingRoot, bool createIfMissing)
+        {
+            CreateProviderCalls++;
+            throw new InvalidOperationException("The fake key-ring store must remain untouched.");
+        }
+    }
+
+    private sealed class OneVectorIndexGenerationStore : IIndexGenerationStore
+    {
+        private static readonly IReadOnlyList<CanonicalVector> Vectors = [CreateVector()];
+
+        public ValueTask<IReadOnlyList<CanonicalTextChunk>> ReadChunksAsync(
+            FluxKnowledge.Domain.Common.PipelineRecordId pipelineRecordId,
+            long sourceRevision,
+            CancellationToken cancellationToken) =>
+            ValueTask.FromResult<IReadOnlyList<CanonicalTextChunk>>([]);
+
+        public ValueTask<IReadOnlyList<CanonicalVector>> ReadVectorsAsync(
+            Guid indexGenerationId,
+            CancellationToken cancellationToken) =>
+            ValueTask.FromResult(Vectors);
+
+        public ValueTask<IReadOnlyList<CanonicalVector>> ReadEligibleVectorsAsync(CancellationToken cancellationToken) =>
+            ValueTask.FromResult(Vectors);
+
+        public ValueTask<IndexGenerationDescriptor?> GetGenerationAsync(
+            Guid indexGenerationId,
+            CancellationToken cancellationToken) =>
+            ValueTask.FromResult<IndexGenerationDescriptor?>(null);
+
+        public ValueTask<Guid?> GetActiveGenerationIdAsync(CancellationToken cancellationToken) =>
+            ValueTask.FromResult<Guid?>(null);
+
+        public ValueTask UpdateGenerationMetadataAsync(
+            IndexGenerationDescriptor generation,
+            CancellationToken cancellationToken) =>
+            ValueTask.CompletedTask;
+
+        private static CanonicalVector CreateVector()
+        {
+            var values = new float[4];
+            values[0] = 1F;
+            var bytes = new byte[values.Length * sizeof(float)];
+            Buffer.BlockCopy(values, 0, bytes, 0, bytes.Length);
+            return new CanonicalVector(
+                1,
+                1,
+                "production-storage-test",
+                values.Length,
+                bytes,
+                new string('a', 64),
+                Convert.ToHexStringLower(SHA256.HashData(bytes)),
+                1);
         }
     }
 }

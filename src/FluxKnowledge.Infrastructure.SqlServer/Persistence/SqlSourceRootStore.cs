@@ -1,6 +1,4 @@
 using System.Data;
-using System.Security.Cryptography;
-using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using FluxKnowledge.Application.Contracts;
@@ -45,7 +43,7 @@ public sealed class SqlSourceRootStore(
             request.ExcludePatterns,
             request.AllowedClassifications,
             request.ReconciliationCadence);
-        var configuration = CanonicalConfiguration.From(request);
+        var configuration = SourceRootControlConfiguration.From(request);
 
         await using var executionContext = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         var strategy = executionContext.Database.CreateExecutionStrategy();
@@ -70,7 +68,7 @@ public sealed class SqlSourceRootStore(
         SourceRootCreateRequest request,
         ScanStartIntent startIntent,
         string canonicalPath,
-        CanonicalConfiguration configuration,
+        SourceRootControlConfiguration configuration,
         CancellationToken cancellationToken)
     {
         await using var transaction = await context.Database
@@ -137,18 +135,7 @@ public sealed class SqlSourceRootStore(
             CrawlMode = 0,
             ReconciliationCadenceSeconds = checked((long)request.ReconciliationCadence.TotalSeconds),
             PermissionEvidenceJson = request.PathValidation?.PermissionEvidenceJson,
-            HealthEvidenceJson = JsonSerializer.Serialize(new
-            {
-                physicalIdentity = request.PathValidation is null
-                    ? null
-                    : new
-                    {
-                        request.PathValidation.PhysicalIdentity.VolumeRoot,
-                        request.PathValidation.PhysicalIdentity.IsFixedNtfs,
-                        request.PathValidation.PhysicalIdentity.IdentityFingerprint
-                    },
-                configurationFingerprint = configuration.Fingerprint
-            }),
+            HealthEvidenceJson = SourceRootControlAuditEvidence.CreateHealthEvidence(request.PathValidation, configuration),
             ConfigurationRevision = 1,
             CreatedAtUtc = now,
             UpdatedAtUtc = now
@@ -163,12 +150,11 @@ public sealed class SqlSourceRootStore(
             IsReleased = released,
             ReleasedAtUtc = released ? now : null,
             State = released ? (int)SourceScanRequestState.Released : (int)SourceScanRequestState.Held,
-            AuditEvidenceJson = JsonSerializer.Serialize(new
-            {
-                configurationFingerprint = configuration.Fingerprint,
-                requestedByFingerprint = ActorFingerprint(request.RequestedBy),
-                releasedByFingerprint = released ? ActorFingerprint(request.RequestedBy) : null
-            })
+            AuditEvidenceJson = SourceRootControlAuditEvidence.CreateRequestEvidence(
+                configuration,
+                request.RequestedBy,
+                released ? request.RequestedBy : null,
+                released ? now : null)
         });
         context.SourceScanJobs.Add(new SourceScanJobEntity
         {
@@ -312,7 +298,7 @@ public sealed class SqlSourceRootStore(
         request.IsReleased = true;
         request.ReleasedAtUtc = releasedAtUtc;
         request.State = (int)SourceScanRequestState.Released;
-        request.AuditEvidenceJson = AppendReleaseAuditEvidence(
+        request.AuditEvidenceJson = SourceRootControlAuditEvidence.AppendReleaseEvidence(
             request.AuditEvidenceJson,
             actor,
             releasedAtUtc);
@@ -357,26 +343,6 @@ public sealed class SqlSourceRootStore(
              """,
             cancellationToken);
 
-    private static string AppendReleaseAuditEvidence(
-        string? existingEvidenceJson,
-        string actor,
-        DateTimeOffset releasedAtUtc)
-    {
-        JsonObject evidence;
-        try
-        {
-            evidence = JsonNode.Parse(existingEvidenceJson ?? "{}") as JsonObject ?? new JsonObject();
-        }
-        catch (JsonException exception)
-        {
-            throw new InvalidOperationException("Source scan request audit evidence is invalid.", exception);
-        }
-
-        evidence["releasedByFingerprint"] = ActorFingerprint(actor);
-        evidence["releasedAtUtc"] = releasedAtUtc;
-        return evidence.ToJsonString();
-    }
-
     private static bool PhysicalIdentityMatches(
         string? healthEvidenceJson,
         SourceRootPathValidation? validation)
@@ -407,70 +373,4 @@ public sealed class SqlSourceRootStore(
         }
     }
 
-    private static string ActorFingerprint(string actor)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(actor);
-        if (actor.Length > 256)
-        {
-            throw new ArgumentOutOfRangeException(nameof(actor), "Source control actor must be at most 256 characters.");
-        }
-
-        return Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(actor)));
-    }
-
-    private sealed record CanonicalConfiguration(
-        string IncludePatternsJson,
-        string ExcludePatternsJson,
-        string AllowedClassificationsJson,
-        string Fingerprint,
-        string DisplayName,
-        bool Recursive,
-        bool FollowLinks,
-        long MaximumFileBytes,
-        long ReconciliationCadenceSeconds)
-    {
-        public static CanonicalConfiguration From(SourceRootCreateRequest request)
-        {
-            var include = CanonicalJson(request.IncludePatterns);
-            var exclude = CanonicalJson(request.ExcludePatterns);
-            var classifications = CanonicalJson(request.AllowedClassifications);
-            var cadenceSeconds = checked((long)request.ReconciliationCadence.TotalSeconds);
-            var framed = string.Join(
-                "\n",
-                request.DisplayName,
-                include,
-                exclude,
-                classifications,
-                request.Recursive ? "1" : "0",
-                request.FollowLinks ? "1" : "0",
-                request.MaximumFileBytes.ToString(System.Globalization.CultureInfo.InvariantCulture),
-                cadenceSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture));
-            return new CanonicalConfiguration(
-                include,
-                exclude,
-                classifications,
-                Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(framed))),
-                request.DisplayName,
-                request.Recursive,
-                request.FollowLinks,
-                request.MaximumFileBytes,
-                cadenceSeconds);
-        }
-
-        public bool Matches(SourceRootConfigurationEntity entity) =>
-            string.Equals(DisplayName, entity.DisplayName, StringComparison.Ordinal) &&
-            string.Equals(IncludePatternsJson, entity.IncludePatternsJson, StringComparison.Ordinal) &&
-            string.Equals(ExcludePatternsJson, entity.ExcludePatternsJson, StringComparison.Ordinal) &&
-            string.Equals(AllowedClassificationsJson, entity.AllowedClassificationsJson, StringComparison.Ordinal) &&
-            Recursive == entity.Recursive &&
-            FollowLinks == entity.FollowLinks &&
-            MaximumFileBytes == entity.MaximumFileBytes &&
-            ReconciliationCadenceSeconds == entity.ReconciliationCadenceSeconds;
-
-        private static string CanonicalJson(IReadOnlyList<string> values) =>
-            JsonSerializer.Serialize(
-                (values ?? Array.Empty<string>())
-                    .OrderBy(static value => value, StringComparer.Ordinal)
-                    .ToArray());
-    }
 }

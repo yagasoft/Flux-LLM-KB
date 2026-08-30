@@ -5,6 +5,7 @@
 
   <ItemGroup>
     <ProjectReference Include="../FluxKnowledge.Application/FluxKnowledge.Application.csproj" />
+    <ProjectReference Include="../FluxKnowledge.Integrations/FluxKnowledge.Integrations.csproj" />
     <ProjectReference Include="../FluxKnowledge.Infrastructure.SqlServer/FluxKnowledge.Infrastructure.SqlServer.csproj" />
   </ItemGroup>
 </Project>

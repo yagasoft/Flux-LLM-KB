@@ -69,6 +69,23 @@ public sealed class SqlToUsearchRebuildTests(NativeSqlServerFixture fixture) : I
     }
 
     [NativeSqlServerFact]
+    public async Task First_validated_generation_clears_empty_marker_atomically()
+    {
+        await SqlTestData.ClearPipelineAsync(_fixture);
+        await using (var context = await SqlTestData.CreateFactory(_fixture).CreateDbContextAsync())
+        {
+            await new EmptyCatalogueBootstrapper().ProveAndMarkAsync(context, CancellationToken.None);
+        }
+
+        await using var environment = await PipelineEnvironment.CreateAsync(_fixture, "first catalogue entry");
+        await using var verification = await environment.Factory.CreateDbContextAsync();
+        var state = await verification.IndexState.SingleAsync(candidate => candidate.Id == 1);
+
+        Assert.NotNull(state.ActiveIndexGenerationId);
+        Assert.Null(state.EmptyCatalogueValidatedAtUtc);
+    }
+
+    [NativeSqlServerFact]
     public async Task Publish_snapshot_keeps_an_older_unsuppressed_retained_record_when_a_later_retained_revision_is_suppressed()
     {
         await using var environment = await PipelineEnvironment.CreateAsync(_fixture, "retained publish snapshot");

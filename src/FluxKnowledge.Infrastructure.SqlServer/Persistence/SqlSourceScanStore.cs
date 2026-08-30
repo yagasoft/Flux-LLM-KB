@@ -334,6 +334,7 @@ public sealed class SqlSourceScanStore(
                     (value.State == (int)SourceScanJobState.Running && value.LeaseExpiresAtUtc <= nowUtc)) &&
                 value.DueAtUtc <= nowUtc &&
                 value.SourceScanRequest.IsReleased &&
+                value.SourceScanRequest.SourceRoot.State == (int)SourceRootState.Enabled &&
                 (value.LeaseExpiresAtUtc == null || value.LeaseExpiresAtUtc <= nowUtc))
             .OrderBy(value => value.DueAtUtc).ThenBy(value => value.Id)
             .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);

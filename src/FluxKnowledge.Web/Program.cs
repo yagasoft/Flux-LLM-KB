@@ -5,17 +5,28 @@ using FluxKnowledge.Web.Endpoints;
 using FluxKnowledge.Web.Mcp;
 using FluxKnowledge.Infrastructure.SqlServer.Visibility;
 using Microsoft.AspNetCore.Components.Server.Circuits;
+using Microsoft.Extensions.Configuration;
 using System.Text.Json;
 
 const string OutlookConfigurationProjectionSwitch = "--project-outlook-capture-configuration";
+const string NativeGoLiveCompositionValidationSwitch = "--validate-native-go-live-composition";
 var projectOutlookConfiguration = args.Contains(
     OutlookConfigurationProjectionSwitch,
     StringComparer.OrdinalIgnoreCase);
+var validateNativeGoLiveComposition = args.Contains(
+    NativeGoLiveCompositionValidationSwitch,
+    StringComparer.OrdinalIgnoreCase);
 var builder = WebApplication.CreateBuilder(
-    args.Where(argument => !string.Equals(
-        argument,
-        OutlookConfigurationProjectionSwitch,
-        StringComparison.OrdinalIgnoreCase)).ToArray());
+    args.Where(argument =>
+        !string.Equals(argument, OutlookConfigurationProjectionSwitch, StringComparison.OrdinalIgnoreCase) &&
+        !string.Equals(argument, NativeGoLiveCompositionValidationSwitch, StringComparison.OrdinalIgnoreCase)).ToArray());
+if (!WebHostComposition.IsIsolatedTestComposition)
+{
+    builder.Configuration.Sources.Clear();
+    builder.Configuration.AddConfiguration(
+        WebHostComposition.LoadCanonicalProductionConfiguration(
+            FluxKnowledge.Web.Configuration.FileSystemNoFollowPathOpener.Instance));
+}
 if (projectOutlookConfiguration)
 {
     Console.WriteLine(JsonSerializer.Serialize(
@@ -24,6 +35,11 @@ if (projectOutlookConfiguration)
 }
 
 WebHostComposition.AddFluxKnowledgeServices(builder.Services, builder.Configuration);
+if (validateNativeGoLiveComposition)
+{
+    WebHostComposition.ValidateNativeGoLiveComposition(builder.Services, builder.Configuration);
+    return;
+}
 builder.Services.AddRazorComponents()
     .AddInteractiveServerComponents();
 builder.Services.AddSingleton<StatusEventFeed>();
@@ -35,8 +51,14 @@ builder.Services.AddFluxKnowledgeMcp();
 builder.Services
     .AddMcpServer()
     .WithHttpTransport(options => options.Stateless = true)
-    .WithTools<KnowledgeMcpTools>();
+    .WithTools<NativeV1McpTools>();
 var app = builder.Build();
+if (!WebHostComposition.IsIsolatedTestComposition)
+{
+    await WebHostComposition.InitialiseStrictProductionRecoveryAsync(
+        app.Services,
+        app.Lifetime.ApplicationStopping);
+}
 
 app.UseLocalOperatorLoopbackGate();
 app.UseAntiforgery();
@@ -51,6 +73,7 @@ app.MapFluxKnowledgePipelineRecords();
 app.MapFluxKnowledgeOperatorActions();
 app.MapFluxKnowledgeLocalRetainedDetails();
 app.MapFluxKnowledgeLocalRetainedCsharpCode();
+app.MapFluxKnowledgeNativeV1();
 app.MapMcp("/mcp");
 
 app.Run();
