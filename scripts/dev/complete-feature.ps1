@@ -809,7 +809,7 @@ function Invoke-NativeGoLive {
             -Arguments @($plan, $MergedMainRoot)
         $hostType = Get-RequiredReflectionType -Assembly $integrationsAssembly `
             -Name "FluxKnowledge.Integrations.Windows.NativeGoLive.GuardedNativeGoLiveHost"
-        $host = New-RequiredReflectionInstance -Type $hostType `
+        $nativeGoLiveHost = New-RequiredReflectionInstance -Type $hostType `
             -Arguments @($capability, $plan, $MergedMainRoot, $ports, $bootstrapInstaller)
         $requestType = Get-RequiredReflectionType -Assembly $integrationsAssembly `
             -Name "FluxKnowledge.Integrations.Windows.NativeGoLive.NativeGoLiveRequest"
@@ -824,9 +824,9 @@ function Invoke-NativeGoLive {
         $module = Import-Module $ModulePath -Force -PassThru
         try {
             $result = & $module {
-                param($Issuer, $Capability, $Request, $Host)
-                Invoke-NativeGoLive -CapabilityIssuer $Issuer -Capability $Capability -Request $Request -Host $Host
-            } $capabilityIssuer $capability $request $host
+                param($Issuer, $Capability, $Request, $NativeGoLiveHost)
+                Invoke-NativeGoLive -CapabilityIssuer $Issuer -Capability $Capability -Request $Request -NativeGoLiveHost $NativeGoLiveHost
+            } $capabilityIssuer $capability $request $nativeGoLiveHost
         } finally {
             Remove-Module $module -Force -ErrorAction SilentlyContinue
         }
@@ -900,7 +900,7 @@ try {
     Invoke-FeatureStep -Name "native-go-live-one-shot-admission-contract" -Cwd $FeatureWorktree -Command 'dotnet test .\tests\FluxKnowledge.Integration.Tests\FluxKnowledge.Integration.Tests.csproj -c Release --no-build --filter "FullyQualifiedName~NativeGoLiveOneShotAdmissionTests" --logger "console;verbosity=minimal"'
     Invoke-FeatureStep -Name "native-go-live-recovery-removal-contract" -Cwd $FeatureWorktree -Command 'pwsh -NoProfile -File .\tests\native\native-go-live-recovery-removal-contract.ps1 -SourceRoot .'
     Invoke-FeatureStep -Name "native-deployment-contract" -Cwd $FeatureWorktree -Command 'pwsh -NoProfile -File .\tests\native\native-deployment-plan.ps1 -SourceRoot .'
-    Invoke-FeatureStep -Name "feature-commit" -Cwd $FeatureWorktree -Command "git add -A; if ((git status --porcelain) -ne `$null) { git commit -m '$safeCommitMessage' }"
+    Invoke-FeatureStep -Name "feature-commit" -Cwd $FeatureWorktree -Command "git add -A -- . ':(exclude).superpowers/sdd/'; if ((git status --porcelain) -ne `$null) { git commit -m '$safeCommitMessage' }"
     Invoke-FeatureStep -Name "sync-main" -Cwd $MainRoot -Command 'git pull --ff-only origin main'
     Invoke-FeatureStep -Name "squash-merge" -Cwd $MainRoot -Command "git merge --squash '$safeBranch'"
     Invoke-FeatureStep -Name "dotnet-tool-restore-main" -Cwd $MainRoot -Command 'dotnet tool restore'

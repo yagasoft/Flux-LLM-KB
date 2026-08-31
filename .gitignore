@@ -41,6 +41,7 @@ attachments/
 .worktrees/
 worktrees/
 .agents/
+.superpowers/sdd/
 
 # OS/editor
 .DS_Store

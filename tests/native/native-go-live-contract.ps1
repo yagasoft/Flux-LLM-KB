@@ -78,7 +78,7 @@ try {
     Assert-Throws -Action {
         & $module {
             Invoke-NativeGoLive -CapabilityIssuer ([pscustomobject]@{}) -Capability ([pscustomobject]@{}) `
-                -Request ([pscustomobject]@{}) -Host ([pscustomobject]@{})
+                -Request ([pscustomobject]@{}) -NativeGoLiveHost ([pscustomobject]@{})
         }
     } -Pattern 'go-live-closeout-capability-unrecognised' -Message 'Forged closeout values reached execution.'
 }

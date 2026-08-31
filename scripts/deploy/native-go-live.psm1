@@ -101,7 +101,7 @@ function Invoke-NativeGoLive {
         [Parameter(Mandatory)][object]$CapabilityIssuer,
         [Parameter(Mandatory)][object]$Capability,
         [Parameter(Mandatory)][object]$Request,
-        [Parameter(Mandatory)][object]$Host
+        [Parameter(Mandatory)][object]$NativeGoLiveHost
     )
 
     try {
@@ -120,7 +120,7 @@ function Invoke-NativeGoLive {
             $CapabilityIssuer,
             $Capability,
             $Request,
-            $Host,
+            $NativeGoLiveHost,
             [Threading.CancellationToken]::None))
         return $task.GetAwaiter().GetResult()
     }
