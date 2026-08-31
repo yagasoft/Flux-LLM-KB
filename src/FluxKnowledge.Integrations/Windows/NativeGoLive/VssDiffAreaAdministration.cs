@@ -45,6 +45,11 @@ internal interface IVssDiffAreaComApi
     void ChangeDiffAreaMaximumSize(string sourceVolumeId, string storageVolumeId, ulong maximumBytes);
 }
 
+internal interface IVssOperationPrivilegeScope
+{
+    IDisposable EnableBackupPrivilege();
+}
+
 /// <summary>
 /// Applies the one allowed VSS diff-area policy through the typed VSS COM API. It never creates a
 /// snapshot and exposes no command, output-parsing, encryption or restore surface.
@@ -54,13 +59,26 @@ internal sealed class VssDiffAreaAdministration
     internal const ulong MinimumDiffAreaBytes = 320UL * 1024 * 1024;
     private const decimal CanonicalMaximumStorageFraction = 0.10m;
     private readonly IVssDiffAreaComApi _api;
+    private readonly IVssOperationPrivilegeScope _operationPrivilegeScope;
 
-    public VssDiffAreaAdministration() : this(new WindowsVssDiffAreaComApi())
+    public VssDiffAreaAdministration() : this(
+        new WindowsVssDiffAreaComApi(),
+        new WindowsVssOperationPrivilegeScope())
     {
     }
 
-    internal VssDiffAreaAdministration(IVssDiffAreaComApi api) =>
+    internal VssDiffAreaAdministration(IVssDiffAreaComApi api) : this(api, new WindowsVssOperationPrivilegeScope())
+    {
+    }
+
+    internal VssDiffAreaAdministration(
+        IVssDiffAreaComApi api,
+        IVssOperationPrivilegeScope operationPrivilegeScope)
+    {
         _api = api ?? throw new ArgumentNullException(nameof(api));
+        _operationPrivilegeScope = operationPrivilegeScope ??
+            throw new ArgumentNullException(nameof(operationPrivilegeScope));
+    }
 
     public VssDiffAreaState QueryCanonicalState(CancellationToken cancellationToken = default)
         => QueryCanonicalObservation(cancellationToken).Association;
@@ -163,6 +181,7 @@ internal sealed class VssDiffAreaAdministration
                 : NativeGoLiveVssAction.AddDiffArea;
             try
             {
+                using var backupPrivilege = _operationPrivilegeScope.EnableBackupPrivilege();
                 if (state.State == VssAssociationState.ExactExisting)
                 {
                     _api.ChangeDiffAreaMaximumSize(state.SourceVolumeId, state.StorageVolumeId, maximumBytes);
@@ -237,6 +256,146 @@ internal sealed class VssDiffAreaAdministration
     private static VssDiffAreaState Empty(VssAssociationState state) => new(state, string.Empty, string.Empty, null);
     private static NativeGoLiveVssPreflightObservation EmptyObservation(VssAssociationState state) =>
         new(Empty(state), 0, 0);
+}
+
+internal sealed class WindowsVssOperationPrivilegeScope : IVssOperationPrivilegeScope
+{
+    private const uint TokenAdjustPrivileges = 0x20;
+    private const uint TokenQuery = 0x08;
+    private const uint SePrivilegeEnabled = 0x02;
+    private const int ErrorNotAllAssigned = 1300;
+
+    public IDisposable EnableBackupPrivilege()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            throw new PlatformNotSupportedException("VSS diff-area administration is Windows-only.");
+        }
+
+        if (!OpenProcessToken(GetCurrentProcess(), TokenAdjustPrivileges | TokenQuery, out var tokenHandle))
+        {
+            throw new Win32Exception(Marshal.GetLastWin32Error());
+        }
+
+        try
+        {
+            if (!LookupPrivilegeValue(null, "SeBackupPrivilege", out var luid))
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            }
+
+            var requested = new TokenPrivileges
+            {
+                PrivilegeCount = 1,
+                Privileges = new LuidAndAttributes { Luid = luid, Attributes = SePrivilegeEnabled }
+            };
+            if (!AdjustTokenPrivileges(
+                    tokenHandle,
+                    false,
+                    ref requested,
+                    (uint)Marshal.SizeOf<TokenPrivileges>(),
+                    out var previous,
+                    out _))
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            }
+
+            var error = Marshal.GetLastWin32Error();
+            if (error == ErrorNotAllAssigned)
+            {
+                throw new Win32Exception(error);
+            }
+
+            return new TokenPrivilegeReverter(tokenHandle, previous);
+        }
+        catch
+        {
+            CloseHandle(tokenHandle);
+            throw;
+        }
+    }
+
+    private sealed class TokenPrivilegeReverter(nint tokenHandle, TokenPrivileges previous) : IDisposable
+    {
+        private nint _tokenHandle = tokenHandle;
+        private TokenPrivileges _previous = previous;
+
+        public void Dispose()
+        {
+            var handle = Interlocked.Exchange(ref _tokenHandle, 0);
+            if (handle == 0) return;
+            try
+            {
+                if (!AdjustTokenPrivilegesRestore(handle, false, ref _previous, 0, 0, 0))
+                {
+                    throw new Win32Exception(Marshal.GetLastWin32Error());
+                }
+            }
+            finally
+            {
+                CloseHandle(handle);
+            }
+        }
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct Luid
+    {
+        public uint LowPart;
+        public int HighPart;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct LuidAndAttributes
+    {
+        public Luid Luid;
+        public uint Attributes;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct TokenPrivileges
+    {
+        public uint PrivilegeCount;
+        public LuidAndAttributes Privileges;
+    }
+
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool LookupPrivilegeValue(
+        string? systemName,
+        string name,
+        out Luid luid);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool OpenProcessToken(nint processHandle, uint desiredAccess, out nint tokenHandle);
+
+    [DllImport("advapi32.dll", SetLastError = true, EntryPoint = "AdjustTokenPrivileges")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool AdjustTokenPrivileges(
+        nint tokenHandle,
+        [MarshalAs(UnmanagedType.Bool)] bool disableAllPrivileges,
+        ref TokenPrivileges newState,
+        uint bufferLength,
+        out TokenPrivileges previousState,
+        out uint returnLength);
+
+    [DllImport("advapi32.dll", SetLastError = true, EntryPoint = "AdjustTokenPrivileges")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool AdjustTokenPrivilegesRestore(
+        nint tokenHandle,
+        [MarshalAs(UnmanagedType.Bool)] bool disableAllPrivileges,
+        ref TokenPrivileges newState,
+        uint bufferLength,
+        nint previousState,
+        nint returnLength);
+
+    [DllImport("kernel32.dll")]
+    private static extern nint GetCurrentProcess();
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CloseHandle(nint handle);
 }
 
 /// <summary>Windows-only VSS COM adapter. Volume display names are never parsed.</summary>

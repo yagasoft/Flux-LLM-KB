@@ -141,6 +141,22 @@ public sealed class NativeGoLiveLiveGateCompositionTests
     }
 
     [Fact]
+    public void Vss_adapter_enables_backup_privilege_only_while_adding_the_canonical_diff_area()
+    {
+        var privilege = new RecordingVssOperationPrivilegeScope();
+        var api = new PrivilegeRequiredVssApi(privilege);
+        var adapter = new VssDiffAreaAdministration(api, privilege);
+
+        var result = adapter.EnsureMaximumStorageObserved("I:", 0.10m, CancellationToken.None);
+
+        Assert.Equal(VssAssociationState.ExactExisting, result.Verified.State);
+        Assert.Equal(1, privilege.EnableCount);
+        Assert.Equal(1, privilege.DisposeCount);
+        Assert.True(api.AddCalledWhileEnabled);
+        Assert.False(privilege.IsEnabled);
+    }
+
+    [Fact]
     public async Task Preflight_rejects_missing_direct_admin_app_pool_identity()
     {
         using var fixture = new ExecutorOrderingFixture(ValidPreflight() with
@@ -448,6 +464,51 @@ public sealed class NativeGoLiveLiveGateCompositionTests
 
         public void ChangeDiffAreaMaximumSize(string _, string __, ulong ___) =>
             throw new NotSupportedException();
+    }
+
+    private sealed class RecordingVssOperationPrivilegeScope : IVssOperationPrivilegeScope
+    {
+        public int EnableCount { get; private set; }
+        public int DisposeCount { get; private set; }
+        public bool IsEnabled { get; private set; }
+
+        public IDisposable EnableBackupPrivilege()
+        {
+            EnableCount++;
+            IsEnabled = true;
+            return new CallbackDisposable(() =>
+            {
+                DisposeCount++;
+                IsEnabled = false;
+            });
+        }
+    }
+
+    private sealed class PrivilegeRequiredVssApi(RecordingVssOperationPrivilegeScope privilege) : IVssDiffAreaComApi
+    {
+        private bool _added;
+        public bool AddCalledWhileEnabled { get; private set; }
+
+        public VssVolumeDiffAreaState Query(string _) => new(
+            new VssDiffAreaState(
+                _added ? VssAssociationState.ExactExisting : VssAssociationState.SupportedAbsent,
+                "I:", "I:", _added ? 2_000_000_000UL : null),
+            20_000_000_000);
+
+        public void AddDiffArea(string _, string __, ulong ___)
+        {
+            AddCalledWhileEnabled = privilege.IsEnabled;
+            if (!AddCalledWhileEnabled) throw new InvalidOperationException("backup privilege was not enabled");
+            _added = true;
+        }
+
+        public void ChangeDiffAreaMaximumSize(string _, string __, ulong ___) =>
+            throw new NotSupportedException();
+    }
+
+    private sealed class CallbackDisposable(Action dispose) : IDisposable
+    {
+        public void Dispose() => dispose();
     }
 
     internal sealed class OrderingAclPort(NativeGoLivePlan plan, List<string> events) : INativeGoLiveAclPort
