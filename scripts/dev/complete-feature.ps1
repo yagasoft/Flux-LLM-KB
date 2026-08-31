@@ -384,6 +384,17 @@ function Add-DirectNativeGoLiveStep {
         [System.Globalization.DateTimeStyles]::RoundtripKind))
 }
 
+function Record-NativeGoLiveFailure {
+    param(
+        [Parameter(Mandatory)][System.Collections.IDictionary]$Record,
+        [Parameter(Mandatory)][Exception]$Exception)
+
+    $script:FailedStep = 'native-go-live'
+    if ($Exception.Message -cmatch "\ANative go-live failed with safe reason code '(go-live-(?:acknowledgement-required|cancelled-before-admission|lease-unavailable|closeout-capability-(?:unrecognised|expired|binding-mismatch|consumed))|clean-slate-incomplete)'\.\z") {
+        $Record.reason_code = $Matches[1]
+    }
+}
+
 function Get-RequiredReflectionType {
     param(
         [Parameter(Mandatory)][Reflection.Assembly]$Assembly,
@@ -1093,6 +1104,7 @@ try {
                     -BootstrapScript $goLiveBootstrapScript
             } catch {
                 $goLiveRecord.exit_code = 1
+                Record-NativeGoLiveFailure -Record $goLiveRecord -Exception $_.Exception
                 throw
             } finally {
                 Complete-FeatureStepRecord -Record $goLiveRecord -StartedAt ([DateTime]::Parse(

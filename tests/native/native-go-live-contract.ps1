@@ -10,6 +10,7 @@ if ([string]::IsNullOrWhiteSpace($SourceRoot)) {
 $SourceRoot = (Resolve-Path -LiteralPath $SourceRoot).Path
 $deploymentScript = Join-Path $SourceRoot 'scripts\deploy\update-native-windows.ps1'
 $modulePath = Join-Path $SourceRoot 'scripts\deploy\native-go-live.psm1'
+$closeoutPath = Join-Path $SourceRoot 'scripts\dev\complete-feature.ps1'
 $hostPath = Join-Path $SourceRoot 'src\FluxKnowledge.Integrations\Windows\NativeGoLive\GuardedNativeGoLiveHost.cs'
 $portsPath = Join-Path $SourceRoot 'src\FluxKnowledge.Integrations\Windows\NativeGoLive\NativeGoLivePorts.cs'
 $executorPath = Join-Path $SourceRoot 'src\FluxKnowledge.Integrations\Windows\NativeGoLive\NativeGoLiveExecutor.cs'
@@ -31,8 +32,52 @@ function Assert-Throws {
     throw $Message
 }
 
+function Import-CloseoutFunction {
+    param(
+        [Parameter(Mandatory)][System.Management.Automation.Language.Ast]$Ast,
+        [Parameter(Mandatory)][string]$Name)
+
+    $definition = $Ast.Find({
+        param($candidate)
+        $candidate -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+            $candidate.Name -ceq $Name
+    }, $true)
+    if ($null -eq $definition) { throw "Closeout function is missing: $Name" }
+    $captured = & ([scriptblock]::Create(
+        $definition.Extent.Text + "`n(Get-Item -LiteralPath 'Function:$Name').ScriptBlock"))
+    Set-Item -LiteralPath "Function:script:$Name" -Value $captured
+}
+
 foreach ($path in @($deploymentScript, $modulePath, $hostPath, $portsPath, $executorPath)) {
     Assert-True (Test-Path -LiteralPath $path -PathType Leaf) "Required native go-live contract file is missing: $path"
+}
+
+$tokens = $null
+$errors = $null
+$closeoutAst = [System.Management.Automation.Language.Parser]::ParseFile($closeoutPath, [ref]$tokens, [ref]$errors)
+Assert-True ($errors.Count -eq 0) 'Closeout script does not parse.'
+Import-CloseoutFunction -Ast $closeoutAst -Name 'Record-NativeGoLiveFailure'
+
+$script:FailedStep = $null
+$safeFailureRecord = [ordered]@{ name = 'native-go-live'; reason_code = $null }
+Record-NativeGoLiveFailure -Record $safeFailureRecord -Exception ([InvalidOperationException]::new(
+    "Native go-live failed with safe reason code 'clean-slate-incomplete'."))
+Assert-True ($safeFailureRecord.reason_code -ceq 'clean-slate-incomplete') `
+    'A safe native go-live result failure did not retain its exact reason code.'
+Assert-True ($script:FailedStep -ceq 'native-go-live') `
+    'A safe native go-live result failure did not identify the native go-live step.'
+
+foreach ($unsafeMessage in @(
+    "Native go-live failed with safe reason code 'Server=localhost;Password=secret'.",
+    'Native go-live failed with safe reason code clean-slate-incomplete.',
+    'unrelated exception text')) {
+    $script:FailedStep = $null
+    $unsafeFailureRecord = [ordered]@{ name = 'native-go-live'; reason_code = $null }
+    Record-NativeGoLiveFailure -Record $unsafeFailureRecord -Exception ([InvalidOperationException]::new($unsafeMessage))
+    Assert-True ($null -eq $unsafeFailureRecord.reason_code) `
+        'Malformed or unrelated native go-live exception text was surfaced as a reason code.'
+    Assert-True ($script:FailedStep -ceq 'native-go-live') `
+        'A native go-live failure did not identify the native go-live step.'
 }
 
 $planJson = & pwsh -NoProfile -File $deploymentScript -PlanOnly
