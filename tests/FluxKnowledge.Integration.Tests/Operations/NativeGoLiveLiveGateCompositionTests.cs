@@ -25,7 +25,7 @@ public sealed class NativeGoLiveLiveGateCompositionTests
         Assert.Equal(
             [
                 "replace-canonical-iis",
-                "install-signed-bootstrap",
+                "install-direct-admin-bootstrap",
                 "admission-observe-present",
                 "admission-wipe",
                 "admission-observe-absent",
@@ -43,76 +43,7 @@ public sealed class NativeGoLiveLiveGateCompositionTests
     }
 
     [Fact]
-    public async Task Sysadmin_bootstrap_identity_with_master_db_owner_is_permitted_during_preflight()
-    {
-        var preflight = ValidPreflight() with
-        {
-            BootstrapServerRoles = ["sysadmin"],
-            BootstrapMasterDatabaseRoles = ["db_owner"],
-            EffectiveAuthorityFindings =
-            [
-                new NativeGoLiveSqlAuthorityFinding(
-                    BootstrapName, "SERVER", "sysadmin", "SERVER_ROLE", "ROLE", "sysadmin"),
-                new NativeGoLiveSqlAuthorityFinding(
-                    BootstrapName, "master", "db_owner", "DATABASE_ROLE", "ROLE", "db_owner")
-            ]
-        };
-        using var fixture = new ExecutorOrderingFixture(preflight);
-        fixture.BeginExecution();
-
-        var result = await new NativeGoLiveExecutor().ExecuteAsync(fixture.Request, fixture.Host);
-
-        Assert.False(result.Succeeded);
-        Assert.Equal("clean-slate-incomplete", result.ReasonCode);
-        Assert.Contains("stop-iis", fixture.Events);
-    }
-
-    [Fact]
-    public async Task Sysadmin_bootstrap_identity_with_duplicate_server_effective_authority_is_rejected_during_preflight()
-    {
-        var serverAuthority = new NativeGoLiveSqlAuthorityFinding(
-            BootstrapName, "SERVER", "sysadmin", "SERVER_ROLE", "ROLE", "sysadmin");
-        var preflight = ValidPreflight() with
-        {
-            BootstrapServerRoles = ["sysadmin"],
-            BootstrapMasterDatabaseRoles = ["db_owner"],
-            EffectiveAuthorityFindings = [serverAuthority, serverAuthority]
-        };
-        using var fixture = new ExecutorOrderingFixture(preflight);
-        fixture.BeginExecution();
-
-        var result = await new NativeGoLiveExecutor().ExecuteAsync(fixture.Request, fixture.Host);
-
-        Assert.False(result.Succeeded);
-        Assert.Equal("clean-slate-incomplete", result.ReasonCode);
-        Assert.DoesNotContain("stop-iis", fixture.Events);
-    }
-
-    [Fact]
-    public async Task Sysadmin_bootstrap_identity_without_master_db_owner_effective_authority_is_rejected_during_preflight()
-    {
-        var preflight = ValidPreflight() with
-        {
-            BootstrapServerRoles = ["sysadmin"],
-            BootstrapMasterDatabaseRoles = ["db_owner"],
-            EffectiveAuthorityFindings =
-            [
-                new NativeGoLiveSqlAuthorityFinding(
-                    BootstrapName, "SERVER", "sysadmin", "SERVER_ROLE", "ROLE", "sysadmin")
-            ]
-        };
-        using var fixture = new ExecutorOrderingFixture(preflight);
-        fixture.BeginExecution();
-
-        var result = await new NativeGoLiveExecutor().ExecuteAsync(fixture.Request, fixture.Host);
-
-        Assert.False(result.Succeeded);
-        Assert.Equal("clean-slate-incomplete", result.ReasonCode);
-        Assert.DoesNotContain("stop-iis", fixture.Events);
-    }
-
-    [Fact]
-    public async Task Signed_bootstrap_failure_after_canonical_IIS_replacement_fails_closed_before_admission()
+    public async Task Direct_admin_bootstrap_failure_after_canonical_IIS_replacement_fails_closed_before_admission()
     {
         using var fixture = new ExecutorOrderingFixture(failBootstrap: true);
         fixture.BeginExecution();
@@ -121,38 +52,56 @@ public sealed class NativeGoLiveLiveGateCompositionTests
 
         Assert.False(result.Succeeded);
         Assert.Equal("clean-slate-incomplete", result.ReasonCode);
-        Assert.Equal(["replace-canonical-iis", "install-signed-bootstrap"], fixture.Events);
+        Assert.Equal(["replace-canonical-iis", "install-direct-admin-bootstrap"], fixture.Events);
         Assert.True(Directory.Exists(fixture.Plan.Layout.Root));
         Assert.True(File.Exists(Path.Combine(fixture.Plan.Layout.Root, "pre-wipe-sentinel.txt")));
     }
 
     [Fact]
-    public async Task Post_bootstrap_validation_accepts_only_final_app_pool_reader_writer_authority()
+    public async Task Preflight_rejects_missing_direct_admin_app_pool_identity()
     {
-        using var fixture = new PostBootstrapFixture(FinalAppPoolAuthority());
+        using var fixture = new ExecutorOrderingFixture(ValidPreflight() with
+        {
+            AppPoolLoginExists = false,
+            AppPoolLoginSid = null,
+            AppPoolLoginSidHex = null
+        });
+        fixture.BeginExecution();
+
+        var result = await new NativeGoLiveExecutor().ExecuteAsync(fixture.Request, fixture.Host);
+
+        Assert.False(result.Succeeded);
+        Assert.DoesNotContain("stop-iis", fixture.Events);
+    }
+
+    [Fact]
+    public async Task Preflight_rejects_wrong_fixed_procedure_manifest()
+    {
+        using var fixture = new ExecutorOrderingFixture(ValidPreflight() with
+        {
+            BootstrapProcedures = ValidProcedures().Skip(1).ToArray()
+        });
+        fixture.BeginExecution();
+
+        var result = await new NativeGoLiveExecutor().ExecuteAsync(fixture.Request, fixture.Host);
+
+        Assert.False(result.Succeeded);
+        Assert.DoesNotContain("stop-iis", fixture.Events);
+    }
+
+    [Fact]
+    public async Task Post_bootstrap_validation_accepts_direct_admin_app_pool_authority()
+    {
+        using var fixture = new PostBootstrapFixture();
         await using var lease = await fixture.AcquireLeaseAsync();
 
         await fixture.Host.ProvisionEmptyCatalogueAsync(fixture.Plan.Sql, CancellationToken.None);
     }
 
     [Fact]
-    public async Task Post_bootstrap_validation_accepts_production_sysadmin_bootstrap_observation()
+    public async Task Post_bootstrap_validation_rejects_missing_app_pool_sysadmin_membership()
     {
-        using var fixture = new PostBootstrapFixture(
-            FinalAppPoolAuthority(),
-            bootstrapServerRoles: ["sysadmin"],
-            bootstrapMasterDatabaseRoles: ["db_owner"],
-            bootstrapLifecycleAuthorityRevoked: false,
-            bootstrapCanAccessCatalogue: true);
-        await using var lease = await fixture.AcquireLeaseAsync();
-
-        await fixture.Host.ProvisionEmptyCatalogueAsync(fixture.Plan.Sql, CancellationToken.None);
-    }
-
-    [Fact]
-    public async Task Post_bootstrap_validation_rejects_sysadmin_app_pool_authority()
-    {
-        using var fixture = new PostBootstrapFixture(FinalAppPoolAuthority(), appPoolIsSysAdmin: true);
+        using var fixture = new PostBootstrapFixture(appPoolIsSysAdmin: false);
         await using var lease = await fixture.AcquireLeaseAsync();
 
         var exception = await Assert.ThrowsAsync<NativeGoLiveContractException>(
@@ -162,9 +111,9 @@ public sealed class NativeGoLiveLiveGateCompositionTests
     }
 
     [Fact]
-    public async Task Post_bootstrap_validation_rejects_distinguishable_bootstrap_principal_authority()
+    public async Task Post_bootstrap_validation_rejects_non_app_pool_catalogue_owner()
     {
-        using var fixture = new PostBootstrapFixture(BootstrapPrincipalAuthority());
+        using var fixture = new PostBootstrapFixture(catalogueOwnerSidHex: OtherSidHex);
         await using var lease = await fixture.AcquireLeaseAsync();
 
         var exception = await Assert.ThrowsAsync<NativeGoLiveContractException>(
@@ -231,7 +180,7 @@ public sealed class NativeGoLiveLiveGateCompositionTests
                 (connectionString, _) =>
                 {
                     Assert.Equal(bootstrap.ConnectionString, connectionString);
-                    Events.Add("install-signed-bootstrap");
+                    Events.Add("install-direct-admin-bootstrap");
                     return failBootstrap
                         ? Task.FromException(new NativeGoLiveContractException("signed-bootstrap-failed"))
                         : Task.CompletedTask;
@@ -259,12 +208,8 @@ public sealed class NativeGoLiveLiveGateCompositionTests
         private readonly NativeGoLiveRequest _request;
 
         public PostBootstrapFixture(
-            IReadOnlyList<NativeGoLiveSqlAuthorityFinding> authority,
-            bool appPoolIsSysAdmin = false,
-            IReadOnlyList<string>? bootstrapServerRoles = null,
-            IReadOnlyList<string>? bootstrapMasterDatabaseRoles = null,
-            bool bootstrapLifecycleAuthorityRevoked = true,
-            bool bootstrapCanAccessCatalogue = false)
+            bool appPoolIsSysAdmin = true,
+            string? catalogueOwnerSidHex = null)
         {
             _root = Path.Combine(Path.GetTempPath(), "FluxKnowledgeLiveGateAuthority", Guid.NewGuid().ToString("N"));
             var payloadRoot = CreatePayloadRoot(_root);
@@ -285,13 +230,10 @@ public sealed class NativeGoLiveLiveGateCompositionTests
                     null!,
                     null!,
                     new StaticPostBootstrapSqlPort(
-                        ValidPostBootstrap(Plan, authority) with
+                        ValidPostBootstrap(Plan) with
                         {
                             AppPoolLoginIsSysAdmin = appPoolIsSysAdmin,
-                            BootstrapServerRoles = bootstrapServerRoles ?? [],
-                            BootstrapMasterDatabaseRoles = bootstrapMasterDatabaseRoles ?? [],
-                            BootstrapLifecycleAuthorityRevoked = bootstrapLifecycleAuthorityRevoked,
-                            BootstrapCanAccessCatalogue = bootstrapCanAccessCatalogue
+                            CatalogueOwnerSidHex = catalogueOwnerSidHex ?? AppPoolSidHex
                         }),
                     new ExactAclPort(Plan),
                     null!,
@@ -462,45 +404,23 @@ public sealed class NativeGoLiveLiveGateCompositionTests
 
     private static NativeGoLiveSqlPreflightObservation ValidPreflight() => new(
         true,
-        BootstrapName,
-        BootstrapSid,
-        ["FluxKnowledge"],
-        ["FluxKnowledge"],
-        [@"IIS AppPool\FluxKnowledge"],
-        [],
-        [],
         @"IIS AppPool\FluxKnowledge",
         AppPoolSid,
-        false,
-        null,
-        false,
-        [],
-        [],
-        ValidProcedures(),
-        ["SERVER:0:CONNECT SQL:GRANT"],
-        ValidMasterPermissions(),
-        [],
-        CertificateThumbprint,
-        false);
+        true,
+        AppPoolSid,
+        AppPoolSidHex,
+        true,
+        ValidProcedures());
 
-    private static NativeGoLiveSqlPostBootstrapObservation ValidPostBootstrap(
-        NativeGoLivePlan plan,
-        IReadOnlyList<NativeGoLiveSqlAuthorityFinding> authority) => new(
+    private static NativeGoLiveSqlPostBootstrapObservation ValidPostBootstrap(NativeGoLivePlan plan) => new(
         "FluxKnowledge",
         5,
-        CertificateThumbprint,
+        AppPoolSidHex,
         [
             new NativeGoLiveSqlDatabaseFileObservation(1, "ROWS", plan.Sql.DataFilePath),
             new NativeGoLiveSqlDatabaseFileObservation(2, "LOG", plan.Sql.LogFilePath)
         ],
         true,
-        BootstrapName,
-        BootstrapSid,
-        ["FluxKnowledge"],
-        ["FluxKnowledge"],
-        [@"IIS AppPool\FluxKnowledge"],
-        [],
-        [],
         NativeGoLiveDatabaseContract.RequiredMigrations,
         NativeGoLiveDatabaseContract.RequiredMigrations,
         true,
@@ -510,34 +430,14 @@ public sealed class NativeGoLiveLiveGateCompositionTests
         AppPoolSid,
         true,
         AppPoolSid,
-        AppPoolSid,
-        false,
-        ["FluxKnowledge:db_datareader", "FluxKnowledge:db_datawriter"],
-        [],
-        false,
-        0,
-        0,
-        0,
-        0,
-        ValidProcedures(),
-        ["SERVER:0:CONNECT SQL:GRANT"],
-        ValidMasterPermissions(),
-        authority,
-        CertificateThumbprint,
-        false,
+        AppPoolSidHex,
         true,
-        true);
-
-    private static IReadOnlyList<NativeGoLiveSqlAuthorityFinding> FinalAppPoolAuthority() =>
-    [
-        new(@"IIS AppPool\FluxKnowledge", "FluxKnowledge", "db_datareader", "DATABASE_ROLE", "ROLE", "db_datareader"),
-        new(@"IIS AppPool\FluxKnowledge", "FluxKnowledge", "db_datawriter", "DATABASE_ROLE", "ROLE", "db_datawriter")
-    ];
-
-    private static IReadOnlyList<NativeGoLiveSqlAuthorityFinding> BootstrapPrincipalAuthority() =>
-    [
-        new(BootstrapName, "master", "FluxKnowledgeNativeGoLiveCertificateLogin", "CERTIFICATE", "EXECUTE", "CREATE")
-    ];
+        false,
+        0,
+        0,
+        0,
+        0,
+        ValidProcedures());
 
     private static IReadOnlyList<NativeGoLiveSqlProcedureObservation> ValidProcedures() =>
     [
@@ -571,23 +471,7 @@ public sealed class NativeGoLiveLiveGateCompositionTests
         name,
         objectId,
         NativeGoLiveSqlBootstrapAuthorityContract.DefinitionSha256(name),
-        true,
-        NativeGoLiveSqlBootstrapAuthorityContract.SigningCertificateName,
-        CertificateThumbprint,
-        NativeGoLiveSqlBootstrapAuthorityContract.SigningCertificateLoginName,
-        CertificateThumbprint,
-        parameters,
-        [new NativeGoLiveSqlProcedurePermissionObservation(
-            BootstrapName, "WINDOWS_USER", true, "OBJECT_OR_COLUMN", "EXECUTE", "GRANT", 0)]);
-
-    private static IReadOnlyList<string> ValidMasterPermissions() =>
-    [
-        "DATABASE:0:0:master:CONNECT:GRANT",
-        "OBJECT_OR_COLUMN:101:0:dbo.FluxKnowledgeNativeGoLiveCreate:EXECUTE:GRANT",
-        "OBJECT_OR_COLUMN:102:0:dbo.FluxKnowledgeNativeGoLiveDrop:EXECUTE:GRANT",
-        "OBJECT_OR_COLUMN:103:0:dbo.FluxKnowledgeNativeGoLiveManageAppPool:EXECUTE:GRANT",
-        "OBJECT_OR_COLUMN:104:0:dbo.FluxKnowledgeNativeGoLiveObserveAppPool:EXECUTE:GRANT"
-    ];
+        parameters);
 
     private static NativeGoLiveAclObservation ExactAcl(NativeGoLivePlan plan)
     {
@@ -641,9 +525,8 @@ public sealed class NativeGoLiveLiveGateCompositionTests
         return payloadRoot;
     }
 
-    private const string BootstrapName = @"TEST\NativeGoLiveBootstrap";
-    private const string BootstrapSid = "S-1-5-21-100-200-300-400";
     private const string AppPoolSid = "S-1-5-21-101-202-303-404";
+    private const string AppPoolSidHex = "01050000000000051500000065000000ca0000002f01000094010000";
+    private const string OtherSidHex = "01050000000000051500000065000000ca0000002f01000095010000";
     private const string SqlServiceSid = "S-1-5-21-501-602-703-804";
-    private const string CertificateThumbprint = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 }

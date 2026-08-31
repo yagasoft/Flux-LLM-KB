@@ -870,8 +870,6 @@ IF OBJECT_ID(N'dbo.FluxKnowledgeNativeGoLiveCreate',N'P') IS NOT NULL DROP PROCE
 IF OBJECT_ID(N'dbo.FluxKnowledgeNativeGoLiveDrop',N'P') IS NOT NULL DROP PROCEDURE dbo.FluxKnowledgeNativeGoLiveDrop;
 IF OBJECT_ID(N'dbo.FluxKnowledgeNativeGoLiveManageAppPool',N'P') IS NOT NULL DROP PROCEDURE dbo.FluxKnowledgeNativeGoLiveManageAppPool;
 IF OBJECT_ID(N'dbo.FluxKnowledgeNativeGoLiveObserveAppPool',N'P') IS NOT NULL DROP PROCEDURE dbo.FluxKnowledgeNativeGoLiveObserveAppPool;
-IF SUSER_ID(N'FluxKnowledgeNativeGoLiveCertificateLogin') IS NOT NULL DROP LOGIN FluxKnowledgeNativeGoLiveCertificateLogin;
-IF CERT_ID(N'FluxKnowledgeNativeGoLiveCertificate') IS NOT NULL DROP CERTIFICATE FluxKnowledgeNativeGoLiveCertificate;
 '@
         Invoke-NativeGoLiveSqlChild -Operation 'reset' -ConnectionString $ConnectionString `
             -BootstrapLogin $BootstrapLogin -BootstrapScript $BootstrapScript `
@@ -1059,6 +1057,7 @@ try {
     Invoke-FeatureStep -Name "native-closeout-contract" -Cwd $FeatureWorktree -Command 'pwsh -NoProfile -File .\tests\native\complete-feature-dryrun.ps1 -SourceRoot .'
     Invoke-FeatureStep -Name "native-go-live-bootstrap-nondryrun-contract" -Cwd $FeatureWorktree -Command 'pwsh -NoProfile -File .\tests\native\complete-feature-bootstrap-nondryrun.ps1 -SourceRoot .'
     Invoke-FeatureStep -Name "native-go-live-contract" -Cwd $FeatureWorktree -Command 'pwsh -NoProfile -File .\tests\native\native-go-live-contract.ps1 -SourceRoot .'
+    Invoke-FeatureStep -Name "native-go-live-direct-admin-sql-transition-contract" -Cwd $FeatureWorktree -Command 'pwsh -NoProfile -File .\tests\native\native-go-live-direct-admin-sql-transition.ps1 -SourceRoot .'
     Invoke-FeatureStep -Name "native-go-live-one-shot-admission-contract" -Cwd $FeatureWorktree -Command 'dotnet test .\tests\FluxKnowledge.Integration.Tests\FluxKnowledge.Integration.Tests.csproj -c Release --no-build --filter "FullyQualifiedName~NativeGoLiveOneShotAdmissionTests" --logger "console;verbosity=minimal"'
     Invoke-FeatureStep -Name "native-go-live-recovery-removal-contract" -Cwd $FeatureWorktree -Command 'pwsh -NoProfile -File .\tests\native\native-go-live-recovery-removal-contract.ps1 -SourceRoot .'
     Invoke-FeatureStep -Name "native-deployment-contract" -Cwd $FeatureWorktree -Command 'pwsh -NoProfile -File .\tests\native\native-deployment-plan.ps1 -SourceRoot .'

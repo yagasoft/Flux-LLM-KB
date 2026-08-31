@@ -509,65 +509,30 @@ internal sealed record NativeGoLiveRuntimeObservation(
     bool OutlookEnabled, bool PhaseSixEnabled, bool ModelRuntimeEnabled,
     bool GpuEnabled, bool FfmpegEnabled, bool NetworkParsingEnabled);
 internal sealed record NativeGoLiveMarketplaceObservation(string State, string Name, string Root, string PluginName);
-internal sealed record NativeGoLiveSqlAuthorityFinding(
-    string SubjectPrincipal,
-    string Scope,
-    string SourcePrincipal,
-    string SourcePrincipalType,
-    string AuthorityKind,
-    string Authority);
 internal sealed record NativeGoLiveSqlPreflightObservation(
     bool FullTextInstalled,
-    string BootstrapLoginName,
-    string BootstrapLoginSid,
-    IReadOnlyList<string> BootstrapCreatableCatalogues,
-    IReadOnlyList<string> BootstrapDroppableCatalogues,
-    IReadOnlyList<string> BootstrapManageableLogins,
-    IReadOnlyList<string> BootstrapServerRoles,
-    IReadOnlyList<string> BootstrapMasterDatabaseRoles,
     string AppPoolLoginName,
     string ExpectedAppPoolSid,
     bool AppPoolLoginExists,
     string? AppPoolLoginSid,
+    string? AppPoolLoginSidHex,
     bool AppPoolLoginIsSysAdmin,
-    IReadOnlyList<string> AppPoolLoginServerRoles,
-    IReadOnlyList<string> AppPoolLoginDdlGrants,
-    IReadOnlyList<NativeGoLiveSqlProcedureObservation>? BootstrapProcedures,
-    IReadOnlyList<string>? BootstrapServerPermissions,
-    IReadOnlyList<string>? BootstrapMasterPermissions,
-    IReadOnlyList<NativeGoLiveSqlAuthorityFinding>? EffectiveAuthorityFindings,
-    string SigningCertificateLoginSidHex,
-    bool BootstrapCanAccessCatalogue);
+    IReadOnlyList<NativeGoLiveSqlProcedureObservation>? BootstrapProcedures);
 internal sealed record NativeGoLiveSqlProcedureObservation(
     string Name,
     int ObjectId,
     string DefinitionSha256,
-    bool HasCryptographicSignature,
-    string SigningCertificateName,
-    string SigningCertificateThumbprint,
-    string SigningCertificateLoginName,
-    string SigningCertificateLoginSidHex,
-    IReadOnlyList<NativeGoLiveSqlParameterObservation> Parameters,
-    IReadOnlyList<NativeGoLiveSqlProcedurePermissionObservation> Permissions);
+    IReadOnlyList<NativeGoLiveSqlParameterObservation> Parameters);
 internal sealed record NativeGoLiveSqlParameterObservation(
     string Name,
     string TypeName,
     short MaximumLength,
     bool IsOutput);
-internal sealed record NativeGoLiveSqlProcedurePermissionObservation(
-    string GranteeName,
-    string GranteeTypeDescription,
-    bool GranteeIsBootstrapLogin,
-    string ClassDescription,
-    string PermissionName,
-    string StateDescription,
-    int MinorId);
 internal static partial class NativeGoLiveSqlBootstrapAuthorityContract
 {
     internal static bool IsValidProcedureSet(IReadOnlyList<NativeGoLiveSqlProcedureObservation>? procedures)
     {
         if (procedures is null || procedures.Count != 4) return false;
-        string? thumbprint = null;
         var observedNames = new HashSet<string>(StringComparer.Ordinal);
         foreach (var procedure in procedures)
         {
@@ -575,22 +540,11 @@ internal static partial class NativeGoLiveSqlBootstrapAuthorityContract
             try { expectedHash = DefinitionSha256(procedure.Name); }
             catch (ArgumentOutOfRangeException) { return false; }
             if (!observedNames.Add(procedure.Name) ||
-                !string.Equals(procedure.DefinitionSha256, expectedHash, StringComparison.Ordinal) ||
-                !procedure.HasCryptographicSignature ||
-                !string.Equals(procedure.SigningCertificateName, SigningCertificateName, StringComparison.Ordinal) ||
-                !string.Equals(procedure.SigningCertificateLoginName, SigningCertificateLoginName, StringComparison.Ordinal) ||
-                procedure.SigningCertificateThumbprint is not { Length: 40 } observedThumbprint ||
-                !observedThumbprint.All(IsLowerHexadecimal) ||
-                !string.Equals(procedure.SigningCertificateLoginSidHex, observedThumbprint, StringComparison.Ordinal) ||
-                thumbprint is not null && !string.Equals(thumbprint, observedThumbprint, StringComparison.Ordinal))
+                !string.Equals(procedure.DefinitionSha256, expectedHash, StringComparison.Ordinal))
                 return false;
-            thumbprint = observedThumbprint;
         }
-        return thumbprint is not null;
+        return true;
     }
-
-    private static bool IsLowerHexadecimal(char value) =>
-        value is >= '0' and <= '9' or >= 'a' and <= 'f';
 }
 internal sealed record NativeGoLiveSqlDatabaseFileObservation(
     int FileId,
@@ -602,13 +556,6 @@ internal sealed record NativeGoLiveSqlPostBootstrapObservation(
     string CatalogueOwnerSidHex,
     IReadOnlyList<NativeGoLiveSqlDatabaseFileObservation> DatabaseFiles,
     bool FullTextInstalled,
-    string BootstrapLoginName,
-    string BootstrapLoginSid,
-    IReadOnlyList<string> BootstrapCreatableCatalogues,
-    IReadOnlyList<string> BootstrapDroppableCatalogues,
-    IReadOnlyList<string> BootstrapManageableLogins,
-    IReadOnlyList<string> BootstrapServerRoles,
-    IReadOnlyList<string> BootstrapMasterDatabaseRoles,
     IReadOnlyList<string> ExpectedMigrations,
     IReadOnlyList<string> AppliedMigrations,
     bool EmptyMarkerDurable,
@@ -618,23 +565,14 @@ internal sealed record NativeGoLiveSqlPostBootstrapObservation(
     string ExpectedAppPoolSid,
     bool AppPoolLoginExists,
     string AppPoolLoginSid,
-    string AppPoolDatabaseUserSid,
+    string AppPoolLoginSidHex,
     bool AppPoolLoginIsSysAdmin,
-    IReadOnlyList<string> AppPoolLoginServerRoles,
-    IReadOnlyList<string> AppPoolLoginDdlGrants,
     bool AppPoolHasSqlFileAccess,
     long KnowledgeItems,
     long Edges,
     long PendingOperations,
     long ActiveIndexGenerations,
-    IReadOnlyList<NativeGoLiveSqlProcedureObservation>? BootstrapProcedures,
-    IReadOnlyList<string>? BootstrapServerPermissions,
-    IReadOnlyList<string>? BootstrapMasterPermissions,
-    IReadOnlyList<NativeGoLiveSqlAuthorityFinding>? EffectiveAuthorityFindings,
-    string SigningCertificateLoginSidHex,
-    bool BootstrapCanAccessCatalogue,
-    bool BootstrapLifecycleAuthorityRevoked = false,
-    bool BootstrapLifecyclePermissionRowsAbsent = false);
+    IReadOnlyList<NativeGoLiveSqlProcedureObservation>? BootstrapProcedures);
 internal sealed record NativeGoLiveAclObservation(
     IReadOnlyList<string> SqlServiceWriteRoots,
     IReadOnlyList<string> AppPoolReadExecuteRoots,
@@ -1210,73 +1148,22 @@ internal sealed class GuardedNativeGoLiveHost : INativeGoLiveHost
               string.Equals(value.AppPoolLoginSid, expectedAppPoolSid, StringComparison.Ordinal)
             : value.AppPoolLoginSid is null;
         if (!value.FullTextInstalled ||
-            string.IsNullOrWhiteSpace(value.BootstrapLoginName) ||
-            !IsSid(value.BootstrapLoginSid) ||
-            !IsOpaqueCertificateSid(value.SigningCertificateLoginSidHex) ||
-            value.BootstrapProcedures is null ||
-            !value.BootstrapProcedures.All(procedure => string.Equals(
-                procedure.SigningCertificateLoginSidHex,
-                value.SigningCertificateLoginSidHex,
-                StringComparison.Ordinal)) ||
-            !ExactSet(value.BootstrapCreatableCatalogues, ["FluxKnowledge"]) ||
-            !ExactSet(value.BootstrapDroppableCatalogues, ["FluxKnowledge"]) ||
-            !ExactSet(value.BootstrapManageableLogins, [@"IIS AppPool\FluxKnowledge"]) ||
-            !HasPermittedBootstrapPreflightAuthority(
-                value.BootstrapServerRoles,
-                value.BootstrapMasterDatabaseRoles,
-                value.EffectiveAuthorityFindings,
-                value.BootstrapLoginName) ||
             !string.Equals(value.AppPoolLoginName, @"IIS AppPool\FluxKnowledge", StringComparison.Ordinal) ||
-            !IsSid(expectedAppPoolSid) || !existingLoginSafe || value.AppPoolLoginIsSysAdmin ||
-            value.AppPoolLoginServerRoles.Count != 0 || value.AppPoolLoginDdlGrants.Count != 0 ||
-            !ValidateBootstrapProcedureEvidence(
-                value.BootstrapProcedures,
-                value.BootstrapServerPermissions,
-                value.BootstrapMasterPermissions,
-                value.BootstrapLoginName))
-            throw new NativeGoLiveContractException("sql-preflight-not-least-privilege");
+            !IsSid(expectedAppPoolSid) || !existingLoginSafe ||
+            string.IsNullOrWhiteSpace(value.AppPoolLoginSidHex) ||
+            !value.AppPoolLoginIsSysAdmin ||
+            !ValidateBootstrapProcedureEvidence(value.BootstrapProcedures))
+            throw new NativeGoLiveContractException("sql-preflight-direct-admin-not-proved");
     }
-
-    private static bool HasPermittedBootstrapPreflightAuthority(
-        IReadOnlyList<string> serverRoles,
-        IReadOnlyList<string> masterDatabaseRoles,
-        IReadOnlyList<NativeGoLiveSqlAuthorityFinding>? findings,
-        string bootstrapLoginName)
-    {
-        if (!HasPermittedBootstrapRoles(serverRoles, masterDatabaseRoles)) return false;
-        if (ExactSet(serverRoles, [])) return findings is { Count: 0 };
-        var expected = new[]
-        {
-            new NativeGoLiveSqlAuthorityFinding(
-                bootstrapLoginName, "SERVER", "sysadmin", "SERVER_ROLE", "ROLE", "sysadmin"),
-            new NativeGoLiveSqlAuthorityFinding(
-                bootstrapLoginName, "master", "db_owner", "DATABASE_ROLE", "ROLE", "db_owner")
-        };
-        return findings is { Count: 2 } && expected.All(findings.Contains);
-    }
-
-    private static bool HasPermittedBootstrapRoles(
-        IReadOnlyList<string> serverRoles,
-        IReadOnlyList<string> masterDatabaseRoles) =>
-        (ExactSet(serverRoles, []) && ExactSet(masterDatabaseRoles, [])) ||
-        (ExactSet(serverRoles, ["sysadmin"]) && ExactSet(masterDatabaseRoles, ["db_owner"]));
 
     private void ValidatePostBootstrap(NativeGoLiveSqlPostBootstrapObservation value)
     {
         if (!string.Equals(value.CatalogueName, "FluxKnowledge", StringComparison.Ordinal) ||
             value.CatalogueDatabaseId <= 4 ||
-            !IsOpaqueCertificateSid(value.CatalogueOwnerSidHex) ||
+            !IsOpaqueSqlSid(value.CatalogueOwnerSidHex) ||
             !ExactDatabaseFiles(value.DatabaseFiles, _plan.Sql) ||
             !value.FullTextInstalled ||
-            string.IsNullOrWhiteSpace(value.BootstrapLoginName) ||
-            !IsSid(value.BootstrapLoginSid) ||
-            !IsOpaqueCertificateSid(value.SigningCertificateLoginSidHex) ||
-            !string.Equals(value.CatalogueOwnerSidHex, value.SigningCertificateLoginSidHex, StringComparison.Ordinal) ||
-            !HasPermittedBootstrapPostBootstrapAuthority(value) ||
-            !value.BootstrapLifecyclePermissionRowsAbsent ||
-            !ExactSet(value.BootstrapCreatableCatalogues, ["FluxKnowledge"]) ||
-            !ExactSet(value.BootstrapDroppableCatalogues, ["FluxKnowledge"]) ||
-            !ExactSet(value.BootstrapManageableLogins, [@"IIS AppPool\FluxKnowledge"]) ||
+            !string.Equals(value.CatalogueOwnerSidHex, value.AppPoolLoginSidHex, StringComparison.Ordinal) ||
             !value.ExpectedMigrations.SequenceEqual(NativeGoLiveDatabaseContract.RequiredMigrations, StringComparer.Ordinal) ||
             !value.AppliedMigrations.SequenceEqual(NativeGoLiveDatabaseContract.RequiredMigrations, StringComparer.Ordinal) ||
             !value.EmptyMarkerDurable || !value.EmptyReadinessProved ||
@@ -1284,40 +1171,18 @@ internal sealed class GuardedNativeGoLiveHost : INativeGoLiveHost
             !string.Equals(value.AppPoolLoginName, @"IIS AppPool\FluxKnowledge", StringComparison.Ordinal) ||
             !value.AppPoolLoginExists || !IsSid(value.ExpectedAppPoolSid) ||
             !string.Equals(value.AppPoolLoginSid, value.ExpectedAppPoolSid, StringComparison.Ordinal) ||
-            !string.Equals(value.AppPoolDatabaseUserSid, value.ExpectedAppPoolSid, StringComparison.Ordinal) ||
-            value.AppPoolLoginIsSysAdmin ||
-            !ExactSet(value.AppPoolLoginServerRoles, ["FluxKnowledge:db_datareader", "FluxKnowledge:db_datawriter"]) ||
-            value.AppPoolLoginDdlGrants.Count != 0 ||
+            !IsOpaqueSqlSid(value.AppPoolLoginSidHex) ||
+            !value.AppPoolLoginIsSysAdmin ||
             value.AppPoolHasSqlFileAccess || value.KnowledgeItems != 0 || value.Edges != 0 ||
             value.PendingOperations != 0 || value.ActiveIndexGenerations != 0 ||
-            !ExactAppPoolDataAuthority(value.EffectiveAuthorityFindings) ||
-            !ValidateBootstrapProcedureEvidence(
-                value.BootstrapProcedures,
-                value.BootstrapServerPermissions,
-                value.BootstrapMasterPermissions,
-                value.BootstrapLoginName))
+            !ValidateBootstrapProcedureEvidence(value.BootstrapProcedures))
             throw new NativeGoLiveContractException("sql-bootstrap-postcondition-failed");
     }
 
-    private static bool HasPermittedBootstrapPostBootstrapAuthority(
-        NativeGoLiveSqlPostBootstrapObservation value)
-    {
-        if (!HasPermittedBootstrapRoles(
-                value.BootstrapServerRoles,
-                value.BootstrapMasterDatabaseRoles)) return false;
-        return ExactSet(value.BootstrapServerRoles, [])
-            ? value.BootstrapLifecycleAuthorityRevoked && !value.BootstrapCanAccessCatalogue
-            : !value.BootstrapLifecycleAuthorityRevoked && value.BootstrapCanAccessCatalogue;
-    }
-
     private static bool ValidateBootstrapProcedureEvidence(
-        IReadOnlyList<NativeGoLiveSqlProcedureObservation>? procedures,
-        IReadOnlyList<string>? serverPermissions,
-        IReadOnlyList<string>? masterPermissions,
-        string bootstrapLoginName)
+        IReadOnlyList<NativeGoLiveSqlProcedureObservation>? procedures)
     {
-        if (procedures is null || serverPermissions is null || masterPermissions is null ||
-            !ExactSet(serverPermissions, ["SERVER:0:CONNECT SQL:GRANT"]) ||
+        if (procedures is null ||
             !NativeGoLiveSqlBootstrapAuthorityContract.IsValidProcedureSet(procedures))
             return false;
 
@@ -1348,24 +1213,9 @@ internal sealed class GuardedNativeGoLiveHost : INativeGoLiveHost
         if (procedures.Count != expected.Count || !procedures.All(procedure =>
             expected.TryGetValue(procedure.Name, out var parameters) &&
             procedure.ObjectId > 0 &&
-            procedure.Parameters.SequenceEqual(parameters) &&
-            procedure.Permissions.SequenceEqual(
-            [
-                new NativeGoLiveSqlProcedurePermissionObservation(
-                    bootstrapLoginName,
-                    "WINDOWS_USER",
-                    true,
-                    "OBJECT_OR_COLUMN",
-                    "EXECUTE",
-                    "GRANT",
-                    0)
-            ])))
+            procedure.Parameters.SequenceEqual(parameters)))
             return false;
-        var expectedMasterPermissions = new[] { "DATABASE:0:0:master:CONNECT:GRANT" }
-            .Concat(procedures.Select(procedure =>
-                $"OBJECT_OR_COLUMN:{procedure.ObjectId}:0:dbo.{procedure.Name}:EXECUTE:GRANT"))
-            .ToArray();
-        return ExactSet(masterPermissions, expectedMasterPermissions);
+        return true;
     }
 
     private static void ValidateAcls(NativeGoLiveAclObservation value, NativeGoLivePlan plan)
@@ -1476,8 +1326,8 @@ internal sealed class GuardedNativeGoLiveHost : INativeGoLiveHost
         value.StartsWith("S-1-", StringComparison.Ordinal) &&
         value.Length <= 184;
 
-    private static bool IsOpaqueCertificateSid(string? value) =>
-        value is { Length: 40 } && value.All(character =>
+    private static bool IsOpaqueSqlSid(string? value) =>
+        value is { Length: > 0 } && value.Length % 2 == 0 && value.All(character =>
             character is >= '0' and <= '9' or >= 'a' and <= 'f');
 
     private static bool SameManifest(NativeGoLivePayloadManifest left, NativeGoLivePayloadManifest right) =>
@@ -1561,23 +1411,6 @@ internal sealed class GuardedNativeGoLiveHost : INativeGoLiveHost
         actual.Count == expected.Count &&
         actual.OrderBy(value => value, StringComparer.Ordinal).SequenceEqual(
             expected.OrderBy(value => value, StringComparer.Ordinal), StringComparer.Ordinal);
-
-    private static bool ExactAppPoolDataAuthority(IReadOnlyList<NativeGoLiveSqlAuthorityFinding>? findings)
-    {
-        if (findings is not { Count: 2 }) return false;
-        var actual = findings.Select(value => string.Join('|',
-            value.SubjectPrincipal,
-            value.Scope,
-            value.SourcePrincipal,
-            value.SourcePrincipalType,
-            value.AuthorityKind,
-            value.Authority)).ToArray();
-        return ExactSet(actual,
-        [
-            @"IIS AppPool\FluxKnowledge|FluxKnowledge|db_datareader|DATABASE_ROLE|ROLE|db_datareader",
-            @"IIS AppPool\FluxKnowledge|FluxKnowledge|db_datawriter|DATABASE_ROLE|ROLE|db_datawriter"
-        ]);
-    }
 
     private static bool SameVolume(string left, string right) =>
         !string.IsNullOrWhiteSpace(left) &&

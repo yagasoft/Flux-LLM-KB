@@ -38,40 +38,40 @@ Assert-True ($ports -notmatch 'DurableNativeGoLiveJournalSessionFactory') 'The o
 Assert-True ($closeout -match 'CreateProduction" -ParameterCount 2') 'The closeout still passes a journal location into one-shot production ports.'
 Assert-True ($ports -match 'NativeGoLiveProductionPortFactory') 'The production factory still constructs bound ports directly.'
 
-# Lifecycle access is one-shot, and the service principal receives only the two data roles.
-Assert-True ($bootstrap -match 'REVOKE EXECUTE ON OBJECT::dbo\.FluxKnowledgeNativeGoLiveCreate') 'Bootstrap lifecycle EXECUTE is retained after bootstrap.'
-Assert-True ($bootstrap -match 'ALTER ROLE \[db_datareader\] ADD MEMBER \[IIS AppPool\\FluxKnowledge\]') 'The app pool is not assigned db_datareader.'
-Assert-True ($bootstrap -match 'ALTER ROLE \[db_datawriter\] ADD MEMBER \[IIS AppPool\\FluxKnowledge\]') 'The app pool is not assigned db_datawriter.'
-Assert-True ($bootstrap -notmatch 'GRANT CONNECT, SELECT, INSERT, UPDATE, DELETE, EXECUTE TO \[IIS AppPool\\FluxKnowledge\]') 'The app pool retains direct DML or database-wide EXECUTE.'
-Assert-True ($bootstrap -match 'CREATE USER \[IIS AppPool\\FluxKnowledge\] FOR LOGIN \[IIS AppPool\\FluxKnowledge\];[\s\S]*GRANT CONNECT TO \[IIS AppPool\\FluxKnowledge\];[\s\S]*ALTER ROLE \[db_datareader\] ADD MEMBER \[IIS AppPool\\FluxKnowledge\]') `
-    'The final app user is not granted database CONNECT before public CONNECT is revoked.'
+# The approved direct-admin bootstrap gives the fixed app-pool login local administrator authority.
+Assert-True ($bootstrap -match 'ALTER SERVER ROLE \[sysadmin\] ADD MEMBER \[IIS AppPool\\FluxKnowledge\]') `
+    'The direct-admin bootstrap does not grant the fixed app-pool login sysadmin.'
+Assert-True ($bootstrap -match 'ALTER AUTHORIZATION ON DATABASE::\[FluxKnowledge\] TO \[IIS AppPool\\FluxKnowledge\]') `
+    'The direct-admin bootstrap does not make the app-pool login catalogue owner.'
+Assert-True ($bootstrap -notmatch 'REVOKE EXECUTE ON OBJECT::dbo\.FluxKnowledgeNativeGoLive') `
+    'The direct-admin bootstrap retains obsolete lifecycle EXECUTE revocation.'
+Assert-True ($bootstrap -notmatch 'ALTER ROLE \[db_datareader\] ADD MEMBER \[IIS AppPool\\FluxKnowledge\]|ALTER ROLE \[db_datawriter\] ADD MEMBER \[IIS AppPool\\FluxKnowledge\]') `
+    'The direct-admin bootstrap retains obsolete data-role assignment.'
+Assert-True ($bootstrap -notmatch 'CREATE USER \[IIS AppPool\\FluxKnowledge\] FOR LOGIN \[IIS AppPool\\FluxKnowledge\]') `
+    'The direct-admin bootstrap creates an app-pool database user before transferring ownership.'
 $finalisationStart = $bootstrap.IndexOf('CREATE PROCEDURE dbo.FluxKnowledgeNativeGoLiveManageAppPool', [StringComparison]::Ordinal)
 $finalisationEnd = $bootstrap.IndexOf('-- END HASHED PROCEDURE: FluxKnowledgeNativeGoLiveManageAppPool', [StringComparison]::Ordinal)
 $finalisation = $bootstrap.Substring($finalisationStart, $finalisationEnd - $finalisationStart)
-Assert-True ($finalisation.IndexOf('GRANT CONNECT TO [IIS AppPool\FluxKnowledge];', [StringComparison]::Ordinal) -ge 0 -and
-    $finalisation.IndexOf('GRANT CONNECT TO [IIS AppPool\FluxKnowledge];', [StringComparison]::Ordinal) -lt
-    $finalisation.IndexOf('REVOKE CONNECT FROM public;', [StringComparison]::Ordinal)) `
-    'Finalisation does not preserve the app user database CONNECT before revoking public CONNECT.'
-Assert-True ($bootstrap -match "HAS_PERMS_BY_NAME\(N''FluxKnowledge'',N''DATABASE'',N''CONNECT''\)=1") `
-    'The final app-pool observer does not prove target database CONNECT.'
+Assert-True ($finalisation -match 'IS_SRVROLEMEMBER\(N''sysadmin'', N''IIS AppPool\\FluxKnowledge''\)<>1') `
+    'Finalisation does not prove app-pool sysadmin membership.'
 $finalizeBootstrap = $ports.IndexOf('await FinalizeBootstrapAuthorityAsync', [StringComparison]::Ordinal)
 $finalAppPoolObservation = $ports.IndexOf('var appPool = await ObserveAppPoolAsync', $finalizeBootstrap, [StringComparison]::Ordinal)
 Assert-True ($finalizeBootstrap -ge 0 -and $finalAppPoolObservation -gt $finalizeBootstrap) `
-    'The app identity and effective authority are not re-observed after bootstrap finalisation.'
+    'The app identity is not re-observed after bootstrap finalisation.'
 $preflightStart = $ports.IndexOf('internal async ValueTask<NativeGoLiveSqlPreflightObservation> ObservePreflightAsync', [StringComparison]::Ordinal)
 $preflightEnd = $ports.IndexOf('public async ValueTask<NativeGoLiveSqlPostBootstrapObservation> ProvisionAndObserveAsync', [StringComparison]::Ordinal)
 $preflight = $ports.Substring($preflightStart, $preflightEnd - $preflightStart)
 Assert-True ($preflight.IndexOf('ObserveAppPoolAsync', [StringComparison]::Ordinal) -lt 0) `
     'Preflight consumes the one-shot app authority observation before finalisation.'
-Assert-True ($preflight -match 'COUNT_BIG\(\*\)[\s\S]*db_owner') `
-    'The SQL preflight observer does not admit the exact authorised db_owner master role shape for guarded validation.'
+Assert-True ($preflight -notmatch 'HAS_PERMS_BY_NAME|db_owner|sys\.server_role_members|sys\.database_role_members') `
+    'The SQL preflight observer retains obsolete bootstrap scope or least-privilege checks.'
 $postBootstrapObserverStart = $ports.IndexOf('private async ValueTask<NativeGoLiveSqlPostBootstrapObservation> ObservePostBootstrapAsync', [StringComparison]::Ordinal)
-$postBootstrapObserverEnd = $ports.IndexOf('private static async ValueTask<BootstrapLifecycleRevocationObservation>', $postBootstrapObserverStart, [StringComparison]::Ordinal)
+$postBootstrapObserverEnd = $ports.IndexOf('private string CatalogueConnection', $postBootstrapObserverStart, [StringComparison]::Ordinal)
 $postBootstrapObserver = $ports.Substring($postBootstrapObserverStart, $postBootstrapObserverEnd - $postBootstrapObserverStart)
-Assert-True ($postBootstrapObserver -match 'appPool\.EffectiveAuthorityFindings') `
-    'The final SQL post-bootstrap observation does not retain the final app-pool authority evidence.'
-Assert-True ($postBootstrapObserver -notmatch 'bootstrapEvidence\.EffectiveAuthorityFindings') `
-    'The final SQL post-bootstrap observation incorrectly retains bootstrap-principal authority evidence.'
+Assert-True ($postBootstrapObserver -match 'appPool\.LoginSidHex') `
+    'The final SQL post-bootstrap observation does not bind catalogue ownership to the app-pool SID.'
+Assert-True ($postBootstrapObserver -notmatch 'EffectiveAuthority|LifecycleAuthority|PermissionRowsAbsent') `
+    'The final SQL post-bootstrap observation retains obsolete authority evidence.'
 
 # Clean-slate preflight must not inspect a hierarchy that admission has just proved absent.
 $productionPreflightStart = $ports.IndexOf('internal sealed class NativeGoLiveWindowsPreflightPort', [StringComparison]::Ordinal)
@@ -98,27 +98,13 @@ Assert-True ($hostText -match 'WriteProductionConfigurationAsync') 'The host doe
 Assert-True ($ports -match 'RemoveBootstrapFromChildEnvironment') 'Child processes do not explicitly remove the bootstrap environment variable.'
 Assert-True ($hostText -match 'ParseAndClearBootstrap') 'Bootstrap parsing is not deferred to the guarded host.'
 Assert-True ($closeout -notmatch 'RecoverAsync') 'closeout.json is still used to reconstruct live authority.'
-Assert-True ($ports -match 'ObserveLifecycleAuthorityRevocationAsync' -and
-    $hostText -match 'BootstrapLifecyclePermissionRowsAbsent') `
-    'Post-bootstrap validation does not prove that lifecycle grants were removed.'
-$lifecycleObserverStart = $ports.IndexOf('private static async ValueTask<BootstrapLifecycleRevocationObservation> ObserveLifecycleAuthorityRevocationAsync', [StringComparison]::Ordinal)
-$lifecycleObserverEnd = $ports.IndexOf('private string CatalogueConnection', $lifecycleObserverStart, [StringComparison]::Ordinal)
-$lifecycleObserver = $ports.Substring($lifecycleObserverStart, $lifecycleObserverEnd - $lifecycleObserverStart)
-Assert-True ($lifecycleObserver -match "COALESCE\(HAS_DBACCESS\(N'FluxKnowledge'\),0\)=1") `
-    'The bootstrap catalogue-access observation does not truthfully report retained access.'
+Assert-True ($ports -notmatch 'ObserveLifecycleAuthorityRevocationAsync|ObserveCurrentEffectiveAuthorityAsync|ReadAuthorityFindingsAsync|ReadCurrentAuthorityFindingsAsync|BootstrapLifecycleRevocationObservation|BootstrapEffectiveAuthorityObservation') `
+    'The direct-admin bridge retains obsolete lifecycle or effective-authority observation code.'
 $postBootstrapStart = $hostText.IndexOf('private void ValidatePostBootstrap', [StringComparison]::Ordinal)
 $postBootstrapEnd = $hostText.IndexOf('private static bool ValidateBootstrapProcedureEvidence', $postBootstrapStart, [StringComparison]::Ordinal)
 $postBootstrap = $hostText.Substring($postBootstrapStart, $postBootstrapEnd - $postBootstrapStart)
-Assert-True ($postBootstrap -match 'HasPermittedBootstrapPostBootstrapAuthority\(value\)' -and
-    $postBootstrap -match '!value\.BootstrapLifecyclePermissionRowsAbsent') `
-    'Final bootstrap validation does not constrain the authorised bootstrap observation or prove direct grants were removed.'
-$bootstrapAuthorityStart = $hostText.IndexOf('private static bool HasPermittedBootstrapPostBootstrapAuthority', [StringComparison]::Ordinal)
-$bootstrapAuthorityEnd = $hostText.IndexOf('private static bool ValidateBootstrapProcedureEvidence', $bootstrapAuthorityStart, [StringComparison]::Ordinal)
-$bootstrapAuthority = $hostText.Substring($bootstrapAuthorityStart, $bootstrapAuthorityEnd - $bootstrapAuthorityStart)
-Assert-True ($bootstrapAuthority -match 'HasPermittedBootstrapRoles\(' -and
-    $bootstrapAuthority -match '!value\.BootstrapLifecycleAuthorityRevoked && value\.BootstrapCanAccessCatalogue' -and
-    $hostText -match 'private static bool HasPermittedBootstrapRoles[\s\S]*ExactSet\(serverRoles, \["sysadmin"\]\) && ExactSet\(masterDatabaseRoles, \["db_owner"\]\)') `
-    'Final bootstrap validation does not allow only the effective sysadmin and db_owner bootstrap authority.'
+Assert-True ($postBootstrap -notmatch 'HasPermittedBootstrapPostBootstrapAuthority|BootstrapLifecyclePermissionRowsAbsent|EffectiveAuthority') `
+    'Final bootstrap validation retains obsolete least-privilege authority checks.'
 
 # The executor and guarded preflight use only the one-shot admission path.
 Assert-True ($executorText -match 'AdmitAndWipeAsync' -and $executorText -match 'VerifyOneShotPreflightAsync') `

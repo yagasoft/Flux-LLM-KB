@@ -111,8 +111,7 @@ public sealed class SqlCommand : IDisposable
     private static readonly string[] ExpectedResetObjects =
     [
         "FluxKnowledgeNativeGoLiveCreate", "FluxKnowledgeNativeGoLiveDrop",
-        "FluxKnowledgeNativeGoLiveManageAppPool", "FluxKnowledgeNativeGoLiveObserveAppPool",
-        "FluxKnowledgeNativeGoLiveCertificateLogin", "FluxKnowledgeNativeGoLiveCertificate"
+        "FluxKnowledgeNativeGoLiveManageAppPool", "FluxKnowledgeNativeGoLiveObserveAppPool"
     ];
     private readonly string _connectionString;
 

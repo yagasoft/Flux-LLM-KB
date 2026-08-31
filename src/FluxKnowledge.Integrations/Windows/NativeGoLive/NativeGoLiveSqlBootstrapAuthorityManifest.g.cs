@@ -3,18 +3,15 @@ namespace FluxKnowledge.Integrations.Windows.NativeGoLive;
 
 internal static partial class NativeGoLiveSqlBootstrapAuthorityContract
 {
-    internal const string BootstrapSourceSha256 = "b991bb0d1308a1f3af601c5873279ddddfa25cf92eeaba943480600bf792bfe4";
-    internal const string SecurityBootstrapSha256 = "4caf0596fde411c6bbffeb4666ff941787fbda3a74dcfcf8043bda3a293f26a3";
-    internal const string SigningCertificateName = "FluxKnowledgeNativeGoLiveCertificate";
-    internal const string SigningCertificateLoginName = "FluxKnowledgeNativeGoLiveCertificateLogin";
-    internal const string ProcedureManifestSha256 = "aa558b3269f879311cbfaaafc22acc6320023b02307eea90221a5f43a5364527";
+    internal const string BootstrapSourceSha256 = "039b96d087e538f3954b9be30ce753e002921a31b878bdcdeaab08902a2de10a";
+    internal const string ProcedureManifestSha256 = "7cdbff5385e7289f48375ab7e5f4db3ede63122ca8288c3a9e8f8ddae28495b5";
 
     internal static string DefinitionSha256(string procedureName) => procedureName switch
     {
-        "FluxKnowledgeNativeGoLiveCreate" => "1a4d9a8711cbc83e330f59814bfcc5eeea77260ac5e8ad74593481070bb16213",
+        "FluxKnowledgeNativeGoLiveCreate" => "a6e29165292dae603759feaa3494f3eb6a741f7b4033051eecc6a7e78d287bb2",
         "FluxKnowledgeNativeGoLiveDrop" => "1d66fd3beafb537f12bc2e91655de2b68390500775056eb931018f80e20b7f66",
-        "FluxKnowledgeNativeGoLiveManageAppPool" => "54647da826b0b5e3590f1abb28e620c461a1121975f85d46690325b2f455dcde",
-        "FluxKnowledgeNativeGoLiveObserveAppPool" => "970fbd3d0f332311cdaeb2d1dd60a009315b61e4feffd363b9013b2a82bd6629",
+        "FluxKnowledgeNativeGoLiveManageAppPool" => "6b1e601160471031bd9106c9b442c625d24442e97130f17ec7af05c382578ec4",
+        "FluxKnowledgeNativeGoLiveObserveAppPool" => "49bc3649869da7c3a10b3af657700871dad46ab844ec7e4f3605c522e09c7de0",
         _ => throw new ArgumentOutOfRangeException(nameof(procedureName))
     };
 }

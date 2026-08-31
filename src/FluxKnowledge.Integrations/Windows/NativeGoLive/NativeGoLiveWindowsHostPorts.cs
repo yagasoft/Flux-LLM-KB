@@ -540,72 +540,14 @@ internal sealed class NativeGoLiveWindowsSqlPort
         await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
         const string sql =
             """
-            SELECT CONVERT(int, SERVERPROPERTY('IsFullTextInstalled')),
-                   SUSER_SNAME(), SUSER_SID(),
-                   SUSER_SID(N'FluxKnowledgeNativeGoLiveCertificateLogin');
-            SELECT r.name FROM sys.server_role_members rm
-            JOIN sys.server_principals r ON r.principal_id=rm.role_principal_id
-            JOIN sys.server_principals m ON m.principal_id=rm.member_principal_id
-            WHERE m.sid=SUSER_SID() ORDER BY r.name;
-            SELECT r.name FROM sys.database_role_members rm
-            JOIN sys.database_principals r ON r.principal_id=rm.role_principal_id
-            JOIN sys.database_principals m ON m.principal_id=rm.member_principal_id
-            WHERE m.principal_id=DATABASE_PRINCIPAL_ID() ORDER BY r.name;
-            SELECT CONVERT(int, CASE WHEN HAS_PERMS_BY_NAME(N'master.dbo.FluxKnowledgeNativeGoLiveCreate',N'OBJECT',N'EXECUTE')=1
-                                     AND HAS_PERMS_BY_NAME(N'master.dbo.FluxKnowledgeNativeGoLiveDrop',N'OBJECT',N'EXECUTE')=1
-                                     AND HAS_PERMS_BY_NAME(N'master.dbo.FluxKnowledgeNativeGoLiveManageAppPool',N'OBJECT',N'EXECUTE')=1
-                                     AND HAS_PERMS_BY_NAME(N'master.dbo.FluxKnowledgeNativeGoLiveObserveAppPool',N'OBJECT',N'EXECUTE')=1
-                                     AND NOT EXISTS(SELECT 1 FROM sys.server_permissions p
-                                         WHERE p.grantee_principal_id=SUSER_ID() AND NOT
-                                             (p.class_desc=N'SERVER' AND p.major_id=0 AND
-                                              p.permission_name=N'CONNECT SQL' AND p.state=N'G'))
-                                      AND (NOT EXISTS(SELECT 1 FROM sys.database_role_members rm
-                                          WHERE rm.member_principal_id=DATABASE_PRINCIPAL_ID()) OR
-                                           ((SELECT COUNT_BIG(*) FROM sys.database_role_members rm
-                                             JOIN sys.database_principals r ON r.principal_id=rm.role_principal_id
-                                             WHERE rm.member_principal_id=DATABASE_PRINCIPAL_ID())=1 AND
-                                            EXISTS(SELECT 1 FROM sys.database_role_members rm
-                                                   JOIN sys.database_principals r ON r.principal_id=rm.role_principal_id
-                                                   WHERE rm.member_principal_id=DATABASE_PRINCIPAL_ID() AND r.name=N'db_owner')))
-                                     AND NOT EXISTS(SELECT 1 FROM sys.database_permissions p
-                                         WHERE p.grantee_principal_id=DATABASE_PRINCIPAL_ID()
-                                           AND NOT (p.class_desc=N'DATABASE' AND p.major_id=0 AND p.minor_id=0 AND
-                                                    p.permission_name=N'CONNECT' AND p.state=N'G' OR
-                                                p.class_desc=N'OBJECT_OR_COLUMN' AND p.minor_id=0 AND
-                                                p.permission_name=N'EXECUTE' AND p.state=N'G' AND p.major_id IN
-                                                 (OBJECT_ID(N'dbo.FluxKnowledgeNativeGoLiveCreate'),
-                                                 OBJECT_ID(N'dbo.FluxKnowledgeNativeGoLiveDrop'),
-                                                 OBJECT_ID(N'dbo.FluxKnowledgeNativeGoLiveManageAppPool'),
-                                                 OBJECT_ID(N'dbo.FluxKnowledgeNativeGoLiveObserveAppPool'))))
-                                THEN 1 ELSE 0 END);
+            SELECT CONVERT(int, SERVERPROPERTY('IsFullTextInstalled'));
             SELECT CONVERT(int, CASE WHEN p.principal_id IS NULL THEN 0 ELSE 1 END),
                    p.sid, CONVERT(int, COALESCE(IS_SRVROLEMEMBER(N'sysadmin', N'IIS AppPool\FluxKnowledge'),0))
             FROM (VALUES(0)) seed(value)
             LEFT JOIN sys.server_principals p ON p.name=N'IIS AppPool\FluxKnowledge';
-            SELECT r.name FROM sys.server_role_members rm
-            JOIN sys.server_principals r ON r.principal_id=rm.role_principal_id
-            JOIN sys.server_principals m ON m.principal_id=rm.member_principal_id
-            WHERE m.name=N'IIS AppPool\FluxKnowledge' ORDER BY r.name;
-            SELECT p.permission_name FROM sys.server_permissions p
-            JOIN sys.server_principals m ON m.principal_id=p.grantee_principal_id
-            WHERE m.name=N'IIS AppPool\FluxKnowledge' AND p.permission_name<>N'CONNECT SQL'
-            ORDER BY p.permission_name;
             SELECT p.name,p.object_id,
-                   LOWER(CONVERT(varchar(64),HASHBYTES('SHA2_256',CONVERT(varbinary(max),sm.definition)),2)),
-                   CONVERT(int,CASE WHEN signing.certificate_name IS NULL THEN 0 ELSE 1 END),
-                   COALESCE(signing.certificate_name,N''),COALESCE(signing.thumbprint,N''),
-                   COALESCE(signing.certificate_login_name,N''),signing.certificate_login_sid
+                   LOWER(CONVERT(varchar(64),HASHBYTES('SHA2_256',CONVERT(varbinary(max),sm.definition)),2))
             FROM sys.procedures p JOIN sys.sql_modules sm ON sm.object_id=p.object_id
-            OUTER APPLY(SELECT TOP(1) c.name AS certificate_name,
-                               LOWER(CONVERT(varchar(40),c.thumbprint,2)) AS thumbprint,
-                               certificate_login.name AS certificate_login_name,
-                               SUSER_SID(certificate_login.name) AS certificate_login_sid
-                        FROM sys.crypt_properties cp JOIN sys.certificates c ON c.thumbprint=cp.thumbprint
-                        LEFT JOIN sys.server_principals certificate_login
-                          ON certificate_login.name=N'FluxKnowledgeNativeGoLiveCertificateLogin'
-                         AND certificate_login.type=N'C'
-                        WHERE cp.class_desc=N'OBJECT_OR_COLUMN' AND cp.major_id=p.object_id
-                        ORDER BY c.name) signing
             WHERE SCHEMA_NAME(p.schema_id)=N'dbo' AND p.name IN
                 (N'FluxKnowledgeNativeGoLiveCreate',N'FluxKnowledgeNativeGoLiveDrop',
                  N'FluxKnowledgeNativeGoLiveManageAppPool',N'FluxKnowledgeNativeGoLiveObserveAppPool')
@@ -616,83 +558,30 @@ internal sealed class NativeGoLiveWindowsSqlPort
                 (N'FluxKnowledgeNativeGoLiveCreate',N'FluxKnowledgeNativeGoLiveDrop',
                  N'FluxKnowledgeNativeGoLiveManageAppPool',N'FluxKnowledgeNativeGoLiveObserveAppPool')
             ORDER BY p.name,prm.parameter_id;
-            SELECT procedure_object.name,grantee.name,grantee.type_desc,
-                   CONVERT(int,CASE WHEN grantee.sid=SUSER_SID() THEN 1 ELSE 0 END),
-                   procedure_permission.class_desc,procedure_permission.permission_name,
-                   procedure_permission.state_desc,procedure_permission.minor_id
-            FROM sys.procedures procedure_object
-            JOIN sys.database_permissions procedure_permission
-              ON procedure_permission.class_desc=N'OBJECT_OR_COLUMN' AND
-                 procedure_permission.major_id=procedure_object.object_id
-            JOIN sys.database_principals grantee
-              ON grantee.principal_id=procedure_permission.grantee_principal_id
-            WHERE SCHEMA_NAME(procedure_object.schema_id)=N'dbo' AND procedure_object.name IN
-                (N'FluxKnowledgeNativeGoLiveCreate',N'FluxKnowledgeNativeGoLiveDrop',
-                 N'FluxKnowledgeNativeGoLiveManageAppPool',N'FluxKnowledgeNativeGoLiveObserveAppPool')
-            ORDER BY procedure_object.name,grantee.name,procedure_permission.permission_name,
-                     procedure_permission.state_desc,procedure_permission.minor_id;
-            SELECT p.class_desc+N':'+CONVERT(nvarchar(12),p.major_id)+N':'+p.permission_name+N':'+p.state_desc
-            FROM sys.server_permissions p WHERE p.grantee_principal_id=SUSER_ID()
-            ORDER BY p.class_desc,p.major_id,p.permission_name,p.state_desc;
-            SELECT p.class_desc+N':'+CONVERT(nvarchar(12),p.major_id)+N':'+CONVERT(nvarchar(12),p.minor_id)+N':'+
-                   CASE WHEN p.class_desc=N'DATABASE' THEN DB_NAME()
-                        ELSE SCHEMA_NAME(o.schema_id)+N'.'+o.name END+N':'+
-                   p.permission_name+N':'+p.state_desc
-            FROM sys.database_permissions p
-            LEFT JOIN sys.objects o ON o.object_id=p.major_id
-            WHERE p.grantee_principal_id=DATABASE_PRINCIPAL_ID()
-            ORDER BY p.class_desc,p.permission_name,p.major_id;
             """;
         await using var command = new SqlCommand(sql, connection) { CommandTimeout = bootstrap.ConnectTimeout };
         await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
             throw new NativeGoLiveContractException("sql-preflight-observation-missing");
         var fullText = reader.GetInt32(0) == 1;
-        var bootstrapName = reader.GetString(1);
-        var bootstrapSid = Sid(reader, 2);
-        var signingCertificateLoginSidHex = OpaqueSid(reader, 3);
-        var bootstrapRoles = await ReadStringResultAsync(reader, cancellationToken).ConfigureAwait(false);
-        var bootstrapMasterRoles = await ReadStringResultAsync(reader, cancellationToken).ConfigureAwait(false);
-        if (!await reader.NextResultAsync(cancellationToken).ConfigureAwait(false) ||
-            !await reader.ReadAsync(cancellationToken).ConfigureAwait(false) || reader.GetInt32(0) != 1)
-            throw new NativeGoLiveContractException("sql-bootstrap-scope-not-proved");
         if (!await reader.NextResultAsync(cancellationToken).ConfigureAwait(false) ||
             !await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
             throw new NativeGoLiveContractException("sql-app-pool-observation-missing");
         var loginExists = reader.GetInt32(0) == 1;
         var loginSid = reader.IsDBNull(1) ? null : Sid(reader, 1);
+        var loginSidHex = reader.IsDBNull(1) ? null : OpaqueSid(reader, 1);
         var loginSysAdmin = reader.GetInt32(2) == 1;
-        var loginRoles = await ReadStringResultAsync(reader, cancellationToken).ConfigureAwait(false);
-        var ddlGrants = await ReadStringResultAsync(reader, cancellationToken).ConfigureAwait(false);
         var procedures = await ReadProcedureEvidenceAsync(reader, cancellationToken).ConfigureAwait(false);
-        var serverPermissions = await ReadStringResultAsync(reader, cancellationToken).ConfigureAwait(false);
-        var masterPermissions = await ReadStringResultAsync(reader, cancellationToken).ConfigureAwait(false);
         await reader.DisposeAsync().ConfigureAwait(false);
-        var bootstrapAuthority = await ObserveCurrentEffectiveAuthorityAsync(
-            connection, bootstrapName, cancellationToken).ConfigureAwait(false);
-        var effectiveAuthority = bootstrapAuthority.Findings.ToList();
         return new NativeGoLiveSqlPreflightObservation(
             fullText,
-            bootstrapName,
-            bootstrapSid,
-            ["FluxKnowledge"],
-            ["FluxKnowledge"],
-            [AppPoolLogin],
-            bootstrapRoles,
-            bootstrapMasterRoles,
             AppPoolLogin,
             expectedAppPoolSid,
             loginExists,
             loginSid,
+            loginSidHex,
             loginSysAdmin,
-            loginRoles,
-            ddlGrants,
-            procedures,
-            serverPermissions,
-            masterPermissions,
-            effectiveAuthority,
-            signingCertificateLoginSidHex,
-            bootstrapAuthority.CanAccessCatalogue);
+            procedures);
     }
 
     public async ValueTask<NativeGoLiveSqlPostBootstrapObservation> ProvisionAndObserveAsync(
@@ -857,58 +746,16 @@ internal sealed class NativeGoLiveWindowsSqlPort
         await FinalizeBootstrapAuthorityAsync(
             bootstrap, bootstrapName, expectedAppPoolSid, cancellationToken).ConfigureAwait(false);
         var appPool = await ObserveAppPoolAsync(bootstrap, cancellationToken).ConfigureAwait(false);
-        var lifecycle = await ObserveLifecycleAuthorityRevocationAsync(bootstrap, cancellationToken)
-            .ConfigureAwait(false);
         ownerSidHex = await ObserveCatalogueOwnerSidAsync(bootstrap, cancellationToken).ConfigureAwait(false);
         return new NativeGoLiveSqlPostBootstrapObservation(
-            name, databaseId, ownerSidHex, files, fullText, bootstrapName, bootstrapSid,
-            bootstrapEvidence.BootstrapCreatableCatalogues,
-            bootstrapEvidence.BootstrapDroppableCatalogues,
-            bootstrapEvidence.BootstrapManageableLogins,
-            bootstrapEvidence.BootstrapServerRoles,
-            bootstrapEvidence.BootstrapMasterDatabaseRoles,
+            name, databaseId, ownerSidHex, files, fullText,
             NativeGoLiveDatabaseContract.RequiredMigrations, migrations,
             empty, empty, appPool.CanConnect, AppPoolLogin, expectedAppPoolSid,
-            true, appPool.LoginSid, appPool.UserSid ?? string.Empty, appPool.SysAdmin, appPool.ServerRoles, appPool.DdlGrants,
+            true, appPool.LoginSid, appPool.LoginSidHex, appPool.SysAdmin,
             NativeGoLiveWindowsAclInspector.HasAnyAccess(_plan.Layout.SqlDataRoot, expectedAppPoolSid) ||
             NativeGoLiveWindowsAclInspector.HasAnyAccess(_plan.Layout.SqlLogRoot, expectedAppPoolSid),
             knowledge, edges, pending, generations,
-            bootstrapEvidence.BootstrapProcedures,
-            bootstrapEvidence.BootstrapServerPermissions,
-            bootstrapEvidence.BootstrapMasterPermissions,
-            appPool.EffectiveAuthorityFindings,
-            bootstrapEvidence.SigningCertificateLoginSidHex,
-            lifecycle.CanAccessCatalogue,
-            lifecycle.EffectiveExecuteRevoked,
-            lifecycle.PermissionRowsAbsent);
-    }
-
-    private static async ValueTask<BootstrapLifecycleRevocationObservation> ObserveLifecycleAuthorityRevocationAsync(
-        NativeGoLiveSqlBootstrapConnection bootstrap,
-        CancellationToken cancellationToken)
-    {
-        await using var connection = new SqlConnection(bootstrap.ConnectionString);
-        await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
-        const string sql =
-            "SELECT CONVERT(int,CASE WHEN HAS_PERMS_BY_NAME(N'master.dbo.FluxKnowledgeNativeGoLiveCreate',N'OBJECT',N'EXECUTE')=0 " +
-            "AND HAS_PERMS_BY_NAME(N'master.dbo.FluxKnowledgeNativeGoLiveDrop',N'OBJECT',N'EXECUTE')=0 " +
-            "AND HAS_PERMS_BY_NAME(N'master.dbo.FluxKnowledgeNativeGoLiveManageAppPool',N'OBJECT',N'EXECUTE')=0 " +
-            "AND HAS_PERMS_BY_NAME(N'master.dbo.FluxKnowledgeNativeGoLiveObserveAppPool',N'OBJECT',N'EXECUTE')=0 THEN 1 ELSE 0 END)," +
-            "CONVERT(int,CASE WHEN COALESCE(HAS_DBACCESS(N'FluxKnowledge'),0)=1 THEN 1 ELSE 0 END)," +
-            "CONVERT(int,CASE WHEN NOT EXISTS(SELECT 1 FROM sys.database_permissions permission " +
-            "WHERE permission.class_desc=N'OBJECT_OR_COLUMN' AND permission.major_id IN " +
-            "(OBJECT_ID(N'dbo.FluxKnowledgeNativeGoLiveCreate'),OBJECT_ID(N'dbo.FluxKnowledgeNativeGoLiveDrop')," +
-            "OBJECT_ID(N'dbo.FluxKnowledgeNativeGoLiveManageAppPool'),OBJECT_ID(N'dbo.FluxKnowledgeNativeGoLiveObserveAppPool')) " +
-            "AND permission.grantee_principal_id IN (DATABASE_PRINCIPAL_ID(),DATABASE_PRINCIPAL_ID(N'public'))) " +
-            "THEN 1 ELSE 0 END);";
-        await using var command = new SqlCommand(sql, connection) { CommandTimeout = bootstrap.ConnectTimeout };
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-        if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-            throw new NativeGoLiveContractException("sql-bootstrap-lifecycle-observation-missing");
-        return new BootstrapLifecycleRevocationObservation(
-            reader.GetInt32(0) == 1,
-            reader.GetInt32(1) == 1,
-            reader.GetInt32(2) == 1);
+            bootstrapEvidence.BootstrapProcedures);
     }
 
     private string CatalogueConnection(NativeGoLiveSqlBootstrapConnection bootstrap) =>
@@ -930,119 +777,37 @@ internal sealed class NativeGoLiveWindowsSqlPort
         if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
             throw new NativeGoLiveContractException("sql-app-pool-principal-missing");
         var loginSid = Sid(reader, 0);
-        var userSid = reader.IsDBNull(1) ? null : Sid(reader, 1);
-        var sysAdmin = reader.GetInt32(2) == 1;
-        var canConnect = reader.GetInt32(3) == 1;
-        var roles = await ReadStringResultAsync(reader, cancellationToken).ConfigureAwait(false);
-        var ddl = await ReadStringResultAsync(reader, cancellationToken).ConfigureAwait(false);
-        var effectiveAuthority = await ReadAuthorityFindingsAsync(reader, cancellationToken).ConfigureAwait(false);
-        return new AppPoolSqlObservation(loginSid, userSid, sysAdmin, canConnect, roles, ddl, effectiveAuthority);
+        var loginSidHex = OpaqueSid(reader, 0);
+        var sysAdmin = reader.GetInt32(1) == 1;
+        var canConnect = reader.GetInt32(2) == 1;
+        return new AppPoolSqlObservation(loginSid, loginSidHex, sysAdmin, canConnect);
     }
 
-    private static async ValueTask<BootstrapEffectiveAuthorityObservation> ObserveCurrentEffectiveAuthorityAsync(
-        SqlConnection connection,
-        string subjectPrincipal,
+    private static async Task<IReadOnlyList<NativeGoLiveSqlProcedureObservation>> ReadProcedureEvidenceAsync(
+        SqlDataReader reader,
         CancellationToken cancellationToken)
     {
-        const string sql =
-            """
-            DECLARE @CanAccessCatalogue int=CONVERT(int,COALESCE(HAS_DBACCESS(N'FluxKnowledge'),0));
-            CREATE TABLE #Authority (
-                SubjectPrincipal nvarchar(256) NOT NULL,
-                ScopeName nvarchar(128) NOT NULL,
-                SourcePrincipal nvarchar(256) NOT NULL,
-                SourcePrincipalType nvarchar(128) NOT NULL,
-                AuthorityKind nvarchar(32) NOT NULL,
-                Authority nvarchar(512) NOT NULL);
-
-            INSERT #Authority
-            SELECT @subject,N'SERVER',principal.name,principal.type_desc,N'ROLE',principal.name
-            FROM sys.login_token token
-            JOIN sys.server_principals principal ON principal.sid=token.sid
-            WHERE principal.type_desc=N'SERVER_ROLE' AND principal.name<>N'public';
-
-            INSERT #Authority
-            SELECT @subject,N'SERVER',principal.name,principal.type_desc,
-                   CASE WHEN permission.permission_name LIKE N'ALTER %' OR permission.permission_name LIKE N'CREATE %'
-                             OR permission.permission_name IN (N'CONTROL SERVER',N'IMPERSONATE ANY LOGIN',N'TAKE OWNERSHIP')
-                        THEN N'DDL' ELSE N'PERMISSION' END,
-                   permission.class_desc+N':'+CONVERT(nvarchar(12),permission.major_id)+N':'+
-                       permission.permission_name+N':'+permission.state_desc
-            FROM sys.server_permissions permission
-            JOIN sys.server_principals principal ON principal.principal_id=permission.grantee_principal_id
-            JOIN sys.login_token token ON token.sid=principal.sid
-            WHERE principal.principal_id<>SUSER_ID() AND permission.state IN (N'G',N'W') AND
-                  (principal.name<>N'public' OR permission.permission_name LIKE N'ALTER %' OR
-                   permission.permission_name LIKE N'CREATE %' OR
-                   permission.permission_name IN (N'CONTROL SERVER',N'IMPERSONATE ANY LOGIN',N'TAKE OWNERSHIP'));
-
-            INSERT #Authority
-            SELECT @subject,N'master',principal.name,principal.type_desc,N'ROLE',principal.name
-            FROM sys.user_token token
-            JOIN sys.database_principals principal ON principal.sid=token.sid
-            WHERE principal.type_desc=N'DATABASE_ROLE' AND principal.name<>N'public';
-
-            INSERT #Authority
-            SELECT @subject,N'master',principal.name,principal.type_desc,
-                   CASE WHEN permission.permission_name LIKE N'ALTER %' OR permission.permission_name LIKE N'CREATE %'
-                             OR permission.permission_name IN (N'CONTROL',N'IMPERSONATE',N'TAKE OWNERSHIP')
-                        THEN N'DDL' ELSE N'PERMISSION' END,
-                   permission.class_desc+N':'+CONVERT(nvarchar(12),permission.major_id)+N':'+
-                       CONVERT(nvarchar(12),permission.minor_id)+N':'+permission.permission_name+N':'+permission.state_desc
-            FROM sys.database_permissions permission
-            JOIN sys.database_principals principal ON principal.principal_id=permission.grantee_principal_id
-            JOIN sys.user_token token ON token.sid=principal.sid
-            WHERE principal.principal_id<>DATABASE_PRINCIPAL_ID() AND permission.state IN (N'G',N'W') AND
-                  (principal.name<>N'public' OR permission.permission_name LIKE N'ALTER %' OR
-                   permission.permission_name LIKE N'CREATE %' OR
-                   permission.permission_name IN (N'CONTROL',N'IMPERSONATE',N'TAKE OWNERSHIP') OR
-                   principal.name=N'public' AND permission.permission_name=N'EXECUTE' AND
-                       permission.class_desc IN (N'DATABASE',N'SCHEMA'));
-
-            IF @CanAccessCatalogue=1
-            BEGIN
-                EXEC(N'USE [FluxKnowledge];
-                    INSERT #Authority
-                    SELECT SUSER_SNAME(),N''FluxKnowledge'',principal.name,principal.type_desc,N''ROLE'',principal.name
-                    FROM sys.user_token token
-                    JOIN sys.database_principals principal ON principal.sid=token.sid
-                    WHERE principal.type_desc=N''DATABASE_ROLE'' AND principal.name<>N''public'';
-
-                    INSERT #Authority
-                    SELECT SUSER_SNAME(),N''FluxKnowledge'',principal.name,principal.type_desc,
-                           CASE WHEN permission.permission_name LIKE N''ALTER %'' OR permission.permission_name LIKE N''CREATE %'' OR
-                                          permission.permission_name IN (N''CONTROL'',N''IMPERSONATE'',N''TAKE OWNERSHIP'')
-                                THEN N''DDL'' ELSE N''PERMISSION'' END,
-                           permission.class_desc+N'':''+CONVERT(nvarchar(12),permission.major_id)+N'':''+
-                               CONVERT(nvarchar(12),permission.minor_id)+N'':''+permission.permission_name+N'':''+permission.state_desc
-                    FROM sys.database_permissions permission
-                    JOIN sys.database_principals principal ON principal.principal_id=permission.grantee_principal_id
-                    JOIN sys.user_token token ON token.sid=principal.sid
-                    WHERE permission.state IN (N''G'',N''W'') AND
-                          (permission.permission_name LIKE N''ALTER %'' OR permission.permission_name LIKE N''CREATE %'' OR
-                           permission.permission_name IN (N''CONTROL'',N''IMPERSONATE'',N''TAKE OWNERSHIP'') OR
-                           principal.name=N''public'' AND permission.permission_name=N''EXECUTE'' AND
-                               permission.class_desc IN (N''DATABASE'',N''SCHEMA''));
-
-                    INSERT #Authority
-                    SELECT SUSER_SNAME(),N''FluxKnowledge'',USER_NAME(),N''DATABASE_USER'',N''DDL'',N''EFFECTIVE:CONTROL''
-                    WHERE HAS_PERMS_BY_NAME(NULL,N''DATABASE'',N''CONTROL'')=1;');
-            END;
-
-            SELECT @CanAccessCatalogue;
-            SELECT SubjectPrincipal,ScopeName,SourcePrincipal,SourcePrincipalType,AuthorityKind,Authority
-            FROM #Authority ORDER BY ScopeName,SourcePrincipal,AuthorityKind,Authority;
-            """;
-        await using var command = new SqlCommand(sql, connection) { CommandTimeout = 5 };
-        command.Parameters.Add("@subject", System.Data.SqlDbType.NVarChar, 256).Value = subjectPrincipal;
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-        if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-            throw new NativeGoLiveContractException("sql-effective-authority-observation-missing");
-        var canAccessCatalogue = reader.GetInt32(0) == 1;
-        if (!await reader.NextResultAsync(cancellationToken).ConfigureAwait(false))
-            throw new NativeGoLiveContractException("sql-effective-authority-observation-missing");
-        var findings = await ReadCurrentAuthorityFindingsAsync(reader, cancellationToken).ConfigureAwait(false);
-        return new BootstrapEffectiveAuthorityObservation(canAccessCatalogue, findings);
+        if (!await reader.NextResultAsync(cancellationToken).ConfigureAwait(false)) return [];
+        var procedures = new Dictionary<string, (
+            int ObjectId,
+            string Hash)>(StringComparer.Ordinal);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            procedures.Add(reader.GetString(0), (
+                reader.GetInt32(1), reader.GetString(2)));
+        if (!await reader.NextResultAsync(cancellationToken).ConfigureAwait(false)) return [];
+        var parameters = new Dictionary<string, List<NativeGoLiveSqlParameterObservation>>(StringComparer.Ordinal);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            var name = reader.GetString(0);
+            if (!parameters.TryGetValue(name, out var list)) parameters.Add(name, list = []);
+            list.Add(new NativeGoLiveSqlParameterObservation(
+                reader.GetString(2), reader.GetString(3), reader.GetInt16(4), reader.GetInt32(5) == 1));
+        }
+        return procedures.Select(pair => new NativeGoLiveSqlProcedureObservation(
+            pair.Key,
+            pair.Value.ObjectId,
+            pair.Value.Hash,
+            parameters.GetValueOrDefault(pair.Key) ?? [])).ToArray();
     }
 
     private static async Task<IReadOnlyList<string>> ReadStringResultAsync(
@@ -1053,82 +818,6 @@ internal sealed class NativeGoLiveWindowsSqlPort
         var values = new List<string>();
         while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false)) values.Add(reader.GetString(0));
         return values;
-    }
-
-    private static async Task<IReadOnlyList<NativeGoLiveSqlAuthorityFinding>> ReadAuthorityFindingsAsync(
-        SqlDataReader reader,
-        CancellationToken cancellationToken)
-    {
-        if (!await reader.NextResultAsync(cancellationToken).ConfigureAwait(false))
-            throw new NativeGoLiveContractException("sql-effective-authority-observation-missing");
-        return await ReadCurrentAuthorityFindingsAsync(reader, cancellationToken).ConfigureAwait(false);
-    }
-
-    private static async Task<IReadOnlyList<NativeGoLiveSqlAuthorityFinding>> ReadCurrentAuthorityFindingsAsync(
-        SqlDataReader reader,
-        CancellationToken cancellationToken)
-    {
-        var values = new List<NativeGoLiveSqlAuthorityFinding>();
-        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-            values.Add(new NativeGoLiveSqlAuthorityFinding(
-                reader.GetString(0), reader.GetString(1), reader.GetString(2),
-                reader.GetString(3), reader.GetString(4), reader.GetString(5)));
-        return values;
-    }
-
-    private static async Task<IReadOnlyList<NativeGoLiveSqlProcedureObservation>> ReadProcedureEvidenceAsync(
-        SqlDataReader reader,
-        CancellationToken cancellationToken)
-    {
-        if (!await reader.NextResultAsync(cancellationToken).ConfigureAwait(false)) return [];
-        var procedures = new Dictionary<string, (
-            int ObjectId,
-            string Hash,
-            bool Signed,
-            string Certificate,
-            string Thumbprint,
-            string CertificateLogin,
-            string CertificateLoginSidHex)>(StringComparer.Ordinal);
-        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-            procedures.Add(reader.GetString(0), (
-                reader.GetInt32(1), reader.GetString(2), reader.GetInt32(3) == 1,
-                reader.GetString(4), reader.GetString(5), reader.GetString(6),
-                reader.IsDBNull(7) ? string.Empty : OpaqueSid(reader, 7)));
-        if (!await reader.NextResultAsync(cancellationToken).ConfigureAwait(false)) return [];
-        var parameters = new Dictionary<string, List<NativeGoLiveSqlParameterObservation>>(StringComparer.Ordinal);
-        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-        {
-            var name = reader.GetString(0);
-            if (!parameters.TryGetValue(name, out var list)) parameters.Add(name, list = []);
-            list.Add(new NativeGoLiveSqlParameterObservation(
-                reader.GetString(2), reader.GetString(3), reader.GetInt16(4), reader.GetInt32(5) == 1));
-        }
-        if (!await reader.NextResultAsync(cancellationToken).ConfigureAwait(false)) return [];
-        var permissions = new Dictionary<string, List<NativeGoLiveSqlProcedurePermissionObservation>>(StringComparer.Ordinal);
-        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-        {
-            var name = reader.GetString(0);
-            if (!permissions.TryGetValue(name, out var list)) permissions.Add(name, list = []);
-            list.Add(new NativeGoLiveSqlProcedurePermissionObservation(
-                reader.GetString(1),
-                reader.GetString(2),
-                reader.GetInt32(3) == 1,
-                reader.GetString(4),
-                reader.GetString(5),
-                reader.GetString(6),
-                reader.GetInt32(7)));
-        }
-        return procedures.Select(pair => new NativeGoLiveSqlProcedureObservation(
-            pair.Key,
-            pair.Value.ObjectId,
-            pair.Value.Hash,
-            pair.Value.Signed,
-            pair.Value.Certificate,
-            pair.Value.Thumbprint,
-            pair.Value.CertificateLogin,
-            pair.Value.CertificateLoginSidHex,
-            parameters.GetValueOrDefault(pair.Key) ?? [],
-            permissions.GetValueOrDefault(pair.Key) ?? [])).ToArray();
     }
 
     private static async Task<int> ReadSingleIntAsync(SqlDataReader reader, CancellationToken cancellationToken)
@@ -1158,19 +847,9 @@ internal sealed class NativeGoLiveWindowsSqlPort
 
     private sealed record AppPoolSqlObservation(
         string LoginSid,
-        string? UserSid,
+        string LoginSidHex,
         bool SysAdmin,
-        bool CanConnect,
-        IReadOnlyList<string> ServerRoles,
-        IReadOnlyList<string> DdlGrants,
-        IReadOnlyList<NativeGoLiveSqlAuthorityFinding> EffectiveAuthorityFindings);
-    private sealed record BootstrapEffectiveAuthorityObservation(
-        bool CanAccessCatalogue,
-        IReadOnlyList<NativeGoLiveSqlAuthorityFinding> Findings);
-    private sealed record BootstrapLifecycleRevocationObservation(
-        bool EffectiveExecuteRevoked,
-        bool CanAccessCatalogue,
-        bool PermissionRowsAbsent);
+        bool CanConnect);
 }
 
 internal static class NativeGoLiveSqlSid
