@@ -42,12 +42,24 @@ function New-StepLogPath {
 function Stop-FeatureProcessTree {
     param([int]$ProcessId)
 
-    $children = @(Get-CimInstance Win32_Process -Filter "ParentProcessId = $ProcessId" -ErrorAction SilentlyContinue)
+    if ($null -eq (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)) {
+        return
+    }
+    $children = @(Get-CimInstance Win32_Process -Filter "ParentProcessId = $ProcessId" -ErrorAction Stop)
     foreach ($child in $children) {
         Stop-FeatureProcessTree -ProcessId ([int]$child.ProcessId)
     }
-
-    Stop-Process -Id $ProcessId -Force -ErrorAction SilentlyContinue
+    try {
+        Stop-Process -Id $ProcessId -Force -ErrorAction Stop
+    }
+    catch {
+        if ($null -ne (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)) {
+            throw
+        }
+    }
+    if ($null -ne (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)) {
+        throw "Failed to stop process tree member $ProcessId."
+    }
 }
 
 function ConvertTo-FeatureCommandArgument {
@@ -503,6 +515,30 @@ function Get-NativeGoLiveWindowsSqlClientAssemblyPath {
     return $path
 }
 
+function Get-NativeGoLiveWindowsSqlClientNativeSniAsset {
+    param([Parameter(Mandatory)][string]$MergedMainRoot)
+
+    $runtime = switch ([Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture) {
+        'X64' { 'win-x64'; break }
+        'X86' { 'win-x86'; break }
+        'Arm64' { 'win-arm64'; break }
+        default { throw 'native-go-live-windows-sql-client-native-architecture-unsupported' }
+    }
+    $root = [IO.Path]::GetFullPath($MergedMainRoot)
+    $directory = Join-Path $root (Join-Path 'runtimes' (Join-Path $runtime 'native'))
+    $asset = [IO.Path]::GetFullPath((Join-Path $directory 'Microsoft.Data.SqlClient.SNI.dll'))
+    if (-not (Test-Path -LiteralPath $directory -PathType Container) -or
+        -not (Test-Path -LiteralPath $asset -PathType Leaf)) {
+        throw 'native-go-live-windows-sql-client-native-missing'
+    }
+
+    return [pscustomobject]@{
+        RuntimeIdentifier = $runtime
+        Directory = $directory
+        Path = $asset
+    }
+}
+
 function Import-NativeGoLiveWindowsSqlClientAssembly {
     param([Parameter(Mandatory)][string]$SqlClientAssemblyPath)
 
@@ -561,12 +597,63 @@ try {
     $request = [Console]::In.ReadToEnd() | ConvertFrom-Json
     if ($null -eq $request -or [string]::IsNullOrWhiteSpace($request.connectionString) -or
         [string]::IsNullOrWhiteSpace($request.operation) -or
-        [string]::IsNullOrWhiteSpace($request.sqlClientAssemblyPath)) {
+        [string]::IsNullOrWhiteSpace($request.sqlClientAssemblyPath) -or
+        [string]::IsNullOrWhiteSpace($request.publishedPayloadRoot) -or
+        [string]::IsNullOrWhiteSpace($request.sqlClientNativeRuntimeIdentifier) -or
+        [string]::IsNullOrWhiteSpace($request.sqlClientNativeSniAssetPath)) {
+        exit 1
+    }
+    $runtime = switch ([Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture) {
+        'X64' { 'win-x64'; break }
+        'X86' { 'win-x86'; break }
+        'Arm64' { 'win-arm64'; break }
+        default { exit 1 }
+    }
+    if (-not [string]::Equals(
+            [string]$request.sqlClientNativeRuntimeIdentifier,
+            $runtime,
+            [StringComparison]::Ordinal)) { exit 1 }
+    if (-not [IO.Path]::IsPathFullyQualified([string]$request.publishedPayloadRoot) -or
+        -not [IO.Path]::IsPathFullyQualified([string]$request.sqlClientNativeSniAssetPath)) { exit 1 }
+    $expectedSniAsset = [IO.Path]::GetFullPath((Join-Path ([string]$request.publishedPayloadRoot) (
+        Join-Path 'runtimes' (Join-Path $runtime 'native\Microsoft.Data.SqlClient.SNI.dll'))))
+    $sniAsset = [IO.Path]::GetFullPath([string]$request.sqlClientNativeSniAssetPath)
+    if (-not [string]::Equals($sniAsset, $expectedSniAsset, [StringComparison]::OrdinalIgnoreCase) -or
+        -not (Test-Path -LiteralPath $sniAsset -PathType Leaf)) { exit 1 }
+    Add-Type -TypeDefinition @"
+using System;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Text;
+
+public static class NativeGoLiveSqlClientSniAsset
+{
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr LoadLibrary(string lpFileName);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern uint GetModuleFileName(IntPtr hModule, StringBuilder lpFilename, int nSize);
+
+    public static bool LoadExact(string path)
+    {
+        var expected = Path.GetFullPath(path);
+        var module = LoadLibrary(expected);
+        if (module == IntPtr.Zero) return false;
+        var actual = new StringBuilder(32768);
+        var length = GetModuleFileName(module, actual, actual.Capacity);
+        return length > 0 && length < actual.Capacity && string.Equals(
+            Path.GetFullPath(actual.ToString()), expected, StringComparison.OrdinalIgnoreCase);
+    }
+}
+"@
+    if (-not [NativeGoLiveSqlClientSniAsset]::LoadExact($sniAsset)) {
         exit 1
     }
     Add-Type -Path $request.sqlClientAssemblyPath
     $sql = if ($request.operation -ceq 'reset') {
         [string]$request.resetSql
+    } elseif ($request.operation -ceq 'probe') {
+        'SELECT 1;'
     } elseif ($request.operation -ceq 'install') {
         $bootstrap = Get-Content -LiteralPath $request.bootstrapScript -Raw
         $tsqlLines = [System.Collections.Generic.List[string]]::new()
@@ -629,13 +716,17 @@ try {
 
 function Invoke-NativeGoLiveSqlChild {
     param(
-        [Parameter(Mandatory)][ValidateSet('reset', 'install')][string]$Operation,
+        [Parameter(Mandatory)][ValidateSet('reset', 'install', 'probe')][string]$Operation,
         [Parameter(Mandatory)][string]$ConnectionString,
         [Parameter(Mandatory)][string]$BootstrapLogin,
         [Parameter(Mandatory)][string]$BootstrapScript,
         [Parameter(Mandatory)][string]$SqlClientAssemblyPath,
+        [Parameter(Mandatory)][string]$PublishedPayloadRoot,
+        [Parameter(Mandatory)][string]$SqlClientNativeRuntimeIdentifier,
+        [Parameter(Mandatory)][string]$SqlClientNativeSniAssetPath,
         [Parameter(Mandatory)][string]$SqlChildExecutable,
         [Parameter(Mandatory)][string]$ResetSql,
+        [ValidateRange(1, 600)][int]$TimeoutSeconds = 300,
         [Threading.CancellationToken]$CancellationToken = [Threading.CancellationToken]::None)
 
     $CancellationToken.ThrowIfCancellationRequested()
@@ -662,15 +753,50 @@ function Invoke-NativeGoLiveSqlChild {
             bootstrapLogin = $BootstrapLogin
             bootstrapScript = $BootstrapScript
             sqlClientAssemblyPath = $SqlClientAssemblyPath
+            publishedPayloadRoot = $PublishedPayloadRoot
+            sqlClientNativeRuntimeIdentifier = $SqlClientNativeRuntimeIdentifier
+            sqlClientNativeSniAssetPath = $SqlClientNativeSniAssetPath
             resetSql = $ResetSql
         } | ConvertTo-Json -Compress
         $process.StandardInput.Write($payload)
         $process.StandardInput.Close()
         $stdout = $process.StandardOutput.ReadToEndAsync()
         $stderr = $process.StandardError.ReadToEndAsync()
-        $process.WaitForExit()
-        [void]$stdout.GetAwaiter().GetResult()
-        [void]$stderr.GetAwaiter().GetResult()
+        $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+        $timedOut = $false
+        $cancelled = $false
+        while (-not $process.HasExited) {
+            if ($CancellationToken.IsCancellationRequested) {
+                $cancelled = $true
+                break
+            }
+            $remainingMilliseconds = [Math]::Ceiling(($deadline - [DateTime]::UtcNow).TotalMilliseconds)
+            if ($remainingMilliseconds -le 0) {
+                $timedOut = $true
+                break
+            }
+            [void]$process.WaitForExit([Math]::Min(250, [int]$remainingMilliseconds))
+        }
+        if ($timedOut -or $cancelled) {
+            try {
+                Stop-FeatureProcessTree -ProcessId $process.Id
+            }
+            catch {
+                throw "native-go-live-bootstrap-$Operation-termination-failed"
+            }
+            if (-not $process.WaitForExit(5000) -or -not $process.HasExited) {
+                throw "native-go-live-bootstrap-$Operation-termination-unproved"
+            }
+            [void]$stdout.Wait(5000)
+            [void]$stderr.Wait(5000)
+            if ($cancelled) {
+                $CancellationToken.ThrowIfCancellationRequested()
+            }
+            throw "native-go-live-bootstrap-$Operation-timed-out"
+        }
+        if (-not $stdout.Wait(5000) -or -not $stderr.Wait(5000)) {
+            throw "native-go-live-bootstrap-$Operation-stream-close-timed-out"
+        }
         $CancellationToken.ThrowIfCancellationRequested()
         if ($process.ExitCode -ne 0) { throw "native-go-live-bootstrap-$Operation-failed" }
     } finally {
@@ -684,6 +810,9 @@ function Invoke-NativeGoLiveBootstrap {
         [Parameter(Mandatory)][string]$ConnectionString,
         [Parameter(Mandatory)][string]$BootstrapLogin,
         [Parameter(Mandatory)][string]$SqlClientAssemblyPath,
+        [Parameter(Mandatory)][string]$PublishedPayloadRoot,
+        [Parameter(Mandatory)][string]$SqlClientNativeRuntimeIdentifier,
+        [Parameter(Mandatory)][string]$SqlClientNativeSniAssetPath,
         [string]$SqlChildExecutable = 'pwsh',
         [Threading.CancellationToken]$CancellationToken = [Threading.CancellationToken]::None)
 
@@ -726,11 +855,17 @@ IF CERT_ID(N'FluxKnowledgeNativeGoLiveCertificate') IS NOT NULL DROP CERTIFICATE
 '@
         Invoke-NativeGoLiveSqlChild -Operation 'reset' -ConnectionString $ConnectionString `
             -BootstrapLogin $BootstrapLogin -BootstrapScript $BootstrapScript `
-            -SqlClientAssemblyPath $SqlClientAssemblyPath -SqlChildExecutable $SqlChildExecutable `
+            -SqlClientAssemblyPath $SqlClientAssemblyPath -PublishedPayloadRoot $PublishedPayloadRoot `
+            -SqlClientNativeRuntimeIdentifier $SqlClientNativeRuntimeIdentifier `
+            -SqlClientNativeSniAssetPath $SqlClientNativeSniAssetPath `
+            -SqlChildExecutable $SqlChildExecutable `
             -ResetSql $reset -CancellationToken $CancellationToken
         Invoke-NativeGoLiveSqlChild -Operation 'install' -ConnectionString $ConnectionString `
             -BootstrapLogin $BootstrapLogin -BootstrapScript $BootstrapScript `
-            -SqlClientAssemblyPath $SqlClientAssemblyPath -SqlChildExecutable $SqlChildExecutable `
+            -SqlClientAssemblyPath $SqlClientAssemblyPath -PublishedPayloadRoot $PublishedPayloadRoot `
+            -SqlClientNativeRuntimeIdentifier $SqlClientNativeRuntimeIdentifier `
+            -SqlClientNativeSniAssetPath $SqlClientNativeSniAssetPath `
+            -SqlChildExecutable $SqlChildExecutable `
             -ResetSql $reset -CancellationToken $CancellationToken
     } catch {
         $record.exit_code = 1
@@ -766,6 +901,7 @@ function Invoke-NativeGoLive {
             }
         }
         $sqlClientAssemblyPath = Get-NativeGoLiveWindowsSqlClientAssemblyPath -MergedMainRoot $MergedMainRoot
+        $sqlClientNativeSniAsset = Get-NativeGoLiveWindowsSqlClientNativeSniAsset -MergedMainRoot $MergedMainRoot
         $sqlClientAssembly = Import-NativeGoLiveWindowsSqlClientAssembly -SqlClientAssemblyPath $sqlClientAssemblyPath
         $applicationAssembly = [Reflection.Assembly]::LoadFrom($applicationAssemblyPath)
         $integrationsAssembly = [Reflection.Assembly]::LoadFrom($integrationsAssemblyPath)
@@ -777,6 +913,9 @@ function Invoke-NativeGoLive {
             param([string]$connectionString, [System.Threading.CancellationToken]$cancellationToken)
             Invoke-NativeGoLiveBootstrap -BootstrapScript $BootstrapScript -ConnectionString $connectionString `
                 -BootstrapLogin $bootstrapLogin -SqlClientAssemblyPath $sqlClientAssemblyPath `
+                -PublishedPayloadRoot $MergedMainRoot `
+                -SqlClientNativeRuntimeIdentifier $sqlClientNativeSniAsset.RuntimeIdentifier `
+                -SqlClientNativeSniAssetPath $sqlClientNativeSniAsset.Path `
                 -CancellationToken $cancellationToken
             return [System.Threading.Tasks.Task]::CompletedTask
         }

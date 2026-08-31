@@ -178,6 +178,7 @@ foreach ($name in @(
     'Assert-NativeGoLiveBootstrapEnvironment',
     'Assert-NativeGoLiveBootstrapConnection',
     'Get-NativeGoLiveWindowsSqlClientAssemblyPath',
+    'Get-NativeGoLiveWindowsSqlClientNativeSniAsset',
     'Import-NativeGoLiveWindowsSqlClientAssembly',
     'New-RequiredReflectionInstance',
     'Invoke-NativeGoLiveBootstrap')) {
@@ -228,6 +229,7 @@ try {
 
     $windowsLayout = Join-Path $SourceRoot 'artifacts\bin\FluxKnowledge.Web\release'
     $windowsAsset = $windowsProvider
+    $nativeSniAsset = Get-NativeGoLiveWindowsSqlClientNativeSniAsset -MergedMainRoot $windowsLayout
     $selectedProvider = Get-NativeGoLiveWindowsSqlClientAssemblyPath -MergedMainRoot $windowsLayout
     Assert-True ([string]::Equals(
         [IO.Path]::GetFullPath($selectedProvider),
@@ -269,7 +271,10 @@ try {
 
     $output = & {
         Invoke-NativeGoLiveBootstrap -BootstrapScript $bootstrapScript -ConnectionString $connection `
-            -BootstrapLogin 'disposable-bootstrap-login' -SqlClientAssemblyPath $sqlClientSeam
+            -BootstrapLogin 'disposable-bootstrap-login' -SqlClientAssemblyPath $sqlClientSeam `
+            -PublishedPayloadRoot $windowsLayout `
+            -SqlClientNativeRuntimeIdentifier $nativeSniAsset.RuntimeIdentifier `
+            -SqlClientNativeSniAssetPath $nativeSniAsset.Path
     } *>&1 | Out-String
     Assert-True (-not $output.Contains($connection, [StringComparison]::Ordinal)) `
         'The SQL child output exposed bootstrap connection material.'
@@ -297,7 +302,10 @@ try {
     $failure = $null
     try {
         Invoke-NativeGoLiveBootstrap -BootstrapScript $bootstrapScript -ConnectionString $connection `
-            -BootstrapLogin 'disposable-bootstrap-login' -SqlClientAssemblyPath $sqlClientSeam
+            -BootstrapLogin 'disposable-bootstrap-login' -SqlClientAssemblyPath $sqlClientSeam `
+            -PublishedPayloadRoot $windowsLayout `
+            -SqlClientNativeRuntimeIdentifier $nativeSniAsset.RuntimeIdentifier `
+            -SqlClientNativeSniAssetPath $nativeSniAsset.Path
     } catch {
         $failure = $_
     }
@@ -317,7 +325,10 @@ try {
         $unsupportedFailure = $null
         try {
             Invoke-NativeGoLiveBootstrap -BootstrapScript $unsupportedBootstrap -ConnectionString $connection `
-                -BootstrapLogin 'disposable-bootstrap-login' -SqlClientAssemblyPath $sqlClientSeam
+                -BootstrapLogin 'disposable-bootstrap-login' -SqlClientAssemblyPath $sqlClientSeam `
+                -PublishedPayloadRoot $windowsLayout `
+                -SqlClientNativeRuntimeIdentifier $nativeSniAsset.RuntimeIdentifier `
+                -SqlClientNativeSniAssetPath $nativeSniAsset.Path
         } catch {
             $unsupportedFailure = $_
         }
