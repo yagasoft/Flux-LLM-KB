@@ -80,7 +80,10 @@ Assert-True ($script:FailedStep -ceq 'native-go-live') `
 
 foreach ($bridgeReasonCode in @(
     'native-go-live-bridge-composition-failed',
-    'native-go-live-bridge-invocation-failed')) {
+    'native-go-live-bridge-invocation-failed',
+    'native-go-live-bridge-discovery-failed',
+    'native-go-live-bridge-call-failed',
+    'native-go-live-bridge-result-failed')) {
     $script:FailedStep = $null
     $bridgeFailureRecord = [ordered]@{ name = 'native-go-live'; reason_code = $null }
     Record-NativeGoLiveFailure -Record $bridgeFailureRecord -Exception ([InvalidOperationException]::new($bridgeReasonCode))
@@ -133,6 +136,22 @@ Assert-Throws -Action {
 } -Pattern '^native-go-live-bridge-invocation-failed$' `
     -Message 'Module bridge invocation failure did not map to its fixed bridge failure code.'
 
+foreach ($moduleStageReasonCode in @(
+    'native-go-live-bridge-discovery-failed',
+    'native-go-live-bridge-call-failed',
+    'native-go-live-bridge-result-failed')) {
+    function Invoke-NativeGoLiveModuleBridge {
+        throw $moduleStageReasonCode
+    }
+
+    Assert-Throws -Action {
+        Invoke-NativeGoLive -MergedMainRoot $SourceRoot -CommittedSha ('a' * 40) `
+            -Acknowledgements @{ ConfirmCleanSlate = $true; ConfirmConfigureVss = $true; ConfirmDestroySql = $true; ConfirmRegisterCodex = $true } `
+            -ModulePath $modulePath -BootstrapScript (Join-Path $SourceRoot 'scripts\deploy\native-go-live-bootstrap.sql')
+    } -Pattern ("^" + [regex]::Escape($moduleStageReasonCode) + "$") `
+        -Message 'A fixed module bridge stage failure did not retain its exact reason code.'
+}
+
 function Invoke-NativeGoLiveModuleBridge {
     return [pscustomobject]@{ Succeeded = $false; ReasonCode = 'clean-slate-incomplete' }
 }
@@ -171,6 +190,38 @@ Assert-True ($moduleText -notmatch '(?i)vssadmin') 'The private lifecycle must n
 Assert-True ($moduleText -notmatch 'HostOperations|\[hashtable\]|\[scriptblock\]') 'Caller-supplied host callbacks remain.'
 Assert-True ($moduleText -notmatch 'DbConnectionStringBuilder') 'The PowerShell module must not parse SQL generically.'
 Assert-True ($moduleText -match 'NativeGoLiveCloseoutBridge') 'The private module must enter the CLR closeout bridge.'
+foreach ($moduleStageReasonCode in @(
+    'native-go-live-bridge-discovery-failed',
+    'native-go-live-bridge-call-failed',
+    'native-go-live-bridge-result-failed')) {
+    Assert-True ($moduleText -match [regex]::Escape($moduleStageReasonCode)) `
+        'The private module is missing a fixed bridge-stage diagnostic code.'
+}
+
+$escapedModulePath = $modulePath.Replace("'", "''")
+$moduleEnvironmentProbe = @"
+`$env:FLUXKNOWLEDGE_NATIVE_GO_LIVE_SQL_BOOTSTRAP = 'sentinel'
+`$module = Import-Module -Name '$escapedModulePath' -Force -PassThru
+try {
+    & `$module {
+        Invoke-NativeGoLive -CapabilityIssuer ([pscustomobject]@{}) -Capability ([pscustomobject]@{}) -Request ([pscustomobject]@{}) -NativeGoLiveHost ([pscustomobject]@{})
+    }
+} catch {
+    [Console]::WriteLine(`$_.Exception.Message)
+} finally {
+    Remove-Module `$module -Force -ErrorAction SilentlyContinue
+}
+if (`$null -ne [Environment]::GetEnvironmentVariable('FLUXKNOWLEDGE_NATIVE_GO_LIVE_SQL_BOOTSTRAP', [EnvironmentVariableTarget]::Process)) {
+    [Console]::WriteLine('native-go-live-bootstrap-environment-retained')
+}
+"@
+$moduleEnvironmentProbeOutput = & pwsh -NoProfile -Command $moduleEnvironmentProbe
+Assert-True ($LASTEXITCODE -eq 0) 'The isolated module environment probe did not run.'
+Assert-True ([string]::Join("`n", @($moduleEnvironmentProbeOutput)) -match '(?m)^native-go-live-bridge-discovery-failed$') `
+    'The isolated module discovery failure did not use its fixed stage code.'
+Assert-True ('native-go-live-bootstrap-environment-retained' -notin @($moduleEnvironmentProbeOutput)) `
+    'A failed module discovery retained the bootstrap environment value.'
+
 Assert-True ($hostText -match 'host is not GuardedNativeGoLiveHost') 'The CLR bridge must require the concrete guarded host.'
 Assert-True ($hostText -match 'capability is not NativeGoLiveCloseoutCapability') 'The CLR bridge must require the opaque closeout capability.'
 

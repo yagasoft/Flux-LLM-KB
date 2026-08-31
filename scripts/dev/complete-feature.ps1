@@ -390,7 +390,7 @@ function Record-NativeGoLiveFailure {
         [Parameter(Mandatory)][Exception]$Exception)
 
     $script:FailedStep = 'native-go-live'
-    if ($Exception.Message -cmatch "\A(?:Native go-live failed with safe reason code '(go-live-(?:acknowledgement-required|cancelled-before-admission|lease-unavailable|closeout-capability-(?:unrecognised|expired|binding-mismatch|consumed))|clean-slate-(?:incomplete|admission-failed))'\.|(native-go-live-bridge-(?:composition|invocation)-failed))\z") {
+    if ($Exception.Message -cmatch "\A(?:Native go-live failed with safe reason code '(go-live-(?:acknowledgement-required|cancelled-before-admission|lease-unavailable|closeout-capability-(?:unrecognised|expired|binding-mismatch|consumed))|clean-slate-(?:incomplete|admission-failed))'\.|(native-go-live-bridge-(?:composition|invocation|discovery|call|result)-failed))\z") {
         $Record.reason_code = if ([string]::IsNullOrWhiteSpace($Matches[1])) { $Matches[2] } else { $Matches[1] }
     }
 }
@@ -1032,6 +1032,9 @@ function Invoke-NativeGoLive {
         try {
             $result = Invoke-NativeGoLiveModuleBridge -ModulePath $ModulePath -Composition $composition
         } catch {
+            if ($_.Exception.Message -cmatch '\Anative-go-live-bridge-(?:discovery|call|result)-failed\z') {
+                throw $_.Exception
+            }
             throw 'native-go-live-bridge-invocation-failed'
         }
         if (-not $result.Succeeded) {

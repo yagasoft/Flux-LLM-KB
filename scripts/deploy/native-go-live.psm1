@@ -105,24 +105,45 @@ function Invoke-NativeGoLive {
     )
 
     try {
-        $assembly = @([AppDomain]::CurrentDomain.GetAssemblies() | Where-Object {
-            $_.GetName().Name -ceq 'FluxKnowledge.Integrations'
-        })
-        if ($assembly.Count -ne 1) { throw 'go-live-closeout-assembly-unavailable' }
-        $bridgeType = $assembly[0].GetType(
-            'FluxKnowledge.Integrations.Windows.NativeGoLive.NativeGoLiveCloseoutBridge',
-            $true,
-            $false)
-        $flags = [Reflection.BindingFlags]'Static,NonPublic'
-        $method = $bridgeType.GetMethod('ExecuteAsync', $flags)
-        if ($null -eq $method) { throw 'go-live-closeout-bridge-unavailable' }
-        $task = $method.Invoke($null, @(
-            $CapabilityIssuer,
-            $Capability,
-            $Request,
-            $NativeGoLiveHost,
-            [Threading.CancellationToken]::None))
-        return $task.GetAwaiter().GetResult()
+        try {
+            $assembly = @([AppDomain]::CurrentDomain.GetAssemblies() | Where-Object {
+                $_.GetName().Name -ceq 'FluxKnowledge.Integrations'
+            })
+            if ($assembly.Count -ne 1) { throw 'go-live-closeout-assembly-unavailable' }
+            $bridgeType = $assembly[0].GetType(
+                'FluxKnowledge.Integrations.Windows.NativeGoLive.NativeGoLiveCloseoutBridge',
+                $true,
+                $false)
+            $flags = [Reflection.BindingFlags]'Static,NonPublic'
+            $method = $bridgeType.GetMethod('ExecuteAsync', $flags)
+            if ($null -eq $method) { throw 'go-live-closeout-bridge-unavailable' }
+        }
+        catch {
+            throw 'native-go-live-bridge-discovery-failed'
+        }
+
+        try {
+            $task = $method.Invoke($null, @(
+                $CapabilityIssuer,
+                $Capability,
+                $Request,
+                $NativeGoLiveHost,
+                [Threading.CancellationToken]::None))
+        }
+        catch {
+            if ($null -ne $_.Exception.InnerException -and
+                $_.Exception.InnerException.Message -ceq 'go-live-closeout-capability-unrecognised') {
+                throw $_.Exception.InnerException
+            }
+            throw 'native-go-live-bridge-call-failed'
+        }
+
+        try {
+            return $task.GetAwaiter().GetResult()
+        }
+        catch {
+            throw 'native-go-live-bridge-result-failed'
+        }
     }
     finally {
         Clear-NativeGoLiveBootstrapEnvironment
