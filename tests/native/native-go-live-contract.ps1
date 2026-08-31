@@ -13,6 +13,7 @@ $modulePath = Join-Path $SourceRoot 'scripts\deploy\native-go-live.psm1'
 $closeoutPath = Join-Path $SourceRoot 'scripts\dev\complete-feature.ps1'
 $hostPath = Join-Path $SourceRoot 'src\FluxKnowledge.Integrations\Windows\NativeGoLive\GuardedNativeGoLiveHost.cs'
 $portsPath = Join-Path $SourceRoot 'src\FluxKnowledge.Integrations\Windows\NativeGoLive\NativeGoLivePorts.cs'
+$windowsPortsPath = Join-Path $SourceRoot 'src\FluxKnowledge.Integrations\Windows\NativeGoLive\NativeGoLiveWindowsHostPorts.cs'
 $executorPath = Join-Path $SourceRoot 'src\FluxKnowledge.Integrations\Windows\NativeGoLive\NativeGoLiveExecutor.cs'
 
 function Assert-True {
@@ -48,7 +49,7 @@ function Import-CloseoutFunction {
     Set-Item -LiteralPath "Function:script:$Name" -Value $captured
 }
 
-foreach ($path in @($deploymentScript, $modulePath, $hostPath, $portsPath, $executorPath)) {
+foreach ($path in @($deploymentScript, $modulePath, $hostPath, $portsPath, $windowsPortsPath, $executorPath)) {
     Assert-True (Test-Path -LiteralPath $path -PathType Leaf) "Required native go-live contract file is missing: $path"
 }
 
@@ -190,6 +191,7 @@ $closeoutText = Get-Content -LiteralPath $closeoutPath -Raw
 $moduleText = Get-Content -LiteralPath $modulePath -Raw
 $hostText = Get-Content -LiteralPath $hostPath -Raw
 $portsText = Get-Content -LiteralPath $portsPath -Raw
+$windowsPortsText = Get-Content -LiteralPath $windowsPortsPath -Raw
 $executorText = Get-Content -LiteralPath $executorPath -Raw
 
 Assert-True ($deploymentText -notmatch '(?i)vssadmin') 'The public boundary must not use vssadmin.'
@@ -269,6 +271,8 @@ Assert-True ($hostText -match 'NativeGoLivePayloadHasher\.Compute\(_applicationR
 Assert-True ($hostText -notmatch 'NativeGoLiveJournal|NativeGoLiveRootMarker|NativeGoLiveRootAdmission|INativeGoLiveJournalSession') `
     'The guarded host still exposes deployment recovery state.'
 Assert-True ($hostText -match 'NativeGoLiveLoopbackContract\.RequiredMcpTools') 'Exact MCP validation is missing.'
+Assert-True ($windowsPortsText -match 'HASHBYTES\(''SHA2_256'',CONVERT\(varbinary\(max\),REPLACE\(sm\.definition,CHAR\(13\)\+CHAR\(10\),CHAR\(10\)\)\)\)') `
+    'SQL bootstrap procedure evidence must normalise SQL Server CRLF definitions before hashing.'
 Assert-True ($hostText -match 'ForwardedDenial') 'Forwarded denial validation is missing.'
 Assert-True ($hostText -match 'NonLoopbackDenial') 'Non-loopback denial validation is missing.'
 Assert-True ($hostText -match 'FfmpegEnabled' -and $hostText -match 'NetworkParsingEnabled') 'Runtime exclusions are incomplete.'

@@ -546,7 +546,7 @@ internal sealed class NativeGoLiveWindowsSqlPort
             FROM (VALUES(0)) seed(value)
             LEFT JOIN sys.server_principals p ON p.name=N'IIS AppPool\FluxKnowledge';
             SELECT p.name,p.object_id,
-                   LOWER(CONVERT(varchar(64),HASHBYTES('SHA2_256',CONVERT(varbinary(max),sm.definition)),2))
+                   LOWER(CONVERT(varchar(64),HASHBYTES('SHA2_256',CONVERT(varbinary(max),REPLACE(sm.definition,CHAR(13)+CHAR(10),CHAR(10)))),2))
             FROM sys.procedures p JOIN sys.sql_modules sm ON sm.object_id=p.object_id
             WHERE SCHEMA_NAME(p.schema_id)=N'dbo' AND p.name IN
                 (N'FluxKnowledgeNativeGoLiveCreate',N'FluxKnowledgeNativeGoLiveDrop',
