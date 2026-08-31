@@ -67,6 +67,15 @@ Assert-True ($safeFailureRecord.reason_code -ceq 'clean-slate-incomplete') `
 Assert-True ($script:FailedStep -ceq 'native-go-live') `
     'A safe native go-live result failure did not identify the native go-live step.'
 
+$script:FailedStep = $null
+$admissionFailureRecord = [ordered]@{ name = 'native-go-live'; reason_code = $null }
+Record-NativeGoLiveFailure -Record $admissionFailureRecord -Exception ([InvalidOperationException]::new(
+    "Native go-live failed with safe reason code 'clean-slate-admission-failed'."))
+Assert-True ($admissionFailureRecord.reason_code -ceq 'clean-slate-admission-failed') `
+    'A safe native go-live admission failure did not retain its fixed reason code.'
+Assert-True ($script:FailedStep -ceq 'native-go-live') `
+    'A safe native go-live admission failure did not identify the native go-live step.'
+
 foreach ($unsafeMessage in @(
     "Native go-live failed with safe reason code 'Server=localhost;Password=secret'.",
     'Native go-live failed with safe reason code clean-slate-incomplete.',

@@ -58,6 +58,39 @@ public sealed class NativeGoLiveLiveGateCompositionTests
     }
 
     [Fact]
+    public async Task Admission_failure_returns_only_the_fixed_admission_reason_code()
+    {
+        using var fixture = new ExecutorOrderingFixture(failAdmission: true);
+        fixture.BeginExecution();
+
+        var result = await new NativeGoLiveExecutor().ExecuteAsync(fixture.Request, fixture.Host);
+
+        Assert.False(result.Succeeded);
+        Assert.Equal("clean-slate-admission-failed", result.ReasonCode);
+        Assert.Equal(
+            ["replace-canonical-iis", "install-direct-admin-bootstrap", "admission-observe-present"],
+            fixture.Events);
+        Assert.True(Directory.Exists(fixture.Plan.Layout.Root));
+        Assert.True(File.Exists(Path.Combine(fixture.Plan.Layout.Root, "pre-wipe-sentinel.txt")));
+    }
+
+    [Fact]
+    public async Task Admission_cancellation_returns_only_the_fixed_admission_reason_code()
+    {
+        using var fixture = new ExecutorOrderingFixture(cancelAdmission: true);
+        fixture.BeginExecution();
+
+        var result = await new NativeGoLiveExecutor().ExecuteAsync(fixture.Request, fixture.Host);
+
+        Assert.False(result.Succeeded);
+        Assert.Equal("clean-slate-admission-failed", result.ReasonCode);
+        Assert.Equal(
+            ["replace-canonical-iis", "install-direct-admin-bootstrap", "admission-observe-present"],
+            fixture.Events);
+        Assert.True(Directory.Exists(fixture.Plan.Layout.Root));
+    }
+
+    [Fact]
     public async Task Preflight_rejects_missing_direct_admin_app_pool_identity()
     {
         using var fixture = new ExecutorOrderingFixture(ValidPreflight() with
@@ -129,7 +162,9 @@ public sealed class NativeGoLiveLiveGateCompositionTests
 
         public ExecutorOrderingFixture(
             NativeGoLiveSqlPreflightObservation? sqlPreflight = null,
-            bool failBootstrap = false)
+            bool failBootstrap = false,
+            bool failAdmission = false,
+            bool cancelAdmission = false)
         {
             _root = Path.Combine(Path.GetTempPath(), "FluxKnowledgeLiveGateOrdering", Guid.NewGuid().ToString("N"));
             var payloadRoot = CreatePayloadRoot(_root);
@@ -176,7 +211,7 @@ public sealed class NativeGoLiveLiveGateCompositionTests
                     null!,
                     vss,
                     null,
-                    new DisposableAdmissionPort(Plan, Events)),
+                    new DisposableAdmissionPort(Plan, Events, failAdmission, cancelAdmission)),
                 (connectionString, _) =>
                 {
                     Assert.Equal(bootstrap.ConnectionString, connectionString);
@@ -257,7 +292,11 @@ public sealed class NativeGoLiveLiveGateCompositionTests
         }
     }
 
-    private sealed class DisposableAdmissionPort(NativeGoLivePlan plan, List<string> events) : INativeGoLiveAdmissionPort
+    private sealed class DisposableAdmissionPort(
+        NativeGoLivePlan plan,
+        List<string> events,
+        bool failAdmission,
+        bool cancelAdmission) : INativeGoLiveAdmissionPort
     {
         public ValueTask<NativeGoLiveOneShotAdmission> ObserveAsync(CancellationToken _)
         {
@@ -267,6 +306,10 @@ public sealed class NativeGoLiveLiveGateCompositionTests
 
         public ValueTask WipeAsync(CancellationToken _)
         {
+            if (failAdmission)
+                return ValueTask.FromException(new NativeGoLiveContractException("admission-failure"));
+            if (cancelAdmission)
+                return ValueTask.FromException(new OperationCanceledException());
             events.Add("admission-wipe");
             Directory.Delete(plan.Layout.Root, recursive: true);
             return ValueTask.CompletedTask;

@@ -41,7 +41,31 @@ public sealed class NativeGoLiveExecutor
             try
             {
                 await host.PrepareHostPrerequisitesAsync(request.Plan, cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                return NativeGoLiveResult.Refused("clean-slate-incomplete");
+            }
+            catch (Exception)
+            {
+                return NativeGoLiveResult.Refused("clean-slate-incomplete");
+            }
+
+            try
+            {
                 await host.AdmitAndWipeAsync(request, cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                return NativeGoLiveResult.Refused("clean-slate-admission-failed");
+            }
+            catch (Exception)
+            {
+                return NativeGoLiveResult.Refused("clean-slate-admission-failed");
+            }
+
+            try
+            {
                 await host.VerifyOneShotPreflightAsync(request.Plan, cancellationToken).ConfigureAwait(false);
                 await host.StopPoolAsync(cancellationToken).ConfigureAwait(false);
                 await host.ConfigureVssAsync(request.Plan.Vss, cancellationToken).ConfigureAwait(false);

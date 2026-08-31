@@ -390,7 +390,7 @@ function Record-NativeGoLiveFailure {
         [Parameter(Mandatory)][Exception]$Exception)
 
     $script:FailedStep = 'native-go-live'
-    if ($Exception.Message -cmatch "\ANative go-live failed with safe reason code '(go-live-(?:acknowledgement-required|cancelled-before-admission|lease-unavailable|closeout-capability-(?:unrecognised|expired|binding-mismatch|consumed))|clean-slate-incomplete)'\.\z") {
+    if ($Exception.Message -cmatch "\ANative go-live failed with safe reason code '(go-live-(?:acknowledgement-required|cancelled-before-admission|lease-unavailable|closeout-capability-(?:unrecognised|expired|binding-mismatch|consumed))|clean-slate-(?:incomplete|admission-failed))'\.\z") {
         $Record.reason_code = $Matches[1]
     }
 }
