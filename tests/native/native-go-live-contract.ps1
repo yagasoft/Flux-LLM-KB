@@ -57,6 +57,18 @@ $tokens = $null
 $errors = $null
 $closeoutAst = [System.Management.Automation.Language.Parser]::ParseFile($closeoutPath, [ref]$tokens, [ref]$errors)
 Assert-True ($errors.Count -eq 0) 'Closeout script does not parse.'
+$compositionFunction = $closeoutAst.Find({
+    param($candidate)
+    $candidate -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $candidate.Name -ceq 'Invoke-NativeGoLiveComposition'
+}, $true)
+Assert-True ($null -ne $compositionFunction) 'Native go-live composition function is missing.'
+$compositionText = $compositionFunction.Extent.Text
+$bootstrapCall = $compositionText.IndexOf('Invoke-NativeGoLiveBootstrap')
+$bootstrapClear = $compositionText.IndexOf('Clear-NativeGoLiveBootstrapEnvironment', $bootstrapCall)
+$planConstruction = $compositionText.IndexOf('NativeGoLivePlan')
+Assert-True ($bootstrapCall -ge 0 -and $bootstrapClear -gt $bootstrapCall -and $bootstrapClear -lt $planConstruction) `
+    'The parent bootstrap connection is not cleared before native host composition.'
 Import-CloseoutFunction -Ast $closeoutAst -Name 'Record-NativeGoLiveFailure'
 Import-CloseoutFunction -Ast $closeoutAst -Name 'Clear-NativeGoLiveBootstrapEnvironment'
 Import-CloseoutFunction -Ast $closeoutAst -Name 'Invoke-NativeGoLive'
