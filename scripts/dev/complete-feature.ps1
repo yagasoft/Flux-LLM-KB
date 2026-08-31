@@ -985,7 +985,6 @@ function Invoke-NativeGoLiveComposition {
         -PublishedPayloadRoot $MergedMainRoot `
         -SqlClientNativeRuntimeIdentifier $sqlClientNativeSniAsset.RuntimeIdentifier `
         -SqlClientNativeSniAssetPath $sqlClientNativeSniAsset.Path
-    Clear-NativeGoLiveBootstrapEnvironment
     $bootstrapInstaller = [System.Func[string, System.Threading.CancellationToken, System.Threading.Tasks.Task]] {
         param([string]$ignoredConnection, [System.Threading.CancellationToken]$ignoredToken)
         return [System.Threading.Tasks.Task]::CompletedTask

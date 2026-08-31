@@ -64,11 +64,8 @@ $compositionFunction = $closeoutAst.Find({
 }, $true)
 Assert-True ($null -ne $compositionFunction) 'Native go-live composition function is missing.'
 $compositionText = $compositionFunction.Extent.Text
-$bootstrapCall = $compositionText.IndexOf('Invoke-NativeGoLiveBootstrap')
-$bootstrapClear = $compositionText.IndexOf('Clear-NativeGoLiveBootstrapEnvironment', $bootstrapCall)
-$planConstruction = $compositionText.IndexOf('NativeGoLivePlan')
-Assert-True ($bootstrapCall -ge 0 -and $bootstrapClear -gt $bootstrapCall -and $bootstrapClear -lt $planConstruction) `
-    'The parent bootstrap connection is not cleared before native host composition.'
+Assert-True (-not $compositionText.Contains('Clear-NativeGoLiveBootstrapEnvironment', [StringComparison]::Ordinal)) `
+    'Native go-live composition must leave bootstrap state for the guarded host to consume once.'
 Import-CloseoutFunction -Ast $closeoutAst -Name 'Record-NativeGoLiveFailure'
 Import-CloseoutFunction -Ast $closeoutAst -Name 'Clear-NativeGoLiveBootstrapEnvironment'
 Import-CloseoutFunction -Ast $closeoutAst -Name 'Invoke-NativeGoLive'
