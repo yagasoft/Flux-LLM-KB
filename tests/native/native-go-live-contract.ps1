@@ -196,6 +196,10 @@ Assert-True ($deploymentText -notmatch '(?i)vssadmin') 'The public boundary must
 Assert-True ($closeoutText -match '(?s)Assert-NativeGoLiveBootstrapConnection.*?Invoke-NativeGoLiveBootstrap' -and
     $closeoutText -match '(?s)\$bootstrapInstaller\s*=\s*\[System\.Func.*?Task\]::CompletedTask') `
     'The SQL bootstrap must complete synchronously before the CLR one-shot bridge.'
+$nativeSniLoad = $closeoutText.IndexOf('Load-NativeGoLiveWindowsSqlClientNativeSniAsset', [StringComparison]::Ordinal)
+$sqlClientImport = $closeoutText.IndexOf('Import-NativeGoLiveWindowsSqlClientAssembly', [StringComparison]::Ordinal)
+Assert-True ($nativeSniLoad -ge 0 -and $sqlClientImport -gt $nativeSniLoad) `
+    'The CLR bridge must load the exact native SQL client SNI asset before importing SqlClient.'
 Assert-True ($moduleText -notmatch '(?i)vssadmin') 'The private lifecycle must not use vssadmin.'
 Assert-True ($moduleText -notmatch 'HostOperations|\[hashtable\]|\[scriptblock\]') 'Caller-supplied host callbacks remain.'
 Assert-True ($moduleText -notmatch 'DbConnectionStringBuilder') 'The PowerShell module must not parse SQL generically.'
