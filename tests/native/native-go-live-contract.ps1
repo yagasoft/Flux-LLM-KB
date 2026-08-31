@@ -57,6 +57,8 @@ $errors = $null
 $closeoutAst = [System.Management.Automation.Language.Parser]::ParseFile($closeoutPath, [ref]$tokens, [ref]$errors)
 Assert-True ($errors.Count -eq 0) 'Closeout script does not parse.'
 Import-CloseoutFunction -Ast $closeoutAst -Name 'Record-NativeGoLiveFailure'
+Import-CloseoutFunction -Ast $closeoutAst -Name 'Clear-NativeGoLiveBootstrapEnvironment'
+Import-CloseoutFunction -Ast $closeoutAst -Name 'Invoke-NativeGoLive'
 
 $script:FailedStep = $null
 $safeFailureRecord = [ordered]@{ name = 'native-go-live'; reason_code = $null }
@@ -76,6 +78,18 @@ Assert-True ($admissionFailureRecord.reason_code -ceq 'clean-slate-admission-fai
 Assert-True ($script:FailedStep -ceq 'native-go-live') `
     'A safe native go-live admission failure did not identify the native go-live step.'
 
+foreach ($bridgeReasonCode in @(
+    'native-go-live-bridge-composition-failed',
+    'native-go-live-bridge-invocation-failed')) {
+    $script:FailedStep = $null
+    $bridgeFailureRecord = [ordered]@{ name = 'native-go-live'; reason_code = $null }
+    Record-NativeGoLiveFailure -Record $bridgeFailureRecord -Exception ([InvalidOperationException]::new($bridgeReasonCode))
+    Assert-True ($bridgeFailureRecord.reason_code -ceq $bridgeReasonCode) `
+        'A fixed native go-live bridge failure did not retain its exact reason code.'
+    Assert-True ($script:FailedStep -ceq 'native-go-live') `
+        'A fixed native go-live bridge failure did not identify the native go-live step.'
+}
+
 foreach ($unsafeMessage in @(
     "Native go-live failed with safe reason code 'Server=localhost;Password=secret'.",
     'Native go-live failed with safe reason code clean-slate-incomplete.',
@@ -88,6 +102,47 @@ foreach ($unsafeMessage in @(
     Assert-True ($script:FailedStep -ceq 'native-go-live') `
         'A native go-live failure did not identify the native go-live step.'
 }
+
+function Invoke-NativeGoLiveComposition {
+    throw 'malformed-reflected-composition'
+}
+
+function Invoke-NativeGoLiveModuleBridge {
+    throw 'module-bridge-should-not-run-after-composition-failure'
+}
+
+Assert-Throws -Action {
+    Invoke-NativeGoLive -MergedMainRoot $SourceRoot -CommittedSha ('a' * 40) `
+        -Acknowledgements @{ ConfirmCleanSlate = $true; ConfirmConfigureVss = $true; ConfirmDestroySql = $true; ConfirmRegisterCodex = $true } `
+        -ModulePath $modulePath -BootstrapScript (Join-Path $SourceRoot 'scripts\deploy\native-go-live-bootstrap.sql')
+} -Pattern '^native-go-live-bridge-composition-failed$' `
+    -Message 'Malformed reflection composition did not map to its fixed bridge failure code.'
+
+function Invoke-NativeGoLiveComposition {
+    return [pscustomobject]@{ Completed = $true }
+}
+
+function Invoke-NativeGoLiveModuleBridge {
+    throw 'module-invocation-failure'
+}
+
+Assert-Throws -Action {
+    Invoke-NativeGoLive -MergedMainRoot $SourceRoot -CommittedSha ('a' * 40) `
+        -Acknowledgements @{ ConfirmCleanSlate = $true; ConfirmConfigureVss = $true; ConfirmDestroySql = $true; ConfirmRegisterCodex = $true } `
+        -ModulePath $modulePath -BootstrapScript (Join-Path $SourceRoot 'scripts\deploy\native-go-live-bootstrap.sql')
+} -Pattern '^native-go-live-bridge-invocation-failed$' `
+    -Message 'Module bridge invocation failure did not map to its fixed bridge failure code.'
+
+function Invoke-NativeGoLiveModuleBridge {
+    return [pscustomobject]@{ Succeeded = $false; ReasonCode = 'clean-slate-incomplete' }
+}
+
+Assert-Throws -Action {
+    Invoke-NativeGoLive -MergedMainRoot $SourceRoot -CommittedSha ('a' * 40) `
+        -Acknowledgements @{ ConfirmCleanSlate = $true; ConfirmConfigureVss = $true; ConfirmDestroySql = $true; ConfirmRegisterCodex = $true } `
+        -ModulePath $modulePath -BootstrapScript (Join-Path $SourceRoot 'scripts\deploy\native-go-live-bootstrap.sql')
+} -Pattern "^Native go-live failed with safe reason code 'clean-slate-incomplete'\.$" `
+    -Message 'Returned NativeGoLiveResult failures must remain outside bridge-invocation mapping.'
 
 $planJson = & pwsh -NoProfile -File $deploymentScript -PlanOnly
 Assert-True ($LASTEXITCODE -eq 0) 'PlanOnly failed.'
@@ -103,12 +158,15 @@ Assert-Throws -Action {
 } -Pattern 'claimed in-process authority' -Message 'Direct -GoLive execution must be refused.'
 
 $deploymentText = Get-Content -LiteralPath $deploymentScript -Raw
+$closeoutText = Get-Content -LiteralPath $closeoutPath -Raw
 $moduleText = Get-Content -LiteralPath $modulePath -Raw
 $hostText = Get-Content -LiteralPath $hostPath -Raw
 $portsText = Get-Content -LiteralPath $portsPath -Raw
 $executorText = Get-Content -LiteralPath $executorPath -Raw
 
 Assert-True ($deploymentText -notmatch '(?i)vssadmin') 'The public boundary must not use vssadmin.'
+Assert-True ($closeoutText -match '(?s)\[System\.Func\[string, System\.Threading\.CancellationToken, System\.Threading\.Tasks\.Task\]\]\s*\(\s*\{.*?\}\.GetNewClosure\(\)\)') `
+    'The extracted bootstrap delegate must retain its composition inputs after returning.'
 Assert-True ($moduleText -notmatch '(?i)vssadmin') 'The private lifecycle must not use vssadmin.'
 Assert-True ($moduleText -notmatch 'HostOperations|\[hashtable\]|\[scriptblock\]') 'Caller-supplied host callbacks remain.'
 Assert-True ($moduleText -notmatch 'DbConnectionStringBuilder') 'The PowerShell module must not parse SQL generically.'

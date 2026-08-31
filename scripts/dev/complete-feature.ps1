@@ -390,8 +390,8 @@ function Record-NativeGoLiveFailure {
         [Parameter(Mandatory)][Exception]$Exception)
 
     $script:FailedStep = 'native-go-live'
-    if ($Exception.Message -cmatch "\ANative go-live failed with safe reason code '(go-live-(?:acknowledgement-required|cancelled-before-admission|lease-unavailable|closeout-capability-(?:unrecognised|expired|binding-mismatch|consumed))|clean-slate-(?:incomplete|admission-failed))'\.\z") {
-        $Record.reason_code = $Matches[1]
+    if ($Exception.Message -cmatch "\A(?:Native go-live failed with safe reason code '(go-live-(?:acknowledgement-required|cancelled-before-admission|lease-unavailable|closeout-capability-(?:unrecognised|expired|binding-mismatch|consumed))|clean-slate-(?:incomplete|admission-failed))'\.|(native-go-live-bridge-(?:composition|invocation)-failed))\z") {
+        $Record.reason_code = if ([string]::IsNullOrWhiteSpace($Matches[1])) { $Matches[2] } else { $Matches[1] }
     }
 }
 
@@ -911,6 +911,104 @@ IF OBJECT_ID(N'dbo.FluxKnowledgeNativeGoLiveObserveAppPool',N'P') IS NOT NULL DR
     }
 }
 
+function Invoke-NativeGoLiveComposition {
+    param(
+        [Parameter(Mandatory)][string]$MergedMainRoot,
+        [Parameter(Mandatory)][string]$CommittedSha,
+        [Parameter(Mandatory)][hashtable]$Acknowledgements,
+        [Parameter(Mandatory)][string]$BootstrapScript)
+
+    $applicationAssemblyPath = Join-Path $MergedMainRoot "FluxKnowledge.Application.dll"
+    $integrationsAssemblyPath = Join-Path $MergedMainRoot "FluxKnowledge.Integrations.dll"
+    foreach ($assemblyPath in @($applicationAssemblyPath, $integrationsAssemblyPath)) {
+        if (-not (Test-Path -LiteralPath $assemblyPath -PathType Leaf)) {
+            throw "The immutable native go-live payload is incomplete."
+        }
+    }
+    $sqlClientAssemblyPath = Get-NativeGoLiveWindowsSqlClientAssemblyPath -MergedMainRoot $MergedMainRoot
+    $sqlClientNativeSniAsset = Get-NativeGoLiveWindowsSqlClientNativeSniAsset -MergedMainRoot $MergedMainRoot
+    $sqlClientAssembly = Import-NativeGoLiveWindowsSqlClientAssembly -SqlClientAssemblyPath $sqlClientAssemblyPath
+    $applicationAssembly = [Reflection.Assembly]::LoadFrom($applicationAssemblyPath)
+    $integrationsAssembly = [Reflection.Assembly]::LoadFrom($integrationsAssemblyPath)
+    $bootstrapLogin = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+    if ([string]::IsNullOrWhiteSpace($bootstrapLogin)) {
+        throw 'native-go-live-bootstrap-identity-missing'
+    }
+    $bootstrapInstaller = [System.Func[string, System.Threading.CancellationToken, System.Threading.Tasks.Task]] ({
+        param([string]$connectionString, [System.Threading.CancellationToken]$cancellationToken)
+        Invoke-NativeGoLiveBootstrap -BootstrapScript $BootstrapScript -ConnectionString $connectionString `
+            -BootstrapLogin $bootstrapLogin -SqlClientAssemblyPath $sqlClientAssemblyPath `
+            -PublishedPayloadRoot $MergedMainRoot `
+            -SqlClientNativeRuntimeIdentifier $sqlClientNativeSniAsset.RuntimeIdentifier `
+            -SqlClientNativeSniAssetPath $sqlClientNativeSniAsset.Path `
+            -CancellationToken $cancellationToken
+        return [System.Threading.Tasks.Task]::CompletedTask
+    }.GetNewClosure())
+
+    $planType = Get-RequiredReflectionType -Assembly $applicationAssembly `
+        -Name "FluxKnowledge.Application.Operations.NativeGoLivePlan"
+    $plan = Invoke-RequiredReflectionMethod `
+        -Method (Get-RequiredReflectionMethod -Type $planType -Name "CreateProduction" -ParameterCount 1 -Static) `
+        -Instance $null `
+        -Arguments @($CommittedSha)
+    $capabilityIssuerType = Get-RequiredReflectionType -Assembly $integrationsAssembly `
+        -Name "FluxKnowledge.Integrations.Windows.NativeGoLive.NativeGoLiveCloseoutCapabilityIssuer"
+    $capabilityIssuer = New-RequiredReflectionInstance -Type $capabilityIssuerType -Arguments @($null)
+    $hasherType = Get-RequiredReflectionType -Assembly $integrationsAssembly `
+        -Name "FluxKnowledge.Integrations.Windows.NativeGoLive.NativeGoLivePayloadHasher"
+    $manifest = Invoke-RequiredReflectionMethod `
+        -Method (Get-RequiredReflectionMethod -Type $hasherType -Name "Compute" -ParameterCount 1 -Static) `
+        -Instance $null `
+        -Arguments @($MergedMainRoot)
+
+    $capability = Invoke-RequiredReflectionMethod `
+        -Method (Get-RequiredReflectionMethod -Type $capabilityIssuerType -Name "Issue" -ParameterCount 3) `
+        -Instance $capabilityIssuer `
+        -Arguments @($plan, $MergedMainRoot, [string]$manifest.Sha256)
+    $portsFactoryType = Get-RequiredReflectionType -Assembly $integrationsAssembly `
+        -Name "FluxKnowledge.Integrations.Windows.NativeGoLive.NativeGoLiveWindowsHostPorts"
+    $ports = Invoke-RequiredReflectionMethod `
+        -Method (Get-RequiredReflectionMethod -Type $portsFactoryType -Name "CreateProduction" -ParameterCount 2 -Static) `
+        -Instance $null `
+        -Arguments @($plan, $MergedMainRoot)
+    $hostType = Get-RequiredReflectionType -Assembly $integrationsAssembly `
+        -Name "FluxKnowledge.Integrations.Windows.NativeGoLive.GuardedNativeGoLiveHost"
+    $nativeGoLiveHost = New-RequiredReflectionInstance -Type $hostType `
+        -Arguments @($capability, $plan, $MergedMainRoot, $ports, $bootstrapInstaller)
+    $requestType = Get-RequiredReflectionType -Assembly $integrationsAssembly `
+        -Name "FluxKnowledge.Integrations.Windows.NativeGoLive.NativeGoLiveRequest"
+    $request = New-RequiredReflectionInstance -Type $requestType -Arguments @(
+        $plan, $false,
+        [bool]$Acknowledgements.ConfirmCleanSlate,
+        [bool]$Acknowledgements.ConfirmConfigureVss,
+        [bool]$Acknowledgements.ConfirmDestroySql,
+        [bool]$Acknowledgements.ConfirmRegisterCodex,
+        $MergedMainRoot, [string]$manifest.Sha256, $manifest)
+
+    return [pscustomobject]@{
+        CapabilityIssuer = $capabilityIssuer
+        Capability = $capability
+        Request = $request
+        NativeGoLiveHost = $nativeGoLiveHost
+    }
+}
+
+function Invoke-NativeGoLiveModuleBridge {
+    param(
+        [Parameter(Mandatory)][string]$ModulePath,
+        [Parameter(Mandatory)][object]$Composition)
+
+    $module = Import-Module $ModulePath -Force -PassThru
+    try {
+        return & $module {
+            param($Issuer, $Capability, $Request, $NativeGoLiveHost)
+            Invoke-NativeGoLive -CapabilityIssuer $Issuer -Capability $Capability -Request $Request -NativeGoLiveHost $NativeGoLiveHost
+        } $Composition.CapabilityIssuer $Composition.Capability $Composition.Request $Composition.NativeGoLiveHost
+    } finally {
+        Remove-Module $module -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Invoke-NativeGoLive {
     param(
         [Parameter(Mandatory)][string]$MergedMainRoot,
@@ -925,81 +1023,16 @@ function Invoke-NativeGoLive {
         }
     }
     try {
-        $applicationAssemblyPath = Join-Path $MergedMainRoot "FluxKnowledge.Application.dll"
-        $integrationsAssemblyPath = Join-Path $MergedMainRoot "FluxKnowledge.Integrations.dll"
-        foreach ($assemblyPath in @($applicationAssemblyPath, $integrationsAssemblyPath)) {
-            if (-not (Test-Path -LiteralPath $assemblyPath -PathType Leaf)) {
-                throw "The immutable native go-live payload is incomplete."
-            }
-        }
-        $sqlClientAssemblyPath = Get-NativeGoLiveWindowsSqlClientAssemblyPath -MergedMainRoot $MergedMainRoot
-        $sqlClientNativeSniAsset = Get-NativeGoLiveWindowsSqlClientNativeSniAsset -MergedMainRoot $MergedMainRoot
-        $sqlClientAssembly = Import-NativeGoLiveWindowsSqlClientAssembly -SqlClientAssemblyPath $sqlClientAssemblyPath
-        $applicationAssembly = [Reflection.Assembly]::LoadFrom($applicationAssemblyPath)
-        $integrationsAssembly = [Reflection.Assembly]::LoadFrom($integrationsAssemblyPath)
-        $bootstrapLogin = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
-        if ([string]::IsNullOrWhiteSpace($bootstrapLogin)) {
-            throw 'native-go-live-bootstrap-identity-missing'
-        }
-        $bootstrapInstaller = [System.Func[string, System.Threading.CancellationToken, System.Threading.Tasks.Task]] {
-            param([string]$connectionString, [System.Threading.CancellationToken]$cancellationToken)
-            Invoke-NativeGoLiveBootstrap -BootstrapScript $BootstrapScript -ConnectionString $connectionString `
-                -BootstrapLogin $bootstrapLogin -SqlClientAssemblyPath $sqlClientAssemblyPath `
-                -PublishedPayloadRoot $MergedMainRoot `
-                -SqlClientNativeRuntimeIdentifier $sqlClientNativeSniAsset.RuntimeIdentifier `
-                -SqlClientNativeSniAssetPath $sqlClientNativeSniAsset.Path `
-                -CancellationToken $cancellationToken
-            return [System.Threading.Tasks.Task]::CompletedTask
-        }
-
-        $planType = Get-RequiredReflectionType -Assembly $applicationAssembly `
-            -Name "FluxKnowledge.Application.Operations.NativeGoLivePlan"
-        $plan = Invoke-RequiredReflectionMethod `
-            -Method (Get-RequiredReflectionMethod -Type $planType -Name "CreateProduction" -ParameterCount 1 -Static) `
-            -Instance $null `
-            -Arguments @($CommittedSha)
-        $capabilityIssuerType = Get-RequiredReflectionType -Assembly $integrationsAssembly `
-            -Name "FluxKnowledge.Integrations.Windows.NativeGoLive.NativeGoLiveCloseoutCapabilityIssuer"
-        $capabilityIssuer = New-RequiredReflectionInstance -Type $capabilityIssuerType -Arguments @($null)
-        $hasherType = Get-RequiredReflectionType -Assembly $integrationsAssembly `
-            -Name "FluxKnowledge.Integrations.Windows.NativeGoLive.NativeGoLivePayloadHasher"
-        $manifest = Invoke-RequiredReflectionMethod `
-            -Method (Get-RequiredReflectionMethod -Type $hasherType -Name "Compute" -ParameterCount 1 -Static) `
-            -Instance $null `
-            -Arguments @($MergedMainRoot)
-
-        $capability = Invoke-RequiredReflectionMethod `
-            -Method (Get-RequiredReflectionMethod -Type $capabilityIssuerType -Name "Issue" -ParameterCount 3) `
-            -Instance $capabilityIssuer `
-            -Arguments @($plan, $MergedMainRoot, [string]$manifest.Sha256)
-        $portsFactoryType = Get-RequiredReflectionType -Assembly $integrationsAssembly `
-            -Name "FluxKnowledge.Integrations.Windows.NativeGoLive.NativeGoLiveWindowsHostPorts"
-        $ports = Invoke-RequiredReflectionMethod `
-            -Method (Get-RequiredReflectionMethod -Type $portsFactoryType -Name "CreateProduction" -ParameterCount 2 -Static) `
-            -Instance $null `
-            -Arguments @($plan, $MergedMainRoot)
-        $hostType = Get-RequiredReflectionType -Assembly $integrationsAssembly `
-            -Name "FluxKnowledge.Integrations.Windows.NativeGoLive.GuardedNativeGoLiveHost"
-        $nativeGoLiveHost = New-RequiredReflectionInstance -Type $hostType `
-            -Arguments @($capability, $plan, $MergedMainRoot, $ports, $bootstrapInstaller)
-        $requestType = Get-RequiredReflectionType -Assembly $integrationsAssembly `
-            -Name "FluxKnowledge.Integrations.Windows.NativeGoLive.NativeGoLiveRequest"
-        $request = New-RequiredReflectionInstance -Type $requestType -Arguments @(
-            $plan, $false,
-            [bool]$Acknowledgements.ConfirmCleanSlate,
-            [bool]$Acknowledgements.ConfirmConfigureVss,
-            [bool]$Acknowledgements.ConfirmDestroySql,
-            [bool]$Acknowledgements.ConfirmRegisterCodex,
-            $MergedMainRoot, [string]$manifest.Sha256, $manifest)
-
-        $module = Import-Module $ModulePath -Force -PassThru
         try {
-            $result = & $module {
-                param($Issuer, $Capability, $Request, $NativeGoLiveHost)
-                Invoke-NativeGoLive -CapabilityIssuer $Issuer -Capability $Capability -Request $Request -NativeGoLiveHost $NativeGoLiveHost
-            } $capabilityIssuer $capability $request $nativeGoLiveHost
-        } finally {
-            Remove-Module $module -Force -ErrorAction SilentlyContinue
+            $composition = Invoke-NativeGoLiveComposition -MergedMainRoot $MergedMainRoot -CommittedSha $CommittedSha `
+                -Acknowledgements $Acknowledgements -BootstrapScript $BootstrapScript
+        } catch {
+            throw 'native-go-live-bridge-composition-failed'
+        }
+        try {
+            $result = Invoke-NativeGoLiveModuleBridge -ModulePath $ModulePath -Composition $composition
+        } catch {
+            throw 'native-go-live-bridge-invocation-failed'
         }
         if (-not $result.Succeeded) {
             throw "Native go-live failed with safe reason code '$($result.ReasonCode)'."
