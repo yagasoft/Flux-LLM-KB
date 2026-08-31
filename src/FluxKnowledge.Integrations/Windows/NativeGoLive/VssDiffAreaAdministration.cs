@@ -193,7 +193,7 @@ internal sealed class VssDiffAreaAdministration
             var unsupported = Empty(VssAssociationState.Unsupported);
             return new NativeGoLiveVssMutationObservation(unsupported, unsupported, NativeGoLiveVssAction.None);
         }
-        catch (Exception exception) when (IsVssBoundaryFailure(exception))
+        catch (Exception exception) when (exception is not OutOfMemoryException)
         {
             var failed = Empty(VssAssociationState.Failed);
             return new NativeGoLiveVssMutationObservation(failed, failed, NativeGoLiveVssAction.None);

@@ -130,6 +130,18 @@ public sealed class NativeGoLiveLiveGateCompositionTests
     }
 
     [Fact]
+    public void Vss_adapter_maps_an_ordinary_mutation_boundary_failure_to_the_existing_failed_observation()
+    {
+        var adapter = new VssDiffAreaAdministration(new OrdinaryFailureVssApi());
+
+        var result = adapter.EnsureMaximumStorageObserved("I:", 0.10m, CancellationToken.None);
+
+        Assert.Equal(VssAssociationState.Failed, result.Observed.State);
+        Assert.Equal(VssAssociationState.Failed, result.Verified.State);
+        Assert.Equal(NativeGoLiveVssAction.None, result.Action);
+    }
+
+    [Fact]
     public async Task Preflight_rejects_missing_direct_admin_app_pool_identity()
     {
         using var fixture = new ExecutorOrderingFixture(ValidPreflight() with
@@ -424,6 +436,19 @@ public sealed class NativeGoLiveLiveGateCompositionTests
             return new NativeGoLiveVssMutationObservation(
                 expected.Association, expected.Association, NativeGoLiveVssAction.ChangeDiffAreaMaximumSize);
         }
+    }
+
+    private sealed class OrdinaryFailureVssApi : IVssDiffAreaComApi
+    {
+        public VssVolumeDiffAreaState Query(string _) => new(
+            new VssDiffAreaState(VssAssociationState.SupportedAbsent, "I:", "I:", null),
+            20_000_000_000);
+
+        public void AddDiffArea(string _, string __, ulong ___) =>
+            throw new ArgumentException("test ordinary VSS adapter failure");
+
+        public void ChangeDiffAreaMaximumSize(string _, string __, ulong ___) =>
+            throw new NotSupportedException();
     }
 
     internal sealed class OrderingAclPort(NativeGoLivePlan plan, List<string> events) : INativeGoLiveAclPort
