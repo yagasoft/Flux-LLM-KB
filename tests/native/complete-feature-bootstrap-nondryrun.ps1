@@ -133,6 +133,9 @@ public sealed class SqlCommand : IDisposable
         var initialBootstrapBatch = CommandText.Contains(
             "-- Reviewed SQL Server bootstrap authority for the native go-live lifecycle.",
             StringComparison.Ordinal);
+        var hashedProcedureMarkerPresent = CommandText.Contains(
+            "-- BEGIN HASHED PROCEDURE:", StringComparison.Ordinal) || CommandText.Contains(
+            "-- END HASHED PROCEDURE:", StringComparison.Ordinal);
         var validTsql =
             !Regex.IsMatch(CommandText, @"(?m)^\s*:") &&
             !Regex.IsMatch(CommandText, @"(?im)^\s*GO\s*(?:\r?\n|$)") &&
@@ -145,6 +148,7 @@ public sealed class SqlCommand : IDisposable
             resetBatch,
             namedResetOnly = !resetBatch || resetObjects.SequenceEqual(ExpectedResetObjects.OrderBy(value => value, StringComparer.Ordinal)),
             initialBootstrapBatch,
+            hashedProcedureMarkerPresent,
             canonicalConnection = _connectionString.Length > 0
         });
         if (!SqlConnection.IsForcedInstallFailure()) Console.WriteLine(_connectionString);
@@ -320,7 +324,8 @@ try {
         $resetBatches[0].namedResetOnly -and $resetBatches[0].validTsql) `
         'The generated reset child did not retain its exact named-object T-SQL limit.'
     Assert-True ($installBatches.Count -gt 1 -and $installBatches[0].initialBootstrapBatch -and
-        $installBatches[0].validTsql -and @($installBatches | Where-Object { -not $_.validTsql }).Count -eq 0) `
+        $installBatches[0].validTsql -and @($installBatches | Where-Object { -not $_.validTsql }).Count -eq 0 -and
+        @($installBatches | Where-Object { $_.hashedProcedureMarkerPresent }).Count -eq 0) `
         'The generated install child submitted a non-T-SQL first or subsequent bootstrap batch.'
 
     [Environment]::SetEnvironmentVariable('FLUXKNOWLEDGE_TEST_SQLCLIENT_FAIL_OPERATION', 'install', [EnvironmentVariableTarget]::Process)

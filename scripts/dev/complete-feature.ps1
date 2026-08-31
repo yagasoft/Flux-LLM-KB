@@ -717,6 +717,9 @@ public static class NativeGoLiveSqlClientSniAsset
             if ($line -match '(?i)^\s*:setvar\s+NativeGoLiveBootstrapLogin\s+"__SUPPLY_AT_EXECUTION__"\s*$') {
                 continue
             }
+            if ($line -match '(?i)^\s*--\s*(?:BEGIN|END)\s+HASHED\s+PROCEDURE:\s*FluxKnowledgeNativeGoLive(?:Create|Drop|ManageAppPool|ObserveAppPool)\s*$') {
+                continue
+            }
             if ($line -match '(?i)^\s*GO\s*$') {
                 $tsqlLines.Add($line)
                 continue
