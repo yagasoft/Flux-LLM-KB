@@ -98,6 +98,13 @@ Assert-True ($script:FailedStep -ceq 'native-go-live') `
     'A safe native go-live VSS failure did not identify the native go-live step.'
 
 $script:FailedStep = $null
+$vssAddFailureRecord = [ordered]@{ name = 'native-go-live'; reason_code = $null }
+Record-NativeGoLiveFailure -Record $vssAddFailureRecord -Exception ([InvalidOperationException]::new(
+    "Native go-live failed with safe reason code 'vss-add-diff-area-failed'."))
+Assert-True ($vssAddFailureRecord.reason_code -ceq 'vss-add-diff-area-failed') `
+    'A safe native go-live VSS add failure did not retain its fixed reason code.'
+
+$script:FailedStep = $null
 $bootstrapFailureRecord = [ordered]@{ name = 'native-go-live'; reason_code = $null }
 Record-NativeGoLiveFailure -Record $bootstrapFailureRecord -Exception ([InvalidOperationException]::new(
     "Native go-live failed with safe reason code 'native-go-live-bootstrap-install-sql-batch-1-failed'."))

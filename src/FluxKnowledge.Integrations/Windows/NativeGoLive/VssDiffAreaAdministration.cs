@@ -161,13 +161,22 @@ internal sealed class VssDiffAreaAdministration
             var action = state.State == VssAssociationState.ExactExisting
                 ? NativeGoLiveVssAction.ChangeDiffAreaMaximumSize
                 : NativeGoLiveVssAction.AddDiffArea;
-            if (state.State == VssAssociationState.ExactExisting)
+            try
             {
-                _api.ChangeDiffAreaMaximumSize(state.SourceVolumeId, state.StorageVolumeId, maximumBytes);
+                if (state.State == VssAssociationState.ExactExisting)
+                {
+                    _api.ChangeDiffAreaMaximumSize(state.SourceVolumeId, state.StorageVolumeId, maximumBytes);
+                }
+                else
+                {
+                    _api.AddDiffArea(state.SourceVolumeId, state.StorageVolumeId, maximumBytes);
+                }
             }
-            else
+            catch (Exception exception) when (exception is not OutOfMemoryException)
             {
-                _api.AddDiffArea(state.SourceVolumeId, state.StorageVolumeId, maximumBytes);
+                throw new NativeGoLiveContractException(action == NativeGoLiveVssAction.AddDiffArea
+                    ? "vss-add-diff-area-failed"
+                    : "vss-change-diff-area-failed");
             }
 
             cancellationToken.ThrowIfCancellationRequested();
@@ -192,6 +201,10 @@ internal sealed class VssDiffAreaAdministration
         {
             var unsupported = Empty(VssAssociationState.Unsupported);
             return new NativeGoLiveVssMutationObservation(unsupported, unsupported, NativeGoLiveVssAction.None);
+        }
+        catch (NativeGoLiveContractException)
+        {
+            throw;
         }
         catch (Exception exception) when (exception is not OutOfMemoryException)
         {

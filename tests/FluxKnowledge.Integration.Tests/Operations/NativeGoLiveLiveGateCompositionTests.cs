@@ -130,15 +130,14 @@ public sealed class NativeGoLiveLiveGateCompositionTests
     }
 
     [Fact]
-    public void Vss_adapter_maps_an_ordinary_mutation_boundary_failure_to_the_existing_failed_observation()
+    public void Vss_adapter_preserves_the_fixed_add_action_failure_code()
     {
         var adapter = new VssDiffAreaAdministration(new OrdinaryFailureVssApi());
 
-        var result = adapter.EnsureMaximumStorageObserved("I:", 0.10m, CancellationToken.None);
+        var failure = Assert.Throws<NativeGoLiveContractException>(() =>
+            adapter.EnsureMaximumStorageObserved("I:", 0.10m, CancellationToken.None));
 
-        Assert.Equal(VssAssociationState.Failed, result.Observed.State);
-        Assert.Equal(VssAssociationState.Failed, result.Verified.State);
-        Assert.Equal(NativeGoLiveVssAction.None, result.Action);
+        Assert.Equal("vss-add-diff-area-failed", failure.ReasonCode);
     }
 
     [Fact]
