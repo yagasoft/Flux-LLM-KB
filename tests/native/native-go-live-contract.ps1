@@ -193,8 +193,9 @@ $portsText = Get-Content -LiteralPath $portsPath -Raw
 $executorText = Get-Content -LiteralPath $executorPath -Raw
 
 Assert-True ($deploymentText -notmatch '(?i)vssadmin') 'The public boundary must not use vssadmin.'
-Assert-True ($closeoutText -match '(?s)\[System\.Func\[string, System\.Threading\.CancellationToken, System\.Threading\.Tasks\.Task\]\]\s*\(\s*\{.*?\}\.GetNewClosure\(\)\)') `
-    'The extracted bootstrap delegate must retain its composition inputs after returning.'
+Assert-True ($closeoutText -match '(?s)Assert-NativeGoLiveBootstrapConnection.*?Invoke-NativeGoLiveBootstrap' -and
+    $closeoutText -match '(?s)\$bootstrapInstaller\s*=\s*\[System\.Func.*?Task\]::CompletedTask') `
+    'The SQL bootstrap must complete synchronously before the CLR one-shot bridge.'
 Assert-True ($moduleText -notmatch '(?i)vssadmin') 'The private lifecycle must not use vssadmin.'
 Assert-True ($moduleText -notmatch 'HostOperations|\[hashtable\]|\[scriptblock\]') 'Caller-supplied host callbacks remain.'
 Assert-True ($moduleText -notmatch 'DbConnectionStringBuilder') 'The PowerShell module must not parse SQL generically.'

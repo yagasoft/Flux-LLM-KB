@@ -934,16 +934,19 @@ function Invoke-NativeGoLiveComposition {
     if ([string]::IsNullOrWhiteSpace($bootstrapLogin)) {
         throw 'native-go-live-bootstrap-identity-missing'
     }
-    $bootstrapInstaller = [System.Func[string, System.Threading.CancellationToken, System.Threading.Tasks.Task]] ({
-        param([string]$connectionString, [System.Threading.CancellationToken]$cancellationToken)
-        Invoke-NativeGoLiveBootstrap -BootstrapScript $BootstrapScript -ConnectionString $connectionString `
-            -BootstrapLogin $bootstrapLogin -SqlClientAssemblyPath $sqlClientAssemblyPath `
-            -PublishedPayloadRoot $MergedMainRoot `
-            -SqlClientNativeRuntimeIdentifier $sqlClientNativeSniAsset.RuntimeIdentifier `
-            -SqlClientNativeSniAssetPath $sqlClientNativeSniAsset.Path `
-            -CancellationToken $cancellationToken
+    $bootstrapConnection = [Environment]::GetEnvironmentVariable(
+        'FLUXKNOWLEDGE_NATIVE_GO_LIVE_SQL_BOOTSTRAP',
+        [EnvironmentVariableTarget]::Process)
+    Assert-NativeGoLiveBootstrapConnection -ConnectionString $bootstrapConnection
+    Invoke-NativeGoLiveBootstrap -BootstrapScript $BootstrapScript -ConnectionString $bootstrapConnection `
+        -BootstrapLogin $bootstrapLogin -SqlClientAssemblyPath $sqlClientAssemblyPath `
+        -PublishedPayloadRoot $MergedMainRoot `
+        -SqlClientNativeRuntimeIdentifier $sqlClientNativeSniAsset.RuntimeIdentifier `
+        -SqlClientNativeSniAssetPath $sqlClientNativeSniAsset.Path
+    $bootstrapInstaller = [System.Func[string, System.Threading.CancellationToken, System.Threading.Tasks.Task]] {
+        param([string]$ignoredConnection, [System.Threading.CancellationToken]$ignoredToken)
         return [System.Threading.Tasks.Task]::CompletedTask
-    }.GetNewClosure())
+    }
 
     $planType = Get-RequiredReflectionType -Assembly $applicationAssembly `
         -Name "FluxKnowledge.Application.Operations.NativeGoLivePlan"
