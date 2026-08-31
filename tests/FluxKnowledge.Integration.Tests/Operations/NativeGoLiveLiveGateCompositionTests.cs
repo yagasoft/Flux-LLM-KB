@@ -43,7 +43,7 @@ public sealed class NativeGoLiveLiveGateCompositionTests
     }
 
     [Fact]
-    public async Task Direct_admin_bootstrap_failure_after_canonical_IIS_replacement_fails_closed_before_admission()
+    public async Task Direct_admin_bootstrap_failure_with_a_safe_bootstrap_code_preserves_that_code_before_admission()
     {
         using var fixture = new ExecutorOrderingFixture(failBootstrap: true);
         fixture.BeginExecution();
@@ -51,7 +51,7 @@ public sealed class NativeGoLiveLiveGateCompositionTests
         var result = await new NativeGoLiveExecutor().ExecuteAsync(fixture.Request, fixture.Host);
 
         Assert.False(result.Succeeded);
-        Assert.Equal("clean-slate-incomplete", result.ReasonCode);
+        Assert.Equal("native-go-live-bootstrap-install-sql-batch-1-failed", result.ReasonCode);
         Assert.Equal(["replace-canonical-iis", "install-direct-admin-bootstrap"], fixture.Events);
         Assert.True(Directory.Exists(fixture.Plan.Layout.Root));
         Assert.True(File.Exists(Path.Combine(fixture.Plan.Layout.Root, "pre-wipe-sentinel.txt")));
@@ -217,7 +217,8 @@ public sealed class NativeGoLiveLiveGateCompositionTests
                     Assert.Equal(bootstrap.ConnectionString, connectionString);
                     Events.Add("install-direct-admin-bootstrap");
                     return failBootstrap
-                        ? Task.FromException(new NativeGoLiveContractException("signed-bootstrap-failed"))
+                        ? Task.FromException(new NativeGoLiveContractException(
+                            "native-go-live-bootstrap-install-sql-batch-1-failed"))
                         : Task.CompletedTask;
                 });
         }

@@ -1,4 +1,5 @@
 using FluxKnowledge.Application.Operations;
+using System.Text.RegularExpressions;
 
 namespace FluxKnowledge.Integrations.Windows.NativeGoLive;
 
@@ -41,6 +42,10 @@ public sealed class NativeGoLiveExecutor
             try
             {
                 await host.PrepareHostPrerequisitesAsync(request.Plan, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception exception) when (TryGetSafeBootstrapFailureReason(exception, out var reasonCode))
+            {
+                return NativeGoLiveResult.Refused(reasonCode);
             }
             catch (OperationCanceledException)
             {
@@ -92,4 +97,23 @@ public sealed class NativeGoLiveExecutor
         request.ConfirmConfigureVss &&
         request.ConfirmDestroySql &&
         request.ConfirmRegisterCodex;
+
+    private static bool TryGetSafeBootstrapFailureReason(Exception exception, out string reasonCode)
+    {
+        for (var current = exception; current is not null; current = current.InnerException)
+        {
+            if (BootstrapFailureCode.IsMatch(current.Message))
+            {
+                reasonCode = current.Message;
+                return true;
+            }
+        }
+
+        reasonCode = string.Empty;
+        return false;
+    }
+
+    private static readonly Regex BootstrapFailureCode = new(
+        @"\Anative-go-live-bootstrap-(?:reset|install|probe)-(?:connection|sni-load|script-parse|sql-batch-[1-9][0-9]*)-failed\z",
+        RegexOptions.CultureInvariant);
 }
