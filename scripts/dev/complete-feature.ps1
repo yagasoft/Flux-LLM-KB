@@ -593,6 +593,7 @@ function Assert-NativeGoLiveBootstrapConnection {
 function New-NativeGoLiveSqlChildCommand {
     return @'
 $ErrorActionPreference = 'Stop'
+$safeFailureReason = $null
 try {
     $request = [Console]::In.ReadToEnd() | ConvertFrom-Json
     if ($null -eq $request -or [string]::IsNullOrWhiteSpace($request.connectionString) -or
@@ -603,6 +604,9 @@ try {
         [string]::IsNullOrWhiteSpace($request.sqlClientNativeSniAssetPath)) {
         exit 1
     }
+    if ([string]$request.operation -cnotin @('reset', 'install', 'probe')) { exit 1 }
+    $operation = [string]$request.operation
+    $safeFailureReason = "native-go-live-bootstrap-$operation-sni-load-failed"
     $runtime = switch ([Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture) {
         'X64' { 'win-x64'; break }
         'X86' { 'win-x86'; break }
@@ -650,11 +654,13 @@ public static class NativeGoLiveSqlClientSniAsset
         exit 1
     }
     Add-Type -Path $request.sqlClientAssemblyPath
+    $safeFailureReason = $null
     $sql = if ($request.operation -ceq 'reset') {
         [string]$request.resetSql
     } elseif ($request.operation -ceq 'probe') {
         'SELECT 1;'
     } elseif ($request.operation -ceq 'install') {
+        $safeFailureReason = "native-go-live-bootstrap-$operation-script-parse-failed"
         $bootstrap = Get-Content -LiteralPath $request.bootstrapScript -Raw
         $tsqlLines = [System.Collections.Generic.List[string]]::new()
         foreach ($line in $bootstrap -split "`r?`n") {
@@ -682,6 +688,7 @@ public static class NativeGoLiveSqlClientSniAsset
         if ($bootstrap.Contains('$(')) {
             throw 'native-go-live-bootstrap-sqlcmd-variable-unsupported'
         }
+        $safeFailureReason = $null
         $bootstrap
     } else {
         exit 1
@@ -691,11 +698,16 @@ public static class NativeGoLiveSqlClientSniAsset
     } else {
         @($sql)
     }
+    $safeFailureReason = "native-go-live-bootstrap-$operation-connection-failed"
     $connection = [Microsoft.Data.SqlClient.SqlConnection]::new([string]$request.connectionString)
     try {
         $connection.Open()
+        $safeFailureReason = $null
+        $batchNumber = 0
         foreach ($batch in $batches) {
             if ([string]::IsNullOrWhiteSpace($batch)) { continue }
+            $batchNumber++
+            $safeFailureReason = "native-go-live-bootstrap-$operation-sql-batch-$batchNumber-failed"
             $command = $connection.CreateCommand()
             try {
                 $command.CommandTimeout = 30
@@ -704,11 +716,13 @@ public static class NativeGoLiveSqlClientSniAsset
             } finally {
                 $command.Dispose()
             }
+            $safeFailureReason = $null
         }
     } finally {
         $connection.Dispose()
     }
 } catch {
+    if ($null -ne $safeFailureReason) { [Console]::Out.Write($safeFailureReason) }
     exit 1
 }
 '@
@@ -798,7 +812,13 @@ function Invoke-NativeGoLiveSqlChild {
             throw "native-go-live-bootstrap-$Operation-stream-close-timed-out"
         }
         $CancellationToken.ThrowIfCancellationRequested()
-        if ($process.ExitCode -ne 0) { throw "native-go-live-bootstrap-$Operation-failed" }
+        if ($process.ExitCode -ne 0) {
+            $failureReason = [string]$stdout.Result
+            if ($failureReason -cmatch '\Anative-go-live-bootstrap-(?:reset|install|probe)-(?:connection|sni-load|script-parse|sql-batch-[1-9][0-9]*)-failed\z') {
+                throw $failureReason
+            }
+            throw "native-go-live-bootstrap-$Operation-failed"
+        }
     } finally {
         $process.Dispose()
     }
@@ -869,6 +889,9 @@ IF CERT_ID(N'FluxKnowledgeNativeGoLiveCertificate') IS NOT NULL DROP CERTIFICATE
             -ResetSql $reset -CancellationToken $CancellationToken
     } catch {
         $record.exit_code = 1
+        if ($_.Exception.Message -cmatch '\Anative-go-live-bootstrap-(?:reset|install|probe)-(?:connection|sni-load|script-parse|sql-batch-[1-9][0-9]*)-failed\z') {
+            $record.reason_code = $_.Exception.Message
+        }
         $script:FailedStep = "native-go-live-bootstrap"
         throw
     } finally {

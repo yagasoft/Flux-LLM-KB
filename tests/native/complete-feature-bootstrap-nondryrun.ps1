@@ -65,7 +65,10 @@ public sealed class SqlConnection : IDisposable
         });
     }
 
-    public void Open() => Console.WriteLine(_connectionString);
+    public void Open()
+    {
+        if (!IsForcedInstallFailure()) Console.WriteLine(_connectionString);
+    }
 
     public SqlCommand CreateCommand() => new(_connectionString);
 
@@ -96,6 +99,11 @@ public sealed class SqlConnection : IDisposable
         return builder.Keys.Count == expected.Count && expected.All(pair =>
             builder.ContainsKey(pair.Key) && string.Equals(builder[pair.Key]?.ToString(), pair.Value, StringComparison.OrdinalIgnoreCase));
     }
+
+    internal static bool IsForcedInstallFailure() => string.Equals(
+        Environment.GetEnvironmentVariable("FLUXKNOWLEDGE_TEST_SQLCLIENT_FAIL_OPERATION"),
+        "install",
+        StringComparison.Ordinal);
 }
 
 public sealed class SqlCommand : IDisposable
@@ -140,11 +148,8 @@ public sealed class SqlCommand : IDisposable
             initialBootstrapBatch,
             canonicalConnection = _connectionString.Length > 0
         });
-        Console.WriteLine(_connectionString);
-        if (initialBootstrapBatch && string.Equals(
-                Environment.GetEnvironmentVariable("FLUXKNOWLEDGE_TEST_SQLCLIENT_FAIL_OPERATION"),
-                "install",
-                StringComparison.Ordinal))
+        if (!SqlConnection.IsForcedInstallFailure()) Console.WriteLine(_connectionString);
+        if (initialBootstrapBatch && SqlConnection.IsForcedInstallFailure())
         {
             throw new InvalidOperationException("disposable install failure");
         }
@@ -158,6 +163,27 @@ public sealed class SqlCommand : IDisposable
     & dotnet build $project -c Release -o $output --nologo | Out-Null
     Assert-True ($LASTEXITCODE -eq 0) 'Unable to build the recording SqlClient seam.'
     return Join-Path $output 'Microsoft.Data.SqlClient.dll'
+}
+
+function New-FailingSqlChildSeam {
+    param([Parameter(Mandatory)][string]$Root)
+
+    $project = Join-Path $Root 'FailingSqlChild.csproj'
+    $program = Join-Path $Root 'FailingSqlChild.cs'
+    [IO.File]::WriteAllText($project, @'
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><TargetFramework>net10.0</TargetFramework><OutputType>Exe</OutputType><AssemblyName>FailingSqlChild</AssemblyName><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable></PropertyGroup>
+</Project>
+'@)
+    [IO.File]::WriteAllText($program, @'
+Console.In.ReadToEnd();
+Console.Out.Write(Environment.GetEnvironmentVariable("FLUXKNOWLEDGE_TEST_SQL_CHILD_STDOUT") ?? string.Empty);
+return 1;
+'@)
+    $output = Join-Path $Root 'failing-sql-child-out'
+    & dotnet build $project -c Release -o $output --nologo | Out-Null
+    Assert-True ($LASTEXITCODE -eq 0) 'Unable to build the failing SQL child seam.'
+    return Join-Path $output 'FailingSqlChild.exe'
 }
 
 if ([string]::IsNullOrWhiteSpace($SourceRoot)) {
@@ -206,6 +232,7 @@ $priorBootstrap = [Environment]::GetEnvironmentVariable(
     'FLUXKNOWLEDGE_NATIVE_GO_LIVE_SQL_BOOTSTRAP', [EnvironmentVariableTarget]::Process)
 $priorChildLog = [Environment]::GetEnvironmentVariable('FLUXKNOWLEDGE_TEST_SQL_CHILD_LOG', [EnvironmentVariableTarget]::Process)
 $priorFailure = [Environment]::GetEnvironmentVariable('FLUXKNOWLEDGE_TEST_SQLCLIENT_FAIL_OPERATION', [EnvironmentVariableTarget]::Process)
+$priorChildStdout = [Environment]::GetEnvironmentVariable('FLUXKNOWLEDGE_TEST_SQL_CHILD_STDOUT', [EnvironmentVariableTarget]::Process)
 try {
     New-Item -ItemType Directory -Path $temporaryRoot | Out-Null
     $portableProvider = Join-Path $SourceRoot 'artifacts\bin\FluxKnowledge.Web\release\Microsoft.Data.SqlClient.dll'
@@ -260,6 +287,7 @@ try {
         'An unloadable packaged Windows SqlClient runtime asset did not fail closed.'
 
     $sqlClientSeam = New-RecordingSqlClientSeam -Root $temporaryRoot
+    $failingSqlChildSeam = New-FailingSqlChildSeam -Root $temporaryRoot
     $recordPath = Join-Path $temporaryRoot 'children.jsonl'
     [Environment]::SetEnvironmentVariable('FLUXKNOWLEDGE_TEST_SQL_CHILD_LOG', $recordPath, [EnvironmentVariableTarget]::Process)
     [Environment]::SetEnvironmentVariable('FLUXKNOWLEDGE_NATIVE_GO_LIVE_SQL_BOOTSTRAP', 'bootstrap-environment-sentinel', [EnvironmentVariableTarget]::Process)
@@ -309,12 +337,44 @@ try {
     } catch {
         $failure = $_
     }
-    Assert-True ($null -ne $failure -and $failure.Exception.Message -ceq 'native-go-live-bootstrap-install-failed') `
-        'SQL child failure did not propagate as the safe install failure.'
+    Assert-True ($null -ne $failure -and
+        $failure.Exception.Message -cmatch '\Anative-go-live-bootstrap-install-sql-batch-[1-9][0-9]*-failed\z') `
+        'SQL child failure did not propagate as a bounded install batch token.'
+    Assert-True (-not $failure.Exception.Message.Contains($connection, [StringComparison]::Ordinal)) `
+        'The forced SQL child failure exposed synthetic bootstrap connection material.'
     Assert-True ($script:FailedStep -ceq 'native-go-live-bootstrap') 'Bootstrap failure did not identify the failed closeout step.'
+    $bootstrapStep = @($script:Steps | Where-Object { $_.name -ceq 'native-go-live-bootstrap' })[-1]
+    Assert-True ($null -ne $bootstrapStep -and
+        $bootstrapStep.reason_code -cmatch '\Anative-go-live-bootstrap-install-sql-batch-[1-9][0-9]*-failed\z') `
+        'The bootstrap step did not retain the bounded SQL child failure token.'
     $allRecords = @(Get-Content -LiteralPath $recordPath | ForEach-Object { $_ | ConvertFrom-Json })
     Assert-True (@($allRecords | Where-Object { $_.kind -ceq 'connection' }).Count -eq 4) `
         'The failing non-dry bootstrap did not invoke reset then install generated SQL children.'
+
+    foreach ($childOutput in @($connection, '')) {
+        [Environment]::SetEnvironmentVariable('FLUXKNOWLEDGE_TEST_SQL_CHILD_STDOUT', $childOutput, [EnvironmentVariableTarget]::Process)
+        $script:Steps = @()
+        $script:FailedStep = $null
+        $childOutputFailure = $null
+        try {
+            Invoke-NativeGoLiveBootstrap -BootstrapScript $bootstrapScript -ConnectionString $connection `
+                -BootstrapLogin 'disposable-bootstrap-login' -SqlClientAssemblyPath $sqlClientSeam `
+                -PublishedPayloadRoot $windowsLayout `
+                -SqlClientNativeRuntimeIdentifier $nativeSniAsset.RuntimeIdentifier `
+                -SqlClientNativeSniAssetPath $nativeSniAsset.Path `
+                -SqlChildExecutable $failingSqlChildSeam
+        } catch {
+            $childOutputFailure = $_
+        }
+        Assert-True ($null -ne $childOutputFailure -and
+            $childOutputFailure.Exception.Message -ceq 'native-go-live-bootstrap-reset-failed') `
+            'Malformed or empty SQL child output did not retain the generic reset failure.'
+        Assert-True (-not $childOutputFailure.Exception.Message.Contains($connection, [StringComparison]::Ordinal)) `
+            'Malformed SQL child output exposed synthetic bootstrap connection material.'
+        $childOutputStep = @($script:Steps | Where-Object { $_.name -ceq 'native-go-live-bootstrap' })[-1]
+        Assert-True ($null -ne $childOutputStep -and $null -eq $childOutputStep.reason_code) `
+            'Malformed or empty SQL child output was retained as a bootstrap reason code.'
+    }
 
     [Environment]::SetEnvironmentVariable('FLUXKNOWLEDGE_TEST_SQLCLIENT_FAIL_OPERATION', $null, [EnvironmentVariableTarget]::Process)
     foreach ($unsupportedMetaCommand in @(':r unsupported.sql', 'GO 2', '!! unsupported-shell-command')) {
@@ -333,8 +393,8 @@ try {
             $unsupportedFailure = $_
         }
         Assert-True ($null -ne $unsupportedFailure -and
-            $unsupportedFailure.Exception.Message -ceq 'native-go-live-bootstrap-install-failed') `
-            'An unsupported sqlcmd meta-command did not fail the install child closed.'
+            $unsupportedFailure.Exception.Message -ceq 'native-go-live-bootstrap-install-script-parse-failed') `
+            'An unsupported sqlcmd meta-command did not return the bounded parser token.'
         Assert-True ($script:FailedStep -ceq 'native-go-live-bootstrap') `
             'Unsupported sqlcmd meta-command failure did not identify the bootstrap step.'
     }
@@ -342,6 +402,7 @@ try {
     [Environment]::SetEnvironmentVariable('FLUXKNOWLEDGE_NATIVE_GO_LIVE_SQL_BOOTSTRAP', $priorBootstrap, [EnvironmentVariableTarget]::Process)
     [Environment]::SetEnvironmentVariable('FLUXKNOWLEDGE_TEST_SQL_CHILD_LOG', $priorChildLog, [EnvironmentVariableTarget]::Process)
     [Environment]::SetEnvironmentVariable('FLUXKNOWLEDGE_TEST_SQLCLIENT_FAIL_OPERATION', $priorFailure, [EnvironmentVariableTarget]::Process)
+    [Environment]::SetEnvironmentVariable('FLUXKNOWLEDGE_TEST_SQL_CHILD_STDOUT', $priorChildStdout, [EnvironmentVariableTarget]::Process)
     if (Test-Path -LiteralPath $temporaryRoot) {
         Remove-Item -LiteralPath $temporaryRoot -Recurse -Force
     }
