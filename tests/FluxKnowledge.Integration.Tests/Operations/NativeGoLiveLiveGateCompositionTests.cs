@@ -58,6 +58,21 @@ public sealed class NativeGoLiveLiveGateCompositionTests
     }
 
     [Fact]
+    public async Task Generic_bootstrap_operation_failure_preserves_its_existing_fixed_code()
+    {
+        using var fixture = new ExecutorOrderingFixture(
+            failBootstrap: true,
+            bootstrapFailureCode: "native-go-live-bootstrap-reset-failed");
+        fixture.BeginExecution();
+
+        var result = await new NativeGoLiveExecutor().ExecuteAsync(fixture.Request, fixture.Host);
+
+        Assert.False(result.Succeeded);
+        Assert.Equal("native-go-live-bootstrap-reset-failed", result.ReasonCode);
+        Assert.Equal(["replace-canonical-iis", "install-direct-admin-bootstrap"], fixture.Events);
+    }
+
+    [Fact]
     public async Task Admission_failure_returns_only_the_fixed_admission_reason_code()
     {
         using var fixture = new ExecutorOrderingFixture(failAdmission: true);
@@ -163,6 +178,7 @@ public sealed class NativeGoLiveLiveGateCompositionTests
         public ExecutorOrderingFixture(
             NativeGoLiveSqlPreflightObservation? sqlPreflight = null,
             bool failBootstrap = false,
+            string bootstrapFailureCode = "native-go-live-bootstrap-install-sql-batch-1-failed",
             bool failAdmission = false,
             bool cancelAdmission = false)
         {
@@ -218,7 +234,7 @@ public sealed class NativeGoLiveLiveGateCompositionTests
                     Events.Add("install-direct-admin-bootstrap");
                     return failBootstrap
                         ? Task.FromException(new NativeGoLiveContractException(
-                            "native-go-live-bootstrap-install-sql-batch-1-failed"))
+                            bootstrapFailureCode))
                         : Task.CompletedTask;
                 });
         }

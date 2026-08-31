@@ -114,6 +114,6 @@ public sealed class NativeGoLiveExecutor
     }
 
     private static readonly Regex BootstrapFailureCode = new(
-        @"\Anative-go-live-bootstrap-(?:reset|install|probe)-(?:connection|sni-load|script-parse|sql-batch-[1-9][0-9]*)-failed\z",
+        @"\Anative-go-live-bootstrap-(?:(?:reset|install|probe)-(?:connection|sni-load|script-parse|sql-batch-[1-9][0-9]*)-failed|(?:reset|install|probe)-failed)\z",
         RegexOptions.CultureInvariant);
 }
