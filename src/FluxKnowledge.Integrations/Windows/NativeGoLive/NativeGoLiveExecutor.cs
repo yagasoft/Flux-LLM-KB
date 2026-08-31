@@ -85,6 +85,11 @@ public sealed class NativeGoLiveExecutor
             {
                 return NativeGoLiveResult.Refused("clean-slate-incomplete");
             }
+            catch (NativeGoLiveContractException exception) when (
+                string.Equals(exception.ReasonCode, "vss-exact-action-not-proved", StringComparison.Ordinal))
+            {
+                return NativeGoLiveResult.Refused(exception.ReasonCode);
+            }
             catch (Exception)
             {
                 return NativeGoLiveResult.Refused("clean-slate-incomplete");

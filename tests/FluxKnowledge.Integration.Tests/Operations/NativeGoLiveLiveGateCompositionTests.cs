@@ -106,6 +106,30 @@ public sealed class NativeGoLiveLiveGateCompositionTests
     }
 
     [Fact]
+    public async Task Vss_contract_failure_preserves_its_existing_fixed_code()
+    {
+        using var fixture = new ExecutorOrderingFixture(failVss: true);
+        fixture.BeginExecution();
+
+        var result = await new NativeGoLiveExecutor().ExecuteAsync(fixture.Request, fixture.Host);
+
+        Assert.False(result.Succeeded);
+        Assert.Equal("vss-exact-action-not-proved", result.ReasonCode);
+        Assert.Equal(
+            [
+                "replace-canonical-iis",
+                "install-direct-admin-bootstrap",
+                "admission-observe-present",
+                "admission-wipe",
+                "admission-observe-absent",
+                "windows-preflight-sql",
+                "stop-iis",
+                "configure-vss"
+            ],
+            fixture.Events);
+    }
+
+    [Fact]
     public async Task Preflight_rejects_missing_direct_admin_app_pool_identity()
     {
         using var fixture = new ExecutorOrderingFixture(ValidPreflight() with
@@ -180,7 +204,8 @@ public sealed class NativeGoLiveLiveGateCompositionTests
             bool failBootstrap = false,
             string bootstrapFailureCode = "native-go-live-bootstrap-install-sql-batch-1-failed",
             bool failAdmission = false,
-            bool cancelAdmission = false)
+            bool cancelAdmission = false,
+            bool failVss = false)
         {
             _root = Path.Combine(Path.GetTempPath(), "FluxKnowledgeLiveGateOrdering", Guid.NewGuid().ToString("N"));
             var payloadRoot = CreatePayloadRoot(_root);
@@ -193,7 +218,7 @@ public sealed class NativeGoLiveLiveGateCompositionTests
             _capability = new NativeGoLiveCloseoutCapabilityIssuer().Issue(Plan, payloadRoot, manifest.Sha256);
             Request = new NativeGoLiveRequest(
                 Plan, false, true, true, true, true, payloadRoot, manifest.Sha256, manifest);
-            var vss = new RecordingVssPort(Plan, Events);
+            var vss = new RecordingVssPort(Plan, Events, failVss);
             Acls = new OrderingAclPort(Plan, Events);
             var bootstrap = NativeGoLiveSqlBootstrap.Parse(CanonicalBootstrap);
             var preflight = new NativeGoLiveWindowsPreflightPort(
@@ -370,9 +395,10 @@ public sealed class NativeGoLiveLiveGateCompositionTests
 
     private sealed class RecordingVssPort : INativeGoLiveVssPort
     {
-        public RecordingVssPort(NativeGoLivePlan plan, List<string> events)
+        public RecordingVssPort(NativeGoLivePlan plan, List<string> events, bool fail)
         {
             _events = events;
+            _fail = fail;
             const ulong capacity = 20_000_000_000;
             var maximum = checked((ulong)decimal.Floor(capacity * plan.Vss.MaximumStorageFraction));
             var state = new VssDiffAreaState(VssAssociationState.ExactExisting, "V:", "V:", maximum);
@@ -380,6 +406,7 @@ public sealed class NativeGoLiveLiveGateCompositionTests
         }
 
         private readonly List<string> _events;
+        private readonly bool _fail;
         public NativeGoLiveVssPreflightObservation Observation { get; }
 
         public NativeGoLiveVssPreflightObservation Query(CancellationToken _) => Observation;
@@ -388,6 +415,12 @@ public sealed class NativeGoLiveLiveGateCompositionTests
             NativeGoLiveVssPolicy _, NativeGoLiveVssPreflightObservation expected, CancellationToken __)
         {
             _events.Add("configure-vss");
+            if (_fail)
+            {
+                var failed = expected.Association with { State = VssAssociationState.Failed };
+                return new NativeGoLiveVssMutationObservation(
+                    expected.Association, failed, NativeGoLiveVssAction.ChangeDiffAreaMaximumSize);
+            }
             return new NativeGoLiveVssMutationObservation(
                 expected.Association, expected.Association, NativeGoLiveVssAction.ChangeDiffAreaMaximumSize);
         }
