@@ -23,6 +23,8 @@ $bootstrapPath = Join-Path $SourceRoot 'scripts\deploy\native-go-live-bootstrap.
 $webProgramPath = Join-Path $SourceRoot 'src\FluxKnowledge.Web\Program.cs'
 
 $ports = Get-Content -LiteralPath $portsPath -Raw
+$adaptersPath = Join-Path $SourceRoot 'src\FluxKnowledge.Integrations\Windows\NativeGoLive\NativeGoLiveWindowsAdapters.cs'
+$adapters = Get-Content -LiteralPath $adaptersPath -Raw
 $hostText = Get-Content -LiteralPath $hostPath -Raw
 $executorText = Get-Content -LiteralPath $executorPath -Raw
 $filesystem = Get-Content -LiteralPath $filesystemPath -Raw
@@ -88,6 +90,14 @@ Assert-True ($preflightValidation -notmatch 'ValidateAcls') `
 # One-shot admission explicitly wipes and recreates the root through the held-handle primitive.
 Assert-True ($ports -match 'WipeRootAsync' -and $ports -match 'CreateEmptyRootAsync') `
     'The one-shot clean-slate path does not wipe and recreate its root.'
+$observeStart = $adapters.IndexOf('public NativeGoLiveIisObservation Observe', [StringComparison]::Ordinal)
+$observeEnd = $adapters.IndexOf('private static void EnsureWindows', $observeStart, [StringComparison]::Ordinal)
+$iisObserve = $adapters.Substring($observeStart, $observeEnd - $observeStart)
+Assert-True ($iisObserve -match 'GetSection\("system\.webServer/security/authentication/anonymousAuthentication"\)' -and
+    $iisObserve -match 'GetSection\("system\.webServer/security/authentication/windowsAuthentication"\)' -and
+    $iisObserve -notmatch 'anonymousAuthentication", plan\.IisSiteName' -and
+    $iisObserve -notmatch 'windowsAuthentication", plan\.IisSiteName') `
+    'Pre-admission IIS observation must not load the absent application web.config.'
 Assert-True ($ports -notmatch 'Directory\.CreateDirectory\(_plan\.Layout\.SqlDataRoot\)') 'SQL directory creation bypasses the held-handle primitive.'
 Assert-True ($ports -notmatch 'Directory\.CreateDirectory\(path\)') 'ACL directory creation bypasses the held-handle primitive.'
 Assert-True ($filesystem -match 'SetDirectorySecurityAsync') 'ACL mutation has no held-handle primitive.'

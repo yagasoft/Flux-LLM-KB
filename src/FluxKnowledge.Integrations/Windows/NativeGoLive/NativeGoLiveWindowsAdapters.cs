@@ -148,11 +148,15 @@ internal sealed class MicrosoftWebAdministrationNativeGoLiveApi : INativeGoLiveI
             throw new NativeGoLiveContractException("iis-site-or-pool-missing");
 
         var configuration = manager.GetApplicationHostConfiguration();
+        // The application root is intentionally absent until the confirmed clean-slate admission.
+        // Reading a site-scoped section here makes IIS try to load its not-yet-published web.config.
+        // These authentication values are written to applicationHost.config during replacement, so
+        // observe them there without dereferencing the future application root.
         var anonymous = Convert.ToBoolean(configuration
-            .GetSection("system.webServer/security/authentication/anonymousAuthentication", plan.IisSiteName)
+            .GetSection("system.webServer/security/authentication/anonymousAuthentication")
             .GetAttributeValue("enabled"), System.Globalization.CultureInfo.InvariantCulture);
         var windows = Convert.ToBoolean(configuration
-            .GetSection("system.webServer/security/authentication/windowsAuthentication", plan.IisSiteName)
+            .GetSection("system.webServer/security/authentication/windowsAuthentication")
             .GetAttributeValue("enabled"), System.Globalization.CultureInfo.InvariantCulture);
         var bindings = site.Bindings.Select(binding =>
         {
