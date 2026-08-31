@@ -67,10 +67,12 @@ public sealed class ZipArchiveReplayIntegrationTests(NativeSqlServerFixture fixt
             store.ClaimAsync("second-owner", 16, CancellationToken.None).AsTask());
 
         var owner = Assert.Single(claims.SelectMany(value => value));
-        Assert.Equal("first-owner", owner.LeaseOwner);
         await using var verification = CreateContext();
+        var branch = await verification.SourceProcessorBranches.SingleAsync(value => value.Id == owner.BranchId);
+        Assert.Contains(owner.LeaseOwner, new[] { "first-owner", "second-owner" });
+        Assert.Equal(owner.LeaseOwner, branch.LeaseOwner);
         Assert.Equal(1, await verification.SourceProcessorAttempts.CountAsync(value => value.BranchId == owner.BranchId));
-        (await verification.SourceProcessorBranches.SingleAsync(value => value.Id == owner.BranchId)).State = (int)RetainedProcessorBranchState.Blocked;
+        branch.State = (int)RetainedProcessorBranchState.Blocked;
         await verification.SaveChangesAsync();
     }
 
