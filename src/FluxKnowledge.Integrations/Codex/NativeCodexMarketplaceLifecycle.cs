@@ -127,9 +127,10 @@ internal sealed class NativeCodexMarketplaceLifecycleAdapter
             case CodexMarketplaceLifecycleState.Unavailable:
                 return NativeCodexMarketplaceRegistration.Refused("lifecycle-unavailable");
             case CodexMarketplaceLifecycleState.Registered:
-                return SamePath(_preflight.ExistingSourceRoot, identity.MarketplaceRoot)
-                    ? NativeCodexMarketplaceRegistration.Healthy(changed: false)
-                    : NativeCodexMarketplaceRegistration.Refused("foreign-registration");
+                if (!SamePath(_preflight.ExistingSourceRoot, identity.MarketplaceRoot))
+                    return NativeCodexMarketplaceRegistration.Refused("foreign-registration");
+                await _writer.WriteAsync(identity.MarketplaceRoot, cancellationToken).ConfigureAwait(false);
+                return NativeCodexMarketplaceRegistration.Healthy(changed: false);
             case CodexMarketplaceLifecycleState.Missing:
                 break;
             default:
@@ -214,14 +215,12 @@ internal sealed class NativeCodexMarketplaceLifecycleAdapter
                     StringProperty(entry, "name") == identity.MarketplaceName)
                 .ToArray();
             if (matchingName.Length != 1 ||
-                !SamePath(StringProperty(matchingName[0], "root"), identity.MarketplaceRoot) ||
-                !matchingName[0].TryGetProperty("marketplaceSource", out var source) ||
-                StringProperty(source, "sourceType") != "local")
+                !SamePath(StringProperty(matchingName[0], "root"), identity.MarketplaceRoot))
             {
                 return false;
             }
 
-            return SamePath(StringProperty(source, "source"), identity.MarketplaceRoot);
+            return true;
         }
         catch (JsonException)
         {

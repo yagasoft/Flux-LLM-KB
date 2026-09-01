@@ -1030,14 +1030,9 @@ internal sealed class NativeGoLiveWindowsMarketplacePort : INativeGoLiveMarketpl
                 .ToArray();
             if (matching.Length == 0) return (CodexMarketplaceLifecycleState.Missing, null);
             if (matching.Length != 1 ||
-                !SamePath(StringProperty(matching[0], "root"), identity.MarketplaceRoot) ||
-                !matching[0].TryGetProperty("marketplaceSource", out var source) ||
-                StringProperty(source, "sourceType") != "local")
+                !SamePath(StringProperty(matching[0], "root"), identity.MarketplaceRoot))
                 return (CodexMarketplaceLifecycleState.Foreign, null);
-            var path = StringProperty(source, "source");
-            return SamePath(path, identity.MarketplaceRoot)
-                ? (CodexMarketplaceLifecycleState.Registered, path)
-                : (CodexMarketplaceLifecycleState.Foreign, path);
+            return (CodexMarketplaceLifecycleState.Registered, identity.MarketplaceRoot);
         }
         catch (JsonException)
         {

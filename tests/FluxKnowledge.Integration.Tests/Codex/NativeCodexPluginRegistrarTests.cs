@@ -201,7 +201,7 @@ public sealed class NativeCodexPluginRegistrarTests
     }
 
     [Fact]
-    public async Task Exact_existing_marketplace_source_is_a_no_op()
+    public async Task Exact_existing_marketplace_rehydrates_the_app_owned_plugin_material_without_readding()
     {
         await using var fixture = new NativeMarketplaceFixture();
         var runner = new RecordingMarketplaceCommandRunner(
@@ -219,7 +219,7 @@ public sealed class NativeCodexPluginRegistrarTests
         Assert.True(result.IsHealthy, result.Reason);
         Assert.False(result.Changed);
         Assert.Empty(runner.Commands);
-        Assert.False(Directory.Exists(Path.Combine(fixture.Identity.MarketplaceRoot, "plugins")));
+        Assert.True(Directory.Exists(Path.Combine(fixture.Identity.MarketplaceRoot, "plugins")));
     }
 
     [Fact]
@@ -287,8 +287,7 @@ public sealed class NativeCodexPluginRegistrarTests
             new
             {
                 name = identity.MarketplaceName,
-                root = identity.MarketplaceRoot,
-                marketplaceSource = new { sourceType = "local", source = identity.MarketplaceRoot }
+                root = identity.MarketplaceRoot
             }
         }
     });
