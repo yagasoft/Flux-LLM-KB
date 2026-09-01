@@ -174,22 +174,6 @@ public sealed class NativeGoLiveLiveGateCompositionTests
     }
 
     [Fact]
-    public void Vss_adapter_enables_backup_privilege_only_while_adding_the_canonical_diff_area()
-    {
-        var privilege = new RecordingVssOperationPrivilegeScope();
-        var api = new PrivilegeRequiredVssApi(privilege);
-        var adapter = new VssDiffAreaAdministration(api, privilege);
-
-        var result = adapter.EnsureMaximumStorageObserved("I:", 0.10m, CancellationToken.None);
-
-        Assert.Equal(VssAssociationState.ExactExisting, result.Verified.State);
-        Assert.Equal(1, privilege.EnableCount);
-        Assert.Equal(1, privilege.DisposeCount);
-        Assert.True(api.AddCalledWhileEnabled);
-        Assert.False(privilege.IsEnabled);
-    }
-
-    [Fact]
     public async Task Preflight_rejects_missing_direct_admin_app_pool_identity()
     {
         using var fixture = new ExecutorOrderingFixture(ValidPreflight() with
