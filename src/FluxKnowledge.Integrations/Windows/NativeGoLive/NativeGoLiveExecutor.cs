@@ -65,6 +65,10 @@ public sealed class NativeGoLiveExecutor
             {
                 return NativeGoLiveResult.Refused("clean-slate-admission-failed");
             }
+            catch (NativeGoLiveContractException exception)
+            {
+                return NativeGoLiveResult.Refused(exception.ReasonCode, exception.DiagnosticDetail);
+            }
             catch (Exception)
             {
                 return NativeGoLiveResult.Refused("clean-slate-admission-failed");

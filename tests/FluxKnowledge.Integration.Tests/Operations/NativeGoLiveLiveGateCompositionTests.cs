@@ -84,7 +84,7 @@ public sealed class NativeGoLiveLiveGateCompositionTests
     }
 
     [Fact]
-    public async Task Admission_failure_returns_only_the_fixed_admission_reason_code()
+    public async Task Admission_contract_failure_preserves_its_existing_reason_code()
     {
         using var fixture = new ExecutorOrderingFixture(failAdmission: true);
         fixture.BeginExecution();
@@ -92,7 +92,7 @@ public sealed class NativeGoLiveLiveGateCompositionTests
         var result = await new NativeGoLiveExecutor().ExecuteAsync(fixture.Request, fixture.Host);
 
         Assert.False(result.Succeeded);
-        Assert.Equal("clean-slate-admission-failed", result.ReasonCode);
+        Assert.Equal("admission-failure", result.ReasonCode);
         Assert.Equal(
             ["replace-canonical-iis", "install-direct-admin-bootstrap", "stop-iis", "admission-observe-present"],
             fixture.Events);
