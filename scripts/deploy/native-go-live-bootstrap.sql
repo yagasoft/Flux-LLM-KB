@@ -126,8 +126,7 @@ BEGIN
         BEGIN TRY
             SELECT SUSER_SID(),
                    CONVERT(int,COALESCE(IS_SRVROLEMEMBER(N''sysadmin''),0)),
-                   CONVERT(int,CASE WHEN HAS_PERMS_BY_NAME(NULL,N''SERVER'',N''CONNECT SQL'')=1
-                                        AND HAS_PERMS_BY_NAME(N''FluxKnowledge'',N''DATABASE'',N''CONNECT'')=1
+                   CONVERT(int,CASE WHEN HAS_PERMS_BY_NAME(N''FluxKnowledge'',N''DATABASE'',N''CONNECT'')=1
                                     THEN 1 ELSE 0 END);
             REVERT;
         END TRY

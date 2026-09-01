@@ -33,6 +33,10 @@ Assert-True ($ddl -notmatch '(?i)(CERTIFICATE|ADD\s+SIGNATURE|DROP\s+SIGNATURE|C
 Assert-True ($ddl -match 'ALTER\s+SERVER\s+ROLE\s+\[sysadmin\]\s+ADD\s+MEMBER\s+\[IIS AppPool\\FluxKnowledge\]') `
     'The direct-admin bootstrap must grant the fixed app-pool login sysadmin membership.'
 Assert-True ($ddl -match 'FluxKnowledgeNativeGoLiveObserveAppPool') 'The canonical app-pool observer is missing.'
+Assert-True ($ddl -notmatch "HAS_PERMS_BY_NAME\(NULL,N''SERVER'',N''CONNECT SQL''\)") `
+    'The app-pool observer must not reject a valid impersonated login because SQL does not report CONNECT SQL through EXECUTE AS.'
+Assert-True ($ddl -match "HAS_PERMS_BY_NAME\(N''FluxKnowledge'',N''DATABASE'',N''CONNECT''\)=1") `
+    'The app-pool observer must prove database connectivity.'
 Assert-True ($ddl -match "N'FluxKnowledge'") 'The canonical catalogue binding is missing.'
 $firstProcedure = $ddl.IndexOf('-- BEGIN HASHED PROCEDURE:', [StringComparison]::Ordinal)
 $existingProcedureGuard = [regex]::Match(
