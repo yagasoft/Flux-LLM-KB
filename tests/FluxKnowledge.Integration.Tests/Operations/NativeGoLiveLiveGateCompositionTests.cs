@@ -200,23 +200,6 @@ public sealed class NativeGoLiveLiveGateCompositionTests
     }
 
     [Fact]
-    public async Task Preflight_rejects_missing_direct_admin_app_pool_identity()
-    {
-        using var fixture = new ExecutorOrderingFixture(ValidPreflight() with
-        {
-            AppPoolLoginExists = false,
-            AppPoolLoginSid = null,
-            AppPoolLoginSidHex = null
-        });
-        fixture.BeginExecution();
-
-        var result = await new NativeGoLiveExecutor().ExecuteAsync(fixture.Request, fixture.Host);
-
-        Assert.False(result.Succeeded);
-        Assert.DoesNotContain("stop-iis", fixture.Events);
-    }
-
-    [Fact]
     public async Task Preflight_rejects_wrong_fixed_procedure_manifest()
     {
         using var fixture = new ExecutorOrderingFixture(ValidPreflight() with
@@ -232,30 +215,9 @@ public sealed class NativeGoLiveLiveGateCompositionTests
     }
 
     [Fact]
-    public async Task Post_bootstrap_validation_accepts_direct_admin_app_pool_authority()
+    public async Task Provisioning_completes_without_observing_sql_app_pool_authority()
     {
-        using var fixture = new PostBootstrapFixture();
-        await using var lease = await fixture.AcquireLeaseAsync();
-
-        await fixture.Host.ProvisionEmptyCatalogueAsync(fixture.Plan.Sql, CancellationToken.None);
-    }
-
-    [Fact]
-    public async Task Post_bootstrap_validation_rejects_missing_app_pool_sysadmin_membership()
-    {
-        using var fixture = new PostBootstrapFixture(appPoolIsSysAdmin: false);
-        await using var lease = await fixture.AcquireLeaseAsync();
-
-        var exception = await Assert.ThrowsAsync<NativeGoLiveContractException>(
-            () => fixture.Host.ProvisionEmptyCatalogueAsync(fixture.Plan.Sql, CancellationToken.None).AsTask());
-
-        Assert.Equal("sql-bootstrap-postcondition-failed", exception.Message);
-    }
-
-    [Fact]
-    public async Task Post_bootstrap_validation_accepts_a_usable_catalogue_with_a_non_app_pool_owner()
-    {
-        using var fixture = new PostBootstrapFixture(catalogueOwnerSidHex: OtherSidHex);
+        using var fixture = new EmptyCatalogueFixture();
         await using var lease = await fixture.AcquireLeaseAsync();
 
         await fixture.Host.ProvisionEmptyCatalogueAsync(fixture.Plan.Sql, CancellationToken.None);
@@ -346,15 +308,13 @@ public sealed class NativeGoLiveLiveGateCompositionTests
         }
     }
 
-    private sealed class PostBootstrapFixture : IDisposable
+    private sealed class EmptyCatalogueFixture : IDisposable
     {
         private readonly string _root;
         private readonly NativeGoLiveCloseoutCapability _capability;
         private readonly NativeGoLiveRequest _request;
 
-        public PostBootstrapFixture(
-            bool appPoolIsSysAdmin = true,
-            string? catalogueOwnerSidHex = null)
+        public EmptyCatalogueFixture()
         {
             _root = Path.Combine(Path.GetTempPath(), "FluxKnowledgeLiveGateAuthority", Guid.NewGuid().ToString("N"));
             var payloadRoot = CreatePayloadRoot(_root);
@@ -374,12 +334,7 @@ public sealed class NativeGoLiveLiveGateCompositionTests
                     null!,
                     null!,
                     null!,
-                    new StaticPostBootstrapSqlPort(
-                        ValidPostBootstrap(Plan) with
-                        {
-                            AppPoolLoginIsSysAdmin = appPoolIsSysAdmin,
-                            CatalogueOwnerSidHex = catalogueOwnerSidHex ?? AppPoolSidHex
-                        }),
+                    new StaticEmptyCatalogueSqlPort(),
                     new ExactAclPort(Plan),
                     null!,
                     null!,
@@ -561,7 +516,7 @@ public sealed class NativeGoLiveLiveGateCompositionTests
         List<string> events,
         Exception? exception) : INativeGoLiveSqlPort
     {
-        public ValueTask<NativeGoLiveSqlPostBootstrapObservation> ProvisionAndObserveAsync(
+        public ValueTask ProvisionEmptyCatalogueAsync(
             NativeGoLiveSqlIdentity _,
             NativeGoLiveSqlBootstrapConnection __,
             NativeGoLivePayloadManifest ___,
@@ -569,21 +524,20 @@ public sealed class NativeGoLiveLiveGateCompositionTests
         {
             events.Add("provision-sql");
             if (exception is not null)
-                return ValueTask.FromException<NativeGoLiveSqlPostBootstrapObservation>(exception);
+                return ValueTask.FromException(exception);
             Directory.CreateDirectory(plan.Layout.SqlDataRoot);
             Directory.CreateDirectory(plan.Layout.SqlLogRoot);
-            return ValueTask.FromException<NativeGoLiveSqlPostBootstrapObservation>(
-                new NativeGoLiveContractException("stop-after-ordered-provision"));
+            return ValueTask.FromException(new NativeGoLiveContractException("stop-after-ordered-provision"));
         }
     }
 
-    private sealed class StaticPostBootstrapSqlPort(NativeGoLiveSqlPostBootstrapObservation observation) : INativeGoLiveSqlPort
+    private sealed class StaticEmptyCatalogueSqlPort : INativeGoLiveSqlPort
     {
-        public ValueTask<NativeGoLiveSqlPostBootstrapObservation> ProvisionAndObserveAsync(
+        public ValueTask ProvisionEmptyCatalogueAsync(
             NativeGoLiveSqlIdentity _,
             NativeGoLiveSqlBootstrapConnection __,
             NativeGoLivePayloadManifest ___,
-            CancellationToken ____) => ValueTask.FromResult(observation);
+            CancellationToken ____) => ValueTask.CompletedTask;
     }
 
     private static NativeGoLiveIisObservation CanonicalIis(NativeGoLivePlan plan) =>
@@ -595,42 +549,7 @@ public sealed class NativeGoLiveLiveGateCompositionTests
     private static NativeGoLiveMarketplaceObservation MissingMarketplace(NativeGoLivePlan plan) =>
         new("Missing", plan.Codex.MarketplaceName, plan.Codex.MarketplaceRoot, plan.Codex.PluginName);
 
-    private static NativeGoLiveSqlPreflightObservation ValidPreflight() => new(
-        true,
-        @"IIS AppPool\FluxKnowledge",
-        AppPoolSid,
-        true,
-        AppPoolSid,
-        AppPoolSidHex,
-        true,
-        ValidProcedures());
-
-    private static NativeGoLiveSqlPostBootstrapObservation ValidPostBootstrap(NativeGoLivePlan plan) => new(
-        "FluxKnowledge",
-        5,
-        AppPoolSidHex,
-        [
-            new NativeGoLiveSqlDatabaseFileObservation(1, "ROWS", plan.Sql.DataFilePath),
-            new NativeGoLiveSqlDatabaseFileObservation(2, "LOG", plan.Sql.LogFilePath)
-        ],
-        true,
-        NativeGoLiveDatabaseContract.RequiredMigrations,
-        NativeGoLiveDatabaseContract.RequiredMigrations,
-        true,
-        true,
-        true,
-        @"IIS AppPool\FluxKnowledge",
-        AppPoolSid,
-        true,
-        AppPoolSid,
-        AppPoolSidHex,
-        true,
-        false,
-        0,
-        0,
-        0,
-        0,
-        ValidProcedures());
+    private static NativeGoLiveSqlPreflightObservation ValidPreflight() => new(true, ValidProcedures());
 
     private static IReadOnlyList<NativeGoLiveSqlProcedureObservation> ValidProcedures() =>
     [
@@ -638,23 +557,9 @@ public sealed class NativeGoLiveLiveGateCompositionTests
         [
             new("@Catalogue", "nvarchar", 256, false),
             new("@DataFile", "nvarchar", 520, false),
-            new("@LogFile", "nvarchar", 520, false),
-            new("@AppPoolLogin", "nvarchar", 256, false),
-            new("@AppPoolSid", "varbinary", 85, false)
+            new("@LogFile", "nvarchar", 520, false)
         ]),
-        Procedure("FluxKnowledgeNativeGoLiveDrop", 102, [new("@Catalogue", "nvarchar", 256, false)]),
-        Procedure("FluxKnowledgeNativeGoLiveManageAppPool", 103,
-        [
-            new("@Catalogue", "nvarchar", 256, false),
-            new("@AppPoolLogin", "nvarchar", 256, false),
-            new("@AppPoolSid", "varbinary", 85, false),
-            new("@BootstrapLogin", "nvarchar", 256, false)
-        ]),
-        Procedure("FluxKnowledgeNativeGoLiveObserveAppPool", 104,
-        [
-            new("@Catalogue", "nvarchar", 256, false),
-            new("@AppPoolLogin", "nvarchar", 256, false)
-        ])
+        Procedure("FluxKnowledgeNativeGoLiveDrop", 102, [new("@Catalogue", "nvarchar", 256, false)])
     ];
 
     private static NativeGoLiveSqlProcedureObservation Procedure(
@@ -663,7 +568,7 @@ public sealed class NativeGoLiveLiveGateCompositionTests
         IReadOnlyList<NativeGoLiveSqlParameterObservation> parameters) => new(
         name,
         objectId,
-        NativeGoLiveSqlBootstrapAuthorityContract.DefinitionSha256(name),
+        NativeGoLiveSqlBootstrapContract.DefinitionSha256(name),
         parameters);
 
     private static NativeGoLiveAclObservation ExactAcl(NativeGoLivePlan plan)

@@ -524,7 +524,6 @@ internal sealed class NativeGoLiveWindowsOwnedStatePort(
 internal sealed class NativeGoLiveWindowsSqlPort
     : INativeGoLiveSqlPort
 {
-    private const string AppPoolLogin = @"IIS AppPool\FluxKnowledge";
     private readonly NativeGoLivePlan _plan;
     private readonly string _mergedMainRoot;
     private readonly HandleRelativeNativeFileSystem _fileSystem = new();
@@ -553,28 +552,21 @@ internal sealed class NativeGoLiveWindowsSqlPort
         NativeGoLiveSqlBootstrapConnection bootstrap,
         CancellationToken cancellationToken)
     {
-        var expectedAppPoolSid = ResolveAccountSid(AppPoolLogin);
         await using var connection = new SqlConnection(bootstrap.ConnectionString);
         await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
         const string sql =
             """
             SELECT CONVERT(int, SERVERPROPERTY('IsFullTextInstalled'));
-            SELECT CONVERT(int, CASE WHEN p.principal_id IS NULL THEN 0 ELSE 1 END),
-                   p.sid, CONVERT(int, COALESCE(IS_SRVROLEMEMBER(N'sysadmin', N'IIS AppPool\FluxKnowledge'),0))
-            FROM (VALUES(0)) seed(value)
-            LEFT JOIN sys.server_principals p ON p.name=N'IIS AppPool\FluxKnowledge';
             SELECT p.name,p.object_id,
                    LOWER(CONVERT(varchar(64),HASHBYTES('SHA2_256',CONVERT(varbinary(max),REPLACE(sm.definition,CHAR(13)+CHAR(10),CHAR(10)))),2))
             FROM sys.procedures p JOIN sys.sql_modules sm ON sm.object_id=p.object_id
             WHERE SCHEMA_NAME(p.schema_id)=N'dbo' AND p.name IN
-                (N'FluxKnowledgeNativeGoLiveCreate',N'FluxKnowledgeNativeGoLiveDrop',
-                 N'FluxKnowledgeNativeGoLiveManageAppPool',N'FluxKnowledgeNativeGoLiveObserveAppPool')
+                (N'FluxKnowledgeNativeGoLiveCreate',N'FluxKnowledgeNativeGoLiveDrop')
             ORDER BY p.name;
             SELECT p.name,prm.parameter_id,prm.name,TYPE_NAME(prm.user_type_id),prm.max_length,CONVERT(int,prm.is_output)
             FROM sys.procedures p JOIN sys.parameters prm ON prm.object_id=p.object_id
             WHERE SCHEMA_NAME(p.schema_id)=N'dbo' AND p.name IN
-                (N'FluxKnowledgeNativeGoLiveCreate',N'FluxKnowledgeNativeGoLiveDrop',
-                 N'FluxKnowledgeNativeGoLiveManageAppPool',N'FluxKnowledgeNativeGoLiveObserveAppPool')
+                (N'FluxKnowledgeNativeGoLiveCreate',N'FluxKnowledgeNativeGoLiveDrop')
             ORDER BY p.name,prm.parameter_id;
             """;
         await using var command = new SqlCommand(sql, connection) { CommandTimeout = bootstrap.ConnectTimeout };
@@ -582,27 +574,12 @@ internal sealed class NativeGoLiveWindowsSqlPort
         if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
             throw new NativeGoLiveContractException("sql-preflight-observation-missing");
         var fullText = reader.GetInt32(0) == 1;
-        if (!await reader.NextResultAsync(cancellationToken).ConfigureAwait(false) ||
-            !await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-            throw new NativeGoLiveContractException("sql-app-pool-observation-missing");
-        var loginExists = reader.GetInt32(0) == 1;
-        var loginSid = reader.IsDBNull(1) ? null : Sid(reader, 1);
-        var loginSidHex = reader.IsDBNull(1) ? null : OpaqueSid(reader, 1);
-        var loginSysAdmin = reader.GetInt32(2) == 1;
         var procedures = await ReadProcedureEvidenceAsync(reader, cancellationToken).ConfigureAwait(false);
         await reader.DisposeAsync().ConfigureAwait(false);
-        return new NativeGoLiveSqlPreflightObservation(
-            fullText,
-            AppPoolLogin,
-            expectedAppPoolSid,
-            loginExists,
-            loginSid,
-            loginSidHex,
-            loginSysAdmin,
-            procedures);
+        return new NativeGoLiveSqlPreflightObservation(fullText, procedures);
     }
 
-    public async ValueTask<NativeGoLiveSqlPostBootstrapObservation> ProvisionAndObserveAsync(
+    public async ValueTask ProvisionEmptyCatalogueAsync(
         NativeGoLiveSqlIdentity identity,
         NativeGoLiveSqlBootstrapConnection bootstrap,
         NativeGoLivePayloadManifest payloadManifest,
@@ -611,11 +588,9 @@ internal sealed class NativeGoLiveWindowsSqlPort
         if (identity != _plan.Sql) throw new NativeGoLiveContractException("sql-identity-not-canonical");
         using var dataRoot = OpenSqlStorageDirectory(_plan.Layout.SqlDataRoot, "data");
         using var logRoot = OpenSqlStorageDirectory(_plan.Layout.SqlLogRoot, "log");
-        var expectedAppPoolSid = ResolveAccountSid(AppPoolLogin);
-        await ExecuteCreateAsync(bootstrap, expectedAppPoolSid, cancellationToken).ConfigureAwait(false);
+        await ExecuteCreateAsync(bootstrap, cancellationToken).ConfigureAwait(false);
         await RunMigrationsAsync(bootstrap, payloadManifest, cancellationToken).ConfigureAwait(false);
         await MarkEmptyCatalogueAsync(bootstrap, cancellationToken).ConfigureAwait(false);
-        return await ObservePostBootstrapAsync(bootstrap, expectedAppPoolSid, cancellationToken).ConfigureAwait(false);
     }
 
     internal async ValueTask DropCatalogueAsync(
@@ -632,7 +607,6 @@ internal sealed class NativeGoLiveWindowsSqlPort
 
     private async ValueTask ExecuteCreateAsync(
         NativeGoLiveSqlBootstrapConnection bootstrap,
-        string appPoolSid,
         CancellationToken cancellationToken)
     {
         try
@@ -641,12 +615,10 @@ internal sealed class NativeGoLiveWindowsSqlPort
             await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
             const string sql =
                 "EXEC master.dbo.FluxKnowledgeNativeGoLiveCreate " +
-                "@Catalogue=N'FluxKnowledge',@DataFile=@data,@LogFile=@log,@AppPoolLogin=N'IIS AppPool\\FluxKnowledge',@AppPoolSid=@sid;";
+                "@Catalogue=N'FluxKnowledge',@DataFile=@data,@LogFile=@log;";
             await using var command = new SqlCommand(sql, connection) { CommandTimeout = 60 };
             command.Parameters.AddWithValue("@data", _plan.Sql.DataFilePath);
             command.Parameters.AddWithValue("@log", _plan.Sql.LogFilePath);
-            command.Parameters.Add("@sid", System.Data.SqlDbType.VarBinary, 85).Value =
-                new SecurityIdentifier(appPoolSid).GetBinaryForm();
             await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         }
         catch (SqlException exception)
@@ -686,40 +658,6 @@ internal sealed class NativeGoLiveWindowsSqlPort
         }
     }
 
-    private async ValueTask FinalizeBootstrapAuthorityAsync(
-        NativeGoLiveSqlBootstrapConnection bootstrap,
-        string bootstrapLogin,
-        string appPoolSid,
-        CancellationToken cancellationToken)
-    {
-        await using var connection = new SqlConnection(bootstrap.ConnectionString);
-        await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
-        const string sql =
-            "EXEC master.dbo.FluxKnowledgeNativeGoLiveManageAppPool " +
-            "@Catalogue=N'FluxKnowledge',@AppPoolLogin=N'IIS AppPool\\FluxKnowledge'," +
-            "@AppPoolSid=@sid,@BootstrapLogin=@bootstrap;";
-        await using var command = new SqlCommand(sql, connection) { CommandTimeout = 30 };
-        command.Parameters.Add("@sid", System.Data.SqlDbType.VarBinary, 85).Value =
-            new SecurityIdentifier(appPoolSid).GetBinaryForm();
-        command.Parameters.Add("@bootstrap", System.Data.SqlDbType.NVarChar, 128).Value = bootstrapLogin;
-        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-    }
-
-    private static async ValueTask<string> ObserveCatalogueOwnerSidAsync(
-        NativeGoLiveSqlBootstrapConnection bootstrap,
-        CancellationToken cancellationToken)
-    {
-        await using var connection = new SqlConnection(bootstrap.ConnectionString);
-        await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
-        await using var command = new SqlCommand(
-            "SELECT owner_sid FROM sys.databases WHERE name=N'FluxKnowledge';",
-            connection) { CommandTimeout = 5 };
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-        if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-            throw new NativeGoLiveContractException("sql-bootstrap-catalogue-owner-missing");
-        return OpaqueSid(reader, 0);
-    }
-
     private async ValueTask RunMigrationsAsync(
         NativeGoLiveSqlBootstrapConnection bootstrap,
         NativeGoLivePayloadManifest payloadManifest,
@@ -754,90 +692,11 @@ internal sealed class NativeGoLiveWindowsSqlPort
         await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
-    private async ValueTask<NativeGoLiveSqlPostBootstrapObservation> ObservePostBootstrapAsync(
-        NativeGoLiveSqlBootstrapConnection bootstrap,
-        string expectedAppPoolSid,
-        CancellationToken cancellationToken)
-    {
-        await using var connection = new SqlConnection(CatalogueConnection(bootstrap));
-        await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
-        const string sql =
-            """
-            SELECT DB_NAME(),DB_ID(),owner_sid,CONVERT(int,SERVERPROPERTY('IsFullTextInstalled'))
-            FROM sys.databases WHERE name=N'FluxKnowledge';
-            SELECT file_id,type_desc,physical_name FROM sys.database_files ORDER BY file_id;
-            SELECT MigrationId FROM dbo.__EFMigrationsHistory ORDER BY MigrationId;
-            SELECT CONVERT(int,CASE WHEN EmptyCatalogueValidatedAtUtc IS NOT NULL AND ActiveIndexGenerationId IS NULL THEN 1 ELSE 0 END)
-              FROM dbo.IndexState WHERE Id=1;
-            SELECT COUNT_BIG(*) FROM dbo.KnowledgeItems;
-            SELECT COUNT_BIG(*) FROM dbo.KnowledgeRelations;
-            SELECT COUNT_BIG(*) FROM dbo.NativeOperationIntents WHERE ConsumedAtUtc IS NULL;
-            SELECT COUNT_BIG(*) FROM dbo.IndexState WHERE ActiveIndexGenerationId IS NOT NULL;
-            SELECT SUSER_SNAME(),SUSER_SID();
-            """;
-        await using var command = new SqlCommand(sql, connection) { CommandTimeout = 30 };
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-        if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-            throw new NativeGoLiveContractException("sql-bootstrap-postcondition-missing");
-        var name = reader.GetString(0);
-        var databaseId = reader.GetInt32(1);
-        var ownerSidHex = OpaqueSid(reader, 2);
-        var fullText = reader.GetInt32(3) == 1;
-        var files = new List<NativeGoLiveSqlDatabaseFileObservation>();
-        await reader.NextResultAsync(cancellationToken).ConfigureAwait(false);
-        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-            files.Add(new(reader.GetInt32(0), reader.GetString(1), reader.GetString(2)));
-        var migrations = await ReadStringResultAsync(reader, cancellationToken).ConfigureAwait(false);
-        var empty = await ReadSingleIntAsync(reader, cancellationToken).ConfigureAwait(false) == 1;
-        var knowledge = await ReadSingleLongAsync(reader, cancellationToken).ConfigureAwait(false);
-        var edges = await ReadSingleLongAsync(reader, cancellationToken).ConfigureAwait(false);
-        var pending = await ReadSingleLongAsync(reader, cancellationToken).ConfigureAwait(false);
-        var generations = await ReadSingleLongAsync(reader, cancellationToken).ConfigureAwait(false);
-        await reader.NextResultAsync(cancellationToken).ConfigureAwait(false);
-        await reader.ReadAsync(cancellationToken).ConfigureAwait(false);
-        var bootstrapName = reader.GetString(0);
-        var bootstrapSid = Sid(reader, 1);
-        await reader.DisposeAsync().ConfigureAwait(false);
-        var bootstrapEvidence = await ObservePreflightAsync(bootstrap, cancellationToken).ConfigureAwait(false);
-        await FinalizeBootstrapAuthorityAsync(
-            bootstrap, bootstrapName, expectedAppPoolSid, cancellationToken).ConfigureAwait(false);
-        var appPool = await ObserveAppPoolAsync(bootstrap, cancellationToken).ConfigureAwait(false);
-        ownerSidHex = await ObserveCatalogueOwnerSidAsync(bootstrap, cancellationToken).ConfigureAwait(false);
-        return new NativeGoLiveSqlPostBootstrapObservation(
-            name, databaseId, ownerSidHex, files, fullText,
-            NativeGoLiveDatabaseContract.RequiredMigrations, migrations,
-            empty, empty, appPool.CanConnect, AppPoolLogin, expectedAppPoolSid,
-            true, appPool.LoginSid, appPool.LoginSidHex, appPool.SysAdmin,
-            NativeGoLiveWindowsAclInspector.HasAnyAccess(_plan.Layout.SqlDataRoot, expectedAppPoolSid) ||
-            NativeGoLiveWindowsAclInspector.HasAnyAccess(_plan.Layout.SqlLogRoot, expectedAppPoolSid),
-            knowledge, edges, pending, generations,
-            bootstrapEvidence.BootstrapProcedures);
-    }
-
     private string CatalogueConnection(NativeGoLiveSqlBootstrapConnection bootstrap) =>
         new SqlConnectionStringBuilder(bootstrap.ConnectionString)
         {
             InitialCatalog = _plan.Sql.CatalogName
         }.ConnectionString;
-
-    private async ValueTask<AppPoolSqlObservation> ObserveAppPoolAsync(
-        NativeGoLiveSqlBootstrapConnection bootstrap,
-        CancellationToken cancellationToken)
-    {
-        await using var connection = new SqlConnection(bootstrap.ConnectionString);
-        await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
-        await using var command = new SqlCommand(
-            "EXEC master.dbo.FluxKnowledgeNativeGoLiveObserveAppPool @Catalogue=N'FluxKnowledge',@AppPoolLogin=N'IIS AppPool\\FluxKnowledge';",
-            connection) { CommandTimeout = 30 };
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-        if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-            throw new NativeGoLiveContractException("sql-app-pool-principal-missing");
-        var loginSid = Sid(reader, 0);
-        var loginSidHex = OpaqueSid(reader, 0);
-        var sysAdmin = reader.GetInt32(1) == 1;
-        var canConnect = reader.GetInt32(2) == 1;
-        return new AppPoolSqlObservation(loginSid, loginSidHex, sysAdmin, canConnect);
-    }
 
     private static async Task<IReadOnlyList<NativeGoLiveSqlProcedureObservation>> ReadProcedureEvidenceAsync(
         SqlDataReader reader,
@@ -866,63 +725,6 @@ internal sealed class NativeGoLiveWindowsSqlPort
             parameters.GetValueOrDefault(pair.Key) ?? [])).ToArray();
     }
 
-    private static async Task<IReadOnlyList<string>> ReadStringResultAsync(
-        SqlDataReader reader,
-        CancellationToken cancellationToken)
-    {
-        if (!await reader.NextResultAsync(cancellationToken).ConfigureAwait(false)) return [];
-        var values = new List<string>();
-        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false)) values.Add(reader.GetString(0));
-        return values;
-    }
-
-    private static async Task<int> ReadSingleIntAsync(SqlDataReader reader, CancellationToken cancellationToken)
-    {
-        if (!await reader.NextResultAsync(cancellationToken).ConfigureAwait(false) ||
-            !await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-            throw new NativeGoLiveContractException("sql-bootstrap-postcondition-missing");
-        return reader.GetInt32(0);
-    }
-
-    private static async Task<long> ReadSingleLongAsync(SqlDataReader reader, CancellationToken cancellationToken)
-    {
-        if (!await reader.NextResultAsync(cancellationToken).ConfigureAwait(false) ||
-            !await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-            throw new NativeGoLiveContractException("sql-bootstrap-postcondition-missing");
-        return reader.GetInt64(0);
-    }
-
-    private static string Sid(SqlDataReader reader, int ordinal)
-        => NativeGoLiveSqlSid.WindowsAccount((byte[])reader.GetValue(ordinal));
-
-    private static string OpaqueSid(SqlDataReader reader, int ordinal) =>
-        NativeGoLiveSqlSid.CanonicalOpaqueHex((byte[])reader.GetValue(ordinal));
-
-    private static string ResolveAccountSid(string account) =>
-        ((SecurityIdentifier)new NTAccount(account).Translate(typeof(SecurityIdentifier))).Value;
-
-    private sealed record AppPoolSqlObservation(
-        string LoginSid,
-        string LoginSidHex,
-        bool SysAdmin,
-        bool CanConnect);
-}
-
-internal static class NativeGoLiveSqlSid
-{
-    internal static string CanonicalOpaqueHex(byte[] value)
-    {
-        ArgumentNullException.ThrowIfNull(value);
-        if (value.Length is 0 or > 85)
-            throw new NativeGoLiveContractException("sql-opaque-sid-invalid");
-        return Convert.ToHexString(value).ToLowerInvariant();
-    }
-
-    internal static string WindowsAccount(byte[] value)
-    {
-        ArgumentNullException.ThrowIfNull(value);
-        return new SecurityIdentifier(value, 0).Value;
-    }
 }
 
 internal static class NativeGoLivePublishedMigrationRunner
@@ -957,16 +759,6 @@ internal static class NativeGoLivePublishedMigrationRunner
         start.ArgumentList.Add("--apply-native-go-live-migrations");
         start.Environment[ConnectionEnvironmentVariable] = applicationConnectionString;
         return start;
-    }
-}
-
-internal static class SecurityIdentifierExtensions
-{
-    internal static byte[] GetBinaryForm(this SecurityIdentifier sid)
-    {
-        var result = new byte[sid.BinaryLength];
-        sid.GetBinaryForm(result, 0);
-        return result;
     }
 }
 

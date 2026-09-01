@@ -28,7 +28,7 @@ public sealed class NativeGoLiveOneShotAdmissionTests
             var port = new NativeGoLiveWindowsSqlPort(plan, payloadRoot);
 
             var exception = await Assert.ThrowsAsync<NativeGoLiveContractException>(
-                () => port.ProvisionAndObserveAsync(plan.Sql, bootstrap, payload, CancellationToken.None).AsTask());
+                () => port.ProvisionEmptyCatalogueAsync(plan.Sql, bootstrap, payload, CancellationToken.None).AsTask());
 
             Assert.Equal("sql-provisioning-storage-data-failed", exception.ReasonCode);
             Assert.Matches(@"\Ahresult-0x[0-9A-F]{8}\z", exception.DiagnosticDetail);

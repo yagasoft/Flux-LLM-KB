@@ -152,7 +152,6 @@ try {
         'native-closeout-contract',
         'native-go-live-bootstrap-nondryrun-contract',
         'native-go-live-contract',
-        'native-go-live-direct-admin-sql-transition-contract',
         'native-go-live-one-shot-admission-contract',
         'native-go-live-recovery-removal-contract',
         'native-deployment-contract',

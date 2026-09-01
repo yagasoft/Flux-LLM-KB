@@ -110,8 +110,7 @@ public sealed class SqlCommand : IDisposable
 {
     private static readonly string[] ExpectedResetObjects =
     [
-        "FluxKnowledgeNativeGoLiveCreate", "FluxKnowledgeNativeGoLiveDrop",
-        "FluxKnowledgeNativeGoLiveManageAppPool", "FluxKnowledgeNativeGoLiveObserveAppPool"
+        "FluxKnowledgeNativeGoLiveCreate", "FluxKnowledgeNativeGoLiveDrop"
     ];
     private readonly string _connectionString;
 

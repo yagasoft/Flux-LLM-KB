@@ -521,12 +521,6 @@ internal sealed record NativeGoLiveRuntimeObservation(
 internal sealed record NativeGoLiveMarketplaceObservation(string State, string Name, string Root, string PluginName);
 internal sealed record NativeGoLiveSqlPreflightObservation(
     bool FullTextInstalled,
-    string AppPoolLoginName,
-    string ExpectedAppPoolSid,
-    bool AppPoolLoginExists,
-    string? AppPoolLoginSid,
-    string? AppPoolLoginSidHex,
-    bool AppPoolLoginIsSysAdmin,
     IReadOnlyList<NativeGoLiveSqlProcedureObservation>? BootstrapProcedures);
 internal sealed record NativeGoLiveSqlProcedureObservation(
     string Name,
@@ -538,11 +532,11 @@ internal sealed record NativeGoLiveSqlParameterObservation(
     string TypeName,
     short MaximumLength,
     bool IsOutput);
-internal static partial class NativeGoLiveSqlBootstrapAuthorityContract
+internal static partial class NativeGoLiveSqlBootstrapContract
 {
     internal static bool IsValidProcedureSet(IReadOnlyList<NativeGoLiveSqlProcedureObservation>? procedures)
     {
-        if (procedures is null || procedures.Count != 4) return false;
+        if (procedures is null || procedures.Count != 2) return false;
         var observedNames = new HashSet<string>(StringComparer.Ordinal);
         foreach (var procedure in procedures)
         {
@@ -556,33 +550,6 @@ internal static partial class NativeGoLiveSqlBootstrapAuthorityContract
         return true;
     }
 }
-internal sealed record NativeGoLiveSqlDatabaseFileObservation(
-    int FileId,
-    string TypeDescription,
-    string PhysicalPath);
-internal sealed record NativeGoLiveSqlPostBootstrapObservation(
-    string CatalogueName,
-    int CatalogueDatabaseId,
-    string CatalogueOwnerSidHex,
-    IReadOnlyList<NativeGoLiveSqlDatabaseFileObservation> DatabaseFiles,
-    bool FullTextInstalled,
-    IReadOnlyList<string> ExpectedMigrations,
-    IReadOnlyList<string> AppliedMigrations,
-    bool EmptyMarkerDurable,
-    bool EmptyReadinessProved,
-    bool AppPoolCanConnect,
-    string AppPoolLoginName,
-    string ExpectedAppPoolSid,
-    bool AppPoolLoginExists,
-    string AppPoolLoginSid,
-    string AppPoolLoginSidHex,
-    bool AppPoolLoginIsSysAdmin,
-    bool AppPoolHasSqlFileAccess,
-    long KnowledgeItems,
-    long Edges,
-    long PendingOperations,
-    long ActiveIndexGenerations,
-    IReadOnlyList<NativeGoLiveSqlProcedureObservation>? BootstrapProcedures);
 internal sealed record NativeGoLiveAclObservation(
     IReadOnlyList<string> SqlServiceWriteRoots,
     IReadOnlyList<string> AppPoolReadExecuteRoots,
@@ -741,7 +708,7 @@ internal interface INativeGoLiveOwnedStatePort
 }
 internal interface INativeGoLiveSqlPort
 {
-    ValueTask<NativeGoLiveSqlPostBootstrapObservation> ProvisionAndObserveAsync(
+    ValueTask ProvisionEmptyCatalogueAsync(
         NativeGoLiveSqlIdentity identity,
         NativeGoLiveSqlBootstrapConnection bootstrap,
         NativeGoLivePayloadManifest payloadManifest,
@@ -977,8 +944,8 @@ internal sealed class GuardedNativeGoLiveHost : INativeGoLiveHost
         var observation = await _ports.OneShotPreflight.ObserveAsync(
             plan, _bootstrap, cancellationToken).ConfigureAwait(false);
         ValidatePreflight(observation, plan);
-        if (!NativeGoLiveSqlBootstrapAuthorityContract.IsValidProcedureSet(observation.Sql.BootstrapProcedures))
-            throw new NativeGoLiveContractException("sql-bootstrap-authority-drift");
+        if (!NativeGoLiveSqlBootstrapContract.IsValidProcedureSet(observation.Sql.BootstrapProcedures))
+            throw new NativeGoLiveContractException("sql-bootstrap-contract-drift");
         var independentlyObservedVss = _ports.Vss.Query(cancellationToken);
         if (independentlyObservedVss != observation.Vss)
             throw new NativeGoLiveContractException("vss-observation-not-bound");
@@ -1051,9 +1018,8 @@ internal sealed class GuardedNativeGoLiveHost : INativeGoLiveHost
                     NativeGoLivePayloadHasher.Compute(_mergedMainRoot),
                     _capability.PayloadManifest))
                 throw new NativeGoLiveContractException("merged-main-payload-changed");
-            var observation = await _ports.Sql.ProvisionAndObserveAsync(
+            await _ports.Sql.ProvisionEmptyCatalogueAsync(
                 sql, _bootstrap, _capability.PayloadManifest, cancellationToken).ConfigureAwait(false);
-            ValidatePostBootstrap(observation);
         }
         finally
         {
@@ -1146,47 +1112,16 @@ internal sealed class GuardedNativeGoLiveHost : INativeGoLiveHost
         NativeGoLiveSqlPreflightObservation value,
         NativeGoLivePlan plan)
     {
-        var expectedAppPoolSid = value.ExpectedAppPoolSid;
-        var existingLoginSafe = value.AppPoolLoginExists
-            ? !string.IsNullOrWhiteSpace(value.AppPoolLoginSid) &&
-              string.Equals(value.AppPoolLoginSid, expectedAppPoolSid, StringComparison.Ordinal)
-            : value.AppPoolLoginSid is null;
         if (!value.FullTextInstalled ||
-            !string.Equals(value.AppPoolLoginName, @"IIS AppPool\FluxKnowledge", StringComparison.Ordinal) ||
-            !IsSid(expectedAppPoolSid) || !existingLoginSafe ||
-            string.IsNullOrWhiteSpace(value.AppPoolLoginSidHex) ||
-            !value.AppPoolLoginIsSysAdmin ||
             !ValidateBootstrapProcedureEvidence(value.BootstrapProcedures))
             throw new NativeGoLiveContractException("sql-preflight-direct-admin-not-proved");
-    }
-
-    private void ValidatePostBootstrap(NativeGoLiveSqlPostBootstrapObservation value)
-    {
-        if (!string.Equals(value.CatalogueName, "FluxKnowledge", StringComparison.Ordinal) ||
-            value.CatalogueDatabaseId <= 4 ||
-            !IsOpaqueSqlSid(value.CatalogueOwnerSidHex) ||
-            !ExactDatabaseFiles(value.DatabaseFiles, _plan.Sql) ||
-            !value.FullTextInstalled ||
-            !value.ExpectedMigrations.SequenceEqual(NativeGoLiveDatabaseContract.RequiredMigrations, StringComparer.Ordinal) ||
-            !value.AppliedMigrations.SequenceEqual(NativeGoLiveDatabaseContract.RequiredMigrations, StringComparer.Ordinal) ||
-            !value.EmptyMarkerDurable || !value.EmptyReadinessProved ||
-            !value.AppPoolCanConnect ||
-            !string.Equals(value.AppPoolLoginName, @"IIS AppPool\FluxKnowledge", StringComparison.Ordinal) ||
-            !value.AppPoolLoginExists || !IsSid(value.ExpectedAppPoolSid) ||
-            !string.Equals(value.AppPoolLoginSid, value.ExpectedAppPoolSid, StringComparison.Ordinal) ||
-            !IsOpaqueSqlSid(value.AppPoolLoginSidHex) ||
-            !value.AppPoolLoginIsSysAdmin ||
-            value.AppPoolHasSqlFileAccess || value.KnowledgeItems != 0 || value.Edges != 0 ||
-            value.PendingOperations != 0 || value.ActiveIndexGenerations != 0 ||
-            !ValidateBootstrapProcedureEvidence(value.BootstrapProcedures))
-            throw new NativeGoLiveContractException("sql-bootstrap-postcondition-failed");
     }
 
     private static bool ValidateBootstrapProcedureEvidence(
         IReadOnlyList<NativeGoLiveSqlProcedureObservation>? procedures)
     {
         if (procedures is null ||
-            !NativeGoLiveSqlBootstrapAuthorityContract.IsValidProcedureSet(procedures))
+            !NativeGoLiveSqlBootstrapContract.IsValidProcedureSet(procedures))
             return false;
 
         var expected = new Dictionary<string, NativeGoLiveSqlParameterObservation[]>(StringComparer.Ordinal)
@@ -1195,23 +1130,9 @@ internal sealed class GuardedNativeGoLiveHost : INativeGoLiveHost
             [
                 new("@Catalogue", "nvarchar", 256, false),
                 new("@DataFile", "nvarchar", 520, false),
-                new("@LogFile", "nvarchar", 520, false),
-                new("@AppPoolLogin", "nvarchar", 256, false),
-                new("@AppPoolSid", "varbinary", 85, false)
+                new("@LogFile", "nvarchar", 520, false)
             ],
-            ["FluxKnowledgeNativeGoLiveDrop"] = [new("@Catalogue", "nvarchar", 256, false)],
-            ["FluxKnowledgeNativeGoLiveManageAppPool"] =
-            [
-                new("@Catalogue", "nvarchar", 256, false),
-                new("@AppPoolLogin", "nvarchar", 256, false),
-                new("@AppPoolSid", "varbinary", 85, false),
-                new("@BootstrapLogin", "nvarchar", 256, false)
-            ],
-            ["FluxKnowledgeNativeGoLiveObserveAppPool"] =
-            [
-                new("@Catalogue", "nvarchar", 256, false),
-                new("@AppPoolLogin", "nvarchar", 256, false)
-            ]
+            ["FluxKnowledgeNativeGoLiveDrop"] = [new("@Catalogue", "nvarchar", 256, false)]
         };
         if (procedures.Count != expected.Count || !procedures.All(procedure =>
             expected.TryGetValue(procedure.Name, out var parameters) &&
@@ -1313,25 +1234,10 @@ internal sealed class GuardedNativeGoLiveHost : INativeGoLiveHost
             HasExactRules(layout.RecoveryRoot);
     }
 
-    private static bool ExactDatabaseFiles(
-        IReadOnlyList<NativeGoLiveSqlDatabaseFileObservation> files,
-        NativeGoLiveSqlIdentity expected) =>
-        files.Count == 2 &&
-        files[0].FileId == 1 &&
-        string.Equals(files[0].TypeDescription, "ROWS", StringComparison.Ordinal) &&
-        SamePath(files[0].PhysicalPath, expected.DataFilePath) &&
-        files[1].FileId == 2 &&
-        string.Equals(files[1].TypeDescription, "LOG", StringComparison.Ordinal) &&
-        SamePath(files[1].PhysicalPath, expected.LogFilePath);
-
     private static bool IsSid(string? value) =>
         !string.IsNullOrWhiteSpace(value) &&
         value.StartsWith("S-1-", StringComparison.Ordinal) &&
         value.Length <= 184;
-
-    private static bool IsOpaqueSqlSid(string? value) =>
-        value is { Length: > 0 } && value.Length % 2 == 0 && value.All(character =>
-            character is >= '0' and <= '9' or >= 'a' and <= 'f');
 
     private static bool SameManifest(NativeGoLivePayloadManifest left, NativeGoLivePayloadManifest right) =>
         NativeGoLivePayloadHasher.Same(left, right);

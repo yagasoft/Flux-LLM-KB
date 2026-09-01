@@ -94,14 +94,14 @@ public sealed class NativeGoLiveCleanSlateRemediationTests
 
     private sealed class SqlPortThatMustRunWithoutAclAdministration(List<string> events) : INativeGoLiveSqlPort
     {
-        public ValueTask<NativeGoLiveSqlPostBootstrapObservation> ProvisionAndObserveAsync(
+        public ValueTask ProvisionEmptyCatalogueAsync(
             NativeGoLiveSqlIdentity _,
             NativeGoLiveSqlBootstrapConnection __,
             NativeGoLivePayloadManifest ___,
             CancellationToken ____)
         {
             events.Add("provision-sql");
-            return ValueTask.FromException<NativeGoLiveSqlPostBootstrapObservation>(
+            return ValueTask.FromException(
                 new NativeGoLiveContractException("sql-called-without-acl-administration"));
         }
     }

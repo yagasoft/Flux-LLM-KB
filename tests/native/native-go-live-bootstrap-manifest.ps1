@@ -11,7 +11,7 @@ $SourceRoot = (Resolve-Path -LiteralPath $SourceRoot).Path
 
 $ddlPath = Join-Path $SourceRoot 'scripts\deploy\native-go-live-bootstrap.sql'
 $generatorPath = Join-Path $SourceRoot 'scripts\dev\generate-native-go-live-bootstrap-manifest.ps1'
-$manifestPath = Join-Path $SourceRoot 'src\FluxKnowledge.Integrations\Windows\NativeGoLive\NativeGoLiveSqlBootstrapAuthorityManifest.g.cs'
+$manifestPath = Join-Path $SourceRoot 'src\FluxKnowledge.Integrations\Windows\NativeGoLive\NativeGoLiveSqlBootstrapManifest.g.cs'
 
 function Assert-True {
     param([bool]$Condition, [string]$Message)
@@ -30,27 +30,20 @@ Assert-True ($ddl -notmatch '(?i)(PRIVATE\s+KEY|PASSWORD\s*=|PWD\s*=|USER\s+ID\s
     'The reviewed bootstrap DDL must not contain secret or connection material.'
 Assert-True ($ddl -notmatch '(?i)(CERTIFICATE|ADD\s+SIGNATURE|DROP\s+SIGNATURE|CRYPT_PROPERTIES)') `
     'The direct-admin bootstrap must contain no certificate or procedure-signing machinery.'
-Assert-True ($ddl -match 'ALTER\s+SERVER\s+ROLE\s+\[sysadmin\]\s+ADD\s+MEMBER\s+\[IIS AppPool\\FluxKnowledge\]') `
-    'The direct-admin bootstrap must grant the fixed app-pool login sysadmin membership.'
-Assert-True ($ddl -match 'FluxKnowledgeNativeGoLiveObserveAppPool') 'The canonical app-pool observer is missing.'
-Assert-True ($ddl -notmatch "HAS_PERMS_BY_NAME\(NULL,N''SERVER'',N''CONNECT SQL''\)") `
-    'The app-pool observer must not reject a valid impersonated login because SQL does not report CONNECT SQL through EXECUTE AS.'
-Assert-True ($ddl -match "HAS_PERMS_BY_NAME\(N''FluxKnowledge'',N''DATABASE'',N''CONNECT''\)=1") `
-    'The app-pool observer must prove database connectivity.'
+Assert-True ($ddl -notmatch 'IIS AppPool\\FluxKnowledge|ALTER\s+AUTHORIZATION\s+ON\s+DATABASE') `
+    'The bootstrap must not create, transfer to, or observe an app-pool SQL identity.'
 Assert-True ($ddl -match "N'FluxKnowledge'") 'The canonical catalogue binding is missing.'
 $firstProcedure = $ddl.IndexOf('-- BEGIN HASHED PROCEDURE:', [StringComparison]::Ordinal)
 $existingProcedureGuard = [regex]::Match(
     $ddl,
-    "(?s)IF EXISTS \(.*?sys\.procedures.*?FluxKnowledgeNativeGoLiveCreate.*?FluxKnowledgeNativeGoLiveDrop.*?FluxKnowledgeNativeGoLiveManageAppPool.*?FluxKnowledgeNativeGoLiveObserveAppPool.*?\)\s*THROW 51000, 'native-go-live-bootstrap-procedure-already-exists', 1;")
+    "(?s)IF EXISTS \(.*?sys\.procedures.*?FluxKnowledgeNativeGoLiveCreate.*?FluxKnowledgeNativeGoLiveDrop.*?\)\s*THROW 51000, 'native-go-live-bootstrap-procedure-already-exists', 1;")
 Assert-True ($existingProcedureGuard.Success -and $existingProcedureGuard.Index -lt $firstProcedure) `
     'The clean-slate bootstrap must reject every existing canonical procedure before the creation-only definition batches.'
 $creationOnlyProcedures = [regex]::Matches(
     $ddl,
-    '(?m)^CREATE PROCEDURE dbo\.(FluxKnowledgeNativeGoLiveCreate|FluxKnowledgeNativeGoLiveDrop|FluxKnowledgeNativeGoLiveManageAppPool|FluxKnowledgeNativeGoLiveObserveAppPool)$')
-Assert-True ($creationOnlyProcedures.Count -eq 4 -and $ddl -notmatch '(?im)^CREATE\s+OR\s+ALTER\s+PROCEDURE') `
+    '(?m)^CREATE PROCEDURE dbo\.(FluxKnowledgeNativeGoLiveCreate|FluxKnowledgeNativeGoLiveDrop)$')
+Assert-True ($creationOnlyProcedures.Count -eq 2 -and $ddl -notmatch '(?im)^CREATE\s+OR\s+ALTER\s+PROCEDURE') `
     'Every canonical procedure must use creation-only DDL so a late pre-existing object cannot be overwritten.'
-Assert-True ($ddl -match 'ALTER\s+AUTHORIZATION\s+ON\s+DATABASE::\[FluxKnowledge\]') `
-    'The canonical bootstrap must transfer target database ownership away from its caller.'
 Assert-True (-not ($ddl -match '(?i)(CREATE\s+USER|DROP\s+USER|sp_addrolemember|db_datareader|db_datawriter)')) `
     'The direct-admin bootstrap must not retain named database-user or role management.'
 
@@ -75,9 +68,6 @@ try {
         missing_existing_procedure_guard = $ddl.Remove(
             $existingProcedureGuard.Index,
             $existingProcedureGuard.Length)
-        missing_app_pool_sysadmin = $ddl.Replace(
-            'ALTER SERVER ROLE [sysadmin] ADD MEMBER [IIS AppPool\FluxKnowledge];',
-            '-- app-pool sysadmin grant removed')
         allow_existing_procedure_replacement = $ddl.Replace(
             'CREATE PROCEDURE dbo.FluxKnowledgeNativeGoLiveCreate',
             'CREATE OR ALTER PROCEDURE dbo.FluxKnowledgeNativeGoLiveCreate')
