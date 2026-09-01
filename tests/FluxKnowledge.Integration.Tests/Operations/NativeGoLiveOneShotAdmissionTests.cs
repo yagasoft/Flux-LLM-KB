@@ -6,6 +6,22 @@ namespace FluxKnowledge.Integration.Tests.Operations;
 
 public sealed class NativeGoLiveOneShotAdmissionTests
 {
+    [Fact]
+    public async Task Empty_root_creation_creates_the_required_runtime_hierarchy()
+    {
+        using var fixture = new DisposableAdmissionFixture(catalogueExists: false);
+
+        await fixture.OwnedState.CreateEmptyRootAsync(CancellationToken.None);
+
+        Assert.True(Directory.Exists(fixture.Layout.SqlDataRoot));
+        Assert.True(Directory.Exists(fixture.Layout.SqlLogRoot));
+        Assert.True(Directory.Exists(fixture.Layout.IndexRoot));
+        Assert.True(Directory.Exists(fixture.Layout.RetainedRoot));
+        Assert.True(Directory.Exists(fixture.Layout.SpoolRoot));
+        Assert.True(Directory.Exists(fixture.Layout.TempRoot));
+        Assert.True(Directory.Exists(fixture.Layout.LogsRoot));
+    }
+
     private static readonly NativeGoLivePlan Plan = NativeGoLivePlan.CreateProduction(new string('a', 40));
 
     [Fact]
@@ -285,16 +301,17 @@ public sealed class NativeGoLiveOneShotAdmissionTests
                 "Encrypt=True;Trust Server Certificate=True;Connect Timeout=5;Connect Retry Count=0;" +
                 "Pooling=False;Application Name=FluxKnowledge.NativeGoLive");
             var sql = new NativeGoLiveWindowsSqlPort(plan, _root);
-            var ownedState = new NativeGoLiveWindowsOwnedStatePort(plan, bootstrap);
+            OwnedState = new NativeGoLiveWindowsOwnedStatePort(plan, bootstrap);
             Catalogue = new DisposableCatalogue(catalogueExists);
             Admission = new NativeGoLiveWindowsOneShotAdmissionPort(
                 plan,
-                ownedState,
+                OwnedState,
                 Catalogue.ExistsAsync,
                 Catalogue.DropAsync);
         }
 
         public LiveRootLayout Layout { get; }
+        public NativeGoLiveWindowsOwnedStatePort OwnedState { get; }
         public DisposableCatalogue Catalogue { get; }
         public INativeGoLiveAdmissionPort Admission { get; }
 

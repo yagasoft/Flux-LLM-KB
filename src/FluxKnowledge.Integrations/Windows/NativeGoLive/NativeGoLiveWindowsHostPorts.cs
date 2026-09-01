@@ -478,6 +478,13 @@ internal sealed class NativeGoLiveWindowsOwnedStatePort(
                 continue;
             RequireMutation(await _fileSystem.CreateDirectoryAsync(root, child, cancellationToken).ConfigureAwait(false));
         }
+        foreach (var path in new[]
+                 {
+                     plan.Layout.SqlDataRoot, plan.Layout.SqlLogRoot, plan.Layout.IndexRoot,
+                     plan.Layout.RetainedRoot, plan.Layout.SpoolRoot, plan.Layout.TempRoot,
+                     plan.Layout.LogsRoot
+                 })
+            using (var directory = _fileSystem.OpenOrCreateDirectory(path)) { }
     }
 
     public async ValueTask WriteProductionConfigurationAsync(CancellationToken cancellationToken)
