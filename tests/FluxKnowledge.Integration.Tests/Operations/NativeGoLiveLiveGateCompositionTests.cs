@@ -253,15 +253,12 @@ public sealed class NativeGoLiveLiveGateCompositionTests
     }
 
     [Fact]
-    public async Task Post_bootstrap_validation_rejects_non_app_pool_catalogue_owner()
+    public async Task Post_bootstrap_validation_accepts_a_usable_catalogue_with_a_non_app_pool_owner()
     {
         using var fixture = new PostBootstrapFixture(catalogueOwnerSidHex: OtherSidHex);
         await using var lease = await fixture.AcquireLeaseAsync();
 
-        var exception = await Assert.ThrowsAsync<NativeGoLiveContractException>(
-            () => fixture.Host.ProvisionEmptyCatalogueAsync(fixture.Plan.Sql, CancellationToken.None).AsTask());
-
-        Assert.Equal("sql-bootstrap-postcondition-failed", exception.Message);
+        await fixture.Host.ProvisionEmptyCatalogueAsync(fixture.Plan.Sql, CancellationToken.None);
     }
 
     private sealed class ExecutorOrderingFixture : IDisposable

@@ -1167,7 +1167,6 @@ internal sealed class GuardedNativeGoLiveHost : INativeGoLiveHost
             !IsOpaqueSqlSid(value.CatalogueOwnerSidHex) ||
             !ExactDatabaseFiles(value.DatabaseFiles, _plan.Sql) ||
             !value.FullTextInstalled ||
-            !string.Equals(value.CatalogueOwnerSidHex, value.AppPoolLoginSidHex, StringComparison.Ordinal) ||
             !value.ExpectedMigrations.SequenceEqual(NativeGoLiveDatabaseContract.RequiredMigrations, StringComparer.Ordinal) ||
             !value.AppliedMigrations.SequenceEqual(NativeGoLiveDatabaseContract.RequiredMigrations, StringComparer.Ordinal) ||
             !value.EmptyMarkerDurable || !value.EmptyReadinessProved ||
