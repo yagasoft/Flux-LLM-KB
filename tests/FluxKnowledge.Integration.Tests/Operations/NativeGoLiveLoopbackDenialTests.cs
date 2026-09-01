@@ -56,9 +56,9 @@ public sealed class NativeGoLiveLoopbackDenialTests
     }
 
     [Fact]
-    public async Task Empty_search_waits_for_one_transient_startup_unavailability()
+    public async Task Empty_search_accepts_the_native_result_array()
     {
-        var transport = new LoopbackOnlyTransport(transientSearchFailures: 1);
+        var transport = new LoopbackOnlyTransport(searchResultIsDirectArray: true);
         var port = new NativeGoLiveWindowsLoopbackPort(
             transport,
             () => [],
@@ -67,10 +67,11 @@ public sealed class NativeGoLiveLoopbackDenialTests
 
         var observation = await port.ObserveAsync(CancellationToken.None);
 
-        Assert.Equal(9, transport.Requests.Count);
-        Assert.Equal(2, transport.Requests.Count(request => request.Uri.AbsolutePath == "/api/v1/knowledge/search"));
+        Assert.Equal(8, transport.Requests.Count);
+        Assert.Single(transport.Requests, request => request.Uri.AbsolutePath == "/api/v1/knowledge/search");
         Assert.Equal(200, observation.Search.Http.StatusCode);
         Assert.True(observation.Search.Succeeded);
+        Assert.Equal(0, observation.Search.ResultCount);
     }
 
     [Fact]
@@ -97,10 +98,8 @@ public sealed class NativeGoLiveLoopbackDenialTests
     internal sealed class LoopbackOnlyTransport(
         bool includeNativeProofMarker = true,
         bool returnHttpSysDenialForNonLoopback = false,
-        int transientSearchFailures = 0) : INativeGoLiveHttpTransport
+        bool searchResultIsDirectArray = false) : INativeGoLiveHttpTransport
     {
-        private int _transientSearchFailuresRemaining = transientSearchFailures;
-
         public List<NativeGoLiveHttpRequestSpec> Requests { get; } = [];
 
         public ValueTask<NativeGoLiveRawHttpResponse> SendAsync(
@@ -124,20 +123,10 @@ public sealed class NativeGoLiveLoopbackDenialTests
                     }));
             }
 
-            if (request.Uri.AbsolutePath == "/api/v1/knowledge/search" && _transientSearchFailuresRemaining-- > 0)
-            {
-                return ValueTask.FromResult(new NativeGoLiveRawHttpResponse(
-                    503,
-                    new NativeGoLiveHttpPeer("127.0.0.1", "127.0.0.1"),
-                    "Service Unavailable",
-                    UsedProxy: false,
-                    FollowedRedirect: false));
-            }
-
             return ValueTask.FromResult(new NativeGoLiveRawHttpResponse(
                 request.Uri.AbsolutePath == "/health/live" && request.Headers.Count != 0 ? 403 : 200,
                 new NativeGoLiveHttpPeer("127.0.0.1", "127.0.0.1"),
-                BodyFor(request),
+                BodyFor(request, searchResultIsDirectArray),
                 UsedProxy: false,
                 FollowedRedirect: false,
                 Headers: includeNativeProofMarker && request.Uri.AbsolutePath is "/health/live" or "/health/ready"
@@ -148,13 +137,15 @@ public sealed class NativeGoLiveLoopbackDenialTests
                     : null));
         }
 
-        private static string BodyFor(NativeGoLiveHttpRequestSpec request) => request.Uri.AbsolutePath switch
+        private static string BodyFor(NativeGoLiveHttpRequestSpec request, bool searchResultIsDirectArray) => request.Uri.AbsolutePath switch
         {
             "/api/index-health" =>
                 "{\"state\":\"Healthy\",\"activeGeneration\":null,\"failureCategory\":null,\"cleanedCandidateCount\":0}",
             "/api/gpu-status" =>
                 "{\"readyCount\":0,\"activeCount\":0,\"deferredCount\":0,\"outcomeUncertainCount\":0,\"hasActiveBatch\":false}",
-            "/api/v1/knowledge/search" => "{\"ok\":true,\"result\":{\"items\":[]}}",
+            "/api/v1/knowledge/search" => searchResultIsDirectArray
+                ? "{\"ok\":true,\"result\":[]}"
+                : "{\"ok\":true,\"result\":{\"items\":[]}}",
             "/mcp" when request.JsonBody!.Contains("\"id\":1", StringComparison.Ordinal) =>
                 "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2025-11-25\",\"serverInfo\":{\"name\":\"FluxKnowledge\",\"version\":\"1\"},\"capabilities\":{}}}",
             "/mcp" =>

@@ -524,6 +524,7 @@ public sealed class NativeWorkerSupervisorServiceTests
         await adapter.DeliverAsync(handle, CancellationToken.None);
         await lifecycle.Callback.Task.WaitAsync(TimeSpan.FromSeconds(10));
         await store.Cleared.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        await supervisor.StopAsync(CancellationToken.None);
 
         Assert.Equal(miniTaskId, Assert.Single(lifecycle.Receipts).MiniTaskId);
         Assert.NotEqual(handle.BatchId, Assert.Single(lifecycle.Receipts).MiniTaskId);

@@ -331,8 +331,6 @@ internal interface INativeGoLiveTcpProbe
 internal sealed class NativeGoLiveWindowsLoopbackPort : INativeGoLiveLoopbackPort
 {
     private const int MaximumResponseBytes = 1024 * 1024;
-    private static readonly TimeSpan SearchReadinessObservationWindow = TimeSpan.FromSeconds(5);
-    private static readonly TimeSpan SearchReadinessObservationInterval = TimeSpan.FromMilliseconds(100);
     private static readonly Uri BaseUri = new(NativeGoLiveLoopbackContract.BaseUri + "/");
     private readonly INativeGoLiveHttpTransport? _transport;
     private readonly Func<IReadOnlyList<IPAddress>>? _nonLoopbackAddresses;
@@ -371,7 +369,12 @@ internal sealed class NativeGoLiveWindowsLoopbackPort : INativeGoLiveLoopbackPor
         var ready = await SendAsync("GET", "/health/ready", null, null, cancellationToken).ConfigureAwait(false);
         var index = await SendAsync("GET", "/api/index-health", null, null, cancellationToken).ConfigureAwait(false);
         var gpu = await SendAsync("GET", "/api/gpu-status", null, null, cancellationToken).ConfigureAwait(false);
-        var search = await ObserveEmptySearchReadyAsync(cancellationToken).ConfigureAwait(false);
+        var search = await SendAsync(
+            "POST",
+            "/api/v1/knowledge/search",
+            "{\"query\":\"native-go-live-empty-probe\",\"limit\":1}",
+            null,
+            cancellationToken).ConfigureAwait(false);
         var mcpHeaders = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
             ["Accept"] = "application/json, text/event-stream"
@@ -587,25 +590,6 @@ internal sealed class NativeGoLiveWindowsLoopbackPort : INativeGoLiveLoopbackPor
         CancellationToken cancellationToken) =>
         await SendAbsoluteAsync(method, new Uri(BaseUri, path), json, headers, cancellationToken).ConfigureAwait(false);
 
-    private async ValueTask<(NativeGoLiveHttpObservation Observation, NativeGoLiveRawHttpResponse Raw)> ObserveEmptySearchReadyAsync(
-        CancellationToken cancellationToken)
-    {
-        var deadline = DateTime.UtcNow + SearchReadinessObservationWindow;
-        while (true)
-        {
-            var search = await SendAsync(
-                "POST",
-                "/api/v1/knowledge/search",
-                "{\"query\":\"native-go-live-empty-probe\",\"limit\":1}",
-                null,
-                cancellationToken).ConfigureAwait(false);
-            if (search.Observation.StatusCode == 200 || DateTime.UtcNow >= deadline)
-                return search;
-
-            await Task.Delay(SearchReadinessObservationInterval, cancellationToken).ConfigureAwait(false);
-        }
-    }
-
     private async ValueTask<(NativeGoLiveHttpObservation Observation, NativeGoLiveRawHttpResponse Raw)> SendAbsoluteAsync(
         string method,
         Uri uri,
@@ -689,7 +673,11 @@ internal sealed class NativeGoLiveWindowsLoopbackPort : INativeGoLiveLoopbackPor
 
     private static int SearchResultCount(JsonElement envelope)
     {
-        if (!envelope.TryGetProperty("result", out var result) || result.ValueKind != JsonValueKind.Object)
+        if (!envelope.TryGetProperty("result", out var result))
+            throw new NativeGoLiveContractException("rest-empty-search-invalid");
+        if (result.ValueKind == JsonValueKind.Array)
+            return result.GetArrayLength();
+        if (result.ValueKind != JsonValueKind.Object)
             throw new NativeGoLiveContractException("rest-empty-search-invalid");
         foreach (var name in new[] { "items", "results" })
         {
