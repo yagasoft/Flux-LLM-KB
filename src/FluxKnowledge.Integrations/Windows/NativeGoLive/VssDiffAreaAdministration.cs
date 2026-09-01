@@ -195,7 +195,11 @@ internal sealed class VssDiffAreaAdministration
             {
                 throw new NativeGoLiveContractException(action == NativeGoLiveVssAction.AddDiffArea
                     ? "vss-add-diff-area-failed"
-                    : "vss-change-diff-area-failed");
+                    : "vss-change-diff-area-failed",
+                    exception is COMException
+                        ? $"hresult-0x{unchecked((uint)exception.HResult):X8}"
+                        : null,
+                    exception);
             }
 
             cancellationToken.ThrowIfCancellationRequested();

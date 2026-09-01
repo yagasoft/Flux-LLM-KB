@@ -89,7 +89,7 @@ public sealed class NativeGoLiveExecutor
                 exception.ReasonCode is "vss-exact-action-not-proved" or
                     "vss-add-diff-area-failed" or "vss-change-diff-area-failed")
             {
-                return NativeGoLiveResult.Refused(exception.ReasonCode);
+                return NativeGoLiveResult.Refused(exception.ReasonCode, exception.DiagnosticDetail);
             }
             catch (Exception)
             {

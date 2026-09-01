@@ -390,7 +390,12 @@ function Record-NativeGoLiveFailure {
         [Parameter(Mandatory)][Exception]$Exception)
 
     $script:FailedStep = 'native-go-live'
-    if ($Exception.Message -cmatch "\A(?:Native go-live failed with safe reason code '(go-live-(?:acknowledgement-required|cancelled-before-admission|lease-unavailable|closeout-capability-(?:unrecognised|expired|binding-mismatch|consumed))|clean-slate-(?:incomplete|admission-failed)|vss-(?:exact-action-not-proved|add-diff-area-failed|change-diff-area-failed)|native-go-live-bootstrap-(?:(?:reset|install|probe)-(?:connection|sni-load|script-parse|sql-batch-[1-9][0-9]*)-failed|(?:reset|install|probe)-failed))'\.|(native-go-live-bridge-(?:composition|invocation|discovery|call|result)-failed))\z") {
+    if ($Exception.Message -cmatch "\ANative go-live failed with safe reason code '(?<reason>go-live-(?:acknowledgement-required|cancelled-before-admission|lease-unavailable|closeout-capability-(?:unrecognised|expired|binding-mismatch|consumed))|clean-slate-(?:incomplete|admission-failed)|vss-(?:exact-action-not-proved|add-diff-area-failed|change-diff-area-failed)|native-go-live-bootstrap-(?:(?:reset|install|probe)-(?:connection|sni-load|script-parse|sql-batch-[1-9][0-9]*)-failed|(?:reset|install|probe)-failed))'(?: \(diagnostic: (?<detail>hresult-0x[0-9A-F]{8})\))?\.\z") {
+        $Record.reason_code = $Matches['reason']
+        if (-not [string]::IsNullOrWhiteSpace($Matches['detail'])) {
+            $Record.diagnostic_detail = $Matches['detail']
+        }
+    } elseif ($Exception.Message -cmatch "\A(?:Native go-live failed with safe reason code '(go-live-(?:acknowledgement-required|cancelled-before-admission|lease-unavailable|closeout-capability-(?:unrecognised|expired|binding-mismatch|consumed))|clean-slate-(?:incomplete|admission-failed)|vss-(?:exact-action-not-proved|add-diff-area-failed|change-diff-area-failed)|native-go-live-bootstrap-(?:(?:reset|install|probe)-(?:connection|sni-load|script-parse|sql-batch-[1-9][0-9]*)-failed|(?:reset|install|probe)-failed))'\.|(native-go-live-bridge-(?:composition|invocation|discovery|call|result)-failed))\z") {
         $Record.reason_code = if ([string]::IsNullOrWhiteSpace($Matches[1])) { $Matches[2] } else { $Matches[1] }
     }
 }
@@ -1083,7 +1088,12 @@ function Invoke-NativeGoLive {
             throw 'native-go-live-bridge-invocation-failed'
         }
         if (-not $result.Succeeded) {
-            throw "Native go-live failed with safe reason code '$($result.ReasonCode)'."
+            $detail = [string]$result.DiagnosticDetail
+            if ($detail -and $detail -notmatch '\Ahresult-0x[0-9A-F]{8}\z') {
+                throw 'native-go-live-bridge-result-failed'
+            }
+            $suffix = if ($detail) { " (diagnostic: $detail)" } else { '' }
+            throw "Native go-live failed with safe reason code '$($result.ReasonCode)'$suffix."
         }
     } finally {
         Clear-NativeGoLiveBootstrapEnvironment

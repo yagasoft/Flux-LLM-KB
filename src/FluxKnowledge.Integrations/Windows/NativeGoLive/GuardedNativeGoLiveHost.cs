@@ -6,9 +6,19 @@ using Microsoft.Data.SqlClient;
 
 namespace FluxKnowledge.Integrations.Windows.NativeGoLive;
 
-internal sealed class NativeGoLiveContractException(string reasonCode) : InvalidOperationException(reasonCode)
+internal sealed class NativeGoLiveContractException : InvalidOperationException
 {
-    internal string ReasonCode { get; } = reasonCode;
+    internal NativeGoLiveContractException(
+        string reasonCode,
+        string? diagnosticDetail = null,
+        Exception? innerException = null) : base(reasonCode, innerException)
+    {
+        ReasonCode = reasonCode;
+        DiagnosticDetail = diagnosticDetail;
+    }
+
+    internal string ReasonCode { get; }
+    internal string? DiagnosticDetail { get; }
 }
 
 /// <summary>

@@ -1,5 +1,6 @@
 using FluxKnowledge.Application.Operations;
 using FluxKnowledge.Integrations.Windows.NativeGoLive;
+using System.Runtime.InteropServices;
 using Xunit;
 
 namespace FluxKnowledge.Integration.Tests.Operations;
@@ -130,6 +131,21 @@ public sealed class NativeGoLiveLiveGateCompositionTests
     }
 
     [Fact]
+    public async Task Vss_com_failure_preserves_its_bounded_hresult_detail()
+    {
+        using var fixture = new ExecutorOrderingFixture(
+            vssException: new NativeGoLiveContractException(
+                "vss-add-diff-area-failed", "hresult-0x8004230F"));
+        fixture.BeginExecution();
+
+        var result = await new NativeGoLiveExecutor().ExecuteAsync(fixture.Request, fixture.Host);
+
+        Assert.False(result.Succeeded);
+        Assert.Equal("vss-add-diff-area-failed", result.ReasonCode);
+        Assert.Equal("hresult-0x8004230F", result.DiagnosticDetail);
+    }
+
+    [Fact]
     public void Vss_adapter_preserves_the_fixed_add_action_failure_code()
     {
         var adapter = new VssDiffAreaAdministration(new OrdinaryFailureVssApi());
@@ -138,6 +154,23 @@ public sealed class NativeGoLiveLiveGateCompositionTests
             adapter.EnsureMaximumStorageObserved("I:", 0.10m, CancellationToken.None));
 
         Assert.Equal("vss-add-diff-area-failed", failure.ReasonCode);
+        Assert.Equal("hresult-0x80070005", failure.DiagnosticDetail);
+    }
+
+    [Fact]
+    public void Vss_adapter_enables_backup_privilege_only_while_adding_the_canonical_diff_area()
+    {
+        var privilege = new RecordingVssOperationPrivilegeScope();
+        var api = new PrivilegeRequiredVssApi(privilege);
+        var adapter = new VssDiffAreaAdministration(api, privilege);
+
+        var result = adapter.EnsureMaximumStorageObserved("I:", 0.10m, CancellationToken.None);
+
+        Assert.Equal(VssAssociationState.ExactExisting, result.Verified.State);
+        Assert.Equal(1, privilege.EnableCount);
+        Assert.Equal(1, privilege.DisposeCount);
+        Assert.True(api.AddCalledWhileEnabled);
+        Assert.False(privilege.IsEnabled);
     }
 
     [Fact]
@@ -232,7 +265,8 @@ public sealed class NativeGoLiveLiveGateCompositionTests
             string bootstrapFailureCode = "native-go-live-bootstrap-install-sql-batch-1-failed",
             bool failAdmission = false,
             bool cancelAdmission = false,
-            bool failVss = false)
+            bool failVss = false,
+            NativeGoLiveContractException? vssException = null)
         {
             _root = Path.Combine(Path.GetTempPath(), "FluxKnowledgeLiveGateOrdering", Guid.NewGuid().ToString("N"));
             var payloadRoot = CreatePayloadRoot(_root);
@@ -245,7 +279,7 @@ public sealed class NativeGoLiveLiveGateCompositionTests
             _capability = new NativeGoLiveCloseoutCapabilityIssuer().Issue(Plan, payloadRoot, manifest.Sha256);
             Request = new NativeGoLiveRequest(
                 Plan, false, true, true, true, true, payloadRoot, manifest.Sha256, manifest);
-            var vss = new RecordingVssPort(Plan, Events, failVss);
+            var vss = new RecordingVssPort(Plan, Events, failVss, vssException);
             Acls = new OrderingAclPort(Plan, Events);
             var bootstrap = NativeGoLiveSqlBootstrap.Parse(CanonicalBootstrap);
             var preflight = new NativeGoLiveWindowsPreflightPort(
@@ -422,10 +456,15 @@ public sealed class NativeGoLiveLiveGateCompositionTests
 
     private sealed class RecordingVssPort : INativeGoLiveVssPort
     {
-        public RecordingVssPort(NativeGoLivePlan plan, List<string> events, bool fail)
+        public RecordingVssPort(
+            NativeGoLivePlan plan,
+            List<string> events,
+            bool fail,
+            NativeGoLiveContractException? exception = null)
         {
             _events = events;
             _fail = fail;
+            _exception = exception;
             const ulong capacity = 20_000_000_000;
             var maximum = checked((ulong)decimal.Floor(capacity * plan.Vss.MaximumStorageFraction));
             var state = new VssDiffAreaState(VssAssociationState.ExactExisting, "V:", "V:", maximum);
@@ -434,6 +473,7 @@ public sealed class NativeGoLiveLiveGateCompositionTests
 
         private readonly List<string> _events;
         private readonly bool _fail;
+        private readonly NativeGoLiveContractException? _exception;
         public NativeGoLiveVssPreflightObservation Observation { get; }
 
         public NativeGoLiveVssPreflightObservation Query(CancellationToken _) => Observation;
@@ -442,6 +482,7 @@ public sealed class NativeGoLiveLiveGateCompositionTests
             NativeGoLiveVssPolicy _, NativeGoLiveVssPreflightObservation expected, CancellationToken __)
         {
             _events.Add("configure-vss");
+            if (_exception is not null) throw _exception;
             if (_fail)
             {
                 var failed = expected.Association with { State = VssAssociationState.Failed };
@@ -460,7 +501,7 @@ public sealed class NativeGoLiveLiveGateCompositionTests
             20_000_000_000);
 
         public void AddDiffArea(string _, string __, ulong ___) =>
-            throw new ArgumentException("test ordinary VSS adapter failure");
+            throw new COMException("test ordinary VSS adapter failure", unchecked((int)0x80070005));
 
         public void ChangeDiffAreaMaximumSize(string _, string __, ulong ___) =>
             throw new NotSupportedException();
