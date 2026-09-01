@@ -361,17 +361,21 @@ internal sealed class NativeGoLiveWindowsLoopbackPort : INativeGoLiveLoopbackPor
             "{\"query\":\"native-go-live-empty-probe\",\"limit\":1}",
             null,
             cancellationToken).ConfigureAwait(false);
+        var mcpHeaders = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["Accept"] = "application/json, text/event-stream"
+        };
         var initialise = await SendAsync(
             "POST",
             "/mcp",
             "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"clientInfo\":{\"name\":\"native-go-live\",\"version\":\"1\"}}}",
-            null,
+            mcpHeaders,
             cancellationToken).ConfigureAwait(false);
         var tools = await SendAsync(
             "POST",
             "/mcp",
             "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{}}",
-            null,
+            mcpHeaders,
             cancellationToken).ConfigureAwait(false);
         var forwardedHeaders = new Dictionary<string, string>(StringComparer.Ordinal)
         {

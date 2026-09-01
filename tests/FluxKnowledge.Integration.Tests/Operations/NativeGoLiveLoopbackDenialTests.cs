@@ -38,6 +38,24 @@ public sealed class NativeGoLiveLoopbackDenialTests
     }
 
     [Fact]
+    public async Task MCP_validation_requests_accept_JSON_and_event_stream()
+    {
+        var transport = new LoopbackOnlyTransport();
+        var port = new NativeGoLiveWindowsLoopbackPort(
+            transport,
+            () => [],
+            DisabledRuntime(),
+            new StaticTcpProbe());
+
+        _ = await port.ObserveAsync(CancellationToken.None);
+
+        var mcpRequests = transport.Requests.Where(request => request.Uri.AbsolutePath == "/mcp").ToArray();
+        Assert.Equal(2, mcpRequests.Length);
+        Assert.All(mcpRequests, request =>
+            Assert.Equal("application/json, text/event-stream", request.Headers["Accept"]));
+    }
+
+    [Fact]
     public async Task HTTP_sys_handshakes_with_a_complete_non_application_response_are_treated_as_non_loopback_denial()
     {
         var transport = new LoopbackOnlyTransport(returnHttpSysDenialForNonLoopback: true);

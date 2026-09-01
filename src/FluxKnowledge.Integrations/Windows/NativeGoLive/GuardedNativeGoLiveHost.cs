@@ -1258,8 +1258,8 @@ internal sealed class GuardedNativeGoLiveHost : INativeGoLiveHost
             !string.Equals(value.Search.Query, "native-go-live-empty-probe", StringComparison.Ordinal) ||
             value.Search.Limit != 1 || value.Search.ResultCount != 0)
             throw new NativeGoLiveContractException("rest-empty-search-contract-failed");
-        RequireHttp(value.Mcp.Initialise, "POST", "/mcp", 200);
-        RequireHttp(value.Mcp.ToolsList, "POST", "/mcp", 200);
+        RequireHttp(value.Mcp.Initialise, "POST", "/mcp", 200, expectedHeaderNames: ["Accept"]);
+        RequireHttp(value.Mcp.ToolsList, "POST", "/mcp", 200, expectedHeaderNames: ["Accept"]);
         if (!ExactSet(value.Mcp.Tools, NativeGoLiveLoopbackContract.RequiredMcpTools))
             throw new NativeGoLiveContractException("mcp-tool-contract-mismatch");
         if (!string.Equals(value.ForwardedDenial.Method, "GET", StringComparison.Ordinal) ||
@@ -1283,13 +1283,14 @@ internal sealed class GuardedNativeGoLiveHost : INativeGoLiveHost
         string method,
         string path,
         int status,
-        bool requireNativeProofMarker = false)
+        bool requireNativeProofMarker = false,
+        IReadOnlyList<string>? expectedHeaderNames = null)
     {
         if (!string.Equals(value.Method, method, StringComparison.Ordinal) ||
             !string.Equals(value.Uri, NativeGoLiveLoopbackContract.BaseUri + path, StringComparison.Ordinal) ||
             value.StatusCode != status ||
             !IsLoopbackPeer(value.Peer) ||
-            value.SentHeaderNames.Count != 0)
+            !ExactSet(value.SentHeaderNames, expectedHeaderNames ?? []))
             throw new NativeGoLiveContractException("loopback-http-contract-failed");
         if (requireNativeProofMarker && !value.HasNativeProofMarker)
             throw new NativeGoLiveContractException("loopback-native-proof-marker-missing");
