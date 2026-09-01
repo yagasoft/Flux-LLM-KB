@@ -1,4 +1,6 @@
 using System.Text;
+using System.Security.AccessControl;
+using System.Runtime.Versioning;
 using FluxKnowledge.Integrations.Windows.NativeGoLive;
 using Xunit;
 
@@ -6,6 +8,23 @@ namespace FluxKnowledge.Integration.Tests.Operations;
 
 public sealed class HandleRelativeNativeFileSystemTests
 {
+    [Fact]
+    [SupportedOSPlatform("windows")]
+    public async Task Security_handle_can_apply_a_directory_DACL()
+    {
+        await using var fixture = new Fixture();
+        var fileSystem = new HandleRelativeNativeFileSystem();
+        var security = new DirectoryInfo(fixture.Root)
+            .GetAccessControl(AccessControlSections.Access);
+
+        using var directory = fileSystem.OpenDirectoryForSecurity(fixture.Root);
+        await fileSystem.SetDirectorySecurityAsync(directory, security);
+
+        Assert.NotEmpty(new DirectoryInfo(fixture.Root)
+            .GetAccessControl(AccessControlSections.Access)
+            .GetSecurityDescriptorBinaryForm());
+    }
+
     [Fact]
     public async Task Swap_between_validation_and_delete_is_rejected_without_deleting_either_identity()
     {

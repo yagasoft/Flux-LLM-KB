@@ -858,7 +858,7 @@ internal sealed class NativeGoLiveWindowsAclPort : INativeGoLiveAclPort
         foreach (var (sid, rights) in grants)
             security.AddAccessRule(new FileSystemAccessRule(
                 sid, rights, inherit, PropagationFlags.None, AccessControlType.Allow));
-        using var directory = _fileSystem.OpenDirectory(path);
+        using var directory = _fileSystem.OpenDirectoryForSecurity(path);
         _fileSystem.SetDirectorySecurityAsync(directory, security).GetAwaiter().GetResult();
     }
 

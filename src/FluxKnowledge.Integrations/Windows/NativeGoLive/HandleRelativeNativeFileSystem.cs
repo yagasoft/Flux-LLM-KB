@@ -81,7 +81,13 @@ internal sealed class HandleRelativeNativeFileSystem
         _beforeMutation = beforeMutation;
     }
 
-    internal VerifiedNativeDirectory OpenDirectory(string absolutePath)
+    internal VerifiedNativeDirectory OpenDirectory(string absolutePath) =>
+        OpenDirectory(absolutePath, NativeMethods.DirectoryReadAccess);
+
+    internal VerifiedNativeDirectory OpenDirectoryForSecurity(string absolutePath) =>
+        OpenDirectory(absolutePath, NativeMethods.DirectorySecurityAccess);
+
+    private VerifiedNativeDirectory OpenDirectory(string absolutePath, uint finalAccess)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(absolutePath);
         if (!Path.IsPathFullyQualified(absolutePath) ||
@@ -98,22 +104,28 @@ internal sealed class HandleRelativeNativeFileSystem
             throw new UnauthorizedAccessException("The directory has no local volume root.");
         }
 
-        var current = NativeMethods.OpenAbsoluteDirectory(root);
+        var current = NativeMethods.OpenAbsoluteDirectory(
+            root,
+            string.Equals(canonicalPath, root, StringComparison.OrdinalIgnoreCase)
+                ? finalAccess
+                : NativeMethods.DirectoryReadAccess);
         try
         {
             EnsureSafeDirectory(current);
             var relative = Path.GetRelativePath(root, canonicalPath);
             if (!string.Equals(relative, ".", StringComparison.Ordinal))
             {
-                foreach (var component in relative.Split(
-                             [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
-                             StringSplitOptions.RemoveEmptyEntries))
+                var components = relative.Split(
+                    [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
+                    StringSplitOptions.RemoveEmptyEntries);
+                for (var index = 0; index < components.Length; index++)
                 {
+                    var component = components[index];
                     EnsureLiteralChild(component);
                     var next = NativeMethods.OpenRelative(
                         current,
                         component,
-                        NativeMethods.DirectoryReadAccess,
+                        index == components.Length - 1 ? finalAccess : NativeMethods.DirectoryReadAccess,
                         NativeMethods.ShareReadWrite,
                         NativeMethods.FileOpen,
                         NativeMethods.DirectoryOpenOptions);
@@ -1040,6 +1052,7 @@ internal sealed class HandleRelativeNativeFileSystem
         internal const uint ShareReadWrite = FileShareRead | FileShareWrite;
         internal const uint ShareAll = FileShareRead | FileShareWrite | FileShareDelete;
         internal const uint DirectoryReadAccess = FileListDirectory | FileAddSubdirectory | FileReadAttributes | Synchronize;
+        internal const uint DirectorySecurityAccess = DirectoryReadAccess | WriteDac;
         internal const uint FileReadAccess = FileReadData | FileReadAttributes | Synchronize;
         internal const uint FileAttributesAccess = FileReadAttributes | Synchronize;
         internal const uint FileWriteAccess = FileWriteData | FileReadAttributes | FileWriteAttributes | Delete | Synchronize;
@@ -1122,11 +1135,11 @@ internal sealed class HandleRelativeNativeFileSystem
         private static extern uint RtlNtStatusToDosError(int status);
 #pragma warning restore SYSLIB1054
 
-        internal static SafeFileHandle OpenAbsoluteDirectory(string path)
+        internal static SafeFileHandle OpenAbsoluteDirectory(string path, uint desiredAccess = DirectoryReadAccess)
         {
             var handle = CreateFile(
                 path,
-                DirectoryReadAccess,
+                desiredAccess,
                 ShareReadWrite,
                 IntPtr.Zero,
                 OpenExisting,
