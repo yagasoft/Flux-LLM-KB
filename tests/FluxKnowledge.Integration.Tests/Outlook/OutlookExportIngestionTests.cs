@@ -1,4 +1,6 @@
 using System.Security.Cryptography;
+using System.Security.AccessControl;
+using System.Security.Principal;
 using System.Text;
 using System.Text.Json;
 using FluxKnowledge.Application.Contracts;
@@ -1197,6 +1199,36 @@ public sealed class OutlookExportIngestionTests(NativeSqlServerFixture fixture) 
             }
             Directory.Delete(container, recursive: true);
             Directory.Delete(outside, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Root_directory_lease_opens_with_modify_without_delete_child()
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+
+        var root = CreateTemporaryDirectory();
+        try
+        {
+            var sid = WindowsIdentity.GetCurrent().User ?? throw new InvalidOperationException("The current Windows identity has no SID.");
+            var security = new DirectorySecurity();
+            security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+            security.AddAccessRule(new FileSystemAccessRule(
+                sid,
+                FileSystemRights.Modify,
+                InheritanceFlags.None,
+                PropagationFlags.None,
+                AccessControlType.Allow));
+            new DirectoryInfo(root).SetAccessControl(security);
+
+            using var lease = PhysicalFileIdentity.OpenDirectoryLease(root);
+
+            Assert.Equal(Path.TrimEndingDirectorySeparator(Path.GetFullPath(root)), lease.Identity.CanonicalPath, StringComparer.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
         }
     }
 

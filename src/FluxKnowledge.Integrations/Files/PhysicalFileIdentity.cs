@@ -131,12 +131,11 @@ public static class PhysicalFileIdentity
         }
 
         const uint fileReadAttributes = 0x80;
-        const uint fileDeleteChild = 0x40;
         const uint fileFlagBackupSemantics = 0x02000000;
         const uint fileFlagOpenReparsePoint = 0x00200000;
         var handle = CreateFile(
             canonicalPath,
-            fileReadAttributes | fileDeleteChild,
+            fileReadAttributes,
             0x3,
             IntPtr.Zero,
             3,
