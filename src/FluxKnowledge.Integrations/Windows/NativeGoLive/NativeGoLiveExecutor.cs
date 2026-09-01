@@ -69,9 +69,11 @@ public sealed class NativeGoLiveExecutor
             {
                 return NativeGoLiveResult.Refused(exception.ReasonCode, exception.DiagnosticDetail);
             }
-            catch (Exception)
+            catch (Exception exception)
             {
-                return NativeGoLiveResult.Refused("clean-slate-admission-failed");
+                return NativeGoLiveResult.Refused(
+                    "clean-slate-admission-failed",
+                    $"hresult-0x{unchecked((uint)exception.HResult):X8}");
             }
 
             try
