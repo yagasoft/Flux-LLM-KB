@@ -34,7 +34,16 @@ public sealed partial class LocalPrivateContentDisclosure : ILocalPrivateContent
     {
         ArgumentNullException.ThrowIfNull(value);
 
-        if (value.Length > MaximumScannedCharacters || ContainsSecret(value))
+        if (value.Length > MaximumScannedCharacters)
+        {
+            return new LocalDisclosureResult(null, true, WithheldReason);
+        }
+
+        try
+        {
+            if (ContainsSecret(value)) return new LocalDisclosureResult(null, true, WithheldReason);
+        }
+        catch (RegexMatchTimeoutException)
         {
             return new LocalDisclosureResult(null, true, WithheldReason);
         }

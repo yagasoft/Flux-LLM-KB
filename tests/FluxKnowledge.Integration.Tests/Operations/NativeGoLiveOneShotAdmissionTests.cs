@@ -7,6 +7,39 @@ namespace FluxKnowledge.Integration.Tests.Operations;
 public sealed class NativeGoLiveOneShotAdmissionTests
 {
     [Fact]
+    public async Task SQL_storage_directory_failure_has_only_a_bounded_hresult_detail()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "FluxKnowledgeSqlStorage", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            var blockedRoot = Path.Combine(root, "blocked-live-root");
+            await File.WriteAllTextAsync(blockedRoot, "blocked");
+            var payloadRoot = Path.Combine(root, "payload");
+            Directory.CreateDirectory(payloadRoot);
+            await File.WriteAllTextAsync(Path.Combine(payloadRoot, "payload.dll"), "one-shot-payload");
+            var plan = NativeGoLivePlan.CreateForIsolatedTests(
+                LiveRootLayout.CreateForIsolatedTests(blockedRoot), new string('a', 40));
+            var bootstrap = NativeGoLiveSqlBootstrap.Parse(
+                "Data Source=localhost;Initial Catalog=master;Integrated Security=True;" +
+                "Encrypt=True;Trust Server Certificate=True;Connect Timeout=5;Connect Retry Count=0;" +
+                "Pooling=False;Application Name=FluxKnowledge.NativeGoLive");
+            var payload = NativeGoLivePayloadHasher.Compute(payloadRoot);
+            var port = new NativeGoLiveWindowsSqlPort(plan, payloadRoot);
+
+            var exception = await Assert.ThrowsAsync<NativeGoLiveContractException>(
+                () => port.ProvisionAndObserveAsync(plan.Sql, bootstrap, payload, CancellationToken.None).AsTask());
+
+            Assert.Equal("sql-provisioning-storage-data-failed", exception.ReasonCode);
+            Assert.Matches(@"\Ahresult-0x[0-9A-F]{8}\z", exception.DiagnosticDetail);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task Empty_root_creation_creates_the_required_runtime_hierarchy()
     {
         using var fixture = new DisposableAdmissionFixture(catalogueExists: false);

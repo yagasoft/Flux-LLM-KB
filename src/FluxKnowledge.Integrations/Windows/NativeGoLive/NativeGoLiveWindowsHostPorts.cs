@@ -612,8 +612,8 @@ internal sealed class NativeGoLiveWindowsSqlPort
         CancellationToken cancellationToken)
     {
         if (identity != _plan.Sql) throw new NativeGoLiveContractException("sql-identity-not-canonical");
-        using var dataRoot = _fileSystem.OpenOrCreateDirectory(_plan.Layout.SqlDataRoot);
-        using var logRoot = _fileSystem.OpenOrCreateDirectory(_plan.Layout.SqlLogRoot);
+        using var dataRoot = OpenSqlStorageDirectory(_plan.Layout.SqlDataRoot, "data");
+        using var logRoot = OpenSqlStorageDirectory(_plan.Layout.SqlLogRoot, "log");
         var expectedAppPoolSid = ResolveAccountSid(AppPoolLogin);
         await ExecuteCreateAsync(bootstrap, expectedAppPoolSid, cancellationToken).ConfigureAwait(false);
         await RunMigrationsAsync(bootstrap, payloadManifest, cancellationToken).ConfigureAwait(false);
@@ -657,6 +657,21 @@ internal sealed class NativeGoLiveWindowsSqlPort
             throw new NativeGoLiveContractException(
                 $"sql-provisioning-create-error-{exception.Number}",
                 innerException: exception);
+        }
+    }
+
+    private VerifiedNativeDirectory OpenSqlStorageDirectory(string path, string role)
+    {
+        try
+        {
+            return _fileSystem.OpenOrCreateDirectory(path);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            throw new NativeGoLiveContractException(
+                $"sql-provisioning-storage-{role}-failed",
+                $"hresult-0x{unchecked((uint)exception.HResult):X8}",
+                exception);
         }
     }
 
