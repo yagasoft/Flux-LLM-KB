@@ -597,12 +597,21 @@ internal sealed class NativeGoLiveWindowsSqlPort
         NativeGoLiveSqlBootstrapConnection bootstrap,
         CancellationToken cancellationToken)
     {
-        await using var connection = new SqlConnection(bootstrap.ConnectionString);
-        await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
-        await using var command = new SqlCommand(
-            "EXEC master.dbo.FluxKnowledgeNativeGoLiveDrop @Catalogue=N'FluxKnowledge';",
-            connection) { CommandTimeout = 30 };
-        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await using var connection = new SqlConnection(bootstrap.ConnectionString);
+            await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+            await using var command = new SqlCommand(
+                "EXEC master.dbo.FluxKnowledgeNativeGoLiveDrop @Catalogue=N'FluxKnowledge';",
+                connection) { CommandTimeout = 30 };
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (SqlException exception)
+        {
+            throw new NativeGoLiveContractException(
+                $"sql-admission-drop-error-{exception.Number}",
+                innerException: exception);
+        }
     }
 
     private async ValueTask ExecuteCreateAsync(
