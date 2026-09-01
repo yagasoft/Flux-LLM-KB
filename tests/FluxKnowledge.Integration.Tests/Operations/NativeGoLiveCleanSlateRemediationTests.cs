@@ -13,18 +13,16 @@ public sealed class NativeGoLiveCleanSlateRemediationTests
         "Pooling=False;Application Name=FluxKnowledge.NativeGoLive";
 
     [Fact]
-    public async Task Empty_hierarchy_provisions_SQL_without_ACL_administration()
+    public async Task Empty_hierarchy_fails_closed_before_SQL_when_the_application_access_grant_is_not_proved()
     {
         using var fixture = new CleanSlateFixture();
         await using var lease = await fixture.AcquireLeaseAsync();
 
-        await fixture.Host.CreateEmptyRootAsync(fixture.Plan, CancellationToken.None);
-
         var exception = await Assert.ThrowsAsync<NativeGoLiveContractException>(
-            () => fixture.Host.ProvisionEmptyCatalogueAsync(fixture.Plan.Sql, CancellationToken.None).AsTask());
+            () => fixture.Host.CreateEmptyRootAsync(fixture.Plan, CancellationToken.None).AsTask());
 
-        Assert.Equal("sql-called-without-acl-administration", exception.Message);
-        Assert.Equal(["create-empty-root", "provision-sql"], fixture.Events);
+        Assert.Equal("effective-acl-postcondition-failed", exception.Message);
+        Assert.Equal(["create-empty-root", "apply-and-validate-acls"], fixture.Events);
     }
 
     private sealed class CleanSlateFixture : IDisposable

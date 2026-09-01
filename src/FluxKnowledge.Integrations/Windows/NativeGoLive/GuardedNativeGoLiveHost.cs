@@ -1003,10 +1003,11 @@ internal sealed class GuardedNativeGoLiveHost : INativeGoLiveHost
         return ValueTask.CompletedTask;
     }
 
-    public ValueTask CreateEmptyRootAsync(NativeGoLivePlan plan, CancellationToken cancellationToken)
+    public async ValueTask CreateEmptyRootAsync(NativeGoLivePlan plan, CancellationToken cancellationToken)
     {
         EnsurePlan(plan);
-        return _ports.OwnedState.CreateEmptyRootAsync(cancellationToken);
+        await _ports.OwnedState.CreateEmptyRootAsync(cancellationToken);
+        ValidateAcls(await _ports.Acls.ApplyAndObserveAsync(plan, cancellationToken), plan);
     }
 
     public async ValueTask ProvisionEmptyCatalogueAsync(
