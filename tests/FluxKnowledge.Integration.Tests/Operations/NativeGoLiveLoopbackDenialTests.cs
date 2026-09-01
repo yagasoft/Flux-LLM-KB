@@ -56,6 +56,24 @@ public sealed class NativeGoLiveLoopbackDenialTests
     }
 
     [Fact]
+    public async Task Empty_search_waits_for_one_transient_startup_unavailability()
+    {
+        var transport = new LoopbackOnlyTransport(transientSearchFailures: 1);
+        var port = new NativeGoLiveWindowsLoopbackPort(
+            transport,
+            () => [],
+            DisabledRuntime(),
+            new StaticTcpProbe());
+
+        var observation = await port.ObserveAsync(CancellationToken.None);
+
+        Assert.Equal(9, transport.Requests.Count);
+        Assert.Equal(2, transport.Requests.Count(request => request.Uri.AbsolutePath == "/api/v1/knowledge/search"));
+        Assert.Equal(200, observation.Search.Http.StatusCode);
+        Assert.True(observation.Search.Succeeded);
+    }
+
+    [Fact]
     public async Task HTTP_sys_handshakes_with_a_complete_non_application_response_are_treated_as_non_loopback_denial()
     {
         var transport = new LoopbackOnlyTransport(returnHttpSysDenialForNonLoopback: true);
@@ -78,8 +96,11 @@ public sealed class NativeGoLiveLoopbackDenialTests
 
     internal sealed class LoopbackOnlyTransport(
         bool includeNativeProofMarker = true,
-        bool returnHttpSysDenialForNonLoopback = false) : INativeGoLiveHttpTransport
+        bool returnHttpSysDenialForNonLoopback = false,
+        int transientSearchFailures = 0) : INativeGoLiveHttpTransport
     {
+        private int _transientSearchFailuresRemaining = transientSearchFailures;
+
         public List<NativeGoLiveHttpRequestSpec> Requests { get; } = [];
 
         public ValueTask<NativeGoLiveRawHttpResponse> SendAsync(
@@ -101,6 +122,16 @@ public sealed class NativeGoLiveLoopbackDenialTests
                     {
                         ["Server"] = "Microsoft-HTTPAPI/2.0"
                     }));
+            }
+
+            if (request.Uri.AbsolutePath == "/api/v1/knowledge/search" && _transientSearchFailuresRemaining-- > 0)
+            {
+                return ValueTask.FromResult(new NativeGoLiveRawHttpResponse(
+                    503,
+                    new NativeGoLiveHttpPeer("127.0.0.1", "127.0.0.1"),
+                    "Service Unavailable",
+                    UsedProxy: false,
+                    FollowedRedirect: false));
             }
 
             return ValueTask.FromResult(new NativeGoLiveRawHttpResponse(
