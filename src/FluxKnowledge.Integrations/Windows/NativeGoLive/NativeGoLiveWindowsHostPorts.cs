@@ -617,17 +617,26 @@ internal sealed class NativeGoLiveWindowsSqlPort
         string appPoolSid,
         CancellationToken cancellationToken)
     {
-        await using var connection = new SqlConnection(bootstrap.ConnectionString);
-        await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
-        const string sql =
-            "EXEC master.dbo.FluxKnowledgeNativeGoLiveCreate " +
-            "@Catalogue=N'FluxKnowledge',@DataFile=@data,@LogFile=@log,@AppPoolLogin=N'IIS AppPool\\FluxKnowledge',@AppPoolSid=@sid;";
-        await using var command = new SqlCommand(sql, connection) { CommandTimeout = 60 };
-        command.Parameters.AddWithValue("@data", _plan.Sql.DataFilePath);
-        command.Parameters.AddWithValue("@log", _plan.Sql.LogFilePath);
-        command.Parameters.Add("@sid", System.Data.SqlDbType.VarBinary, 85).Value =
-            new SecurityIdentifier(appPoolSid).GetBinaryForm();
-        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await using var connection = new SqlConnection(bootstrap.ConnectionString);
+            await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+            const string sql =
+                "EXEC master.dbo.FluxKnowledgeNativeGoLiveCreate " +
+                "@Catalogue=N'FluxKnowledge',@DataFile=@data,@LogFile=@log,@AppPoolLogin=N'IIS AppPool\\FluxKnowledge',@AppPoolSid=@sid;";
+            await using var command = new SqlCommand(sql, connection) { CommandTimeout = 60 };
+            command.Parameters.AddWithValue("@data", _plan.Sql.DataFilePath);
+            command.Parameters.AddWithValue("@log", _plan.Sql.LogFilePath);
+            command.Parameters.Add("@sid", System.Data.SqlDbType.VarBinary, 85).Value =
+                new SecurityIdentifier(appPoolSid).GetBinaryForm();
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (SqlException exception)
+        {
+            throw new NativeGoLiveContractException(
+                $"sql-provisioning-create-error-{exception.Number}",
+                innerException: exception);
+        }
     }
 
     private async ValueTask FinalizeBootstrapAuthorityAsync(
