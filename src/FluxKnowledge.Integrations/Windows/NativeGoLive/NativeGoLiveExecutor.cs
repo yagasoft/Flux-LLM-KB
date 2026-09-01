@@ -90,7 +90,22 @@ public sealed class NativeGoLiveExecutor
                 {
                     return NativeGoLiveResult.Refused("root-hierarchy-create-failed");
                 }
-                await host.ProvisionEmptyCatalogueAsync(request.Plan.Sql, cancellationToken).ConfigureAwait(false);
+                try
+                {
+                    await host.ProvisionEmptyCatalogueAsync(request.Plan.Sql, cancellationToken).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    return NativeGoLiveResult.Refused("clean-slate-incomplete");
+                }
+                catch (NativeGoLiveContractException exception)
+                {
+                    return NativeGoLiveResult.Refused(exception.ReasonCode, exception.DiagnosticDetail);
+                }
+                catch (Exception)
+                {
+                    return NativeGoLiveResult.Refused("sql-provisioning-failed");
+                }
                 await host.PublishAndStartAsync(request.Plan, cancellationToken).ConfigureAwait(false);
                 await host.ValidateAsync(request.Plan, cancellationToken).ConfigureAwait(false);
                 await host.RegisterMarketplaceAsync(request.Plan.Codex, cancellationToken).ConfigureAwait(false);

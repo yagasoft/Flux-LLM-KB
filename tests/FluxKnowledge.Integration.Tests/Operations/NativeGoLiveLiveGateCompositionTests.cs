@@ -170,6 +170,18 @@ public sealed class NativeGoLiveLiveGateCompositionTests
     }
 
     [Fact]
+    public async Task Unexpected_SQL_provisioning_failure_returns_its_bounded_stage_code()
+    {
+        using var fixture = new ExecutorOrderingFixture(sqlException: new IOException("synthetic-sql-failure"));
+        fixture.BeginExecution();
+
+        var result = await new NativeGoLiveExecutor().ExecuteAsync(fixture.Request, fixture.Host);
+
+        Assert.False(result.Succeeded);
+        Assert.Equal("sql-provisioning-failed", result.ReasonCode);
+    }
+
+    [Fact]
     public void Vss_adapter_creates_a_missing_canonical_diff_area_through_change_with_backup_privilege()
     {
         var privilege = new RecordingVssOperationPrivilegeScope();
@@ -264,7 +276,8 @@ public sealed class NativeGoLiveLiveGateCompositionTests
             bool cancelAdmission = false,
             bool failVss = false,
             NativeGoLiveContractException? vssException = null,
-            Exception? rootException = null)
+            Exception? rootException = null,
+            Exception? sqlException = null)
         {
             _root = Path.Combine(Path.GetTempPath(), "FluxKnowledgeLiveGateOrdering", Guid.NewGuid().ToString("N"));
             var payloadRoot = CreatePayloadRoot(_root);
@@ -303,7 +316,7 @@ public sealed class NativeGoLiveLiveGateCompositionTests
                     preflight,
                     new RecordingIisPort(Plan, Events),
                     new DisposableOwnedStatePort(Plan, Events, rootException),
-                    new OrderingSqlPort(Plan, Events),
+                    new OrderingSqlPort(Plan, Events, sqlException),
                     new ExactAclPort(Plan),
                     null!,
                     null!,
@@ -545,7 +558,10 @@ public sealed class NativeGoLiveLiveGateCompositionTests
             ValueTask.FromResult(ExactAcl(plan));
     }
 
-    private sealed class OrderingSqlPort(NativeGoLivePlan plan, List<string> events) : INativeGoLiveSqlPort
+    private sealed class OrderingSqlPort(
+        NativeGoLivePlan plan,
+        List<string> events,
+        Exception? exception) : INativeGoLiveSqlPort
     {
         public ValueTask<NativeGoLiveSqlPostBootstrapObservation> ProvisionAndObserveAsync(
             NativeGoLiveSqlIdentity _,
@@ -554,6 +570,8 @@ public sealed class NativeGoLiveLiveGateCompositionTests
             CancellationToken ____)
         {
             events.Add("provision-sql");
+            if (exception is not null)
+                return ValueTask.FromException<NativeGoLiveSqlPostBootstrapObservation>(exception);
             Directory.CreateDirectory(plan.Layout.SqlDataRoot);
             Directory.CreateDirectory(plan.Layout.SqlLogRoot);
             return ValueTask.FromException<NativeGoLiveSqlPostBootstrapObservation>(
