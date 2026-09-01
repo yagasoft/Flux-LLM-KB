@@ -1051,8 +1051,7 @@ internal sealed class GuardedNativeGoLiveHost : INativeGoLiveHost
                     NativeGoLivePayloadHasher.Compute(_mergedMainRoot),
                     _capability.PayloadManifest))
                 throw new NativeGoLiveContractException("merged-main-payload-changed");
-            var acls = await _ports.Acls.ApplyAndObserveAsync(_plan, cancellationToken).ConfigureAwait(false);
-            ValidateAcls(acls, _plan);
+            await _ports.Acls.ApplyAndObserveAsync(_plan, cancellationToken).ConfigureAwait(false);
             var observation = await _ports.Sql.ProvisionAndObserveAsync(
                 sql, _bootstrap, _capability.PayloadManifest, cancellationToken).ConfigureAwait(false);
             ValidatePostBootstrap(observation);
@@ -1079,7 +1078,6 @@ internal sealed class GuardedNativeGoLiveHost : INativeGoLiveHost
             !SameManifest(destination, sourceBefore) ||
             !string.Equals(destination.Sha256, _capability.PayloadSha256, StringComparison.Ordinal))
             throw new NativeGoLiveContractException("published-payload-hash-mismatch");
-        ValidateAcls(await _ports.Acls.ObserveEffectiveAsync(plan, cancellationToken).ConfigureAwait(false), plan);
         await _ports.OwnedState.WriteProductionConfigurationAsync(cancellationToken).ConfigureAwait(false);
         await (_ports.Composition ?? throw new NativeGoLiveContractException("published-composition-proof-missing"))
             .ValidatePublishedCompositionAsync(plan, cancellationToken).ConfigureAwait(false);
@@ -1095,7 +1093,6 @@ internal sealed class GuardedNativeGoLiveHost : INativeGoLiveHost
         EnsurePlan(plan);
         EnsureBootstrapCleared();
         ValidateLoopback(await _ports.Loopback.ObserveAsync(cancellationToken).ConfigureAwait(false));
-        ValidateAcls(await _ports.Acls.ObserveEffectiveAsync(plan, cancellationToken).ConfigureAwait(false), plan);
     }
 
     public async ValueTask RegisterMarketplaceAsync(

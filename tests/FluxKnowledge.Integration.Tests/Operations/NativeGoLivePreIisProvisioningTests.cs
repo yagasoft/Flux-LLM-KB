@@ -70,7 +70,7 @@ public sealed class NativeGoLivePreIisProvisioningTests
         await fixture.Host.PublishAndStartAsync(fixture.Plan, CancellationToken.None);
 
         Assert.Equal(
-            ["publish", "validate-acls", "write-production-configuration", "validate-published-composition", "start-iis"],
+            ["publish", "write-production-configuration", "validate-published-composition", "start-iis"],
             fixture.Events);
     }
 

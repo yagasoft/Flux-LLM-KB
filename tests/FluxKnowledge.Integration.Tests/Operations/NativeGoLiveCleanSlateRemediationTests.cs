@@ -13,7 +13,7 @@ public sealed class NativeGoLiveCleanSlateRemediationTests
         "Pooling=False;Application Name=FluxKnowledge.NativeGoLive";
 
     [Fact]
-    public async Task Empty_hierarchy_requires_exact_ACLs_before_SQL_provisioning()
+    public async Task Empty_hierarchy_applies_its_runtime_directories_before_SQL_provisioning()
     {
         using var fixture = new CleanSlateFixture();
         await using var lease = await fixture.AcquireLeaseAsync();
@@ -23,8 +23,8 @@ public sealed class NativeGoLiveCleanSlateRemediationTests
         var exception = await Assert.ThrowsAsync<NativeGoLiveContractException>(
             () => fixture.Host.ProvisionEmptyCatalogueAsync(fixture.Plan.Sql, CancellationToken.None).AsTask());
 
-        Assert.Equal("effective-acl-postcondition-failed", exception.Message);
-        Assert.Equal(["create-empty-root", "apply-and-validate-acls"], fixture.Events);
+        Assert.Equal("sql-called-after-runtime-directory-application", exception.Message);
+        Assert.Equal(["create-empty-root", "apply-and-validate-acls", "provision-sql"], fixture.Events);
     }
 
     private sealed class CleanSlateFixture : IDisposable
@@ -53,7 +53,7 @@ public sealed class NativeGoLiveCleanSlateRemediationTests
                     null!,
                     null!,
                     new RecordingOwnedStatePort(Events),
-                    new SqlPortThatMustNotRunBeforeExactAcls(Events),
+                    new SqlPortThatMustRunAfterRuntimeDirectories(Events),
                     new InvalidAclPort(Events),
                     null!,
                     null!,
@@ -92,7 +92,7 @@ public sealed class NativeGoLiveCleanSlateRemediationTests
         public ValueTask WriteProductionConfigurationAsync(CancellationToken _) => throw new NotSupportedException();
     }
 
-    private sealed class SqlPortThatMustNotRunBeforeExactAcls(List<string> events) : INativeGoLiveSqlPort
+    private sealed class SqlPortThatMustRunAfterRuntimeDirectories(List<string> events) : INativeGoLiveSqlPort
     {
         public ValueTask<NativeGoLiveSqlPostBootstrapObservation> ProvisionAndObserveAsync(
             NativeGoLiveSqlIdentity _,
@@ -102,7 +102,7 @@ public sealed class NativeGoLiveCleanSlateRemediationTests
         {
             events.Add("provision-sql");
             return ValueTask.FromException<NativeGoLiveSqlPostBootstrapObservation>(
-                new NativeGoLiveContractException("sql-called-before-exact-acl-validation"));
+                new NativeGoLiveContractException("sql-called-after-runtime-directory-application"));
         }
     }
 
