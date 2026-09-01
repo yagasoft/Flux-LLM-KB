@@ -1038,7 +1038,7 @@ internal sealed class HandleRelativeNativeFileSystem
         internal const uint ShareRead = FileShareRead;
         internal const uint ShareReadWrite = FileShareRead | FileShareWrite;
         internal const uint ShareAll = FileShareRead | FileShareWrite | FileShareDelete;
-        internal const uint DirectoryReadAccess = FileListDirectory | FileReadAttributes | WriteDac | Synchronize;
+        internal const uint DirectoryReadAccess = FileListDirectory | FileReadAttributes | Synchronize;
         internal const uint FileReadAccess = FileReadData | FileReadAttributes | Synchronize;
         internal const uint FileAttributesAccess = FileReadAttributes | Synchronize;
         internal const uint FileWriteAccess = FileWriteData | FileReadAttributes | FileWriteAttributes | Delete | Synchronize;
