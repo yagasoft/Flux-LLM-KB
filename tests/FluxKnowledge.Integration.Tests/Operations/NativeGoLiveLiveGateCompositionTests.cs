@@ -22,7 +22,7 @@ public sealed class NativeGoLiveLiveGateCompositionTests
         var result = await new NativeGoLiveExecutor().ExecuteAsync(fixture.Request, fixture.Host);
 
         Assert.False(result.Succeeded);
-        Assert.Equal("clean-slate-incomplete", result.ReasonCode);
+        Assert.Equal("stop-after-ordered-provision", result.ReasonCode);
         Assert.Equal(
             [
                 "replace-canonical-iis",
@@ -146,6 +146,20 @@ public sealed class NativeGoLiveLiveGateCompositionTests
     }
 
     [Fact]
+    public async Task Bounded_post_vss_contract_failure_preserves_its_existing_reason_code()
+    {
+        using var fixture = new ExecutorOrderingFixture(
+            rootException: new NativeGoLiveContractException("sql-bootstrap-postcondition-failed"));
+        fixture.BeginExecution();
+
+        var result = await new NativeGoLiveExecutor().ExecuteAsync(fixture.Request, fixture.Host);
+
+        Assert.False(result.Succeeded);
+        Assert.Equal("sql-bootstrap-postcondition-failed", result.ReasonCode);
+        Assert.Contains("create-empty-root", fixture.Events);
+    }
+
+    [Fact]
     public void Vss_adapter_creates_a_missing_canonical_diff_area_through_change_with_backup_privilege()
     {
         var privilege = new RecordingVssOperationPrivilegeScope();
@@ -239,7 +253,8 @@ public sealed class NativeGoLiveLiveGateCompositionTests
             bool failAdmission = false,
             bool cancelAdmission = false,
             bool failVss = false,
-            NativeGoLiveContractException? vssException = null)
+            NativeGoLiveContractException? vssException = null,
+            NativeGoLiveContractException? rootException = null)
         {
             _root = Path.Combine(Path.GetTempPath(), "FluxKnowledgeLiveGateOrdering", Guid.NewGuid().ToString("N"));
             var payloadRoot = CreatePayloadRoot(_root);
@@ -278,7 +293,7 @@ public sealed class NativeGoLiveLiveGateCompositionTests
                 new NativeGoLiveHostPorts(
                     preflight,
                     new RecordingIisPort(Plan, Events),
-                    new DisposableOwnedStatePort(Plan, Events),
+                    new DisposableOwnedStatePort(Plan, Events, rootException),
                     new OrderingSqlPort(Plan, Acls, Events),
                     Acls,
                     null!,
@@ -392,13 +407,17 @@ public sealed class NativeGoLiveLiveGateCompositionTests
         }
     }
 
-    private sealed class DisposableOwnedStatePort(NativeGoLivePlan plan, List<string> events) : INativeGoLiveOwnedStatePort
+    private sealed class DisposableOwnedStatePort(
+        NativeGoLivePlan plan,
+        List<string> events,
+        NativeGoLiveContractException? rootException) : INativeGoLiveOwnedStatePort
     {
         public ValueTask WipeRootAsync(CancellationToken _) => throw new NotSupportedException();
 
         public ValueTask CreateEmptyRootAsync(CancellationToken _)
         {
             events.Add("create-empty-root");
+            if (rootException is not null) return ValueTask.FromException(rootException);
             Directory.CreateDirectory(plan.Layout.Root);
             return ValueTask.CompletedTask;
         }
