@@ -1,6 +1,7 @@
 using FluxKnowledge.Application.Operations;
 using FluxKnowledge.Integrations.Files;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Win32.SafeHandles;
 
 namespace FluxKnowledge.Web.Configuration;
 
@@ -71,7 +72,7 @@ public sealed class FileSystemNoFollowPathOpener : INoFollowPathOpener
                 throw new InvalidOperationException("The production configuration file resolved outside its canonical path.");
             }
 
-            return new FileStream(handle, FileAccess.Read, bufferSize: 81920, isAsync: false);
+            return CreateReadStream(handle);
         }
         catch
         {
@@ -79,6 +80,9 @@ public sealed class FileSystemNoFollowPathOpener : INoFollowPathOpener
             throw;
         }
     }
+
+    internal static FileStream CreateReadStream(SafeFileHandle handle) =>
+        new(handle, FileAccess.Read, bufferSize: 81920, isAsync: true);
 
     public string ValidateDirectory(string canonicalPath)
     {

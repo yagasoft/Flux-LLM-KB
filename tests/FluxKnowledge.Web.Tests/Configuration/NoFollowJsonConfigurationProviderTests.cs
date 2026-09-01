@@ -46,6 +46,29 @@ public sealed class NoFollowJsonConfigurationProviderTests
         Assert.Equal(1, opener.FileOpenCount);
     }
 
+    [Fact]
+    public void No_follow_reader_wraps_an_overlapped_handle_as_an_async_stream()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"FluxKnowledgeNoFollow-{Guid.NewGuid():N}.json");
+        try
+        {
+            File.WriteAllText(path, "{}");
+            using var handle = File.OpenHandle(
+                path,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read,
+                FileOptions.Asynchronous);
+            using var stream = FileSystemNoFollowPathOpener.CreateReadStream(handle);
+
+            Assert.True(stream.IsAsync);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
     private sealed class RecordingNoFollowPathOpener(string? reparseAt = null, string? json = null)
         : INoFollowPathOpener
     {
