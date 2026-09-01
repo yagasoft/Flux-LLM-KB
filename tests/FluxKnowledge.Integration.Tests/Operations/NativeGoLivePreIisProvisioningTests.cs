@@ -18,13 +18,28 @@ public sealed class NativeGoLivePreIisProvisioningTests
         "Pooling=False;Application Name=FluxKnowledge.NativeGoLive";
 
     [Fact]
-    public void Published_migration_dependency_resolution_uses_the_published_payload()
+    public void Published_migration_child_uses_the_published_web_host()
     {
-        var path = NativeGoLivePublishedAssemblyImage.ResolvePayloadDependency(
-            AppContext.BaseDirectory,
-            new AssemblyName("Microsoft.EntityFrameworkCore"));
+        var root = Path.Combine(Path.GetTempPath(), "FluxKnowledgeMigrationChild", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        File.WriteAllBytes(Path.Combine(root, "FluxKnowledge.Web.dll"), []);
+        try
+        {
+            var start = NativeGoLivePublishedMigrationRunner.CreateStartInfo(root, CanonicalBootstrap);
 
-        Assert.Equal(Path.Combine(AppContext.BaseDirectory, "Microsoft.EntityFrameworkCore.dll"), path);
+            Assert.Equal("dotnet", start.FileName);
+            Assert.Equal(root, start.WorkingDirectory);
+            Assert.Equal(
+                [Path.Combine(root, "FluxKnowledge.Web.dll"), "--apply-native-go-live-migrations"],
+                start.ArgumentList);
+            Assert.Equal(
+                CanonicalBootstrap,
+                start.Environment[NativeGoLivePublishedMigrationRunner.ConnectionEnvironmentVariable]);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
     }
 
     [Fact]

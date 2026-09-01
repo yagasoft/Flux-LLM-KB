@@ -3,14 +3,11 @@ using System.Diagnostics;
 using System.Security.AccessControl;
 using System.Security.Cryptography;
 using System.Security.Principal;
-using System.Reflection;
-using System.Runtime.Loader;
 using System.Text;
 using System.Text.Json;
 using FluxKnowledge.Application.Operations;
 using FluxKnowledge.Integrations.Codex;
 using Microsoft.Data.SqlClient;
-using Microsoft.EntityFrameworkCore;
 
 namespace FluxKnowledge.Integrations.Windows.NativeGoLive;
 
@@ -724,7 +721,7 @@ internal sealed class NativeGoLiveWindowsSqlPort
             ApplicationName = "FluxKnowledge.NativeGoLive.Migrations"
         }.ConnectionString;
         await NativeGoLivePublishedMigrationRunner.MigrateAsync(
-            _mergedMainRoot, application, payloadManifest, cancellationToken).ConfigureAwait(false);
+            _mergedMainRoot, application, cancellationToken).ConfigureAwait(false);
     }
 
     private async ValueTask MarkEmptyCatalogueAsync(
@@ -920,160 +917,36 @@ internal static class NativeGoLiveSqlSid
 
 internal static class NativeGoLivePublishedMigrationRunner
 {
-    private const string ContextTypeName =
-        "FluxKnowledge.Infrastructure.SqlServer.Persistence.FluxKnowledgeDbContext";
+    internal const string ConnectionEnvironmentVariable =
+        "FLUXKNOWLEDGE_NATIVE_GO_LIVE_MIGRATION_CONNECTION";
 
     internal static async ValueTask MigrateAsync(
         string publishedRoot,
         string applicationConnectionString,
-        NativeGoLivePayloadManifest payloadManifest,
         CancellationToken cancellationToken)
     {
-        await using var context = CreateContext(publishedRoot, applicationConnectionString, payloadManifest);
-        await context.Database.MigrateAsync(cancellationToken).ConfigureAwait(false);
+        using var process = Process.Start(CreateStartInfo(publishedRoot, applicationConnectionString))
+            ?? throw new NativeGoLiveContractException("published-migration-start-failed");
+        var stdout = process.StandardOutput.ReadToEndAsync(cancellationToken);
+        var stderr = process.StandardError.ReadToEndAsync(cancellationToken);
+        await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
+        await Task.WhenAll(stdout, stderr).ConfigureAwait(false);
+        if (process.ExitCode != 0)
+            throw new NativeGoLiveContractException("published-migration-failed");
     }
 
-    internal static DbContext CreateContext(
-        string publishedRoot,
-        string applicationConnectionString,
-        NativeGoLivePayloadManifest payloadManifest)
-    {
-        using var image = NativeGoLivePublishedAssemblyImage.Open(publishedRoot, payloadManifest);
-        var assembly = image.LoadExact();
-        var contextType = assembly.GetType(ContextTypeName, throwOnError: false, ignoreCase: false);
-        if (contextType is null || !typeof(DbContext).IsAssignableFrom(contextType))
-            throw new NativeGoLiveContractException("published-migration-context-missing");
-
-        var builderType = typeof(DbContextOptionsBuilder<>).MakeGenericType(contextType);
-        var builder = Activator.CreateInstance(builderType)
-            ?? throw new NativeGoLiveContractException("published-migration-context-invalid");
-        ConfigureSqlServer(builderType, builder, contextType, applicationConnectionString);
-        var options = builderType.GetProperties(BindingFlags.Instance | BindingFlags.Public)
-            .SingleOrDefault(property => property.Name == "Options" &&
-                property.PropertyType.IsGenericType &&
-                property.PropertyType.GetGenericTypeDefinition() == typeof(DbContextOptions<>))
-            ?.GetValue(builder)
-            ?? throw new NativeGoLiveContractException("published-migration-options-invalid");
-        if (Activator.CreateInstance(contextType, options) is not DbContext context)
-            throw new NativeGoLiveContractException("published-migration-context-invalid");
-        return context;
-    }
-
-    private static void ConfigureSqlServer(
-        Type builderType,
-        object builder,
-        Type contextType,
-        string connectionString)
-    {
-        var method = typeof(SqlServerDbContextOptionsExtensions).GetMethods(BindingFlags.Static | BindingFlags.Public)
-            .Where(candidate => candidate.Name == nameof(SqlServerDbContextOptionsExtensions.UseSqlServer) &&
-                                candidate.IsGenericMethodDefinition)
-            .Select(candidate => candidate.MakeGenericMethod(contextType))
-            .SingleOrDefault(candidate =>
-            {
-                var parameters = candidate.GetParameters();
-                return parameters.Length == 3 && parameters[0].ParameterType == builderType &&
-                       parameters[1].ParameterType == typeof(string);
-            }) ?? throw new NativeGoLiveContractException("published-migration-options-invalid");
-        try
-        {
-            method.Invoke(null, [builder, connectionString, null]);
-        }
-        catch (TargetInvocationException exception)
-        {
-            throw new NativeGoLiveContractException(
-                exception.InnerException is ArgumentException
-                    ? "published-migration-connection-invalid"
-                    : "published-migration-options-invalid");
-        }
-    }
-}
-
-internal sealed class NativeGoLivePublishedAssemblyImage : IDisposable
-{
-    private const string AssemblyName = "FluxKnowledge.Infrastructure.SqlServer";
-    private const string AssemblyFileName = AssemblyName + ".dll";
-    private const long MaximumAssemblyBytes = 64L * 1024 * 1024;
-    private readonly FileStream _stream;
-    private readonly string _publishedRoot;
-    private int _disposed;
-
-    private NativeGoLivePublishedAssemblyImage(FileStream stream, string publishedRoot)
-    {
-        _stream = stream;
-        _publishedRoot = publishedRoot;
-    }
-
-    internal static NativeGoLivePublishedAssemblyImage Open(
-        string publishedRoot,
-        NativeGoLivePayloadManifest payloadManifest)
+    internal static ProcessStartInfo CreateStartInfo(string publishedRoot, string applicationConnectionString)
     {
         var root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(publishedRoot));
-        var assemblyPath = Path.Combine(root, AssemblyFileName);
-        FileStream stream;
-        try
-        {
-            stream = new FileStream(
-                assemblyPath,
-                FileMode.Open,
-                FileAccess.Read,
-                FileShare.Read,
-                64 * 1024,
-                FileOptions.SequentialScan);
-        }
-        catch (FileNotFoundException)
-        {
+        var assembly = Path.Combine(root, "FluxKnowledge.Web.dll");
+        if (!File.Exists(assembly))
             throw new NativeGoLiveContractException("published-migration-assembly-missing");
-        }
-        try
-        {
-            if (stream.Length is <= 0 or > MaximumAssemblyBytes)
-                throw new NativeGoLiveContractException("published-migration-assembly-invalid");
-            if (!NativeGoLivePayloadHasher.Same(NativeGoLivePayloadHasher.Compute(root), payloadManifest))
-                throw new NativeGoLiveContractException("published-migration-manifest-mismatch");
-            stream.Position = 0;
-            _ = SHA256.HashData(stream);
-            stream.Position = 0;
-            return new NativeGoLivePublishedAssemblyImage(stream, root);
-        }
-        catch
-        {
-            stream.Dispose();
-            throw;
-        }
-    }
-
-    internal Assembly LoadExact()
-    {
-        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
-        _stream.Position = 0;
-        return new NativeGoLiveMigrationAssemblyLoadContext(_publishedRoot).LoadFromStream(_stream);
-    }
-
-    internal static string? ResolvePayloadDependency(string publishedRoot, AssemblyName assemblyName)
-    {
-        var name = assemblyName.Name;
-        if (string.IsNullOrWhiteSpace(name)) return null;
-        var candidate = Path.Combine(publishedRoot, name + ".dll");
-        return File.Exists(candidate) ? candidate : null;
-    }
-
-    public void Dispose()
-    {
-        if (Interlocked.Exchange(ref _disposed, 1) == 0) _stream.Dispose();
-    }
-
-    private sealed class NativeGoLiveMigrationAssemblyLoadContext(string publishedRoot)
-        : AssemblyLoadContext($"NativeGoLiveMigration-{Guid.NewGuid():N}", isCollectible: false)
-    {
-        protected override Assembly? Load(AssemblyName assemblyName)
-        {
-            var existing = Default.Assemblies.FirstOrDefault(candidate =>
-                System.Reflection.AssemblyName.ReferenceMatchesDefinition(candidate.GetName(), assemblyName));
-            if (existing is not null) return existing;
-            var dependency = ResolvePayloadDependency(publishedRoot, assemblyName);
-            return dependency is null ? null : LoadFromAssemblyPath(dependency);
-        }
+        var start = NativeGoLiveChildStartBuilder.Create("dotnet");
+        start.WorkingDirectory = root;
+        start.ArgumentList.Add(assembly);
+        start.ArgumentList.Add("--apply-native-go-live-migrations");
+        start.Environment[ConnectionEnvironmentVariable] = applicationConnectionString;
+        return start;
     }
 }
 

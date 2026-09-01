@@ -3,23 +3,53 @@ using FluxKnowledge.Web.Components;
 using FluxKnowledge.Web.Components.Status;
 using FluxKnowledge.Web.Endpoints;
 using FluxKnowledge.Web.Mcp;
+using FluxKnowledge.Infrastructure.SqlServer.Persistence;
 using FluxKnowledge.Infrastructure.SqlServer.Visibility;
 using Microsoft.AspNetCore.Components.Server.Circuits;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using System.Text.Json;
 
 const string OutlookConfigurationProjectionSwitch = "--project-outlook-capture-configuration";
 const string NativeGoLiveCompositionValidationSwitch = "--validate-native-go-live-composition";
+const string NativeGoLiveMigrationSwitch = "--apply-native-go-live-migrations";
 var projectOutlookConfiguration = args.Contains(
     OutlookConfigurationProjectionSwitch,
     StringComparer.OrdinalIgnoreCase);
 var validateNativeGoLiveComposition = args.Contains(
     NativeGoLiveCompositionValidationSwitch,
     StringComparer.OrdinalIgnoreCase);
+var applyNativeGoLiveMigrations = args.Contains(
+    NativeGoLiveMigrationSwitch,
+    StringComparer.OrdinalIgnoreCase);
 var builder = WebApplication.CreateBuilder(
     args.Where(argument =>
         !string.Equals(argument, OutlookConfigurationProjectionSwitch, StringComparison.OrdinalIgnoreCase) &&
-        !string.Equals(argument, NativeGoLiveCompositionValidationSwitch, StringComparison.OrdinalIgnoreCase)).ToArray());
+        !string.Equals(argument, NativeGoLiveCompositionValidationSwitch, StringComparison.OrdinalIgnoreCase) &&
+        !string.Equals(argument, NativeGoLiveMigrationSwitch, StringComparison.OrdinalIgnoreCase)).ToArray());
+if (applyNativeGoLiveMigrations)
+{
+    var connection = Environment.GetEnvironmentVariable(
+        "FLUXKNOWLEDGE_NATIVE_GO_LIVE_MIGRATION_CONNECTION",
+        EnvironmentVariableTarget.Process);
+    if (string.IsNullOrWhiteSpace(connection)) return;
+    try
+    {
+        var options = new DbContextOptionsBuilder<FluxKnowledgeDbContext>()
+            .UseSqlServer(connection)
+            .Options;
+        await using var context = new FluxKnowledgeDbContext(options);
+        await context.Database.MigrateAsync();
+    }
+    finally
+    {
+        Environment.SetEnvironmentVariable(
+            "FLUXKNOWLEDGE_NATIVE_GO_LIVE_MIGRATION_CONNECTION",
+            null,
+            EnvironmentVariableTarget.Process);
+    }
+    return;
+}
 if (!WebHostComposition.IsIsolatedTestComposition)
 {
     builder.Configuration.Sources.Clear();
