@@ -179,6 +179,7 @@ public sealed class NativeGoLiveLiveGateCompositionTests
 
         Assert.False(result.Succeeded);
         Assert.Equal("sql-provisioning-failed", result.ReasonCode);
+        Assert.Matches(@"\Ahresult-0x[0-9A-F]{8}\z", result.DiagnosticDetail);
     }
 
     [Fact]

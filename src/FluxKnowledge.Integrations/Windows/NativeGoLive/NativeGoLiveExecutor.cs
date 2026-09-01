@@ -102,9 +102,11 @@ public sealed class NativeGoLiveExecutor
                 {
                     return NativeGoLiveResult.Refused(exception.ReasonCode, exception.DiagnosticDetail);
                 }
-                catch (Exception)
+                catch (Exception exception)
                 {
-                    return NativeGoLiveResult.Refused("sql-provisioning-failed");
+                    return NativeGoLiveResult.Refused(
+                        "sql-provisioning-failed",
+                        $"hresult-0x{unchecked((uint)exception.HResult):X8}");
                 }
                 await host.PublishAndStartAsync(request.Plan, cancellationToken).ConfigureAwait(false);
                 await host.ValidateAsync(request.Plan, cancellationToken).ConfigureAwait(false);
