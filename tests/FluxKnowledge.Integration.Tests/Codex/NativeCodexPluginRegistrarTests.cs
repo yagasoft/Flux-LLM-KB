@@ -284,7 +284,12 @@ public sealed class NativeCodexPluginRegistrarTests
     {
         marketplaces = new[]
         {
-            new { name = identity.MarketplaceName, source = new { source = "local", path = identity.MarketplaceRoot } }
+            new
+            {
+                name = identity.MarketplaceName,
+                root = identity.MarketplaceRoot,
+                marketplaceSource = new { sourceType = "local", source = identity.MarketplaceRoot }
+            }
         }
     });
 

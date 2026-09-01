@@ -214,13 +214,14 @@ internal sealed class NativeCodexMarketplaceLifecycleAdapter
                     StringProperty(entry, "name") == identity.MarketplaceName)
                 .ToArray();
             if (matchingName.Length != 1 ||
-                !matchingName[0].TryGetProperty("source", out var source) ||
-                StringProperty(source, "source") != "local")
+                !SamePath(StringProperty(matchingName[0], "root"), identity.MarketplaceRoot) ||
+                !matchingName[0].TryGetProperty("marketplaceSource", out var source) ||
+                StringProperty(source, "sourceType") != "local")
             {
                 return false;
             }
 
-            return SamePath(StringProperty(source, "path"), identity.MarketplaceRoot);
+            return SamePath(StringProperty(source, "source"), identity.MarketplaceRoot);
         }
         catch (JsonException)
         {

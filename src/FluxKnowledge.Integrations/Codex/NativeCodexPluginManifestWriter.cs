@@ -27,9 +27,11 @@ public sealed class NativeCodexPluginManifestWriter
         ArgumentException.ThrowIfNullOrWhiteSpace(marketplaceRoot);
         var paths = CodexRegistrationPaths.CreateForIsolatedTests(marketplaceRoot);
         using var marketplace = _fileSystem.OpenOrCreateDirectory(paths.MarketplaceRoot);
-        using var plugins = await OpenOrCreateChildAsync(marketplace, "plugins", cancellationToken).ConfigureAwait(false);
-        using var plugin = await OpenOrCreateChildAsync(plugins, PluginName, cancellationToken).ConfigureAwait(false);
+        using var pluginDirectory = await OpenOrCreateChildAsync(marketplace, "plugins", cancellationToken).ConfigureAwait(false);
+        using var plugin = await OpenOrCreateChildAsync(pluginDirectory, PluginName, cancellationToken).ConfigureAwait(false);
         using var metadata = await OpenOrCreateChildAsync(plugin, ".codex-plugin", cancellationToken).ConfigureAwait(false);
+        using var agentDirectory = await OpenOrCreateChildAsync(marketplace, ".agents", cancellationToken).ConfigureAwait(false);
+        using var marketplaceDirectory = await OpenOrCreateChildAsync(agentDirectory, "plugins", cancellationToken).ConfigureAwait(false);
 
         var manifest = new
         {
@@ -65,7 +67,7 @@ public sealed class NativeCodexPluginManifestWriter
                 new
                 {
                     name = PluginName,
-                    source = new { source = "local", path = "./plugins/fluxknowledge" },
+                    source = new { source = "local", path = "../../plugins/fluxknowledge" },
                     policy = new { installation = "AVAILABLE", authentication = "ON_INSTALL" },
                     category = "Productivity"
                 }
@@ -74,7 +76,7 @@ public sealed class NativeCodexPluginManifestWriter
 
         await WriteJsonAsync(metadata, "plugin.json", manifest, cancellationToken).ConfigureAwait(false);
         await WriteJsonAsync(plugin, ".mcp.json", companion, cancellationToken).ConfigureAwait(false);
-        await WriteJsonAsync(marketplace, "marketplace.json", marketplaceDocument, cancellationToken).ConfigureAwait(false);
+        await WriteJsonAsync(marketplaceDirectory, "marketplace.json", marketplaceDocument, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<NativeCodexPluginValidation> ValidateAsync(
@@ -85,12 +87,14 @@ public sealed class NativeCodexPluginManifestWriter
         {
             var paths = CodexRegistrationPaths.CreateForIsolatedTests(marketplaceRoot);
             using var marketplace = _fileSystem.OpenDirectory(paths.MarketplaceRoot);
-            using var plugins = _fileSystem.OpenDirectory(marketplace, "plugins");
-            using var plugin = _fileSystem.OpenDirectory(plugins, PluginName);
+            using var pluginDirectory = _fileSystem.OpenDirectory(marketplace, "plugins");
+            using var plugin = _fileSystem.OpenDirectory(pluginDirectory, PluginName);
             using var metadata = _fileSystem.OpenDirectory(plugin, ".codex-plugin");
+            using var agentDirectory = _fileSystem.OpenDirectory(marketplace, ".agents");
+            using var marketplaceDirectory = _fileSystem.OpenDirectory(agentDirectory, "plugins");
             var manifestBytes = await _fileSystem.ReadLiteralFileAsync(metadata, "plugin.json", cancellationToken).ConfigureAwait(false);
             var companionBytes = await _fileSystem.ReadLiteralFileAsync(plugin, ".mcp.json", cancellationToken).ConfigureAwait(false);
-            var marketplaceBytes = await _fileSystem.ReadLiteralFileAsync(marketplace, "marketplace.json", cancellationToken).ConfigureAwait(false);
+            var marketplaceBytes = await _fileSystem.ReadLiteralFileAsync(marketplaceDirectory, "marketplace.json", cancellationToken).ConfigureAwait(false);
             if (manifestBytes is null || companionBytes is null || marketplaceBytes is null)
             {
                 return new(false, "plugin-material-missing");
@@ -184,7 +188,7 @@ public sealed class NativeCodexPluginManifestWriter
         && StringProperty(marketplace, "name") == CodexRegistrationPaths.MarketplaceName
         && marketplace.TryGetProperty("plugins", out var plugins) && plugins.ValueKind == JsonValueKind.Array && plugins.GetArrayLength() == 1
         && StringProperty(plugins[0], "name") == PluginName
-        && plugins[0].TryGetProperty("source", out var source) && StringProperty(source, "source") == "local" && StringProperty(source, "path") == "./plugins/fluxknowledge";
+        && plugins[0].TryGetProperty("source", out var source) && StringProperty(source, "source") == "local" && StringProperty(source, "path") == "../../plugins/fluxknowledge";
 
     private static string? StringProperty(JsonElement element, string name) =>
         element.ValueKind == JsonValueKind.Object &&
