@@ -51,6 +51,20 @@ public sealed class NativeGoLiveHostPrerequisiteRemediationTests
         Assert.Equal(1, administration.ObserveCalls);
     }
 
+    [Fact]
+    public async Task Pool_stop_waits_for_the_terminal_stopped_observation()
+    {
+        var administration = new TransitionalPoolAdministration();
+        var port = new NativeGoLiveWindowsIisPort(administration);
+
+        var result = await port.StopAsync("FluxKnowledge", CancellationToken.None);
+
+        Assert.True(result.WasRunning);
+        Assert.Equal("Stopped", result.State);
+        Assert.True(result.OperationSucceeded);
+        Assert.Equal(3, administration.ObserveCalls);
+    }
+
     private sealed class RecordingIisAdministration : INativeGoLiveIisAdministration
     {
         public List<string> Events { get; } = [];
@@ -81,6 +95,22 @@ public sealed class NativeGoLiveHostPrerequisiteRemediationTests
 
         public string ObservePoolState(string _) => "Stopped";
         public void StopPool(string _) => throw new NotSupportedException();
+        public void StartPool(string _) => throw new NotSupportedException();
+    }
+
+    private sealed class TransitionalPoolAdministration : INativeGoLiveIisAdministration
+    {
+        private readonly Queue<string> _states = new(["Started", "Stopping", "Stopped"]);
+
+        public int ObserveCalls { get; private set; }
+        public NativeGoLiveIisObservation Observe(NativeGoLivePlan _) => throw new NotSupportedException();
+        public void ReplaceCanonical(NativeGoLivePlan _) => throw new NotSupportedException();
+        public string ObservePoolState(string _)
+        {
+            ObserveCalls++;
+            return _states.Dequeue();
+        }
+        public void StopPool(string _) { }
         public void StartPool(string _) => throw new NotSupportedException();
     }
 }

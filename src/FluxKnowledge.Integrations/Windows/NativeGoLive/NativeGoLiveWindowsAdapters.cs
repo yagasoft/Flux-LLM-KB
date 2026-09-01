@@ -26,6 +26,8 @@ internal interface INativeGoLiveIisAdministration
 
 internal sealed class NativeGoLiveWindowsIisPort : INativeGoLiveIisPort
 {
+    private static readonly TimeSpan PoolStopObservationWindow = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan PoolStopObservationInterval = TimeSpan.FromMilliseconds(100);
     private readonly INativeGoLiveIisAdministration _administration;
 
     internal NativeGoLiveWindowsIisPort()
@@ -45,7 +47,7 @@ internal sealed class NativeGoLiveWindowsIisPort : INativeGoLiveIisPort
         return _administration.Observe(plan);
     }
 
-    public ValueTask<NativeGoLivePoolObservation> StopAsync(
+    public async ValueTask<NativeGoLivePoolObservation> StopAsync(
         string appPoolName,
         CancellationToken cancellationToken)
     {
@@ -55,7 +57,7 @@ internal sealed class NativeGoLiveWindowsIisPort : INativeGoLiveIisPort
         string after;
         try
         {
-            after = _administration.ObservePoolState(appPoolName);
+            after = await ObserveStoppedAsync(appPoolName, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception exception) when (exception is InvalidOperationException or COMException or Win32Exception)
         {
@@ -63,11 +65,11 @@ internal sealed class NativeGoLiveWindowsIisPort : INativeGoLiveIisPort
                 string.Equals(before, "Started", StringComparison.Ordinal),
                 "app-pool-stop-final-observation-failed");
         }
-        return ValueTask.FromResult(new NativeGoLivePoolObservation(
+        return new NativeGoLivePoolObservation(
             appPoolName,
             string.Equals(before, "Started", StringComparison.Ordinal),
             after,
-            string.Equals(after, "Stopped", StringComparison.Ordinal)));
+            string.Equals(after, "Stopped", StringComparison.Ordinal));
     }
 
     public ValueTask<NativeGoLivePoolObservation> RestoreAsync(
@@ -98,6 +100,18 @@ internal sealed class NativeGoLiveWindowsIisPort : INativeGoLiveIisPort
         catch (Exception exception) when (exception is InvalidOperationException or COMException or Win32Exception)
         {
             return false;
+        }
+    }
+
+    private async ValueTask<string> ObserveStoppedAsync(string appPoolName, CancellationToken cancellationToken)
+    {
+        var deadline = DateTime.UtcNow + PoolStopObservationWindow;
+        while (true)
+        {
+            var state = _administration.ObservePoolState(appPoolName);
+            if (string.Equals(state, "Stopped", StringComparison.Ordinal) || DateTime.UtcNow >= deadline)
+                return state;
+            await Task.Delay(PoolStopObservationInterval, cancellationToken).ConfigureAwait(false);
         }
     }
 }
