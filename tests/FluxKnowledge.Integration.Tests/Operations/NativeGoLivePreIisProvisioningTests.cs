@@ -668,9 +668,9 @@ public sealed class NativeGoLivePreIisProvisioningTests
     {
         const string AppPoolSid = "S-1-5-21-100-200-300-400";
         const string SqlServiceSid = "S-1-5-21-500-600-700-800";
-        const long Read = 131209;
-        const long ReadAndExecute = 131241;
-        const long Modify = 197055;
+        const long Read = 1179785;
+        const long ReadAndExecute = 1179817;
+        const long Modify = 1245631;
         const long FullControl = 2032127;
         var layout = plan.Layout;
         var modifyPaths = new[]

@@ -1189,9 +1189,9 @@ internal sealed class GuardedNativeGoLiveHost : INativeGoLiveHost
         string sqlServiceSid,
         NativeGoLivePlan plan)
     {
-        const long Read = 131209;
-        const long ReadAndExecute = 131241;
-        const long Modify = 197055;
+        const long Read = 1179785;
+        const long ReadAndExecute = 1179817;
+        const long Modify = 1245631;
         const long FullControl = 2032127;
         var byPath = paths.ToDictionary(
             path => Path.TrimEndingDirectorySeparator(Path.GetFullPath(path.Path)),

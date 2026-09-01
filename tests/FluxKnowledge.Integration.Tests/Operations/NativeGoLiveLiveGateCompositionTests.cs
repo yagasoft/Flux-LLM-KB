@@ -585,9 +585,9 @@ public sealed class NativeGoLiveLiveGateCompositionTests
 
     private static NativeGoLiveAclObservation ExactAcl(NativeGoLivePlan plan)
     {
-        const long read = 131209;
-        const long readAndExecute = 131241;
-        const long modify = 197055;
+        const long read = 1179785;
+        const long readAndExecute = 1179817;
+        const long modify = 1245631;
         const long fullControl = 2032127;
         var layout = plan.Layout;
         var modifyPaths = new[]
