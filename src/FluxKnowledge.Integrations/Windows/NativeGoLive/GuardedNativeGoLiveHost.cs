@@ -1175,7 +1175,7 @@ internal sealed class GuardedNativeGoLiveHost : INativeGoLiveHost
             ValidateObservedAclRights(value.Paths, value.AppPoolSid, value.SqlServiceSid, plan);
         if (!aclShapeSafe ||
             !ExactSet(value.SqlServiceWriteRoots, sqlRoots) ||
-            !ExactSet(value.AppPoolReadExecuteRoots, [layout.ApplicationRoot]) ||
+            !ExactSet(value.AppPoolReadExecuteRoots, [layout.Root, layout.ApplicationRoot, layout.DataRoot, layout.RuntimeRoot]) ||
             !ExactSet(value.AppPoolReadRoots, [layout.ConfigRoot]) ||
             !ExactSet(value.AppPoolModifyRoots, appPoolModifyRoots) ||
             value.AppPoolSqlFileAccess || value.AppPoolAppWriteAccess || value.AppPoolConfigWriteAccess ||
@@ -1225,10 +1225,11 @@ internal sealed class GuardedNativeGoLiveHost : INativeGoLiveHost
         var sqlRoots = new[] { layout.SqlDataRoot, layout.SqlLogRoot };
         var deleteChildBoundaries = new[]
         {
-            layout.Root, layout.DataRoot, layout.SqlRoot, layout.RuntimeRoot, layout.CodexPluginRoot
+            layout.SqlRoot, layout.CodexPluginRoot
         };
+        var appReadExecuteRoots = new[] { layout.Root, layout.ApplicationRoot, layout.DataRoot, layout.RuntimeRoot };
         return deleteChildBoundaries.All(path => HasExactRules(path)) &&
-            HasExactRules(layout.ApplicationRoot, (appPoolSid, ReadAndExecute)) &&
+            appReadExecuteRoots.All(path => HasExactRules(path, (appPoolSid, ReadAndExecute))) &&
             HasExactRules(layout.ConfigRoot, (appPoolSid, Read)) &&
             appModify.All(path => HasExactRules(path, (appPoolSid, Modify))) &&
             sqlRoots.All(path => HasExactRules(path, (sqlServiceSid, Modify))) &&

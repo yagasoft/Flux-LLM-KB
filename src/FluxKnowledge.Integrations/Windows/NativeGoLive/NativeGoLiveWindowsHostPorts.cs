@@ -787,11 +787,10 @@ internal sealed class NativeGoLiveWindowsAclPort : INativeGoLiveAclPort
                  })
             using (var directory = _fileSystem.OpenOrCreateDirectory(path)) { }
 
-        foreach (var path in new[]
-                 {
-                     layout.Root, layout.DataRoot, layout.SqlRoot, layout.RuntimeRoot, layout.CodexPluginRoot
-                 })
+        foreach (var path in new[] { layout.SqlRoot, layout.CodexPluginRoot })
             ApplyDirectoryAcl(path);
+        foreach (var path in new[] { layout.Root, layout.DataRoot, layout.RuntimeRoot })
+            ApplyDirectoryAcl(path, (appPoolSid, FileSystemRights.ReadAndExecute));
         ApplyDirectoryAcl(layout.ApplicationRoot, (appPoolSid, FileSystemRights.ReadAndExecute));
         ApplyDirectoryAcl(layout.ConfigRoot, (appPoolSid, FileSystemRights.Read));
         ApplyDirectoryAcl(dataProtection, (appPoolSid, FileSystemRights.Modify));
@@ -824,10 +823,11 @@ internal sealed class NativeGoLiveWindowsAclPort : INativeGoLiveAclPort
         var appModify = candidates.Where(path => NativeGoLiveWindowsAclInspector.HasRights(
             path, appPoolSid.Value, FileSystemRights.Modify)).ToArray();
         var paths = candidates.Select(NativeGoLiveWindowsAclInspector.Observe).ToArray();
+        var appReadExecute = candidates.Where(path => NativeGoLiveWindowsAclInspector.HasRights(
+            path, appPoolSid.Value, FileSystemRights.ReadAndExecute)).ToArray();
         return ValueTask.FromResult(new NativeGoLiveAclObservation(
             sqlWrite,
-            NativeGoLiveWindowsAclInspector.HasRights(layout.ApplicationRoot, appPoolSid.Value, FileSystemRights.ReadAndExecute)
-                ? [layout.ApplicationRoot] : [],
+            appReadExecute,
             NativeGoLiveWindowsAclInspector.HasRights(layout.ConfigRoot, appPoolSid.Value, FileSystemRights.Read)
                 ? [layout.ConfigRoot] : [],
             appModify,

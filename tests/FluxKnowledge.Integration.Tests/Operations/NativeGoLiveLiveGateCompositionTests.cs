@@ -597,8 +597,9 @@ public sealed class NativeGoLiveLiveGateCompositionTests
         };
         var boundaryPaths = new[]
         {
-            layout.Root, layout.DataRoot, layout.SqlRoot, layout.RuntimeRoot, layout.CodexPluginRoot, layout.RecoveryRoot
+            layout.SqlRoot, layout.CodexPluginRoot, layout.RecoveryRoot
         };
+        var appReadExecutePaths = new[] { layout.Root, layout.ApplicationRoot, layout.DataRoot, layout.RuntimeRoot };
         NativeGoLiveAclPathObservation PathWithRules(string path, params (string Sid, long Rights)[] additions) =>
             new(path, true,
             [
@@ -607,7 +608,7 @@ public sealed class NativeGoLiveLiveGateCompositionTests
                 .. additions.Select(item => Ace(item.Sid, item.Rights))
             ]);
         var paths = boundaryPaths.Select(path => PathWithRules(path))
-            .Append(PathWithRules(layout.ApplicationRoot, (AppPoolSid, readAndExecute)))
+            .Concat(appReadExecutePaths.Select(path => PathWithRules(path, (AppPoolSid, readAndExecute))))
             .Append(PathWithRules(layout.ConfigRoot, (AppPoolSid, read)))
             .Concat(modifyPaths.Select(path => PathWithRules(path, (AppPoolSid, modify))))
             .Append(PathWithRules(layout.SqlDataRoot, (SqlServiceSid, modify)))
@@ -615,7 +616,7 @@ public sealed class NativeGoLiveLiveGateCompositionTests
             .ToArray();
         return new NativeGoLiveAclObservation(
             [layout.SqlDataRoot, layout.SqlLogRoot],
-            [layout.ApplicationRoot],
+            appReadExecutePaths,
             [layout.ConfigRoot],
             modifyPaths,
             false, false, false, false, true,

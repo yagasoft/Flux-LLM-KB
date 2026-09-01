@@ -680,8 +680,9 @@ public sealed class NativeGoLivePreIisProvisioningTests
         };
         var boundaryPaths = new[]
         {
-            layout.Root, layout.DataRoot, layout.SqlRoot, layout.RuntimeRoot, layout.CodexPluginRoot, layout.RecoveryRoot
+            layout.SqlRoot, layout.CodexPluginRoot, layout.RecoveryRoot
         };
+        var appReadExecutePaths = new[] { layout.Root, layout.ApplicationRoot, layout.DataRoot, layout.RuntimeRoot };
         NativeGoLiveAclPathObservation PathWithRules(string path, params (string Sid, long Rights)[] additions) =>
             new(path, true,
             [
@@ -690,7 +691,7 @@ public sealed class NativeGoLivePreIisProvisioningTests
                 .. additions.Select(item => Ace(item.Sid, item.Rights))
             ]);
         var paths = boundaryPaths.Select(path => PathWithRules(path))
-            .Append(PathWithRules(layout.ApplicationRoot, (AppPoolSid, ReadAndExecute)))
+            .Concat(appReadExecutePaths.Select(path => PathWithRules(path, (AppPoolSid, ReadAndExecute))))
             .Append(PathWithRules(layout.ConfigRoot, (AppPoolSid, Read)))
             .Concat(modifyPaths.Select(path => PathWithRules(path, (AppPoolSid, Modify))))
             .Append(PathWithRules(layout.SqlDataRoot, (SqlServiceSid, Modify)))
@@ -698,7 +699,7 @@ public sealed class NativeGoLivePreIisProvisioningTests
             .ToArray();
         return new NativeGoLiveAclObservation(
             [layout.SqlDataRoot, layout.SqlLogRoot],
-            [layout.ApplicationRoot],
+            appReadExecutePaths,
             [layout.ConfigRoot],
             modifyPaths,
             false, false, false, false, true,
