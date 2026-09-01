@@ -390,7 +390,7 @@ function Record-NativeGoLiveFailure {
         [Parameter(Mandatory)][Exception]$Exception)
 
     $script:FailedStep = 'native-go-live'
-    if ($Exception.Message -cmatch "\ANative go-live failed with safe reason code '(?<reason>go-live-(?:acknowledgement-required|cancelled-before-admission|lease-unavailable|closeout-capability-(?:unrecognised|expired|binding-mismatch|consumed))|clean-slate-(?:incomplete|admission-failed)|vss-(?:exact-action-not-proved|add-diff-area-failed|change-diff-area-failed)|native-go-live-bootstrap-(?:(?:reset|install|probe)-(?:connection|sni-load|script-parse|sql-batch-[1-9][0-9]*)-failed|(?:reset|install|probe)-failed))'(?: \(diagnostic: (?<detail>hresult-0x[0-9A-F]{8})\))?\.\z") {
+    if ($Exception.Message -cmatch "\ANative go-live failed with safe reason code '(?<reason>[a-z][a-z0-9-]{0,127})'(?: \(diagnostic: (?<detail>hresult-0x[0-9A-F]{8})\))?\.\z") {
         $Record.reason_code = $Matches['reason']
         if (-not [string]::IsNullOrWhiteSpace($Matches['detail'])) {
             $Record.diagnostic_detail = $Matches['detail']

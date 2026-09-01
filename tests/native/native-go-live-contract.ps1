@@ -113,6 +113,15 @@ Assert-True ($bootstrapFailureRecord.reason_code -ceq 'native-go-live-bootstrap-
 Assert-True ($script:FailedStep -ceq 'native-go-live') `
     'A safe native go-live bootstrap failure did not identify the native go-live step.'
 
+$script:FailedStep = $null
+$postconditionFailureRecord = [ordered]@{ name = 'native-go-live'; reason_code = $null }
+Record-NativeGoLiveFailure -Record $postconditionFailureRecord -Exception ([InvalidOperationException]::new(
+    "Native go-live failed with safe reason code 'sql-bootstrap-postcondition-failed'."))
+Assert-True ($postconditionFailureRecord.reason_code -ceq 'sql-bootstrap-postcondition-failed') `
+    'A bounded post-bootstrap failure did not retain its exact reason code.'
+Assert-True ($script:FailedStep -ceq 'native-go-live') `
+    'A bounded post-bootstrap failure did not identify the native go-live step.'
+
 foreach ($bridgeReasonCode in @(
     'native-go-live-bridge-composition-failed',
     'native-go-live-bridge-invocation-failed',
