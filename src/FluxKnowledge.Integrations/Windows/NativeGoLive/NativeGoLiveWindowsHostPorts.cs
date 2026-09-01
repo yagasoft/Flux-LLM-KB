@@ -823,7 +823,8 @@ internal sealed class NativeGoLiveWindowsAclPort : INativeGoLiveAclPort
         var appModify = candidates.Where(path => NativeGoLiveWindowsAclInspector.HasRights(
             path, appPoolSid.Value, FileSystemRights.Modify)).ToArray();
         var paths = candidates.Select(NativeGoLiveWindowsAclInspector.Observe).ToArray();
-        var appReadExecute = candidates.Where(path => NativeGoLiveWindowsAclInspector.HasRights(
+        var appReadExecute = new[] { layout.Root, layout.ApplicationRoot, layout.DataRoot, layout.RuntimeRoot }
+            .Where(path => NativeGoLiveWindowsAclInspector.HasRights(
             path, appPoolSid.Value, FileSystemRights.ReadAndExecute)).ToArray();
         return ValueTask.FromResult(new NativeGoLiveAclObservation(
             sqlWrite,
