@@ -733,6 +733,9 @@ internal interface INativeGoLiveLoopbackPort
 }
 internal interface INativeGoLiveMarketplacePort
 {
+    ValueTask ResetForConfirmedCleanSlateAsync(
+        NativeGoLiveCodexIdentity identity, CancellationToken cancellationToken);
+
     ValueTask<NativeGoLiveMarketplaceObservation> RegisterAndObserveAsync(
         NativeGoLiveCodexIdentity identity, CancellationToken cancellationToken);
 }
@@ -909,10 +912,16 @@ internal sealed class GuardedNativeGoLiveHost : INativeGoLiveHost
         var admission = _ports.Admission ??
             throw new NativeGoLiveContractException("go-live-one-shot-admission-not-supported");
         var observed = await admission.ObserveAsync(cancellationToken).ConfigureAwait(false);
-        if (observed.IsAbsent) return;
+        if (observed.IsAbsent)
+        {
+            if (request.ConfirmCleanSlate)
+                await _ports.Marketplace.ResetForConfirmedCleanSlateAsync(_plan.Codex, cancellationToken).ConfigureAwait(false);
+            return;
+        }
         if (!request.ConfirmCleanSlate)
             throw new NativeGoLiveContractException("go-live-wipe-confirmation-required");
 
+        await _ports.Marketplace.ResetForConfirmedCleanSlateAsync(_plan.Codex, cancellationToken).ConfigureAwait(false);
         await admission.WipeAsync(cancellationToken).ConfigureAwait(false);
         var afterWipe = await admission.ObserveAsync(cancellationToken).ConfigureAwait(false);
         if (!afterWipe.IsAbsent)

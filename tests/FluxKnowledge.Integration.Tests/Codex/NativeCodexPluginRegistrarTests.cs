@@ -410,6 +410,10 @@ public sealed class NativeCodexPluginRegistrarTests
             return ValueTask.FromResult(new NativeCodexMarketplaceCommandResult(0, string.Empty, string.Empty));
         }
 
+        public ValueTask<NativeCodexMarketplaceCommandResult> RemoveFluxKnowledgeMarketplaceAsync(
+            CancellationToken cancellationToken) =>
+            ValueTask.FromResult(new NativeCodexMarketplaceCommandResult(0, string.Empty, string.Empty));
+
         public ValueTask<NativeCodexMarketplaceCommandResult> ListMarketplacesJsonAsync(
             CancellationToken cancellationToken)
         {
@@ -438,6 +442,10 @@ public sealed class NativeCodexPluginRegistrarTests
                 ? new ValueTask<NativeCodexMarketplaceCommandResult>(_never.Task)
                 : ValueTask.FromResult(new NativeCodexMarketplaceCommandResult(0, string.Empty, string.Empty));
         }
+
+        public ValueTask<NativeCodexMarketplaceCommandResult> RemoveFluxKnowledgeMarketplaceAsync(
+            CancellationToken cancellationToken) =>
+            ValueTask.FromResult(new NativeCodexMarketplaceCommandResult(0, string.Empty, string.Empty));
 
         public ValueTask<NativeCodexMarketplaceCommandResult> ListMarketplacesJsonAsync(
             CancellationToken cancellationToken)

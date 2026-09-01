@@ -54,6 +54,9 @@ internal interface INativeCodexMarketplaceCommandRunner
         string marketplaceRoot,
         CancellationToken cancellationToken);
 
+    ValueTask<NativeCodexMarketplaceCommandResult> RemoveFluxKnowledgeMarketplaceAsync(
+        CancellationToken cancellationToken);
+
     ValueTask<NativeCodexMarketplaceCommandResult> ListMarketplacesJsonAsync(
         CancellationToken cancellationToken);
 }

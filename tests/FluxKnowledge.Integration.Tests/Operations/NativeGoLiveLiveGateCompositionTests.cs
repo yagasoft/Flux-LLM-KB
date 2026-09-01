@@ -292,7 +292,7 @@ public sealed class NativeGoLiveLiveGateCompositionTests
                     new ExactAclPort(Plan),
                     null!,
                     null!,
-                    null!,
+                    new RecordingMarketplacePort(Plan),
                     vss,
                     null,
                     new DisposableAdmissionPort(Plan, Events, failAdmission, cancelAdmission)),
@@ -470,6 +470,22 @@ public sealed class NativeGoLiveLiveGateCompositionTests
             return new NativeGoLiveVssMutationObservation(
                 expected.Association, expected.Association, NativeGoLiveVssAction.ChangeDiffAreaMaximumSize);
         }
+    }
+
+    private sealed class RecordingMarketplacePort(NativeGoLivePlan plan) : INativeGoLiveMarketplacePort
+    {
+        public ValueTask ResetForConfirmedCleanSlateAsync(
+            NativeGoLiveCodexIdentity identity,
+            CancellationToken cancellationToken)
+        {
+            Assert.Same(plan.Codex, identity);
+            return ValueTask.CompletedTask;
+        }
+
+        public ValueTask<NativeGoLiveMarketplaceObservation> RegisterAndObserveAsync(
+            NativeGoLiveCodexIdentity identity,
+            CancellationToken cancellationToken) =>
+            ValueTask.FromResult(MissingMarketplace(plan));
     }
 
     private sealed class RecordingVssOperationPrivilegeScope : IVssOperationPrivilegeScope

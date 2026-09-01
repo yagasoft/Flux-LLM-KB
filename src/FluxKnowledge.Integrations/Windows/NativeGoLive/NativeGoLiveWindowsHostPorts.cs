@@ -976,6 +976,24 @@ internal sealed class NativeGoLiveWindowsMarketplacePort : INativeGoLiveMarketpl
         return Observation(state, identity);
     }
 
+    public async ValueTask ResetForConfirmedCleanSlateAsync(
+        NativeGoLiveCodexIdentity identity,
+        CancellationToken cancellationToken)
+    {
+        if (!_capability.IsConsumedForExecution ||
+            !CodexMarketplaceIdentityPolicy.Same(identity, _expected))
+            throw new NativeGoLiveContractException("marketplace-authority-not-consumed");
+
+        _ = await _runner.RemoveFluxKnowledgeMarketplaceAsync(cancellationToken).ConfigureAwait(false);
+        var observed = await _runner.ListMarketplacesJsonAsync(cancellationToken).ConfigureAwait(false);
+        if (observed.ExitCode != 0)
+            throw new NativeGoLiveContractException("marketplace-clean-slate-verification-failed");
+        var (state, _) = ParseState(observed.StandardOutput, identity);
+        if (state != CodexMarketplaceLifecycleState.Missing)
+            throw new NativeGoLiveContractException("marketplace-clean-slate-removal-not-proved");
+        _preflight = null;
+    }
+
     public async ValueTask<NativeGoLiveMarketplaceObservation> RegisterAndObserveAsync(
         NativeGoLiveCodexIdentity identity,
         CancellationToken cancellationToken)
@@ -1066,6 +1084,10 @@ internal sealed class NativeGoLiveCodexProcessRunner(NativeGoLiveCodexIdentity e
         return RunAsync(["plugin", "marketplace", "add", marketplaceRoot], captureOutput: false, cancellationToken);
     }
 
+    public ValueTask<NativeCodexMarketplaceCommandResult> RemoveFluxKnowledgeMarketplaceAsync(
+        CancellationToken cancellationToken) =>
+        RunAsync(["plugin", "marketplace", "remove", expected.MarketplaceName], captureOutput: false, cancellationToken);
+
     public ValueTask<NativeCodexMarketplaceCommandResult> ListMarketplacesJsonAsync(
         CancellationToken cancellationToken) =>
         RunAsync(["plugin", "marketplace", "list", "--json"], captureOutput: true, cancellationToken);
@@ -1084,7 +1106,7 @@ internal sealed class NativeGoLiveCodexProcessRunner(NativeGoLiveCodexIdentity e
         await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
         var output = await stdout.ConfigureAwait(false);
         await stderr.ConfigureAwait(false);
-        var structuralHash = captureOutput
+        var structuralHash = captureOutput && process.ExitCode == 0
             ? HashUnrelatedConfiguration(output)
             : new string('0', 64);
         return new NativeCodexMarketplaceCommandResult(
