@@ -155,7 +155,7 @@ public sealed class NativeGoLiveOneShotAdmissionTests
         Assert.True(result.Succeeded, result.ReasonCode);
         Assert.Equal(1, host.AdmissionCalls);
         Assert.Equal(1, host.WipeCalls);
-        Assert.Equal(["wipe-root-and-catalogue"], host.Mutations.Take(1));
+        Assert.Equal(["stop-pool", "wipe-root-and-catalogue"], host.Mutations.Take(2));
         Assert.DoesNotContain("read-journal", host.Calls);
         Assert.DoesNotContain("compare-and-swap-journal", host.Calls);
     }

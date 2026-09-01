@@ -58,6 +58,7 @@ public sealed class NativeGoLiveExecutor
 
             try
             {
+                await host.StopPoolAsync(cancellationToken).ConfigureAwait(false);
                 await host.AdmitAndWipeAsync(request, cancellationToken).ConfigureAwait(false);
             }
             catch (OperationCanceledException)
@@ -72,7 +73,6 @@ public sealed class NativeGoLiveExecutor
             try
             {
                 await host.VerifyOneShotPreflightAsync(request.Plan, cancellationToken).ConfigureAwait(false);
-                await host.StopPoolAsync(cancellationToken).ConfigureAwait(false);
                 await host.ConfigureVssAsync(request.Plan.Vss, cancellationToken).ConfigureAwait(false);
                 try
                 {

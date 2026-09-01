@@ -14,6 +14,18 @@ public sealed class NativeGoLiveLiveGateCompositionTests
         "Pooling=False;Application Name=FluxKnowledge.NativeGoLive";
 
     [Fact]
+    public async Task Active_pool_is_stopped_before_clean_slate_admission_wipes_the_live_root()
+    {
+        using var fixture = new ExecutorOrderingFixture();
+        fixture.BeginExecution();
+
+        _ = await new NativeGoLiveExecutor().ExecuteAsync(fixture.Request, fixture.Host);
+
+        Assert.True(
+            fixture.Events.IndexOf("stop-iis") < fixture.Events.IndexOf("admission-observe-present"));
+    }
+
+    [Fact]
     public async Task Confirmed_host_prerequisite_replacement_reaches_the_Windows_preflight_adapter_before_any_root_or_catalogue_operation()
     {
         using var fixture = new ExecutorOrderingFixture();
@@ -27,11 +39,11 @@ public sealed class NativeGoLiveLiveGateCompositionTests
             [
                 "replace-canonical-iis",
                 "install-direct-admin-bootstrap",
+                "stop-iis",
                 "admission-observe-present",
                 "admission-wipe",
                 "admission-observe-absent",
                 "windows-preflight-sql",
-                "stop-iis",
                 "configure-vss",
                 "create-empty-root",
                 "provision-sql"
@@ -82,7 +94,7 @@ public sealed class NativeGoLiveLiveGateCompositionTests
         Assert.False(result.Succeeded);
         Assert.Equal("clean-slate-admission-failed", result.ReasonCode);
         Assert.Equal(
-            ["replace-canonical-iis", "install-direct-admin-bootstrap", "admission-observe-present"],
+            ["replace-canonical-iis", "install-direct-admin-bootstrap", "stop-iis", "admission-observe-present"],
             fixture.Events);
         Assert.True(Directory.Exists(fixture.Plan.Layout.Root));
         Assert.True(File.Exists(Path.Combine(fixture.Plan.Layout.Root, "pre-wipe-sentinel.txt")));
@@ -99,7 +111,7 @@ public sealed class NativeGoLiveLiveGateCompositionTests
         Assert.False(result.Succeeded);
         Assert.Equal("clean-slate-admission-failed", result.ReasonCode);
         Assert.Equal(
-            ["replace-canonical-iis", "install-direct-admin-bootstrap", "admission-observe-present"],
+            ["replace-canonical-iis", "install-direct-admin-bootstrap", "stop-iis", "admission-observe-present"],
             fixture.Events);
         Assert.True(Directory.Exists(fixture.Plan.Layout.Root));
     }
@@ -118,11 +130,11 @@ public sealed class NativeGoLiveLiveGateCompositionTests
             [
                 "replace-canonical-iis",
                 "install-direct-admin-bootstrap",
+                "stop-iis",
                 "admission-observe-present",
                 "admission-wipe",
                 "admission-observe-absent",
                 "windows-preflight-sql",
-                "stop-iis",
                 "configure-vss"
             ],
             fixture.Events);
@@ -200,7 +212,7 @@ public sealed class NativeGoLiveLiveGateCompositionTests
     }
 
     [Fact]
-    public async Task Preflight_rejects_wrong_fixed_procedure_manifest()
+    public async Task Preflight_rejects_wrong_fixed_procedure_manifest_after_stopping_the_active_pool()
     {
         using var fixture = new ExecutorOrderingFixture(ValidPreflight() with
         {
@@ -211,7 +223,7 @@ public sealed class NativeGoLiveLiveGateCompositionTests
         var result = await new NativeGoLiveExecutor().ExecuteAsync(fixture.Request, fixture.Host);
 
         Assert.False(result.Succeeded);
-        Assert.DoesNotContain("stop-iis", fixture.Events);
+        Assert.Contains("stop-iis", fixture.Events);
     }
 
     [Fact]
