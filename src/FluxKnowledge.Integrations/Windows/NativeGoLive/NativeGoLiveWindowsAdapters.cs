@@ -616,10 +616,9 @@ internal sealed class NativeGoLiveWindowsLoopbackPort : INativeGoLiveLoopbackPor
 
     private static string JsonRpcPayload(string body)
     {
-        if (!body.StartsWith("data:", StringComparison.Ordinal)) return body;
         var data = body.Split('\n', StringSplitOptions.RemoveEmptyEntries)
-            .SingleOrDefault(line => line.StartsWith("data:", StringComparison.Ordinal));
-        return data is null ? string.Empty : data[5..].Trim();
+            .FirstOrDefault(line => line.StartsWith("data:", StringComparison.Ordinal));
+        return data is null ? body : data[5..].Trim();
     }
 
     private static int RequiredInt(JsonElement root, string property) =>
