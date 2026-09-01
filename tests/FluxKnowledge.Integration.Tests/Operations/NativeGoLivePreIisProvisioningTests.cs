@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
+using System.Reflection;
 using System.Text;
 using FluxKnowledge.Application.Operations;
 using FluxKnowledge.Integrations.Windows.NativeGoLive;
@@ -15,6 +16,16 @@ public sealed class NativeGoLivePreIisProvisioningTests
         "Data Source=localhost;Initial Catalog=master;Integrated Security=True;" +
         "Encrypt=True;Trust Server Certificate=True;Connect Timeout=5;Connect Retry Count=0;" +
         "Pooling=False;Application Name=FluxKnowledge.NativeGoLive";
+
+    [Fact]
+    public void Published_migration_dependency_resolution_uses_the_published_payload()
+    {
+        var path = NativeGoLivePublishedAssemblyImage.ResolvePayloadDependency(
+            AppContext.BaseDirectory,
+            new AssemblyName("Microsoft.EntityFrameworkCore"));
+
+        Assert.Equal(Path.Combine(AppContext.BaseDirectory, "Microsoft.EntityFrameworkCore.dll"), path);
+    }
 
     [Fact]
     public void Production_configuration_validation_rejects_bytes_that_are_not_the_canonical_payload()

@@ -995,9 +995,14 @@ internal sealed class NativeGoLivePublishedAssemblyImage : IDisposable
     private const string AssemblyFileName = AssemblyName + ".dll";
     private const long MaximumAssemblyBytes = 64L * 1024 * 1024;
     private readonly FileStream _stream;
+    private readonly string _publishedRoot;
     private int _disposed;
 
-    private NativeGoLivePublishedAssemblyImage(FileStream stream) => _stream = stream;
+    private NativeGoLivePublishedAssemblyImage(FileStream stream, string publishedRoot)
+    {
+        _stream = stream;
+        _publishedRoot = publishedRoot;
+    }
 
     internal static NativeGoLivePublishedAssemblyImage Open(
         string publishedRoot,
@@ -1029,7 +1034,7 @@ internal sealed class NativeGoLivePublishedAssemblyImage : IDisposable
             stream.Position = 0;
             _ = SHA256.HashData(stream);
             stream.Position = 0;
-            return new NativeGoLivePublishedAssemblyImage(stream);
+            return new NativeGoLivePublishedAssemblyImage(stream, root);
         }
         catch
         {
@@ -1042,7 +1047,15 @@ internal sealed class NativeGoLivePublishedAssemblyImage : IDisposable
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
         _stream.Position = 0;
-        return new NativeGoLiveMigrationAssemblyLoadContext().LoadFromStream(_stream);
+        return new NativeGoLiveMigrationAssemblyLoadContext(_publishedRoot).LoadFromStream(_stream);
+    }
+
+    internal static string? ResolvePayloadDependency(string publishedRoot, AssemblyName assemblyName)
+    {
+        var name = assemblyName.Name;
+        if (string.IsNullOrWhiteSpace(name)) return null;
+        var candidate = Path.Combine(publishedRoot, name + ".dll");
+        return File.Exists(candidate) ? candidate : null;
     }
 
     public void Dispose()
@@ -1050,12 +1063,17 @@ internal sealed class NativeGoLivePublishedAssemblyImage : IDisposable
         if (Interlocked.Exchange(ref _disposed, 1) == 0) _stream.Dispose();
     }
 
-    private sealed class NativeGoLiveMigrationAssemblyLoadContext()
+    private sealed class NativeGoLiveMigrationAssemblyLoadContext(string publishedRoot)
         : AssemblyLoadContext($"NativeGoLiveMigration-{Guid.NewGuid():N}", isCollectible: false)
     {
-        protected override Assembly? Load(AssemblyName assemblyName) =>
-            Default.Assemblies.FirstOrDefault(candidate =>
+        protected override Assembly? Load(AssemblyName assemblyName)
+        {
+            var existing = Default.Assemblies.FirstOrDefault(candidate =>
                 System.Reflection.AssemblyName.ReferenceMatchesDefinition(candidate.GetName(), assemblyName));
+            if (existing is not null) return existing;
+            var dependency = ResolvePayloadDependency(publishedRoot, assemblyName);
+            return dependency is null ? null : LoadFromAssemblyPath(dependency);
+        }
     }
 }
 
