@@ -207,7 +207,9 @@ foreach ($name in @(
     'Assert-NativeGoLiveBootstrapEnvironment',
     'Assert-NativeGoLiveBootstrapConnection',
     'Get-NativeGoLiveWindowsSqlClientAssemblyPath',
+    'Get-NativeGoLiveWindowsSqlClientDependencyAssemblyPath',
     'Get-NativeGoLiveWindowsSqlClientNativeSniAsset',
+    'Import-NativeGoLiveWindowsSqlClientDependencyAssembly',
     'Import-NativeGoLiveWindowsSqlClientAssembly',
     'New-RequiredReflectionInstance',
     'Invoke-NativeGoLiveBootstrap')) {
@@ -259,13 +261,27 @@ try {
 
     $windowsLayout = Join-Path $SourceRoot 'artifacts\bin\FluxKnowledge.Web\release'
     $windowsAsset = $windowsProvider
+    $dependencyAsset = Join-Path $windowsLayout 'Microsoft.SqlServer.Server.dll'
     $nativeSniAsset = Get-NativeGoLiveWindowsSqlClientNativeSniAsset -MergedMainRoot $windowsLayout
     $selectedProvider = Get-NativeGoLiveWindowsSqlClientAssemblyPath -MergedMainRoot $windowsLayout
+    $selectedDependency = Get-NativeGoLiveWindowsSqlClientDependencyAssemblyPath -MergedMainRoot $windowsLayout
     Assert-True ([string]::Equals(
         [IO.Path]::GetFullPath($selectedProvider),
         [IO.Path]::GetFullPath($windowsAsset),
         [StringComparison]::OrdinalIgnoreCase)) `
         'The packaged-layout selection did not choose the explicit Windows runtime SqlClient asset.'
+    Assert-True ((Test-Path -LiteralPath $dependencyAsset -PathType Leaf) -and
+        [string]::Equals(
+            [IO.Path]::GetFullPath($selectedDependency),
+            [IO.Path]::GetFullPath($dependencyAsset),
+            [StringComparison]::OrdinalIgnoreCase)) `
+        'The packaged-layout selection did not choose the SqlClient server dependency from the publish root.'
+    $loadedDependency = Import-NativeGoLiveWindowsSqlClientDependencyAssembly -DependencyAssemblyPath $selectedDependency
+    Assert-True ([string]::Equals(
+        [IO.Path]::GetFullPath($loadedDependency.Location),
+        [IO.Path]::GetFullPath($dependencyAsset),
+        [StringComparison]::OrdinalIgnoreCase)) `
+        'The SqlClient server dependency did not load from the published payload before SqlClient.'
     $loadedProvider = Import-NativeGoLiveWindowsSqlClientAssembly -SqlClientAssemblyPath $selectedProvider
     Assert-True ([string]::Equals(
         [IO.Path]::GetFullPath($loadedProvider.Location),

@@ -531,6 +531,17 @@ function Get-NativeGoLiveWindowsSqlClientAssemblyPath {
     return $path
 }
 
+function Get-NativeGoLiveWindowsSqlClientDependencyAssemblyPath {
+    param([Parameter(Mandatory)][string]$MergedMainRoot)
+
+    $path = Join-Path $MergedMainRoot 'Microsoft.SqlServer.Server.dll'
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        throw 'native-go-live-windows-sql-client-dependency-missing'
+    }
+
+    return $path
+}
+
 function Get-NativeGoLiveWindowsSqlClientNativeSniAsset {
     param([Parameter(Mandatory)][string]$MergedMainRoot)
 
@@ -609,6 +620,26 @@ function Import-NativeGoLiveWindowsSqlClientAssembly {
         return $assembly
     } catch {
         throw 'native-go-live-windows-sql-client-load-failed'
+    }
+}
+
+function Import-NativeGoLiveWindowsSqlClientDependencyAssembly {
+    param([Parameter(Mandatory)][string]$DependencyAssemblyPath)
+
+    try {
+        $assembly = [Reflection.Assembly]::LoadFrom($DependencyAssemblyPath)
+        $expectedPath = [IO.Path]::GetFullPath($DependencyAssemblyPath)
+        if ($assembly.GetName().Name -cne 'Microsoft.SqlServer.Server' -or
+            [string]::IsNullOrWhiteSpace($assembly.Location) -or
+            -not [string]::Equals(
+                [IO.Path]::GetFullPath($assembly.Location),
+                $expectedPath,
+                [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'native-go-live-windows-sql-client-dependency-load-mismatch'
+        }
+        return $assembly
+    } catch {
+        throw 'native-go-live-windows-sql-client-dependency-load-failed'
     }
 }
 
@@ -972,7 +1003,9 @@ function Invoke-NativeGoLiveComposition {
         }
     }
     $sqlClientAssemblyPath = Get-NativeGoLiveWindowsSqlClientAssemblyPath -MergedMainRoot $MergedMainRoot
+    $sqlClientDependencyAssemblyPath = Get-NativeGoLiveWindowsSqlClientDependencyAssemblyPath -MergedMainRoot $MergedMainRoot
     $sqlClientNativeSniAsset = Get-NativeGoLiveWindowsSqlClientNativeSniAsset -MergedMainRoot $MergedMainRoot
+    $sqlClientDependencyAssembly = Import-NativeGoLiveWindowsSqlClientDependencyAssembly -DependencyAssemblyPath $sqlClientDependencyAssemblyPath
     Load-NativeGoLiveWindowsSqlClientNativeSniAsset -SqlClientNativeSniAssetPath $sqlClientNativeSniAsset.Path
     $sqlClientAssembly = Import-NativeGoLiveWindowsSqlClientAssembly -SqlClientAssemblyPath $sqlClientAssemblyPath
     $applicationAssembly = [Reflection.Assembly]::LoadFrom($applicationAssemblyPath)
