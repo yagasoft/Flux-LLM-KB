@@ -666,7 +666,11 @@ internal sealed class NativeGoLiveWindowsSqlPort
         {
             return _fileSystem.OpenOrCreateDirectory(path);
         }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        catch (NativeGoLiveContractException)
+        {
+            throw;
+        }
+        catch (Exception exception)
         {
             throw new NativeGoLiveContractException(
                 $"sql-provisioning-storage-{role}-failed",
