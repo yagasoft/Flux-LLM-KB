@@ -96,6 +96,20 @@ public sealed class WebHostCompositionTests : IDisposable
     }
 
     [Fact]
+    public void Production_composition_registers_the_UTF8_endpoint_handler_without_hosted_services()
+    {
+        var services = new ServiceCollection();
+        WebHostComposition.AddProductionFluxKnowledgeServicesForTests(
+            services,
+            CreateProductionConfiguration());
+
+        Assert.Contains(services, descriptor =>
+            descriptor.ServiceType == typeof(RegisterUtf8FileHandler));
+        Assert.DoesNotContain(services, descriptor =>
+            descriptor.ServiceType == typeof(IHostedService));
+    }
+
+    [Fact]
     public void Production_composition_proof_accepts_only_the_inert_no_hosted_service_graph()
     {
         var services = new ServiceCollection();

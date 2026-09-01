@@ -308,9 +308,9 @@ public static class WebHostComposition
         services.AddScoped<NativeOperationsStatusService>();
         services.AddScoped<NativeAuditQueryService>();
         services.AddScoped<INativeV1Facade, NativeV1Facade>();
+        services.AddFluxKnowledgeOutboxWorkers();
         if (!strictProductionPaths)
         {
-            services.AddFluxKnowledgeOutboxWorkers();
             services.AddScoped<SqlSourceRootStore>();
             services.AddScoped<ISourceRootStore>(provider => provider.GetRequiredService<SqlSourceRootStore>());
             services.AddScoped<SqlSourceActivityStore>();
@@ -370,10 +370,7 @@ public static class WebHostComposition
         services.AddScoped<LocalOperatorConnectionContext>();
         services.AddScoped<ILocalOperatorPolicy, LocalOperatorPolicy>();
         services.AddScoped<OperatorActionPageState>();
-        if (!strictProductionPaths)
-        {
-            services.AddFluxKnowledgeGpuScheduler();
-        }
+        services.AddFluxKnowledgeGpuScheduler();
         services.AddScoped<IProjectionReader, SqlProjectionReader>();
         services.AddScoped<ICorpusProjectionReader, SqlCorpusProjectionReader>();
         services.AddScoped<IOperatorEventProjectionReader, SqlOperatorEventProjectionReader>();
@@ -386,7 +383,22 @@ public static class WebHostComposition
             services.AddScoped<IStageWorker, EmbedStageWorker>();
             services.AddScoped<IStageWorker, PublishStageWorker>();
         }
+        if (strictProductionPaths)
+        {
+            RemoveHostedServiceRegistrations(services);
+        }
         return services;
+    }
+
+    private static void RemoveHostedServiceRegistrations(IServiceCollection services)
+    {
+        for (var index = services.Count - 1; index >= 0; index--)
+        {
+            if (typeof(IHostedService).IsAssignableFrom(services[index].ServiceType))
+            {
+                services.RemoveAt(index);
+            }
+        }
     }
 
     private static IReadOnlyList<string> ReadConfiguredSafetyRoots(IConfiguration configuration) =>
