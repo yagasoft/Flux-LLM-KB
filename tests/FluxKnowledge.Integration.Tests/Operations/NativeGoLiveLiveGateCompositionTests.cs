@@ -135,43 +135,18 @@ public sealed class NativeGoLiveLiveGateCompositionTests
     {
         using var fixture = new ExecutorOrderingFixture(
             vssException: new NativeGoLiveContractException(
-                "vss-add-diff-area-failed", "hresult-0x8004230F"));
+                "vss-change-diff-area-failed", "hresult-0x8004230F"));
         fixture.BeginExecution();
 
         var result = await new NativeGoLiveExecutor().ExecuteAsync(fixture.Request, fixture.Host);
 
         Assert.False(result.Succeeded);
-        Assert.Equal("vss-add-diff-area-failed", result.ReasonCode);
+        Assert.Equal("vss-change-diff-area-failed", result.ReasonCode);
         Assert.Equal("hresult-0x8004230F", result.DiagnosticDetail);
     }
 
     [Fact]
-    public void Vss_adapter_preserves_the_fixed_add_action_failure_code()
-    {
-        var adapter = new VssDiffAreaAdministration(new OrdinaryFailureVssApi());
-
-        var failure = Assert.Throws<NativeGoLiveContractException>(() =>
-            adapter.EnsureMaximumStorageObserved("I:", 0.10m, CancellationToken.None));
-
-        Assert.Equal("vss-add-diff-area-failed", failure.ReasonCode);
-        Assert.Equal("hresult-0x80070005", failure.DiagnosticDetail);
-    }
-
-    [Fact]
-    public void Vss_adapter_preserves_a_bounded_hresult_for_a_non_com_add_failure()
-    {
-        var adapter = new VssDiffAreaAdministration(
-            new OrdinaryFailureVssApi(new InvalidOperationException("test non-COM VSS adapter failure")));
-
-        var failure = Assert.Throws<NativeGoLiveContractException>(() =>
-            adapter.EnsureMaximumStorageObserved("I:", 0.10m, CancellationToken.None));
-
-        Assert.Equal("vss-add-diff-area-failed", failure.ReasonCode);
-        Assert.Equal("hresult-0x80131509", failure.DiagnosticDetail);
-    }
-
-    [Fact]
-    public void Vss_adapter_enables_backup_privilege_only_while_adding_the_canonical_diff_area()
+    public void Vss_adapter_creates_a_missing_canonical_diff_area_through_change_with_backup_privilege()
     {
         var privilege = new RecordingVssOperationPrivilegeScope();
         var api = new PrivilegeRequiredVssApi(privilege);
@@ -180,9 +155,10 @@ public sealed class NativeGoLiveLiveGateCompositionTests
         var result = adapter.EnsureMaximumStorageObserved("I:", 0.10m, CancellationToken.None);
 
         Assert.Equal(VssAssociationState.ExactExisting, result.Verified.State);
+        Assert.Equal(NativeGoLiveVssAction.ChangeDiffAreaMaximumSize, result.Action);
         Assert.Equal(1, privilege.EnableCount);
         Assert.Equal(1, privilege.DisposeCount);
-        Assert.True(api.AddCalledWhileEnabled);
+        Assert.True(api.ChangeCalledWhileEnabled);
         Assert.False(privilege.IsEnabled);
     }
 
@@ -491,21 +467,6 @@ public sealed class NativeGoLiveLiveGateCompositionTests
         }
     }
 
-    private sealed class OrdinaryFailureVssApi(Exception? exception = null) : IVssDiffAreaComApi
-    {
-        private readonly Exception _exception = exception ??
-            new COMException("test ordinary VSS adapter failure", unchecked((int)0x80070005));
-
-        public VssVolumeDiffAreaState Query(string _) => new(
-            new VssDiffAreaState(VssAssociationState.SupportedAbsent, "I:", "I:", null),
-            20_000_000_000);
-
-        public void AddDiffArea(string _, string __, ulong ___) => throw _exception;
-
-        public void ChangeDiffAreaMaximumSize(string _, string __, ulong ___) =>
-            throw new NotSupportedException();
-    }
-
     private sealed class RecordingVssOperationPrivilegeScope : IVssOperationPrivilegeScope
     {
         public int EnableCount { get; private set; }
@@ -526,24 +487,21 @@ public sealed class NativeGoLiveLiveGateCompositionTests
 
     private sealed class PrivilegeRequiredVssApi(RecordingVssOperationPrivilegeScope privilege) : IVssDiffAreaComApi
     {
-        private bool _added;
-        public bool AddCalledWhileEnabled { get; private set; }
+        private bool _configured;
+        public bool ChangeCalledWhileEnabled { get; private set; }
 
         public VssVolumeDiffAreaState Query(string _) => new(
             new VssDiffAreaState(
-                _added ? VssAssociationState.ExactExisting : VssAssociationState.SupportedAbsent,
-                "I:", "I:", _added ? 2_000_000_000UL : null),
+                _configured ? VssAssociationState.ExactExisting : VssAssociationState.SupportedAbsent,
+                "I:", "I:", _configured ? 2_000_000_000UL : null),
             20_000_000_000);
 
-        public void AddDiffArea(string _, string __, ulong ___)
+        public void ChangeDiffAreaMaximumSize(string _, string __, ulong ___)
         {
-            AddCalledWhileEnabled = privilege.IsEnabled;
-            if (!AddCalledWhileEnabled) throw new InvalidOperationException("backup privilege was not enabled");
-            _added = true;
+            ChangeCalledWhileEnabled = privilege.IsEnabled;
+            if (!ChangeCalledWhileEnabled) throw new InvalidOperationException("backup privilege was not enabled");
+            _configured = true;
         }
-
-        public void ChangeDiffAreaMaximumSize(string _, string __, ulong ___) =>
-            throw new NotSupportedException();
     }
 
     private sealed class CallbackDisposable(Action dispose) : IDisposable

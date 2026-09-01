@@ -87,7 +87,7 @@ public sealed class NativeGoLiveExecutor
             }
             catch (NativeGoLiveContractException exception) when (
                 exception.ReasonCode is "vss-exact-action-not-proved" or
-                    "vss-add-diff-area-failed" or "vss-change-diff-area-failed")
+                    "vss-change-diff-area-failed")
             {
                 return NativeGoLiveResult.Refused(exception.ReasonCode, exception.DiagnosticDetail);
             }

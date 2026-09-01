@@ -29,7 +29,6 @@ internal sealed record NativeGoLiveVssPreflightObservation(
 internal enum NativeGoLiveVssAction
 {
     None,
-    AddDiffArea,
     ChangeDiffAreaMaximumSize
 }
 
@@ -41,7 +40,6 @@ internal sealed record NativeGoLiveVssMutationObservation(
 internal interface IVssDiffAreaComApi
 {
     VssVolumeDiffAreaState Query(string volume);
-    void AddDiffArea(string sourceVolumeId, string storageVolumeId, ulong maximumBytes);
     void ChangeDiffAreaMaximumSize(string sourceVolumeId, string storageVolumeId, ulong maximumBytes);
 }
 
@@ -52,7 +50,7 @@ internal interface IVssOperationPrivilegeScope
 
 /// <summary>
 /// Applies the one allowed VSS diff-area policy through the typed VSS COM API. It never creates a
-/// snapshot and exposes no command, output-parsing, encryption or restore surface.
+/// snapshot, parses command output, enables encryption or exposes a restore surface.
 /// </summary>
 internal sealed class VssDiffAreaAdministration
 {
@@ -176,26 +174,15 @@ internal sealed class VssDiffAreaAdministration
             }
 
             cancellationToken.ThrowIfCancellationRequested();
-            var action = state.State == VssAssociationState.ExactExisting
-                ? NativeGoLiveVssAction.ChangeDiffAreaMaximumSize
-                : NativeGoLiveVssAction.AddDiffArea;
+            const NativeGoLiveVssAction action = NativeGoLiveVssAction.ChangeDiffAreaMaximumSize;
             try
             {
                 using var backupPrivilege = _operationPrivilegeScope.EnableBackupPrivilege();
-                if (state.State == VssAssociationState.ExactExisting)
-                {
-                    _api.ChangeDiffAreaMaximumSize(state.SourceVolumeId, state.StorageVolumeId, maximumBytes);
-                }
-                else
-                {
-                    _api.AddDiffArea(state.SourceVolumeId, state.StorageVolumeId, maximumBytes);
-                }
+                _api.ChangeDiffAreaMaximumSize(state.SourceVolumeId, state.StorageVolumeId, maximumBytes);
             }
             catch (Exception exception) when (exception is not OutOfMemoryException)
             {
-                throw new NativeGoLiveContractException(action == NativeGoLiveVssAction.AddDiffArea
-                    ? "vss-add-diff-area-failed"
-                    : "vss-change-diff-area-failed",
+                throw new NativeGoLiveContractException("vss-change-diff-area-failed",
                     $"hresult-0x{unchecked((uint)exception.HResult):X8}",
                     exception);
             }
@@ -435,13 +422,6 @@ internal sealed class WindowsVssDiffAreaComApi : IVssDiffAreaComApi
             ? VssAssociationState.SupportedAbsent
             : VssAssociationState.Unsupported;
         return new VssVolumeDiffAreaState(new VssDiffAreaState(state, volumeId, volumeId, null), totalBytes);
-    }
-
-    public void AddDiffArea(string sourceVolumeId, string storageVolumeId, ulong maximumBytes)
-    {
-        EnsureWindows();
-        using var api = OpenDifferentialManagement();
-        ThrowIfFailed(api.Value.AddDiffArea(sourceVolumeId, storageVolumeId, checked((long)maximumBytes)));
     }
 
     public void ChangeDiffAreaMaximumSize(string sourceVolumeId, string storageVolumeId, ulong maximumBytes)

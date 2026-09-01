@@ -1023,9 +1023,7 @@ internal sealed class GuardedNativeGoLiveHost : INativeGoLiveHost
         if (_preflightVss is null) throw new NativeGoLiveContractException("vss-preflight-missing");
         if (policy != _plan.Vss) throw new NativeGoLiveContractException("vss-policy-not-plan-bound");
         var result = _ports.Vss.Ensure(policy, _preflightVss, cancellationToken);
-        var expectedAction = _preflightVss.Association.State == VssAssociationState.ExactExisting
-            ? NativeGoLiveVssAction.ChangeDiffAreaMaximumSize
-            : NativeGoLiveVssAction.AddDiffArea;
+        const NativeGoLiveVssAction expectedAction = NativeGoLiveVssAction.ChangeDiffAreaMaximumSize;
         if (result.Observed != _preflightVss.Association ||
             result.Action != expectedAction ||
             result.Verified.State != VssAssociationState.ExactExisting ||
