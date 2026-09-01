@@ -74,7 +74,22 @@ public sealed class NativeGoLiveExecutor
                 await host.VerifyOneShotPreflightAsync(request.Plan, cancellationToken).ConfigureAwait(false);
                 await host.StopPoolAsync(cancellationToken).ConfigureAwait(false);
                 await host.ConfigureVssAsync(request.Plan.Vss, cancellationToken).ConfigureAwait(false);
-                await host.CreateEmptyRootAsync(request.Plan, cancellationToken).ConfigureAwait(false);
+                try
+                {
+                    await host.CreateEmptyRootAsync(request.Plan, cancellationToken).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    return NativeGoLiveResult.Refused("clean-slate-incomplete");
+                }
+                catch (NativeGoLiveContractException exception)
+                {
+                    return NativeGoLiveResult.Refused(exception.ReasonCode, exception.DiagnosticDetail);
+                }
+                catch (Exception)
+                {
+                    return NativeGoLiveResult.Refused("root-hierarchy-create-failed");
+                }
                 await host.ProvisionEmptyCatalogueAsync(request.Plan.Sql, cancellationToken).ConfigureAwait(false);
                 await host.PublishAndStartAsync(request.Plan, cancellationToken).ConfigureAwait(false);
                 await host.ValidateAsync(request.Plan, cancellationToken).ConfigureAwait(false);

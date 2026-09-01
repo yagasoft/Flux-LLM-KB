@@ -158,6 +158,18 @@ public sealed class NativeGoLiveLiveGateCompositionTests
     }
 
     [Fact]
+    public async Task Unexpected_empty_root_failure_returns_its_bounded_stage_code()
+    {
+        using var fixture = new ExecutorOrderingFixture(rootException: new IOException("synthetic-root-failure"));
+        fixture.BeginExecution();
+
+        var result = await new NativeGoLiveExecutor().ExecuteAsync(fixture.Request, fixture.Host);
+
+        Assert.False(result.Succeeded);
+        Assert.Equal("root-hierarchy-create-failed", result.ReasonCode);
+    }
+
+    [Fact]
     public void Vss_adapter_creates_a_missing_canonical_diff_area_through_change_with_backup_privilege()
     {
         var privilege = new RecordingVssOperationPrivilegeScope();
@@ -252,7 +264,7 @@ public sealed class NativeGoLiveLiveGateCompositionTests
             bool cancelAdmission = false,
             bool failVss = false,
             NativeGoLiveContractException? vssException = null,
-            NativeGoLiveContractException? rootException = null)
+            Exception? rootException = null)
         {
             _root = Path.Combine(Path.GetTempPath(), "FluxKnowledgeLiveGateOrdering", Guid.NewGuid().ToString("N"));
             var payloadRoot = CreatePayloadRoot(_root);
@@ -406,7 +418,7 @@ public sealed class NativeGoLiveLiveGateCompositionTests
     private sealed class DisposableOwnedStatePort(
         NativeGoLivePlan plan,
         List<string> events,
-        NativeGoLiveContractException? rootException) : INativeGoLiveOwnedStatePort
+        Exception? rootException) : INativeGoLiveOwnedStatePort
     {
         public ValueTask WipeRootAsync(CancellationToken _) => throw new NotSupportedException();
 
