@@ -478,13 +478,27 @@ internal sealed class NativeGoLiveWindowsOwnedStatePort(
                 continue;
             RequireMutation(await _fileSystem.CreateDirectoryAsync(root, child, cancellationToken).ConfigureAwait(false));
         }
-        foreach (var path in new[]
-                 {
-                     plan.Layout.SqlDataRoot, plan.Layout.SqlLogRoot, plan.Layout.IndexRoot,
-                     plan.Layout.RetainedRoot, plan.Layout.SpoolRoot, plan.Layout.TempRoot,
-                     plan.Layout.LogsRoot
-                 })
-            using (var directory = _fileSystem.OpenOrCreateDirectory(path)) { }
+        using var data = _fileSystem.OpenDirectory(root, "Data");
+        foreach (var child in new[] { "Sql", "Index", "Retained", "Spool", "Temp", "Logs" })
+        {
+            if (_fileSystem.EnumerateLiteralChildren(data).Contains(child, StringComparer.OrdinalIgnoreCase))
+                continue;
+            RequireMutation(await _fileSystem.CreateDirectoryAsync(data, child, cancellationToken).ConfigureAwait(false));
+        }
+        using var sql = _fileSystem.OpenDirectory(data, "Sql");
+        foreach (var child in new[] { "Data", "Log" })
+        {
+            if (_fileSystem.EnumerateLiteralChildren(sql).Contains(child, StringComparer.OrdinalIgnoreCase))
+                continue;
+            RequireMutation(await _fileSystem.CreateDirectoryAsync(sql, child, cancellationToken).ConfigureAwait(false));
+        }
+        using var runtime = _fileSystem.OpenDirectory(root, "Runtime");
+        foreach (var child in new[] { "Spool", "Temp", "Logs" })
+        {
+            if (_fileSystem.EnumerateLiteralChildren(runtime).Contains(child, StringComparer.OrdinalIgnoreCase))
+                continue;
+            RequireMutation(await _fileSystem.CreateDirectoryAsync(runtime, child, cancellationToken).ConfigureAwait(false));
+        }
     }
 
     public async ValueTask WriteProductionConfigurationAsync(CancellationToken cancellationToken)
