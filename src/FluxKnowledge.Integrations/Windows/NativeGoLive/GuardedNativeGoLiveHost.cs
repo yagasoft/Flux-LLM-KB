@@ -1051,7 +1051,6 @@ internal sealed class GuardedNativeGoLiveHost : INativeGoLiveHost
                     NativeGoLivePayloadHasher.Compute(_mergedMainRoot),
                     _capability.PayloadManifest))
                 throw new NativeGoLiveContractException("merged-main-payload-changed");
-            await _ports.Acls.ApplyAndObserveAsync(_plan, cancellationToken).ConfigureAwait(false);
             var observation = await _ports.Sql.ProvisionAndObserveAsync(
                 sql, _bootstrap, _capability.PayloadManifest, cancellationToken).ConfigureAwait(false);
             ValidatePostBootstrap(observation);

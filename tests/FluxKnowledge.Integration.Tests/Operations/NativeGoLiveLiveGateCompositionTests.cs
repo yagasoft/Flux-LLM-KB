@@ -34,11 +34,9 @@ public sealed class NativeGoLiveLiveGateCompositionTests
                 "stop-iis",
                 "configure-vss",
                 "create-empty-root",
-                "apply-acls",
                 "provision-sql"
             ],
             fixture.Events);
-        Assert.True(fixture.Acls.AppliedAfterRootCreation);
         Assert.True(Directory.Exists(fixture.Plan.Layout.SqlDataRoot));
         Assert.True(Directory.Exists(fixture.Plan.Layout.SqlLogRoot));
     }
@@ -268,7 +266,6 @@ public sealed class NativeGoLiveLiveGateCompositionTests
             Request = new NativeGoLiveRequest(
                 Plan, false, true, true, true, true, payloadRoot, manifest.Sha256, manifest);
             var vss = new RecordingVssPort(Plan, Events, failVss, vssException);
-            Acls = new OrderingAclPort(Plan, Events);
             var bootstrap = NativeGoLiveSqlBootstrap.Parse(CanonicalBootstrap);
             var preflight = new NativeGoLiveWindowsPreflightPort(
                 Plan,
@@ -294,8 +291,8 @@ public sealed class NativeGoLiveLiveGateCompositionTests
                     preflight,
                     new RecordingIisPort(Plan, Events),
                     new DisposableOwnedStatePort(Plan, Events, rootException),
-                    new OrderingSqlPort(Plan, Acls, Events),
-                    Acls,
+                    new OrderingSqlPort(Plan, Events),
+                    new ExactAclPort(Plan),
                     null!,
                     null!,
                     null!,
@@ -316,7 +313,6 @@ public sealed class NativeGoLiveLiveGateCompositionTests
         public NativeGoLivePlan Plan { get; }
         public NativeGoLiveRequest Request { get; }
         public GuardedNativeGoLiveHost Host { get; }
-        internal OrderingAclPort Acls { get; }
         public List<string> Events { get; } = [];
 
         public void BeginExecution() => Assert.True(_capability.TryBeginExecution());
@@ -528,26 +524,6 @@ public sealed class NativeGoLiveLiveGateCompositionTests
         public void Dispose() => dispose();
     }
 
-    internal sealed class OrderingAclPort(NativeGoLivePlan plan, List<string> events) : INativeGoLiveAclPort
-    {
-        public bool AppliedAfterRootCreation { get; private set; }
-
-        public ValueTask<NativeGoLiveAclObservation> ApplyAndObserveAsync(NativeGoLivePlan _, CancellationToken __)
-        {
-            events.Add("apply-acls");
-            AppliedAfterRootCreation = Directory.Exists(plan.Layout.Root);
-            if (!AppliedAfterRootCreation)
-                return ValueTask.FromException<NativeGoLiveAclObservation>(
-                    new NativeGoLiveContractException("acl-applied-before-root-creation"));
-            Directory.CreateDirectory(plan.Layout.SqlDataRoot);
-            Directory.CreateDirectory(plan.Layout.SqlLogRoot);
-            return ValueTask.FromResult(ExactAcl(plan));
-        }
-
-        public ValueTask<NativeGoLiveAclObservation> ObserveEffectiveAsync(NativeGoLivePlan _, CancellationToken __) =>
-            throw new NativeGoLiveContractException("acl-observed-before-hierarchy-application");
-    }
-
     private sealed class ExactAclPort(NativeGoLivePlan plan) : INativeGoLiveAclPort
     {
         public ValueTask<NativeGoLiveAclObservation> ApplyAndObserveAsync(NativeGoLivePlan _, CancellationToken __) =>
@@ -557,10 +533,7 @@ public sealed class NativeGoLiveLiveGateCompositionTests
             ValueTask.FromResult(ExactAcl(plan));
     }
 
-    private sealed class OrderingSqlPort(
-        NativeGoLivePlan plan,
-        OrderingAclPort acls,
-        List<string> events) : INativeGoLiveSqlPort
+    private sealed class OrderingSqlPort(NativeGoLivePlan plan, List<string> events) : INativeGoLiveSqlPort
     {
         public ValueTask<NativeGoLiveSqlPostBootstrapObservation> ProvisionAndObserveAsync(
             NativeGoLiveSqlIdentity _,
@@ -569,11 +542,8 @@ public sealed class NativeGoLiveLiveGateCompositionTests
             CancellationToken ____)
         {
             events.Add("provision-sql");
-            if (!acls.AppliedAfterRootCreation ||
-                !Directory.Exists(plan.Layout.SqlDataRoot) ||
-                !Directory.Exists(plan.Layout.SqlLogRoot))
-                return ValueTask.FromException<NativeGoLiveSqlPostBootstrapObservation>(
-                    new NativeGoLiveContractException("sql-provisioned-before-hierarchy-acls"));
+            Directory.CreateDirectory(plan.Layout.SqlDataRoot);
+            Directory.CreateDirectory(plan.Layout.SqlLogRoot);
             return ValueTask.FromException<NativeGoLiveSqlPostBootstrapObservation>(
                 new NativeGoLiveContractException("stop-after-ordered-provision"));
         }
