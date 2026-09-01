@@ -655,7 +655,17 @@ internal sealed class NativeGoLiveWindowsSqlPort
                 $"sql-provisioning-create-error-{exception.Number}",
                 innerException: exception);
         }
+        catch (Exception exception)
+        {
+            throw MapCreateFailure(exception);
+        }
     }
+
+    internal static NativeGoLiveContractException MapCreateFailure(Exception exception) =>
+        new(
+            "sql-provisioning-create-failed",
+            $"hresult-0x{unchecked((uint)exception.HResult):X8}",
+            exception);
 
     private VerifiedNativeDirectory OpenSqlStorageDirectory(string path, string role)
     {

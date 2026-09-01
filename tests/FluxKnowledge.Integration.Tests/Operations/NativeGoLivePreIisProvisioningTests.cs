@@ -42,6 +42,15 @@ public sealed class NativeGoLivePreIisProvisioningTests
     }
 
     [Fact]
+    public void Unexpected_SQL_create_failure_has_a_bounded_result()
+    {
+        var failure = NativeGoLiveWindowsSqlPort.MapCreateFailure(new FileNotFoundException());
+
+        Assert.Equal("sql-provisioning-create-failed", failure.ReasonCode);
+        Assert.Matches(@"\Ahresult-0x[0-9A-F]{8}\z", failure.DiagnosticDetail);
+    }
+
+    [Fact]
     public void Production_configuration_validation_rejects_bytes_that_are_not_the_canonical_payload()
     {
         var layout = LiveRootLayout.CreateForIsolatedTests(
