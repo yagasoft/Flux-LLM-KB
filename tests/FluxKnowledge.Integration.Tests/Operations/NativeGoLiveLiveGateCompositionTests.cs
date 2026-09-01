@@ -158,6 +158,19 @@ public sealed class NativeGoLiveLiveGateCompositionTests
     }
 
     [Fact]
+    public void Vss_adapter_preserves_a_bounded_hresult_for_a_non_com_add_failure()
+    {
+        var adapter = new VssDiffAreaAdministration(
+            new OrdinaryFailureVssApi(new InvalidOperationException("test non-COM VSS adapter failure")));
+
+        var failure = Assert.Throws<NativeGoLiveContractException>(() =>
+            adapter.EnsureMaximumStorageObserved("I:", 0.10m, CancellationToken.None));
+
+        Assert.Equal("vss-add-diff-area-failed", failure.ReasonCode);
+        Assert.Equal("hresult-0x80131509", failure.DiagnosticDetail);
+    }
+
+    [Fact]
     public void Vss_adapter_enables_backup_privilege_only_while_adding_the_canonical_diff_area()
     {
         var privilege = new RecordingVssOperationPrivilegeScope();
@@ -478,14 +491,16 @@ public sealed class NativeGoLiveLiveGateCompositionTests
         }
     }
 
-    private sealed class OrdinaryFailureVssApi : IVssDiffAreaComApi
+    private sealed class OrdinaryFailureVssApi(Exception? exception = null) : IVssDiffAreaComApi
     {
+        private readonly Exception _exception = exception ??
+            new COMException("test ordinary VSS adapter failure", unchecked((int)0x80070005));
+
         public VssVolumeDiffAreaState Query(string _) => new(
             new VssDiffAreaState(VssAssociationState.SupportedAbsent, "I:", "I:", null),
             20_000_000_000);
 
-        public void AddDiffArea(string _, string __, ulong ___) =>
-            throw new COMException("test ordinary VSS adapter failure", unchecked((int)0x80070005));
+        public void AddDiffArea(string _, string __, ulong ___) => throw _exception;
 
         public void ChangeDiffAreaMaximumSize(string _, string __, ulong ___) =>
             throw new NotSupportedException();
