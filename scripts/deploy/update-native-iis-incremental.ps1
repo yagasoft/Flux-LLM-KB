@@ -168,6 +168,19 @@ function Remove-DeploymentValidationHold {
     Remove-Item -LiteralPath $Path -Force -ErrorAction Stop
 }
 
+function ConvertTo-DeploymentValidationConnectionString {
+    param([Parameter(Mandatory)][string]$ConnectionString)
+
+    $normalised = [regex]::Replace(
+        $ConnectionString,
+        '(?i)(^|;)\s*Trust Server Certificate\s*=',
+        '$1TrustServerCertificate=')
+    return [regex]::Replace(
+        $normalised,
+        '(?i)(^|;)\s*Connect Retry Count\s*=',
+        '$1ConnectRetryCount=')
+}
+
 function Get-RetainedPipelineStateBaseline {
     $configurationPath = "$CanonicalLiveRoot\Config\appsettings.Production.json"
     if (-not (Test-Path -LiteralPath $configurationPath -PathType Leaf)) {
@@ -178,7 +191,8 @@ function Get-RetainedPipelineStateBaseline {
     if ([string]::IsNullOrWhiteSpace($connectionString)) {
         throw "The production connection string required for read-only deployment validation is missing."
     }
-    $connectionStringBuilder = [System.Data.SqlClient.SqlConnectionStringBuilder]::new($connectionString)
+    $connectionStringBuilder = [System.Data.SqlClient.SqlConnectionStringBuilder]::new(
+        (ConvertTo-DeploymentValidationConnectionString -ConnectionString $connectionString))
     $connectionStringBuilder.ApplicationName = "FluxKnowledge.DeploymentValidation"
     $connection = [System.Data.SqlClient.SqlConnection]::new($connectionStringBuilder.ConnectionString)
     try {

@@ -61,6 +61,34 @@ foreach ($step in $requiredDeploymentValidationSteps) {
         throw "The incremental IIS updater is missing deployment-validation step $step."
     }
 }
+$requiredSqlClientCompatibilitySteps = @(
+    'ConvertTo-DeploymentValidationConnectionString',
+    'TrustServerCertificate=',
+    'ConnectRetryCount='
+)
+foreach ($step in $requiredSqlClientCompatibilitySteps) {
+    if ($deploymentScriptText -notmatch [regex]::Escape($step)) {
+        throw "The incremental IIS updater is missing SQL-client compatibility step $step."
+    }
+}
+$legacySqlClientConnectionString = 'Data Source=localhost;Initial Catalog=FluxKnowledge;Integrated Security=True;Trust Server Certificate=True;Connect Retry Count=0'
+$normalisedSqlClientConnectionString = [regex]::Replace(
+    $legacySqlClientConnectionString,
+    '(?i)(^|;)\s*Trust Server Certificate\s*=',
+    '$1TrustServerCertificate=')
+$normalisedSqlClientConnectionString = [regex]::Replace(
+    $normalisedSqlClientConnectionString,
+    '(?i)(^|;)\s*Connect Retry Count\s*=',
+    '$1ConnectRetryCount=')
+try {
+    $normalisedSqlClientBuilder = [System.Data.SqlClient.SqlConnectionStringBuilder]::new($normalisedSqlClientConnectionString)
+}
+catch {
+    throw "The incremental IIS updater cannot read the existing production SQL connection-string spellings."
+}
+if (-not $normalisedSqlClientBuilder.TrustServerCertificate -or $normalisedSqlClientBuilder.ConnectRetryCount -ne 0) {
+    throw "The incremental IIS updater did not preserve the existing production SQL connection-string values."
+}
 $holdCreatedAt = $deploymentScriptText.IndexOf('New-DeploymentValidationHold -Path $ValidationHoldPath -ReleaseId $releaseId')
 $candidateStartedAt = $deploymentScriptText.IndexOf('Start-WebAppPool -Name $SiteName', $holdCreatedAt)
 $probedAt = $deploymentScriptText.IndexOf('Invoke-RequiredLoopbackProbes -Origin $loopbackOrigin.Origin -TimeoutSeconds $ReadinessTimeoutSeconds', $candidateStartedAt)
