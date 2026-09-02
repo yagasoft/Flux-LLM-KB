@@ -47,6 +47,7 @@ try {
         -CandidateRoot $candidateRoot `
         -PreviousRoot $previousRoot `
         -FailedRoot $failedRoot `
+        -ActivateCandidate { Copy-Item -LiteralPath $candidateRoot -Destination $activeRoot -Recurse -Force } `
         -StopApplication { $successfulState.Stops++ } `
         -StartApplication { $successfulState.Starts++ } `
         -ValidateApplication {
@@ -75,6 +76,7 @@ try {
             -CandidateRoot $candidateRoot `
             -PreviousRoot $previousRoot `
             -FailedRoot $failedRoot `
+            -ActivateCandidate { Copy-Item -LiteralPath $candidateRoot -Destination $activeRoot -Recurse -Force } `
             -StopApplication { $rollbackState.Stops++ } `
             -StartApplication { $rollbackState.Starts++ } `
             -ValidateApplication {
@@ -99,6 +101,7 @@ try {
     if (-not $validationFailureSeen -or
         (Read-TestPayloadMarker -Path $activeRoot) -ne "previous" -or
         (Read-TestPayloadMarker -Path $failedRoot) -ne "candidate" -or
+        (Read-TestPayloadMarker -Path $candidateRoot) -ne "candidate" -or
         (Test-Path -LiteralPath $previousRoot) -or
         $rollbackState.Stops -ne 2 -or $rollbackState.Starts -ne 2 -or $rollbackState.Validations -ne 2) {
         throw "A failed candidate validation did not restore and validate the previous application payload."
@@ -118,6 +121,7 @@ try {
             -CandidateRoot $candidateRoot `
             -PreviousRoot (Join-Path $blockedParent "previous") `
             -FailedRoot $failedRoot `
+            -ActivateCandidate { Copy-Item -LiteralPath $candidateRoot -Destination $activeRoot -Recurse -Force } `
             -StopApplication { $moveFailureState.Stops++ } `
             -StartApplication { $moveFailureState.Starts++ } `
             -ValidateApplication {
@@ -151,6 +155,7 @@ try {
             -CandidateRoot $candidateRoot `
             -PreviousRoot $previousRoot `
             -FailedRoot $failedRoot `
+            -ActivateCandidate { Copy-Item -LiteralPath $candidateRoot -Destination $activeRoot -Recurse -Force } `
             -StopApplication {
                 $stopFailureState.Stops++
                 throw "stop status confirmation failed"

@@ -12,6 +12,8 @@ function Invoke-IncrementalApplicationPayloadSwap {
         [Parameter(Mandatory)]
         [string]$FailedRoot,
         [Parameter(Mandatory)]
+        [scriptblock]$ActivateCandidate,
+        [Parameter(Mandatory)]
         [scriptblock]$StopApplication,
         [Parameter(Mandatory)]
         [scriptblock]$StartApplication,
@@ -35,7 +37,7 @@ function Invoke-IncrementalApplicationPayloadSwap {
     $poolStopped = $false
     $stopRequested = $false
     $previousMoved = $false
-    $candidateMoved = $false
+    $candidateActivationStarted = $false
     try {
         $stopRequested = $true
         & $StopApplication
@@ -43,8 +45,11 @@ function Invoke-IncrementalApplicationPayloadSwap {
 
         Move-Item -LiteralPath $ApplicationRoot -Destination $PreviousRoot -ErrorAction Stop
         $previousMoved = $true
-        Move-Item -LiteralPath $CandidateRoot -Destination $ApplicationRoot -ErrorAction Stop
-        $candidateMoved = $true
+        $candidateActivationStarted = $true
+        & $ActivateCandidate
+        if (-not (Test-Path -LiteralPath $ApplicationRoot -PathType Container)) {
+            throw "The candidate application payload was not activated."
+        }
 
         & $StartApplication
         $poolStopped = $false
@@ -58,12 +63,12 @@ function Invoke-IncrementalApplicationPayloadSwap {
     catch {
         $updateFailure = $_
         try {
-            if (-not $stopRequested -or $candidateMoved) {
+            if (-not $stopRequested -or $candidateActivationStarted) {
                 $stopRequested = $true
                 & $StopApplication
                 $poolStopped = $true
             }
-            if ($candidateMoved -and (Test-Path -LiteralPath $ApplicationRoot -PathType Container)) {
+            if ($candidateActivationStarted -and (Test-Path -LiteralPath $ApplicationRoot -PathType Container)) {
                 Move-Item -LiteralPath $ApplicationRoot -Destination $FailedRoot -ErrorAction Stop
             }
             if ($previousMoved -and (Test-Path -LiteralPath $PreviousRoot -PathType Container) -and

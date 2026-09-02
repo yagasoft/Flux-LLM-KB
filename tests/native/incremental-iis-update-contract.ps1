@@ -41,6 +41,7 @@ if ($plan.mode -ne "plan-only" -or
     $plan.recovery_root -ne "I:\FluxKnowledge\Recovery" -or
     $plan.migrations -ne $false -or
     $plan.clean_slate -ne $false -or
+    $plan.payload_acl -ne "inherit-from-live-root" -or
     $plan.rollback -ne "automatic-application-payload-restore") {
     throw "The incremental IIS plan is not restricted to the existing application payload and loopback site."
 }

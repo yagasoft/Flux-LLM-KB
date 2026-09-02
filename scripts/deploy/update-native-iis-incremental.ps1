@@ -72,6 +72,43 @@ function Test-ApplicationPayload {
     }
 }
 
+function Assert-ApplicationPayloadReadAccess {
+    param([Parameter(Mandatory)][string]$Path)
+
+    $requiredRights = [int][Security.AccessControl.FileSystemRights]::ReadAndExecute
+    foreach ($payloadPath in @($Path, (Join-Path $Path "web.config"))) {
+        $rules = @((Get-Acl -LiteralPath $payloadPath -ErrorAction Stop).Access | Where-Object {
+            $_.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and
+            $_.IdentityReference.Value -ieq "IIS APPPOOL\FluxKnowledge" -and
+            (([int]$_.FileSystemRights -band $requiredRights) -eq $requiredRights)
+        })
+        if ($rules.Count -lt 1) {
+            throw "The activated application payload does not grant IIS APPPOOL\FluxKnowledge read and execute access: $payloadPath"
+        }
+    }
+}
+
+function Invoke-CandidatePayloadActivation {
+    param(
+        [Parameter(Mandatory)]
+        [string]$CandidateRoot,
+        [Parameter(Mandatory)]
+        [string]$ApplicationRoot
+    )
+
+    New-Item -ItemType Directory -Path $ApplicationRoot -ErrorAction Stop | Out-Null
+    Assert-NotReparsePoint `
+        -Path $ApplicationRoot `
+        -Message "The activated application payload root cannot be a reparse point."
+    $robocopyOutput = @(& robocopy $CandidateRoot $ApplicationRoot /E /COPY:DAT /DCOPY:DAT /XJ /R:0 /W:0 /NFL /NDL /NP 2>&1)
+    $robocopyExitCode = $LASTEXITCODE
+    if ($robocopyExitCode -gt 7) {
+        throw "Copying the staged application payload into the live root failed with robocopy exit code $robocopyExitCode."
+    }
+    Test-ApplicationPayload -Path $ApplicationRoot
+    Assert-ApplicationPayloadReadAccess -Path $ApplicationRoot
+}
+
 function Invoke-RequiredLoopbackProbes {
     param(
         [Parameter(Mandatory)]
@@ -163,6 +200,7 @@ if ($PlanOnly) {
         migrations = $false
         clean_slate = $false
         preserved = @("Config", "Data", "Runtime", "Recovery", "CodexPlugin")
+        payload_acl = "inherit-from-live-root"
         rollback = "automatic-application-payload-restore"
     } | ConvertTo-Json -Depth 3
     exit 0
@@ -247,6 +285,9 @@ try {
         -CandidateRoot $candidateRoot `
         -PreviousRoot $previousRoot `
         -FailedRoot $failedRoot `
+        -ActivateCandidate {
+            Invoke-CandidatePayloadActivation -CandidateRoot $candidateRoot -ApplicationRoot $CanonicalDeployRoot
+        } `
         -StopApplication {
             Stop-WebAppPool -Name $SiteName
             Wait-IisAppPoolState -Name $SiteName -ExpectedState "Stopped" -TimeoutSeconds $ReadinessTimeoutSeconds
