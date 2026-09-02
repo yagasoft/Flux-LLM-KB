@@ -369,6 +369,26 @@ public sealed class OoxmlReplayIntegrationTests(NativeSqlServerFixture fixture) 
     }
 
     [NativeSqlServerFact]
+    public async Task Legacy_office_designation_completes_with_the_retrying_sql_execution_strategy()
+    {
+        const string hash = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+        var seeded = await SeedDeferredOoxmlAsync(hash, 9, "ignored.bin", ".doc", "watched-file");
+        var store = new SqlRetainedProcessorBranchStore(
+            new ContextFactory(_fixture.ConnectionString, useRetryingExecutionStrategy: true), TimeProvider.System);
+
+        var designated = await store.DesignateLegacyOfficeAsync(
+            new RetainedProcessorPromotionCandidate(seeded.ActivityId, new SourceRevisionId(seeded.RevisionId), hash, ".doc"),
+            CancellationToken.None);
+
+        Assert.True(designated);
+        await using var verification = CreateContext();
+        var predecessor = await verification.SourceActivities.SingleAsync(value => value.Id == seeded.ActivityId);
+        Assert.Equal((int)SourceActivityState.CancelledSuperseded, predecessor.State);
+        var successor = await verification.SourceActivities.SingleAsync(value => value.SourceRevisionId == seeded.RevisionId && value.Id != seeded.ActivityId);
+        Assert.Equal("legacy-office-binary-parser-unavailable", successor.Reason);
+    }
+
+    [NativeSqlServerFact]
     public async Task Missing_corrupt_and_malformed_retained_ooxml_are_blocked_without_children()
     {
         var privateRoot = Path.Combine(Path.GetTempPath(), $"flux-ooxml-blocked-{Guid.NewGuid():N}");
@@ -641,9 +661,17 @@ public sealed class OoxmlReplayIntegrationTests(NativeSqlServerFixture fixture) 
             CancellationToken cancellationToken) => inner.ReadUtf8Async(sourceRevisionId, cancellationToken);
     }
 
-    private sealed class ContextFactory(string connectionString) : IDbContextFactory<FluxKnowledgeDbContext>
+    private sealed class ContextFactory(string connectionString, bool useRetryingExecutionStrategy = false) : IDbContextFactory<FluxKnowledgeDbContext>
     {
-        private readonly DbContextOptions<FluxKnowledgeDbContext> _options = new DbContextOptionsBuilder<FluxKnowledgeDbContext>().UseSqlServer(connectionString).Options;
+        private readonly DbContextOptions<FluxKnowledgeDbContext> _options = new DbContextOptionsBuilder<FluxKnowledgeDbContext>()
+            .UseSqlServer(connectionString, sqlServer =>
+            {
+                if (useRetryingExecutionStrategy)
+                {
+                    sqlServer.EnableRetryOnFailure();
+                }
+            })
+            .Options;
         public FluxKnowledgeDbContext CreateDbContext() => new(_options);
         public Task<FluxKnowledgeDbContext> CreateDbContextAsync(CancellationToken cancellationToken = default) => Task.FromResult(CreateDbContext());
     }

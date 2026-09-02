@@ -1040,43 +1040,48 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
         RetainedProcessorPromotionCandidate candidate,
         CancellationToken cancellationToken)
     {
-        await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
-        await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken).ConfigureAwait(false);
-        var predecessor = await context.SourceActivities.SingleOrDefaultAsync(value => value.Id == candidate.LegacyActivityId, cancellationToken).ConfigureAwait(false);
-        if (predecessor is null || predecessor.State != (int)SourceActivityState.DeferredUnsupported ||
-            predecessor.ExecutionClass != (int)ExecutionClass.DeferredCapability ||
-            string.Equals(predecessor.RequiredCapability, "document-office-legacy-structural-extract", StringComparison.Ordinal) ||
-            await context.SourceActivityRelations.AnyAsync(value => value.PredecessorActivityId == predecessor.Id, cancellationToken).ConfigureAwait(false))
+        await using var executionContext = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        var strategy = executionContext.Database.CreateExecutionStrategy();
+        return await strategy.ExecuteAsync(async () =>
         {
-            return false;
-        }
+            await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+            await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken).ConfigureAwait(false);
+            var predecessor = await context.SourceActivities.SingleOrDefaultAsync(value => value.Id == candidate.LegacyActivityId, cancellationToken).ConfigureAwait(false);
+            if (predecessor is null || predecessor.State != (int)SourceActivityState.DeferredUnsupported ||
+                predecessor.ExecutionClass != (int)ExecutionClass.DeferredCapability ||
+                string.Equals(predecessor.RequiredCapability, "document-office-legacy-structural-extract", StringComparison.Ordinal) ||
+                await context.SourceActivityRelations.AnyAsync(value => value.PredecessorActivityId == predecessor.Id, cancellationToken).ConfigureAwait(false))
+            {
+                return false;
+            }
 
-        var now = timeProvider.GetUtcNow();
-        var successor = new SourceActivityEntity
-        {
-            Id = Guid.NewGuid(), SourceRevisionId = predecessor.SourceRevisionId,
-            ActivityKind = (int)SourceActivityKind.DocumentParsing,
-            ExecutionClass = (int)ExecutionClass.DeferredCapability,
-            ProcessorVersion = "phase-5-office-legacy-designation-v1",
-            InputFingerprint = predecessor.InputFingerprint,
-            RequiredCapability = "document-office-legacy-structural-extract",
-            Reason = "legacy-office-binary-parser-unavailable",
-            State = (int)SourceActivityState.DeferredUnsupported,
-            CreatedAtUtc = now, UpdatedAtUtc = now
-        };
-        const string supersessionReason = "superseded-by-legacy-office-designation";
-        predecessor.State = (int)SourceActivityState.CancelledSuperseded;
-        predecessor.Reason = supersessionReason;
-        predecessor.UpdatedAtUtc = now;
-        context.SourceActivities.Add(successor);
-        context.SourceActivityRelations.Add(new SourceActivityRelationEntity
-        {
-            Id = Guid.NewGuid(), PredecessorActivityId = predecessor.Id, SuccessorActivityId = successor.Id,
-            RelationshipKind = "superseded-by-legacy-office-designation", ReasonCode = supersessionReason, CreatedAtUtc = now
-        });
-        await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
-        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-        return true;
+            var now = timeProvider.GetUtcNow();
+            var successor = new SourceActivityEntity
+            {
+                Id = Guid.NewGuid(), SourceRevisionId = predecessor.SourceRevisionId,
+                ActivityKind = (int)SourceActivityKind.DocumentParsing,
+                ExecutionClass = (int)ExecutionClass.DeferredCapability,
+                ProcessorVersion = "phase-5-office-legacy-designation-v1",
+                InputFingerprint = predecessor.InputFingerprint,
+                RequiredCapability = "document-office-legacy-structural-extract",
+                Reason = "legacy-office-binary-parser-unavailable",
+                State = (int)SourceActivityState.DeferredUnsupported,
+                CreatedAtUtc = now, UpdatedAtUtc = now
+            };
+            const string supersessionReason = "superseded-by-legacy-office-designation";
+            predecessor.State = (int)SourceActivityState.CancelledSuperseded;
+            predecessor.Reason = supersessionReason;
+            predecessor.UpdatedAtUtc = now;
+            context.SourceActivities.Add(successor);
+            context.SourceActivityRelations.Add(new SourceActivityRelationEntity
+            {
+                Id = Guid.NewGuid(), PredecessorActivityId = predecessor.Id, SuccessorActivityId = successor.Id,
+                RelationshipKind = "superseded-by-legacy-office-designation", ReasonCode = supersessionReason, CreatedAtUtc = now
+            });
+            await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            return true;
+        }).ConfigureAwait(false);
     }
 
     public async ValueTask<bool> PromoteAsync(RetainedProcessorPromotionCandidate candidate, SourceCapabilityDescriptor capability, CancellationToken cancellationToken)
