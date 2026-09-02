@@ -1091,26 +1091,33 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
             return await PromoteRetainedCsharpAsync(candidate, capability, cancellationToken).ConfigureAwait(false);
         }
 
-        await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
-        await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken).ConfigureAwait(false);
-        var legacy = await context.SourceActivities.SingleOrDefaultAsync(value => value.Id == candidate.LegacyActivityId, cancellationToken).ConfigureAwait(false);
-        if (legacy is null || legacy.State != (int)SourceActivityState.DeferredUnsupported ||
-            await context.SourceProcessorBranches.AnyAsync(value => value.SourceActivityId == legacy.Id, cancellationToken).ConfigureAwait(false)) return false;
-        var successor = new SourceActivityEntity { Id = Guid.NewGuid(), SourceRevisionId = legacy.SourceRevisionId, ActivityKind = (int)capability.AcceptedActivityKind,
-            ExecutionClass = (int)ExecutionClass.InProcess, ProcessorVersion = capability.ProcessorVersion, InputFingerprint = legacy.InputFingerprint,
-            DescriptorFingerprint = capability.ProcessorKind == RetainedCsharpCodeProcessor.ProcessorKind
-                ? capability.ProcessorFingerprint
-                : SourceActivityEntity.LegacyDescriptorFingerprint,
-            State = (int)SourceActivityState.Pending, CreatedAtUtc = timeProvider.GetUtcNow(), UpdatedAtUtc = timeProvider.GetUtcNow() };
-        var supersessionReason = $"superseded-by-{capability.ProcessorKind}";
-        legacy.State = (int)SourceActivityState.CancelledSuperseded; legacy.Reason = supersessionReason; legacy.UpdatedAtUtc = timeProvider.GetUtcNow();
-        context.SourceActivities.Add(successor);
-        context.SourceActivityRelations.Add(new SourceActivityRelationEntity { Id = Guid.NewGuid(), PredecessorActivityId = legacy.Id, SuccessorActivityId = successor.Id,
-            RelationshipKind = "superseded-by-retained-processor", ReasonCode = supersessionReason, CreatedAtUtc = timeProvider.GetUtcNow() });
-        context.SourceProcessorBranches.Add(new SourceProcessorBranchEntity { Id = Guid.NewGuid(), SourceActivityId = successor.Id, SourceRevisionId = successor.SourceRevisionId,
-            InputSha256 = legacy.InputFingerprint, ProcessorVersion = capability.ProcessorVersion, ProcessorFingerprint = capability.ProcessorFingerprint,
-            State = (int)RetainedProcessorBranchState.Pending, CreatedAtUtc = timeProvider.GetUtcNow(), UpdatedAtUtc = timeProvider.GetUtcNow() });
-        await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false); await transaction.CommitAsync(cancellationToken).ConfigureAwait(false); return true;
+        await using var executionContext = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        var strategy = executionContext.Database.CreateExecutionStrategy();
+        return await strategy.ExecuteAsync(async () =>
+        {
+            await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+            await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken).ConfigureAwait(false);
+            var legacy = await context.SourceActivities.SingleOrDefaultAsync(value => value.Id == candidate.LegacyActivityId, cancellationToken).ConfigureAwait(false);
+            if (legacy is null || legacy.State != (int)SourceActivityState.DeferredUnsupported ||
+                await context.SourceProcessorBranches.AnyAsync(value => value.SourceActivityId == legacy.Id, cancellationToken).ConfigureAwait(false)) return false;
+            var successor = new SourceActivityEntity { Id = Guid.NewGuid(), SourceRevisionId = legacy.SourceRevisionId, ActivityKind = (int)capability.AcceptedActivityKind,
+                ExecutionClass = (int)ExecutionClass.InProcess, ProcessorVersion = capability.ProcessorVersion, InputFingerprint = legacy.InputFingerprint,
+                DescriptorFingerprint = capability.ProcessorKind == RetainedCsharpCodeProcessor.ProcessorKind
+                    ? capability.ProcessorFingerprint
+                    : SourceActivityEntity.LegacyDescriptorFingerprint,
+                State = (int)SourceActivityState.Pending, CreatedAtUtc = timeProvider.GetUtcNow(), UpdatedAtUtc = timeProvider.GetUtcNow() };
+            var supersessionReason = $"superseded-by-{capability.ProcessorKind}";
+            legacy.State = (int)SourceActivityState.CancelledSuperseded; legacy.Reason = supersessionReason; legacy.UpdatedAtUtc = timeProvider.GetUtcNow();
+            context.SourceActivities.Add(successor);
+            context.SourceActivityRelations.Add(new SourceActivityRelationEntity { Id = Guid.NewGuid(), PredecessorActivityId = legacy.Id, SuccessorActivityId = successor.Id,
+                RelationshipKind = "superseded-by-retained-processor", ReasonCode = supersessionReason, CreatedAtUtc = timeProvider.GetUtcNow() });
+            context.SourceProcessorBranches.Add(new SourceProcessorBranchEntity { Id = Guid.NewGuid(), SourceActivityId = successor.Id, SourceRevisionId = successor.SourceRevisionId,
+                InputSha256 = legacy.InputFingerprint, ProcessorVersion = capability.ProcessorVersion, ProcessorFingerprint = capability.ProcessorFingerprint,
+                State = (int)RetainedProcessorBranchState.Pending, CreatedAtUtc = timeProvider.GetUtcNow(), UpdatedAtUtc = timeProvider.GetUtcNow() });
+            await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            return true;
+        }).ConfigureAwait(false);
     }
 
     private async ValueTask<bool> PromoteRetainedCsharpAsync(

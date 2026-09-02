@@ -389,6 +389,26 @@ public sealed class OoxmlReplayIntegrationTests(NativeSqlServerFixture fixture) 
     }
 
     [NativeSqlServerFact]
+    public async Task Ooxml_promotion_completes_with_the_retrying_sql_execution_strategy()
+    {
+        const string hash = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+        var seeded = await SeedDeferredOoxmlAsync(hash, 10, "ignored.bin", ".docx", "watched-file");
+        var store = new SqlRetainedProcessorBranchStore(
+            new ContextFactory(_fixture.ConnectionString, useRetryingExecutionStrategy: true), TimeProvider.System);
+
+        var promoted = await store.PromoteAsync(
+            new RetainedProcessorPromotionCandidate(seeded.ActivityId, new SourceRevisionId(seeded.RevisionId), hash, ".docx"),
+            OoxmlStructuralTextProcessor.Capability,
+            CancellationToken.None);
+
+        Assert.True(promoted);
+        await using var verification = CreateContext();
+        Assert.Equal((int)SourceActivityState.CancelledSuperseded,
+            (await verification.SourceActivities.SingleAsync(value => value.Id == seeded.ActivityId)).State);
+        Assert.Single(await verification.SourceProcessorBranches.Where(value => value.SourceRevisionId == seeded.RevisionId).ToListAsync());
+    }
+
+    [NativeSqlServerFact]
     public async Task Missing_corrupt_and_malformed_retained_ooxml_are_blocked_without_children()
     {
         var privateRoot = Path.Combine(Path.GetTempPath(), $"flux-ooxml-blocked-{Guid.NewGuid():N}");
