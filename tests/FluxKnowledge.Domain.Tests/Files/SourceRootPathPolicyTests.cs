@@ -26,16 +26,24 @@ public sealed class SourceRootPathPolicyTests : IDisposable
     }
 
     [Fact]
-    public void Validate_rejects_a_directory_outside_the_configured_fixed_drive_roots()
+    public void Constructor_rejects_empty_local_ingress_options()
+    {
+        var exception = Assert.Throws<ArgumentException>(() =>
+            new SourceRootPathPolicy(new LocalIngressOptions([])));
+
+        Assert.Contains("At least one", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Validate_allows_a_fixed_ntfs_directory_outside_the_configured_ingress_roots()
     {
         var outsideRoot = Path.Combine(Path.GetTempPath(), $"FluxKnowledgeOutside_{Guid.NewGuid():N}");
         Directory.CreateDirectory(outsideRoot);
         try
         {
-            var exception = Assert.Throws<UnauthorizedAccessException>(() =>
-                CreatePolicy().ValidateAndCanonicalise(Request(outsideRoot)));
+            var validation = CreatePolicy().ValidateAndCanonicalise(Request(outsideRoot));
 
-            Assert.Contains("configured", exception.Message, StringComparison.OrdinalIgnoreCase);
+            Assert.Equal(Path.GetFullPath(outsideRoot), validation.CanonicalPath);
         }
         finally
         {

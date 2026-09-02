@@ -15,7 +15,6 @@ public sealed record SourceRootPathPolicyOptions(IReadOnlyList<string> Protected
 
 public sealed class SourceRootPathPolicy : ISourceRootPathPolicy
 {
-    private readonly IReadOnlyList<AllowedRoot> _allowedRoots;
     private readonly IReadOnlyList<string> _protectedRoots;
 
     public SourceRootPathPolicy(
@@ -27,13 +26,7 @@ public sealed class SourceRootPathPolicy : ISourceRootPathPolicy
             throw new PlatformNotSupportedException("Local source-root validation requires Windows.");
         }
 
-        _allowedRoots = LocalIngressOptionsValidator.ValidateAndCanonicalise(allowedRoots)
-            .Select(root =>
-            {
-                EnsureNoReparsePointTraversal(root);
-                return new AllowedRoot(root, ResolvePhysicalDirectory(root).CanonicalPath);
-            })
-            .ToArray();
+        _ = LocalIngressOptionsValidator.ValidateAndCanonicalise(allowedRoots);
         _protectedRoots = (options ?? SourceRootPathPolicyOptions.None).ProtectedRoots
             .Where(static path => !string.IsNullOrWhiteSpace(path))
             .Select(CanonicalProtectedRoot)
@@ -53,12 +46,6 @@ public sealed class SourceRootPathPolicy : ISourceRootPathPolicy
         var canonicalPath = CanonicalExistingDirectory(request.FullPath);
         EnsureNoReparsePointTraversal(canonicalPath);
         var physical = ResolvePhysicalDirectory(canonicalPath);
-        if (!_allowedRoots.Any(root =>
-                IsWithinRoot(root.ConfiguredPath, canonicalPath) &&
-                IsWithinRoot(root.PhysicalPath, physical.CanonicalPath)))
-        {
-            throw new UnauthorizedAccessException("The source root is outside the configured local ingress roots.");
-        }
 
         if (_protectedRoots.Any(root =>
                 Overlaps(root, canonicalPath) ||
@@ -236,8 +223,6 @@ public sealed class SourceRootPathPolicy : ISourceRootPathPolicy
             capacity = checked((int)length + 1);
         }
     }
-
-    private sealed record AllowedRoot(string ConfiguredPath, string PhysicalPath);
 
     private sealed record PhysicalDirectory(string CanonicalPath, NativeMethods.FileIdentity Identity)
     {
