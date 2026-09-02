@@ -82,6 +82,7 @@ $normalisedSqlClientConnectionString = [regex]::Replace(
     '$1ConnectRetryCount=')
 try {
     $normalisedSqlClientBuilder = [System.Data.SqlClient.SqlConnectionStringBuilder]::new($normalisedSqlClientConnectionString)
+    $normalisedSqlClientConnection = [System.Data.SqlClient.SqlConnection]::new($normalisedSqlClientBuilder.ConnectionString)
 }
 catch {
     throw "The incremental IIS updater cannot read the existing production SQL connection-string spellings."
@@ -89,6 +90,10 @@ catch {
 if (-not $normalisedSqlClientBuilder.TrustServerCertificate -or $normalisedSqlClientBuilder.ConnectRetryCount -ne 0) {
     throw "The incremental IIS updater did not preserve the existing production SQL connection-string values."
 }
+if ($deploymentScriptText -match [regex]::Escape('.ApplicationName =')) {
+    throw "The incremental IIS updater uses the unsupported legacy SQL-client ApplicationName property."
+}
+$normalisedSqlClientConnection.Dispose()
 $holdCreatedAt = $deploymentScriptText.IndexOf('New-DeploymentValidationHold -Path $ValidationHoldPath -ReleaseId $releaseId')
 $candidateStartedAt = $deploymentScriptText.IndexOf('Start-WebAppPool -Name $SiteName', $holdCreatedAt)
 $probedAt = $deploymentScriptText.IndexOf('Invoke-RequiredLoopbackProbes -Origin $loopbackOrigin.Origin -TimeoutSeconds $ReadinessTimeoutSeconds', $candidateStartedAt)

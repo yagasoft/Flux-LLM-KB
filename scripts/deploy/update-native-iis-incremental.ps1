@@ -193,7 +193,6 @@ function Get-RetainedPipelineStateBaseline {
     }
     $connectionStringBuilder = [System.Data.SqlClient.SqlConnectionStringBuilder]::new(
         (ConvertTo-DeploymentValidationConnectionString -ConnectionString $connectionString))
-    $connectionStringBuilder.ApplicationName = "FluxKnowledge.DeploymentValidation"
     $connection = [System.Data.SqlClient.SqlConnection]::new($connectionStringBuilder.ConnectionString)
     try {
         $connection.Open()
