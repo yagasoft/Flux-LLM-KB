@@ -328,7 +328,53 @@ public sealed class RetainedTextPipelineIntegrationTests(NativeSqlServerFixture 
         Assert.Single(await verification.PipelineRecords.Where(value => value.SourceRevisionId == revisionId).ToListAsync());
     }
 
-    private async Task<Guid> SeedRevisionAsync(string hash, int byteLength, string relativePath)
+    [NativeSqlServerFact]
+    public async Task Malformed_processor_owned_activity_does_not_block_valid_retained_utf8_reconciliation()
+    {
+        const string validHash = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+        const string malformedHash = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+        var validRevisionId = await SeedRevisionAsync(validHash, 4, Path.Combine("sha256", "dd", $"{validHash}.bin"));
+        var malformedRevisionId = await SeedRevisionAsync(malformedHash, 4, Path.Combine("sha256", "ee", $"{malformedHash}.bin"), "OoxmlDocumentContainer");
+        var validActivityId = Guid.NewGuid();
+        var malformedActivityId = Guid.NewGuid();
+        await using (var setup = CreateContext())
+        {
+            var now = DateTimeOffset.UtcNow;
+            setup.SourceActivities.AddRange(
+                new SourceActivityEntity
+                {
+                    Id = validActivityId, SourceRevisionId = validRevisionId, ActivityKind = (int)SourceActivityKind.TextExtraction,
+                    ExecutionClass = (int)ExecutionClass.InProcess, ProcessorVersion = "phase-3a-v1", InputFingerprint = validHash,
+                    State = (int)SourceActivityState.Pending, CreatedAtUtc = now, UpdatedAtUtc = now
+                },
+                new SourceActivityEntity
+                {
+                    Id = malformedActivityId, SourceRevisionId = malformedRevisionId, ActivityKind = (int)SourceActivityKind.TextExtraction,
+                    ExecutionClass = (int)ExecutionClass.InProcess, ProcessorVersion = "phase-5-ooxml-structural-v1", InputFingerprint = malformedHash,
+                    State = (int)SourceActivityState.Pending, CreatedAtUtc = now, UpdatedAtUtc = now
+                });
+            setup.SourceProcessorBranches.Add(new SourceProcessorBranchEntity
+            {
+                Id = Guid.NewGuid(), SourceActivityId = malformedActivityId, SourceRevisionId = malformedRevisionId,
+                InputSha256 = malformedHash, ProcessorVersion = "phase-5-ooxml-structural-v1",
+                ProcessorFingerprint = "phase-5-ooxml-retained-structural-v1", State = (int)RetainedProcessorBranchState.Pending,
+                CreatedAtUtc = now, UpdatedAtUtc = now
+            });
+            await setup.SaveChangesAsync();
+        }
+
+        var offered = await new SqlRetainedTextRegistrationStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System)
+            .OfferUnlinkedInProcessActivitiesAsync(CancellationToken.None);
+
+        Assert.Equal(1, offered);
+        await using var verification = CreateContext();
+        Assert.NotNull((await verification.SourceActivities.SingleAsync(value => value.Id == validActivityId)).ResultingPipelineRecordId);
+        var malformed = await verification.SourceActivities.SingleAsync(value => value.Id == malformedActivityId);
+        Assert.Equal((int)SourceActivityState.Pending, malformed.State);
+        Assert.Null(malformed.ResultingPipelineRecordId);
+    }
+
+    private async Task<Guid> SeedRevisionAsync(string hash, int byteLength, string relativePath, string classification = "AcceptedUtf8Text")
     {
         var rootId = Guid.NewGuid();
         var revisionId = Guid.NewGuid();
@@ -344,7 +390,7 @@ public sealed class RetainedTextPipelineIntegrationTests(NativeSqlServerFixture 
         context.SourceRevisions.Add(new SourceRevisionEntity
         {
             Id = revisionId, SourceRootId = rootId, StableSourceIdentity = $"test:{revisionId:N}", Revision = 1,
-            ContentSha256 = hash, CanonicalPath = $"C:\\retained-tests\\{revisionId:N}.txt", Classification = "AcceptedUtf8Text",
+            ContentSha256 = hash, CanonicalPath = $"C:\\retained-tests\\{revisionId:N}.txt", Classification = classification,
             Extension = ".txt", ByteLength = byteLength, DiscoveredAtUtc = now, DiscoveryEvidenceJson = "{}"
         });
         context.SourceArtifacts.Add(new SourceArtifactEntity

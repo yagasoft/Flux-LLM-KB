@@ -33,7 +33,8 @@ public sealed class SourceReconciliationService(
     IServiceScopeFactory scopeFactory,
     ISourceScanWakeSignal wakeSignal,
     TimeProvider timeProvider,
-    SourceWatchCoordinator? watchCoordinator = null) : BackgroundService
+    SourceWatchCoordinator? watchCoordinator = null,
+    IDeploymentValidationHold? deploymentValidationHold = null) : BackgroundService
 {
     private static readonly TimeSpan DefaultCadence = TimeSpan.FromMinutes(15);
     private static readonly TimeSpan WatchCadence = TimeSpan.FromSeconds(2);
@@ -41,6 +42,8 @@ public sealed class SourceReconciliationService(
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        await (deploymentValidationHold ?? DeploymentValidationHold.None)
+            .WaitUntilReleasedAsync(stoppingToken).ConfigureAwait(false);
         await PumpDueWatchBatchesAsync(stoppingToken).ConfigureAwait(false);
         await RunAvailableAsync(stoppingToken).ConfigureAwait(false);
         var nextReconciliationAtUtc = timeProvider.GetUtcNow().Add(DefaultCadence);

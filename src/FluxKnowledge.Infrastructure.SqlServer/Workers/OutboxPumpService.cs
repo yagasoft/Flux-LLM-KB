@@ -1,5 +1,6 @@
 using FluxKnowledge.Application.Pipeline;
 using FluxKnowledge.Application.Ports;
+using FluxKnowledge.Application.Sources;
 using FluxKnowledge.Application.Workers;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -12,7 +13,8 @@ public sealed class OutboxPumpService(
     IServiceScopeFactory scopeFactory,
     ChannelOutboxWakeSignal wakeSignal,
     TimeProvider timeProvider,
-    ILogger<OutboxPumpService>? logger = null) : BackgroundService, IOutboxPump
+    ILogger<OutboxPumpService>? logger = null,
+    IDeploymentValidationHold? deploymentValidationHold = null) : BackgroundService, IOutboxPump
 {
     private static readonly TimeSpan LeaseDuration = TimeSpan.FromMinutes(2);
     private static readonly TimeSpan FallbackInterval = TimeSpan.FromSeconds(60);
@@ -111,6 +113,8 @@ public sealed class OutboxPumpService(
     {
         try
         {
+            await (deploymentValidationHold ?? DeploymentValidationHold.None)
+                .WaitUntilReleasedAsync(stoppingToken).ConfigureAwait(false);
             while (!stoppingToken.IsCancellationRequested)
             {
                 try

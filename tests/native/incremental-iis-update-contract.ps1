@@ -42,8 +42,33 @@ if ($plan.mode -ne "plan-only" -or
     $plan.migrations -ne $false -or
     $plan.clean_slate -ne $false -or
     $plan.payload_acl -ne "inherit-from-live-root" -or
-    $plan.rollback -ne "automatic-application-payload-restore") {
+    $plan.rollback -ne "automatic-application-payload-restore" -or
+    $plan.deployment_validation_hold -ne $true -or
+    $plan.candidate_validation -ne "held-loopback-probes-and-unchanged-retained-pipeline-state") {
     throw "The incremental IIS plan is not restricted to the existing application payload and loopback site."
+}
+
+$deploymentScriptText = Get-Content -LiteralPath $deploymentScript -Raw
+$requiredDeploymentValidationSteps = @(
+    'New-DeploymentValidationHold',
+    'Get-RetainedPipelineStateBaseline',
+    'Invoke-RequiredLoopbackProbes',
+    'Assert-RetainedPipelineStateUnchanged',
+    'Remove-DeploymentValidationHold'
+)
+foreach ($step in $requiredDeploymentValidationSteps) {
+    if ($deploymentScriptText -notmatch [regex]::Escape($step)) {
+        throw "The incremental IIS updater is missing deployment-validation step $step."
+    }
+}
+$holdCreatedAt = $deploymentScriptText.IndexOf('New-DeploymentValidationHold -Path $ValidationHoldPath -ReleaseId $releaseId')
+$candidateStartedAt = $deploymentScriptText.IndexOf('Start-WebAppPool -Name $SiteName', $holdCreatedAt)
+$probedAt = $deploymentScriptText.IndexOf('Invoke-RequiredLoopbackProbes -Origin $loopbackOrigin.Origin -TimeoutSeconds $ReadinessTimeoutSeconds', $candidateStartedAt)
+$stateComparedAt = $deploymentScriptText.IndexOf('Assert-RetainedPipelineStateUnchanged', $probedAt)
+$holdReleasedAt = $deploymentScriptText.IndexOf('Remove-DeploymentValidationHold -Path $ValidationHoldPath -ReleaseId $releaseId', $stateComparedAt)
+if ($holdCreatedAt -lt 0 -or $candidateStartedAt -lt 0 -or $probedAt -lt $candidateStartedAt -or
+    $stateComparedAt -lt $probedAt -or $holdReleasedAt -lt $stateComparedAt) {
+    throw 'The incremental IIS updater can release the deployment-validation hold before candidate probes and unchanged-state validation.'
 }
 
 $ordinary = Invoke-ExpectedRejection -Arguments @('-SourceRoot', $SourceRoot)

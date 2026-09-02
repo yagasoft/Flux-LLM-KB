@@ -18,7 +18,8 @@ function Invoke-IncrementalApplicationPayloadSwap {
         [Parameter(Mandatory)]
         [scriptblock]$StartApplication,
         [Parameter(Mandatory)]
-        [scriptblock]$ValidateApplication
+        [scriptblock]$ValidateApplication,
+        [scriptblock]$ValidateRollbackApplication
     )
 
     if (-not (Test-Path -LiteralPath $ApplicationRoot -PathType Container)) {
@@ -32,6 +33,9 @@ function Invoke-IncrementalApplicationPayloadSwap {
     }
     if (Test-Path -LiteralPath $FailedRoot) {
         throw "The failed application payload location already exists."
+    }
+    if ($null -eq $ValidateRollbackApplication) {
+        $ValidateRollbackApplication = $ValidateApplication
     }
 
     $poolStopped = $false
@@ -81,7 +85,7 @@ function Invoke-IncrementalApplicationPayloadSwap {
 
             & $StartApplication
             $poolStopped = $false
-            & $ValidateApplication
+            & $ValidateRollbackApplication
         }
         catch {
             throw "Incremental IIS deployment failed and rollback was unsuccessful. Update failure: $($updateFailure.Exception.Message) Rollback failure: $($_.Exception.Message)"

@@ -409,6 +409,39 @@ public sealed class OoxmlReplayIntegrationTests(NativeSqlServerFixture fixture) 
     }
 
     [NativeSqlServerFact]
+    public async Task Retrying_sql_execution_strategy_completes_the_ooxml_activation_path()
+    {
+        var privateRoot = Path.Combine(Path.GetTempPath(), $"flux-ooxml-retrying-activation-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(privateRoot);
+        try
+        {
+            var bytes = CreateOfficePackage(".docx", "retrying activation sentinel");
+            var hash = Convert.ToHexStringLower(SHA256.HashData(bytes));
+            var relativePath = Path.Combine("sha256", hash[..2], $"{hash}.bin");
+            Directory.CreateDirectory(Path.Combine(privateRoot, "sha256", hash[..2]));
+            await File.WriteAllBytesAsync(Path.Combine(privateRoot, relativePath), bytes);
+            var seeded = await SeedDeferredOoxmlAsync(hash, bytes.Length, relativePath, ".docx", "retrying-activation");
+
+            var result = await CreateActivation(privateRoot, ooxmlEnabled: true, useRetryingExecutionStrategy: true)
+                .RunOnceAsync(CancellationToken.None);
+
+            Assert.Equal(OoxmlStructuralTextProcessor.Capability.ProcessorKind, result.Capability);
+            Assert.Equal(1, result.PromotedBranches);
+            Assert.Equal(1, result.ClaimedBranches);
+            Assert.Equal(1, result.CompletedBranches);
+            await using var verification = CreateContext();
+            Assert.Equal((int)SourceActivityState.CancelledSuperseded,
+                (await verification.SourceActivities.SingleAsync(value => value.Id == seeded.ActivityId)).State);
+            Assert.Equal((int)RetainedProcessorBranchState.Completed,
+                (await verification.SourceProcessorBranches.SingleAsync(value => value.SourceRevisionId == seeded.RevisionId)).State);
+        }
+        finally
+        {
+            if (Directory.Exists(privateRoot)) Directory.Delete(privateRoot, recursive: true);
+        }
+    }
+
+    [NativeSqlServerFact]
     public async Task Missing_corrupt_and_malformed_retained_ooxml_are_blocked_without_children()
     {
         var privateRoot = Path.Combine(Path.GetTempPath(), $"flux-ooxml-blocked-{Guid.NewGuid():N}");
@@ -507,9 +540,10 @@ public sealed class OoxmlReplayIntegrationTests(NativeSqlServerFixture fixture) 
         bool ooxmlEnabled,
         bool zipEnabled = false,
         IRetainedSourceReader? retainedReader = null,
-        string? outlookSpoolRoot = null)
+        string? outlookSpoolRoot = null,
+        bool useRetryingExecutionStrategy = false)
     {
-        var factory = new ContextFactory(_fixture.ConnectionString);
+        var factory = new ContextFactory(_fixture.ConnectionString, useRetryingExecutionStrategy);
         var policy = outlookSpoolRoot is null
             ? null
             : PersistedOutlookSpoolRootPolicy.CreateForIsolatedTests(outlookSpoolRoot);

@@ -72,11 +72,19 @@ public sealed class SqlRetainedTextRegistrationStore(
             join artifact in context.SourceArtifacts.AsNoTracking() on revision.Id equals artifact.SourceRevisionId
             where activity.State == (int)SourceActivityState.Pending &&
                 activity.ExecutionClass == (int)ExecutionClass.InProcess &&
+                (activity.ActivityKind == (int)SourceActivityKind.TextExtraction ||
+                 activity.ActivityKind == (int)SourceActivityKind.MetadataExtraction) &&
                 activity.ResultingPipelineRecordId == null && revision.SuppressedAtUtc == null &&
+                revision.Classification == AcceptedUtf8Classification &&
+                revision.ByteLength >= 0 && revision.ByteLength <= 16L * 1024 * 1024 &&
+                artifact.ByteLength == revision.ByteLength &&
                 EF.Functions.Collate(artifact.ContentSha256, SchemaConfiguration.SchedulerFenceCollation) ==
                     EF.Functions.Collate(revision.ContentSha256, SchemaConfiguration.SchedulerFenceCollation) &&
                 EF.Functions.Collate(artifact.ContentSha256, SchemaConfiguration.SchedulerFenceCollation) ==
-                    EF.Functions.Collate(activity.InputFingerprint, SchemaConfiguration.SchedulerFenceCollation)
+                    EF.Functions.Collate(activity.InputFingerprint, SchemaConfiguration.SchedulerFenceCollation) &&
+                EF.Functions.Collate(artifact.StoreRelativePath, SchemaConfiguration.SchedulerFenceCollation) ==
+                    EF.Functions.Collate("sha256\\" + revision.ContentSha256.Substring(0, 2) + "\\" + revision.ContentSha256 + ".bin", SchemaConfiguration.SchedulerFenceCollation) &&
+                !context.SourceProcessorBranches.Any(branch => branch.SourceActivityId == activity.Id)
             orderby activity.SourceRevisionId, activity.ActivityKind, activity.ProcessorVersion, activity.InputFingerprint
             select activity).ToListAsync(cancellationToken).ConfigureAwait(false);
         var offered = 0;
@@ -161,7 +169,7 @@ public sealed class SqlRetainedTextRegistrationStore(
             !string.Equals(artifact.ContentSha256, sourceRevision.ContentSha256, StringComparison.Ordinal) ||
             !string.Equals(artifact.StoreRelativePath, Path.Combine("sha256", sourceRevision.ContentSha256[..2], $"{sourceRevision.ContentSha256}.bin"), StringComparison.OrdinalIgnoreCase))
         {
-            throw new InvalidOperationException("A retained text activity requires its immutable source revision and artifact.");
+            return false;
         }
 
         if (replayCapability is not null)

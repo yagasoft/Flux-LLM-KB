@@ -75,6 +75,7 @@ public sealed class WebHostCompositionTests : IDisposable
         Assert.True(options.OoxmlDocumentStructuralExtractEnabled);
         Assert.True(options.MediaMetadataEnabled);
         Assert.True(options.CsharpCodeEnabled);
+        Assert.IsType<FileDeploymentValidationHold>(provider.GetRequiredService<IDeploymentValidationHold>());
         Assert.Contains(provider.GetServices<IHostedService>(), service => service is OutboxPumpService);
         Assert.Contains(provider.GetServices<IHostedService>(), service => service is RetainedProcessorActivationHostedService);
         Assert.Contains(scope.ServiceProvider.GetServices<IStageWorker>(), worker => worker is ExtractUtf8StageWorker);

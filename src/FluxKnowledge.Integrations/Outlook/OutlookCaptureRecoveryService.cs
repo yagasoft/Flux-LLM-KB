@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using FluxKnowledge.Application.Contracts;
 using FluxKnowledge.Application.Ports;
+using FluxKnowledge.Application.Sources;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -47,7 +48,8 @@ public sealed class OutlookCaptureRecoveryService(
     IServiceScopeFactory scopeFactory,
     TimeProvider timeProvider,
     OutlookCaptureRecoveryOptions options,
-    ILogger<OutlookCaptureRecoveryService>? logger = null) : BackgroundService
+    ILogger<OutlookCaptureRecoveryService>? logger = null,
+    IDeploymentValidationHold? deploymentValidationHold = null) : BackgroundService
 {
     private readonly ILogger<OutlookCaptureRecoveryService> _logger =
         logger ?? NullLogger<OutlookCaptureRecoveryService>.Instance;
@@ -120,6 +122,8 @@ public sealed class OutlookCaptureRecoveryService(
             return;
         }
 
+        await (deploymentValidationHold ?? DeploymentValidationHold.None)
+            .WaitUntilReleasedAsync(stoppingToken).ConfigureAwait(false);
         while (!stoppingToken.IsCancellationRequested)
         {
             try

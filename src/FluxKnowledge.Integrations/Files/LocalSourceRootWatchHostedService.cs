@@ -11,12 +11,15 @@ public sealed class LocalSourceRootWatchHostedService(
     ISourceRootWatchStore store,
     SourceWatchCoordinator coordinator,
     TimeProvider timeProvider,
-    ILogger<LocalSourceRootWatchHostedService> logger) : BackgroundService
+    ILogger<LocalSourceRootWatchHostedService> logger,
+    IDeploymentValidationHold? deploymentValidationHold = null) : BackgroundService
 {
     private static readonly TimeSpan RebuildCadence = TimeSpan.FromMinutes(15);
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        await (deploymentValidationHold ?? DeploymentValidationHold.None)
+            .WaitUntilReleasedAsync(stoppingToken).ConfigureAwait(false);
         while (!stoppingToken.IsCancellationRequested)
         {
             IDisposable? watchers = null;

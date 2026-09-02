@@ -213,6 +213,7 @@ public static class WebHostComposition
 
         services.AddSingleton(liveRoot);
         services.AddSingleton(persistedOutlookSpoolPolicy);
+        services.AddSingleton<IDeploymentValidationHold, FileDeploymentValidationHold>();
         services.AddFluxKnowledgeSqlServer(configuration);
         services.AddSingleton(new LocalOperatorOriginPolicy(operatorOrigin));
         services.AddSingleton<ILocalPrivateContentDisclosure, LocalPrivateContentDisclosure>();

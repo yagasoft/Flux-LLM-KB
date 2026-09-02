@@ -15,6 +15,7 @@ $CanonicalLiveRoot = "I:\FluxKnowledge"
 $CanonicalDeployRoot = "$CanonicalLiveRoot\App"
 $CanonicalRecoveryRoot = "$CanonicalLiveRoot\Recovery"
 $IncrementalRecoveryRoot = "$CanonicalRecoveryRoot\IncrementalUpdates"
+$ValidationHoldPath = "$CanonicalLiveRoot\Runtime\deployment-validation-hold.json"
 
 function Assert-CanonicalPath {
     param(
@@ -123,6 +124,118 @@ function Invoke-RequiredLoopbackProbes {
     }
 }
 
+function New-DeploymentValidationHold {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$ReleaseId
+    )
+
+    $runtimeRoot = Split-Path -Parent $Path
+    if (-not (Test-Path -LiteralPath $runtimeRoot -PathType Container)) {
+        throw "The deployment-validation runtime root is missing."
+    }
+    Assert-NotReparsePoint -Path $runtimeRoot -Message "The deployment-validation runtime root cannot be a reparse point."
+    $payload = [Text.Encoding]::UTF8.GetBytes(($ReleaseId | ConvertTo-Json -Compress))
+    try {
+        $stream = [IO.File]::Open($Path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::Read)
+    }
+    catch [IO.IOException] {
+        throw "A deployment-validation hold already exists; inspect and remove it through the recovery procedure before retrying."
+    }
+    try {
+        $stream.Write($payload, 0, $payload.Length)
+        $stream.Flush($true)
+    }
+    finally {
+        $stream.Dispose()
+    }
+}
+
+function Remove-DeploymentValidationHold {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$ReleaseId
+    )
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return
+    }
+    $expected = $ReleaseId | ConvertTo-Json -Compress
+    $actual = [IO.File]::ReadAllText($Path, [Text.Encoding]::UTF8)
+    if (-not [string]::Equals($actual, $expected, [StringComparison]::Ordinal)) {
+        throw "The deployment-validation hold is not owned by this release."
+    }
+    Remove-Item -LiteralPath $Path -Force -ErrorAction Stop
+}
+
+function Get-RetainedPipelineStateBaseline {
+    $configurationPath = "$CanonicalLiveRoot\Config\appsettings.Production.json"
+    if (-not (Test-Path -LiteralPath $configurationPath -PathType Leaf)) {
+        throw "The production configuration required for read-only deployment validation is missing."
+    }
+    $configuration = Get-Content -LiteralPath $configurationPath -Raw | ConvertFrom-Json
+    $connectionString = $configuration.ConnectionStrings.FluxKnowledge
+    if ([string]::IsNullOrWhiteSpace($connectionString)) {
+        throw "The production connection string required for read-only deployment validation is missing."
+    }
+    $connectionStringBuilder = [System.Data.SqlClient.SqlConnectionStringBuilder]::new($connectionString)
+    $connectionStringBuilder.ApplicationName = "FluxKnowledge.DeploymentValidation"
+    $connection = [System.Data.SqlClient.SqlConnection]::new($connectionStringBuilder.ConnectionString)
+    try {
+        $connection.Open()
+        $tables = @("SourceActivities", "SourceProcessorBranches", "SourceProcessorAttempts", "PipelineRecords", "Jobs", "OutboxMessages")
+        $baseline = [ordered]@{}
+        foreach ($table in $tables) {
+            $command = $connection.CreateCommand()
+            try {
+                $command.CommandText = @"
+SET NOCOUNT ON;
+SELECT COUNT_BIG(1) AS [RowCount],
+    CONVERT(varchar(64), HASHBYTES('SHA2_256', CONVERT(varbinary(max),
+        COALESCE((SELECT * FROM [$table] ORDER BY [Id] FOR JSON PATH, INCLUDE_NULL_VALUES), N'[]'))), 2) AS [Fingerprint]
+FROM [$table];
+"@
+                $reader = $command.ExecuteReader()
+                try {
+                    if (-not $reader.Read()) {
+                        throw "The read-only deployment-validation query returned no result for $table."
+                    }
+                    $baseline[$table] = [pscustomobject]@{
+                        RowCount = $reader.GetInt64(0)
+                        Fingerprint = $reader.GetString(1)
+                    }
+                }
+                finally {
+                    $reader.Dispose()
+                }
+            }
+            finally {
+                $command.Dispose()
+            }
+        }
+        return $baseline
+    }
+    finally {
+        $connection.Dispose()
+    }
+}
+
+function Assert-RetainedPipelineStateUnchanged {
+    param(
+        [Parameter(Mandatory)][System.Collections.IDictionary]$Baseline,
+        [Parameter(Mandatory)][System.Collections.IDictionary]$Current
+    )
+
+    foreach ($table in $Baseline.Keys) {
+        $before = $Baseline[$table]
+        $after = $Current[$table]
+        if ($null -eq $after -or $before.RowCount -ne $after.RowCount -or
+            -not [string]::Equals($before.Fingerprint, $after.Fingerprint, [StringComparison]::Ordinal)) {
+            throw "Candidate validation changed retained or pipeline state in $table."
+        }
+    }
+}
+
 function Assert-NotReparsePoint {
     param(
         [Parameter(Mandatory)]
@@ -202,6 +315,8 @@ if ($PlanOnly) {
         preserved = @("Config", "Data", "Runtime", "Recovery", "CodexPlugin")
         payload_acl = "inherit-from-live-root"
         rollback = "automatic-application-payload-restore"
+        deployment_validation_hold = $true
+        candidate_validation = "held-loopback-probes-and-unchanged-retained-pipeline-state"
     } | ConvertTo-Json -Depth 3
     exit 0
 }
@@ -233,6 +348,8 @@ if ($LASTEXITCODE -ne 0 -or $commit -notmatch "^[0-9a-f]{40}$") {
 Import-Module WebAdministration -ErrorAction Stop
 $mutex = [Threading.Mutex]::new($false, "Global\FluxKnowledge.IncrementalIisUpdate.v1")
 $leaseAcquired = $false
+$deploymentValidation = $null
+$releaseId = $null
 try {
     try {
         $leaseAcquired = $mutex.WaitOne([TimeSpan]::FromMinutes(1))
@@ -264,6 +381,7 @@ try {
     $candidateRoot = Join-Path $releaseRoot "candidate"
     $previousRoot = Join-Path $releaseRoot "previous"
     $failedRoot = Join-Path $releaseRoot "failed"
+    $deploymentValidation = @{ HoldCreated = $false; Baseline = $null }
 
     & dotnet publish $webProject -c Release --no-restore --nologo -o $candidateRoot
     if ($LASTEXITCODE -ne 0) {
@@ -291,6 +409,9 @@ try {
         -StopApplication {
             Stop-WebAppPool -Name $SiteName
             Wait-IisAppPoolState -Name $SiteName -ExpectedState "Stopped" -TimeoutSeconds $ReadinessTimeoutSeconds
+            New-DeploymentValidationHold -Path $ValidationHoldPath -ReleaseId $releaseId
+            $deploymentValidation.HoldCreated = $true
+            $deploymentValidation.Baseline = Get-RetainedPipelineStateBaseline
         } `
         -StartApplication {
             Start-WebAppPool -Name $SiteName
@@ -298,7 +419,17 @@ try {
         } `
         -ValidateApplication {
             Invoke-RequiredLoopbackProbes -Origin $loopbackOrigin.Origin -TimeoutSeconds $ReadinessTimeoutSeconds
+            Assert-RetainedPipelineStateUnchanged `
+                -Baseline $deploymentValidation.Baseline `
+                -Current (Get-RetainedPipelineStateBaseline)
+        } `
+        -ValidateRollbackApplication {
+            Invoke-RequiredLoopbackProbes -Origin $loopbackOrigin.Origin -TimeoutSeconds $ReadinessTimeoutSeconds
         }
+
+    Remove-DeploymentValidationHold -Path $ValidationHoldPath -ReleaseId $releaseId
+    $deploymentValidation.HoldCreated = $false
+    Invoke-RequiredLoopbackProbes -Origin $loopbackOrigin.Origin -TimeoutSeconds $ReadinessTimeoutSeconds
 
     [ordered]@{
         ok = $true
@@ -308,9 +439,13 @@ try {
         rollback_payload = $swap.PreviousPayload
         migrations = $false
         clean_slate = $false
+        deployment_validation_hold = "released-after-unchanged-state-validation"
     } | ConvertTo-Json -Depth 3
 }
 finally {
+    if ($leaseAcquired -and $null -ne $deploymentValidation -and $deploymentValidation.HoldCreated) {
+        Remove-DeploymentValidationHold -Path $ValidationHoldPath -ReleaseId $releaseId
+    }
     if ($leaseAcquired) {
         $mutex.ReleaseMutex()
     }

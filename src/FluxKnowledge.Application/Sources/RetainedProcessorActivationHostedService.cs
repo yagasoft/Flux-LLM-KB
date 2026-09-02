@@ -5,10 +5,13 @@ namespace FluxKnowledge.Application.Sources;
 
 /// <summary>Local automatic retained-processor replay; disabled options remain completely inert.</summary>
 public sealed class RetainedProcessorActivationHostedService(
-    IServiceScopeFactory scopeFactory) : BackgroundService
+    IServiceScopeFactory scopeFactory,
+    IDeploymentValidationHold? deploymentValidationHold = null) : BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        await (deploymentValidationHold ?? DeploymentValidationHold.None)
+            .WaitUntilReleasedAsync(stoppingToken).ConfigureAwait(false);
         while (!stoppingToken.IsCancellationRequested)
         {
             using var scope = scopeFactory.CreateScope();

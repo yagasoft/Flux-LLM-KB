@@ -688,6 +688,8 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
             return [];
         }
 
+        return await ExecuteWithRetryAsync(async () =>
+        {
         await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken).ConfigureAwait(false);
         var requested = await context.SourceProcessorForceRequests
@@ -746,6 +748,7 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
         await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
         return claims;
+        }, cancellationToken).ConfigureAwait(false);
     }
 
     public ValueTask<int> ReconcileForceRequestsAsync(CancellationToken cancellationToken) =>
@@ -772,6 +775,8 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
         bool ooxmlDescriptorEnabled,
         CancellationToken cancellationToken)
     {
+        return await ExecuteWithRetryAsync(async () =>
+        {
         await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken).ConfigureAwait(false);
         var request = await context.SourceProcessorForceRequests
@@ -826,6 +831,7 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
             return await TerminaliseClaimedForceRequestAsync(context, transaction, request, branch, now, "lease-expired-reconciled", cancellationToken).ConfigureAwait(false);
         }
         return false;
+        }, cancellationToken).ConfigureAwait(false);
     }
 
     private static async ValueTask<bool> TerminaliseRequestedForceRequestAsync(
@@ -1131,6 +1137,8 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
             return false;
         }
 
+        return await ExecuteWithRetryAsync(async () =>
+        {
         await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken).ConfigureAwait(false);
         var holding = await context.SourceActivities.FromSqlInterpolated($"""
@@ -1258,10 +1266,13 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
         await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
         return true;
+        }, cancellationToken).ConfigureAwait(false);
     }
 
     public async ValueTask<bool> BlockPromotionAsync(RetainedProcessorPromotionCandidate candidate, string outcomeCode, CancellationToken cancellationToken)
     {
+        return await ExecuteWithRetryAsync(async () =>
+        {
         await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken).ConfigureAwait(false);
         var legacy = await context.SourceActivities.SingleOrDefaultAsync(value => value.Id == candidate.LegacyActivityId, cancellationToken).ConfigureAwait(false);
@@ -1273,10 +1284,13 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
         await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
         return true;
+        }, cancellationToken).ConfigureAwait(false);
     }
 
     public async ValueTask<bool> DeferPromotionAsync(RetainedProcessorPromotionCandidate candidate, string outcomeCode, CancellationToken cancellationToken)
     {
+        return await ExecuteWithRetryAsync(async () =>
+        {
         await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken).ConfigureAwait(false);
         var legacy = await context.SourceActivities.SingleOrDefaultAsync(value => value.Id == candidate.LegacyActivityId, cancellationToken).ConfigureAwait(false);
@@ -1287,6 +1301,7 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
         await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
         return true;
+        }, cancellationToken).ConfigureAwait(false);
     }
 
     public async ValueTask<IReadOnlyList<RetainedCsharpCodeClaim>> ClaimCsharpCodeAsync(
@@ -1403,6 +1418,8 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
     {
         ArgumentNullException.ThrowIfNull(claim);
         ArgumentNullException.ThrowIfNull(completion);
+        return await ExecuteWithRetryAsync(async () =>
+        {
         await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken).ConfigureAwait(false);
         var receipt = await context.SourceProcessorCodeCompletionReceipts.FromSqlInterpolated($"SELECT * FROM [SourceProcessorCodeCompletionReceipts] WITH (UPDLOCK, HOLDLOCK) WHERE [SourceProcessorBranchId] = {claim.BranchId}").SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
@@ -1486,6 +1503,7 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
         await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
         return new RetainedCsharpCodeCompletionWriteResult(true, false, completion.OutcomeCode, completion.OutcomeCode == "success" ? completion.CompletionFingerprint : completion.BlockedCompletionFingerprint);
+        }, cancellationToken).ConfigureAwait(false);
     }
 
     private static void ValidateCsharpCompletion(RetainedCsharpCodeClaim claim, RetainedCsharpCodeCompletion completion)
@@ -1716,6 +1734,8 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
 
     public async ValueTask<IReadOnlyList<RetainedProcessorClaim>> ClaimAsync(string leaseOwner, int maximumCount, string? processorFingerprint, CancellationToken cancellationToken)
     {
+        return await ExecuteWithRetryAsync(async () =>
+        {
         await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken).ConfigureAwait(false);
         var now = await DatabaseUtcNowAsync(context, cancellationToken).ConfigureAwait(false);
@@ -1765,10 +1785,13 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
         var revisions = await context.SourceRevisions.AsNoTracking().Where(value => branches.Select(branch => branch.SourceRevisionId).Contains(value.Id)).ToDictionaryAsync(value => value.Id, cancellationToken).ConfigureAwait(false);
         return branches.Select(branch => new RetainedProcessorClaim(branch.Id, new SourceRevisionId(branch.SourceRevisionId), revisions[branch.SourceRevisionId].StableSourceIdentity,
             branch.InputSha256, leaseOwner, branch.LeaseGeneration, expiry)).ToArray();
+        }, cancellationToken).ConfigureAwait(false);
     }
 
     public async ValueTask<bool> CommitAsync(RetainedProcessorClaim claim, RetainedProcessorCompletion completion, CancellationToken cancellationToken)
     {
+        return await ExecuteWithRetryAsync(async () =>
+        {
         await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken).ConfigureAwait(false);
         var now = await DatabaseUtcNowAsync(context, cancellationToken).ConfigureAwait(false);
@@ -1880,10 +1903,13 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
         }
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
         return true;
+        }, cancellationToken).ConfigureAwait(false);
     }
 
     public async ValueTask<bool> FailAsync(RetainedProcessorClaim claim, RetainedProcessorFailure failure, CancellationToken cancellationToken)
     {
+        return await ExecuteWithRetryAsync(async () =>
+        {
         await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken).ConfigureAwait(false);
         var now = await DatabaseUtcNowAsync(context, cancellationToken).ConfigureAwait(false);
@@ -1956,10 +1982,13 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
         }
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
         return true;
+        }, cancellationToken).ConfigureAwait(false);
     }
 
     public async ValueTask<bool> RetryAsync(RetainedProcessorClaim claim, string outcomeCode, CancellationToken cancellationToken)
     {
+        return await ExecuteWithRetryAsync(async () =>
+        {
         await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken).ConfigureAwait(false);
         var now = await DatabaseUtcNowAsync(context, cancellationToken).ConfigureAwait(false);
@@ -2014,6 +2043,7 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
         }
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
         return true;
+        }, cancellationToken).ConfigureAwait(false);
     }
 
     private static string EventKind(string? processorFingerprint) => processorFingerprint switch
@@ -2024,6 +2054,14 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
         "phase-5-media-metadata-retained-v1" => "media_metadata",
         _ => "retained_processor"
     };
+
+    private async ValueTask<T> ExecuteWithRetryAsync<T>(Func<Task<T>> operation, CancellationToken cancellationToken)
+    {
+        await using var executionContext = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        return await executionContext.Database.CreateExecutionStrategy()
+            .ExecuteAsync(operation)
+            .ConfigureAwait(false);
+    }
 
     private static async ValueTask<DateTimeOffset> DatabaseUtcNowAsync(FluxKnowledgeDbContext context, CancellationToken cancellationToken) =>
         await context.Database.SqlQuery<DateTimeOffset>($"SELECT TODATETIMEOFFSET(SYSUTCDATETIME(), '+00:00') AS [Value]")
