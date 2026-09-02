@@ -116,6 +116,79 @@ public sealed class SourceRootProjectionReaderIntegrationTests(NativeSqlServerFi
         Assert.Equal(2, detail.ErrorCount);
     }
 
+    [NativeSqlServerFact]
+    public async Task Source_root_detail_projects_a_legacy_pdf_generic_reason_without_mutating_the_stored_activity()
+    {
+        var rootId = Guid.NewGuid();
+        var revisionId = Guid.NewGuid();
+        var activityId = Guid.NewGuid();
+        var now = DateTimeOffset.Parse("2026-09-03T21:00:00+00:00");
+        var factory = new TestDbContextFactory(_fixture.ConnectionString);
+        await using (var setup = factory.CreateDbContext())
+        {
+            setup.SourceRootConfigurations.Add(new SourceRootConfigurationEntity
+            {
+                Id = rootId,
+                CanonicalPath = $"E:\\source-projection-tests\\{rootId:N}",
+                DisplayName = "Legacy PDF projection",
+                State = (int)SourceRootState.Enabled,
+                Recursive = true,
+                IncludePatternsJson = "[]",
+                ExcludePatternsJson = "[]",
+                AllowedClassificationsJson = "[\"text/plain\"]",
+                MaximumFileBytes = 16 * 1024 * 1024,
+                ReconciliationCadenceSeconds = 900,
+                ConfigurationRevision = 1,
+                CreatedAtUtc = now,
+                UpdatedAtUtc = now
+            });
+            setup.SourceRevisions.Add(new SourceRevisionEntity
+            {
+                Id = revisionId,
+                SourceRootId = rootId,
+                StableSourceIdentity = $"legacy-pdf:{revisionId:N}",
+                Revision = 1,
+                ContentSha256 = new string('b', 64),
+                CanonicalPath = $"E:\\source-projection-tests\\{rootId:N}\\legacy.pdf",
+                Classification = "DeferredCapability",
+                Extension = ".pdf",
+                ByteLength = 1,
+                DiscoveredAtUtc = now,
+                DiscoveryEvidenceJson = "{}"
+            });
+            setup.SourceActivities.Add(new SourceActivityEntity
+            {
+                Id = activityId,
+                SourceRevisionId = revisionId,
+                ActivityKind = (int)SourceActivityKind.DocumentParsing,
+                ExecutionClass = (int)ExecutionClass.DeferredCapability,
+                ProcessorVersion = "phase-3a-v1",
+                InputFingerprint = new string('b', 64),
+                State = (int)SourceActivityState.DeferredUnsupported,
+                Reason = "Binary signature requires a capability that is not registered.",
+                CreatedAtUtc = now,
+                UpdatedAtUtc = now
+            });
+            await setup.SaveChangesAsync();
+        }
+
+        var reader = new SourceRootProjectionReader(
+            factory,
+            new NoPathPolicy(),
+            new NoEnumeration(),
+            new LocalSourceCapabilityHandlerRegistry([]));
+
+        var detail = await reader.ReadRootAsync(rootId, CancellationToken.None);
+
+        Assert.NotNull(detail);
+        Assert.Contains(detail.DeferredOrBlockedReasons, value =>
+            value.State == nameof(SourceActivityState.DeferredUnsupported) &&
+            value.Reason == "pdf-parser-unavailable" && value.Count == 1);
+        await using var verification = factory.CreateDbContext();
+        Assert.Equal("Binary signature requires a capability that is not registered.",
+            (await verification.SourceActivities.SingleAsync(value => value.Id == activityId)).Reason);
+    }
+
     private static SourceRevisionEntity Revision(
         Guid id,
         Guid rootId,

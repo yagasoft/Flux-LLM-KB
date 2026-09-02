@@ -80,6 +80,7 @@ public sealed class SourceRootProjectionReader(
                     activity.ResultingPipelineRecordId,
                     revision.SuppressedAtUtc,
                     revision.Classification,
+                    revision.Extension,
                     revision.ContentSha256,
                     revision.ByteLength,
                     artifact == null ? null : artifact.ContentSha256,
@@ -93,7 +94,7 @@ public sealed class SourceRootProjectionReader(
             .GroupBy(activity => new
             {
                 State = ((SourceActivityState)activity.State).ToString(),
-                Reason = string.IsNullOrWhiteSpace(activity.Reason) ? "No reason recorded." : activity.Reason
+                Reason = DisplayReason(activity)
             })
             .OrderByDescending(group => group.Count()).ThenBy(group => group.Key.State).ThenBy(group => group.Key.Reason)
             .Take(20)
@@ -289,6 +290,12 @@ public sealed class SourceRootProjectionReader(
             (SourceActivityState)activity.State,
             activity.Reason).IdempotencyKey;
 
+    private static string DisplayReason(SourceActivityRow activity) =>
+        string.Equals(activity.Reason, "Binary signature requires a capability that is not registered.", StringComparison.Ordinal) &&
+        string.Equals(activity.Extension, ".pdf", StringComparison.OrdinalIgnoreCase)
+            ? "pdf-parser-unavailable"
+            : string.IsNullOrWhiteSpace(activity.Reason) ? "No reason recorded." : activity.Reason;
+
     private sealed record SourceActivityRow(
         Guid Id,
         Guid SourceRevisionId,
@@ -302,6 +309,7 @@ public sealed class SourceRootProjectionReader(
         Guid? ResultingPipelineRecordId,
         DateTimeOffset? SuppressedAtUtc,
         string Classification,
+        string Extension,
         string ContentSha256,
         long ByteLength,
         string? ArtifactContentSha256,
