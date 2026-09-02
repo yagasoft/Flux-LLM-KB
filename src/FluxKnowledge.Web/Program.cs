@@ -78,6 +78,7 @@ builder.Services.AddSingleton<FluxKnowledge.Application.Ports.IStatusEventPublis
 builder.Services.AddScoped<OverviewProjectionState>();
 builder.Services.AddScoped<CircuitHandler, StatusEventCircuitHandler>();
 builder.Services.AddFluxKnowledgeMcp();
+builder.Services.AddScoped<NativeCodexHookService>();
 builder.Services
     .AddMcpServer()
     .WithHttpTransport(options => options.Stateless = true)
@@ -104,6 +105,7 @@ app.MapFluxKnowledgeOperatorActions();
 app.MapFluxKnowledgeLocalRetainedDetails();
 app.MapFluxKnowledgeLocalRetainedCsharpCode();
 app.MapFluxKnowledgeNativeV1();
+app.MapFluxKnowledgeNativeCodexHooks();
 app.MapMcp("/mcp");
 
 app.Run();

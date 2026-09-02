@@ -17,7 +17,7 @@ public sealed record NativeGoLiveRuntimeConfiguration(
     bool FfmpegEnabled,
     bool NetworkParsingEnabled);
 
-/// <summary>Defines the intentionally inert capabilities of the native go-live runtime.</summary>
+/// <summary>Defines the provisioned operational and inert provider capabilities of the native go-live runtime.</summary>
 public static class NativeGoLiveRuntimeOptions
 {
     public static NativeGoLiveRuntimeConfiguration Read(IConfiguration configuration)
@@ -40,13 +40,13 @@ public static class NativeGoLiveRuntimeOptions
             new LocalIngressOptions([requiredIngress]),
             ReadBoolean(configuration, "Outlook:Enabled") || ReadBoolean(configuration, "OutlookCapture:Enabled"),
             ReadBoolean(configuration, "Worker:Enabled") || ReadBoolean(configuration, "NativeWorker:Enabled"),
-            ReadBoolean(configuration, "Runtime:ModelRuntimeEnabled"),
-            ReadBoolean(configuration, "Runtime:GpuEnabled"),
-            ReadBoolean(configuration, "Runtime:OcrEnabled"),
+            ReadProviderEnabled(configuration, "Model", "ModelRuntimeEnabled"),
+            ReadProviderEnabled(configuration, "Gpu", "GpuEnabled"),
+            ReadProviderEnabled(configuration, "Ocr", "OcrEnabled"),
             ReadBoolean(configuration, "Runtime:VisionEnabled"),
-            ReadBoolean(configuration, "Runtime:AsrEnabled"),
-            ReadBoolean(configuration, "Runtime:FfmpegEnabled"),
-            ReadBoolean(configuration, "Runtime:NetworkParsingEnabled"));
+            ReadProviderEnabled(configuration, "Asr", "AsrEnabled"),
+            ReadProviderEnabled(configuration, "Ffmpeg", "FfmpegEnabled"),
+            ReadProviderEnabled(configuration, "NetworkParsing", "NetworkParsingEnabled"));
         ValidateEffective(result);
         return result;
     }
@@ -66,12 +66,13 @@ public static class NativeGoLiveRuntimeOptions
             throw new InvalidOperationException("retained-ingress-required");
         }
 
-        if (options.OutlookEnabled) throw new InvalidOperationException("outlook-active");
-        if (options.WorkerEnabled || options.ModelRuntimeEnabled || options.GpuEnabled)
-            throw new InvalidOperationException("phase-6-runtime-active");
-        if (options.OcrEnabled || options.VisionEnabled || options.AsrEnabled || options.FfmpegEnabled)
-            throw new InvalidOperationException("media-runtime-active");
-        if (options.NetworkParsingEnabled) throw new InvalidOperationException("network-parsing-active");
+        ValidateUnprovisionedProvider(options.ModelRuntimeEnabled, "model");
+        ValidateUnprovisionedProvider(options.GpuEnabled, "gpu");
+        ValidateUnprovisionedProvider(options.OcrEnabled, "ocr");
+        ValidateUnprovisionedProvider(options.VisionEnabled, "vision");
+        ValidateUnprovisionedProvider(options.AsrEnabled, "asr");
+        ValidateUnprovisionedProvider(options.FfmpegEnabled, "ffmpeg");
+        ValidateUnprovisionedProvider(options.NetworkParsingEnabled, "network-parsing");
     }
 
     private static IReadOnlyList<string> ReadRoots(IConfiguration configuration, string section) =>
@@ -91,5 +92,16 @@ public static class NativeGoLiveRuntimeOptions
         }
 
         return result;
+    }
+
+    private static bool ReadProviderEnabled(IConfiguration configuration, string provider, string legacyKey)
+    {
+        var nestedKey = $"Runtime:{provider}:Enabled";
+        return ReadBoolean(configuration, nestedKey) || ReadBoolean(configuration, $"Runtime:{legacyKey}");
+    }
+
+    private static void ValidateUnprovisionedProvider(bool enabled, string provider)
+    {
+        if (enabled) throw new InvalidOperationException($"runtime-provider-not-ready:{provider}");
     }
 }

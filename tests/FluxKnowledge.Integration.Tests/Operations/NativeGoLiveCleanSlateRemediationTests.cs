@@ -41,7 +41,7 @@ public sealed class NativeGoLiveCleanSlateRemediationTests
             var manifest = NativeGoLivePayloadHasher.Compute(payloadRoot);
             _capability = new NativeGoLiveCloseoutCapabilityIssuer().Issue(Plan, payloadRoot, manifest.Sha256);
             _request = new NativeGoLiveRequest(
-                Plan, false, true, true, true, true, payloadRoot, manifest.Sha256, manifest);
+                Plan, false, true, true, true, true, true, payloadRoot, manifest.Sha256, manifest);
             Host = new GuardedNativeGoLiveHost(
                 _capability,
                 Plan,

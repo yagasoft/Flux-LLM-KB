@@ -89,23 +89,34 @@ public static class WebHostComposition
     internal static bool IsIsolatedTestComposition => _isolatedTestLayout is not null;
 
     /// <summary>
-    /// Runs before the published Web host is built.  It validates the no-follow configuration's
-    /// effective inert runtime options and rejects registrations that could start a background
-    /// worker, scheduler, GPU/media capability or Outlook capture path.  It starts no listener.
+    /// Runs before the published Web host is built. It permits only the provisioned source-worker
+    /// and Outlook-capture hosted services, while rejecting every unprovisioned runtime provider.
+    /// It starts no listener.
     /// </summary>
     internal static void ValidateNativeGoLiveComposition(
         IServiceCollection services,
         IConfiguration configuration)
     {
         ArgumentNullException.ThrowIfNull(services);
-        NativeGoLiveRuntimeOptions.ValidateEffective(ReadNativeGoLiveRuntimeOptions(configuration));
-        if (services.Any(descriptor => typeof(IHostedService).IsAssignableFrom(descriptor.ServiceType)))
+        var runtime = ReadNativeGoLiveRuntimeOptions(configuration);
+        NativeGoLiveRuntimeOptions.ValidateEffective(runtime);
+        var allowedHostedServiceTypes = new HashSet<Type>();
+        if (runtime.WorkerEnabled)
+        {
+            allowedHostedServiceTypes.Add(typeof(SourceReconciliationService));
+            allowedHostedServiceTypes.Add(typeof(LocalSourceRootWatchHostedService));
+        }
+        if (runtime.OutlookEnabled)
+            allowedHostedServiceTypes.Add(typeof(OutlookCaptureRecoveryService));
+        var hostedServiceTypes = services
+            .Where(descriptor => descriptor.ServiceType == typeof(IHostedService))
+            .Select(descriptor => descriptor.ImplementationType)
+            .ToArray();
+        if (hostedServiceTypes.Length != allowedHostedServiceTypes.Count ||
+            hostedServiceTypes.Any(type => type is null || !allowedHostedServiceTypes.Remove(type)))
             throw new InvalidOperationException("native-go-live-hosted-service-registered");
         var prohibited = new[]
         {
-            typeof(OutlookCaptureRecoveryService),
-            typeof(SourceReconciliationService),
-            typeof(LocalSourceRootWatchHostedService),
             typeof(GpuSchedulerService),
             typeof(CanonicalIndexStageWorker),
             typeof(EmbedStageWorker),
@@ -309,28 +320,28 @@ public static class WebHostComposition
         services.AddScoped<NativeAuditQueryService>();
         services.AddScoped<INativeV1Facade, NativeV1Facade>();
         services.AddFluxKnowledgeOutboxWorkers();
-        if (!strictProductionPaths)
+        services.AddScoped<SqlSourceRootStore>();
+        services.AddScoped<ISourceRootStore>(provider => provider.GetRequiredService<SqlSourceRootStore>());
+        services.AddScoped<SqlSourceActivityStore>();
+        services.AddScoped<ISourceActivityStore>(provider => provider.GetRequiredService<SqlSourceActivityStore>());
+        services.AddScoped<ISourceCapabilityStore>(provider => provider.GetRequiredService<SqlSourceActivityStore>());
+        services.AddScoped<SqlSourceScanStore>();
+        services.AddScoped<ISourceScanStore>(provider => provider.GetRequiredService<SqlSourceScanStore>());
+        services.AddScoped<ISourceScanControlStore>(provider => provider.GetRequiredService<SqlSourceScanStore>());
+        services.AddScoped<ISourceFileEnumerator, LocalSourceEnumerator>();
+        services.AddScoped<ISourceScanner, SourceScanWorker>();
+        services.AddSingleton<ChannelSourceScanWakeSignal>();
+        services.AddSingleton<ISourceScanWakeSignal>(provider => provider.GetRequiredService<ChannelSourceScanWakeSignal>());
+        services.AddScoped<SourceRootService>();
+        services.AddScoped<SourceScanControlService>();
+        var workersEnabled = configuration.GetValue<bool>("Worker:Enabled");
+        if (workersEnabled)
         {
-            services.AddScoped<SqlSourceRootStore>();
-            services.AddScoped<ISourceRootStore>(provider => provider.GetRequiredService<SqlSourceRootStore>());
-            services.AddScoped<SqlSourceActivityStore>();
-            services.AddScoped<ISourceActivityStore>(provider => provider.GetRequiredService<SqlSourceActivityStore>());
-            services.AddScoped<ISourceCapabilityStore>(provider => provider.GetRequiredService<SqlSourceActivityStore>());
-            services.AddScoped<SqlSourceScanStore>();
-            services.AddScoped<ISourceScanStore>(provider => provider.GetRequiredService<SqlSourceScanStore>());
-            services.AddScoped<ISourceScanControlStore>(provider => provider.GetRequiredService<SqlSourceScanStore>());
-            services.AddScoped<ISourceFileEnumerator, LocalSourceEnumerator>();
-            services.AddScoped<ISourceScanner, SourceScanWorker>();
-            services.AddSingleton<ChannelSourceScanWakeSignal>();
-            services.AddSingleton<ISourceScanWakeSignal>(provider => provider.GetRequiredService<ChannelSourceScanWakeSignal>());
             services.AddSingleton<SqlSourceRootWatchStore>();
             services.AddSingleton<ISourceRootWatchStore>(provider => provider.GetRequiredService<SqlSourceRootWatchStore>());
             services.AddSingleton<SourceWatchCoordinator>();
-            services.AddSingleton<SourceReconciliationService>();
-            services.AddSingleton<IHostedService>(provider => provider.GetRequiredService<SourceReconciliationService>());
+            services.AddSingleton<IHostedService, SourceReconciliationService>();
             services.AddSingleton<IHostedService, LocalSourceRootWatchHostedService>();
-            services.AddScoped<SourceRootService>();
-            services.AddScoped<SourceScanControlService>();
         }
         services.AddScoped<ISourceRootProjectionReader, SourceRootProjectionReader>();
         services.AddScoped<SourceRootPageState>();
@@ -341,22 +352,19 @@ public static class WebHostComposition
         services.AddScoped<RetainedBranchDetailPageState>();
         services.AddScoped<RetainedCsharpCodeDetailPageState>();
         services.AddScoped<RetainedCsharpCodeSearchPageState>();
-        if (!strictProductionPaths)
+        services.AddScoped<SqlOutlookCaptureStore>();
+        services.AddScoped<IOutlookCaptureStore>(provider => provider.GetRequiredService<SqlOutlookCaptureStore>());
+        services.AddScoped<IOutlookCaptureRecoveryStore>(provider => provider.GetRequiredService<SqlOutlookCaptureStore>());
+        var outlookRecoveryOptions = ReadOutlookRecoveryOptions(configuration);
+        services.AddSingleton(outlookRecoveryOptions);
+        if (outlookRecoveryOptions.Enabled)
         {
-            services.AddScoped<SqlOutlookCaptureStore>();
-            services.AddScoped<IOutlookCaptureStore>(provider => provider.GetRequiredService<SqlOutlookCaptureStore>());
-            services.AddScoped<IOutlookCaptureRecoveryStore>(provider => provider.GetRequiredService<SqlOutlookCaptureStore>());
-            var outlookRecoveryOptions = ReadOutlookRecoveryOptions(configuration);
-            services.AddSingleton(outlookRecoveryOptions);
-            if (outlookRecoveryOptions.Enabled)
-            {
-                services.AddSingleton<IHostedService, OutlookCaptureRecoveryService>();
-            }
-            services.AddScoped<IOutlookOperatorPolicy, LocalOutlookOperatorPolicy>();
-            services.AddScoped<LocalOutlookConnectionContext>();
-            services.AddScoped<IOutlookProjectionReader, SqlOutlookProjectionReader>();
-            services.AddScoped<OutlookPageState>();
+            services.AddSingleton<IHostedService, OutlookCaptureRecoveryService>();
         }
+        services.AddScoped<IOutlookOperatorPolicy, LocalOutlookOperatorPolicy>();
+        services.AddScoped<LocalOutlookConnectionContext>();
+        services.AddScoped<IOutlookProjectionReader, SqlOutlookProjectionReader>();
+        services.AddScoped<OutlookPageState>();
         services.AddSingleton(new OutlookSpoolPolicyOptions(
             strictProductionPaths || configuredSpoolRoots.Length == 0
                 ? [liveRoot.SpoolRoot]
@@ -385,16 +393,33 @@ public static class WebHostComposition
         }
         if (strictProductionPaths)
         {
-            RemoveHostedServiceRegistrations(services);
+            RemoveUnapprovedHostedServiceRegistrations(services, nativeRuntimeOptions!);
         }
         return services;
     }
 
-    private static void RemoveHostedServiceRegistrations(IServiceCollection services)
+    private static void RemoveUnapprovedHostedServiceRegistrations(
+        IServiceCollection services,
+        NativeGoLiveRuntimeConfiguration runtime)
     {
+        var unapprovedHostedServiceTypes = new HashSet<Type>
+        {
+            typeof(OutboxPumpService),
+            typeof(RetainedProcessorActivationHostedService),
+            typeof(GpuSchedulerService),
+            typeof(GpuExecutorDispatchRecoveryService)
+        };
+        if (!runtime.OutlookEnabled)
+            unapprovedHostedServiceTypes.Add(typeof(OutlookCaptureRecoveryService));
         for (var index = services.Count - 1; index >= 0; index--)
         {
-            if (typeof(IHostedService).IsAssignableFrom(services[index].ServiceType))
+            var descriptor = services[index];
+            if ((unapprovedHostedServiceTypes.Contains(descriptor.ServiceType) ||
+                 descriptor.ServiceType == typeof(IHostedService) &&
+                 (descriptor.ImplementationType is { } implementationType && unapprovedHostedServiceTypes.Contains(implementationType) ||
+                 descriptor.ImplementationFactory?.Method.Name.Contains(
+                     nameof(OutboxWorkerServiceCollectionExtensions.AddFluxKnowledgeOutboxWorkers),
+                     StringComparison.Ordinal) == true)))
             {
                 services.RemoveAt(index);
             }

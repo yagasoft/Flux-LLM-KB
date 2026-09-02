@@ -31,12 +31,22 @@ public sealed class SqlNativeOperationStore(
     private readonly Action? _beforeCommitInjector = beforeCommitInjector;
     private readonly Action? _afterSaveBeforeCommitInjector = afterSaveBeforeCommitInjector;
 
+    public async ValueTask<NativeActionReceipt?> FindReceiptAsync(string idempotencyKey, string actorSurface, CancellationToken cancellationToken)
+    {
+        await using var context = await _contextFactory.CreateDbContextAsync(cancellationToken);
+        var receipt = await context.NativeOperationReceipts.AsNoTracking().SingleOrDefaultAsync(
+            value => value.ActorSurface == actorSurface && value.IdempotencyKey == idempotencyKey,
+            cancellationToken);
+        return receipt is null ? null : ToReplay(receipt);
+    }
+
     public async ValueTask<NativeActionReceipt?> TryReplayAsync(string action, string canonicalPayload, string confirmationId, string idempotencyKey, string actorSurface, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(confirmationId) || confirmationId.Length > 256) return null;
         await using var context = await _contextFactory.CreateDbContextAsync(cancellationToken);
         var receipt = await context.NativeOperationReceipts.AsNoTracking().SingleOrDefaultAsync(value => value.ActorSurface == actorSurface && value.IdempotencyKey == idempotencyKey, cancellationToken);
         if (receipt is null) return null;
+        if (IsCodexStopCapture(action, idempotencyKey, actorSurface)) return ToReplay(receipt);
         var intent = await context.NativeOperationIntents.AsNoTracking().SingleOrDefaultAsync(value => value.Id == receipt.IntentId && value.ConfirmationHash == NativeOperationCanonicalization.CreateConfirmationHash(confirmationId), cancellationToken);
         if (intent is null) throw new NativeOperationException("confirmation-mismatch");
         var targets = JsonSerializer.Deserialize<NativeTargetVersion[]>(intent.TargetMetadataJson) ?? throw new NativeOperationException("confirmation-mismatch");
@@ -99,6 +109,11 @@ public sealed class SqlNativeOperationStore(
             cancellationToken);
         if (existing is not null)
         {
+            if (IsCodexStopCapture(prepared.Action, prepared.IdempotencyKey, prepared.ActorSurface))
+            {
+                await transaction.CommitAsync(cancellationToken);
+                return ToReplay(existing);
+            }
             if (!string.Equals(existing.RequestFingerprint, prepared.RequestFingerprint, StringComparison.Ordinal))
             {
                 throw new NativeOperationException("idempotency-key-conflict");
@@ -301,6 +316,11 @@ public sealed class SqlNativeOperationStore(
 
     private static NativeActionReceipt ToReplay(NativeOperationReceiptEntity receipt) =>
         new(receipt.OperationId, true, receipt.Outcome, receipt.ReasonCode);
+
+    private static bool IsCodexStopCapture(string action, string idempotencyKey, string actorSurface) =>
+        action == "note_create" &&
+        actorSurface == "codex-hook" &&
+        idempotencyKey.StartsWith("codex-stop-", StringComparison.Ordinal);
 
     private async Task ApplyMutationAsync(
         FluxKnowledgeDbContext context,

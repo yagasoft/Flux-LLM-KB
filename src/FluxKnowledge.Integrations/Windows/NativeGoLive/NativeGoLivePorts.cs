@@ -10,12 +10,13 @@ public sealed record NativeGoLiveRequest(
     bool ConfirmConfigureVss,
     bool ConfirmDestroySql,
     bool ConfirmRegisterCodex,
+    bool ConfirmRemoveLegacyPlugin,
     string? MergedMainRoot = null,
     string? MergedMainPayloadSha256 = null,
     NativeGoLivePayloadManifest? MergedMainPayloadManifest = null)
 {
     public static NativeGoLiveRequest PlanOnly(NativeGoLivePlan plan) =>
-        new(plan, true, false, false, false, false);
+        new(plan, true, false, false, false, false, false);
 }
 
 /// <summary>Host boundary for the native go-live state machine. This assembly supplies no live implementation.</summary>
@@ -42,13 +43,19 @@ public interface INativeGoLiveHost
         ValueTask.FromException(new NativeGoLiveContractException("go-live-one-shot-root-creation-not-supported"));
     ValueTask ProvisionEmptyCatalogueAsync(NativeGoLiveSqlIdentity sql, CancellationToken cancellationToken);
     ValueTask PublishAndStartAsync(NativeGoLivePlan plan, CancellationToken cancellationToken);
+    /// <summary>Starts only the approved native work after publication and the application start proof.</summary>
+    ValueTask ActivateNativeTasksAsync(NativeGoLivePlan plan, CancellationToken cancellationToken) =>
+        ValueTask.FromException(new NativeGoLiveContractException("native-task-activation-not-supported"));
     ValueTask ValidateAsync(NativeGoLivePlan plan, CancellationToken cancellationToken);
     ValueTask RegisterMarketplaceAsync(NativeGoLiveCodexIdentity codex, CancellationToken cancellationToken);
+    /// <summary>Removes only the exact legacy Codex plugin before native marketplace registration.</summary>
+    ValueTask RemoveLegacyPluginAsync(CancellationToken cancellationToken) =>
+        ValueTask.FromException(new NativeGoLiveContractException("legacy-plugin-removal-not-supported"));
 }
 
 public interface INativeGoLiveLease : IAsyncDisposable { }
 
-/// <summary>Closed live-validation contract that must succeed before marketplace registration.</summary>
+/// <summary>Closed live-validation contract that succeeds after exact legacy removal and native marketplace registration.</summary>
 public static class NativeGoLiveLoopbackContract
 {
     public const string BaseUri = "http://127.0.0.1:5137";

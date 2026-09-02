@@ -391,6 +391,20 @@ internal sealed class NativeGoLiveWindowsLoopbackPort : INativeGoLiveLoopbackPor
             "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{}}",
             mcpHeaders,
             cancellationToken).ConfigureAwait(false);
+        var hookProbes = new[]
+        {
+            ("UserPromptSubmit", "{\"prompt\":\"native-go-live-hook-probe\"}"),
+            ("PreCompact", "{\"trigger\":\"native-go-live\"}"),
+            ("Stop", "{\"session_id\":\"native-go-live\",\"turn_id\":\"native-go-live\",\"last_assistant_message\":\"Native go-live hook probe.\"}")
+        };
+        var hooks = new List<(string EventName, NativeGoLiveHttpObservation Observation, NativeGoLiveRawHttpResponse Raw)>();
+        foreach (var (eventName, payload) in hookProbes)
+        {
+            var response = await SendAsync(
+                "POST", "/native/v1/codex/hooks/" + eventName, payload, null, cancellationToken)
+                .ConfigureAwait(false);
+            hooks.Add((eventName, response.Observation, response.Raw));
+        }
         var forwardedHeaders = new Dictionary<string, string>(StringComparer.Ordinal)
         {
             ["Forwarded"] = "for=192.0.2.20;proto=https;host=foreign.invalid",
@@ -412,6 +426,15 @@ internal sealed class NativeGoLiveWindowsLoopbackPort : INativeGoLiveLoopbackPor
             .EnumerateArray()
             .Select(tool => tool.GetProperty("name").GetString() ?? string.Empty)
             .ToArray();
+        var hookObservations = hooks.Select(hook =>
+        {
+            using var json = ParseObject(hook.Raw.Body, "native-hook-invalid");
+            return new NativeGoLiveCodexHookObservation(
+                hook.EventName,
+                hook.Observation,
+                json.RootElement.TryGetProperty("continue", out var continueProperty) &&
+                continueProperty.ValueKind == JsonValueKind.True);
+        }).ToArray();
         var searchRoot = searchJson.RootElement;
         var resultCount = SearchResultCount(searchRoot);
         var gpuRoot = gpuJson.RootElement;
@@ -436,11 +459,14 @@ internal sealed class NativeGoLiveWindowsLoopbackPort : INativeGoLiveLoopbackPor
                 1,
                 resultCount),
             new NativeGoLiveMcpObservation(initialise.Observation, tools.Observation, toolNames),
+            hookObservations,
             forwarded.Observation,
             nonLoopback,
             new[] { live.Raw, ready.Raw, index.Raw, gpu.Raw, search.Raw, initialise.Raw, tools.Raw, forwarded.Raw }
+                .Concat(hooks.Select(hook => hook.Raw))
                 .Any(response => response.UsedProxy),
             new[] { live.Raw, ready.Raw, index.Raw, gpu.Raw, search.Raw, initialise.Raw, tools.Raw, forwarded.Raw }
+                .Concat(hooks.Select(hook => hook.Raw))
                 .Any(response => response.FollowedRedirect),
             runtime);
     }
@@ -873,6 +899,10 @@ internal static class NativeGoLiveRuntimeConfiguration
             using var document = JsonDocument.Parse(bytes);
             return ReadRuntime(document.RootElement, expectedRetainedRoot);
         }
+        catch (NativeGoLiveContractException)
+        {
+            throw;
+        }
         catch (Exception exception) when (exception is JsonException or KeyNotFoundException or InvalidOperationException)
         {
             throw new NativeGoLiveContractException("runtime-configuration-invalid");
@@ -889,23 +919,52 @@ internal static class NativeGoLiveRuntimeConfiguration
         if (allowedRoots.ValueKind != JsonValueKind.Array || allowedRoots.GetArrayLength() != 1 ||
             !string.Equals(allowedRoots[0].GetString(), expectedRetainedRoot, StringComparison.OrdinalIgnoreCase))
             throw new NativeGoLiveContractException("runtime-configuration-invalid");
+        var modelEnabled = ProviderEnabled(runtime, "Model", "ModelRuntimeEnabled");
+        var gpuEnabled = ProviderEnabled(runtime, "Gpu", "GpuEnabled");
+        var ocrEnabled = ProviderEnabled(runtime, "Ocr", "OcrEnabled");
+        var visionEnabled = Boolean(runtime, "VisionEnabled");
+        var asrEnabled = ProviderEnabled(runtime, "Asr", "AsrEnabled");
+        var ffmpegEnabled = ProviderEnabled(runtime, "Ffmpeg", "FfmpegEnabled");
+        var networkParsingEnabled = ProviderEnabled(runtime, "NetworkParsing", "NetworkParsingEnabled");
+        ValidateUnprovisionedProvider(modelEnabled, "model");
+        ValidateUnprovisionedProvider(gpuEnabled, "gpu");
+        ValidateUnprovisionedProvider(ocrEnabled, "ocr");
+        ValidateUnprovisionedProvider(visionEnabled, "vision");
+        ValidateUnprovisionedProvider(asrEnabled, "asr");
+        ValidateUnprovisionedProvider(ffmpegEnabled, "ffmpeg");
+        ValidateUnprovisionedProvider(networkParsingEnabled, "network-parsing");
         return new NativeGoLiveRuntimeObservation(
             RequiredBoolean(root, "Outlook", "Enabled") || RequiredBoolean(root, "OutlookCapture", "Enabled"),
             RequiredBoolean(root, "Worker", "Enabled") || Boolean(root, "NativeWorker", "Enabled"),
-            RequiredBoolean(runtime, "ModelRuntimeEnabled") || RequiredBoolean(runtime, "OcrEnabled") ||
-                RequiredBoolean(runtime, "VisionEnabled") || RequiredBoolean(runtime, "AsrEnabled"),
-            RequiredBoolean(runtime, "GpuEnabled"),
-            RequiredBoolean(runtime, "FfmpegEnabled"),
-            RequiredBoolean(runtime, "NetworkParsingEnabled"));
+            modelEnabled || ocrEnabled || visionEnabled || asrEnabled,
+            gpuEnabled,
+            ffmpegEnabled,
+            networkParsingEnabled);
     }
 
     private static void ValidateDisabled(NativeGoLiveRuntimeObservation observation)
     {
-        if (observation.OutlookEnabled || observation.PhaseSixEnabled || observation.ModelRuntimeEnabled ||
-            observation.GpuEnabled || observation.FfmpegEnabled || observation.NetworkParsingEnabled)
+        if (observation.ModelRuntimeEnabled || observation.GpuEnabled || observation.FfmpegEnabled ||
+            observation.NetworkParsingEnabled)
         {
             throw new NativeGoLiveContractException("runtime-configuration-invalid");
         }
+    }
+
+    private static bool ProviderEnabled(JsonElement runtime, string provider, string legacyProperty)
+    {
+        var hasNestedProvider = runtime.TryGetProperty(provider, out var nestedProvider);
+        var hasLegacyProvider = runtime.TryGetProperty(legacyProperty, out var legacyProvider);
+        if (!hasNestedProvider && !hasLegacyProvider)
+            throw new NativeGoLiveContractException("runtime-configuration-invalid");
+        return hasNestedProvider && RequiredBoolean(nestedProvider, "Enabled") ||
+               hasLegacyProvider && RequiredBooleanValue(legacyProvider);
+    }
+
+    private static void ValidateUnprovisionedProvider(bool enabled, string provider)
+    {
+        if (enabled)
+            throw new NativeGoLiveContractException($"runtime-provider-not-ready:{provider}");
     }
 
     private static bool Boolean(JsonElement root, string section, string property) =>
@@ -928,11 +987,13 @@ internal static class NativeGoLiveRuntimeConfiguration
     {
         if (!root.TryGetProperty(property, out var value))
             throw new NativeGoLiveContractException("runtime-configuration-invalid");
-        return value.ValueKind switch
-        {
-            JsonValueKind.True => true,
-            JsonValueKind.False => false,
-            _ => throw new NativeGoLiveContractException("runtime-configuration-invalid")
-        };
+        return RequiredBooleanValue(value);
     }
+
+    private static bool RequiredBooleanValue(JsonElement value) => value.ValueKind switch
+    {
+        JsonValueKind.True => true,
+        JsonValueKind.False => false,
+        _ => throw new NativeGoLiveContractException("runtime-configuration-invalid")
+    };
 }

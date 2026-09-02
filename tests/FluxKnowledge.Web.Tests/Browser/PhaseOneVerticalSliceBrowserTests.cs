@@ -1,6 +1,7 @@
 using System.Net.Http.Json;
 using System.Text;
 using FluxKnowledge.Application.Contracts;
+using FluxKnowledge.Application.Operations;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Integration.Tests.Support;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
@@ -130,7 +131,8 @@ public sealed class PhaseOneVerticalSliceBrowserTests
             string connectionString,
             string ingressRoot,
             string indexRoot,
-            Action<IServiceCollection>? configureServices = null)
+            Action<IServiceCollection>? configureServices = null,
+            bool strictProductionComposition = false)
         {
             var builder = WebApplication.CreateBuilder(
                 new WebApplicationOptions
@@ -146,11 +148,26 @@ public sealed class PhaseOneVerticalSliceBrowserTests
                 new Dictionary<string, string?>
                 {
                     ["ConnectionStrings:FluxKnowledge"] = ValidatedPlaceholderConnection,
-                    ["LocalIngress:AllowedRoots:0"] = ingressRoot,
-                    ["Outlook:AllowedSpoolRoots:0"] = ingressRoot,
-                    ["Usearch:RootPath"] = indexRoot
+                    ["LocalIngress:AllowedRoots:0"] = strictProductionComposition
+                        ? LiveRootLayout.Production.RetainedRoot
+                        : ingressRoot,
+                    ["Outlook:AllowedSpoolRoots:0"] = strictProductionComposition
+                        ? LiveRootLayout.Production.SpoolRoot
+                        : ingressRoot,
+                    ["Usearch:RootPath"] = strictProductionComposition
+                        ? LiveRootLayout.Production.IndexRoot
+                        : indexRoot
                 });
-            WebHostComposition.AddFluxKnowledgeServices(builder.Services, builder.Configuration);
+            if (strictProductionComposition)
+            {
+                WebHostComposition.AddProductionFluxKnowledgeServicesForTests(
+                    builder.Services,
+                    builder.Configuration);
+            }
+            else
+            {
+                WebHostComposition.AddFluxKnowledgeServices(builder.Services, builder.Configuration);
+            }
             // The production options validator deliberately accepts only the FluxKnowledge
             // catalogue. Browser tests retain that contract and replace only the EF factory
             // with their generated disposable catalogue.

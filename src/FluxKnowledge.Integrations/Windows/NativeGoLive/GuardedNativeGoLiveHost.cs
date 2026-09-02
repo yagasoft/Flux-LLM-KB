@@ -596,6 +596,8 @@ internal sealed record NativeGoLiveSearchObservation(
     NativeGoLiveHttpObservation Http, bool Succeeded, string Query, int Limit, int ResultCount);
 internal sealed record NativeGoLiveMcpObservation(
     NativeGoLiveHttpObservation Initialise, NativeGoLiveHttpObservation ToolsList, IReadOnlyList<string> Tools);
+internal sealed record NativeGoLiveCodexHookObservation(
+    string EventName, NativeGoLiveHttpObservation Http, bool Continue);
 /// <summary>
 /// Count-only evidence that no active local non-loopback IPv4 address served the native health contract.
 /// A TCP handshake alone is not evidence of application exposure: HTTP.sys can complete it for a loopback
@@ -614,6 +616,7 @@ internal sealed record NativeGoLiveLoopbackObservation(
     NativeGoLiveGpuObservation Gpu,
     NativeGoLiveSearchObservation Search,
     NativeGoLiveMcpObservation Mcp,
+    IReadOnlyList<NativeGoLiveCodexHookObservation>? Hooks,
     NativeGoLiveHttpObservation ForwardedDenial,
     NativeGoLiveTcpDenialObservation NonLoopbackDenial,
     bool UsedProxy,
@@ -738,6 +741,13 @@ internal interface INativeGoLiveMarketplacePort
 
     ValueTask<NativeGoLiveMarketplaceObservation> RegisterAndObserveAsync(
         NativeGoLiveCodexIdentity identity, CancellationToken cancellationToken);
+
+    ValueTask RemoveExactLegacyPluginAsync(CancellationToken cancellationToken) =>
+        ValueTask.FromException(new NativeGoLiveContractException("legacy-plugin-removal-not-supported"));
+}
+internal interface INativeGoLiveTaskActivationPort
+{
+    ValueTask ActivateAfterApplicationStartAsync(NativeGoLivePlan plan, CancellationToken cancellationToken);
 }
 internal interface INativeGoLiveVssPort
 {
@@ -759,7 +769,8 @@ internal sealed record NativeGoLiveHostPorts(
     INativeGoLiveMarketplacePort Marketplace,
     INativeGoLiveVssPort Vss,
     INativeGoLiveCompositionPort? Composition = null,
-    INativeGoLiveAdmissionPort? Admission = null);
+    INativeGoLiveAdmissionPort? Admission = null,
+    INativeGoLiveTaskActivationPort? Tasks = null);
 
 /// <summary>
 /// Holds the sole machine-wide exclusion for a currently active one-shot invocation.  The named
@@ -1070,12 +1081,30 @@ internal sealed class GuardedNativeGoLiveHost : INativeGoLiveHost
         ValidateLoopback(await _ports.Loopback.ObserveAsync(cancellationToken).ConfigureAwait(false));
     }
 
+    public ValueTask ActivateNativeTasksAsync(NativeGoLivePlan plan, CancellationToken cancellationToken)
+    {
+        EnsurePlan(plan);
+        EnsureBootstrapCleared();
+        if (_ports.Tasks is null)
+        {
+            if (_testBootstrap is not null) return ValueTask.CompletedTask;
+            throw new NativeGoLiveContractException("native-task-activation-not-supported");
+        }
+        return _ports.Tasks.ActivateAfterApplicationStartAsync(plan, cancellationToken);
+    }
+
     public async ValueTask RegisterMarketplaceAsync(
         NativeGoLiveCodexIdentity codex, CancellationToken cancellationToken)
     {
         EnsureBootstrapCleared();
         var result = await _ports.Marketplace.RegisterAndObserveAsync(codex, cancellationToken).ConfigureAwait(false);
         ValidateMarketplace(result, codex, allowMissing: false);
+    }
+
+    public ValueTask RemoveLegacyPluginAsync(CancellationToken cancellationToken)
+    {
+        EnsureBootstrapCleared();
+        return _ports.Marketplace.RemoveExactLegacyPluginAsync(cancellationToken);
     }
 
     private void EnsurePlan(NativeGoLivePlan plan)
@@ -1271,6 +1300,14 @@ internal sealed class GuardedNativeGoLiveHost : INativeGoLiveHost
         RequireHttp(value.Mcp.ToolsList, "POST", "/mcp", 200, expectedHeaderNames: ["Accept"]);
         if (!ExactSet(value.Mcp.Tools, NativeGoLiveLoopbackContract.RequiredMcpTools))
             throw new NativeGoLiveContractException("mcp-tool-contract-mismatch");
+        var hooks = value.Hooks ?? [];
+        if (hooks.Count != 3 ||
+            !hooks.Select(hook => hook.EventName).OrderBy(value => value, StringComparer.Ordinal)
+                .SequenceEqual(["PreCompact", "Stop", "UserPromptSubmit"], StringComparer.Ordinal) ||
+            hooks.Any(hook => !hook.Continue))
+            throw new NativeGoLiveContractException("native-hook-contract-mismatch");
+        foreach (var hook in hooks)
+            RequireHttp(hook.Http, "POST", "/native/v1/codex/hooks/" + hook.EventName, 200);
         if (!string.Equals(value.ForwardedDenial.Method, "GET", StringComparison.Ordinal) ||
             !string.Equals(value.ForwardedDenial.Uri, NativeGoLiveLoopbackContract.BaseUri + "/health/live", StringComparison.Ordinal) ||
             value.ForwardedDenial.StatusCode != 403 ||
@@ -1311,8 +1348,7 @@ internal sealed class GuardedNativeGoLiveHost : INativeGoLiveHost
 
     private static void ValidateRuntime(NativeGoLiveRuntimeObservation value)
     {
-        if (value.OutlookEnabled || value.PhaseSixEnabled || value.ModelRuntimeEnabled ||
-            value.GpuEnabled || value.FfmpegEnabled || value.NetworkParsingEnabled)
+        if (value.ModelRuntimeEnabled || value.GpuEnabled || value.FfmpegEnabled || value.NetworkParsingEnabled)
             throw new NativeGoLiveContractException("prohibited-runtime-enabled");
     }
 

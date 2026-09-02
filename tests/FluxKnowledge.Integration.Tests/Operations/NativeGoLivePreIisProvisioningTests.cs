@@ -140,7 +140,7 @@ public sealed class NativeGoLivePreIisProvisioningTests
         await fixture.Host.ValidateAsync(fixture.Plan, CancellationToken.None);
 
         Assert.True(events.IndexOf("start-iis") < events.IndexOf("probe-non-loopback-tcp"));
-        Assert.Equal(8, transport.Requests.Count);
+        Assert.Equal(11, transport.Requests.Count);
         Assert.All(transport.Requests, request =>
             Assert.True(IPAddress.IsLoopback(IPAddress.Parse(request.Uri.Host))));
     }
@@ -182,7 +182,7 @@ public sealed class NativeGoLivePreIisProvisioningTests
 
         await fixture.Host.ValidateAsync(fixture.Plan, CancellationToken.None);
 
-        Assert.Equal(12, transport.Requests.Count);
+        Assert.Equal(15, transport.Requests.Count);
         Assert.Equal(4, transport.Requests.Count(request => !IPAddress.IsLoopback(IPAddress.Parse(request.Uri.Host))));
         Assert.Equal(
             ["/health/live", "/health/ready", "/health/live", "/health/ready"],
@@ -413,7 +413,7 @@ public sealed class NativeGoLivePreIisProvisioningTests
             var issuer = new NativeGoLiveCloseoutCapabilityIssuer();
             _capability = issuer.Issue(Plan, payloadRoot, manifest.Sha256);
             _request = new NativeGoLiveRequest(
-                Plan, false, true, true, true, true, payloadRoot, manifest.Sha256, manifest);
+                Plan, false, true, true, true, true, true, payloadRoot, manifest.Sha256, manifest);
             var recordedEvents = Events;
             var ports = new NativeGoLiveHostPorts(
                 null!,

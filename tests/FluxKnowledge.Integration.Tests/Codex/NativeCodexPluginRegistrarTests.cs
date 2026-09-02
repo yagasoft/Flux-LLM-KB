@@ -91,6 +91,21 @@ public sealed class NativeCodexPluginRegistrarTests
     }
 
     [Fact]
+    public async Task Generated_material_validation_rejects_a_marketplace_plugin_path_that_escapes_the_marketplace_root()
+    {
+        await using var fixture = new WriterFixture();
+        await fixture.Writer.WriteAsync(fixture.Paths.MarketplaceRoot);
+        await File.WriteAllTextAsync(
+            Path.Combine(fixture.Paths.MarketplaceRoot, ".agents", "plugins", "marketplace.json"),
+            """{"name":"fluxknowledge","plugins":[{"name":"fluxknowledge","source":{"source":"local","path":"../../plugins/fluxknowledge"}}]}""");
+
+        var validation = await fixture.Writer.ValidateAsync(fixture.Paths.MarketplaceRoot);
+
+        Assert.False(validation.IsValid);
+        Assert.Equal("plugin-material-invalid", validation.Reason);
+    }
+
+    [Fact]
     public async Task Manifest_writer_rejects_a_reparse_segment_without_writing_through_it()
     {
         await using var fixture = new WriterFixture();
@@ -147,6 +162,30 @@ public sealed class NativeCodexPluginRegistrarTests
         Assert.True(runner.ListCancellationWasBounded);
         Assert.True(result.IsHealthy, result.Reason);
         Assert.True(result.Changed);
+    }
+
+    [Fact]
+    public async Task Marketplace_verification_rejects_a_malformed_entry_after_the_expected_marketplace()
+    {
+        await using var fixture = new NativeMarketplaceFixture();
+        var listJson = JsonSerializer.Serialize(new
+        {
+            marketplaces = new object[]
+            {
+                new { name = fixture.Identity.MarketplaceName, root = fixture.Identity.MarketplaceRoot },
+                17
+            }
+        });
+        var runner = new RecordingMarketplaceCommandRunner(listJson, fixture.BeforeStructuralHash);
+        var adapter = fixture.CreateAdapter(
+            runner,
+            new CodexMarketplacePreflight(CodexMarketplaceLifecycleState.Missing, null, fixture.BeforeStructuralHash));
+
+        var result = await adapter.RegisterAsync(fixture.Identity, CancellationToken.None);
+
+        Assert.False(result.IsHealthy);
+        Assert.True(result.Changed);
+        Assert.Equal("marketplace-verification-failed", result.Reason);
     }
 
     [Theory]
@@ -278,6 +317,168 @@ public sealed class NativeCodexPluginRegistrarTests
         Assert.Equal("go-live-closeout-capability-not-consumed", exception.Message);
         Assert.Empty(runner.Commands);
         Assert.False(Directory.Exists(Path.Combine(fixture.Identity.MarketplaceRoot, "plugins")));
+    }
+
+    [Fact]
+    public async Task Codex_process_runner_uses_exact_target_add_and_legacy_remove_arguments()
+    {
+        await using var fixture = new NativeMarketplaceFixture();
+        var commands = new List<string>();
+        var runner = new NativeGoLiveCodexProcessRunner(
+            fixture.Identity,
+            (arguments, _) =>
+            {
+                commands.Add(string.Join(" ", arguments));
+                return ValueTask.FromResult(new NativeCodexProcessOutput(0, "{\"installed\":[]}"));
+            });
+
+        await runner.AddFluxKnowledgePluginAsync(CancellationToken.None);
+        await runner.RemoveLegacyFluxLlmKbPluginAsync(CancellationToken.None);
+
+        Assert.Equal(
+            [
+                "plugin add fluxknowledge@fluxknowledge",
+                "plugin remove flux-llm-kb@flux-llm-kb-local"
+            ],
+            commands);
+    }
+
+    [Fact]
+    public async Task Codex_process_runner_rejects_an_overridden_profile_before_executing_a_command()
+    {
+        await using var fixture = new NativeMarketplaceFixture();
+        var previous = Environment.GetEnvironmentVariable("CODEX_HOME", EnvironmentVariableTarget.Process);
+        var invoked = false;
+        try
+        {
+            Environment.SetEnvironmentVariable("CODEX_HOME", "C:\\overridden-profile", EnvironmentVariableTarget.Process);
+            var runner = new NativeGoLiveCodexProcessRunner(
+                fixture.Identity,
+                (_, _) =>
+                {
+                    invoked = true;
+                    return ValueTask.FromResult(new NativeCodexProcessOutput(0, "{\"installed\":[]}"));
+                });
+
+            var exception = await Assert.ThrowsAsync<NativeGoLiveContractException>(
+                () => runner.ListPluginsJsonAsync(CancellationToken.None).AsTask());
+
+            Assert.Equal("codex-home-overridden", exception.ReasonCode);
+            Assert.False(invoked);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("CODEX_HOME", previous, EnvironmentVariableTarget.Process);
+        }
+    }
+
+    [Fact]
+    public async Task Production_process_runner_returns_valid_plugin_list_JSON_without_marketplace_hash_parsing()
+    {
+        await using var fixture = new NativeMarketplaceFixture();
+        var runner = new NativeGoLiveCodexProcessRunner(
+            fixture.Identity,
+            (_, _) => ValueTask.FromResult(new NativeCodexProcessOutput(
+                0,
+                "{\"installed\":[{\"pluginId\":\"fluxknowledge@fluxknowledge\",\"installed\":true,\"enabled\":true}]}")));
+
+        var result = await runner.ListPluginsJsonAsync(CancellationToken.None);
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.Contains("\"installed\"", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Equal(new string('0', 64), result.UnrelatedConfigurationStructuralHash);
+    }
+
+    [Fact]
+    public async Task Production_process_runner_still_hashes_marketplace_list_output()
+    {
+        await using var fixture = new NativeMarketplaceFixture();
+        var runner = new NativeGoLiveCodexProcessRunner(
+            fixture.Identity,
+            (_, _) => ValueTask.FromResult(new NativeCodexProcessOutput(0, "{\"marketplaces\":[]}")));
+
+        var result = await runner.ListMarketplacesJsonAsync(CancellationToken.None);
+
+        Assert.Equal("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            result.UnrelatedConfigurationStructuralHash);
+    }
+
+    [Fact]
+    public void Outlook_task_activation_rejects_a_recently_completed_run_that_precedes_start()
+    {
+        var before = DateTimeOffset.Parse("2026-09-01T12:00:05Z");
+
+        Assert.False(NativeGoLiveWindowsTaskActivationPort.IsSuccessfulFreshTaskRun(
+            before,
+            before,
+            observedLastTaskResult: 0,
+            isRunning: false));
+    }
+
+    [Fact]
+    public void Outlook_task_activation_rejects_an_unchanged_last_run_time()
+    {
+        var before = DateTimeOffset.Parse("2026-09-01T12:00:05Z");
+
+        Assert.False(NativeGoLiveWindowsTaskActivationPort.IsSuccessfulFreshTaskRun(
+            before,
+            before,
+            observedLastTaskResult: 0,
+            isRunning: false));
+    }
+
+    [Fact]
+    public void Outlook_task_activation_accepts_a_delayed_fresh_zero_exit_completion()
+    {
+        var before = DateTimeOffset.Parse("2026-09-01T12:00:05Z");
+
+        Assert.False(NativeGoLiveWindowsTaskActivationPort.IsSuccessfulFreshTaskRun(
+            before,
+            before,
+            observedLastTaskResult: 267009,
+            isRunning: true));
+        Assert.True(NativeGoLiveWindowsTaskActivationPort.IsSuccessfulFreshTaskRun(
+            before,
+            before.AddSeconds(1),
+            observedLastTaskResult: 0,
+            isRunning: false));
+    }
+
+    [Fact]
+    public void Outlook_task_activation_rejects_a_fresh_nonzero_completion()
+    {
+        var before = DateTimeOffset.Parse("2026-09-01T12:00:05Z");
+
+        Assert.False(NativeGoLiveWindowsTaskActivationPort.IsSuccessfulFreshTaskRun(
+            before,
+            before.AddSeconds(1),
+            observedLastTaskResult: 1,
+            isRunning: false));
+    }
+
+    [Fact]
+    public async Task Outlook_task_activation_fails_closed_when_the_task_command_fails()
+    {
+        var plan = NativeGoLivePlan.CreateForIsolatedTests(
+            LiveRootLayout.CreateForIsolatedTests(Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"))),
+            new string('a', 40));
+        string? command = null;
+        var port = new NativeGoLiveWindowsTaskActivationPort(
+            plan,
+            (candidate, _) =>
+            {
+                command = candidate;
+                return ValueTask.FromResult(1);
+            },
+            () => true);
+
+        var exception = await Assert.ThrowsAsync<NativeGoLiveContractException>(
+            () => port.ActivateAfterApplicationStartAsync(plan, CancellationToken.None).AsTask());
+
+        Assert.Equal("native-outlook-task-activation-failed", exception.ReasonCode);
+        Assert.Contains("$before = Get-ScheduledTaskInfo", command, StringComparison.Ordinal);
+        Assert.Contains("Start-ScheduledTask -TaskName 'FluxKnowledge.OutlookHost' -ErrorAction Stop", command, StringComparison.Ordinal);
+        Assert.Contains("$info.LastRunTime.ToUniversalTime() -gt $before.LastRunTime.ToUniversalTime()", command, StringComparison.Ordinal);
     }
 
     private static string MarketplaceListJson(NativeGoLiveCodexIdentity identity) => JsonSerializer.Serialize(new

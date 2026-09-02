@@ -14,7 +14,8 @@ param(
     [switch]$ConfirmCleanSlate,
     [switch]$ConfirmConfigureVss,
     [switch]$ConfirmDestroySql,
-    [switch]$ConfirmRegisterCodex
+    [switch]$ConfirmRegisterCodex,
+    [switch]$ConfirmRemoveLegacyPlugin
 )
 
 $ErrorActionPreference = "Stop"
@@ -60,6 +61,12 @@ if ($PreflightOnly -and $PlanOnly) {
 }
 if ($GoLive -and ($PlanOnly -or $PreflightOnly)) {
     throw "-GoLive cannot be combined with preparation-only modes."
+}
+if ($GoLive -and -not ($ConfirmCleanSlate -and $ConfirmConfigureVss -and $ConfirmDestroySql -and $ConfirmRegisterCodex -and $ConfirmRemoveLegacyPlugin)) {
+    throw "-GoLive requires -ConfirmCleanSlate, -ConfirmConfigureVss, -ConfirmDestroySql, -ConfirmRegisterCodex and -ConfirmRemoveLegacyPlugin."
+}
+if (-not $GoLive -and ($ConfirmCleanSlate -or $ConfirmConfigureVss -or $ConfirmDestroySql -or $ConfirmRegisterCodex -or $ConfirmRemoveLegacyPlugin)) {
+    throw "Native go-live acknowledgement switches require -GoLive."
 }
 if ($ConfirmApplyMigrations -and -not $ApplyMigrations) {
     throw "-ConfirmApplyMigrations requires -ApplyMigrations."

@@ -1,11 +1,18 @@
 using FluxKnowledge.Application.Operations;
 using FluxKnowledge.Integrations.Windows.NativeGoLive;
+using System.Text.Json;
 using Xunit;
 
 namespace FluxKnowledge.Integration.Tests.Operations;
 
 public sealed class NativeGoLiveOneShotAdmissionTests
 {
+    [Fact]
+    public void Native_go_live_request_requires_an_explicit_legacy_removal_acknowledgement()
+    {
+        Assert.NotNull(typeof(NativeGoLiveRequest).GetProperty("ConfirmRemoveLegacyPlugin"));
+    }
+
     [Fact]
     public async Task SQL_storage_directory_failure_has_only_a_bounded_hresult_detail()
     {
@@ -53,6 +60,111 @@ public sealed class NativeGoLiveOneShotAdmissionTests
         Assert.True(Directory.Exists(fixture.Layout.SpoolRoot));
         Assert.True(Directory.Exists(fixture.Layout.TempRoot));
         Assert.True(Directory.Exists(fixture.Layout.LogsRoot));
+    }
+
+    [Fact]
+    public async Task Missing_legacy_removal_acknowledgement_rejects_before_mutation()
+    {
+        var host = new OneShotAdmissionHost(NativeGoLiveDeploymentState.Absent);
+
+        var result = await new NativeGoLiveExecutor().ExecuteAsync(
+            ConfirmedRequest() with { ConfirmRemoveLegacyPlugin = false }, host);
+
+        Assert.False(result.Succeeded);
+        Assert.Equal("go-live-acknowledgement-required", result.ReasonCode);
+        Assert.Empty(host.Mutations);
+    }
+
+    [Fact]
+    public void Production_configuration_admits_provisioned_worker_and_Outlook_operations_only()
+    {
+        var plan = NativeGoLivePlan.CreateForIsolatedTests(
+            LiveRootLayout.CreateForIsolatedTests(Path.Combine(Path.GetTempPath(), "FluxKnowledgeRuntime", Guid.NewGuid().ToString("N"))),
+            new string('a', 40));
+        const string connectionString =
+            "Data Source=localhost;Initial Catalog=FluxKnowledge;Integrated Security=True;" +
+            "Encrypt=True;Trust Server Certificate=True;Connect Timeout=5;Connect Retry Count=0;" +
+            "Pooling=False;Application Name=FluxKnowledge.Native";
+
+        var bytes = NativeGoLiveProductionConfigurationSerializer.Serialize(plan, connectionString);
+
+        using var document = JsonDocument.Parse(bytes);
+        var root = document.RootElement;
+        Assert.True(root.GetProperty("Worker").GetProperty("Enabled").GetBoolean());
+        Assert.True(root.GetProperty("OutlookCapture").GetProperty("Enabled").GetBoolean());
+        var runtime = root.GetProperty("Runtime");
+        foreach (var provider in new[] { "Model", "Gpu", "Ocr", "Asr", "Ffmpeg", "NetworkParsing" })
+        {
+            Assert.False(runtime.GetProperty(provider).GetProperty("Enabled").GetBoolean());
+        }
+
+        NativeGoLiveRuntimeConfiguration.ValidateProductionConfiguration(bytes, plan, connectionString);
+    }
+
+    [Fact]
+    public void Production_configuration_does_not_admit_an_unready_runtime_provider()
+    {
+        var plan = NativeGoLivePlan.CreateForIsolatedTests(
+            LiveRootLayout.CreateForIsolatedTests(Path.Combine(Path.GetTempPath(), "FluxKnowledgeRuntime", Guid.NewGuid().ToString("N"))),
+            new string('a', 40));
+        const string connectionString =
+            "Data Source=localhost;Initial Catalog=FluxKnowledge;Integrated Security=True;" +
+            "Encrypt=True;Trust Server Certificate=True;Connect Timeout=5;Connect Retry Count=0;" +
+            "Pooling=False;Application Name=FluxKnowledge.Native";
+        var bytes = NativeGoLiveProductionConfigurationSerializer.Serialize(plan, connectionString);
+        var providerEnabled = System.Text.Encoding.UTF8.GetBytes(
+            System.Text.Encoding.UTF8.GetString(bytes).Replace(
+                "\"Model\":{\"Enabled\":false}",
+                "\"Model\":{\"Enabled\":true}",
+                StringComparison.Ordinal));
+        var mergedMainRoot = Path.Combine(Path.GetTempPath(), "FluxKnowledgeRuntime", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(mergedMainRoot);
+        try
+        {
+            File.WriteAllBytes(Path.Combine(mergedMainRoot, "appsettings.json"), providerEnabled);
+
+            var exception = Assert.Throws<NativeGoLiveContractException>(() =>
+                NativeGoLiveRuntimeConfiguration.ReadMergedMain(plan, mergedMainRoot));
+
+            Assert.Equal("runtime-provider-not-ready:model", exception.ReasonCode);
+        }
+        finally
+        {
+            Directory.Delete(mergedMainRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Production_configuration_does_not_admit_a_legacy_provider_activation_beside_a_disabled_nested_provider()
+    {
+        var plan = NativeGoLivePlan.CreateForIsolatedTests(
+            LiveRootLayout.CreateForIsolatedTests(Path.Combine(Path.GetTempPath(), "FluxKnowledgeRuntime", Guid.NewGuid().ToString("N"))),
+            new string('a', 40));
+        const string connectionString =
+            "Data Source=localhost;Initial Catalog=FluxKnowledge;Integrated Security=True;" +
+            "Encrypt=True;Trust Server Certificate=True;Connect Timeout=5;Connect Retry Count=0;" +
+            "Pooling=False;Application Name=FluxKnowledge.Native";
+        var bytes = NativeGoLiveProductionConfigurationSerializer.Serialize(plan, connectionString);
+        var conflictingProviders = System.Text.Encoding.UTF8.GetBytes(
+            System.Text.Encoding.UTF8.GetString(bytes).Replace(
+                "\"Model\":{\"Enabled\":false}",
+                "\"Model\":{\"Enabled\":false},\"ModelRuntimeEnabled\":true",
+                StringComparison.Ordinal));
+        var mergedMainRoot = Path.Combine(Path.GetTempPath(), "FluxKnowledgeRuntime", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(mergedMainRoot);
+        try
+        {
+            File.WriteAllBytes(Path.Combine(mergedMainRoot, "appsettings.json"), conflictingProviders);
+
+            var exception = Assert.Throws<NativeGoLiveContractException>(() =>
+                NativeGoLiveRuntimeConfiguration.ReadMergedMain(plan, mergedMainRoot));
+
+            Assert.Equal("runtime-provider-not-ready:model", exception.ReasonCode);
+        }
+        finally
+        {
+            Directory.Delete(mergedMainRoot, recursive: true);
+        }
     }
 
     private static readonly NativeGoLivePlan Plan = NativeGoLivePlan.CreateProduction(new string('a', 40));
@@ -129,7 +241,7 @@ public sealed class NativeGoLiveOneShotAdmissionTests
 
         var result = await new NativeGoLiveExecutor().ExecuteAsync(ConfirmedRequest(), host);
 
-        Assert.True(result.Succeeded, result.ReasonCode);
+        Assert.True(result.Succeeded);
         Assert.Equal(1, host.AdmissionCalls);
         Assert.Equal(0, host.WipeCalls);
         Assert.Contains("one-shot-preflight", host.Calls);
@@ -152,7 +264,7 @@ public sealed class NativeGoLiveOneShotAdmissionTests
 
         var result = await new NativeGoLiveExecutor().ExecuteAsync(ConfirmedRequest(), host);
 
-        Assert.True(result.Succeeded, result.ReasonCode);
+        Assert.True(result.Succeeded);
         Assert.Equal(1, host.AdmissionCalls);
         Assert.Equal(1, host.WipeCalls);
         Assert.Equal(["stop-pool", "wipe-root-and-catalogue"], host.Mutations.Take(2));
@@ -181,7 +293,69 @@ public sealed class NativeGoLiveOneShotAdmissionTests
         Assert.Empty(host.Mutations);
     }
 
-    private static NativeGoLiveRequest ConfirmedRequest() => new(Plan, false, true, true, true, true);
+    [Fact]
+    public async Task Successful_go_live_removes_legacy_before_native_registration_and_validation()
+    {
+        var host = new OneShotAdmissionHost(NativeGoLiveDeploymentState.Absent);
+
+        var result = await new NativeGoLiveExecutor().ExecuteAsync(ConfirmedRequest(), host);
+
+        Assert.True(result.Succeeded);
+        Assert.Equal(
+            [
+                "stop-pool",
+                "configure-vss",
+                "create-empty-root",
+                "provision-empty-catalogue",
+                "publish-and-start",
+                "activate-native-tasks",
+                "remove-legacy-plugin",
+                "register-marketplace",
+                "validate"
+            ],
+            host.Mutations);
+    }
+
+    [Fact]
+    public async Task Legacy_removal_failure_prevents_native_registration()
+    {
+        var host = new OneShotAdmissionHost(NativeGoLiveDeploymentState.Absent, failLegacyRemoval: true);
+
+        var result = await new NativeGoLiveExecutor().ExecuteAsync(ConfirmedRequest(), host);
+
+        Assert.False(result.Succeeded);
+        Assert.Equal("legacy-plugin-removal-failed", result.ReasonCode);
+        Assert.DoesNotContain("register-marketplace", host.Mutations);
+    }
+
+    [Fact]
+    public async Task Native_registration_failure_never_restores_legacy_plugin()
+    {
+        var host = new OneShotAdmissionHost(NativeGoLiveDeploymentState.Absent, failNativeInstall: true);
+
+        var result = await new NativeGoLiveExecutor().ExecuteAsync(ConfirmedRequest(), host);
+
+        Assert.False(result.Succeeded);
+        Assert.Equal("native-install-failed", result.ReasonCode);
+        Assert.DoesNotContain("validate", host.Mutations);
+        Assert.Contains("remove-legacy-plugin", host.Mutations);
+        Assert.DoesNotContain("restore-legacy-plugin", host.Mutations);
+    }
+
+    [Fact]
+    public async Task Failed_task_activation_prevents_native_registration_and_legacy_removal()
+    {
+        var host = new OneShotAdmissionHost(NativeGoLiveDeploymentState.Absent, failTaskActivation: true);
+
+        var result = await new NativeGoLiveExecutor().ExecuteAsync(ConfirmedRequest(), host);
+
+        Assert.False(result.Succeeded);
+        Assert.Equal("native-task-activation-failed", result.ReasonCode);
+        Assert.DoesNotContain("register-marketplace", host.Mutations);
+        Assert.DoesNotContain("remove-legacy-plugin", host.Mutations);
+    }
+
+    private static NativeGoLiveRequest ConfirmedRequest() => new(Plan, false, true, true, true, true, true);
 
     public enum NativeGoLiveDeploymentState
     {
@@ -193,7 +367,12 @@ public sealed class NativeGoLiveOneShotAdmissionTests
         Unknown
     }
 
-    private sealed class OneShotAdmissionHost(NativeGoLiveDeploymentState state) : INativeGoLiveHost
+    private sealed class OneShotAdmissionHost(
+        NativeGoLiveDeploymentState state,
+        bool failNativeProof = false,
+        bool failNativeInstall = false,
+        bool failTaskActivation = false,
+        bool failLegacyRemoval = false) : INativeGoLiveHost
     {
         public List<string> Calls { get; } = [];
         public List<string> Mutations { get; } = [];
@@ -249,13 +428,26 @@ public sealed class NativeGoLiveOneShotAdmissionTests
             Mutate("provision-empty-catalogue");
         public ValueTask PublishAndStartAsync(NativeGoLivePlan plan, CancellationToken cancellationToken) =>
             Mutate("publish-and-start");
+        public ValueTask ActivateNativeTasksAsync(NativeGoLivePlan plan, CancellationToken cancellationToken) =>
+            failTaskActivation
+                ? ValueTask.FromException(new NativeGoLiveContractException("native-task-activation-failed"))
+                : Mutate("activate-native-tasks");
         public ValueTask ValidateAsync(NativeGoLivePlan plan, CancellationToken cancellationToken)
         {
             Calls.Add("validate");
+            if (failNativeProof)
+                return ValueTask.FromException(new NativeGoLiveContractException("native-proof-failed"));
+            Mutations.Add("validate");
             return ValueTask.CompletedTask;
         }
         public ValueTask RegisterMarketplaceAsync(NativeGoLiveCodexIdentity codex, CancellationToken cancellationToken) =>
-            Mutate("register-marketplace");
+            failNativeInstall
+                ? ValueTask.FromException(new NativeGoLiveContractException("native-install-failed"))
+                : Mutate("register-marketplace");
+        public ValueTask RemoveLegacyPluginAsync(CancellationToken cancellationToken) =>
+            failLegacyRemoval
+                ? ValueTask.FromException(new NativeGoLiveContractException("legacy-plugin-removal-failed"))
+                : Mutate("remove-legacy-plugin");
 
         private ValueTask Mutate(string operation)
         {

@@ -122,6 +122,12 @@ Assert-True ($postconditionFailureRecord.reason_code -ceq 'sql-bootstrap-postcon
 Assert-True ($script:FailedStep -ceq 'native-go-live') `
     'A bounded post-bootstrap failure did not identify the native go-live step.'
 
+$legacyRemovalFailureRecord = [ordered]@{ name = 'native-go-live'; reason_code = $null }
+Record-NativeGoLiveFailure -Record $legacyRemovalFailureRecord -Exception ([InvalidOperationException]::new(
+    "Native go-live failed with safe reason code 'legacy-plugin-removal-not-proved'."))
+Assert-True ($legacyRemovalFailureRecord.reason_code -ceq 'legacy-plugin-removal-not-proved') `
+    'An exact legacy-removal failure did not retain its fixed reason code.'
+
 foreach ($bridgeReasonCode in @(
     'native-go-live-bridge-composition-failed',
     'native-go-live-bridge-invocation-failed',
@@ -160,7 +166,7 @@ function Invoke-NativeGoLiveModuleBridge {
 
 Assert-Throws -Action {
     Invoke-NativeGoLive -MergedMainRoot $SourceRoot -CommittedSha ('a' * 40) `
-        -Acknowledgements @{ ConfirmCleanSlate = $true; ConfirmConfigureVss = $true; ConfirmDestroySql = $true; ConfirmRegisterCodex = $true } `
+        -Acknowledgements @{ ConfirmCleanSlate = $true; ConfirmConfigureVss = $true; ConfirmDestroySql = $true; ConfirmRegisterCodex = $true; ConfirmRemoveLegacyPlugin = $true } `
         -ModulePath $modulePath -BootstrapScript (Join-Path $SourceRoot 'scripts\deploy\native-go-live-bootstrap.sql')
 } -Pattern '^native-go-live-bridge-composition-failed$' `
     -Message 'Malformed reflection composition did not map to its fixed bridge failure code.'
@@ -175,7 +181,7 @@ function Invoke-NativeGoLiveModuleBridge {
 
 Assert-Throws -Action {
     Invoke-NativeGoLive -MergedMainRoot $SourceRoot -CommittedSha ('a' * 40) `
-        -Acknowledgements @{ ConfirmCleanSlate = $true; ConfirmConfigureVss = $true; ConfirmDestroySql = $true; ConfirmRegisterCodex = $true } `
+        -Acknowledgements @{ ConfirmCleanSlate = $true; ConfirmConfigureVss = $true; ConfirmDestroySql = $true; ConfirmRegisterCodex = $true; ConfirmRemoveLegacyPlugin = $true } `
         -ModulePath $modulePath -BootstrapScript (Join-Path $SourceRoot 'scripts\deploy\native-go-live-bootstrap.sql')
 } -Pattern '^native-go-live-bridge-invocation-failed$' `
     -Message 'Module bridge invocation failure did not map to its fixed bridge failure code.'
@@ -190,7 +196,7 @@ foreach ($moduleStageReasonCode in @(
 
     Assert-Throws -Action {
         Invoke-NativeGoLive -MergedMainRoot $SourceRoot -CommittedSha ('a' * 40) `
-            -Acknowledgements @{ ConfirmCleanSlate = $true; ConfirmConfigureVss = $true; ConfirmDestroySql = $true; ConfirmRegisterCodex = $true } `
+            -Acknowledgements @{ ConfirmCleanSlate = $true; ConfirmConfigureVss = $true; ConfirmDestroySql = $true; ConfirmRegisterCodex = $true; ConfirmRemoveLegacyPlugin = $true } `
             -ModulePath $modulePath -BootstrapScript (Join-Path $SourceRoot 'scripts\deploy\native-go-live-bootstrap.sql')
     } -Pattern ("^" + [regex]::Escape($moduleStageReasonCode) + "$") `
         -Message 'A fixed module bridge stage failure did not retain its exact reason code.'
@@ -202,7 +208,7 @@ function Invoke-NativeGoLiveModuleBridge {
 
 Assert-Throws -Action {
     Invoke-NativeGoLive -MergedMainRoot $SourceRoot -CommittedSha ('a' * 40) `
-        -Acknowledgements @{ ConfirmCleanSlate = $true; ConfirmConfigureVss = $true; ConfirmDestroySql = $true; ConfirmRegisterCodex = $true } `
+        -Acknowledgements @{ ConfirmCleanSlate = $true; ConfirmConfigureVss = $true; ConfirmDestroySql = $true; ConfirmRegisterCodex = $true; ConfirmRemoveLegacyPlugin = $true } `
         -ModulePath $modulePath -BootstrapScript (Join-Path $SourceRoot 'scripts\deploy\native-go-live-bootstrap.sql')
 } -Pattern "^Native go-live failed with safe reason code 'clean-slate-incomplete'\.$" `
     -Message 'Returned NativeGoLiveResult failures must remain outside bridge-invocation mapping.'
@@ -217,7 +223,7 @@ Assert-True ($plan.vss.volume -eq 'I:' -and $plan.vss.maximumStorageFraction -eq
 Assert-True (@($plan.validation.mcpTools).Count -eq 9) 'PlanOnly must advertise the nine-tool MCP contract.'
 
 Assert-Throws -Action {
-    & $deploymentScript -GoLive -ConfirmCleanSlate -ConfirmConfigureVss -ConfirmDestroySql -ConfirmRegisterCodex
+    & $deploymentScript -GoLive -ConfirmCleanSlate -ConfirmConfigureVss -ConfirmDestroySql -ConfirmRegisterCodex -ConfirmRemoveLegacyPlugin
 } -Pattern 'claimed in-process authority' -Message 'Direct -GoLive execution must be refused.'
 
 $deploymentText = Get-Content -LiteralPath $deploymentScript -Raw
@@ -310,6 +316,15 @@ Assert-True ($windowsPortsText -match 'HASHBYTES\(''SHA2_256'',CONVERT\(varbinar
 Assert-True ($hostText -match 'ForwardedDenial') 'Forwarded denial validation is missing.'
 Assert-True ($hostText -match 'NonLoopbackDenial') 'Non-loopback denial validation is missing.'
 Assert-True ($hostText -match 'FfmpegEnabled' -and $hostText -match 'NetworkParsingEnabled') 'Runtime exclusions are incomplete.'
+Assert-True ($windowsPortsText -match 'OutlookCapture\s*=\s*new\s*\{\s*Enabled\s*=\s*true\s*\}' -and
+    $windowsPortsText -match 'Worker\s*=\s*new\s*\{\s*Enabled\s*=\s*true\s*\}' -and
+    $windowsPortsText -match 'Model\s*=\s*new\s*\{\s*Enabled\s*=\s*false\s*\}' -and
+    $windowsPortsText -match 'Gpu\s*=\s*new\s*\{\s*Enabled\s*=\s*false\s*\}' -and
+    $windowsPortsText -match 'Ocr\s*=\s*new\s*\{\s*Enabled\s*=\s*false\s*\}' -and
+    $windowsPortsText -match 'Asr\s*=\s*new\s*\{\s*Enabled\s*=\s*false\s*\}' -and
+    $windowsPortsText -match 'Ffmpeg\s*=\s*new\s*\{\s*Enabled\s*=\s*false\s*\}' -and
+    $windowsPortsText -match 'NetworkParsing\s*=\s*new\s*\{\s*Enabled\s*=\s*false\s*\}') `
+    'The generated native configuration does not activate only provisioned operations.'
 Assert-True ($portsText -notmatch 'NativeGoLiveJournal|RecoverAsync|ResumeAsync|ReplayAsync') `
     'The public native go-live host contract still exposes recovery operations.'
 Assert-True ($executorText -notmatch 'ReadJournalAsync|CompareAndSwapJournalAsync|DestroyOwnedStateAsync') `

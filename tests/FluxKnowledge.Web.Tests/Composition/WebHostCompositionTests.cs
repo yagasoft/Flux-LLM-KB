@@ -59,18 +59,20 @@ public sealed class WebHostCompositionTests : IDisposable
     }
 
     [Theory]
-    [InlineData("Outlook:Enabled", "outlook-active")]
-    [InlineData("OutlookCapture:Enabled", "outlook-active")]
-    [InlineData("Worker:Enabled", "phase-6-runtime-active")]
-    [InlineData("NativeWorker:Enabled", "phase-6-runtime-active")]
-    [InlineData("Runtime:ModelRuntimeEnabled", "phase-6-runtime-active")]
-    [InlineData("Runtime:GpuEnabled", "phase-6-runtime-active")]
-    [InlineData("Runtime:OcrEnabled", "media-runtime-active")]
-    [InlineData("Runtime:VisionEnabled", "media-runtime-active")]
-    [InlineData("Runtime:AsrEnabled", "media-runtime-active")]
-    [InlineData("Runtime:FfmpegEnabled", "media-runtime-active")]
-    [InlineData("Runtime:NetworkParsingEnabled", "network-parsing-active")]
-    public void Go_live_options_reject_disabled_capability_activation(string key, string reason)
+    [InlineData("Runtime:Model:Enabled", "runtime-provider-not-ready:model")]
+    [InlineData("Runtime:Gpu:Enabled", "runtime-provider-not-ready:gpu")]
+    [InlineData("Runtime:Ocr:Enabled", "runtime-provider-not-ready:ocr")]
+    [InlineData("Runtime:Asr:Enabled", "runtime-provider-not-ready:asr")]
+    [InlineData("Runtime:Ffmpeg:Enabled", "runtime-provider-not-ready:ffmpeg")]
+    [InlineData("Runtime:NetworkParsing:Enabled", "runtime-provider-not-ready:network-parsing")]
+    [InlineData("Runtime:ModelRuntimeEnabled", "runtime-provider-not-ready:model")]
+    [InlineData("Runtime:GpuEnabled", "runtime-provider-not-ready:gpu")]
+    [InlineData("Runtime:OcrEnabled", "runtime-provider-not-ready:ocr")]
+    [InlineData("Runtime:VisionEnabled", "runtime-provider-not-ready:vision")]
+    [InlineData("Runtime:AsrEnabled", "runtime-provider-not-ready:asr")]
+    [InlineData("Runtime:FfmpegEnabled", "runtime-provider-not-ready:ffmpeg")]
+    [InlineData("Runtime:NetworkParsingEnabled", "runtime-provider-not-ready:network-parsing")]
+    public void Go_live_options_reject_unprovisioned_provider_activation(string key, string reason)
     {
         var configuration = new ConfigurationBuilder()
             .AddConfiguration(CreateProductionConfiguration())
@@ -84,6 +86,24 @@ public sealed class WebHostCompositionTests : IDisposable
     }
 
     [Fact]
+    public void Go_live_options_reject_a_legacy_provider_activation_beside_a_disabled_nested_provider()
+    {
+        var configuration = new ConfigurationBuilder()
+            .AddConfiguration(CreateProductionConfiguration())
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Runtime:Model:Enabled"] = "false",
+                ["Runtime:ModelRuntimeEnabled"] = "true"
+            })
+            .Build();
+
+        var exception = Assert.Throws<InvalidOperationException>(() =>
+            WebHostComposition.ReadNativeGoLiveRuntimeOptions(configuration));
+
+        Assert.Contains("runtime-provider-not-ready:model", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Production_composition_registers_no_background_service()
     {
         var services = new ServiceCollection();
@@ -93,6 +113,25 @@ public sealed class WebHostCompositionTests : IDisposable
         Assert.DoesNotContain(services, descriptor => descriptor.ServiceType == typeof(IHostedService));
         Assert.Contains(services, descriptor =>
             descriptor.ServiceType == typeof(IDerivedIndexRecoveryStatus));
+    }
+
+    [Fact]
+    public void Strict_production_composition_resolves_the_source_and_Outlook_page_control_planes()
+    {
+        var services = new ServiceCollection();
+        services.AddLogging();
+
+        WebHostComposition.AddProductionFluxKnowledgeServicesForTests(services, CreateProductionConfiguration());
+
+        using var provider = services.BuildServiceProvider(
+            new ServiceProviderOptions { ValidateScopes = true, ValidateOnBuild = true });
+        using var scope = provider.CreateScope();
+
+        Assert.IsType<SqlSourceRootStore>(scope.ServiceProvider.GetRequiredService<ISourceRootStore>());
+        _ = scope.ServiceProvider.GetRequiredService<SourceRootService>();
+        _ = scope.ServiceProvider.GetRequiredService<SourceScanControlService>();
+        Assert.IsType<SqlOutlookCaptureStore>(scope.ServiceProvider.GetRequiredService<IOutlookCaptureStore>());
+        _ = scope.ServiceProvider.GetRequiredService<OutlookPageState>();
     }
 
     [Fact]
@@ -117,7 +156,48 @@ public sealed class WebHostCompositionTests : IDisposable
 
         WebHostComposition.AddProductionFluxKnowledgeServicesForTests(services, configuration);
 
+        Assert.DoesNotContain(services, descriptor => descriptor.ServiceType == typeof(IHostedService));
         WebHostComposition.ValidateNativeGoLiveComposition(services, configuration);
+    }
+
+    [Fact]
+    public void Production_composition_proof_accepts_the_provisioned_worker_and_Outlook_hosted_services()
+    {
+        var configuration = new ConfigurationBuilder()
+            .AddConfiguration(CreateProductionConfiguration())
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Worker:Enabled"] = "true",
+                ["OutlookCapture:Enabled"] = "true"
+            })
+            .Build();
+        var services = new ServiceCollection();
+
+        WebHostComposition.AddProductionFluxKnowledgeServicesForTests(services, configuration);
+
+        Assert.Equal(3, services.Count(descriptor => descriptor.ServiceType == typeof(IHostedService)));
+        WebHostComposition.ValidateNativeGoLiveComposition(services, configuration);
+    }
+
+    [Fact]
+    public void Production_composition_proof_rejects_an_unapproved_hosted_service_at_the_expected_count()
+    {
+        var configuration = new ConfigurationBuilder()
+            .AddConfiguration(CreateProductionConfiguration())
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Worker:Enabled"] = "true",
+                ["OutlookCapture:Enabled"] = "true"
+            })
+            .Build();
+        var services = new ServiceCollection();
+
+        WebHostComposition.AddProductionFluxKnowledgeServicesForTests(services, configuration);
+        services.Remove(services.First(descriptor => descriptor.ServiceType == typeof(IHostedService)));
+        services.AddSingleton<IHostedService, UnapprovedHostedService>();
+
+        Assert.Throws<InvalidOperationException>(() =>
+            WebHostComposition.ValidateNativeGoLiveComposition(services, configuration));
     }
 
     [Fact]
@@ -519,7 +599,8 @@ public sealed class WebHostCompositionTests : IDisposable
                         "Server=unreachable.invalid;Initial Catalog=FluxKnowledge;" +
                         "Integrated Security=true;Encrypt=true;TrustServerCertificate=true",
                     ["LocalIngress:AllowedRoots:0"] = _ingressRoot,
-                    ["Usearch:RootPath"] = Path.Combine(Path.GetTempPath(), $"FluxKnowledgeIndexes_{Guid.NewGuid():N}")
+                    ["Usearch:RootPath"] = Path.Combine(Path.GetTempPath(), $"FluxKnowledgeIndexes_{Guid.NewGuid():N}"),
+                    ["Worker:Enabled"] = "true"
                 })
             .Build();
         var services = new ServiceCollection();
@@ -805,6 +886,12 @@ public sealed class WebHostCompositionTests : IDisposable
         }
 
         return snapshot;
+    }
+
+    private sealed class UnapprovedHostedService : IHostedService
+    {
+        public Task StartAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
     }
 
     public void Dispose()

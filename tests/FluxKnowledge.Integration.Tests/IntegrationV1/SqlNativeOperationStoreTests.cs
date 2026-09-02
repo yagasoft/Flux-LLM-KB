@@ -1,7 +1,9 @@
 using FluxKnowledge.Application.IntegrationV1;
 using FluxKnowledge.Application.IntegrationV1.Corpus;
+using FluxKnowledge.Application.Knowledge;
 using FluxKnowledge.Application.Contracts;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
+using FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
 using FluxKnowledge.Integration.Tests.Support;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
@@ -58,6 +60,61 @@ public sealed class SqlNativeOperationStoreTests(NativeSqlServerFixture fixture)
         Assert.Equal(first.OperationId, replay.OperationId);
         await using var context = await SqlTestData.CreateFactory(_fixture).CreateDbContextAsync();
         Assert.Single(await context.NativeOperationReceipts.ToListAsync());
+    }
+
+    [NativeSqlServerFact]
+    public async Task FindReceiptAsync_reads_the_durable_receipt_by_exact_surface_and_idempotency_key()
+    {
+        await ClearAsync();
+        var store = CreateStore(new ManualTimeProvider(Now));
+        var preview = await store.CreatePreviewAsync(Preview("{\"title\":\"safe\"}"), CancellationToken.None);
+        var committed = await store.CommitAsync(Commit("{\"title\":\"safe\"}", preview.ConfirmationId, "durable-stop-key"), CancellationToken.None);
+
+        var replay = await CreateStore(new ManualTimeProvider(Now)).FindReceiptAsync("durable-stop-key", "mcp", CancellationToken.None);
+        var wrongSurface = await CreateStore(new ManualTimeProvider(Now)).FindReceiptAsync("durable-stop-key", "other", CancellationToken.None);
+
+        Assert.NotNull(replay);
+        Assert.True(replay.WasReplay);
+        Assert.Equal(committed.OperationId, replay.OperationId);
+        Assert.Null(wrongSurface);
+    }
+
+    [NativeSqlServerFact]
+    public async Task CommitAsync_replays_a_codex_stop_identity_when_a_changed_summary_arrives_after_restart()
+    {
+        await ClearAsync();
+        const string actor = "codex-hook";
+        var key = "codex-stop-" + new string('a', 64);
+        var intentId = Guid.NewGuid();
+        await using (var seed = await SqlTestData.CreateFactory(_fixture).CreateDbContextAsync())
+        {
+            seed.NativeOperationIntents.Add(new NativeOperationIntentEntity
+            {
+                Id = intentId, Action = "note_create", ActorSurface = actor,
+                RequestFingerprint = new string('b', 64), ConfirmationHash = new string('c', 64),
+                TargetMetadataJson = "[]", CreatedAtUtc = Now, ExpiresAtUtc = Now.AddMinutes(5), ConsumedAtUtc = Now
+            });
+            seed.NativeOperationReceipts.Add(new NativeOperationReceiptEntity
+            {
+                OperationId = Guid.NewGuid(), IntentId = intentId, Action = "note_create", ActorSurface = actor,
+                IdempotencyKey = key, RequestFingerprint = new string('b', 64), Outcome = "completed", CompletedAtUtc = Now
+            });
+            await seed.SaveChangesAsync();
+        }
+
+        var changed = new KnowledgeMutation("note_create", Guid.NewGuid().ToString("D"), "different", "changed summary", null, null, null, null, null, null);
+        var request = new NativeActionCommitRequest("note_create", "{}", "new-confirmation", key, actor)
+        {
+            RequestFingerprint = NativeOperationCanonicalization.CreateRequestFingerprint("note_create", "{}", []),
+            CommitOperation = new KnowledgeMutationCommitOperation(changed)
+        };
+
+        var replay = await CreateStore(new ManualTimeProvider(Now)).CommitAsync(request, CancellationToken.None);
+
+        Assert.True(replay.WasReplay);
+        await using var verify = await SqlTestData.CreateFactory(_fixture).CreateDbContextAsync();
+        Assert.Single(await verify.NativeOperationReceipts.ToListAsync());
+        Assert.Empty(await verify.KnowledgeItems.ToListAsync());
     }
 
     [NativeSqlServerFact]

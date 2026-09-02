@@ -24,7 +24,7 @@ public sealed class NativeGoLiveLoopbackDenialTests
 
         var observation = await port.ObserveAsync(CancellationToken.None);
 
-        Assert.Equal(8, transport.Requests.Count);
+        Assert.Equal(11, transport.Requests.Count);
         Assert.All(transport.Requests, request =>
             Assert.True(IPAddress.IsLoopback(IPAddress.Parse(request.Uri.Host))));
         Assert.Equal(2, observation.NonLoopbackDenial.CandidateCount);
@@ -67,7 +67,7 @@ public sealed class NativeGoLiveLoopbackDenialTests
 
         var observation = await port.ObserveAsync(CancellationToken.None);
 
-        Assert.Equal(8, transport.Requests.Count);
+        Assert.Equal(11, transport.Requests.Count);
         Assert.Single(transport.Requests, request => request.Uri.AbsolutePath == "/api/v1/knowledge/search");
         Assert.Equal(200, observation.Search.Http.StatusCode);
         Assert.True(observation.Search.Succeeded);
@@ -88,7 +88,7 @@ public sealed class NativeGoLiveLoopbackDenialTests
 
         var observation = await port.ObserveAsync(CancellationToken.None);
 
-        Assert.Equal(12, transport.Requests.Count);
+        Assert.Equal(15, transport.Requests.Count);
         Assert.Equal(4, transport.Requests.Count(request => !IPAddress.IsLoopback(IPAddress.Parse(request.Uri.Host))));
         Assert.Equal(2, observation.NonLoopbackDenial.ConnectionRefusedCount);
         Assert.Equal(0, observation.NonLoopbackDenial.ConnectionSucceededCount);
@@ -150,6 +150,8 @@ public sealed class NativeGoLiveLoopbackDenialTests
                 "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2025-11-25\",\"serverInfo\":{\"name\":\"FluxKnowledge\",\"version\":\"1\"},\"capabilities\":{}}}",
             "/mcp" =>
                 "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"tools\":[{\"name\":\"knowledge.search\"},{\"name\":\"knowledge.write\"},{\"name\":\"knowledge.graph\"},{\"name\":\"code.query\"},{\"name\":\"code.write\"},{\"name\":\"corpus.query\"},{\"name\":\"corpus.write\"},{\"name\":\"operations.status\"},{\"name\":\"operations.audit\"}]}}",
+            var path when path.StartsWith("/native/v1/codex/hooks/", StringComparison.Ordinal) =>
+                "{\"continue\":true}",
             _ => "{}"
         };
     }

@@ -49,6 +49,7 @@ public static class LocalOperatorLoopbackGate
                 context.Request.Path.StartsWithSegments("/api/local/retained-branches") ||
                 context.Request.Path.StartsWithSegments("/api/local/retained-csharp-code") ||
                 context.Request.Path.StartsWithSegments("/api/v1") ||
+                context.Request.Path.StartsWithSegments("/native/v1/codex/hooks") ||
                 context.Request.Path.StartsWithSegments("/sources/retained") ||
                 context.Request.Path.StartsWithSegments("/search/csharp-code") ||
                 context.Request.Path.StartsWithSegments("/mcp") ||

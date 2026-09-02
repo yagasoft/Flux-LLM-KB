@@ -59,6 +59,21 @@ internal interface INativeCodexMarketplaceCommandRunner
 
     ValueTask<NativeCodexMarketplaceCommandResult> ListMarketplacesJsonAsync(
         CancellationToken cancellationToken);
+
+    ValueTask<NativeCodexMarketplaceCommandResult> AddFluxKnowledgePluginAsync(
+        CancellationToken cancellationToken) =>
+        ValueTask.FromException<NativeCodexMarketplaceCommandResult>(
+            new NativeGoLiveContractException("native-plugin-install-not-supported"));
+
+    ValueTask<NativeCodexMarketplaceCommandResult> ListPluginsJsonAsync(
+        CancellationToken cancellationToken) =>
+        ValueTask.FromException<NativeCodexMarketplaceCommandResult>(
+            new NativeGoLiveContractException("native-plugin-install-not-supported"));
+
+    ValueTask<NativeCodexMarketplaceCommandResult> RemoveLegacyFluxLlmKbPluginAsync(
+        CancellationToken cancellationToken) =>
+        ValueTask.FromException<NativeCodexMarketplaceCommandResult>(
+            new NativeGoLiveContractException("legacy-plugin-removal-not-supported"));
 }
 
 internal sealed record NativeCodexMarketplaceRegistration(bool Changed, bool IsHealthy, string? Reason)
@@ -213,9 +228,14 @@ internal sealed class NativeCodexMarketplaceLifecycleAdapter
                 return false;
             }
 
-            var matchingName = marketplaces.EnumerateArray()
-                .Where(entry => entry.ValueKind == JsonValueKind.Object &&
-                    StringProperty(entry, "name") == identity.MarketplaceName)
+            var entries = marketplaces.EnumerateArray().ToArray();
+            if (!entries.All(IsWellFormedMarketplaceEntry))
+            {
+                return false;
+            }
+
+            var matchingName = entries
+                .Where(entry => StringProperty(entry, "name") == identity.MarketplaceName)
                 .ToArray();
             if (matchingName.Length != 1 ||
                 !SamePath(StringProperty(matchingName[0], "root"), identity.MarketplaceRoot))
@@ -237,6 +257,11 @@ internal sealed class NativeCodexMarketplaceLifecycleAdapter
         property.ValueKind == JsonValueKind.String
             ? property.GetString()
             : null;
+
+    private static bool IsWellFormedMarketplaceEntry(JsonElement entry) =>
+        entry.ValueKind == JsonValueKind.Object &&
+        !string.IsNullOrWhiteSpace(StringProperty(entry, "name")) &&
+        !string.IsNullOrWhiteSpace(StringProperty(entry, "root"));
 
     private static bool IsStructuralHash(string? value) =>
         value is { Length: 64 } && value.All(character =>

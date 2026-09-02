@@ -73,7 +73,8 @@ internal sealed class NativeGoLiveProductionPortFactory
             marketplace,
             vss,
             new NativeGoLivePublishedCompositionPort(_plan),
-            new NativeGoLiveWindowsOneShotAdmissionPort(_plan, ownedState, sql, bootstrap));
+            new NativeGoLiveWindowsOneShotAdmissionPort(_plan, ownedState, sql, bootstrap),
+            new NativeGoLiveWindowsTaskActivationPort(_plan));
     }
 
     private static string CanonicalPath(string path)
@@ -330,18 +331,17 @@ internal static class NativeGoLiveProductionConfigurationSerializer
             SourceRoots = Array.Empty<string>(),
             LocalIngress = new { AllowedRoots = new[] { plan.Layout.RetainedRoot } },
             Outlook = new { Enabled = false },
-            OutlookCapture = new { Enabled = false },
-            Worker = new { Enabled = false },
+            OutlookCapture = new { Enabled = true },
+            Worker = new { Enabled = true },
             NativeWorker = new { Enabled = false },
             Runtime = new
             {
-                ModelRuntimeEnabled = false,
-                GpuEnabled = false,
-                OcrEnabled = false,
-                VisionEnabled = false,
-                AsrEnabled = false,
-                FfmpegEnabled = false,
-                NetworkParsingEnabled = false
+                Model = new { Enabled = false },
+                Gpu = new { Enabled = false },
+                Ocr = new { Enabled = false },
+                Asr = new { Enabled = false },
+                Ffmpeg = new { Enabled = false },
+                NetworkParsing = new { Enabled = false }
             }
         });
     }
@@ -936,6 +936,86 @@ internal static class NativeGoLiveWindowsAclInspector
     }
 }
 
+/// <summary>
+/// Activates the already-published native work only after IIS has proved the application started.
+/// The web-host source worker is enabled by the published production configuration; this port only
+/// enables and starts the pre-provisioned native Outlook task. It never creates or alters task XML.
+/// </summary>
+internal sealed class NativeGoLiveWindowsTaskActivationPort : INativeGoLiveTaskActivationPort
+{
+    private const string OutlookTaskName = "FluxKnowledge.OutlookHost";
+    private readonly NativeGoLivePlan _plan;
+    private readonly Func<string, CancellationToken, ValueTask<int>>? _runCommand;
+    private readonly Func<bool> _isWindows;
+
+    internal NativeGoLiveWindowsTaskActivationPort(NativeGoLivePlan plan)
+        : this(plan, null, OperatingSystem.IsWindows)
+    {
+    }
+
+    internal NativeGoLiveWindowsTaskActivationPort(
+        NativeGoLivePlan plan,
+        Func<string, CancellationToken, ValueTask<int>>? runCommand,
+        Func<bool> isWindows)
+    {
+        _plan = plan ?? throw new ArgumentNullException(nameof(plan));
+        _runCommand = runCommand;
+        _isWindows = isWindows ?? throw new ArgumentNullException(nameof(isWindows));
+    }
+
+    public async ValueTask ActivateAfterApplicationStartAsync(
+        NativeGoLivePlan expectedPlan,
+        CancellationToken cancellationToken)
+    {
+        if (!ReferenceEquals(_plan, expectedPlan))
+            throw new NativeGoLiveContractException("go-live-plan-not-canonical");
+        if (!_isWindows())
+            throw new NativeGoLiveContractException("native-task-activation-windows-only");
+
+        var command = BuildActivationCommand();
+        if (_runCommand is not null)
+        {
+            if (await _runCommand(command, cancellationToken).ConfigureAwait(false) != 0)
+                throw new NativeGoLiveContractException("native-outlook-task-activation-failed");
+            return;
+        }
+        var start = NativeGoLiveChildStartBuilder.Create("powershell.exe");
+        start.ArgumentList.Add("-NoProfile");
+        start.ArgumentList.Add("-NonInteractive");
+        start.ArgumentList.Add("-Command");
+        start.ArgumentList.Add(command);
+        using var process = Process.Start(start)
+            ?? throw new NativeGoLiveContractException("native-outlook-task-runner-unavailable");
+        await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
+        if (process.ExitCode != 0)
+            throw new NativeGoLiveContractException("native-outlook-task-activation-failed");
+    }
+
+    internal static bool IsSuccessfulFreshTaskRun(
+        DateTimeOffset? beforeLastRunTimeUtc,
+        DateTimeOffset? observedLastRunTimeUtc,
+        int observedLastTaskResult,
+        bool isRunning) =>
+        observedLastRunTimeUtc is not null &&
+        (beforeLastRunTimeUtc is null || observedLastRunTimeUtc > beforeLastRunTimeUtc) &&
+        !isRunning &&
+        observedLastTaskResult == 0;
+
+    internal static string BuildActivationCommand() => "& { " +
+        $"Enable-ScheduledTask -TaskName '{OutlookTaskName}' -ErrorAction Stop | Out-Null; " +
+        $"$before = Get-ScheduledTaskInfo -TaskName '{OutlookTaskName}' -ErrorAction Stop; " +
+        $"Start-ScheduledTask -TaskName '{OutlookTaskName}' -ErrorAction Stop; " +
+        "$deadline = [DateTime]::UtcNow.AddSeconds(30); $launchProved = $false; " +
+        "do { " +
+        $"$task = Get-ScheduledTask -TaskName '{OutlookTaskName}' -ErrorAction Stop; " +
+        $"$info = Get-ScheduledTaskInfo -TaskName '{OutlookTaskName}' -ErrorAction Stop; " +
+        "if ($info.LastRunTime.ToUniversalTime() -gt $before.LastRunTime.ToUniversalTime() -and " +
+        "$task.State -ne 'Running' -and $info.LastTaskResult -eq 0) { $launchProved = $true; break }; " +
+        "Start-Sleep -Milliseconds 250 " +
+        "} while ([DateTime]::UtcNow -lt $deadline); " +
+        "if (-not $launchProved) { throw 'native-outlook-task-launch-not-proved' } }";
+}
+
 internal sealed class NativeGoLiveWindowsMarketplacePort : INativeGoLiveMarketplacePort
 {
     private readonly NativeGoLiveCloseoutCapability _capability;
@@ -1016,7 +1096,36 @@ internal sealed class NativeGoLiveWindowsMarketplacePort : INativeGoLiveMarketpl
         if (observed.ExitCode != 0)
             throw new NativeGoLiveContractException("marketplace-verification-failed");
         var (state, _) = ParseState(observed.StandardOutput, identity);
+        if (state != CodexMarketplaceLifecycleState.Registered)
+            throw new NativeGoLiveContractException("marketplace-verification-failed");
+
+        var installed = await _runner.AddFluxKnowledgePluginAsync(cancellationToken).ConfigureAwait(false);
+        if (installed.ExitCode != 0)
+            throw new NativeGoLiveContractException("native-plugin-install-failed");
+        var plugins = await _runner.ListPluginsJsonAsync(cancellationToken).ConfigureAwait(false);
+        if (plugins.ExitCode != 0 || !HasInstalledEnabledPluginWithoutLegacy(plugins.StandardOutput, identity))
+            throw new NativeGoLiveContractException("native-plugin-install-not-proved");
         return Observation(state, identity);
+    }
+
+    public async ValueTask RemoveExactLegacyPluginAsync(CancellationToken cancellationToken)
+    {
+        if (!_capability.IsConsumedForExecution)
+            throw new NativeGoLiveContractException("marketplace-authority-not-consumed");
+
+        var before = await _runner.ListPluginsJsonAsync(cancellationToken).ConfigureAwait(false);
+        if (before.ExitCode != 0 ||
+            !TryReadInstalledPluginState(before.StandardOutput, out var legacyPresent))
+            throw new NativeGoLiveContractException("legacy-plugin-removal-not-proved");
+        if (!legacyPresent) return;
+
+        var removed = await _runner.RemoveLegacyFluxLlmKbPluginAsync(cancellationToken).ConfigureAwait(false);
+        if (removed.ExitCode != 0)
+            throw new NativeGoLiveContractException("legacy-plugin-removal-failed");
+        var plugins = await _runner.ListPluginsJsonAsync(cancellationToken).ConfigureAwait(false);
+        if (plugins.ExitCode != 0 ||
+            !TryReadInstalledPluginState(plugins.StandardOutput, out legacyPresent) || legacyPresent)
+            throw new NativeGoLiveContractException("legacy-plugin-removal-not-proved");
     }
 
     private static NativeGoLiveMarketplaceObservation Observation(
@@ -1039,12 +1148,15 @@ internal sealed class NativeGoLiveWindowsMarketplacePort : INativeGoLiveMarketpl
         try
         {
             using var document = JsonDocument.Parse(json);
-            if (!document.RootElement.TryGetProperty("marketplaces", out var marketplaces) ||
+            if (document.RootElement.ValueKind != JsonValueKind.Object ||
+                !document.RootElement.TryGetProperty("marketplaces", out var marketplaces) ||
                 marketplaces.ValueKind != JsonValueKind.Array)
                 return (CodexMarketplaceLifecycleState.Unavailable, null);
-            var matching = marketplaces.EnumerateArray()
-                .Where(entry => entry.ValueKind == JsonValueKind.Object &&
-                                StringProperty(entry, "name") == identity.MarketplaceName)
+            var entries = marketplaces.EnumerateArray().ToArray();
+            if (!entries.All(IsWellFormedMarketplaceEntry))
+                return (CodexMarketplaceLifecycleState.Unavailable, null);
+            var matching = entries
+                .Where(entry => StringProperty(entry, "name") == identity.MarketplaceName)
                 .ToArray();
             if (matching.Length == 0) return (CodexMarketplaceLifecycleState.Missing, null);
             if (matching.Length != 1 ||
@@ -1059,60 +1171,180 @@ internal sealed class NativeGoLiveWindowsMarketplacePort : INativeGoLiveMarketpl
     }
 
     private static string? StringProperty(JsonElement element, string name) =>
+        element.ValueKind == JsonValueKind.Object &&
         element.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String
             ? value.GetString()
             : null;
 
-    private static bool SamePath(string? left, string right) =>
-        !string.IsNullOrWhiteSpace(left) && string.Equals(
-            Path.TrimEndingDirectorySeparator(Path.GetFullPath(left)),
-            Path.TrimEndingDirectorySeparator(Path.GetFullPath(right)),
-            StringComparison.OrdinalIgnoreCase);
+    private static bool IsWellFormedMarketplaceEntry(JsonElement entry) =>
+        entry.ValueKind == JsonValueKind.Object &&
+        !string.IsNullOrWhiteSpace(StringProperty(entry, "name")) &&
+        !string.IsNullOrWhiteSpace(StringProperty(entry, "root"));
+
+    private static bool HasInstalledEnabledPluginWithoutLegacy(string json, NativeGoLiveCodexIdentity identity)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            if (document.RootElement.ValueKind != JsonValueKind.Object ||
+                !document.RootElement.TryGetProperty("installed", out var installed) ||
+                installed.ValueKind != JsonValueKind.Array)
+                return false;
+            var entries = installed.EnumerateArray().ToArray();
+            var expected = entries.Where(plugin =>
+                string.Equals(StringProperty(plugin, "pluginId"),
+                    identity.PluginName + "@" + identity.MarketplaceName, StringComparison.Ordinal)).ToArray();
+            return entries.All(IsWellFormedInstalledPluginEntry) &&
+                   expected.Length == 1 &&
+                   HasInstalledAndEnabledState(expected[0]) &&
+                   !entries.Any(plugin => string.Equals(
+                       StringProperty(plugin, "pluginId"),
+                       "flux-llm-kb@flux-llm-kb-local",
+                       StringComparison.Ordinal));
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
+    private static bool TryReadInstalledPluginState(string json, out bool legacyPresent)
+    {
+        legacyPresent = false;
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            if (document.RootElement.ValueKind != JsonValueKind.Object ||
+                !document.RootElement.TryGetProperty("installed", out var installed) ||
+                installed.ValueKind != JsonValueKind.Array)
+                return false;
+            var entries = installed.EnumerateArray().ToArray();
+            if (!entries.All(IsWellFormedInstalledPluginEntry)) return false;
+            legacyPresent = entries.Any(plugin => string.Equals(
+                StringProperty(plugin, "pluginId"),
+                "flux-llm-kb@flux-llm-kb-local",
+                StringComparison.Ordinal));
+            return true;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
+    private static bool IsWellFormedInstalledPluginEntry(JsonElement plugin) =>
+        plugin.ValueKind == JsonValueKind.Object &&
+        !string.IsNullOrWhiteSpace(StringProperty(plugin, "pluginId")) &&
+        plugin.TryGetProperty("installed", out var installed) &&
+        (installed.ValueKind is JsonValueKind.True or JsonValueKind.False) &&
+        plugin.TryGetProperty("enabled", out var enabled) &&
+        (enabled.ValueKind is JsonValueKind.True or JsonValueKind.False);
+
+    private static bool HasInstalledAndEnabledState(JsonElement plugin) =>
+        plugin.TryGetProperty("installed", out var installed) && installed.ValueKind == JsonValueKind.True &&
+        plugin.TryGetProperty("enabled", out var enabled) && enabled.ValueKind == JsonValueKind.True;
+
+    private static bool SamePath(string? left, string right)
+    {
+        if (string.IsNullOrWhiteSpace(left)) return false;
+        try
+        {
+            return string.Equals(
+                Path.TrimEndingDirectorySeparator(Path.GetFullPath(left)),
+                Path.TrimEndingDirectorySeparator(Path.GetFullPath(right)),
+                StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception exception) when (
+            exception is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return false;
+        }
+    }
 }
 
-internal sealed class NativeGoLiveCodexProcessRunner(NativeGoLiveCodexIdentity expected)
-    : INativeCodexMarketplaceCommandRunner
+internal sealed record NativeCodexProcessOutput(int ExitCode, string StandardOutput);
+
+internal sealed class NativeGoLiveCodexProcessRunner : INativeCodexMarketplaceCommandRunner
 {
     private const int MaximumOutputCharacters = 256 * 1024;
+    private readonly NativeGoLiveCodexIdentity _expected;
+    private readonly Func<IReadOnlyList<string>, CancellationToken, ValueTask<NativeCodexProcessOutput>>? _run;
+
+    internal NativeGoLiveCodexProcessRunner(NativeGoLiveCodexIdentity expected)
+        : this(expected, null)
+    {
+    }
+
+    internal NativeGoLiveCodexProcessRunner(
+        NativeGoLiveCodexIdentity expected,
+        Func<IReadOnlyList<string>, CancellationToken, ValueTask<NativeCodexProcessOutput>>? run)
+    {
+        _expected = expected ?? throw new ArgumentNullException(nameof(expected));
+        _run = run;
+    }
 
     public ValueTask<NativeCodexMarketplaceCommandResult> AddFluxKnowledgeMarketplaceAsync(
         string marketplaceRoot,
         CancellationToken cancellationToken)
     {
-        if (!SamePath(marketplaceRoot, expected.MarketplaceRoot))
+        if (!SamePath(marketplaceRoot, _expected.MarketplaceRoot))
             throw new NativeGoLiveContractException("marketplace-state-foreign");
-        return RunAsync(["plugin", "marketplace", "add", marketplaceRoot], captureOutput: false, cancellationToken);
+        return RunAsync(["plugin", "marketplace", "add", marketplaceRoot], false, cancellationToken);
     }
 
     public ValueTask<NativeCodexMarketplaceCommandResult> RemoveFluxKnowledgeMarketplaceAsync(
         CancellationToken cancellationToken) =>
-        RunAsync(["plugin", "marketplace", "remove", expected.MarketplaceName], captureOutput: false, cancellationToken);
+        RunAsync(["plugin", "marketplace", "remove", _expected.MarketplaceName], false, cancellationToken);
 
     public ValueTask<NativeCodexMarketplaceCommandResult> ListMarketplacesJsonAsync(
         CancellationToken cancellationToken) =>
-        RunAsync(["plugin", "marketplace", "list", "--json"], captureOutput: true, cancellationToken);
+        RunAsync(["plugin", "marketplace", "list", "--json"], true, cancellationToken, HashUnrelatedConfiguration);
+
+    public ValueTask<NativeCodexMarketplaceCommandResult> AddFluxKnowledgePluginAsync(
+        CancellationToken cancellationToken) =>
+        RunAsync(["plugin", "add", _expected.PluginName + "@" + _expected.MarketplaceName], false, cancellationToken);
+
+    public ValueTask<NativeCodexMarketplaceCommandResult> ListPluginsJsonAsync(
+        CancellationToken cancellationToken) =>
+        RunAsync(["plugin", "list", "--json"], true, cancellationToken);
+
+    public ValueTask<NativeCodexMarketplaceCommandResult> RemoveLegacyFluxLlmKbPluginAsync(
+        CancellationToken cancellationToken) =>
+        RunAsync(["plugin", "remove", "flux-llm-kb@flux-llm-kb-local"], false, cancellationToken);
 
     private async ValueTask<NativeCodexMarketplaceCommandResult> RunAsync(
         IReadOnlyList<string> arguments,
         bool captureOutput,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Func<string, string>? structuralHash = null)
     {
-        var start = NativeGoLiveChildStartBuilder.Create("codex");
-        foreach (var argument in arguments) start.ArgumentList.Add(argument);
-        using var process = Process.Start(start)
-            ?? throw new NativeGoLiveContractException("codex-marketplace-runner-unavailable");
-        var stdout = ReadBoundedAsync(process.StandardOutput, cancellationToken);
-        var stderr = ReadBoundedAsync(process.StandardError, cancellationToken);
-        await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
-        var output = await stdout.ConfigureAwait(false);
-        await stderr.ConfigureAwait(false);
-        var structuralHash = captureOutput && process.ExitCode == 0
-            ? HashUnrelatedConfiguration(output)
+        if (Environment.GetEnvironmentVariable("CODEX_HOME", EnvironmentVariableTarget.Process) is not null)
+            throw new NativeGoLiveContractException("codex-home-overridden");
+        NativeCodexProcessOutput processOutput;
+        if (_run is not null)
+        {
+            processOutput = await _run(arguments, cancellationToken).ConfigureAwait(false);
+        }
+        else
+        {
+            var start = NativeGoLiveChildStartBuilder.Create("codex");
+            foreach (var argument in arguments) start.ArgumentList.Add(argument);
+            using var process = Process.Start(start)
+                ?? throw new NativeGoLiveContractException("codex-marketplace-runner-unavailable");
+            var stdout = ReadBoundedAsync(process.StandardOutput, cancellationToken);
+            var stderr = ReadBoundedAsync(process.StandardError, cancellationToken);
+            await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
+            var output = await stdout.ConfigureAwait(false);
+            await stderr.ConfigureAwait(false);
+            processOutput = new NativeCodexProcessOutput(process.ExitCode, output);
+        }
+        var hash = captureOutput && processOutput.ExitCode == 0 && structuralHash is not null
+            ? structuralHash(processOutput.StandardOutput)
             : new string('0', 64);
         return new NativeCodexMarketplaceCommandResult(
-            process.ExitCode,
-            captureOutput ? output : string.Empty,
-            structuralHash);
+            processOutput.ExitCode,
+            captureOutput ? processOutput.StandardOutput : string.Empty,
+            hash);
     }
 
     private string HashUnrelatedConfiguration(string json)
@@ -1126,7 +1358,7 @@ internal sealed class NativeGoLiveCodexProcessRunner(NativeGoLiveCodexIdentity e
                     .Where(item => item.ValueKind != JsonValueKind.Object ||
                                    !string.Equals(
                                        item.TryGetProperty("name", out var name) ? name.GetString() : null,
-                                       expected.MarketplaceName,
+                                   _expected.MarketplaceName,
                                        StringComparison.Ordinal))
                     .Select(item => item.GetRawText())
                     .OrderBy(value => value, StringComparer.Ordinal)

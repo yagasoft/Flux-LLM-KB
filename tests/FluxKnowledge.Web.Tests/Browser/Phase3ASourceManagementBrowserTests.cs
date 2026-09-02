@@ -8,6 +8,35 @@ namespace FluxKnowledge.Web.Tests.Browser;
 public sealed class Phase3ASourceManagementBrowserTests
 {
     [BrowserFact]
+    public async Task Strict_production_composition_renders_the_sources_page()
+    {
+        await using var sql = new NativeSqlServerFixture();
+        await sql.InitializeAsync();
+        var ingressRoot = BrowserTestRoots.Create($"FluxKnowledgeStrictSourcesIngress_{Guid.NewGuid():N}");
+        var indexRoot = BrowserTestRoots.Create($"FluxKnowledgeStrictSourcesIndexes_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(ingressRoot);
+        Directory.CreateDirectory(indexRoot);
+        try
+        {
+            await using var host = await PhaseOneVerticalSliceBrowserTests.BrowserHost.StartAsync(
+                sql.ConnectionString,
+                ingressRoot,
+                indexRoot,
+                strictProductionComposition: true);
+            using var client = new HttpClient { BaseAddress = host.BaseAddress };
+
+            using var response = await client.GetAsync("/sources");
+
+            Assert.Equal(System.Net.HttpStatusCode.OK, response.StatusCode);
+        }
+        finally
+        {
+            if (Directory.Exists(ingressRoot)) Directory.Delete(ingressRoot, recursive: true);
+            if (Directory.Exists(indexRoot)) Directory.Delete(indexRoot, recursive: true);
+        }
+    }
+
+    [BrowserFact]
     public async Task Sources_navigation_exposes_the_local_add_folder_operator_surface()
     {
         await using var sql = new NativeSqlServerFixture();

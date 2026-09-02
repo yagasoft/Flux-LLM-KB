@@ -63,6 +63,7 @@ public sealed class NativeOperationServiceTests
         public NativeActionPreviewRequest? PreviewRequest { get; private set; }
         public NativeActionCommitRequest? CommitRequest { get; private set; }
 
+        public ValueTask<NativeActionReceipt?> FindReceiptAsync(string idempotencyKey, string actorSurface, CancellationToken cancellationToken) => ValueTask.FromResult<NativeActionReceipt?>(null);
         public ValueTask<NativeActionReceipt?> TryReplayAsync(string action, string canonicalPayload, string confirmationId, string idempotencyKey, string actorSurface, CancellationToken cancellationToken) => ValueTask.FromResult<NativeActionReceipt?>(null);
 
         public ValueTask<NativeActionPreview> CreatePreviewAsync(NativeActionPreviewRequest request, CancellationToken cancellationToken)

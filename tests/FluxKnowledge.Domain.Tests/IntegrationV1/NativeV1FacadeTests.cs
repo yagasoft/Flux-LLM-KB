@@ -278,6 +278,7 @@ public sealed class NativeV1FacadeTests
 
     private sealed class RecordingOperationStore : INativeOperationStore
     {
+        public ValueTask<NativeActionReceipt?> FindReceiptAsync(string idempotencyKey, string actorSurface, CancellationToken cancellationToken) => throw new Xunit.Sdk.XunitException("The operation store must not be called.");
         public ValueTask<NativeActionReceipt?> TryReplayAsync(string action, string canonicalPayload, string confirmationId, string idempotencyKey, string actorSurface, CancellationToken cancellationToken) => throw new Xunit.Sdk.XunitException("The operation store must not be called.");
         public ValueTask<NativeActionPreview> CreatePreviewAsync(NativeActionPreviewRequest request, CancellationToken cancellationToken) => throw new Xunit.Sdk.XunitException("The operation store must not be called.");
         public ValueTask<NativeActionReceipt> CommitAsync(NativeActionCommitRequest request, CancellationToken cancellationToken) => throw new Xunit.Sdk.XunitException("The operation store must not be called.");

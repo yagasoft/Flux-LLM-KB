@@ -52,6 +52,7 @@ function Invoke-Guard {
 try {
     New-Item -ItemType Directory -Path $mainRoot | Out-Null
     & git init --initial-branch main $mainRoot | Out-Null
+    & git -C $mainRoot config core.autocrlf false
     & git -C $mainRoot config user.email "gmail-guard@example.invalid"
     & git -C $mainRoot config user.name "Gmail Guard Test"
     foreach ($relativePath in $approvedPaths) {
