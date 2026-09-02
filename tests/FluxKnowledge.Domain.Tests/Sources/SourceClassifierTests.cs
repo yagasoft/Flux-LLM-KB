@@ -64,6 +64,28 @@ public sealed class SourceClassifierTests
     }
 
     [Theory]
+    [MemberData(nameof(BinarySignatureReasons))]
+    public void Classify_records_a_precise_reason_for_each_binary_format_path(
+        string fileName,
+        byte[] bytes,
+        string expectedReason)
+    {
+        var result = SourceClassifier.Classify(fileName, bytes, bytes.Length);
+
+        Assert.Equal(SourceClassification.DeferredCapability, result.Classification);
+        Assert.Equal(expectedReason, result.Reason);
+    }
+
+    public static TheoryData<string, byte[], string> BinarySignatureReasons() => new()
+    {
+        { "document.pdf", "%PDF-1.7"u8.ToArray(), "pdf-parser-unavailable" },
+        { "legacy.doc", new byte[] { 0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1 }, "legacy-office-binary-parser-unavailable" },
+        { "diagram.vsdx", new byte[] { 0x50, 0x4b, 0x03, 0x04 }, "archive-zip-expansion-pending" },
+        { "document.docx", new byte[] { 0x50, 0x4b, 0x03, 0x04 }, "ooxml-structural-extraction-pending" },
+        { "photo.jpg", new byte[] { 0xff, 0xd8, 0xff, 0xe0 }, "media-metadata-extraction-pending" }
+    };
+
+    [Theory]
     [MemberData(nameof(SupportedMediaBinarySignatures))]
     public void Classify_defers_each_supported_media_signature_to_a_capability(string fileName, byte[] bytes)
     {

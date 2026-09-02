@@ -101,6 +101,8 @@ public static class WebHostComposition
         var runtime = ReadNativeGoLiveRuntimeOptions(configuration);
         NativeGoLiveRuntimeOptions.ValidateEffective(runtime);
         var allowedHostedServiceTypes = new HashSet<Type>();
+        allowedHostedServiceTypes.Add(typeof(OutboxPumpService));
+        allowedHostedServiceTypes.Add(typeof(RetainedProcessorActivationHostedService));
         if (runtime.WorkerEnabled)
         {
             allowedHostedServiceTypes.Add(typeof(SourceReconciliationService));
@@ -110,17 +112,14 @@ public static class WebHostComposition
             allowedHostedServiceTypes.Add(typeof(OutlookCaptureRecoveryService));
         var hostedServiceTypes = services
             .Where(descriptor => descriptor.ServiceType == typeof(IHostedService))
-            .Select(descriptor => descriptor.ImplementationType)
+            .Select(HostedServiceType)
             .ToArray();
         if (hostedServiceTypes.Length != allowedHostedServiceTypes.Count ||
             hostedServiceTypes.Any(type => type is null || !allowedHostedServiceTypes.Remove(type)))
             throw new InvalidOperationException("native-go-live-hosted-service-registered");
         var prohibited = new[]
         {
-            typeof(GpuSchedulerService),
-            typeof(CanonicalIndexStageWorker),
-            typeof(EmbedStageWorker),
-            typeof(PublishStageWorker)
+            typeof(GpuSchedulerService)
         };
         if (services.Any(descriptor => prohibited.Contains(descriptor.ServiceType) ||
                                        descriptor.ImplementationType is not null && prohibited.Contains(descriptor.ImplementationType)))
@@ -301,7 +300,7 @@ public static class WebHostComposition
             artifactRoot,
             protectedRoots,
             provider.GetRequiredService<PersistedOutlookSpoolRootPolicy>()));
-        services.AddSingleton(ReadRetainedProcessorOptions(configuration));
+        services.AddSingleton(ReadRetainedProcessorOptions(configuration, strictProductionPaths));
         services.AddSingleton<IEmbeddingProvider, DeterministicTokenHashEmbeddingProvider>();
         services.AddScoped<ISearchService, HybridSearchService>();
         services.AddScoped<SqlNativeOperationStore>();
@@ -385,12 +384,9 @@ public static class WebHostComposition
         services.AddScoped<Components.Corpus.CorpusPageState>();
         services.AddScoped<Components.Corpus.CorpusDetailPageState>();
         services.AddScoped<Components.Events.EventsPageState>();
-        if (!strictProductionPaths)
-        {
-            services.AddScoped<IStageWorker, CanonicalIndexStageWorker>();
-            services.AddScoped<IStageWorker, EmbedStageWorker>();
-            services.AddScoped<IStageWorker, PublishStageWorker>();
-        }
+        services.AddScoped<IStageWorker, CanonicalIndexStageWorker>();
+        services.AddScoped<IStageWorker, EmbedStageWorker>();
+        services.AddScoped<IStageWorker, PublishStageWorker>();
         if (strictProductionPaths)
         {
             RemoveUnapprovedHostedServiceRegistrations(services, nativeRuntimeOptions!);
@@ -404,8 +400,6 @@ public static class WebHostComposition
     {
         var unapprovedHostedServiceTypes = new HashSet<Type>
         {
-            typeof(OutboxPumpService),
-            typeof(RetainedProcessorActivationHostedService),
             typeof(GpuSchedulerService),
             typeof(GpuExecutorDispatchRecoveryService)
         };
@@ -414,12 +408,9 @@ public static class WebHostComposition
         for (var index = services.Count - 1; index >= 0; index--)
         {
             var descriptor = services[index];
-            if ((unapprovedHostedServiceTypes.Contains(descriptor.ServiceType) ||
-                 descriptor.ServiceType == typeof(IHostedService) &&
-                 (descriptor.ImplementationType is { } implementationType && unapprovedHostedServiceTypes.Contains(implementationType) ||
-                 descriptor.ImplementationFactory?.Method.Name.Contains(
-                     nameof(OutboxWorkerServiceCollectionExtensions.AddFluxKnowledgeOutboxWorkers),
-                     StringComparison.Ordinal) == true)))
+            if (unapprovedHostedServiceTypes.Contains(descriptor.ServiceType) ||
+                descriptor.ImplementationType is { } implementationType &&
+                unapprovedHostedServiceTypes.Contains(implementationType))
             {
                 services.RemoveAt(index);
             }
@@ -445,7 +436,9 @@ public static class WebHostComposition
             ? value
             : defaultValue;
 
-    internal static RetainedProcessorOptions ReadRetainedProcessorOptions(IConfiguration configuration)
+    internal static RetainedProcessorOptions ReadRetainedProcessorOptions(
+        IConfiguration configuration,
+        bool enableImplementedProcessorsByDefault = false)
     {
         var section = RetainedProcessorOptions.ConfigurationSectionName;
         var configuredBatchSize = configuration[$"{section}:AutomaticReplayBatchSize"];
@@ -464,14 +457,27 @@ public static class WebHostComposition
 
         return new RetainedProcessorOptions
         {
-            ArchiveZipExpandEnabled = bool.TryParse(configuration[$"{section}:ArchiveZipExpandEnabled"], out var zipEnabled) && zipEnabled,
-            ArchiveTarExpandEnabled = bool.TryParse(configuration[$"{section}:ArchiveTarExpandEnabled"], out var tarEnabled) && tarEnabled,
-            OoxmlDocumentStructuralExtractEnabled = bool.TryParse(configuration[$"{section}:OoxmlDocumentStructuralExtractEnabled"], out var ooxmlEnabled) && ooxmlEnabled,
-            CsharpCodeEnabled = !bool.TryParse(configuration[$"{section}:CsharpCodeEnabled"], out var csharpEnabled) || csharpEnabled,
-            MediaMetadataEnabled = bool.TryParse(configuration[$"{section}:MediaMetadataEnabled"], out var mediaMetadataEnabled) && mediaMetadataEnabled,
+            ArchiveZipExpandEnabled = ReadProcessorEnabled(configuration, $"{section}:ArchiveZipExpandEnabled", enableImplementedProcessorsByDefault),
+            ArchiveTarExpandEnabled = ReadProcessorEnabled(configuration, $"{section}:ArchiveTarExpandEnabled", enableImplementedProcessorsByDefault),
+            OoxmlDocumentStructuralExtractEnabled = ReadProcessorEnabled(configuration, $"{section}:OoxmlDocumentStructuralExtractEnabled", enableImplementedProcessorsByDefault),
+            CsharpCodeEnabled = ReadProcessorEnabled(configuration, $"{section}:CsharpCodeEnabled", true),
+            MediaMetadataEnabled = ReadProcessorEnabled(configuration, $"{section}:MediaMetadataEnabled", enableImplementedProcessorsByDefault),
             AutomaticReplayBatchSize = batchSize
         };
     }
+
+    private static Type? HostedServiceType(ServiceDescriptor descriptor) =>
+        descriptor.ImplementationType ??
+        (descriptor.ImplementationFactory?.Method.Name.Contains(
+            nameof(OutboxWorkerServiceCollectionExtensions.AddFluxKnowledgeOutboxWorkers),
+            StringComparison.Ordinal) == true
+            ? typeof(OutboxPumpService)
+            : null);
+
+    private static bool ReadProcessorEnabled(IConfiguration configuration, string key, bool defaultValue) =>
+        configuration[key] is not { } configured
+            ? defaultValue
+            : bool.TryParse(configured, out var enabled) && enabled;
 
     internal static OutlookCaptureRecoveryOptions ReadOutlookRecoveryOptions(IConfiguration configuration)
     {

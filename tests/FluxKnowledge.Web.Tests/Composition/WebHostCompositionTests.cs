@@ -50,12 +50,39 @@ public sealed class WebHostCompositionTests : IDisposable
     }
 
     [Fact]
-    public void Production_options_have_empty_catalogue_and_inert_retained_ingress()
+    public void Production_options_have_empty_catalogue_and_local_retained_ingress()
     {
         var options = WebHostComposition.ReadNativeGoLiveRuntimeOptions(CreateProductionConfiguration());
 
         Assert.Empty(options.SourceRoots);
         Assert.Equal([@"I:\FluxKnowledge\Data\Retained"], options.LocalIngress.AllowedRoots);
+    }
+
+    [Fact]
+    public void Production_composition_enables_existing_retained_processors_and_the_full_in_process_indexing_flow()
+    {
+        var services = new ServiceCollection();
+        var configuration = CreateProductionConfiguration();
+
+        WebHostComposition.AddProductionFluxKnowledgeServicesForTests(services, configuration);
+
+        using var provider = services.BuildServiceProvider();
+        using var scope = provider.CreateScope();
+        var options = provider.GetRequiredService<RetainedProcessorOptions>();
+
+        Assert.True(options.ArchiveZipExpandEnabled);
+        Assert.True(options.ArchiveTarExpandEnabled);
+        Assert.True(options.OoxmlDocumentStructuralExtractEnabled);
+        Assert.True(options.MediaMetadataEnabled);
+        Assert.True(options.CsharpCodeEnabled);
+        Assert.Contains(provider.GetServices<IHostedService>(), service => service is OutboxPumpService);
+        Assert.Contains(provider.GetServices<IHostedService>(), service => service is RetainedProcessorActivationHostedService);
+        Assert.Contains(scope.ServiceProvider.GetServices<IStageWorker>(), worker => worker is ExtractUtf8StageWorker);
+        Assert.Contains(scope.ServiceProvider.GetServices<IStageWorker>(), worker => worker is NormaliseTextStageWorker);
+        Assert.Contains(scope.ServiceProvider.GetServices<IStageWorker>(), worker => worker is CanonicalIndexStageWorker);
+        Assert.Contains(scope.ServiceProvider.GetServices<IStageWorker>(), worker => worker is EmbedStageWorker);
+        Assert.Contains(scope.ServiceProvider.GetServices<IStageWorker>(), worker => worker is PublishStageWorker);
+        WebHostComposition.ValidateNativeGoLiveComposition(services, configuration);
     }
 
     [Theory]
@@ -104,13 +131,13 @@ public sealed class WebHostCompositionTests : IDisposable
     }
 
     [Fact]
-    public void Production_composition_registers_no_background_service()
+    public void Production_composition_registers_the_local_in_process_background_services()
     {
         var services = new ServiceCollection();
 
         WebHostComposition.AddProductionFluxKnowledgeServicesForTests(services, CreateProductionConfiguration());
 
-        Assert.DoesNotContain(services, descriptor => descriptor.ServiceType == typeof(IHostedService));
+        Assert.Contains(services, descriptor => descriptor.ServiceType == typeof(IHostedService));
         Assert.Contains(services, descriptor =>
             descriptor.ServiceType == typeof(IDerivedIndexRecoveryStatus));
     }
@@ -135,7 +162,7 @@ public sealed class WebHostCompositionTests : IDisposable
     }
 
     [Fact]
-    public void Production_composition_registers_the_UTF8_endpoint_handler_without_hosted_services()
+    public void Production_composition_registers_the_UTF8_endpoint_handler_with_local_hosted_services()
     {
         var services = new ServiceCollection();
         WebHostComposition.AddProductionFluxKnowledgeServicesForTests(
@@ -144,19 +171,19 @@ public sealed class WebHostCompositionTests : IDisposable
 
         Assert.Contains(services, descriptor =>
             descriptor.ServiceType == typeof(RegisterUtf8FileHandler));
-        Assert.DoesNotContain(services, descriptor =>
+        Assert.Contains(services, descriptor =>
             descriptor.ServiceType == typeof(IHostedService));
     }
 
     [Fact]
-    public void Production_composition_proof_accepts_only_the_inert_no_hosted_service_graph()
+    public void Production_composition_proof_accepts_only_the_local_in_process_hosted_service_graph()
     {
         var services = new ServiceCollection();
         var configuration = CreateProductionConfiguration();
 
         WebHostComposition.AddProductionFluxKnowledgeServicesForTests(services, configuration);
 
-        Assert.DoesNotContain(services, descriptor => descriptor.ServiceType == typeof(IHostedService));
+        Assert.Equal(2, services.Count(descriptor => descriptor.ServiceType == typeof(IHostedService)));
         WebHostComposition.ValidateNativeGoLiveComposition(services, configuration);
     }
 
@@ -175,7 +202,7 @@ public sealed class WebHostCompositionTests : IDisposable
 
         WebHostComposition.AddProductionFluxKnowledgeServicesForTests(services, configuration);
 
-        Assert.Equal(3, services.Count(descriptor => descriptor.ServiceType == typeof(IHostedService)));
+        Assert.Equal(5, services.Count(descriptor => descriptor.ServiceType == typeof(IHostedService)));
         WebHostComposition.ValidateNativeGoLiveComposition(services, configuration);
     }
 
@@ -201,7 +228,7 @@ public sealed class WebHostCompositionTests : IDisposable
     }
 
     [Fact]
-    public async Task Strict_production_initialisation_makes_a_validated_empty_catalogue_HTTP_ready_without_hosted_service()
+    public async Task Strict_production_initialisation_makes_a_validated_empty_catalogue_HTTP_ready()
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
@@ -210,6 +237,7 @@ public sealed class WebHostCompositionTests : IDisposable
             CreateProductionConfiguration());
         builder.Services.AddSingleton<IDerivedIndexRecoveryStore>(new ValidatedEmptyCatalogueRecoveryStore());
         builder.Services.AddSingleton<ISqlServerReadinessValidator>(new ReadyReadinessValidator());
+        builder.Services.RemoveAll<IHostedService>();
         Assert.DoesNotContain(builder.Services, descriptor => descriptor.ServiceType == typeof(IHostedService));
         await using var application = builder.Build();
         application.MapFluxKnowledgeHealth();

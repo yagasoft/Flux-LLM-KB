@@ -60,7 +60,7 @@ public static class SourceClassifier
             {
                 return new SourceClassificationResult(SourceClassification.Unknown, null, "File signature conflicts with its text extension.");
             }
-            return DeferredCapability("Binary signature requires a capability that is not registered.");
+            return DeferredCapability(BinarySignatureReason(extension, bytes));
         }
 
         if (HasBinaryControlBytes(bytes))
@@ -124,6 +124,39 @@ public static class SourceClassifier
 
     private static SourceClassificationResult DeferredPolicy(string reason) =>
         new(SourceClassification.DeferredPolicy, null, reason);
+
+    private static string BinarySignatureReason(string extension, ReadOnlySpan<byte> bytes)
+    {
+        if (bytes.StartsWith("%PDF-"u8)) return "pdf-parser-unavailable";
+        if (bytes.StartsWith(new byte[] { 0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1 }))
+        {
+            return extension.Equals(".doc", StringComparison.OrdinalIgnoreCase) ||
+                   extension.Equals(".xls", StringComparison.OrdinalIgnoreCase) ||
+                   extension.Equals(".ppt", StringComparison.OrdinalIgnoreCase)
+                ? "legacy-office-binary-parser-unavailable"
+                : "compound-binary-parser-unavailable";
+        }
+        if (ZipArchiveRetainedProcessor.IsZipSignature(bytes))
+        {
+            return extension.Equals(".docx", StringComparison.OrdinalIgnoreCase) ||
+                   extension.Equals(".xlsx", StringComparison.OrdinalIgnoreCase) ||
+                   extension.Equals(".pptx", StringComparison.OrdinalIgnoreCase)
+                ? "ooxml-structural-extraction-pending"
+                : "archive-zip-expansion-pending";
+        }
+        if (TarArchiveRetainedProcessor.IsTarSignature(bytes)) return "archive-tar-expansion-pending";
+        if (MediaMetadataSignature.IsRecognisedUnsupportedMediaSignature(bytes))
+            return "media-metadata-format-unsupported";
+        if (MediaMetadataSignature.TryDetect(bytes, out _) ||
+            bytes.StartsWith("GIF87a"u8) ||
+            bytes.StartsWith("GIF89a"u8) ||
+            bytes.StartsWith("RIFF"u8) ||
+            bytes.StartsWith("ID3"u8) ||
+            bytes.StartsWith("OggS"u8) ||
+            bytes.StartsWith(new byte[] { 0x1a, 0x45, 0xdf, 0xa3 }))
+            return "media-metadata-extraction-pending";
+        return "binary-format-parser-unavailable";
+    }
 
     private static ReadOnlySpan<byte> RemoveUtf8Bom(ReadOnlySpan<byte> bytes) =>
         bytes.StartsWith(new byte[] { 0xef, 0xbb, 0xbf }) ? bytes[3..] : bytes;
