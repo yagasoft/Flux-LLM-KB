@@ -98,6 +98,14 @@ if ($holdCreatedAt -lt 0 -or $candidateStartedAt -lt 0 -or $probedAt -lt $candid
     $stateComparedAt -lt $probedAt -or $holdReleasedAt -lt $stateComparedAt) {
     throw 'The incremental IIS updater can release the deployment-validation hold before candidate probes and unchanged-state validation.'
 }
+$preflightStart = $deploymentScriptText.IndexOf('function Assert-IncrementalIisPreflight')
+$preflightEnd = $deploymentScriptText.IndexOf('Assert-CanonicalPath', $preflightStart)
+if ($preflightStart -lt 0 -or $preflightEnd -lt $preflightStart) {
+    throw 'The incremental IIS updater preflight contract is not readable.'
+}
+if ($deploymentScriptText.Substring($preflightStart, $preflightEnd - $preflightStart) -match [regex]::Escape('Invoke-RequiredLoopbackProbes')) {
+    throw 'The incremental IIS updater requires a failing payload to pass health probes before its held recovery candidate can start.'
+}
 
 $ordinary = Invoke-ExpectedRejection -Arguments @('-SourceRoot', $SourceRoot)
 if ($ordinary.ExitCode -eq 0 -or $ordinary.Output -notmatch 'requires -Apply') {

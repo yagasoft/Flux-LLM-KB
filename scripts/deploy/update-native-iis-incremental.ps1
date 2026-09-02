@@ -296,7 +296,6 @@ function Assert-IncrementalIisPreflight {
         -Path $CanonicalRecoveryRoot `
         -Message "The canonical recovery root cannot be a reparse point."
     Test-ApplicationPayload -Path $CanonicalDeployRoot
-    Invoke-RequiredLoopbackProbes -Origin $loopbackOrigin.Origin -TimeoutSeconds $ReadinessTimeoutSeconds
 }
 
 Assert-CanonicalPath `
