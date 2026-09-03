@@ -66,7 +66,7 @@ public sealed class SourceRootProjectionReader(
                 join revision in context.SourceRevisions.AsNoTracking() on activity.SourceRevisionId equals revision.Id
                 join artifactValue in context.SourceArtifacts.AsNoTracking() on revision.Id equals artifactValue.SourceRevisionId into artifactValues
                 from artifact in artifactValues.DefaultIfEmpty()
-                where revision.SourceRootId == rootId
+                where revision.SourceRootId == rootId && revision.SuppressedAtUtc == null
                 select new SourceActivityRow(
                     activity.Id,
                     activity.SourceRevisionId,
@@ -90,7 +90,8 @@ public sealed class SourceRootProjectionReader(
         var terminalBlockedBranches = await (
                 from branch in context.SourceProcessorBranches.AsNoTracking()
                 join revision in context.SourceRevisions.AsNoTracking() on branch.SourceRevisionId equals revision.Id
-                where revision.SourceRootId == rootId && branch.State == (int)RetainedProcessorBranchState.Blocked
+                where revision.SourceRootId == rootId && revision.SuppressedAtUtc == null &&
+                      branch.State == (int)RetainedProcessorBranchState.Blocked
                 select new TerminalProcessorBranchRow(branch.Id, branch.LeaseGeneration))
             .ToListAsync(cancellationToken).ConfigureAwait(false);
         var terminalBlockedBranchIds = terminalBlockedBranches.Select(branch => branch.Id).ToArray();

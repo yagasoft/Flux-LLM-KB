@@ -326,6 +326,113 @@ public sealed class SourceRootProjectionReaderIntegrationTests(NativeSqlServerFi
             value => Assert.Equal((int)RetainedProcessorBranchState.Blocked, value.State));
     }
 
+    [NativeSqlServerFact]
+    public async Task Source_root_detail_excludes_suppressed_activity_and_processor_branch_reasons()
+    {
+        var rootId = Guid.NewGuid();
+        var currentRevisionId = Guid.NewGuid();
+        var suppressedBranchRevisionId = Guid.NewGuid();
+        var suppressedActivityRevisionId = Guid.NewGuid();
+        var now = DateTimeOffset.Parse("2026-09-03T23:00:00+00:00");
+        var factory = new TestDbContextFactory(_fixture.ConnectionString);
+        await using (var setup = factory.CreateDbContext())
+        {
+            setup.SourceRootConfigurations.Add(new SourceRootConfigurationEntity
+            {
+                Id = rootId,
+                CanonicalPath = $"E:\\source-projection-suppressed-reason-tests\\{rootId:N}",
+                DisplayName = "Suppressed reason projection",
+                State = (int)SourceRootState.Enabled,
+                Recursive = true,
+                IncludePatternsJson = "[]",
+                ExcludePatternsJson = "[]",
+                AllowedClassificationsJson = "[\"text/plain\"]",
+                MaximumFileBytes = 16L * 1024 * 1024,
+                ReconciliationCadenceSeconds = 900,
+                ConfigurationRevision = 1,
+                CreatedAtUtc = now,
+                UpdatedAtUtc = now
+            });
+            setup.SourceRevisions.AddRange(
+                Revision(currentRevisionId, rootId, "current.vsdx", now, false),
+                Revision(suppressedBranchRevisionId, rootId, "historic.docx", now, true),
+                Revision(suppressedActivityRevisionId, rootId, "historic.pdf", now, true));
+
+            var currentActivity = Activity(currentRevisionId, SourceActivityState.Pending);
+            var suppressedBranchActivity = Activity(suppressedBranchRevisionId, SourceActivityState.Pending);
+            var suppressedDeferredActivity = Activity(suppressedActivityRevisionId, SourceActivityState.DeferredUnsupported);
+            suppressedDeferredActivity.Reason = "historic-pdf-parser-unavailable";
+            setup.SourceActivities.AddRange(currentActivity, suppressedBranchActivity, suppressedDeferredActivity);
+
+            var currentBranchId = Guid.NewGuid();
+            var suppressedBranchId = Guid.NewGuid();
+            setup.SourceProcessorBranches.AddRange(
+                new SourceProcessorBranchEntity
+                {
+                    Id = currentBranchId,
+                    SourceActivityId = currentActivity.Id,
+                    SourceRevisionId = currentRevisionId,
+                    InputSha256 = new string('d', 64),
+                    ProcessorVersion = "phase-5-compat-v1",
+                    ProcessorFingerprint = "suppressed-reason-projection-test",
+                    State = (int)RetainedProcessorBranchState.Blocked,
+                    LeaseGeneration = 1,
+                    AttemptCount = 1,
+                    CreatedAtUtc = now,
+                    UpdatedAtUtc = now
+                },
+                new SourceProcessorBranchEntity
+                {
+                    Id = suppressedBranchId,
+                    SourceActivityId = suppressedBranchActivity.Id,
+                    SourceRevisionId = suppressedBranchRevisionId,
+                    InputSha256 = new string('d', 64),
+                    ProcessorVersion = "phase-5-compat-v1",
+                    ProcessorFingerprint = "suppressed-reason-projection-test",
+                    State = (int)RetainedProcessorBranchState.Blocked,
+                    LeaseGeneration = 1,
+                    AttemptCount = 1,
+                    CreatedAtUtc = now,
+                    UpdatedAtUtc = now
+                });
+            setup.SourceProcessorAttempts.AddRange(
+                new SourceProcessorAttemptEntity
+                {
+                    Id = Guid.NewGuid(),
+                    BranchId = currentBranchId,
+                    LeaseGeneration = 1,
+                    StartedAtUtc = now,
+                    FinishedAtUtc = now,
+                    OutcomeCode = "archive-member-not-utf8"
+                },
+                new SourceProcessorAttemptEntity
+                {
+                    Id = Guid.NewGuid(),
+                    BranchId = suppressedBranchId,
+                    LeaseGeneration = 1,
+                    StartedAtUtc = now,
+                    FinishedAtUtc = now,
+                    OutcomeCode = "office-document-part-unsupported"
+                });
+            await setup.SaveChangesAsync();
+        }
+
+        var reader = new SourceRootProjectionReader(
+            factory,
+            new NoPathPolicy(),
+            new NoEnumeration(),
+            new LocalSourceCapabilityHandlerRegistry([]));
+
+        var detail = await reader.ReadRootAsync(rootId, CancellationToken.None);
+
+        Assert.NotNull(detail);
+        Assert.Equal(1, detail.BlockedCount);
+        Assert.Contains(detail.DeferredOrBlockedReasons, value =>
+            value.State == "Blocked" && value.Reason == "archive-member-not-utf8" && value.Count == 1);
+        Assert.DoesNotContain(detail.DeferredOrBlockedReasons, value =>
+            value.Reason == "office-document-part-unsupported" || value.Reason == "historic-pdf-parser-unavailable");
+    }
+
     private static SourceRevisionEntity Revision(
         Guid id,
         Guid rootId,
