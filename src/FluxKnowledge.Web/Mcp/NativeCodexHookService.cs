@@ -1,22 +1,49 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using FluxKnowledge.Application.IntegrationV1;
 using FluxKnowledge.Application.Knowledge;
 using FluxKnowledge.Application.Ports;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace FluxKnowledge.Web.Mcp;
 
-public sealed record NativeCodexHookSpecificOutput(string HookEventName, string AdditionalContext);
+public sealed record NativeCodexHookSpecificOutput(
+    [property: JsonPropertyName("hookEventName")] string HookEventName,
+    [property: JsonPropertyName("additionalContext")] string AdditionalContext);
 
 /// <summary>Codex-compatible, fail-open response for local hook invocations.</summary>
-public sealed record NativeCodexHookResponse(
-    bool Continue,
-    NativeCodexHookSpecificOutput? HookSpecificOutput = null,
-    string? SystemMessage = null);
+public sealed record NativeCodexHookResponse
+{
+    public NativeCodexHookResponse(
+        bool Continue,
+        NativeCodexHookSpecificOutput? HookSpecificOutput = null,
+        string? SystemMessage = null)
+    {
+        this.Continue = Continue;
+        this.HookSpecificOutput = HookSpecificOutput;
+        this.SystemMessage = string.IsNullOrWhiteSpace(SystemMessage) ? null : SystemMessage;
+    }
+
+    [JsonPropertyName("continue")]
+    public bool Continue { get; }
+
+    [JsonPropertyName("hookSpecificOutput")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public NativeCodexHookSpecificOutput? HookSpecificOutput { get; }
+
+    [JsonPropertyName("systemMessage")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? SystemMessage { get; }
+}
 
 /// <summary>Maps the three supported Codex hooks onto the native v1 knowledge boundary.</summary>
-public sealed class NativeCodexHookService(INativeV1Facade facade, INativeOperationStore operationStore)
+public sealed class NativeCodexHookService(
+    INativeV1Facade facade,
+    INativeOperationStore operationStore,
+    ILogger<NativeCodexHookService>? logger = null)
 {
     private const int SearchLimit = 5;
     private const int MaximumSummaryCharacters = 8_000;
@@ -24,6 +51,7 @@ public sealed class NativeCodexHookService(INativeV1Facade facade, INativeOperat
     private const string ActorSurface = "codex-hook";
     private readonly INativeV1Facade _facade = facade ?? throw new ArgumentNullException(nameof(facade));
     private readonly INativeOperationStore _operationStore = operationStore ?? throw new ArgumentNullException(nameof(operationStore));
+    private readonly ILogger<NativeCodexHookService> _logger = logger ?? NullLogger<NativeCodexHookService>.Instance;
 
     public async ValueTask<NativeCodexHookResponse> HandleAsync(
         string? eventName,
@@ -78,26 +106,51 @@ public sealed class NativeCodexHookService(INativeV1Facade facade, INativeOperat
         var turnId = RequiredText(payload, "turn_id", 256);
         var summary = RequiredText(payload, "last_assistant_message", MaximumSummaryCharacters);
         var idempotencyKey = IdempotencyKey(sessionId, turnId);
-        if (await _operationStore.FindReceiptAsync(idempotencyKey, ActorSurface, cancellationToken).ConfigureAwait(false) is not null)
+        var phase = "receipt_lookup";
+        try
         {
+            if (await _operationStore.FindReceiptAsync(idempotencyKey, ActorSurface, cancellationToken).ConfigureAwait(false) is not null)
+            {
+                return new NativeCodexHookResponse(true);
+            }
+            var mutation = new KnowledgeMutation(
+                "note_create",
+                null,
+                CaptureTitle(sessionId, turnId),
+                summary,
+                null, null, null, null, null, null);
+            phase = "preview";
+            var preview = await _facade.PreviewAsync("knowledge", mutation, ActorSurface, cancellationToken).ConfigureAwait(false);
+            phase = "commit";
+            await _facade.CommitAsync(
+                "knowledge",
+                mutation,
+                preview.ConfirmationId,
+                idempotencyKey,
+                ActorSurface,
+                cancellationToken).ConfigureAwait(false);
             return new NativeCodexHookResponse(true);
         }
-        var mutation = new KnowledgeMutation(
-            "note_create",
-            null,
-            CaptureTitle(sessionId, turnId),
-            summary,
-            null, null, null, null, null, null);
-        var preview = await _facade.PreviewAsync("knowledge", mutation, ActorSurface, cancellationToken).ConfigureAwait(false);
-        await _facade.CommitAsync(
-            "knowledge",
-            mutation,
-            preview.ConfirmationId,
-            idempotencyKey,
-            ActorSurface,
-            cancellationToken).ConfigureAwait(false);
-        return new NativeCodexHookResponse(true);
+        catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+        {
+            _logger.LogWarning(
+                "Native Codex Stop persistence failed at {Phase} ({Classification}).",
+                phase,
+                FailureClassification(exception));
+            throw;
+        }
     }
+
+    private static string FailureClassification(Exception exception) => exception switch
+    {
+        NativeOperationCommitUncertainException => "commit-uncertain",
+        NativeOperationException { ReasonCode: "confirmation-mismatch" } => "confirmation-mismatch",
+        NativeOperationException { ReasonCode: "operation-fenced" } => "operation-fenced",
+        NativeOperationException { ReasonCode: "operation-conflict" } => "operation-conflict",
+        NativeOperationException => "native-operation",
+        TimeoutException => "timeout",
+        _ => "unexpected"
+    };
 
     private static string RequiredText(JsonElement payload, string propertyName, int maximumCharacters)
     {

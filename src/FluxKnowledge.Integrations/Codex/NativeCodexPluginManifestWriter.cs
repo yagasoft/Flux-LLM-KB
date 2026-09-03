@@ -281,10 +281,21 @@ param([Parameter(Mandatory = $true)][ValidateSet('UserPromptSubmit', 'PreCompact
 $payload = [Console]::In.ReadToEnd()
 try {
     $response = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:5137/native/v1/codex/hooks/$EventName" -ContentType 'application/json' -Body $payload -TimeoutSec 10
-    $response | ConvertTo-Json -Compress -Depth 8
+    $output = [ordered]@{ continue = if ($null -eq $response.continue) { $true } else { [bool]$response.continue } }
+    if ($EventName -eq 'UserPromptSubmit' -and $null -ne $response.hookSpecificOutput) {
+        $context = [string]$response.hookSpecificOutput.additionalContext
+        if (-not [string]::IsNullOrWhiteSpace($context)) {
+            $output.hookSpecificOutput = [ordered]@{ hookEventName = 'UserPromptSubmit'; additionalContext = $context }
+        }
+    }
+    $systemMessage = [string]$response.systemMessage
+    if (-not [string]::IsNullOrWhiteSpace($systemMessage)) {
+        $output.systemMessage = $systemMessage
+    }
+    $output | ConvertTo-Json -Compress -Depth 8
 }
 catch {
-    @{ continue = $true; systemMessage = 'Native Codex hook transport unavailable; continuing.' } | ConvertTo-Json -Compress
+    [ordered]@{ continue = $true; systemMessage = 'Native Codex hook transport unavailable; continuing.' } | ConvertTo-Json -Compress
 }
 """;
 

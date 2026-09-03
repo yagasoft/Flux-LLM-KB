@@ -5,6 +5,7 @@
     <ProjectReference Include="../../src/FluxKnowledge.Infrastructure.Inference/FluxKnowledge.Infrastructure.Inference.csproj" />
     <ProjectReference Include="../../src/FluxKnowledge.Integrations/FluxKnowledge.Integrations.csproj" />
     <ProjectReference Include="../../src/FluxKnowledge.Cli/FluxKnowledge.Cli.csproj" />
+    <ProjectReference Include="../../src/FluxKnowledge.Web/FluxKnowledge.Web.csproj" />
     <ProjectReference Include="../../src/FluxKnowledge.DeterministicWorker/FluxKnowledge.DeterministicWorker.csproj" ReferenceOutputAssembly="false" />
   </ItemGroup>
 

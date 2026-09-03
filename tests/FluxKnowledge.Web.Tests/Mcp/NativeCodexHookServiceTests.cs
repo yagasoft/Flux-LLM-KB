@@ -3,6 +3,7 @@ using FluxKnowledge.Application.IntegrationV1;
 using FluxKnowledge.Application.Knowledge;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Web.Mcp;
+using Microsoft.Extensions.Logging;
 using Xunit;
 
 namespace FluxKnowledge.Web.Tests.Mcp;
@@ -92,6 +93,29 @@ public sealed class NativeCodexHookServiceTests
         Assert.DoesNotContain("secret-content-sentinel", failed.SystemMessage, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task Stop_commit_failure_logs_only_its_safe_phase_and_classification()
+    {
+        var logger = new RecordingLogger();
+        var service = new NativeCodexHookService(new CommitFailingFacade(), new RecordingOperationStore(), logger);
+
+        var response = await service.HandleAsync(
+            "Stop",
+            Json("{\"session_id\":\"session-sensitive\",\"turn_id\":\"turn-sensitive\",\"last_assistant_message\":\"summary-sensitive\"}"),
+            CancellationToken.None);
+
+        Assert.True(response.Continue);
+        Assert.Equal("Native Codex hook could not access local knowledge; continuing.", response.SystemMessage);
+        var entry = Assert.Single(logger.Entries);
+        Assert.Equal(LogLevel.Warning, entry.Level);
+        Assert.Null(entry.Exception);
+        Assert.Contains("commit", entry.Message, StringComparison.Ordinal);
+        Assert.Contains("confirmation-mismatch", entry.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("session-sensitive", entry.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("turn-sensitive", entry.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("summary-sensitive", entry.Message, StringComparison.Ordinal);
+    }
+
     private static JsonElement Json(string value)
     {
         using var document = JsonDocument.Parse(value);
@@ -143,5 +167,33 @@ public sealed class NativeCodexHookServiceTests
         public ValueTask<NativeActionReceipt?> TryReplayAsync(string action, string canonicalPayload, string confirmationId, string idempotencyKey, string actorSurface, CancellationToken cancellationToken) => throw new NotSupportedException();
         public ValueTask<NativeActionPreview> CreatePreviewAsync(NativeActionPreviewRequest request, CancellationToken cancellationToken) => throw new NotSupportedException();
         public ValueTask<NativeActionReceipt> CommitAsync(NativeActionCommitRequest request, CancellationToken cancellationToken) => throw new NotSupportedException();
+    }
+
+    private sealed class CommitFailingFacade : INativeV1Facade
+    {
+        public ValueTask<object> ExecuteQueryAsync(string family, object request, CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+
+        public ValueTask<NativeActionPreview> PreviewAsync(string family, object command, string surface, CancellationToken cancellationToken) =>
+            ValueTask.FromResult(new NativeActionPreview(Guid.Empty, "confirmation", "fingerprint", DateTimeOffset.MaxValue, [], "saved"));
+
+        public ValueTask<NativeActionReceipt> CommitAsync(string family, object command, string confirmationId, string idempotencyKey, string surface, CancellationToken cancellationToken) =>
+            ValueTask.FromException<NativeActionReceipt>(new NativeOperationException("confirmation-mismatch"));
+    }
+
+    private sealed class RecordingLogger : ILogger<NativeCodexHookService>
+    {
+        public List<(LogLevel Level, string Message, Exception? Exception)> Entries { get; } = [];
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(
+            LogLevel logLevel,
+            EventId eventId,
+            TState state,
+            Exception? exception,
+            Func<TState, Exception?, string> formatter) =>
+            Entries.Add((logLevel, formatter(state, exception), exception));
     }
 }

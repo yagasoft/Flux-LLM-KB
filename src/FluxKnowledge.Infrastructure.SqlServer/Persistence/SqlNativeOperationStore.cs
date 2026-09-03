@@ -88,7 +88,22 @@ public sealed class SqlNativeOperationStore(
         cancellationToken.ThrowIfCancellationRequested();
         var prepared = PrepareCommit(request);
         var confirmationHash = NativeOperationCanonicalization.CreateConfirmationHash(request.ConfirmationId);
-        await using var context = await _contextFactory.CreateDbContextAsync(cancellationToken);
+        await using var strategyContext = await _contextFactory.CreateDbContextAsync(cancellationToken);
+        var strategy = strategyContext.Database.CreateExecutionStrategy();
+        return await strategy.ExecuteAsync(async () =>
+        {
+            await using var context = await _contextFactory.CreateDbContextAsync(cancellationToken);
+            return await CommitWithinTransactionAsync(context, request, prepared, confirmationHash, cancellationToken).ConfigureAwait(false);
+        }).ConfigureAwait(false);
+    }
+
+    private async Task<NativeActionReceipt> CommitWithinTransactionAsync(
+        FluxKnowledgeDbContext context,
+        NativeActionCommitRequest request,
+        PreparedCommit prepared,
+        string confirmationHash,
+        CancellationToken cancellationToken)
+    {
         await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
         await AcquireApplicationLockAsync(
             context,

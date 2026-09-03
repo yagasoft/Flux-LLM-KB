@@ -29,11 +29,38 @@ public sealed class NativeCodexHookEndpointTests
         using var response = await host.Client.PostAsJsonAsync(
             "/native/v1/codex/hooks/UserPromptSubmit",
             new { prompt = "Continue the native activation work using prior decisions." });
-        var envelope = await ReadAsync(response);
+        var body = await response.Content.ReadAsStringAsync();
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        Assert.True(envelope.GetProperty("continue").GetBoolean());
-        Assert.Equal("UserPromptSubmit", envelope.GetProperty("hookSpecificOutput").GetProperty("hookEventName").GetString());
+        Assert.Equal("{\"continue\":true,\"hookSpecificOutput\":{\"hookEventName\":\"UserPromptSubmit\",\"additionalContext\":\"Relevant local knowledge:\\n- Prior decision: Use the native loopback boundary.\"}}", body);
+    }
+
+    [Theory]
+    [InlineData("PreCompact", "{\"trigger\":\"manual\"}")]
+    [InlineData("Stop", "{\"session_id\":\"session-1\",\"turn_id\":\"turn-1\",\"last_assistant_message\":\"Captured local note.\"}")]
+    public async Task Loopback_hook_emits_a_Codex_compatible_success_envelope_without_unsupported_fields(string eventName, string payload)
+    {
+        await using var host = await StartAsync();
+        using var response = await host.Client.PostAsync(
+            $"/native/v1/codex/hooks/{eventName}",
+            new StringContent(payload, Encoding.UTF8, "application/json"));
+        var body = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("{\"continue\":true}", body);
+    }
+
+    [Fact]
+    public async Task Loopback_empty_UserPromptSubmit_context_emits_only_common_fields()
+    {
+        await using var host = await StartAsync([]);
+        using var response = await host.Client.PostAsJsonAsync(
+            "/native/v1/codex/hooks/UserPromptSubmit",
+            new { prompt = "Find no matching local knowledge." });
+        var body = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("{\"continue\":true}", body);
     }
 
     [Fact]
@@ -68,6 +95,19 @@ public sealed class NativeCodexHookEndpointTests
     }
 
     [Fact]
+    public async Task Invalid_Stop_preserves_its_non_empty_fail_open_system_message()
+    {
+        await using var host = await StartAsync();
+        using var response = await host.Client.PostAsync(
+            "/native/v1/codex/hooks/Stop",
+            new StringContent("{\"session_id\":\"session-1\"}", Encoding.UTF8, "application/json"));
+        var body = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("{\"continue\":true,\"systemMessage\":\"Native Codex hook ignored invalid input.\"}", body);
+    }
+
+    [Fact]
     public async Task Oversized_hook_body_returns_a_fail_open_Codex_envelope()
     {
         await using var host = await StartAsync();
@@ -88,11 +128,14 @@ public sealed class NativeCodexHookEndpointTests
         return document.RootElement.Clone();
     }
 
-    private static async Task<TestHost> StartAsync()
+    private static async Task<TestHost> StartAsync(IReadOnlyList<KnowledgeSearchResult>? knowledgeResults = null)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
-        builder.Services.AddSingleton<INativeV1Facade>(new Facade());
+        builder.Services.AddSingleton<INativeV1Facade>(new Facade(knowledgeResults ??
+        [
+            new KnowledgeSearchResult(Guid.Empty, "note", "Prior decision", "Use the native loopback boundary.", "knowledge")
+        ]));
         builder.Services.AddSingleton<INativeOperationStore>(new OperationStore());
         builder.Services.AddSingleton<NativeCodexHookService>();
         var app = builder.Build();
@@ -109,13 +152,10 @@ public sealed class NativeCodexHookEndpointTests
         return new TestHost(app, app.GetTestClient());
     }
 
-    private sealed class Facade : INativeV1Facade
+    private sealed class Facade(IReadOnlyList<KnowledgeSearchResult> knowledgeResults) : INativeV1Facade
     {
         public ValueTask<object> ExecuteQueryAsync(string family, object request, CancellationToken cancellationToken) =>
-            ValueTask.FromResult<object>(new List<KnowledgeSearchResult>
-            {
-                new(Guid.Empty, "note", "Prior decision", "Use the native loopback boundary.", "knowledge")
-            });
+            ValueTask.FromResult<object>(knowledgeResults);
 
         public ValueTask<NativeActionPreview> PreviewAsync(string family, object command, string surface, CancellationToken cancellationToken) =>
             ValueTask.FromResult(new NativeActionPreview(Guid.Empty, "confirmation", "fingerprint", DateTimeOffset.MaxValue, [], "saved"));

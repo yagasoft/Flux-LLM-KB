@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text.Json;
 using FluxKnowledge.Application.Operations;
 using FluxKnowledge.Integrations.Codex;
@@ -8,6 +9,109 @@ namespace FluxKnowledge.Integration.Tests.Codex;
 
 public sealed class NativeCodexPluginMarketplaceTests
 {
+    [Theory]
+    [InlineData(
+        "UserPromptSubmit",
+        "{\"continue\":true,\"hookSpecificOutput\":{\"hookEventName\":\"UserPromptSubmit\",\"additionalContext\":\"Prior local context\"},\"systemMessage\":null}",
+        "{\"continue\":true,\"hookSpecificOutput\":{\"hookEventName\":\"UserPromptSubmit\",\"additionalContext\":\"Prior local context\"}}")]
+    [InlineData(
+        "UserPromptSubmit",
+        "{\"continue\":true,\"hookSpecificOutput\":null,\"systemMessage\":null}",
+        "{\"continue\":true}")]
+    [InlineData(
+        "PreCompact",
+        "{\"continue\":true,\"hookSpecificOutput\":null,\"systemMessage\":null}",
+        "{\"continue\":true}")]
+    [InlineData(
+        "Stop",
+        "{\"continue\":true,\"hookSpecificOutput\":null,\"systemMessage\":null}",
+        "{\"continue\":true}")]
+    [InlineData(
+        "Stop",
+        "{\"continue\":true,\"hookSpecificOutput\":null,\"systemMessage\":\"Native Codex hook ignored invalid input.\"}",
+        "{\"continue\":true,\"systemMessage\":\"Native Codex hook ignored invalid input.\"}")]
+    public async Task Generated_native_hook_adapter_emits_only_Codex_supported_fields(
+        string eventName,
+        string loopbackResponse,
+        string expectedOutput)
+    {
+        var root = Path.Combine(Path.GetTempPath(), "FluxKnowledgeNativeHookAdapterTests", Guid.NewGuid().ToString("N"));
+        try
+        {
+            Directory.CreateDirectory(root);
+            var adapterPath = Path.Combine(root, "invoke-native-hook.ps1");
+            var wrapperPath = Path.Combine(root, "invoke-with-stubbed-loopback.ps1");
+            await File.WriteAllBytesAsync(adapterPath, NativeCodexPluginManifestWriter.RenderNativeHookAdapterUtf8());
+            await File.WriteAllTextAsync(wrapperPath, """
+param(
+    [Parameter(Mandatory = $true)][string]$AdapterPath,
+    [Parameter(Mandatory = $true)][string]$EventName
+)
+function Invoke-RestMethod {
+    param(
+        [string]$Method,
+        [string]$Uri,
+        [string]$ContentType,
+        [string]$Body,
+        [int]$TimeoutSec
+    )
+    return $env:FLUX_TEST_NATIVE_HOOK_RESPONSE | ConvertFrom-Json
+}
+& $AdapterPath $EventName
+""");
+
+            var result = await RunPowerShellAdapterAsync(wrapperPath, adapterPath, eventName, loopbackResponse);
+
+            Assert.Equal(0, result.ExitCode);
+            Assert.Equal(string.Empty, result.Error.Trim());
+            Assert.Equal(expectedOutput, result.Output.Trim());
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Generated_native_hook_adapter_preserves_the_fail_open_transport_response()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "FluxKnowledgeNativeHookAdapterTests", Guid.NewGuid().ToString("N"));
+        try
+        {
+            Directory.CreateDirectory(root);
+            var adapterPath = Path.Combine(root, "invoke-native-hook.ps1");
+            var wrapperPath = Path.Combine(root, "invoke-with-stubbed-loopback.ps1");
+            await File.WriteAllBytesAsync(adapterPath, NativeCodexPluginManifestWriter.RenderNativeHookAdapterUtf8());
+            await File.WriteAllTextAsync(wrapperPath, """
+param(
+    [Parameter(Mandatory = $true)][string]$AdapterPath,
+    [Parameter(Mandatory = $true)][string]$EventName
+)
+function Invoke-RestMethod {
+    param(
+        [string]$Method,
+        [string]$Uri,
+        [string]$ContentType,
+        [string]$Body,
+        [int]$TimeoutSec
+    )
+    throw 'test loopback transport failure'
+}
+& $AdapterPath $EventName
+""");
+
+            var result = await RunPowerShellAdapterAsync(wrapperPath, adapterPath, "Stop", "{}");
+
+            Assert.Equal(0, result.ExitCode);
+            Assert.Equal(string.Empty, result.Error.Trim());
+            Assert.Equal("{\"continue\":true,\"systemMessage\":\"Native Codex hook transport unavailable; continuing.\"}", result.Output.Trim());
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
     [Fact]
     public async Task Confirmed_clean_slate_removes_a_stale_exact_marketplace_before_reobserving_missing()
     {
@@ -34,6 +138,42 @@ public sealed class NativeCodexPluginMarketplaceTests
             if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
         }
     }
+
+    private static async Task<PowerShellResult> RunPowerShellAdapterAsync(
+        string wrapperPath,
+        string adapterPath,
+        string eventName,
+        string loopbackResponse)
+    {
+        using var process = new Process
+        {
+            StartInfo = new ProcessStartInfo
+            {
+                FileName = "pwsh",
+                UseShellExecute = false,
+                RedirectStandardInput = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true
+            }
+        };
+        process.StartInfo.ArgumentList.Add("-NoProfile");
+        process.StartInfo.ArgumentList.Add("-File");
+        process.StartInfo.ArgumentList.Add(wrapperPath);
+        process.StartInfo.ArgumentList.Add(adapterPath);
+        process.StartInfo.ArgumentList.Add(eventName);
+        process.StartInfo.Environment["FLUX_TEST_NATIVE_HOOK_RESPONSE"] = loopbackResponse;
+
+        process.Start();
+        await process.StandardInput.WriteAsync("{\"test\":true}");
+        process.StandardInput.Close();
+        var output = process.StandardOutput.ReadToEndAsync();
+        var error = process.StandardError.ReadToEndAsync();
+        await process.WaitForExitAsync();
+
+        return new PowerShellResult(process.ExitCode, await output, await error);
+    }
+
+    private sealed record PowerShellResult(int ExitCode, string Output, string Error);
 
     [Fact]
     public async Task Writer_creates_the_normalised_plugin_beneath_the_app_owned_marketplace_root()

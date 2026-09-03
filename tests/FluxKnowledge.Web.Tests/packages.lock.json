@@ -764,6 +764,7 @@
           "FluxKnowledge.Infrastructure.SqlServer": "[1.0.0, )",
           "FluxKnowledge.Infrastructure.Usearch": "[1.0.0, )",
           "FluxKnowledge.Integrations": "[1.0.0, )",
+          "FluxKnowledge.Web": "[1.0.0, )",
           "Microsoft.NET.Test.Sdk": "[18.8.1, )",
           "xunit": "[2.9.3, )"
         }
