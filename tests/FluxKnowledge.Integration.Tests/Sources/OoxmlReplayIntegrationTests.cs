@@ -85,6 +85,74 @@ public sealed class OoxmlReplayIntegrationTests(NativeSqlServerFixture fixture) 
     }
 
     [NativeSqlServerFact]
+    public async Task Explicit_activation_extracts_retained_docx_text_when_an_unselected_external_relationship_is_present_without_emitting_its_target()
+    {
+        var privateRoot = Path.Combine(Path.GetTempPath(), $"flux-ooxml-external-relationship-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(privateRoot);
+        try
+        {
+            const string structuralText = "external relationship structural text sentinel";
+            const string externalTarget = "https://external-target-not-followed.invalid/private-sentinel";
+            var bytes = CreateOfficePackage(".docx", structuralText, externalRelationshipTarget: externalTarget);
+            var hash = Convert.ToHexStringLower(SHA256.HashData(bytes));
+            var relativePath = Path.Combine("sha256", hash[..2], $"{hash}.bin");
+            Directory.CreateDirectory(Path.Combine(privateRoot, "sha256", hash[..2]));
+            await File.WriteAllBytesAsync(Path.Combine(privateRoot, relativePath), bytes);
+            var seeded = await SeedDeferredOoxmlAsync(hash, bytes.Length, relativePath, ".docx", "external-relationship");
+
+            var result = await CreateActivation(privateRoot, ooxmlEnabled: true).RunOnceAsync(CancellationToken.None);
+
+            Assert.Equal(1, result.CompletedBranches);
+            await using var verification = CreateContext();
+            var branch = await verification.SourceProcessorBranches.SingleAsync(value => value.SourceRevisionId == seeded.RevisionId);
+            var child = await verification.SourceRevisions.SingleAsync(value => value.ParentSourceRevisionId == seeded.RevisionId);
+            var artifact = await verification.SourceArtifacts.SingleAsync(value => value.SourceRevisionId == child.Id);
+            var extracted = await File.ReadAllTextAsync(Path.Combine(privateRoot, artifact.StoreRelativePath));
+            Assert.Equal((int)RetainedProcessorBranchState.Completed, branch.State);
+            Assert.Contains(structuralText, extracted, StringComparison.Ordinal);
+            Assert.DoesNotContain(externalTarget, extracted, StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (Directory.Exists(privateRoot)) Directory.Delete(privateRoot, recursive: true);
+        }
+    }
+
+    [NativeSqlServerFact]
+    public async Task Explicit_activation_extracts_retained_xlsx_text_with_a_package_contained_relative_custom_xml_relationship_without_indexing_custom_xml()
+    {
+        var privateRoot = Path.Combine(Path.GetTempPath(), $"flux-ooxml-relative-relationship-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(privateRoot);
+        try
+        {
+            const string structuralText = "relative relationship worksheet text sentinel";
+            const string customXmlText = "custom XML must not be indexed sentinel";
+            var bytes = CreateOfficePackage(".xlsx", structuralText, workbookCustomXmlRelationshipTarget: "../customXml/item1.xml", customXmlText: customXmlText);
+            var hash = Convert.ToHexStringLower(SHA256.HashData(bytes));
+            var relativePath = Path.Combine("sha256", hash[..2], $"{hash}.bin");
+            Directory.CreateDirectory(Path.Combine(privateRoot, "sha256", hash[..2]));
+            await File.WriteAllBytesAsync(Path.Combine(privateRoot, relativePath), bytes);
+            var seeded = await SeedDeferredOoxmlAsync(hash, bytes.Length, relativePath, ".xlsx", "relative-custom-xml");
+
+            var result = await CreateActivation(privateRoot, ooxmlEnabled: true).RunOnceAsync(CancellationToken.None);
+
+            Assert.Equal(1, result.CompletedBranches);
+            await using var verification = CreateContext();
+            var branch = await verification.SourceProcessorBranches.SingleAsync(value => value.SourceRevisionId == seeded.RevisionId);
+            var child = await verification.SourceRevisions.SingleAsync(value => value.ParentSourceRevisionId == seeded.RevisionId);
+            var artifact = await verification.SourceArtifacts.SingleAsync(value => value.SourceRevisionId == child.Id);
+            var extracted = await File.ReadAllTextAsync(Path.Combine(privateRoot, artifact.StoreRelativePath));
+            Assert.Equal((int)RetainedProcessorBranchState.Completed, branch.State);
+            Assert.Contains(structuralText, extracted, StringComparison.Ordinal);
+            Assert.DoesNotContain(customXmlText, extracted, StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (Directory.Exists(privateRoot)) Directory.Delete(privateRoot, recursive: true);
+        }
+    }
+
+    [NativeSqlServerFact]
     public async Task Activation_claims_and_completes_a_requested_ooxml_force_retry_without_an_ordinary_claim()
     {
         var privateRoot = Path.Combine(Path.GetTempPath(), $"flux-ooxml-force-{Guid.NewGuid():N}");
@@ -642,7 +710,12 @@ public sealed class OoxmlReplayIntegrationTests(NativeSqlServerFixture fixture) 
         return (activityId, revisionId);
     }
 
-    private static byte[] CreateOfficePackage(string extension, string text)
+    private static byte[] CreateOfficePackage(
+        string extension,
+        string text,
+        string? externalRelationshipTarget = null,
+        string? workbookCustomXmlRelationshipTarget = null,
+        string? customXmlText = null)
     {
         using var buffer = new MemoryStream();
         using (var archive = new ZipArchive(buffer, ZipArchiveMode.Create, true))
@@ -652,15 +725,22 @@ public sealed class OoxmlReplayIntegrationTests(NativeSqlServerFixture fixture) 
                 WriteEntry(archive, "[Content_Types].xml", "<Types><Override PartName='/word/document.xml' ContentType='application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml'/></Types>");
                 WriteEntry(archive, "_rels/.rels", "<Relationships><Relationship Id='rId1' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument' Target='word/document.xml'/></Relationships>");
                 WriteEntry(archive, "word/document.xml", $"<w:document xmlns:w='w'><w:body><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:body></w:document>");
+                if (externalRelationshipTarget is not null)
+                    WriteEntry(archive, "word/_rels/document.xml.rels", $"<Relationships><Relationship Id='rIdExternal' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink' Target='{externalRelationshipTarget}' TargetMode='External'/></Relationships>");
             }
             else if (extension == ".xlsx")
             {
                 WriteEntry(archive, "[Content_Types].xml", "<Types><Override PartName='/xl/workbook.xml' ContentType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml'/><Override PartName='/xl/sharedStrings.xml' ContentType='application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml'/><Override PartName='/xl/worksheets/sheet2.xml' ContentType='application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml'/></Types>");
                 WriteEntry(archive, "_rels/.rels", "<Relationships><Relationship Id='rId1' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument' Target='xl/workbook.xml'/></Relationships>");
                 WriteEntry(archive, "xl/workbook.xml", "<workbook xmlns:r='r'><sheets><sheet name='Second' r:id='rId2'/></sheets></workbook>");
-                WriteEntry(archive, "xl/_rels/workbook.xml.rels", "<Relationships><Relationship Id='rId2' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet' Target='worksheets/sheet2.xml'/><Relationship Id='rIdShared' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings' Target='sharedStrings.xml'/></Relationships>");
+                var customXmlRelationship = workbookCustomXmlRelationshipTarget is null
+                    ? string.Empty
+                    : $"<Relationship Id='rIdCustomXml' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/customXml' Target='{workbookCustomXmlRelationshipTarget}'/>";
+                WriteEntry(archive, "xl/_rels/workbook.xml.rels", $"<Relationships><Relationship Id='rId2' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet' Target='worksheets/sheet2.xml'/><Relationship Id='rIdShared' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings' Target='sharedStrings.xml'/>{customXmlRelationship}</Relationships>");
                 WriteEntry(archive, "xl/sharedStrings.xml", $"<sst><si><t>{text}</t></si></sst>");
                 WriteEntry(archive, "xl/worksheets/sheet2.xml", "<worksheet><sheetData><row><c t='s'><v>0</v></c><c><f>PRIVATE_FORMULA_SENTINEL</f><v>42</v></c></row></sheetData></worksheet>");
+                if (workbookCustomXmlRelationshipTarget is not null)
+                    WriteEntry(archive, "customXml/item1.xml", $"<custom>{customXmlText ?? "custom XML private sentinel"}</custom>");
             }
             else
             {

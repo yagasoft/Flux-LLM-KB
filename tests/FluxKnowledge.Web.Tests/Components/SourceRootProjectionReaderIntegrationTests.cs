@@ -101,7 +101,7 @@ public sealed class SourceRootProjectionReaderIntegrationTests(NativeSqlServerFi
             new NoEnumeration(),
             new LocalSourceCapabilityHandlerRegistry([]));
 
-        var list = Assert.Single(await reader.ReadRootsAsync(CancellationToken.None));
+        var list = Assert.Single(await reader.ReadRootsAsync(CancellationToken.None), value => value.Id == rootId);
         var detail = await reader.ReadRootAsync(rootId, CancellationToken.None);
 
         Assert.NotNull(detail);
@@ -187,6 +187,143 @@ public sealed class SourceRootProjectionReaderIntegrationTests(NativeSqlServerFi
         await using var verification = factory.CreateDbContext();
         Assert.Equal("Binary signature requires a capability that is not registered.",
             (await verification.SourceActivities.SingleAsync(value => value.Id == activityId)).Reason);
+    }
+
+    [NativeSqlServerFact]
+    public async Task Source_root_projection_counts_terminal_processor_owned_branches_once_and_projects_their_attempt_reasons()
+    {
+        var rootId = Guid.NewGuid();
+        var indexedRevisionId = Guid.NewGuid();
+        var deferredRevisionIds = Enumerable.Range(0, 9).Select(_ => Guid.NewGuid()).ToArray();
+        var blockedRevisionIds = Enumerable.Range(0, 3).Select(_ => Guid.NewGuid()).ToArray();
+        var recordId = Guid.NewGuid();
+        var now = DateTimeOffset.Parse("2026-09-03T22:00:00+00:00");
+        var expectedBlockedReasons = new[]
+        {
+            "office-document-part-unsupported",
+            "office-document-container-invalid",
+            "archive-compression-ratio-limit"
+        };
+        var factory = new TestDbContextFactory(_fixture.ConnectionString);
+        var pendingActivities = new List<SourceActivityEntity>();
+        await using (var setup = factory.CreateDbContext())
+        {
+            setup.SourceRootConfigurations.Add(new SourceRootConfigurationEntity
+            {
+                Id = rootId,
+                CanonicalPath = $"E:\\source-projection-processor-branch-tests\\{rootId:N}",
+                DisplayName = "Processor branch projection",
+                State = (int)SourceRootState.Enabled,
+                Recursive = true,
+                IncludePatternsJson = "[]",
+                ExcludePatternsJson = "[]",
+                AllowedClassificationsJson = "[\"text/plain\"]",
+                MaximumFileBytes = 16L * 1024 * 1024,
+                ReconciliationCadenceSeconds = 900,
+                ConfigurationRevision = 1,
+                CreatedAtUtc = now,
+                UpdatedAtUtc = now
+            });
+            setup.SourceRevisions.Add(Revision(indexedRevisionId, rootId, "indexed.txt", now, false));
+            setup.SourceRevisions.AddRange(deferredRevisionIds.Select((id, index) => Revision(id, rootId, $"deferred-{index:D2}.txt", now, false)));
+            setup.SourceRevisions.AddRange(blockedRevisionIds.Select((id, index) => Revision(id, rootId, $"blocked-{index:D2}.docx", now, false)));
+            var sourceIdentityId = Guid.NewGuid();
+            setup.SourceIdentities.Add(new SourceIdentityEntity
+            {
+                Id = sourceIdentityId,
+                SourceKind = "projection-processor-branch-test",
+                StableKey = $"projection-processor-branch:{recordId:N}",
+                CreatedAtUtc = now
+            });
+            setup.PipelineRecords.Add(new PipelineRecordEntity
+            {
+                Id = recordId,
+                SourceIdentityId = sourceIdentityId,
+                SourceRevisionId = indexedRevisionId,
+                Revision = 1,
+                ContentHash = new string('c', 64),
+                RootLineageRecordId = recordId,
+                CurrentStage = (int)PipelineStage.Publish,
+                CompletionCriteriaMet = true,
+                RegisteredAtUtc = now
+            });
+            setup.SourceActivities.Add(Activity(indexedRevisionId, SourceActivityState.Completed, recordId));
+            setup.SourceActivities.AddRange(deferredRevisionIds.Select(id => Activity(id, SourceActivityState.DeferredUnsupported)));
+            pendingActivities.AddRange(blockedRevisionIds.Select(id => Activity(id, SourceActivityState.Pending)));
+            setup.SourceActivities.AddRange(pendingActivities);
+            for (var index = 0; index < pendingActivities.Count; index++)
+            {
+                var branchId = Guid.NewGuid();
+                setup.SourceProcessorBranches.Add(new SourceProcessorBranchEntity
+                {
+                    Id = branchId,
+                    SourceActivityId = pendingActivities[index].Id,
+                    SourceRevisionId = blockedRevisionIds[index],
+                    InputSha256 = new string('c', 64),
+                    ProcessorVersion = "phase-5-compat-v1",
+                    ProcessorFingerprint = "projection-processor-branch-test",
+                    State = (int)RetainedProcessorBranchState.Blocked,
+                    LeaseGeneration = 1,
+                    AttemptCount = 1,
+                    CreatedAtUtc = now,
+                    UpdatedAtUtc = now
+                });
+                setup.SourceProcessorAttempts.Add(new SourceProcessorAttemptEntity
+                {
+                    Id = Guid.NewGuid(),
+                    BranchId = branchId,
+                    LeaseGeneration = 1,
+                    StartedAtUtc = now,
+                    FinishedAtUtc = now,
+                    OutcomeCode = expectedBlockedReasons[index]
+                });
+            }
+            setup.SourceScanRequests.Add(new SourceScanRequestEntity
+            {
+                Id = Guid.NewGuid(),
+                SourceRootId = rootId,
+                RequestKind = 0,
+                RequestedBy = "test",
+                RequestedAtUtc = now,
+                IsReleased = true,
+                ReleasedAtUtc = now,
+                State = (int)SourceScanRequestState.Completed,
+                DiscoveredFileCount = 13,
+                ErrorFileCount = 0
+            });
+            await setup.SaveChangesAsync();
+        }
+
+        var reader = new SourceRootProjectionReader(
+            factory,
+            new NoPathPolicy(),
+            new NoEnumeration(),
+            new LocalSourceCapabilityHandlerRegistry([]));
+
+        var list = Assert.Single(await reader.ReadRootsAsync(CancellationToken.None), value => value.Id == rootId);
+        var detail = await reader.ReadRootAsync(rootId, CancellationToken.None);
+
+        Assert.NotNull(detail);
+        Assert.Equal(1, list.IndexedCount);
+        Assert.Equal(9, list.DeferredCount);
+        Assert.Equal(3, list.BlockedCount);
+        Assert.Equal(0, list.ErrorCount);
+        Assert.Equal(13, detail.DiscoveredCount);
+        Assert.Equal(1, detail.IndexedCount);
+        Assert.Equal(9, detail.DeferredCount);
+        Assert.Equal(3, detail.BlockedCount);
+        Assert.Equal(0, detail.ErrorCount);
+        foreach (var reason in expectedBlockedReasons)
+        {
+            Assert.Contains(detail.DeferredOrBlockedReasons, value =>
+                value.State == "Blocked" && value.Reason == reason && value.Count == 1);
+        }
+
+        await using var verification = factory.CreateDbContext();
+        Assert.All(await verification.SourceActivities.Where(value => pendingActivities.Select(activity => activity.Id).Contains(value.Id)).ToArrayAsync(),
+            value => Assert.Equal((int)SourceActivityState.Pending, value.State));
+        Assert.All(await verification.SourceProcessorBranches.Where(value => blockedRevisionIds.Contains(value.SourceRevisionId)).ToArrayAsync(),
+            value => Assert.Equal((int)RetainedProcessorBranchState.Blocked, value.State));
     }
 
     private static SourceRevisionEntity Revision(

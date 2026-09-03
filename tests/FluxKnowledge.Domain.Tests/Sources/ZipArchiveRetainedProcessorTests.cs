@@ -208,6 +208,40 @@ public sealed class ZipArchiveRetainedProcessorTests
         Assert.InRange(writer.MaximumReadSize, 1, 128 * 1024);
     }
 
+    [Fact]
+    public async Task Office_style_zip_member_at_the_measured_169_to_1_limit_is_processed()
+    {
+        var content = "<PageContents><Text>" + new string('x', 12_065) + "</Text></PageContents>";
+        var archive = CreateZip("visio/pages/page1.xml", content);
+        Assert.Equal(169, CompressionRatio(archive, "visio/pages/page1.xml"));
+        var writer = new RecordingStreamWriter();
+        var hash = Convert.ToHexStringLower(SHA256.HashData(archive));
+        var claim = new RetainedProcessorClaim(Guid.NewGuid(), SourceRevisionId.New(), "parent", hash, "owner", 1, DateTimeOffset.UtcNow.AddMinutes(5));
+
+        var completion = await new ZipArchiveRetainedProcessor(writer).ProcessAsync(
+            claim, new RetainedSourceBytes(claim.SourceRevisionId, archive, hash, archive.Length), new RetainedProcessorOptions(), CancellationToken.None);
+
+        Assert.Single(completion.Members);
+        Assert.True(writer.BytesWritten > 0);
+    }
+
+    [Fact]
+    public async Task Office_style_zip_member_just_above_the_169_to_1_limit_is_rejected_before_any_member_is_written()
+    {
+        var content = "<PageContents><Text>" + new string('x', 12_288) + "</Text></PageContents>";
+        var archive = CreateZip("visio/pages/page1.xml", content);
+        Assert.Equal(172, CompressionRatio(archive, "visio/pages/page1.xml"));
+        var writer = new RecordingStreamWriter();
+        var hash = Convert.ToHexStringLower(SHA256.HashData(archive));
+        var claim = new RetainedProcessorClaim(Guid.NewGuid(), SourceRevisionId.New(), "parent", hash, "owner", 1, DateTimeOffset.UtcNow.AddMinutes(5));
+
+        var error = await Assert.ThrowsAsync<RetainedProcessorException>(() => new ZipArchiveRetainedProcessor(writer).ProcessAsync(
+            claim, new RetainedSourceBytes(claim.SourceRevisionId, archive, hash, archive.Length), new RetainedProcessorOptions(), CancellationToken.None).AsTask());
+
+        Assert.Equal("archive-compression-ratio-limit", error.OutcomeCode);
+        Assert.Equal(0, writer.BytesWritten);
+    }
+
     [Theory]
     [MemberData(nameof(RejectedZipCases))]
     public async Task Unsafe_zip_is_rejected_before_any_member_is_written(string expectedCode, byte[] archive, RetainedProcessorOptions options)
@@ -598,6 +632,13 @@ public sealed class ZipArchiveRetainedProcessorTests
         using (var archive = new ZipArchive(buffer, ZipArchiveMode.Create, leaveOpen: true))
         using (var writer = new StreamWriter(archive.CreateEntry(entryName).Open())) writer.Write(content);
         return buffer.ToArray();
+    }
+
+    private static int CompressionRatio(byte[] archive, string entryName)
+    {
+        using var package = new ZipArchive(new MemoryStream(archive, writable: false), ZipArchiveMode.Read);
+        var entry = Assert.Single(package.Entries, value => value.FullName == entryName);
+        return (int)Math.Ceiling((double)entry.Length / entry.CompressedLength);
     }
 
     private static byte[] CreateZip(string entryName, byte[] content)

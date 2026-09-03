@@ -22,7 +22,7 @@ public sealed class RetainedProcessorOptions
     public long MaximumExpandedBytes { get; init; } = 128L * 1024 * 1024;
     public long MaximumMemberBytes { get; init; } = 16L * 1024 * 1024;
     public int MaximumLogicalPathLength { get; init; } = 512;
-    public int MaximumCompressionRatio { get; init; } = 100;
+    public int MaximumCompressionRatio { get; init; } = 169;
 }
 
 /// <summary>Processes only checksum-verified retained ZIP bytes into content-addressed child artifacts.</summary>

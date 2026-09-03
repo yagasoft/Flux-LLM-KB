@@ -86,15 +86,49 @@ public sealed class SourceRootProjectionReader(
                     artifact == null ? null : artifact.ContentSha256,
                     artifact == null ? null : artifact.ByteLength,
                     artifact == null ? null : artifact.StoreRelativePath))
+                .ToListAsync(cancellationToken).ConfigureAwait(false);
+        var terminalBlockedBranches = await (
+                from branch in context.SourceProcessorBranches.AsNoTracking()
+                join revision in context.SourceRevisions.AsNoTracking() on branch.SourceRevisionId equals revision.Id
+                where revision.SourceRootId == rootId && branch.State == (int)RetainedProcessorBranchState.Blocked
+                select new TerminalProcessorBranchRow(branch.Id, branch.LeaseGeneration))
             .ToListAsync(cancellationToken).ConfigureAwait(false);
+        var terminalBlockedBranchIds = terminalBlockedBranches.Select(branch => branch.Id).ToArray();
+        var terminalAttempts = terminalBlockedBranchIds.Length == 0
+            ? []
+            : await context.SourceProcessorAttempts.AsNoTracking()
+                .Where(attempt => terminalBlockedBranchIds.Contains(attempt.BranchId))
+                .Select(attempt => new SourceProcessorAttemptRow(
+                    attempt.BranchId,
+                    attempt.LeaseGeneration,
+                    attempt.StartedAtUtc,
+                    attempt.FinishedAtUtc,
+                    attempt.OutcomeCode))
+                .ToListAsync(cancellationToken).ConfigureAwait(false);
+        var terminalBlockedReasons = terminalBlockedBranches
+            .Select(branch => new SourceActivityReasonProjection(
+                "Blocked",
+                terminalAttempts
+                    .Where(attempt => attempt.BranchId == branch.Id)
+                    .OrderByDescending(attempt => attempt.LeaseGeneration)
+                    .ThenByDescending(attempt => attempt.FinishedAtUtc)
+                    .ThenByDescending(attempt => attempt.StartedAtUtc)
+                    .Select(attempt => attempt.OutcomeCode)
+                    .FirstOrDefault(outcome => !string.IsNullOrWhiteSpace(outcome)) ?? "No reason recorded.",
+                1));
         var reasons = activities
             .Where(activity => activity.State == (int)SourceActivityState.DeferredUnsupported ||
                 activity.State == (int)SourceActivityState.DeferredPolicy ||
                 activity.State == (int)SourceActivityState.FailedTerminal)
+            .Select(activity => new SourceActivityReasonProjection(
+                ((SourceActivityState)activity.State).ToString(),
+                DisplayReason(activity),
+                1))
+            .Concat(terminalBlockedReasons)
             .GroupBy(activity => new
             {
-                State = ((SourceActivityState)activity.State).ToString(),
-                Reason = DisplayReason(activity)
+                activity.State,
+                activity.Reason
             })
             .OrderByDescending(group => group.Count()).ThenBy(group => group.Key.State).ThenBy(group => group.Key.Reason)
             .Take(20)
@@ -250,19 +284,40 @@ public sealed class SourceRootProjectionReader(
             from activity in context.SourceActivities.AsNoTracking()
             join revision in context.SourceRevisions.AsNoTracking() on activity.SourceRevisionId equals revision.Id
             where rootIds.Contains(revision.SourceRootId) && revision.SuppressedAtUtc == null
-            select new { revision.SourceRootId, activity.SourceRevisionId, activity.State, activity.ResultingPipelineRecordId })
+            join branch in context.SourceProcessorBranches.AsNoTracking() on activity.Id equals branch.SourceActivityId into branches
+            from branch in branches.DefaultIfEmpty()
+            select new SourceStateRow(
+                revision.SourceRootId,
+                activity.SourceRevisionId,
+                activity.State,
+                activity.ResultingPipelineRecordId,
+                branch == null ? null : branch.State))
             .ToListAsync(cancellationToken).ConfigureAwait(false);
         return rows.GroupBy(row => row.SourceRootId).ToDictionary(
             group => group.Key,
             group =>
             {
-                var revisions = group.GroupBy(row => row.SourceRevisionId).Select(revision => revision.ToArray()).ToArray();
+                var revisions = group.GroupBy(row => row.SourceRevisionId)
+                    .Select(revision => ClassifyRevision(revision.ToArray()))
+                    .ToArray();
                 return new SourceStateSummary(
-                    revisions.Count(revision => revision.Any(row => row.State == (int)SourceActivityState.Completed && row.ResultingPipelineRecordId != null)),
-                    revisions.Count(revision => revision.Any(row => row.State == (int)SourceActivityState.DeferredUnsupported && row.ResultingPipelineRecordId == null)),
-                    revisions.Count(revision => revision.Any(row => row.State == (int)SourceActivityState.DeferredPolicy)),
-                    revisions.Count(revision => revision.Any(row => row.State == (int)SourceActivityState.FailedTerminal)));
+                    revisions.Count(state => state == SourceRevisionProjectionState.Indexed),
+                    revisions.Count(state => state == SourceRevisionProjectionState.Deferred),
+                    revisions.Count(state => state == SourceRevisionProjectionState.Blocked),
+                    revisions.Count(state => state == SourceRevisionProjectionState.Error));
             });
+    }
+
+    private static SourceRevisionProjectionState ClassifyRevision(IReadOnlyCollection<SourceStateRow> rows)
+    {
+        if (rows.Any(row => row.State == (int)SourceActivityState.FailedTerminal)) return SourceRevisionProjectionState.Error;
+        if (rows.Any(row => row.ProcessorBranchState == (int)RetainedProcessorBranchState.Blocked ||
+                            row.State == (int)SourceActivityState.DeferredPolicy)) return SourceRevisionProjectionState.Blocked;
+        if (rows.Any(row => row.State == (int)SourceActivityState.DeferredUnsupported && row.ResultingPipelineRecordId is null))
+            return SourceRevisionProjectionState.Deferred;
+        if (rows.Any(row => row.State == (int)SourceActivityState.Completed && row.ResultingPipelineRecordId is not null))
+            return SourceRevisionProjectionState.Indexed;
+        return SourceRevisionProjectionState.Unresolved;
     }
 
     private static SourceRootCreateRequest ToCreateRequest(SourceRootDraft draft) =>
@@ -323,6 +378,31 @@ public sealed class SourceRootProjectionReader(
         string ProcessorFingerprint,
         string AcceptedClassificationsJson,
         string OutputContract);
+
+    private sealed record TerminalProcessorBranchRow(Guid Id, long LeaseGeneration);
+
+    private sealed record SourceProcessorAttemptRow(
+        Guid BranchId,
+        long LeaseGeneration,
+        DateTimeOffset StartedAtUtc,
+        DateTimeOffset? FinishedAtUtc,
+        string? OutcomeCode);
+
+    private sealed record SourceStateRow(
+        Guid SourceRootId,
+        Guid SourceRevisionId,
+        int State,
+        Guid? ResultingPipelineRecordId,
+        int? ProcessorBranchState);
+
+    private enum SourceRevisionProjectionState
+    {
+        Unresolved,
+        Indexed,
+        Deferred,
+        Blocked,
+        Error
+    }
 
     private sealed record SourceStateSummary(int Indexed, int Deferred, int Blocked, int Error)
     {

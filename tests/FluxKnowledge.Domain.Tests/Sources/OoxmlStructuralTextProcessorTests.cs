@@ -873,8 +873,62 @@ public sealed class OoxmlStructuralTextProcessorTests
         cases.Add("office-document-container-invalid", PatchWindowsReparsePoint(CreateWordPackageWithAdditionalXml("customXml/reparse.xml", "<x/>")));
         cases.Add("office-document-container-invalid", PatchCompressionMethod(CreateWordPackageWithAdditionalXml("customXml/compression.xml", "<x/>"), 99));
         cases.Add("office-document-container-invalid", PatchMultiVolumeEndRecord(CreateWordPackageWithAdditionalXml("customXml/multi.xml", "<x/>")));
-        cases.Add("office-document-part-unsupported", CreateWordPackageWithExternalRelationship());
+        cases.Add("office-document-container-invalid", CreateWordPackageWithExternalRootRelationship());
+        cases.Add("office-document-container-invalid", CreateWordPackageWithDuplicateExternalAndInternalRootRelationship());
+        cases.Add("office-document-container-invalid", CreateWorkbookWithDuplicateExternalAndInternalWorksheetRelationship());
+        cases.Add("office-document-container-invalid", CreatePresentationWithDuplicateExternalAndInternalSlideRelationship());
         return cases;
+    }
+
+    [Fact]
+    public async Task Workbook_relationship_that_escapes_the_package_root_is_rejected_before_any_child_write()
+    {
+        var archive = CreateWorkbookWithCustomXmlRelationship("../../customXml/item1.xml", includeCustomXmlPart: false);
+        var hash = Convert.ToHexStringLower(SHA256.HashData(archive));
+        var claim = new RetainedProcessorClaim(Guid.NewGuid(), SourceRevisionId.New(), "parent", hash, "owner", 1, DateTimeOffset.UtcNow.AddMinutes(5));
+        var writer = new RecordingWriter();
+
+        var error = await Assert.ThrowsAsync<RetainedProcessorException>(() => new OoxmlStructuralTextProcessor(writer).ProcessAsync(
+            claim, new RetainedSourceBytes(claim.SourceRevisionId, archive, hash, archive.Length), new RetainedProcessorOptions(), CancellationToken.None).AsTask());
+
+        Assert.Equal("office-document-container-invalid", error.OutcomeCode);
+        Assert.Equal(0, writer.BytesWritten);
+    }
+
+    [Fact]
+    public async Task Highly_compressed_structural_word_part_at_the_measured_169_to_1_limit_is_extracted()
+    {
+        var archive = CreateWordPackageWithCompressedStructuralText(27_349);
+        using var package = new ZipArchive(new MemoryStream(archive, writable: false), ZipArchiveMode.Read);
+        var document = Assert.Single(package.Entries, value => value.FullName == "word/document.xml");
+        Assert.InRange((int)Math.Ceiling((double)document.Length / document.CompressedLength), 101, 169);
+        var hash = Convert.ToHexStringLower(SHA256.HashData(archive));
+        var claim = new RetainedProcessorClaim(Guid.NewGuid(), SourceRevisionId.New(), "parent", hash, "owner", 1, DateTimeOffset.UtcNow.AddMinutes(5));
+        var writer = new RecordingWriter();
+
+        var completion = await new OoxmlStructuralTextProcessor(writer).ProcessAsync(
+            claim, new RetainedSourceBytes(claim.SourceRevisionId, archive, hash, archive.Length), new RetainedProcessorOptions(), CancellationToken.None);
+
+        Assert.Single(completion.Members);
+        Assert.Contains("compressed structural text", writer.Text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Highly_compressed_structural_word_part_above_the_169_to_1_limit_is_rejected_before_any_child_write()
+    {
+        var archive = CreateWordPackageWithCompressedStructuralText(64_000);
+        using var package = new ZipArchive(new MemoryStream(archive, writable: false), ZipArchiveMode.Read);
+        var document = Assert.Single(package.Entries, value => value.FullName == "word/document.xml");
+        Assert.True((int)Math.Ceiling((double)document.Length / document.CompressedLength) > 169);
+        var hash = Convert.ToHexStringLower(SHA256.HashData(archive));
+        var claim = new RetainedProcessorClaim(Guid.NewGuid(), SourceRevisionId.New(), "parent", hash, "owner", 1, DateTimeOffset.UtcNow.AddMinutes(5));
+        var writer = new RecordingWriter();
+
+        var error = await Assert.ThrowsAsync<RetainedProcessorException>(() => new OoxmlStructuralTextProcessor(writer).ProcessAsync(
+            claim, new RetainedSourceBytes(claim.SourceRevisionId, archive, hash, archive.Length), new RetainedProcessorOptions(), CancellationToken.None).AsTask());
+
+        Assert.Equal("office-document-expanded-xml-limit", error.OutcomeCode);
+        Assert.Equal(0, writer.BytesWritten);
     }
 
     [Fact]
@@ -1137,6 +1191,85 @@ public sealed class OoxmlStructuralTextProcessorTests
             WriteEntry(archive, "_rels/.rels", "<Relationships><Relationship Id='rId1' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument' Target='word/document.xml'/></Relationships>");
             WriteEntry(archive, "word/document.xml", "<w:document xmlns:w='w'><w:t>safe</w:t></w:document>");
             WriteEntry(archive, "word/_rels/document.xml.rels", "<Relationships><Relationship Id='rId2' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink' Target='https://example.invalid/' TargetMode='External'/></Relationships>");
+        }
+        return buffer.ToArray();
+    }
+
+    private static byte[] CreateWordPackageWithExternalRootRelationship()
+    {
+        using var buffer = new MemoryStream();
+        using (var archive = new ZipArchive(buffer, ZipArchiveMode.Create, true))
+        {
+            WriteEntry(archive, "[Content_Types].xml", "<Types><Override PartName='/word/document.xml' ContentType='application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml'/></Types>");
+            WriteEntry(archive, "_rels/.rels", "<Relationships><Relationship Id='rId1' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument' Target='https://external-target-not-followed.invalid/' TargetMode='External'/></Relationships>");
+            WriteEntry(archive, "word/document.xml", "<w:document xmlns:w='w'><w:t>safe</w:t></w:document>");
+        }
+        return buffer.ToArray();
+    }
+
+    private static byte[] CreateWordPackageWithDuplicateExternalAndInternalRootRelationship()
+    {
+        using var buffer = new MemoryStream();
+        using (var archive = new ZipArchive(buffer, ZipArchiveMode.Create, true))
+        {
+            WriteEntry(archive, "[Content_Types].xml", "<Types><Override PartName='/word/document.xml' ContentType='application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml'/></Types>");
+            WriteEntry(archive, "_rels/.rels", "<Relationships><Relationship Id='rIdMain' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument' Target='https://external-target-not-followed.invalid/' TargetMode='External'/><Relationship Id='rIdMain' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument' Target='word/document.xml'/></Relationships>");
+            WriteEntry(archive, "word/document.xml", "<w:document xmlns:w='w'><w:t>safe</w:t></w:document>");
+        }
+        return buffer.ToArray();
+    }
+
+    private static byte[] CreateWorkbookWithDuplicateExternalAndInternalWorksheetRelationship()
+    {
+        using var buffer = new MemoryStream();
+        using (var archive = new ZipArchive(buffer, ZipArchiveMode.Create, true))
+        {
+            WriteEntry(archive, "[Content_Types].xml", "<Types><Override PartName='/xl/workbook.xml' ContentType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml'/><Override PartName='/xl/worksheets/sheet1.xml' ContentType='application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml'/></Types>");
+            WriteEntry(archive, "_rels/.rels", "<Relationships><Relationship Id='rIdMain' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument' Target='xl/workbook.xml'/></Relationships>");
+            WriteEntry(archive, "xl/workbook.xml", "<workbook xmlns:r='r'><sheets><sheet r:id='rIdSheet'/></sheets></workbook>");
+            WriteEntry(archive, "xl/_rels/workbook.xml.rels", "<Relationships><Relationship Id='rIdSheet' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet' Target='https://external-target-not-followed.invalid/' TargetMode='External'/><Relationship Id='rIdSheet' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet' Target='worksheets/sheet1.xml'/></Relationships>");
+            WriteEntry(archive, "xl/worksheets/sheet1.xml", "<worksheet><sheetData><row><c><v>safe</v></c></row></sheetData></worksheet>");
+        }
+        return buffer.ToArray();
+    }
+
+    private static byte[] CreatePresentationWithDuplicateExternalAndInternalSlideRelationship()
+    {
+        using var buffer = new MemoryStream();
+        using (var archive = new ZipArchive(buffer, ZipArchiveMode.Create, true))
+        {
+            WriteEntry(archive, "[Content_Types].xml", "<Types><Override PartName='/ppt/presentation.xml' ContentType='application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml'/><Override PartName='/ppt/slides/slide1.xml' ContentType='application/vnd.openxmlformats-officedocument.presentationml.slide+xml'/></Types>");
+            WriteEntry(archive, "_rels/.rels", "<Relationships><Relationship Id='rIdMain' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument' Target='ppt/presentation.xml'/></Relationships>");
+            WriteEntry(archive, "ppt/presentation.xml", "<p:presentation xmlns:p='p' xmlns:r='r'><p:sldIdLst><p:sldId r:id='rIdSlide'/></p:sldIdLst></p:presentation>");
+            WriteEntry(archive, "ppt/_rels/presentation.xml.rels", "<Relationships><Relationship Id='rIdSlide' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide' Target='https://external-target-not-followed.invalid/' TargetMode='External'/><Relationship Id='rIdSlide' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide' Target='slides/slide1.xml'/></Relationships>");
+            WriteEntry(archive, "ppt/slides/slide1.xml", "<p:sld xmlns:p='p'><p:txBody><p:p><p:r><p:t>safe</p:t></p:r></p:p></p:txBody></p:sld>");
+        }
+        return buffer.ToArray();
+    }
+
+    private static byte[] CreateWorkbookWithCustomXmlRelationship(string target, bool includeCustomXmlPart)
+    {
+        using var buffer = new MemoryStream();
+        using (var archive = new ZipArchive(buffer, ZipArchiveMode.Create, true))
+        {
+            WriteEntry(archive, "[Content_Types].xml", "<Types><Override PartName='/xl/workbook.xml' ContentType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml'/><Override PartName='/xl/worksheets/sheet1.xml' ContentType='application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml'/></Types>");
+            WriteEntry(archive, "_rels/.rels", "<Relationships><Relationship Id='rId1' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument' Target='xl/workbook.xml'/></Relationships>");
+            WriteEntry(archive, "xl/workbook.xml", "<workbook xmlns:r='r'><sheets><sheet r:id='rId1'/></sheets></workbook>");
+            WriteEntry(archive, "xl/_rels/workbook.xml.rels", $"<Relationships><Relationship Id='rId1' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet' Target='worksheets/sheet1.xml'/><Relationship Id='rIdCustom' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/customXml' Target='{target}'/></Relationships>");
+            WriteEntry(archive, "xl/worksheets/sheet1.xml", "<worksheet><sheetData><row><c><v>safe</v></c></row></sheetData></worksheet>");
+            if (includeCustomXmlPart) WriteEntry(archive, "customXml/item1.xml", "<custom>private custom XML</custom>");
+        }
+        return buffer.ToArray();
+    }
+
+    private static byte[] CreateWordPackageWithCompressedStructuralText(int textLength)
+    {
+        using var buffer = new MemoryStream();
+        using (var archive = new ZipArchive(buffer, ZipArchiveMode.Create, true))
+        {
+            WriteEntry(archive, "[Content_Types].xml", "<Types><Override PartName='/word/document.xml' ContentType='application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml'/></Types>");
+            WriteEntry(archive, "_rels/.rels", "<Relationships><Relationship Id='rId1' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument' Target='word/document.xml'/></Relationships>");
+            WriteEntry(archive, "word/document.xml", $"<w:document xmlns:w='w'><w:body><w:p><w:r><w:t>compressed structural text {new string('x', textLength)}</w:t></w:r></w:p></w:body></w:document>");
         }
         return buffer.ToArray();
     }

@@ -10,6 +10,7 @@ namespace FluxKnowledge.Application.Sources;
 /// <summary>Processes only checksum-verified retained ustar/GNU TAR bytes into content-addressed child artifacts.</summary>
 public sealed class TarArchiveRetainedProcessor(IRetainedArtifactWriter artifactWriter) : ILocalSourceCapabilityHandler
 {
+    private const int MaximumTarCompressionRatio = 100;
     public static readonly SourceCapabilityDescriptor Capability = new(
         new Guid("3d8e4b4e-8d16-45c7-aa02-c4e546ba997d"),
         "archive-tar-expand",
@@ -201,7 +202,7 @@ public sealed class TarArchiveRetainedProcessor(IRetainedArtifactWriter artifact
         {
             throw new RetainedProcessorException("archive-member-size-limit");
         }
-        if (inputLength == 0 || entry.Length > checked((long)inputLength * options.MaximumCompressionRatio))
+        if (inputLength == 0 || entry.Length > checked((long)inputLength * Math.Min(options.MaximumCompressionRatio, MaximumTarCompressionRatio)))
         {
             throw new RetainedProcessorException("archive-compression-ratio-limit");
         }

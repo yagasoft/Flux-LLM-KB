@@ -24,7 +24,7 @@ public sealed class OoxmlStructuralTextProcessor(IRetainedArtifactWriter artifac
     private const int MaximumRelationships = 8_192;
     private const long MaximumSelectedPartBytes = 32L * 1024 * 1024;
     private const int MaximumPathLength = 512;
-    private const int MaximumCompressionRatio = 100;
+    private const int MaximumCompressionRatio = 169;
     private const string OfficeDocumentRelationshipType = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument";
     private const string WorksheetRelationshipType = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet";
     private const string SlideRelationshipType = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide";
@@ -761,6 +761,7 @@ public sealed class OoxmlStructuralTextProcessor(IRetainedArtifactWriter artifac
     private static Dictionary<string, RelationshipTarget> ReadRelationshipTargets(ZipArchiveEntry relationshipsEntry, string ownerPart, CancellationToken cancellationToken)
     {
         var targets = new Dictionary<string, RelationshipTarget>(StringComparer.Ordinal);
+        var relationshipIds = new HashSet<string>(StringComparer.Ordinal);
         using var relationships = CreateReader(relationshipsEntry.Open());
         while (relationships.Read())
         {
@@ -770,12 +771,14 @@ public sealed class OoxmlStructuralTextProcessor(IRetainedArtifactWriter artifac
                 throw new RetainedProcessorException("office-document-container-invalid");
             if (relationships.LocalName != "Relationship") continue;
             if (relationships.NamespaceURI != RelationshipsNamespace) throw new RetainedProcessorException("office-document-container-invalid");
-            if (string.Equals(relationships.GetAttribute("TargetMode"), "External", StringComparison.OrdinalIgnoreCase))
-                throw new RetainedProcessorException("office-document-part-unsupported");
             var id = relationships.GetAttribute("Id");
+            if (string.IsNullOrWhiteSpace(id) || !relationshipIds.Add(id))
+                throw new RetainedProcessorException("office-document-container-invalid");
+            if (string.Equals(relationships.GetAttribute("TargetMode"), "External", StringComparison.OrdinalIgnoreCase))
+                continue;
             var target = relationships.GetAttribute("Target");
             var type = relationships.GetAttribute("Type");
-            if (string.IsNullOrWhiteSpace(id) || string.IsNullOrWhiteSpace(target) || string.IsNullOrWhiteSpace(type) ||
+            if (string.IsNullOrWhiteSpace(target) || string.IsNullOrWhiteSpace(type) ||
                 !targets.TryAdd(id, new RelationshipTarget(ResolveRelationshipTarget(ownerPart, target), type)))
                 throw new RetainedProcessorException("office-document-container-invalid");
         }
@@ -831,8 +834,6 @@ public sealed class OoxmlStructuralTextProcessor(IRetainedArtifactWriter artifac
                 if (entry.FullName.EndsWith(".rels", StringComparison.OrdinalIgnoreCase) &&
                     string.Equals(reader.LocalName, "Relationship", StringComparison.Ordinal))
                 {
-                    if (string.Equals(reader.GetAttribute("TargetMode"), "External", StringComparison.OrdinalIgnoreCase))
-                        throw new RetainedProcessorException("office-document-part-unsupported");
                     budget.AddRelationship();
                 }
             }
@@ -888,10 +889,17 @@ public sealed class OoxmlStructuralTextProcessor(IRetainedArtifactWriter artifac
         var ownerSegments = string.IsNullOrEmpty(ownerPart) ? [] : ownerPart.Split('/').SkipLast(1).ToList();
         foreach (var segment in target.Split('/', StringSplitOptions.None))
         {
-            if (segment is "" or "." or "..") throw new RetainedProcessorException("office-document-container-invalid");
+            if (segment.Length == 0) throw new RetainedProcessorException("office-document-container-invalid");
+            if (segment == ".") continue;
+            if (segment == "..")
+            {
+                if (ownerSegments.Count == 0) throw new RetainedProcessorException("office-document-container-invalid");
+                ownerSegments.RemoveAt(ownerSegments.Count - 1);
+                continue;
+            }
             ownerSegments.Add(segment);
         }
-        return string.Join('/', ownerSegments);
+        return ValidatePath(string.Join('/', ownerSegments));
     }
 
     private static string ValidatePath(string path)
