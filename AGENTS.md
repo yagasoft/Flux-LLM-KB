@@ -6,6 +6,7 @@
 - Prefer PostgreSQL + pgvector as the primary persistence backend.
 - Use MCP, CLI, and REST as first-class integration surfaces.
 - Use tests for behavior changes and run focused verification before reporting completion.
+- For a routine deployment, use `scripts/deploy/update-native-iis-incremental.ps1`: review its `-PlanOnly` output, then use `-Apply` only with current user authority. Do not use the full clean-slate/native GoLive path, or actions that clean the installation, configure VSS, destroy/bootstrap SQL, register Codex, or remove a legacy plugin, unless the user explicitly names and authorises that full path in the current conversation. If an advanced deployment need is not covered by the incremental updater, explain the gap and request direction before using another deployment action.
 - Treat `docs/roadmap.md` and `docs/architecture.md` as durable project intent.
 - After each roadmap-significant session or turn, update `docs/roadmap.md`
   `Progress %` and `Remaining Work` entries for affected roadmap items before
