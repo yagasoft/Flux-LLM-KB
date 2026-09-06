@@ -26,7 +26,7 @@ public sealed class ZipArchiveRetainedProcessorTests
     {
         var descriptor = ZipArchiveRetainedProcessor.Capability;
 
-        Assert.Equal(new Guid("b4a06e5d-6f01-4f73-9722-79b6df4e85c3"), descriptor.Id);
+        Assert.Equal(new Guid("1f0fd4d6-00e4-4838-8e3c-ee1a482017dc"), descriptor.Id);
         Assert.Equal("archive-zip-expand", descriptor.ProcessorKind);
         Assert.Equal("phase-5-zip-v2", descriptor.ProcessorVersion);
         Assert.Equal("phase-5-zip-retained-archive-v2", descriptor.ProcessorFingerprint);

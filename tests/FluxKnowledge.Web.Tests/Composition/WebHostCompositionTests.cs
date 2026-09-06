@@ -682,7 +682,7 @@ public sealed class WebHostCompositionTests : IDisposable
         var localHandlers = provider.GetRequiredService<ILocalSourceCapabilityHandlerRegistry>();
         Assert.True(localHandlers.TryResolve(new Guid("9c56d5b2-c931-4c8b-ab66-fd0601e9c1df"), out var localHandler));
         Assert.Equal("pipeline:extract-utf8", localHandler.OutputContract);
-        Assert.True(localHandlers.TryResolve(new Guid("b4a06e5d-6f01-4f73-9722-79b6df4e85c3"), out var zipHandler));
+        Assert.True(localHandlers.TryResolve(new Guid("1f0fd4d6-00e4-4838-8e3c-ee1a482017dc"), out var zipHandler));
         Assert.Equal("retained:archive-zip-expand", zipHandler.OutputContract);
         Assert.True(localHandlers.TryResolve(new Guid("3d8e4b4e-8d16-45c7-aa02-c4e546ba997d"), out var tarHandler));
         Assert.Equal("retained:archive-tar-expand", tarHandler.OutputContract);

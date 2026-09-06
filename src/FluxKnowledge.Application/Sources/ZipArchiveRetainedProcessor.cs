@@ -41,7 +41,7 @@ public sealed class ZipArchiveRetainedProcessor(IRetainedArtifactWriter artifact
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);
 
     public static readonly SourceCapabilityDescriptor Capability = new(
-        new Guid("b4a06e5d-6f01-4f73-9722-79b6df4e85c3"),
+        new Guid("1f0fd4d6-00e4-4838-8e3c-ee1a482017dc"),
         "archive-zip-expand",
         "phase-5-zip-v2",
         ExecutionClass.InProcess,

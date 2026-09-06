@@ -149,6 +149,36 @@ public sealed class ZipArchiveReplayIntegrationTests(NativeSqlServerFixture fixt
     }
 
     [NativeSqlServerFact]
+    public async Task Archive_zip_v2_capability_registers_alongside_the_terminal_v1_capability()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"flux-zip-capability-successor-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            var factory = new ContextFactory(_fixture.ConnectionString);
+            var processor = new ZipArchiveRetainedProcessor(new SqlRetainedArtifactWriter(factory, root));
+            var capabilityService = new SourceCapabilityService(
+                new SqlSourceActivityStore(factory, TimeProvider.System),
+                new LocalSourceCapabilityHandlerRegistry([processor]));
+            var legacy = LegacyZipV1Capability();
+
+            await capabilityService.RegisterAsync(legacy, CancellationToken.None);
+
+            var result = await CreateActivation(root).RunOnceAsync(CancellationToken.None);
+
+            Assert.True(result.Enabled);
+            await using var verification = CreateContext();
+            Assert.Single(await verification.SourceCapabilities.Where(value => value.Id == legacy.Id).ToListAsync());
+            Assert.Single(await verification.SourceCapabilities
+                .Where(value => value.Id == ZipArchiveRetainedProcessor.Capability.Id).ToListAsync());
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [NativeSqlServerFact]
     public async Task Named_historical_not_utf8_v1_failure_creates_only_one_v2_successor_without_mutating_terminal_ownership()
     {
         var root = Path.Combine(Path.GetTempPath(), $"flux-zip-v1-member-reconcile-{Guid.NewGuid():N}");
@@ -864,7 +894,7 @@ public sealed class ZipArchiveReplayIntegrationTests(NativeSqlServerFixture fixt
     }
 
     private static SourceCapabilityDescriptor LegacyZipV1Capability() => new(
-        ZipArchiveRetainedProcessor.Capability.Id,
+        new Guid("b4a06e5d-6f01-4f73-9722-79b6df4e85c3"),
         ZipArchiveRetainedProcessor.Capability.ProcessorKind,
         "phase-5-zip-v1",
         ExecutionClass.InProcess,
