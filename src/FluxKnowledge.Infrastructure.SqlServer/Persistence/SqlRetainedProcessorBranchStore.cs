@@ -1814,6 +1814,13 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
             .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
         if (branch is null) return false;
         var parent = await context.SourceRevisions.SingleAsync(value => value.Id == branch.SourceRevisionId, cancellationToken).ConfigureAwait(false);
+        var memberOutcomes = completion.MemberOutcomes ?? [];
+        var memberFingerprints = new HashSet<string>(StringComparer.Ordinal);
+        if (completion.Members.Any(member => !memberFingerprints.Add(member.MemberFingerprint)) ||
+            memberOutcomes.Any(outcome => !memberFingerprints.Add(outcome.MemberFingerprint)))
+        {
+            throw new InvalidOperationException("A retained processor completion contains conflicting member dispositions.");
+        }
         foreach (var member in completion.Members)
         {
             var child = await context.SourceRevisions.SingleOrDefaultAsync(value =>
@@ -1847,11 +1854,43 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
                 context.SourceProcessorBranchMembers.Add(new SourceProcessorBranchMemberEntity { Id = Guid.NewGuid(), BranchId = branch.Id, MemberFingerprint = member.MemberFingerprint,
                     ChildSourceRevisionId = child.Id, ChildSourceActivityId = childActivity.Id, Disposition = "completed", ByteLength = member.ByteLength, CreatedAtUtc = now });
             }
+            else if (persistedMember.Disposition != "completed" || persistedMember.ChildSourceRevisionId != child.Id ||
+                     persistedMember.ChildSourceActivityId != childActivity.Id || persistedMember.ReasonCode is not null)
+            {
+                throw new InvalidOperationException("A retained processor member outcome conflicts with its durable disposition.");
+            }
+        }
+        foreach (var outcome in memberOutcomes)
+        {
+            if (outcome.Disposition is not ("skipped" or "deferred") || string.IsNullOrWhiteSpace(outcome.ReasonCode) || outcome.ByteLength < 0)
+            {
+                throw new InvalidOperationException("A retained processor completion contains an invalid non-emitted member disposition.");
+            }
+            var persistedMember = await context.SourceProcessorBranchMembers.SingleOrDefaultAsync(value =>
+                value.BranchId == branch.Id && value.MemberFingerprint == outcome.MemberFingerprint, cancellationToken).ConfigureAwait(false);
+            if (persistedMember is null)
+            {
+                context.SourceProcessorBranchMembers.Add(new SourceProcessorBranchMemberEntity
+                {
+                    Id = Guid.NewGuid(), BranchId = branch.Id, MemberFingerprint = outcome.MemberFingerprint,
+                    Disposition = outcome.Disposition, ReasonCode = outcome.ReasonCode, ByteLength = outcome.ByteLength, CreatedAtUtc = now
+                });
+            }
+            else if (!string.Equals(persistedMember.Disposition, outcome.Disposition, StringComparison.Ordinal) ||
+                     !string.Equals(persistedMember.ReasonCode, outcome.ReasonCode, StringComparison.Ordinal) ||
+                     persistedMember.ByteLength != outcome.ByteLength || persistedMember.ChildSourceRevisionId is not null ||
+                     persistedMember.ChildSourceActivityId is not null)
+            {
+                throw new InvalidOperationException("A retained processor member outcome conflicts with its durable disposition.");
+            }
         }
         await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
-        if (await context.SourceProcessorBranchMembers.CountAsync(value => value.BranchId == branch.Id &&
-                (value.Disposition != "completed" || value.ChildSourceRevisionId == null || value.ChildSourceActivityId == null), cancellationToken).ConfigureAwait(false) != 0 ||
-            await context.SourceProcessorBranchMembers.CountAsync(value => value.BranchId == branch.Id, cancellationToken).ConfigureAwait(false) != completion.Members.Count)
+        var persistedMembers = await context.SourceProcessorBranchMembers.Where(value => value.BranchId == branch.Id).ToArrayAsync(cancellationToken).ConfigureAwait(false);
+        if (persistedMembers.Length != completion.Members.Count + memberOutcomes.Count ||
+            persistedMembers.Any(member => member.Disposition == "completed"
+                ? member.ChildSourceRevisionId is null || member.ChildSourceActivityId is null || member.ReasonCode is not null
+                : member.Disposition is not ("skipped" or "deferred") || member.ChildSourceRevisionId is not null ||
+                    member.ChildSourceActivityId is not null || string.IsNullOrWhiteSpace(member.ReasonCode)))
         {
             throw new InvalidOperationException("A retained processor completion requires every member to have a child disposition.");
         }
@@ -2046,9 +2085,143 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
         }, cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Creates exactly one current ZIP successor for an explicitly selected historical v1
+    /// UTF-8 member failure. The original branch, attempt and source activity remain intact.
+    /// </summary>
+    public async ValueTask<ArchiveZipMemberEncodingFailureReconciliationResult> ReconcileArchiveZipMemberNotUtf8Async(
+        Guid branchId,
+        CancellationToken cancellationToken)
+    {
+        if (branchId == Guid.Empty)
+        {
+            return ArchiveZipMemberEncodingFailureReconciliationResult.NotEligible;
+        }
+
+        return await ExecuteWithRetryAsync(async () =>
+        {
+            await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+            await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken).ConfigureAwait(false);
+            var branch = await context.SourceProcessorBranches.FromSqlInterpolated($"""
+                SELECT * FROM [SourceProcessorBranches] WITH (UPDLOCK, HOLDLOCK)
+                WHERE [Id] = {branchId}
+                  AND [State] = {(int)RetainedProcessorBranchState.Blocked}
+                  AND [ProcessorVersion] = {"phase-5-zip-v1"}
+                  AND [ProcessorFingerprint] = {"phase-5-zip-retained-archive-v1"}
+                """).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+            if (branch is null)
+            {
+                return ArchiveZipMemberEncodingFailureReconciliationResult.NotEligible;
+            }
+
+            var predecessor = await context.SourceActivities.FromSqlInterpolated($"""
+                SELECT * FROM [SourceActivities] WITH (UPDLOCK, HOLDLOCK)
+                WHERE [Id] = {branch.SourceActivityId}
+                  AND [SourceRevisionId] = {branch.SourceRevisionId}
+                  AND [ActivityKind] = {(int)SourceActivityKind.ArchiveExpansion}
+                  AND [ExecutionClass] = {(int)ExecutionClass.InProcess}
+                  AND [ProcessorVersion] = {"phase-5-zip-v1"}
+                  AND [InputFingerprint] = {branch.InputSha256}
+                """).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+            if (predecessor is null ||
+                !await context.SourceProcessorAttempts.AnyAsync(value =>
+                    value.BranchId == branch.Id && value.LeaseGeneration == branch.LeaseGeneration &&
+                    value.FinishedAtUtc != null && value.OutcomeCode == "archive-member-not-utf8", cancellationToken).ConfigureAwait(false))
+            {
+                return ArchiveZipMemberEncodingFailureReconciliationResult.NotEligible;
+            }
+
+            const string reasonCode = "superseded-by-archive-zip-member-skip-v2";
+            var priorRelation = await context.SourceActivityRelations
+                .Where(value => value.PredecessorActivityId == predecessor.Id)
+                .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+            if (priorRelation is not null)
+            {
+                if (!string.Equals(priorRelation.RelationshipKind, "superseded-by-retained-processor", StringComparison.Ordinal) ||
+                    !string.Equals(priorRelation.ReasonCode, reasonCode, StringComparison.Ordinal))
+                {
+                    return ArchiveZipMemberEncodingFailureReconciliationResult.NotEligible;
+                }
+
+                var replay = await context.SourceProcessorBranches.SingleOrDefaultAsync(value =>
+                    value.SourceActivityId == priorRelation.SuccessorActivityId &&
+                    value.SourceRevisionId == branch.SourceRevisionId &&
+                    value.InputSha256 == branch.InputSha256 &&
+                    value.ProcessorVersion == ZipArchiveRetainedProcessor.Capability.ProcessorVersion &&
+                    value.ProcessorFingerprint == ZipArchiveRetainedProcessor.Capability.ProcessorFingerprint,
+                    cancellationToken).ConfigureAwait(false);
+                if (replay is null)
+                {
+                    return ArchiveZipMemberEncodingFailureReconciliationResult.NotEligible;
+                }
+
+                await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+                return new ArchiveZipMemberEncodingFailureReconciliationResult(false, true, replay.Id);
+            }
+
+            var revision = await context.SourceRevisions.FromSqlInterpolated($"""
+                SELECT * FROM [SourceRevisions] WITH (UPDLOCK, HOLDLOCK)
+                WHERE [Id] = {branch.SourceRevisionId}
+                  AND [ContentSha256] = {branch.InputSha256}
+                """).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+            if (revision is null)
+            {
+                return ArchiveZipMemberEncodingFailureReconciliationResult.NotEligible;
+            }
+
+            var now = await DatabaseUtcNowAsync(context, cancellationToken).ConfigureAwait(false);
+            var descriptor = ZipArchiveRetainedProcessor.Capability;
+            var successorActivity = new SourceActivityEntity
+            {
+                Id = Guid.NewGuid(),
+                SourceRevisionId = branch.SourceRevisionId,
+                ActivityKind = (int)descriptor.AcceptedActivityKind,
+                ExecutionClass = (int)ExecutionClass.InProcess,
+                ProcessorVersion = descriptor.ProcessorVersion,
+                InputFingerprint = branch.InputSha256,
+                DescriptorFingerprint = SourceActivityEntity.LegacyDescriptorFingerprint,
+                State = (int)SourceActivityState.Pending,
+                CreatedAtUtc = now,
+                UpdatedAtUtc = now
+            };
+            var successorBranch = new SourceProcessorBranchEntity
+            {
+                Id = Guid.NewGuid(),
+                SourceActivityId = successorActivity.Id,
+                SourceRevisionId = branch.SourceRevisionId,
+                InputSha256 = branch.InputSha256,
+                ProcessorVersion = descriptor.ProcessorVersion,
+                ProcessorFingerprint = descriptor.ProcessorFingerprint,
+                State = (int)RetainedProcessorBranchState.Pending,
+                CreatedAtUtc = now,
+                UpdatedAtUtc = now
+            };
+            context.SourceActivities.Add(successorActivity);
+            context.SourceProcessorBranches.Add(successorBranch);
+            context.SourceActivityRelations.Add(new SourceActivityRelationEntity
+            {
+                Id = Guid.NewGuid(),
+                PredecessorActivityId = predecessor.Id,
+                SuccessorActivityId = successorActivity.Id,
+                RelationshipKind = "superseded-by-retained-processor",
+                ReasonCode = reasonCode,
+                CreatedAtUtc = now
+            });
+            OperatorEventAppender.Add(context, new OperatorEventDraft(
+                "retained_processor.reconciled", "retained_processor", "information", "retained-processor",
+                now, SourceRootId: revision.SourceRootId, SourceRevisionId: revision.Id, SourceActivityId: successorActivity.Id,
+                CorrelationId: $"retained-processor:{successorBranch.Id:N}",
+                Details: new { kind = "archive_zip", reasonCode = "archive-member-not-utf8", predecessorBranchId = branch.Id, successorBranchId = successorBranch.Id }));
+            await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            return new ArchiveZipMemberEncodingFailureReconciliationResult(true, false, successorBranch.Id);
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
     private static string EventKind(string? processorFingerprint) => processorFingerprint switch
     {
         "phase-5-zip-retained-archive-v1" => "archive_zip",
+        "phase-5-zip-retained-archive-v2" => "archive_zip",
         "phase-5-tar-retained-archive-v1" => "archive_tar",
         "phase-5-ooxml-retained-structural-v1" => "document_ooxml",
         "phase-5-media-metadata-retained-v1" => "media_metadata",

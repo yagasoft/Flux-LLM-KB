@@ -22,6 +22,215 @@ public sealed class ZipArchiveReplayIntegrationTests(NativeSqlServerFixture fixt
     private readonly NativeSqlServerFixture _fixture = fixture;
 
     [NativeSqlServerFact]
+    public async Task Vsdx_style_zip_with_a_non_utf8_member_completes_and_offers_only_utf8_text_to_the_pipeline()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"flux-zip-vsdx-member-skip-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            var zip = CreateZipBytes(
+            [
+                ("visio/pages/page1.xml", "<PageContents><Text>indexed XML sentinel</Text></PageContents>"u8.ToArray()),
+                ("visio/media/image1.png", new byte[] { 0x89, 0x50, 0x4e, 0x47, 0xff, 0x00, 0x80 })
+            ]);
+            var hash = Convert.ToHexStringLower(SHA256.HashData(zip));
+            var relativePath = Path.Combine("sha256", hash[..2], $"{hash}.bin");
+            Directory.CreateDirectory(Path.Combine(root, "sha256", hash[..2]));
+            await File.WriteAllBytesAsync(Path.Combine(root, relativePath), zip);
+            var seeded = await SeedDeferredZipAsync(hash, zip.Length, relativePath, extension: ".vsdx");
+
+            var result = await CreateActivation(root).RunOnceAsync(CancellationToken.None);
+
+            Assert.Equal(1, result.CompletedBranches);
+            Assert.Equal(0, result.FailedBranches);
+            await using var verification = CreateContext();
+            var branch = await verification.SourceProcessorBranches.SingleAsync(value => value.SourceRevisionId == seeded.SourceRevisionId);
+            Assert.Equal((int)RetainedProcessorBranchState.Completed, branch.State);
+            Assert.Equal(1, branch.CompletedMemberCount);
+            var members = await verification.SourceProcessorBranchMembers
+                .Where(value => value.BranchId == branch.Id)
+                .OrderBy(value => value.Disposition)
+                .ToArrayAsync();
+            var completed = Assert.Single(members, value => value.Disposition == "completed");
+            var skipped = Assert.Single(members, value => value.Disposition == "skipped");
+            Assert.Equal("archive-member-not-utf8", skipped.ReasonCode);
+            Assert.Null(skipped.ChildSourceRevisionId);
+            Assert.Null(skipped.ChildSourceActivityId);
+
+            var child = await verification.SourceRevisions.SingleAsync(value => value.Id == completed.ChildSourceRevisionId);
+            Assert.Equal(seeded.SourceRevisionId, child.ParentSourceRevisionId);
+            Assert.Single(await verification.SourceArtifacts.Where(value => value.SourceRevisionId == child.Id).ToListAsync());
+            Assert.Single(await verification.SourceActivities.Where(value => value.SourceRevisionId == child.Id &&
+                value.ActivityKind == (int)SourceActivityKind.TextExtraction).ToListAsync());
+
+            var offered = await new SqlRetainedTextRegistrationStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System)
+                .OfferUnlinkedInProcessActivitiesAsync(CancellationToken.None);
+
+            Assert.True(offered >= 1);
+            var record = await verification.PipelineRecords.SingleAsync(value => value.SourceRevisionId == child.Id);
+            Assert.Equal(child.Id, record.SourceRevisionId);
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [NativeSqlServerFact]
+    public async Task Safe_zip_defers_a_recognised_member_without_an_archive_member_processor()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"flux-zip-member-defer-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            var zip = CreateZipBytes(
+            [
+                ("notes.txt", "permitted text sentinel"u8.ToArray()),
+                ("report.pdf", "%PDF-1.7\n% archive-member deferred sentinel"u8.ToArray())
+            ]);
+            var hash = Convert.ToHexStringLower(SHA256.HashData(zip));
+            var relativePath = Path.Combine("sha256", hash[..2], $"{hash}.bin");
+            Directory.CreateDirectory(Path.Combine(root, "sha256", hash[..2]));
+            await File.WriteAllBytesAsync(Path.Combine(root, relativePath), zip);
+            var seeded = await SeedDeferredZipAsync(hash, zip.Length, relativePath);
+
+            var result = await CreateActivation(root).RunOnceAsync(CancellationToken.None);
+
+            Assert.Equal(1, result.CompletedBranches);
+            await using var verification = CreateContext();
+            var branch = await verification.SourceProcessorBranches.SingleAsync(value => value.SourceRevisionId == seeded.SourceRevisionId);
+            var members = await verification.SourceProcessorBranchMembers.Where(value => value.BranchId == branch.Id).ToArrayAsync();
+            var deferred = Assert.Single(members, value => value.Disposition == "deferred");
+            Assert.Equal("pdf-parser-unavailable", deferred.ReasonCode);
+            Assert.Null(deferred.ChildSourceRevisionId);
+            Assert.Null(deferred.ChildSourceActivityId);
+            Assert.Single(await verification.SourceRevisions.Where(value => value.ParentSourceRevisionId == seeded.SourceRevisionId).ToListAsync());
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [NativeSqlServerFact]
+    public async Task Structurally_unsafe_zip_remains_blocked_without_emitting_safe_or_skipped_members()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"flux-zip-unsafe-member-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            var zip = CreateZipBytes(
+            [
+                ("safe.txt", "safe text sentinel"u8.ToArray()),
+                ("visio/media/image1.png", new byte[] { 0x89, 0x50, 0x4e, 0x47, 0xff, 0x00, 0x80 }),
+                ("../traversal.txt", "must reject the entire archive"u8.ToArray())
+            ]);
+            var hash = Convert.ToHexStringLower(SHA256.HashData(zip));
+            var relativePath = Path.Combine("sha256", hash[..2], $"{hash}.bin");
+            Directory.CreateDirectory(Path.Combine(root, "sha256", hash[..2]));
+            await File.WriteAllBytesAsync(Path.Combine(root, relativePath), zip);
+            var seeded = await SeedDeferredZipAsync(hash, zip.Length, relativePath);
+
+            var result = await CreateActivation(root).RunOnceAsync(CancellationToken.None);
+
+            Assert.Equal(1, result.FailedBranches);
+            await using var verification = CreateContext();
+            var branch = await verification.SourceProcessorBranches.SingleAsync(value => value.SourceRevisionId == seeded.SourceRevisionId);
+            Assert.Equal((int)RetainedProcessorBranchState.Blocked, branch.State);
+            var outcome = await verification.SourceProcessorBranchMembers.SingleAsync(value => value.BranchId == branch.Id);
+            Assert.Equal("blocked", outcome.Disposition);
+            Assert.Equal("archive-entry-path-invalid", outcome.ReasonCode);
+            Assert.Empty(await verification.SourceRevisions.Where(value => value.ParentSourceRevisionId == seeded.SourceRevisionId).ToListAsync());
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [NativeSqlServerFact]
+    public async Task Named_historical_not_utf8_v1_failure_creates_only_one_v2_successor_without_mutating_terminal_ownership()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"flux-zip-v1-member-reconcile-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            var zip = CreateZipBytes(
+            [
+                ("visio/pages/page1.xml", "<PageContents><Text>successor text sentinel</Text></PageContents>"u8.ToArray()),
+                ("visio/media/image1.png", new byte[] { 0x89, 0x50, 0x4e, 0x47, 0xff, 0x00, 0x80 })
+            ]);
+            var hash = Convert.ToHexStringLower(SHA256.HashData(zip));
+            var relativePath = Path.Combine("sha256", hash[..2], $"{hash}.bin");
+            Directory.CreateDirectory(Path.Combine(root, "sha256", hash[..2]));
+            await File.WriteAllBytesAsync(Path.Combine(root, relativePath), zip);
+            var selected = await SeedDeferredZipAsync(hash, zip.Length, relativePath, extension: ".vsdx");
+            var unrelated = await SeedDeferredZipAsync(hash, zip.Length, relativePath, extension: ".vsdx");
+            var legacyV1 = LegacyZipV1Capability();
+            var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System);
+
+            Assert.True(await store.PromoteAsync(
+                new RetainedProcessorPromotionCandidate(selected.LegacyActivityId, new SourceRevisionId(selected.SourceRevisionId), hash),
+                legacyV1,
+                CancellationToken.None));
+            var selectedClaim = Assert.Single(await store.ClaimAsync("historical-v1", 1, legacyV1.ProcessorFingerprint, CancellationToken.None));
+            Assert.True(await store.FailAsync(selectedClaim, new RetainedProcessorFailure("archive-member-not-utf8", []), CancellationToken.None));
+
+            Assert.True(await store.PromoteAsync(
+                new RetainedProcessorPromotionCandidate(unrelated.LegacyActivityId, new SourceRevisionId(unrelated.SourceRevisionId), hash),
+                legacyV1,
+                CancellationToken.None));
+            var unrelatedClaim = Assert.Single(await store.ClaimAsync("unrelated-v1", 1, legacyV1.ProcessorFingerprint, CancellationToken.None));
+            Assert.True(await store.FailAsync(unrelatedClaim, new RetainedProcessorFailure("archive-entry-path-invalid", []), CancellationToken.None));
+
+            var reconciliation = await store.ReconcileArchiveZipMemberNotUtf8Async(selectedClaim.BranchId, CancellationToken.None);
+
+            Assert.True(reconciliation.Created);
+            Assert.NotNull(reconciliation.SuccessorBranchId);
+            var replay = await store.ReconcileArchiveZipMemberNotUtf8Async(selectedClaim.BranchId, CancellationToken.None);
+            Assert.True(replay.WasReplay);
+            Assert.Equal(reconciliation.SuccessorBranchId, replay.SuccessorBranchId);
+            await using (var verification = CreateContext())
+            {
+                var oldBranch = await verification.SourceProcessorBranches.SingleAsync(value => value.Id == selectedClaim.BranchId);
+                Assert.Equal((int)RetainedProcessorBranchState.Blocked, oldBranch.State);
+                Assert.Equal(selectedClaim.LeaseGeneration, oldBranch.LeaseGeneration);
+                var oldAttempt = await verification.SourceProcessorAttempts.SingleAsync(value => value.BranchId == oldBranch.Id);
+                Assert.Equal("archive-member-not-utf8", oldAttempt.OutcomeCode);
+                var oldActivity = await verification.SourceActivities.SingleAsync(value => value.Id == oldBranch.SourceActivityId);
+                Assert.Equal((int)SourceActivityState.Pending, oldActivity.State);
+                Assert.Equal("phase-5-zip-v1", oldActivity.ProcessorVersion);
+
+                var successor = await verification.SourceProcessorBranches.SingleAsync(value => value.Id == reconciliation.SuccessorBranchId);
+                Assert.Equal((int)RetainedProcessorBranchState.Pending, successor.State);
+                Assert.Equal(ZipArchiveRetainedProcessor.Capability.ProcessorVersion, successor.ProcessorVersion);
+                Assert.Equal(ZipArchiveRetainedProcessor.Capability.ProcessorFingerprint, successor.ProcessorFingerprint);
+                Assert.Equal(selected.SourceRevisionId, successor.SourceRevisionId);
+                var relation = await verification.SourceActivityRelations.SingleAsync(value => value.SuccessorActivityId == successor.SourceActivityId);
+                Assert.Equal(oldBranch.SourceActivityId, relation.PredecessorActivityId);
+                Assert.Equal("superseded-by-archive-zip-member-skip-v2", relation.ReasonCode);
+
+                Assert.Single(await verification.SourceProcessorBranches.Where(value => value.SourceRevisionId == unrelated.SourceRevisionId).ToListAsync());
+                Assert.Equal((int)RetainedProcessorBranchState.Blocked,
+                    (await verification.SourceProcessorBranches.SingleAsync(value => value.Id == unrelatedClaim.BranchId)).State);
+            }
+
+            var result = await CreateActivation(root).RunOnceAsync(CancellationToken.None);
+
+            Assert.Equal(1, result.CompletedBranches);
+            await using var completed = CreateContext();
+            Assert.Equal((int)RetainedProcessorBranchState.Blocked,
+                (await completed.SourceProcessorBranches.SingleAsync(value => value.Id == selectedClaim.BranchId)).State);
+            Assert.Equal((int)RetainedProcessorBranchState.Completed,
+                (await completed.SourceProcessorBranches.SingleAsync(value => value.Id == reconciliation.SuccessorBranchId)).State);
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [NativeSqlServerFact]
     public async Task Retained_binary_reader_accepts_a_zip_sized_artifact_without_relaxing_the_utf8_text_ceiling()
     {
         var root = Path.Combine(Path.GetTempPath(), $"flux-zip-reader-limits-{Guid.NewGuid():N}");
@@ -601,7 +810,8 @@ public sealed class ZipArchiveReplayIntegrationTests(NativeSqlServerFixture fixt
         string hash,
         int byteLength,
         string relativePath,
-        string? outlookSpoolRoot = null)
+        string? outlookSpoolRoot = null,
+        string extension = ".zip")
     {
         var rootId = Guid.NewGuid(); var revisionId = Guid.NewGuid(); var activityId = Guid.NewGuid(); var now = DateTimeOffset.UtcNow;
         await using var context = CreateContext();
@@ -609,7 +819,7 @@ public sealed class ZipArchiveReplayIntegrationTests(NativeSqlServerFixture fixt
             Recursive = true, IncludePatternsJson = "[]", ExcludePatternsJson = "[]", FollowLinks = false, MaximumFileBytes = 64L * 1024 * 1024,
             AllowedClassificationsJson = "[]", CrawlMode = 0, ReconciliationCadenceSeconds = 900, ConfigurationRevision = 1, CreatedAtUtc = now, UpdatedAtUtc = now });
         context.SourceRevisions.Add(new SourceRevisionEntity { Id = revisionId, SourceRootId = rootId, StableSourceIdentity = $"zip-parent:{revisionId:N}", Revision = 1,
-            ContentSha256 = hash, CanonicalPath = "C:\\missing-source-original-sentinel.zip", Classification = "DeferredCapability", Extension = ".zip", ByteLength = byteLength, DiscoveredAtUtc = now, DiscoveryEvidenceJson = "{}" });
+            ContentSha256 = hash, CanonicalPath = $"C:\\missing-source-original-sentinel{extension}", Classification = "DeferredCapability", Extension = extension, ByteLength = byteLength, DiscoveredAtUtc = now, DiscoveryEvidenceJson = "{}" });
         context.SourceArtifacts.Add(new SourceArtifactEntity { Id = Guid.NewGuid(), SourceRevisionId = revisionId, ContentSha256 = hash, StoreRelativePath = relativePath, ByteLength = byteLength, ChecksumVerifiedAtUtc = now, ReferenceCount = 1 });
         context.SourceActivities.Add(new SourceActivityEntity { Id = activityId, SourceRevisionId = revisionId, ActivityKind = (int)SourceActivityKind.DocumentParsing,
             ExecutionClass = (int)ExecutionClass.DeferredCapability, ProcessorVersion = "phase-3a-v1", InputFingerprint = hash, RequiredCapability = "local-source-capability",
@@ -641,6 +851,27 @@ public sealed class ZipArchiveReplayIntegrationTests(NativeSqlServerFixture fixt
         }
         return buffer.ToArray();
     }
+
+    private static byte[] CreateZipBytes(IEnumerable<(string Name, byte[] Content)> entries)
+    {
+        using var buffer = new MemoryStream();
+        using (var archive = new ZipArchive(buffer, ZipArchiveMode.Create, leaveOpen: true))
+        {
+            foreach (var (name, content) in entries)
+            using (var stream = archive.CreateEntry(name).Open()) stream.Write(content);
+        }
+        return buffer.ToArray();
+    }
+
+    private static SourceCapabilityDescriptor LegacyZipV1Capability() => new(
+        ZipArchiveRetainedProcessor.Capability.Id,
+        ZipArchiveRetainedProcessor.Capability.ProcessorKind,
+        "phase-5-zip-v1",
+        ExecutionClass.InProcess,
+        "phase-5-zip-retained-archive-v1",
+        SourceActivityKind.ArchiveExpansion,
+        "ArchiveZip",
+        "retained:archive-zip-expand");
 
     private FluxKnowledgeDbContext CreateContext() => new(new DbContextOptionsBuilder<FluxKnowledgeDbContext>().UseSqlServer(_fixture.ConnectionString).Options);
     private sealed class ContextFactory(string connectionString, IInterceptor? interceptor = null) : IDbContextFactory<FluxKnowledgeDbContext>

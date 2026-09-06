@@ -1,4 +1,6 @@
 using FluxKnowledge.Application.Contracts;
+using FluxKnowledge.Application.Ports;
+using FluxKnowledge.Application.Sources;
 using FluxKnowledge.Domain.Sources;
 using FluxKnowledge.Web.Components.OperatorActions;
 using Microsoft.AspNetCore.Antiforgery;
@@ -24,7 +26,43 @@ public static class OperatorActionEndpoints
                     OperatorActionService service, CancellationToken cancellationToken) =>
                     MutateAsync(actionId, routeAction, request, context, antiforgery, originPolicy, service, cancellationToken));
         }
+        endpoints.MapPost("/api/operator-actions/archive-zip-member-not-utf8/{branchId:guid}/reconcile",
+            ReconcileArchiveZipMemberNotUtf8Async);
         return endpoints;
+    }
+
+    private static async Task<IResult> ReconcileArchiveZipMemberNotUtf8Async(
+        Guid branchId,
+        HttpContext context,
+        IAntiforgery antiforgery,
+        LocalOperatorOriginPolicy originPolicy,
+        RetainedProcessorOptions options,
+        IRetainedProcessorBranchStore branchStore,
+        IStatusEventPublisher statusEvents,
+        CancellationToken cancellationToken)
+    {
+        if (!LocalOperatorLoopbackGate.IsDirectLoopback(context) || !HasSameOrigin(context.Request, originPolicy))
+            return Results.Json(new { reasonCode = "operator-authority-denied" }, statusCode: StatusCodes.Status403Forbidden);
+        try { await antiforgery.ValidateRequestAsync(context).ConfigureAwait(false); }
+        catch (AntiforgeryValidationException)
+        {
+            return Results.Json(new { reasonCode = "operator-authority-denied" }, statusCode: StatusCodes.Status403Forbidden);
+        }
+
+        if (!options.ArchiveZipExpandEnabled)
+            return Results.Json(new { reasonCode = "archive-zip-descriptor-disabled" }, statusCode: StatusCodes.Status503ServiceUnavailable);
+
+        var result = await branchStore.ReconcileArchiveZipMemberNotUtf8Async(branchId, cancellationToken).ConfigureAwait(false);
+        if (!result.Accepted)
+            return Results.Json(new { reasonCode = "archive-zip-reconciliation-not-eligible" }, statusCode: StatusCodes.Status409Conflict);
+        if (result.Created)
+        {
+            await statusEvents.PublishAsync(new StatusChanged(null, "sources", DateTimeOffset.UtcNow), cancellationToken).ConfigureAwait(false);
+        }
+
+        return result.WasReplay
+            ? Results.Ok(result)
+            : Results.Created($"/api/operator-actions/archive-zip-member-not-utf8/{branchId:D}/reconcile", result);
     }
 
     private static async Task<IResult> ListAsync(

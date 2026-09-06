@@ -28,12 +28,24 @@ public sealed class RetainedProcessorOptions
 /// <summary>Processes only checksum-verified retained ZIP bytes into content-addressed child artifacts.</summary>
 public sealed class ZipArchiveRetainedProcessor(IRetainedArtifactWriter artifactWriter) : ILocalSourceCapabilityHandler
 {
+    private static readonly HashSet<string> TextExtensions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".txt", ".md", ".markdown", ".log", ".csv", ".tsv", ".json", ".xml", ".yaml", ".yml"
+    };
+
+    private static readonly HashSet<string> CodeExtensions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".cs", ".csproj", ".fs", ".vb", ".py", ".js", ".ts", ".tsx", ".jsx", ".java", ".c", ".h", ".cpp", ".go", ".rs", ".php", ".rb", ".sh", ".ps1", ".sql"
+    };
+
+    private static readonly UTF8Encoding StrictUtf8 = new(false, true);
+
     public static readonly SourceCapabilityDescriptor Capability = new(
         new Guid("b4a06e5d-6f01-4f73-9722-79b6df4e85c3"),
         "archive-zip-expand",
-        "phase-5-zip-v1",
+        "phase-5-zip-v2",
         ExecutionClass.InProcess,
-        "phase-5-zip-retained-archive-v1",
+        "phase-5-zip-retained-archive-v2",
         SourceActivityKind.ArchiveExpansion,
         "ArchiveZip",
         "retained:archive-zip-expand");
@@ -71,7 +83,7 @@ public sealed class ZipArchiveRetainedProcessor(IRetainedArtifactWriter artifact
             }
 
             long expandedTotal = 0;
-            var preparedMembers = new List<(ZipArchiveEntry Entry, ArchiveMemberIdentity Identity)>();
+            var preparedMembers = new List<(ZipArchiveEntry Entry, ArchiveMemberIdentity Identity, string Path)>();
             var fingerprints = new HashSet<string>(StringComparer.Ordinal);
             var blockedMembers = new List<RetainedProcessorMemberOutcome>();
             if (centralEntries.Count != archive.Entries.Count)
@@ -97,7 +109,7 @@ public sealed class ZipArchiveRetainedProcessor(IRetainedArtifactWriter artifact
                     {
                         throw new RetainedProcessorException("nested-archive-depth-limit");
                     }
-                    preparedMembers.Add((entry, identity));
+                    preparedMembers.Add((entry, identity, path));
                 }
                 catch (RetainedProcessorException exception)
                 {
@@ -112,9 +124,21 @@ public sealed class ZipArchiveRetainedProcessor(IRetainedArtifactWriter artifact
             }
 
             var members = new List<RetainedProcessorDerivedChild>();
-            foreach (var (entry, identity) in preparedMembers)
+            var memberOutcomes = new List<RetainedProcessorMemberOutcome>();
+            foreach (var (entry, identity, path) in preparedMembers)
             {
                 cancellationToken.ThrowIfCancellationRequested();
+                var classification = await ClassifyMemberAsync(entry, path, cancellationToken).ConfigureAwait(false);
+                if (classification.Disposition != ArchiveMemberDisposition.Extract)
+                {
+                    memberOutcomes.Add(new RetainedProcessorMemberOutcome(
+                        identity.MemberFingerprint,
+                        entry.Length,
+                        classification.Disposition == ArchiveMemberDisposition.Defer ? "deferred" : "skipped",
+                        classification.ReasonCode));
+                    continue;
+                }
+
                 await using var memberStream = entry.Open();
                 var receipt = await artifactWriter.WriteAsync(
                     claim.SourceRevisionId,
@@ -137,9 +161,10 @@ public sealed class ZipArchiveRetainedProcessor(IRetainedArtifactWriter artifact
                     receipt.ByteLength, "AcceptedUtf8Text"));
             }
             var receiptFingerprint = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(
-                string.Join("|", members.OrderBy(member => member.MemberFingerprint, StringComparer.Ordinal)
-                    .Select(member => $"{member.MemberFingerprint}:{member.ContentSha256}:{member.ByteLength}")))));
-            return new RetainedProcessorCompletion(members, receiptFingerprint);
+                string.Join("|", members.Select(member => $"completed:{member.MemberFingerprint}:{member.ContentSha256}:{member.ByteLength}")
+                    .Concat(memberOutcomes.Select(member => $"{member.Disposition}:{member.MemberFingerprint}:{member.ByteLength}:{member.ReasonCode}"))
+                    .OrderBy(value => value, StringComparer.Ordinal)))));
+            return new RetainedProcessorCompletion(members, receiptFingerprint, memberOutcomes);
         }
         catch (InvalidDataException exception)
         {
@@ -350,6 +375,63 @@ public sealed class ZipArchiveRetainedProcessor(IRetainedArtifactWriter artifact
         return prefix[..offset];
     }
 
+    private static async ValueTask<ArchiveMemberClassification> ClassifyMemberAsync(
+        ZipArchiveEntry entry,
+        string path,
+        CancellationToken cancellationToken)
+    {
+        var decoder = StrictUtf8.GetDecoder();
+        var buffer = new byte[128 * 1024];
+        var chars = new char[StrictUtf8.GetMaxCharCount(buffer.Length)];
+        var prefix = new List<byte>(8);
+        var hasBinaryControl = false;
+        try
+        {
+            await using var stream = entry.Open();
+            int read;
+            while ((read = await stream.ReadAsync(buffer, cancellationToken).ConfigureAwait(false)) != 0)
+            {
+                var content = buffer.AsSpan(0, read);
+                foreach (var value in content)
+                {
+                    if (prefix.Count < 8)
+                    {
+                        prefix.Add(value);
+                    }
+                    if (value == 0 || value is < 0x08 or > 0x0d and < 0x20)
+                    {
+                        hasBinaryControl = true;
+                    }
+                }
+                decoder.Convert(content, chars, flush: false, out _, out _, out _);
+            }
+            decoder.Convert(ReadOnlySpan<byte>.Empty, chars, flush: true, out _, out _, out _);
+        }
+        catch (DecoderFallbackException)
+        {
+            return new ArchiveMemberClassification(ArchiveMemberDisposition.Skip, "archive-member-not-utf8");
+        }
+
+        var extension = Path.GetExtension(path);
+        if (extension.Equals(".pdf", StringComparison.OrdinalIgnoreCase) && prefix.ToArray().AsSpan().StartsWith("%PDF-"u8))
+        {
+            return new ArchiveMemberClassification(ArchiveMemberDisposition.Defer, "pdf-parser-unavailable");
+        }
+        if (hasBinaryControl)
+        {
+            return new ArchiveMemberClassification(ArchiveMemberDisposition.Skip, "archive-member-nontext");
+        }
+        if (TextExtensions.Contains(extension))
+        {
+            return new ArchiveMemberClassification(ArchiveMemberDisposition.Extract, "");
+        }
+        if (CodeExtensions.Contains(extension))
+        {
+            return new ArchiveMemberClassification(ArchiveMemberDisposition.Defer, "archive-member-processor-unavailable");
+        }
+        return new ArchiveMemberClassification(ArchiveMemberDisposition.Skip, "archive-member-unsupported");
+    }
+
     private static string ComputeUnsafeMemberFingerprint(string parentStableIdentity, int centralDirectoryOrdinal, string rawEntryName) =>
         Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(
             $"archive-member-outcome:{parentStableIdentity.Length}:{parentStableIdentity}:{centralDirectoryOrdinal}:{rawEntryName.Length}:{rawEntryName}")));
@@ -364,6 +446,15 @@ public sealed class ZipArchiveRetainedProcessor(IRetainedArtifactWriter artifact
         uint LocalHeaderOffset,
         bool IsSymbolicLink,
         bool IsWindowsReparsePoint);
+
+    private enum ArchiveMemberDisposition
+    {
+        Extract,
+        Defer,
+        Skip
+    }
+
+    private sealed record ArchiveMemberClassification(ArchiveMemberDisposition Disposition, string ReasonCode);
 }
 
 /// <summary>Publishes the ZIP processor descriptor without resolving its scoped retained-artifact writer.</summary>

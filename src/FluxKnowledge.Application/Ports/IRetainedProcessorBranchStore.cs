@@ -128,6 +128,15 @@ public interface IRetainedProcessorBranchStore
         RetainedProcessorClaim claim,
         RetainedProcessorFailure failure,
         CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Creates a v2 ZIP successor for one explicitly named v1 terminal branch whose only
+    /// fixed condition is an invalid UTF-8 member. The terminal branch is immutable.
+    /// </summary>
+    ValueTask<ArchiveZipMemberEncodingFailureReconciliationResult> ReconcileArchiveZipMemberNotUtf8Async(
+        Guid branchId,
+        CancellationToken cancellationToken) =>
+        ValueTask.FromResult(ArchiveZipMemberEncodingFailureReconciliationResult.NotEligible);
 }
 
 public sealed record RetainedProcessorPromotionCandidate(
@@ -172,7 +181,8 @@ public sealed record RetainedProcessorMember(
 
 public sealed record RetainedProcessorCompletion(
     IReadOnlyList<RetainedProcessorDerivedChild> Members,
-    string ReceiptFingerprint);
+    string ReceiptFingerprint,
+    IReadOnlyList<RetainedProcessorMemberOutcome>? MemberOutcomes = null);
 
 public sealed record RetainedProcessorMemberOutcome(
     string MemberFingerprint,
@@ -183,6 +193,16 @@ public sealed record RetainedProcessorMemberOutcome(
 public sealed record RetainedProcessorFailure(
     string OutcomeCode,
     IReadOnlyList<RetainedProcessorMemberOutcome> MemberOutcomes);
+
+public sealed record ArchiveZipMemberEncodingFailureReconciliationResult(
+    bool Created,
+    bool WasReplay,
+    Guid? SuccessorBranchId)
+{
+    public bool Accepted => Created || WasReplay;
+
+    public static ArchiveZipMemberEncodingFailureReconciliationResult NotEligible { get; } = new(false, false, null);
+}
 
 public sealed record RetainedCsharpCodeCompletionWriteResult(
     bool IsCommitted,

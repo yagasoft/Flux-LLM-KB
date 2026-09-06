@@ -28,8 +28,8 @@ public sealed class ZipArchiveRetainedProcessorTests
 
         Assert.Equal(new Guid("b4a06e5d-6f01-4f73-9722-79b6df4e85c3"), descriptor.Id);
         Assert.Equal("archive-zip-expand", descriptor.ProcessorKind);
-        Assert.Equal("phase-5-zip-v1", descriptor.ProcessorVersion);
-        Assert.Equal("phase-5-zip-retained-archive-v1", descriptor.ProcessorFingerprint);
+        Assert.Equal("phase-5-zip-v2", descriptor.ProcessorVersion);
+        Assert.Equal("phase-5-zip-retained-archive-v2", descriptor.ProcessorFingerprint);
         Assert.Equal("ArchiveZip", descriptor.AcceptedClassification);
         Assert.Equal("retained:archive-zip-expand", descriptor.OutputContract);
     }

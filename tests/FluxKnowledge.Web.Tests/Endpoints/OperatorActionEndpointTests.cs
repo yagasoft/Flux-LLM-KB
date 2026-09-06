@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Json;
 using FluxKnowledge.Application.Contracts;
 using FluxKnowledge.Application.Ports;
+using FluxKnowledge.Application.Sources;
 using FluxKnowledge.Domain.Sources;
 using FluxKnowledge.Web;
 using FluxKnowledge.Web.Components.OperatorActions;
@@ -121,6 +122,47 @@ public sealed class OperatorActionEndpointTests
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         Assert.Empty(publisher.Published);
+    }
+
+    [Fact]
+    public async Task Named_archive_zip_reconciliation_is_loopback_antiforgery_protected_and_idempotent()
+    {
+        var branchId = Guid.Parse("44444444-4444-4444-4444-444444444444");
+        var successorId = Guid.Parse("55555555-5555-5555-5555-555555555555");
+        var branchStore = new RecordingRetainedProcessorBranchStore
+        {
+            Result = new ArchiveZipMemberEncodingFailureReconciliationResult(true, false, successorId)
+        };
+        var publisher = new RecordingStatusPublisher();
+        await using var host = await StartAsync(new RecordingOperatorActionStore([VisibleAction]), publisher, branchStore: branchStore);
+
+        using var missingToken = new HttpRequestMessage(HttpMethod.Post,
+            $"/api/operator-actions/archive-zip-member-not-utf8/{branchId:D}/reconcile")
+        {
+            Content = JsonContent.Create(new { })
+        };
+        missingToken.Headers.TryAddWithoutValidation("Origin", "http://localhost");
+        using var denied = await host.Client.SendAsync(missingToken);
+        Assert.Equal(HttpStatusCode.Forbidden, denied.StatusCode);
+        Assert.Null(branchStore.RequestedBranchId);
+
+        using var message = PostArchiveZipReconciliation(branchId);
+        using var response = await host.Client.SendAsync(message);
+        var receipt = await response.Content.ReadFromJsonAsync<ArchiveZipMemberEncodingFailureReconciliationResult>();
+
+        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
+        Assert.Equal(branchId, branchStore.RequestedBranchId);
+        Assert.True(receipt!.Created);
+        Assert.Equal(successorId, receipt.SuccessorBranchId);
+        var changed = Assert.Single(publisher.Published);
+        Assert.Equal("sources", changed.Projection);
+
+        branchStore.Result = new ArchiveZipMemberEncodingFailureReconciliationResult(false, true, successorId);
+        using var replayMessage = PostArchiveZipReconciliation(branchId);
+        using var replayResponse = await host.Client.SendAsync(replayMessage);
+
+        Assert.Equal(HttpStatusCode.OK, replayResponse.StatusCode);
+        Assert.Single(publisher.Published);
     }
 
     [Theory]
@@ -304,15 +346,30 @@ public sealed class OperatorActionEndpointTests
         return message;
     }
 
+    private static HttpRequestMessage PostArchiveZipReconciliation(Guid branchId)
+    {
+        var message = new HttpRequestMessage(HttpMethod.Post,
+            $"/api/operator-actions/archive-zip-member-not-utf8/{branchId:D}/reconcile")
+        {
+            Content = JsonContent.Create(new { })
+        };
+        message.Headers.Add("X-CSRF-TOKEN", "valid");
+        message.Headers.TryAddWithoutValidation("Origin", "http://localhost");
+        return message;
+    }
+
     private static async Task<TestHost> StartAsync(
         RecordingOperatorActionStore store,
         RecordingStatusPublisher? publisher = null,
-        string canonicalOrigin = "http://localhost")
+        string canonicalOrigin = "http://localhost",
+        RecordingRetainedProcessorBranchStore? branchStore = null)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
         builder.Services.AddSingleton<IOperatorActionStore>(store);
         builder.Services.AddSingleton<IStatusEventPublisher>(publisher ?? new RecordingStatusPublisher());
+        builder.Services.AddSingleton<IRetainedProcessorBranchStore>(branchStore ?? new RecordingRetainedProcessorBranchStore());
+        builder.Services.AddSingleton(new RetainedProcessorOptions { ArchiveZipExpandEnabled = true });
         builder.Services.AddSingleton<TimeProvider>(new FixedTimeProvider(DateTimeOffset.Parse("2026-08-14T19:00:00Z")));
         builder.Services.AddSingleton<IAntiforgery, HeaderAntiforgery>();
         builder.Services.AddSingleton(new LocalOperatorOriginPolicy(canonicalOrigin));
@@ -373,6 +430,56 @@ public sealed class OperatorActionEndpointTests
         {
             Published.Add(statusChanged);
             return ValueTask.CompletedTask;
+        }
+    }
+
+    private sealed class RecordingRetainedProcessorBranchStore : IRetainedProcessorBranchStore
+    {
+        public ArchiveZipMemberEncodingFailureReconciliationResult Result { get; set; } =
+            ArchiveZipMemberEncodingFailureReconciliationResult.NotEligible;
+
+        public Guid? RequestedBranchId { get; private set; }
+
+        public ValueTask<IReadOnlyList<RetainedProcessorPromotionCandidate>> ReadPromotionCandidatesAsync(
+            int maximumCount,
+            CancellationToken cancellationToken) => throw new NotSupportedException();
+
+        public ValueTask<bool> PromoteAsync(
+            RetainedProcessorPromotionCandidate candidate,
+            SourceCapabilityDescriptor capability,
+            CancellationToken cancellationToken) => throw new NotSupportedException();
+
+        public ValueTask<bool> BlockPromotionAsync(
+            RetainedProcessorPromotionCandidate candidate,
+            string outcomeCode,
+            CancellationToken cancellationToken) => throw new NotSupportedException();
+
+        public ValueTask<IReadOnlyList<RetainedProcessorClaim>> ClaimAsync(
+            string leaseOwner,
+            int maximumCount,
+            CancellationToken cancellationToken) => throw new NotSupportedException();
+
+        public ValueTask<bool> CommitAsync(
+            RetainedProcessorClaim claim,
+            RetainedProcessorCompletion completion,
+            CancellationToken cancellationToken) => throw new NotSupportedException();
+
+        public ValueTask<bool> RetryAsync(
+            RetainedProcessorClaim claim,
+            string outcomeCode,
+            CancellationToken cancellationToken) => throw new NotSupportedException();
+
+        public ValueTask<bool> FailAsync(
+            RetainedProcessorClaim claim,
+            RetainedProcessorFailure failure,
+            CancellationToken cancellationToken) => throw new NotSupportedException();
+
+        public ValueTask<ArchiveZipMemberEncodingFailureReconciliationResult> ReconcileArchiveZipMemberNotUtf8Async(
+            Guid branchId,
+            CancellationToken cancellationToken)
+        {
+            RequestedBranchId = branchId;
+            return ValueTask.FromResult(Result);
         }
     }
 
