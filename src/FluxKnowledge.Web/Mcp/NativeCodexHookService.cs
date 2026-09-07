@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using FluxKnowledge.Application.Contracts;
 using FluxKnowledge.Application.IntegrationV1;
 using FluxKnowledge.Application.Knowledge;
 using FluxKnowledge.Application.Ports;
@@ -43,7 +44,10 @@ public sealed record NativeCodexHookResponse
 public sealed class NativeCodexHookService(
     INativeV1Facade facade,
     INativeOperationStore operationStore,
-    ILogger<NativeCodexHookService>? logger = null)
+    ILogger<NativeCodexHookService>? logger = null,
+    ICodexHookAuditWriter? auditWriter = null,
+    IStatusEventPublisher? statusPublisher = null,
+    TimeProvider? timeProvider = null)
 {
     private const int SearchLimit = 5;
     private const int MaximumSummaryCharacters = 8_000;
@@ -52,6 +56,9 @@ public sealed class NativeCodexHookService(
     private readonly INativeV1Facade _facade = facade ?? throw new ArgumentNullException(nameof(facade));
     private readonly INativeOperationStore _operationStore = operationStore ?? throw new ArgumentNullException(nameof(operationStore));
     private readonly ILogger<NativeCodexHookService> _logger = logger ?? NullLogger<NativeCodexHookService>.Instance;
+    private readonly ICodexHookAuditWriter? _auditWriter = auditWriter;
+    private readonly IStatusEventPublisher? _statusPublisher = statusPublisher;
+    private readonly TimeProvider _timeProvider = timeProvider ?? TimeProvider.System;
 
     public async ValueTask<NativeCodexHookResponse> HandleAsync(
         string? eventName,
@@ -60,32 +67,45 @@ public sealed class NativeCodexHookService(
     {
         try
         {
-            if (payload.ValueKind != JsonValueKind.Object) return InvalidInput();
+            if (payload.ValueKind != JsonValueKind.Object)
+            {
+                return await HandleInvalidInputAsync(cancellationToken).ConfigureAwait(false);
+            }
 
             return eventName switch
             {
                 "UserPromptSubmit" => await HandleUserPromptSubmitAsync(payload, cancellationToken).ConfigureAwait(false),
                 "PreCompact" => new NativeCodexHookResponse(true),
                 "Stop" => await HandleStopAsync(payload, cancellationToken).ConfigureAwait(false),
-                _ => InvalidInput()
+                _ => await HandleInvalidInputAsync(cancellationToken).ConfigureAwait(false)
             };
         }
         catch (NativeCodexHookInputException)
         {
-            return InvalidInput();
+            return await HandleInvalidInputAsync(cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             throw;
         }
-        catch (Exception)
+        catch (Exception exception)
         {
+            await RecordAuditAsync(
+                CodexHookAuditEvent.ProcessingFailed(FailureClassification(exception), _timeProvider.GetUtcNow()),
+                cancellationToken).ConfigureAwait(false);
             return new NativeCodexHookResponse(true, SystemMessage: "Native Codex hook could not access local knowledge; continuing.");
         }
     }
 
     public static NativeCodexHookResponse InvalidInput() =>
         new(true, SystemMessage: "Native Codex hook ignored invalid input.");
+
+    /// <summary>Records an invalid loopback-hook request without retaining its payload, then returns the fail-open envelope.</summary>
+    public async ValueTask<NativeCodexHookResponse> HandleInvalidInputAsync(CancellationToken cancellationToken)
+    {
+        await RecordAuditAsync(CodexHookAuditEvent.InputRejected(_timeProvider.GetUtcNow()), cancellationToken).ConfigureAwait(false);
+        return InvalidInput();
+    }
 
     private async ValueTask<NativeCodexHookResponse> HandleUserPromptSubmitAsync(JsonElement payload, CancellationToken cancellationToken)
     {
@@ -95,6 +115,7 @@ public sealed class NativeCodexHookService(
             new NativeKnowledgeQuery(prompt, SearchLimit),
             cancellationToken).ConfigureAwait(false);
         var context = FormatContext(results);
+        await RecordAuditAsync(CodexHookAuditEvent.Preflight(!string.IsNullOrEmpty(context), _timeProvider.GetUtcNow()), cancellationToken).ConfigureAwait(false);
         return string.IsNullOrEmpty(context)
             ? new NativeCodexHookResponse(true)
             : new NativeCodexHookResponse(true, new NativeCodexHookSpecificOutput("UserPromptSubmit", context));
@@ -129,6 +150,7 @@ public sealed class NativeCodexHookService(
                 idempotencyKey,
                 ActorSurface,
                 cancellationToken).ConfigureAwait(false);
+            await PublishEventsAsync(cancellationToken).ConfigureAwait(false);
             return new NativeCodexHookResponse(true);
         }
         catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
@@ -151,6 +173,43 @@ public sealed class NativeCodexHookService(
         TimeoutException => "timeout",
         _ => "unexpected"
     };
+
+    private async ValueTask RecordAuditAsync(CodexHookAuditEvent auditEvent, CancellationToken cancellationToken)
+    {
+        if (_auditWriter is null) return;
+        try
+        {
+            await _auditWriter.AppendAsync(auditEvent, cancellationToken).ConfigureAwait(false);
+            await PublishEventsAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception)
+        {
+            _logger.LogWarning("Native Codex hook audit persistence failed.");
+        }
+    }
+
+    private async ValueTask PublishEventsAsync(CancellationToken cancellationToken)
+    {
+        if (_statusPublisher is null) return;
+        try
+        {
+            await _statusPublisher.PublishAsync(
+                new StatusChanged(null, "events", _timeProvider.GetUtcNow()),
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception)
+        {
+            _logger.LogWarning("Native Codex hook event refresh notification failed.");
+        }
+    }
 
     private static string RequiredText(JsonElement payload, string propertyName, int maximumCharacters)
     {

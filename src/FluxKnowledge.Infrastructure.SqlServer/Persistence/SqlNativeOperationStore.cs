@@ -194,6 +194,19 @@ public sealed class SqlNativeOperationStore(
         };
         intent.ConsumedAtUtc = receipt.CompletedAtUtc;
         context.NativeOperationReceipts.Add(receipt);
+        if (IsCodexStopCapture(prepared.Action, prepared.IdempotencyKey, prepared.ActorSurface))
+        {
+            OperatorEventAppender.Add(
+                context,
+                new OperatorEventDraft(
+                    "codex_hook.capture_saved",
+                    "codex_hook",
+                    "information",
+                    "codex-hook",
+                    receipt.CompletedAtUtc,
+                    CorrelationId: "codex-hook:" + prepared.IdempotencyKey["codex-stop-".Length..],
+                    Details: new { state = "saved" }));
+        }
         _beforeCommitInjector?.Invoke();
         var committed = false;
         var sqlChangesSaved = false;

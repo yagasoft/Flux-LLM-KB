@@ -2,6 +2,7 @@ using System.Text.Json;
 using FluxKnowledge.Application.IntegrationV1;
 using FluxKnowledge.Application.Knowledge;
 using FluxKnowledge.Application.Ports;
+using FluxKnowledge.Web.Components.Status;
 using FluxKnowledge.Web.Mcp;
 using Microsoft.Extensions.Logging;
 using Xunit;
@@ -23,6 +24,68 @@ public sealed class NativeCodexHookServiceTests
         Assert.Equal("UserPromptSubmit", response.HookSpecificOutput!.HookEventName);
         Assert.Contains("Prior decision", response.HookSpecificOutput.AdditionalContext, StringComparison.Ordinal);
         Assert.Equal(["knowledge"], facade.QueryFamilies);
+    }
+
+    [Fact]
+    public async Task UserPromptSubmit_records_only_the_preflight_outcome_for_the_Events_projection()
+    {
+        var audits = new RecordingCodexHookAuditWriter();
+        var service = new NativeCodexHookService(
+            new RecordingFacade(
+                [new KnowledgeSearchResult(Guid.Empty, "note", "Prior decision", "Use the native loopback boundary.", "knowledge")]),
+            new RecordingOperationStore(),
+            auditWriter: audits);
+
+        await service.HandleAsync(
+            "UserPromptSubmit",
+            Json("{\"prompt\":\"secret-prompt-sentinel\"}"),
+            CancellationToken.None);
+
+        var audit = Assert.Single(audits.Entries);
+        Assert.Equal(CodexHookAuditOutcome.PreflightContextInjected, audit.Outcome);
+        Assert.Null(audit.ReasonCode);
+    }
+
+    [Fact]
+    public async Task UserPromptSubmit_notifies_the_live_Events_projection_after_the_audit_is_saved()
+    {
+        var feed = new StatusEventFeed();
+        await using var subscription = feed.Subscribe();
+        var service = new NativeCodexHookService(
+            new RecordingFacade([]),
+            new RecordingOperationStore(),
+            auditWriter: new RecordingCodexHookAuditWriter(),
+            statusPublisher: feed);
+
+        await service.HandleAsync(
+            "UserPromptSubmit",
+            Json("{\"prompt\":\"A non-sensitive test prompt.\"}"),
+            CancellationToken.None);
+
+        Assert.True(subscription.Reader.TryRead(out var change));
+        Assert.NotNull(change);
+        Assert.Equal("events", change.Projection);
+    }
+
+    [Fact]
+    public async Task Stop_notifies_the_live_Events_projection_after_the_capture_is_saved()
+    {
+        var feed = new StatusEventFeed();
+        await using var subscription = feed.Subscribe();
+        var captures = new RecordingOperationStore();
+        var service = new NativeCodexHookService(
+            new RecordingFacade([], captures),
+            captures,
+            statusPublisher: feed);
+
+        var response = await service.HandleAsync(
+            "Stop",
+            Json("{\"session_id\":\"session-1\",\"turn_id\":\"turn-9\",\"last_assistant_message\":\"Completed summary.\"}"),
+            CancellationToken.None);
+        var change = await subscription.Reader.ReadAsync();
+
+        Assert.True(response.Continue);
+        Assert.Equal("events", change.Projection);
     }
 
     [Fact]
@@ -81,9 +144,10 @@ public sealed class NativeCodexHookServiceTests
     [Fact]
     public async Task Invalid_input_and_backend_errors_fail_open_with_a_sanitised_diagnostic()
     {
-        var invalid = await new NativeCodexHookService(new RecordingFacade([]), new RecordingOperationStore()).HandleAsync(
+        var audits = new RecordingCodexHookAuditWriter();
+        var invalid = await new NativeCodexHookService(new RecordingFacade([]), new RecordingOperationStore(), auditWriter: audits).HandleAsync(
             "Stop", Json("{\"session_id\":\"session-1\",\"last_assistant_message\":\"summary\"}"), CancellationToken.None);
-        var failed = await new NativeCodexHookService(new RecordingFacade([], throwOnQuery: true), new RecordingOperationStore()).HandleAsync(
+        var failed = await new NativeCodexHookService(new RecordingFacade([], throwOnQuery: true), new RecordingOperationStore(), auditWriter: audits).HandleAsync(
             "UserPromptSubmit", Json("{\"prompt\":\"secret-content-sentinel\"}"), CancellationToken.None);
 
         Assert.True(invalid.Continue);
@@ -91,6 +155,14 @@ public sealed class NativeCodexHookServiceTests
         Assert.True(failed.Continue);
         Assert.Equal("Native Codex hook could not access local knowledge; continuing.", failed.SystemMessage);
         Assert.DoesNotContain("secret-content-sentinel", failed.SystemMessage, StringComparison.Ordinal);
+        Assert.Collection(
+            audits.Entries,
+            audit => Assert.Equal(CodexHookAuditOutcome.InputRejected, audit.Outcome),
+            audit =>
+            {
+                Assert.Equal(CodexHookAuditOutcome.ProcessingFailed, audit.Outcome);
+                Assert.Equal("unexpected", audit.ReasonCode);
+            });
     }
 
     [Fact]
@@ -167,6 +239,17 @@ public sealed class NativeCodexHookServiceTests
         public ValueTask<NativeActionReceipt?> TryReplayAsync(string action, string canonicalPayload, string confirmationId, string idempotencyKey, string actorSurface, CancellationToken cancellationToken) => throw new NotSupportedException();
         public ValueTask<NativeActionPreview> CreatePreviewAsync(NativeActionPreviewRequest request, CancellationToken cancellationToken) => throw new NotSupportedException();
         public ValueTask<NativeActionReceipt> CommitAsync(NativeActionCommitRequest request, CancellationToken cancellationToken) => throw new NotSupportedException();
+    }
+
+    private sealed class RecordingCodexHookAuditWriter : ICodexHookAuditWriter
+    {
+        public List<CodexHookAuditEvent> Entries { get; } = [];
+
+        public ValueTask AppendAsync(CodexHookAuditEvent auditEvent, CancellationToken cancellationToken)
+        {
+            Entries.Add(auditEvent);
+            return ValueTask.CompletedTask;
+        }
     }
 
     private sealed class CommitFailingFacade : INativeV1Facade

@@ -34,11 +34,11 @@ public static class NativeCodexHookEndpoints
         }
         catch (JsonException)
         {
-            return Results.Json(NativeCodexHookService.InvalidInput());
+            return Results.Json(await service.HandleInvalidInputAsync(cancellationToken).ConfigureAwait(false));
         }
         catch (NativeCodexHookBodyTooLargeException)
         {
-            return Results.Json(NativeCodexHookService.InvalidInput());
+            return Results.Json(await service.HandleInvalidInputAsync(cancellationToken).ConfigureAwait(false));
         }
     }
 

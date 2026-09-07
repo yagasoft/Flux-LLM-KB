@@ -92,6 +92,26 @@ public sealed class NativeCodexHookEndpointTests
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         Assert.True(envelope.GetProperty("continue").GetBoolean());
         Assert.Equal("Native Codex hook ignored invalid input.", envelope.GetProperty("systemMessage").GetString());
+        Assert.Collection(
+            host.Audits.Entries,
+            audit => Assert.Equal(CodexHookAuditOutcome.InputRejected, audit.Outcome));
+    }
+
+    [Fact]
+    public async Task Unsupported_hook_name_returns_a_fail_open_envelope_and_records_rejection()
+    {
+        await using var host = await StartAsync();
+        using var response = await host.Client.PostAsync(
+            "/native/v1/codex/hooks/Unsupported",
+            new StringContent("{}", Encoding.UTF8, "application/json"));
+        var envelope = await ReadAsync(response);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.True(envelope.GetProperty("continue").GetBoolean());
+        Assert.Equal("Native Codex hook ignored invalid input.", envelope.GetProperty("systemMessage").GetString());
+        Assert.Collection(
+            host.Audits.Entries,
+            audit => Assert.Equal(CodexHookAuditOutcome.InputRejected, audit.Outcome));
     }
 
     [Fact]
@@ -120,6 +140,9 @@ public sealed class NativeCodexHookEndpointTests
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         Assert.True(envelope.GetProperty("continue").GetBoolean());
         Assert.Equal("Native Codex hook ignored invalid input.", envelope.GetProperty("systemMessage").GetString());
+        Assert.Collection(
+            host.Audits.Entries,
+            audit => Assert.Equal(CodexHookAuditOutcome.InputRejected, audit.Outcome));
     }
 
     private static async Task<JsonElement> ReadAsync(HttpResponseMessage response)
@@ -137,6 +160,8 @@ public sealed class NativeCodexHookEndpointTests
             new KnowledgeSearchResult(Guid.Empty, "note", "Prior decision", "Use the native loopback boundary.", "knowledge")
         ]));
         builder.Services.AddSingleton<INativeOperationStore>(new OperationStore());
+        var audits = new RecordingCodexHookAuditWriter();
+        builder.Services.AddSingleton<ICodexHookAuditWriter>(audits);
         builder.Services.AddSingleton<NativeCodexHookService>();
         var app = builder.Build();
         app.Use(async (context, next) =>
@@ -149,7 +174,7 @@ public sealed class NativeCodexHookEndpointTests
         app.UseLocalOperatorLoopbackGate();
         app.MapFluxKnowledgeNativeCodexHooks();
         await app.StartAsync();
-        return new TestHost(app, app.GetTestClient());
+        return new TestHost(app, app.GetTestClient(), audits);
     }
 
     private sealed class Facade(IReadOnlyList<KnowledgeSearchResult> knowledgeResults) : INativeV1Facade
@@ -172,7 +197,18 @@ public sealed class NativeCodexHookEndpointTests
         public ValueTask<NativeActionReceipt> CommitAsync(NativeActionCommitRequest request, CancellationToken cancellationToken) => throw new NotSupportedException();
     }
 
-    private sealed record TestHost(WebApplication Application, HttpClient Client) : IAsyncDisposable
+    private sealed class RecordingCodexHookAuditWriter : ICodexHookAuditWriter
+    {
+        public List<CodexHookAuditEvent> Entries { get; } = [];
+
+        public ValueTask AppendAsync(CodexHookAuditEvent auditEvent, CancellationToken cancellationToken)
+        {
+            Entries.Add(auditEvent);
+            return ValueTask.CompletedTask;
+        }
+    }
+
+    private sealed record TestHost(WebApplication Application, HttpClient Client, RecordingCodexHookAuditWriter Audits) : IAsyncDisposable
     {
         public async ValueTask DisposeAsync()
         {

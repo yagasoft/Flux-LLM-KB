@@ -319,6 +319,7 @@ public static class WebHostComposition
         services.AddScoped<NativeOperationsStatusService>();
         services.AddScoped<NativeAuditQueryService>();
         services.AddScoped<INativeV1Facade, NativeV1Facade>();
+        services.AddScoped<ICodexHookAuditWriter, SqlCodexHookAuditWriter>();
         services.AddFluxKnowledgeOutboxWorkers();
         services.AddScoped<SqlSourceRootStore>();
         services.AddScoped<ISourceRootStore>(provider => provider.GetRequiredService<SqlSourceRootStore>());
