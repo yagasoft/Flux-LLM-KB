@@ -114,6 +114,32 @@ public sealed class SourceRootProjectionReaderIntegrationTests(NativeSqlServerFi
         Assert.Equal(1, detail.DeferredCount);
         Assert.Equal(1, detail.BlockedCount);
         Assert.Equal(2, detail.ErrorCount);
+        Assert.Collection(
+            detail.Files,
+            file =>
+            {
+                Assert.Equal("blocked.cs", file.FileName);
+                Assert.Equal("Blocked", file.Status);
+                Assert.Null(file.CorpusPipelineRecordId);
+            },
+            file =>
+            {
+                Assert.Equal("completed.txt", file.FileName);
+                Assert.Equal("Indexed", file.Status);
+                Assert.Equal(recordId, file.CorpusPipelineRecordId);
+            },
+            file =>
+            {
+                Assert.Equal("deferred.pdf", file.FileName);
+                Assert.Equal("Deferred", file.Status);
+                Assert.Null(file.CorpusPipelineRecordId);
+            },
+            file =>
+            {
+                Assert.Equal("failed.txt", file.FileName);
+                Assert.Equal("Failed", file.Status);
+                Assert.Null(file.CorpusPipelineRecordId);
+            });
     }
 
     [NativeSqlServerFact]

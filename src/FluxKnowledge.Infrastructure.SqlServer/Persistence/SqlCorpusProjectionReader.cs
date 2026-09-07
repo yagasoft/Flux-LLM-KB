@@ -143,7 +143,11 @@ public sealed class SqlCorpusProjectionReader(IDbContextFactory<FluxKnowledgeDbC
         return new CorpusEntryDetail(row.PipelineRecordId, row.Entry, row.SourceKind, ((PipelineStage)row.CurrentStage).ToString(), state,
             row.LatestActivityReason, preview, row.SourceRootId, row.SourceRevisionId, row.SafeDisplayIdentity, row.ContentSha256, jobs, eventRows.Select(value => value.Id).ToArray(),
             new CorpusLineage(row.RootLineageRecordId, row.ParentPipelineRecordId, row.ParentSourceRevisionId), activities,
-            eventRows.Select(value => new CorpusEventEvidence(value.Id, value.OccurredAtUtc, value.EventType, SanitiseEventDetails(value.DetailsJson))).ToArray());
+            eventRows.Select(value => new CorpusEventEvidence(value.Id, value.OccurredAtUtc, value.EventType, SanitiseEventDetails(value.DetailsJson))).ToArray())
+        {
+            FileName = row.FileName,
+            RelativePath = row.RelativePath
+        };
     }
 
     private static IQueryable<Row> BuildRows(FluxKnowledgeDbContext context) =>
@@ -196,7 +200,11 @@ public sealed class SqlCorpusProjectionReader(IDbContextFactory<FluxKnowledgeDbC
     private static CorpusEntry ToEntry(Row row) => new(row.PipelineRecordId, row.Entry, row.SourceKind, row.SourceClassification,
         row.SourceRootId is null ? "Direct" : Location(row.RootDisplayName, row.RelativePath), ((PipelineStage)row.CurrentStage).ToString(),
         SourceActivityStatus(row.LatestActivityState, row.LatestActivityResultingPipelineRecordId, row.PipelineRecordId, row.SourceRevisionId), row.LastActivityAtUtc,
-        row.SourceRootId, row.SourceRevisionId, row.LatestActivityResultingPipelineRecordId);
+        row.SourceRootId, row.SourceRevisionId, row.LatestActivityResultingPipelineRecordId)
+    {
+        FileName = row.FileName,
+        RelativePath = row.RelativePath
+    };
 
     private static string SourceActivityStatus(int? state, Guid? resultingRecordId, Guid pipelineRecordId, Guid? sourceRevisionId) =>
         sourceRevisionId is null ? "Indexed" : state switch
@@ -281,6 +289,7 @@ public sealed class SqlCorpusProjectionReader(IDbContextFactory<FluxKnowledgeDbC
         public Guid? LatestActivityResultingPipelineRecordId { get; init; }
         public string? LatestActivityReason { get; init; }
         public string SafeDisplayIdentity => System.IO.Path.GetFileName(SafeSourceIdentity);
+        public string FileName => RelativePath is { Length: > 0 } ? System.IO.Path.GetFileName(RelativePath) : SafeDisplayIdentity;
         public string Entry => RelativePath is { Length: > 0 } ? RelativePath : SafeDisplayIdentity;
     }
     private sealed class FolderRow { public string RelativePath { get; init; } = string.Empty; public int CurrentCount { get; init; } public int DeferredCount { get; init; } public int BlockedCount { get; init; } public int FailedCount { get; init; } }

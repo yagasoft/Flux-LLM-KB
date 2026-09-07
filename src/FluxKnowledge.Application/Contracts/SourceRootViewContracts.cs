@@ -45,6 +45,14 @@ public sealed record SourceRootListProjection(
 
 public sealed record SourceActivityReasonProjection(string State, string Reason, int Count);
 
+public sealed record SourceFileProjection(
+    string FileName,
+    string RelativePath,
+    string Classification,
+    string Status,
+    string? Reason,
+    Guid? CorpusPipelineRecordId);
+
 public sealed record SourceRootDetailProjection(
     Guid Id,
     string DisplayName,
@@ -61,4 +69,8 @@ public sealed record SourceRootDetailProjection(
     IReadOnlyList<DeferredContentReplayRequest> ReprocessableActivities)
 {
     public bool CanReprocessDeferredContent => ReprocessableActivities.Count > 0;
+
+    // Local operator UI only: source filenames must not enter public JSON payloads.
+    [System.Text.Json.Serialization.JsonIgnore]
+    public IReadOnlyList<SourceFileProjection> Files { get; init; } = [];
 }

@@ -43,11 +43,11 @@
     {
         <div class="table-scroll"><table>
             <caption class="visually-hidden">SQL-authoritative Corpus entries</caption>
-            <thead><tr><th>Entry</th><th>Category</th><th>Location</th><th>Pipeline</th><th>Source activity</th><th>Updated</th></tr></thead>
+            <thead><tr><th>File name</th><th>Path</th><th>Category</th><th>Location</th><th>Pipeline</th><th>Source activity</th><th>Updated</th></tr></thead>
             <tbody>
             @foreach (var entry in PageState.Page.Items)
             {
-                <tr><td><a href="@($"/corpus/{entry.PipelineRecordId:D}")">@entry.Entry</a></td><td>@entry.SourceKind@(entry.SourceClassification is null ? "" : $" · {entry.SourceClassification}")</td><td>@entry.Location</td><td>@entry.PipelineStatus</td><td>@entry.SourceActivityState</td><td>@entry.LastActivityAtUtc.LocalDateTime</td></tr>
+                <tr><td><a href="@($"/corpus/{entry.PipelineRecordId:D}")">@entry.FileName</a></td><td>@(entry.RelativePath ?? "Not available")</td><td>@entry.SourceKind@(entry.SourceClassification is null ? "" : $" · {entry.SourceClassification}")</td><td>@entry.Location</td><td>@entry.PipelineStatus</td><td>@entry.SourceActivityState</td><td>@entry.LastActivityAtUtc.LocalDateTime</td></tr>
             }
             </tbody>
         </table></div>

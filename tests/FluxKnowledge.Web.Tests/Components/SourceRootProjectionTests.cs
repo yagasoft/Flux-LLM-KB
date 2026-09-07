@@ -5,6 +5,7 @@ using FluxKnowledge.Domain.Sources;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
 using FluxKnowledge.Web.Components.Sources;
 using Microsoft.EntityFrameworkCore;
+using System.Text.Json;
 using Xunit;
 
 namespace FluxKnowledge.Web.Tests.Components;
@@ -152,6 +153,45 @@ public sealed class SourceRootProjectionTests
 
         Assert.True(result.Accepted);
         Assert.Equal([activity], reprocessor.RequestedActivities);
+    }
+
+    [Fact]
+    public void Local_file_convenience_fields_are_excluded_from_public_JSON_serialisation()
+    {
+        const string sourceFileName = "source-private-filename-sentinel.txt";
+        const string sourcePath = "private\\source-private-filename-sentinel.txt";
+        const string corpusFileName = "corpus-private-filename-sentinel.txt";
+        const string corpusPath = "private\\corpus-private-filename-sentinel.txt";
+        var source = Detail("root") with
+        {
+            Files = [new SourceFileProjection(sourceFileName, sourcePath, "AcceptedUtf8Text", "Indexed", null, Guid.NewGuid())]
+        };
+        var entry = new CorpusEntry(Guid.NewGuid(), "entry", "local file", null, "root", "Publish", "Indexed", DateTimeOffset.UnixEpoch, Guid.NewGuid(), Guid.NewGuid(), null)
+        {
+            FileName = corpusFileName,
+            RelativePath = corpusPath
+        };
+        var detail = new CorpusEntryDetail(Guid.NewGuid(), "entry", "local file", "Publish", "Indexed", null, null, Guid.NewGuid(), Guid.NewGuid(), null, null, [], [],
+            new CorpusLineage(Guid.NewGuid(), null, null), [], [])
+        {
+            FileName = corpusFileName,
+            RelativePath = corpusPath
+        };
+
+        Assert.Equal(sourceFileName, Assert.Single(source.Files).FileName);
+        Assert.Equal(corpusFileName, entry.FileName);
+        Assert.Equal(corpusPath, detail.RelativePath);
+        foreach (var serialized in new[]
+        {
+            JsonSerializer.Serialize(new { source, entry, detail }),
+            JsonSerializer.Serialize(new { source, entry, detail }, new JsonSerializerOptions(JsonSerializerDefaults.Web))
+        })
+        {
+            Assert.DoesNotContain(sourceFileName, serialized, StringComparison.Ordinal);
+            Assert.DoesNotContain(sourcePath, serialized, StringComparison.Ordinal);
+            Assert.DoesNotContain(corpusFileName, serialized, StringComparison.Ordinal);
+            Assert.DoesNotContain(corpusPath, serialized, StringComparison.Ordinal);
+        }
     }
 
     private sealed class FixedPreviewReader(SourceRootPreview preview) : ISourceRootProjectionReader

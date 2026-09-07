@@ -28,6 +28,28 @@ else
             <div><dt>Errors</dt><dd>@PageState.Detail.ErrorCount</dd></div>
         </dl>
     </section>
+    <section aria-labelledby="source-files-heading">
+        <h2 id="source-files-heading">Files</h2>
+        @if (PageState.Detail.Files.Count == 0)
+        {
+            <p>No current files have been recorded for this source root.</p>
+        }
+        else
+        {
+            <div class="table-scroll"><table>
+                <thead><tr><th>File name</th><th>Path</th><th>Classification</th><th>Status</th><th>Reason</th></tr></thead>
+                <tbody>
+                @foreach (var file in PageState.Detail.Files)
+                {
+                    <tr>
+                        <td>@if (file.CorpusPipelineRecordId is { } pipelineRecordId) { <a href="@($"/corpus/{pipelineRecordId:D}")">@file.FileName</a> } else { @file.FileName }</td>
+                        <td>@file.RelativePath</td><td>@file.Classification</td><td>@file.Status</td><td>@(file.Reason ?? "—")</td>
+                    </tr>
+                }
+                </tbody>
+            </table></div>
+        }
+    </section>
     <section aria-labelledby="source-events-heading">
         <h2 id="source-events-heading">Recent events</h2>
         @if (PageState.RecentEvents.Count == 0)

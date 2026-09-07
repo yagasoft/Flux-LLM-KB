@@ -61,6 +61,14 @@ public sealed class SourceRootProjectionReader(
             .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
         var summary = (await ReadStateSummariesAsync(context, [rootId], cancellationToken).ConfigureAwait(false)).GetValueOrDefault(rootId)
             ?? SourceStateSummary.Empty;
+        var revisions = await context.SourceRevisions.AsNoTracking()
+            .Where(revision => revision.SourceRootId == rootId && revision.SuppressedAtUtc == null)
+            .Select(revision => new SourceRevisionRow(
+                revision.Id,
+                revision.CanonicalPath,
+                revision.Classification))
+            .ToArrayAsync(cancellationToken)
+            .ConfigureAwait(false);
         var activities = await (
                 from activity in context.SourceActivities.AsNoTracking()
                 join revision in context.SourceRevisions.AsNoTracking() on activity.SourceRevisionId equals revision.Id
@@ -92,7 +100,7 @@ public sealed class SourceRootProjectionReader(
                 join revision in context.SourceRevisions.AsNoTracking() on branch.SourceRevisionId equals revision.Id
                 where revision.SourceRootId == rootId && revision.SuppressedAtUtc == null &&
                       branch.State == (int)RetainedProcessorBranchState.Blocked
-                select new TerminalProcessorBranchRow(branch.Id, branch.LeaseGeneration))
+                select new TerminalProcessorBranchRow(branch.Id, branch.SourceRevisionId, branch.LeaseGeneration))
             .ToListAsync(cancellationToken).ConfigureAwait(false);
         var terminalBlockedBranchIds = terminalBlockedBranches.Select(branch => branch.Id).ToArray();
         var terminalAttempts = terminalBlockedBranchIds.Length == 0
@@ -183,6 +191,7 @@ public sealed class SourceRootProjectionReader(
                 value.Capabilities[0].ProcessorVersion,
                 value.Capabilities[0].ProcessorFingerprint))
             .ToArray();
+        var files = ProjectFiles(root.CanonicalPath, revisions, activities, terminalBlockedBranches, terminalAttempts);
 
         return new SourceRootDetailProjection(
             root.Id,
@@ -197,7 +206,10 @@ public sealed class SourceRootProjectionReader(
             summary.Blocked,
             summary.Error + (request?.ErrorFileCount ?? 0),
             reasons,
-            replayActivities);
+            replayActivities)
+        {
+            Files = files
+        };
     }
 
     public async ValueTask<SourceRootPreview> PreviewAsync(SourceRootDraft draft, CancellationToken cancellationToken)
@@ -334,6 +346,99 @@ public sealed class SourceRootProjectionReader(
             TimeSpan.FromMinutes(15),
             string.IsNullOrWhiteSpace(draft.RequestedBy) ? "local-operator" : draft.RequestedBy);
 
+    private static IReadOnlyList<SourceFileProjection> ProjectFiles(
+        string rootCanonicalPath,
+        IReadOnlyList<SourceRevisionRow> revisions,
+        IReadOnlyList<SourceActivityRow> activities,
+        IReadOnlyList<TerminalProcessorBranchRow> terminalBlockedBranches,
+        IReadOnlyList<SourceProcessorAttemptRow> terminalAttempts) =>
+        revisions.Select(revision =>
+        {
+            var revisionActivities = activities.Where(activity => activity.SourceRevisionId == revision.Id).ToArray();
+            var revisionBranches = terminalBlockedBranches.Where(branch => branch.SourceRevisionId == revision.Id).ToArray();
+            var state = ClassifyRevision(revisionActivities, revisionBranches.Length > 0);
+            var relativePath = RelativePath(rootCanonicalPath, revision.CanonicalPath);
+            return new SourceFileProjection(
+                Path.GetFileName(relativePath),
+                relativePath,
+                revision.Classification,
+                DisplayStatus(state),
+                DisplayFileReason(state, revisionActivities, revisionBranches, terminalAttempts),
+                state == SourceRevisionProjectionState.Indexed
+                    ? revisionActivities
+                        .Where(activity => activity.State == (int)SourceActivityState.Completed && activity.ResultingPipelineRecordId is not null)
+                        .Select(activity => activity.ResultingPipelineRecordId)
+                        .FirstOrDefault()
+                    : null);
+        })
+        .OrderBy(file => file.RelativePath, StringComparer.OrdinalIgnoreCase)
+        .ToArray();
+
+    private static SourceRevisionProjectionState ClassifyRevision(
+        IReadOnlyCollection<SourceActivityRow> activities,
+        bool hasBlockedProcessorBranch) =>
+        ClassifyRevision(activities.Select(activity => new SourceStateRow(
+            Guid.Empty,
+            activity.SourceRevisionId,
+            activity.State,
+            activity.ResultingPipelineRecordId,
+            hasBlockedProcessorBranch ? (int)RetainedProcessorBranchState.Blocked : null)).ToArray());
+
+    private static string DisplayStatus(SourceRevisionProjectionState state) => state switch
+    {
+        SourceRevisionProjectionState.Indexed => "Indexed",
+        SourceRevisionProjectionState.Deferred => "Deferred",
+        SourceRevisionProjectionState.Blocked => "Blocked",
+        SourceRevisionProjectionState.Error => "Failed",
+        _ => "Pending"
+    };
+
+    private static string? DisplayFileReason(
+        SourceRevisionProjectionState state,
+        IReadOnlyList<SourceActivityRow> activities,
+        IReadOnlyList<TerminalProcessorBranchRow> branches,
+        IReadOnlyList<SourceProcessorAttemptRow> attempts) => state switch
+    {
+        SourceRevisionProjectionState.Error => activities
+            .Where(activity => activity.State == (int)SourceActivityState.FailedTerminal)
+            .Select(DisplayReason)
+            .FirstOrDefault(),
+        SourceRevisionProjectionState.Blocked => activities
+            .Where(activity => activity.State == (int)SourceActivityState.DeferredPolicy)
+            .Select(DisplayReason)
+            .FirstOrDefault() ?? BranchReason(branches, attempts),
+        SourceRevisionProjectionState.Deferred => activities
+            .Where(activity => activity.State == (int)SourceActivityState.DeferredUnsupported && activity.ResultingPipelineRecordId is null)
+            .Select(DisplayReason)
+            .FirstOrDefault(),
+        _ => null
+    };
+
+    private static string? BranchReason(
+        IReadOnlyList<TerminalProcessorBranchRow> branches,
+        IReadOnlyList<SourceProcessorAttemptRow> attempts) => branches
+        .Select(branch => attempts
+            .Where(attempt => attempt.BranchId == branch.Id)
+            .OrderByDescending(attempt => attempt.LeaseGeneration)
+            .ThenByDescending(attempt => attempt.FinishedAtUtc)
+            .ThenByDescending(attempt => attempt.StartedAtUtc)
+            .Select(attempt => attempt.OutcomeCode)
+            .FirstOrDefault(outcome => !string.IsNullOrWhiteSpace(outcome)))
+        .FirstOrDefault(reason => !string.IsNullOrWhiteSpace(reason));
+
+    private static string RelativePath(string rootCanonicalPath, string canonicalPath)
+    {
+        var root = rootCanonicalPath.TrimEnd('\\', '/');
+        if (canonicalPath.Length > root.Length &&
+            canonicalPath.StartsWith(root, StringComparison.OrdinalIgnoreCase) &&
+            canonicalPath[root.Length] is '\\' or '/')
+        {
+            return canonicalPath[(root.Length + 1)..];
+        }
+
+        return Path.GetFileName(canonicalPath);
+    }
+
     private static string ActivityIdempotencyKey(SourceActivityRow activity) =>
         SourceActivity.Restore(
             new SourceActivityId(activity.Id),
@@ -372,6 +477,8 @@ public sealed class SourceRootProjectionReader(
         long? ArtifactByteLength,
         string? ArtifactStoreRelativePath);
 
+    private sealed record SourceRevisionRow(Guid Id, string CanonicalPath, string Classification);
+
     private sealed record SourceCapabilityRow(
         Guid Id,
         string ProcessorKind,
@@ -380,7 +487,7 @@ public sealed class SourceRootProjectionReader(
         string AcceptedClassificationsJson,
         string OutputContract);
 
-    private sealed record TerminalProcessorBranchRow(Guid Id, long LeaseGeneration);
+    private sealed record TerminalProcessorBranchRow(Guid Id, Guid SourceRevisionId, long LeaseGeneration);
 
     private sealed record SourceProcessorAttemptRow(
         Guid BranchId,

@@ -11,7 +11,7 @@ else
 {
     <section aria-labelledby="corpus-entry-heading">
         <h1 id="corpus-entry-heading">@PageState.Detail.Entry</h1>
-        <dl class="metadata"><dt>Source kind</dt><dd>@PageState.Detail.SourceKind</dd><dt>Source identity</dt><dd>@PageState.Detail.SourceIdentity</dd><dt>Pipeline</dt><dd>@PageState.Detail.PipelineStatus</dd><dt>Source activity</dt><dd>@PageState.Detail.SourceActivityState</dd><dt>Checksum</dt><dd>@PageState.Detail.Checksum</dd></dl>
+        <dl class="metadata"><dt>File name</dt><dd>@PageState.Detail.FileName</dd><dt>Root-relative path</dt><dd>@(PageState.Detail.RelativePath ?? "Not available")</dd><dt>Source kind</dt><dd>@PageState.Detail.SourceKind</dd><dt>Source identity</dt><dd>@PageState.Detail.SourceIdentity</dd><dt>Pipeline</dt><dd>@PageState.Detail.PipelineStatus</dd><dt>Source activity</dt><dd>@PageState.Detail.SourceActivityState</dd><dt>Checksum</dt><dd>@PageState.Detail.Checksum</dd></dl>
         @if (PageState.Detail.DeferredOrFailureReason is { } reason) { <p>@reason</p> }
         @if (PageState.Detail.IndexedTextPreview is { } preview) { <h2>Indexed text preview</h2><pre class="indexed-preview">@preview</pre> }
         <h2>Pipeline activity</h2>

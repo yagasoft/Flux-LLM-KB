@@ -94,7 +94,15 @@ public sealed record CorpusEntry(
     DateTimeOffset LastActivityAtUtc,
     Guid? SourceRootId,
     Guid? SourceRevisionId,
-    Guid? ResultingPipelineRecordId);
+    Guid? ResultingPipelineRecordId)
+{
+    // Local operator UI only: keep new file convenience fields out of public JSON payloads.
+    [System.Text.Json.Serialization.JsonIgnore]
+    public string FileName { get; init; } = Entry;
+
+    [System.Text.Json.Serialization.JsonIgnore]
+    public string? RelativePath { get; init; }
+}
 
 public sealed record CorpusPage(IReadOnlyList<CorpusEntry> Items, CorpusCursor? NextCursor);
 
@@ -122,7 +130,15 @@ public sealed record CorpusEntryDetail(
     IReadOnlyList<long> RelatedEventIds,
     CorpusLineage Lineage,
     IReadOnlyList<CorpusActivityEvidence> SourceActivities,
-    IReadOnlyList<CorpusEventEvidence> RelatedEvents);
+    IReadOnlyList<CorpusEventEvidence> RelatedEvents)
+{
+    // Local operator UI only: keep new file convenience fields out of public JSON payloads.
+    [System.Text.Json.Serialization.JsonIgnore]
+    public string FileName { get; init; } = Entry;
+
+    [System.Text.Json.Serialization.JsonIgnore]
+    public string? RelativePath { get; init; }
+}
 
 public sealed record CorpusLineage(Guid RootPipelineRecordId, Guid? ParentPipelineRecordId, Guid? ParentSourceRevisionId);
 public sealed record CorpusActivityEvidence(Guid Id, string State, string? Reason, Guid? ResultingPipelineRecordId, DateTimeOffset UpdatedAtUtc);
