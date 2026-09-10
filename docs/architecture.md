@@ -13,6 +13,20 @@ The complete durable pipeline, compatibility, integration, GPU, retrieval,
 installation and phased-delivery design is in
 [the native Windows replacement design](superpowers/specs/2026-07-26-native-windows-replacement-design.md).
 
+## Offline native model gate
+
+Before any native model-backed adapter may load a payload, the native model
+gate resolves a bounded local manifest against the sole production root
+`J:\Models`. It never accepts a configurable root, a URL, a fallback drive or
+an acquisition path. The gate pins each local ancestor and each verified file
+with no-follow Windows handles, rejects missing, corrupt, reparse, offline or
+recall-required artifacts, and holds read-only files for the issued lease.
+Each success or resolvable refusal receives an immutable local verification
+receipt before it is returned. `models verify --manifest <local-file>` is a
+direct, SQL/IIS/worker/provider-free inspection command. This boundary neither
+loads a provider nor activates GPU/OCR/PDF/VSDX work; acquisition, adoption and
+runtime compatibility remain separately authorised work.
+
 ## Phase 2 local scheduler and native worker supervision
 
 The implemented Phase 2 scheduler and native-worker supervision remain a SQL

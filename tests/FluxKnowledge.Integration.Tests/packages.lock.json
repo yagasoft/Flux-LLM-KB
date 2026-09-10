@@ -309,6 +309,7 @@
         "type": "Project",
         "dependencies": {
           "FluxKnowledge.Application": "[1.0.0, )",
+          "FluxKnowledge.Infrastructure.Inference": "[1.0.0, )",
           "FluxKnowledge.Infrastructure.SqlServer": "[1.0.0, )",
           "FluxKnowledge.Integrations": "[1.0.0, )"
         }

@@ -26,13 +26,17 @@ internal static class CliProgram
                 args.Skip(1).ToArray(),
                 Console.Out,
                 Console.Error),
+            "models" => await ModelStoreCommand.ExecuteAsync(
+                args.Skip(1).ToArray(),
+                Console.Out,
+                Console.Error),
             _ => WriteUsage()
         };
     }
 
     private static int WriteUsage()
     {
-        Console.Error.WriteLine("Usage: FluxKnowledge.Cli <knowledge|code|corpus|operations|codex|csharp-code|fresh-start|validate-sql>");
+        Console.Error.WriteLine("Usage: FluxKnowledge.Cli <knowledge|code|corpus|operations|codex|csharp-code|fresh-start|validate-sql|models>");
         return 2;
     }
 }

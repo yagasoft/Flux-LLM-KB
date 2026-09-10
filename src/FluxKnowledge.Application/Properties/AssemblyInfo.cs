@@ -5,3 +5,4 @@ using System.Runtime.CompilerServices;
 [assembly: InternalsVisibleTo("FluxKnowledge.Web.Tests")]
 [assembly: InternalsVisibleTo("FluxKnowledge.OutlookHost.Tests")]
 [assembly: InternalsVisibleTo("FluxKnowledge.Integrations")]
+[assembly: InternalsVisibleTo("FluxKnowledge.Infrastructure.Inference")]

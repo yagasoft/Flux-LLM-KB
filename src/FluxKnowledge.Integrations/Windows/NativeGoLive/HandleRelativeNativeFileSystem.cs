@@ -66,7 +66,7 @@ internal sealed class VerifiedNativeDirectory : IDisposable
 /// directory handle. Mutating methods accept only one literal child and revalidate identities
 /// immediately before their single-child mutation.
 /// </summary>
-internal sealed class HandleRelativeNativeFileSystem
+internal sealed partial class HandleRelativeNativeFileSystem
 {
     private readonly Func<NativeFileOperation, string, ValueTask>? _beforeMutation;
 
@@ -1012,8 +1012,14 @@ internal sealed class HandleRelativeNativeFileSystem
 
     private static class NativeMethods
     {
+        internal const uint DriveFixed = 3;
         internal const uint FileAttributeDirectory = 0x00000010;
         internal const uint FileAttributeReparsePoint = 0x00000400;
+        internal const uint FileAttributeOffline = 0x00001000;
+        internal const uint FileAttributeRecallOnOpen = 0x00040000;
+        internal const uint FileAttributeRecallOnDataAccess = 0x00400000;
+        internal const uint FileAttributeOfflineOrRecall =
+            FileAttributeOffline | FileAttributeRecallOnOpen | FileAttributeRecallOnDataAccess;
         internal const int ErrorDirectoryNotEmpty = 145;
 
         private const uint Delete = 0x00010000;
@@ -1061,7 +1067,10 @@ internal sealed class HandleRelativeNativeFileSystem
         internal const uint LockFileAccess = FileReadData | FileWriteData | FileReadAttributes | Synchronize;
         internal const uint DirectoryOpenOptions = FileDirectoryFile | FileSynchronousIoNonalert | FileOpenReparsePoint;
         internal const uint FileOpenOptions = FileNonDirectoryFile | FileSynchronousIoNonalert | FileOpenReparsePoint;
+        internal const uint ModelFileOpenOptions = FileOpenOptions | FileOpenNoRecall;
         internal const uint OpenAnyOptions = FileSynchronousIoNonalert | FileOpenReparsePoint;
+
+        private const uint FileOpenNoRecall = 0x00400000;
 
 #pragma warning disable SYSLIB1054
         [DllImport("kernel32.dll", EntryPoint = "CreateFileW", CharSet = CharSet.Unicode, SetLastError = true)]
@@ -1079,6 +1088,13 @@ internal sealed class HandleRelativeNativeFileSystem
         private static extern bool GetFileInformationByHandle(
             SafeFileHandle file,
             out ByHandleFileInformation information);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool FlushFileBuffers(SafeFileHandle file);
+
+        [DllImport("kernel32.dll", EntryPoint = "GetDriveTypeW", CharSet = CharSet.Unicode)]
+        private static extern uint GetDriveTypeNative(string rootPathName);
 
         [DllImport("kernel32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
@@ -1244,6 +1260,18 @@ internal sealed class HandleRelativeNativeFileSystem
         }
 
         internal static NativeFileIdentity GetIdentity(SafeFileHandle handle) => ToIdentity(GetInformation(handle));
+
+        internal static uint GetDriveType(string rootPath) => GetDriveTypeNative(rootPath);
+
+        internal static void Flush(SafeFileHandle handle)
+        {
+            if (!FlushFileBuffers(handle))
+            {
+                throw new IOException(
+                    "The native file buffers could not be flushed.",
+                    new Win32Exception(Marshal.GetLastPInvokeError()));
+            }
+        }
 
         internal static void SetDirectorySecurity(SafeFileHandle handle, byte[] securityDescriptor)
         {
