@@ -299,6 +299,63 @@ public sealed class SqlNativeV1ProjectionReaderTests(NativeSqlServerFixture fixt
         Assert.Equal(new[] { "safe-0", "secret-content-sentinel", "safe-2" }, persisted);
     }
 
+    [NativeSqlServerFact]
+    public async Task Audit_events_exclude_hook_exception_text_from_the_native_projection()
+    {
+        var occurredAt = DateTimeOffset.UtcNow;
+        await using var context = await SqlTestData.CreateFactory(_fixture).CreateDbContextAsync();
+        var audit = new AuditEventEntity
+        {
+            EventFamily = "codex_hook",
+            Severity = "warning",
+            EventType = "codex_hook.processing_failed",
+            Actor = "codex-hook",
+            DetailsJson = "{\"reasonCode\":\"unexpected\",\"phase\":\"preview\",\"exceptionType\":\"InvalidOperationException\",\"exceptionText\":\"operator-only-exception-sentinel\",\"sessionId\":\"hook-session-value-sentinel\",\"rawException\":\"unapproved-error-text-sentinel\"}",
+            OccurredAtUtc = occurredAt
+        };
+        context.AuditEvents.Add(audit);
+        await context.SaveChangesAsync();
+
+        var codec = new NativeV1ProjectionCursorCodec(new EphemeralDataProtectionProvider());
+        var service = new NativeAuditQueryService(CreateReader(codec), codec);
+        var result = JsonSerializer.SerializeToElement(await service.ExecuteAsync(
+            new NativeAuditQuery("events", null, null, 100, null),
+            CancellationToken.None));
+        var item = result.GetProperty("items").EnumerateArray()
+            .Single(value => value.GetProperty("Id").GetInt64() == audit.Id);
+        var details = item.GetProperty("details").GetProperty("value").GetString();
+        Assert.Contains("unexpected", details, StringComparison.Ordinal);
+        Assert.DoesNotContain("operator-only-exception-sentinel", details, StringComparison.Ordinal);
+        Assert.DoesNotContain("hook-session-value-sentinel", details, StringComparison.Ordinal);
+        Assert.DoesNotContain("unapproved-error-text-sentinel", details, StringComparison.Ordinal);
+    }
+
+    [NativeSqlServerFact]
+    public async Task Audit_events_fail_closed_for_malformed_hook_failure_details()
+    {
+        await using var context = await SqlTestData.CreateFactory(_fixture).CreateDbContextAsync();
+        var audit = new AuditEventEntity
+        {
+            EventFamily = "codex_hook",
+            Severity = "warning",
+            EventType = "codex_hook.processing_failed",
+            Actor = "codex-hook",
+            DetailsJson = "unapproved-malformed-hook-details-sentinel",
+            OccurredAtUtc = DateTimeOffset.UtcNow
+        };
+        context.AuditEvents.Add(audit);
+        await context.SaveChangesAsync();
+
+        var codec = new NativeV1ProjectionCursorCodec(new EphemeralDataProtectionProvider());
+        var service = new NativeAuditQueryService(CreateReader(codec), codec);
+        var result = JsonSerializer.SerializeToElement(await service.ExecuteAsync(
+            new NativeAuditQuery("events", null, null, 100, null),
+            CancellationToken.None));
+        var item = result.GetProperty("items").EnumerateArray()
+            .Single(value => value.GetProperty("Id").GetInt64() == audit.Id);
+        Assert.Equal("{}", item.GetProperty("details").GetProperty("value").GetString());
+    }
+
     [NativeSqlServerTheory]
     [InlineData(false, "retained-artifact-missing")]
     [InlineData(true, "retained-artifact-checksum-invalid")]

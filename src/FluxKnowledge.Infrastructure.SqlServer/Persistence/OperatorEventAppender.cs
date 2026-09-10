@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using FluxKnowledge.Application.Gpu;
+using FluxKnowledge.Application.IntegrationV1;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
 
 namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
@@ -27,11 +28,11 @@ public static class OperatorEventAppender
         Severity = Limit(draft.Severity, 64),
         EventType = Limit(draft.EventType, 256) ?? "operator.event",
         Actor = Limit(draft.Actor, 256) ?? "system",
-        DetailsJson = SanitiseDetails(draft.Details),
+        DetailsJson = SanitiseDetails(draft.EventType, draft.Details),
         OccurredAtUtc = draft.OccurredAtUtc
     };
 
-    private static string SanitiseDetails(object? details)
+    private static string SanitiseDetails(string eventType, object? details)
     {
         var node = JsonSerializer.SerializeToNode(details) as JsonObject;
         if (node is null)
@@ -42,7 +43,7 @@ public static class OperatorEventAppender
         var allowed = new JsonObject();
         foreach (var key in AllowedDetailKeys)
         {
-            if (node[key] is not JsonValue value || !TrySanitiseScalar(key, value, out var sanitised))
+            if (node[key] is not JsonValue value || !TrySanitiseScalar(eventType, key, value, out var sanitised))
             {
                 continue;
             }
@@ -51,12 +52,15 @@ public static class OperatorEventAppender
         }
 
         var json = allowed.ToJsonString();
-        return json.Length <= 2048 ? json : "{\"truncated\":true}";
+        var maximumLength = string.Equals(eventType, "codex_hook.processing_failed", StringComparison.Ordinal)
+            ? CodexHookFailureMetadata.MaximumFailureDetailsJsonCharacters
+            : 2_048;
+        return json.Length <= maximumLength ? json : "{\"truncated\":true}";
     }
 
-    private static readonly string[] AllowedDetailKeys = ["revision", "classification", "kind", "executionClass", "stage", "sourceActivity", "reasonCode", "descriptor", "action", "state"];
+    private static readonly string[] AllowedDetailKeys = ["revision", "classification", "kind", "executionClass", "stage", "sourceActivity", "reasonCode", "descriptor", "action", "state", "phase", "exceptionType", "sqlErrorNumber", "exceptionText"];
 
-    private static bool TrySanitiseScalar(string key, JsonValue value, out JsonNode? sanitised)
+    private static bool TrySanitiseScalar(string eventType, string key, JsonValue value, out JsonNode? sanitised)
     {
         if (key == "revision" && value.TryGetValue<long>(out var revision) && revision >= 0)
         {
@@ -64,8 +68,39 @@ public static class OperatorEventAppender
             return true;
         }
         if (key == "sourceActivity" && value.TryGetValue<bool>(out var boolean)) { sanitised = JsonValue.Create(boolean); return true; }
+        if (key == "sqlErrorNumber" &&
+            string.Equals(eventType, "codex_hook.processing_failed", StringComparison.Ordinal) &&
+            value.TryGetValue<int>(out var sqlErrorNumber) &&
+            CodexHookFailureMetadata.IsSqlErrorNumber(sqlErrorNumber))
+        {
+            sanitised = JsonValue.Create(sqlErrorNumber);
+            return true;
+        }
+        if (key == "exceptionText" &&
+            string.Equals(eventType, "codex_hook.processing_failed", StringComparison.Ordinal) &&
+            value.TryGetValue<string>(out var exceptionText) &&
+            CodexHookFailureMetadata.IsExceptionText(exceptionText))
+        {
+            sanitised = JsonValue.Create(exceptionText);
+            return true;
+        }
         if (value.TryGetValue<string>(out var text) && text.Length <= 128 && text.All(character => char.IsLetterOrDigit(character) || character is '.' or '-' or '_'))
         {
+            if (key == "phase" && (!string.Equals(eventType, "codex_hook.processing_failed", StringComparison.Ordinal) || !CodexHookFailureMetadata.IsPhase(text)))
+            {
+                sanitised = null;
+                return false;
+            }
+            if (key == "exceptionType" && (!string.Equals(eventType, "codex_hook.processing_failed", StringComparison.Ordinal) || !CodexHookFailureMetadata.IsExceptionType(text)))
+            {
+                sanitised = null;
+                return false;
+            }
+            if (key == "reasonCode" && string.Equals(eventType, "codex_hook.processing_failed", StringComparison.Ordinal) && !CodexHookFailureMetadata.IsReasonCode(text))
+            {
+                sanitised = null;
+                return false;
+            }
             sanitised = JsonValue.Create(text);
             return true;
         }

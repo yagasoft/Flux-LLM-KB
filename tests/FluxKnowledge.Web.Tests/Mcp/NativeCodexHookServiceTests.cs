@@ -188,6 +188,26 @@ public sealed class NativeCodexHookServiceTests
         Assert.DoesNotContain("summary-sensitive", entry.Message, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task Stop_preview_failure_records_bounded_metadata_and_exception_text()
+    {
+        var audits = new RecordingCodexHookAuditWriter();
+        var service = new NativeCodexHookService(new PreviewFailingFacade(), new RecordingOperationStore(), auditWriter: audits);
+
+        var response = await service.HandleAsync(
+            "Stop",
+            Json("{\"session_id\":\"session-sensitive\",\"turn_id\":\"turn-sensitive\",\"last_assistant_message\":\"summary-sensitive\"}"),
+            CancellationToken.None);
+
+        Assert.True(response.Continue);
+        var audit = Assert.Single(audits.Entries);
+        Assert.Equal(CodexHookAuditOutcome.ProcessingFailed, audit.Outcome);
+        Assert.Equal("preview", audit.FailurePhase);
+        Assert.Equal("InvalidOperationException", audit.ExceptionType);
+        Assert.Null(audit.SqlErrorNumber);
+        Assert.Contains("private-preview-sentinel", audit.ExceptionText, StringComparison.Ordinal);
+    }
+
     private static JsonElement Json(string value)
     {
         using var document = JsonDocument.Parse(value);
@@ -262,6 +282,18 @@ public sealed class NativeCodexHookServiceTests
 
         public ValueTask<NativeActionReceipt> CommitAsync(string family, object command, string confirmationId, string idempotencyKey, string surface, CancellationToken cancellationToken) =>
             ValueTask.FromException<NativeActionReceipt>(new NativeOperationException("confirmation-mismatch"));
+    }
+
+    private sealed class PreviewFailingFacade : INativeV1Facade
+    {
+        public ValueTask<object> ExecuteQueryAsync(string family, object request, CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+
+        public ValueTask<NativeActionPreview> PreviewAsync(string family, object command, string surface, CancellationToken cancellationToken) =>
+            ValueTask.FromException<NativeActionPreview>(new InvalidOperationException("private-preview-sentinel"));
+
+        public ValueTask<NativeActionReceipt> CommitAsync(string family, object command, string confirmationId, string idempotencyKey, string surface, CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
     }
 
     private sealed class RecordingLogger : ILogger<NativeCodexHookService>

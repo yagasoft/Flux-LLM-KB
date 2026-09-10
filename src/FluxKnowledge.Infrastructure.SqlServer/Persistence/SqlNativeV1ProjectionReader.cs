@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using FluxKnowledge.Application.IntegrationV1;
 using FluxKnowledge.Application.IntegrationV1.Code;
 using FluxKnowledge.Application.IntegrationV1.Corpus;
@@ -105,9 +106,58 @@ public sealed class SqlNativeV1ProjectionReader(
             : null;
         return new
         {
-            items = page.Select(value => new { value.Id, value.OccurredAtUtc, value.EventType, value.EventFamily, value.Severity, value.SourceRootId, value.SourceScanRequestId, details = Safe(value.DetailsJson, LocalDisclosureKind.AuditEvidence) }).ToArray(),
+            items = page.Select(value => new { value.Id, value.OccurredAtUtc, value.EventType, value.EventFamily, value.Severity, value.SourceRootId, value.SourceScanRequestId, details = Safe(AuditDetails(value.EventType, value.DetailsJson), LocalDisclosureKind.AuditEvidence) }).ToArray(),
             nextCursor
         };
+    }
+
+    private static string AuditDetails(string eventType, string details)
+    {
+        if (!string.Equals(eventType, "codex_hook.processing_failed", StringComparison.Ordinal))
+        {
+            return details;
+        }
+
+        try
+        {
+            if (JsonNode.Parse(details) is not JsonObject source)
+            {
+                return "{}";
+            }
+
+            var allowed = new JsonObject();
+            AddSafeAuditText(source, allowed, "reasonCode");
+            AddSafeAuditText(source, allowed, "phase");
+            AddSafeAuditText(source, allowed, "exceptionType");
+            if (source["sqlErrorNumber"] is JsonValue value &&
+                value.TryGetValue<int>(out var sqlErrorNumber) &&
+                CodexHookFailureMetadata.IsSqlErrorNumber(sqlErrorNumber))
+            {
+                allowed["sqlErrorNumber"] = sqlErrorNumber;
+            }
+
+            return allowed.Count == 0 ? "{}" : allowed.ToJsonString();
+        }
+        catch (JsonException)
+        {
+            return "{}";
+        }
+    }
+
+    private static void AddSafeAuditText(JsonObject source, JsonObject target, string propertyName)
+    {
+        if (source[propertyName] is JsonValue value &&
+            value.TryGetValue<string>(out var text) &&
+            (propertyName switch
+            {
+                "reasonCode" => CodexHookFailureMetadata.IsReasonCode(text),
+                "phase" => CodexHookFailureMetadata.IsPhase(text),
+                "exceptionType" => CodexHookFailureMetadata.IsExceptionType(text),
+                _ => false
+            }))
+        {
+            target[propertyName] = text;
+        }
     }
 
     private async ValueTask<object> ReadRootsAsync(FluxKnowledgeDbContext context, NativeCorpusQuery query, CancellationToken cancellationToken)

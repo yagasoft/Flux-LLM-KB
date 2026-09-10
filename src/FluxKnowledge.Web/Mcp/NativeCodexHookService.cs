@@ -6,6 +6,7 @@ using FluxKnowledge.Application.Contracts;
 using FluxKnowledge.Application.IntegrationV1;
 using FluxKnowledge.Application.Knowledge;
 using FluxKnowledge.Application.Ports;
+using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -90,8 +91,15 @@ public sealed class NativeCodexHookService(
         }
         catch (Exception exception)
         {
+            var failure = DescribeFailure(exception);
             await RecordAuditAsync(
-                CodexHookAuditEvent.ProcessingFailed(FailureClassification(exception), _timeProvider.GetUtcNow()),
+                CodexHookAuditEvent.ProcessingFailed(
+                    failure.Classification,
+                    failure.Phase,
+                    failure.ExceptionType,
+                    failure.SqlErrorNumber,
+                    _timeProvider.GetUtcNow(),
+                    failure.ExceptionText),
                 cancellationToken).ConfigureAwait(false);
             return new NativeCodexHookResponse(true, SystemMessage: "Native Codex hook could not access local knowledge; continuing.");
         }
@@ -110,30 +118,42 @@ public sealed class NativeCodexHookService(
     private async ValueTask<NativeCodexHookResponse> HandleUserPromptSubmitAsync(JsonElement payload, CancellationToken cancellationToken)
     {
         var prompt = RequiredText(payload, "prompt", NativeV1ContractLimits.MaximumKnowledgeQueryCharacters);
-        var results = await _facade.ExecuteQueryAsync(
-            "knowledge",
-            new NativeKnowledgeQuery(prompt, SearchLimit),
-            cancellationToken).ConfigureAwait(false);
-        var context = FormatContext(results);
-        await RecordAuditAsync(CodexHookAuditEvent.Preflight(!string.IsNullOrEmpty(context), _timeProvider.GetUtcNow()), cancellationToken).ConfigureAwait(false);
-        return string.IsNullOrEmpty(context)
-            ? new NativeCodexHookResponse(true)
-            : new NativeCodexHookResponse(true, new NativeCodexHookSpecificOutput("UserPromptSubmit", context));
+        try
+        {
+            var results = await _facade.ExecuteQueryAsync(
+                "knowledge",
+                new NativeKnowledgeQuery(prompt, SearchLimit),
+                cancellationToken).ConfigureAwait(false);
+            var context = FormatContext(results);
+            await RecordAuditAsync(CodexHookAuditEvent.Preflight(!string.IsNullOrEmpty(context), _timeProvider.GetUtcNow()), cancellationToken).ConfigureAwait(false);
+            return string.IsNullOrEmpty(context)
+                ? new NativeCodexHookResponse(true)
+                : new NativeCodexHookResponse(true, new NativeCodexHookSpecificOutput("UserPromptSubmit", context));
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+        {
+            throw new NativeCodexHookFailureException("user_prompt", [prompt], exception);
+        }
     }
 
     private async ValueTask<NativeCodexHookResponse> HandleStopAsync(JsonElement payload, CancellationToken cancellationToken)
     {
-        var sessionId = RequiredText(payload, "session_id", 256);
-        var turnId = RequiredText(payload, "turn_id", 256);
-        var summary = RequiredText(payload, "last_assistant_message", MaximumSummaryCharacters);
-        var idempotencyKey = IdempotencyKey(sessionId, turnId);
-        var phase = "receipt_lookup";
+        var phase = "input_validation";
+        string? sessionId = null;
+        string? turnId = null;
+        string? summary = null;
         try
         {
+            sessionId = RequiredText(payload, "session_id", 256);
+            turnId = RequiredText(payload, "turn_id", 256);
+            summary = RequiredText(payload, "last_assistant_message", MaximumSummaryCharacters);
+            var idempotencyKey = IdempotencyKey(sessionId, turnId);
+            phase = "receipt_lookup";
             if (await _operationStore.FindReceiptAsync(idempotencyKey, ActorSurface, cancellationToken).ConfigureAwait(false) is not null)
             {
                 return new NativeCodexHookResponse(true);
             }
+            phase = "mutation_build";
             var mutation = new KnowledgeMutation(
                 "note_create",
                 null,
@@ -153,14 +173,37 @@ public sealed class NativeCodexHookService(
             await PublishEventsAsync(cancellationToken).ConfigureAwait(false);
             return new NativeCodexHookResponse(true);
         }
+        catch (NativeCodexHookInputException)
+        {
+            throw;
+        }
         catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
         {
             _logger.LogWarning(
                 "Native Codex Stop persistence failed at {Phase} ({Classification}).",
                 phase,
                 FailureClassification(exception));
-            throw;
+            throw new NativeCodexHookFailureException(phase, [sessionId, turnId, summary], exception);
         }
+    }
+
+    private static HookFailure DescribeFailure(Exception exception)
+    {
+        var phase = "user_prompt";
+        IReadOnlyList<string> sensitiveValues = [];
+        if (exception is NativeCodexHookFailureException hookFailure)
+        {
+            phase = hookFailure.Phase;
+            sensitiveValues = hookFailure.SensitiveValues;
+            exception = hookFailure.InnerException!;
+        }
+
+        return new HookFailure(
+            phase,
+            FailureClassification(exception),
+            ExceptionType(exception),
+            SqlErrorNumber(exception),
+            ExceptionText(exception, sensitiveValues));
     }
 
     private static string FailureClassification(Exception exception) => exception switch
@@ -173,6 +216,51 @@ public sealed class NativeCodexHookService(
         TimeoutException => "timeout",
         _ => "unexpected"
     };
+
+    private static string ExceptionType(Exception exception) => exception switch
+    {
+        SqlException => "SqlException",
+        NativeOperationCommitUncertainException => "NativeOperationCommitUncertainException",
+        NativeOperationException => "NativeOperationException",
+        TimeoutException => "TimeoutException",
+        OperationCanceledException => "OperationCanceledException",
+        InvalidOperationException => "InvalidOperationException",
+        ArgumentException => "ArgumentException",
+        _ => "UnexpectedException"
+    };
+
+    private static int? SqlErrorNumber(Exception exception)
+    {
+        for (var current = exception; current is not null; current = current.InnerException)
+        {
+            if (current is SqlException sqlException) return sqlException.Number;
+        }
+
+        return null;
+    }
+
+    private static string ExceptionText(Exception exception, IReadOnlyList<string> sensitiveValues)
+    {
+        try
+        {
+            var text = exception.ToString();
+            foreach (var sensitiveValue in sensitiveValues
+                         .Where(value => !string.IsNullOrWhiteSpace(value))
+                         .Distinct(StringComparer.Ordinal)
+                         .OrderByDescending(value => value.Length))
+            {
+                text = text.Replace(sensitiveValue, "[hook-input-redacted]", StringComparison.Ordinal);
+                var jsonEscapedValue = JsonSerializer.Serialize(sensitiveValue);
+                text = text.Replace(jsonEscapedValue[1..^1], "[hook-input-redacted]", StringComparison.Ordinal);
+            }
+
+            return Truncate(text, CodexHookFailureMetadata.MaximumExceptionTextCharacters);
+        }
+        catch (Exception)
+        {
+            return Truncate(exception.GetType().FullName ?? "Exception", CodexHookFailureMetadata.MaximumExceptionTextCharacters);
+        }
+    }
 
     private async ValueTask RecordAuditAsync(CodexHookAuditEvent auditEvent, CancellationToken cancellationToken)
     {
@@ -260,5 +348,16 @@ public sealed class NativeCodexHookService(
         $"Codex turn {Truncate(turnId, 220)} [{Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(sessionId)))[..16]}]";
 
     private sealed class NativeCodexHookInputException : Exception;
+
+    private sealed class NativeCodexHookFailureException(string phase, IEnumerable<string?> sensitiveValues, Exception innerException) : Exception(null, innerException)
+    {
+        public string Phase { get; } = phase;
+        public IReadOnlyList<string> SensitiveValues { get; } = sensitiveValues
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .Select(value => value!)
+            .ToArray();
+    }
+
+    private sealed record HookFailure(string Phase, string Classification, string ExceptionType, int? SqlErrorNumber, string ExceptionText);
 
 }

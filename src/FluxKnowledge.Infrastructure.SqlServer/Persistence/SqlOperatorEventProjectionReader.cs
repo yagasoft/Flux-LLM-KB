@@ -1,6 +1,9 @@
 using FluxKnowledge.Application.Contracts;
+using FluxKnowledge.Application.IntegrationV1;
 using FluxKnowledge.Application.Ports;
 using Microsoft.EntityFrameworkCore;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 
 namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
 
@@ -22,9 +25,13 @@ public sealed class SqlOperatorEventProjectionReader(IDbContextFactory<FluxKnowl
         if (filters.OccurredToUtc is { } to) rows = rows.Where(value => value.OccurredAtUtc <= to);
         if (query.Cursor is { } cursor) rows = rows.Where(value => value.OccurredAtUtc < cursor.OccurredAtUtc || (value.OccurredAtUtc == cursor.OccurredAtUtc && value.Id < cursor.EventId));
         var values = await rows.OrderByDescending(value => value.OccurredAtUtc).ThenByDescending(value => value.Id).Take(query.PageSize + 1).ToArrayAsync(cancellationToken).ConfigureAwait(false);
-        var items = values.Take(query.PageSize).Select(value => new OperatorEventEntry(value.Id, value.OccurredAtUtc, value.EventType,
-            value.EventFamily ?? Family(value.EventType), value.Severity ?? "information", value.EventType, value.PipelineRecordId, value.SourceRootId,
-            value.SourceRevisionId, value.SourceActivityId, value.SourceScanRequestId, value.CorrelationId, SanitiseDetails(value.DetailsJson))).ToArray();
+        var items = values.Take(query.PageSize).Select(value =>
+        {
+            var details = SanitiseDetails(value.EventType, value.DetailsJson);
+            return new OperatorEventEntry(value.Id, value.OccurredAtUtc, value.EventType,
+                value.EventFamily ?? Family(value.EventType), value.Severity ?? "information", Message(value.EventType, details), value.PipelineRecordId, value.SourceRootId,
+                value.SourceRevisionId, value.SourceActivityId, value.SourceScanRequestId, value.CorrelationId, details);
+        }).ToArray();
         var last = items.LastOrDefault();
         return new OperatorEventPage(items, values.Length > query.PageSize && last is not null
             ? OperatorEventCursor.Create(last.OccurredAtUtc, last.Id, query.CanonicalFilter) : null);
@@ -32,7 +39,133 @@ public sealed class SqlOperatorEventProjectionReader(IDbContextFactory<FluxKnowl
 
     private static string Family(string eventType) => eventType.Split('.', 2)[0];
 
-    // Historical audit rows pre-date the allow-listed appender.  Do not reflect an
-    // arbitrary legacy payload into the operator UI.
-    private static string SanitiseDetails(string details) => details.Length <= 2_048 && details is "{}" or "{\"truncated\":true}" ? details : "{\"sanitised\":true}";
+    // Historical audit rows pre-date the allow-listed appender.  Revalidate the
+    // only diagnostic shape intentionally rendered to operators; never reflect
+    // arbitrary persisted payloads into the UI.
+    private static string SanitiseDetails(string eventType, string details)
+    {
+        var maximumLength = string.Equals(eventType, "codex_hook.processing_failed", StringComparison.Ordinal)
+            ? CodexHookFailureMetadata.MaximumFailureDetailsJsonCharacters
+            : 2_048;
+        if (details.Length > maximumLength)
+        {
+            return "{\"sanitised\":true}";
+        }
+
+        if (!string.Equals(eventType, "codex_hook.processing_failed", StringComparison.Ordinal))
+        {
+            return details is "{}" or "{\"truncated\":true}" ? details : "{\"sanitised\":true}";
+        }
+
+        try
+        {
+            if (JsonNode.Parse(details) is not JsonObject source)
+            {
+                return "{\"sanitised\":true}";
+            }
+
+            var allowed = new JsonObject();
+            AddSafeText(source, allowed, "reasonCode");
+            AddSafeText(source, allowed, "phase");
+            AddSafeText(source, allowed, "exceptionType");
+            AddSafeExceptionText(source, allowed);
+            if (TryGetSafeSqlErrorNumber(source, out var sqlErrorNumber))
+            {
+                allowed["sqlErrorNumber"] = sqlErrorNumber;
+            }
+
+            return allowed.Count == 0 ? "{}" : allowed.ToJsonString();
+        }
+        catch (JsonException)
+        {
+            return "{\"sanitised\":true}";
+        }
+    }
+
+    private static string Message(string eventType, string details)
+    {
+        if (!string.Equals(eventType, "codex_hook.processing_failed", StringComparison.Ordinal))
+        {
+            return eventType;
+        }
+
+        try
+        {
+            if (JsonNode.Parse(details) is not JsonObject source)
+            {
+                return eventType;
+            }
+
+            var message = new List<string>();
+            if (TryGetSafeText(source, "reasonCode", out var reasonCode)) message.Add($"reason: {reasonCode}");
+            if (TryGetSafeText(source, "phase", out var phase)) message.Add($"phase: {phase}");
+            if (TryGetSafeText(source, "exceptionType", out var exceptionType)) message.Add($"exception: {exceptionType}");
+            if (TryGetSafeSqlErrorNumber(source, out var sqlErrorNumber)) message.Add($"SQL error: {sqlErrorNumber}");
+            if (TryGetSafeExceptionText(source, out var exceptionText)) message.Add($"exception detail: {exceptionText}");
+            return message.Count == 0 ? eventType : string.Join("; ", message);
+        }
+        catch (JsonException)
+        {
+            return eventType;
+        }
+    }
+
+    private static void AddSafeText(JsonObject source, JsonObject target, string propertyName)
+    {
+        if (TryGetSafeText(source, propertyName, out var text))
+        {
+            target[propertyName] = text;
+        }
+    }
+
+    private static void AddSafeExceptionText(JsonObject source, JsonObject target)
+    {
+        if (TryGetSafeExceptionText(source, out var exceptionText))
+        {
+            target["exceptionText"] = exceptionText;
+        }
+    }
+
+    private static bool TryGetSafeText(JsonObject source, string propertyName, out string text)
+    {
+        text = string.Empty;
+        if (source[propertyName] is JsonValue value &&
+            value.TryGetValue<string>(out var candidate) &&
+            (propertyName switch
+            {
+                "reasonCode" => CodexHookFailureMetadata.IsReasonCode(candidate),
+                "phase" => CodexHookFailureMetadata.IsPhase(candidate),
+                "exceptionType" => CodexHookFailureMetadata.IsExceptionType(candidate),
+                _ => false
+            }))
+        {
+            text = candidate;
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool TryGetSafeSqlErrorNumber(JsonObject source, out int sqlErrorNumber)
+    {
+        sqlErrorNumber = 0;
+        return source["sqlErrorNumber"] is JsonValue value &&
+               value.TryGetValue<int>(out sqlErrorNumber) &&
+               CodexHookFailureMetadata.IsSqlErrorNumber(sqlErrorNumber);
+    }
+
+    private static bool TryGetSafeExceptionText(JsonObject source, out string exceptionText)
+    {
+        exceptionText = string.Empty;
+        if (source["exceptionText"] is JsonValue value &&
+            value.TryGetValue<string>(out var candidate) &&
+            candidate is not null &&
+            CodexHookFailureMetadata.IsExceptionText(candidate))
+        {
+            exceptionText = candidate;
+            return true;
+        }
+
+        return false;
+    }
 }
