@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text;
 using System.Text.Json;
 using FluxKnowledge.Application.Operations;
 using FluxKnowledge.Integrations.Codex;
@@ -11,29 +12,33 @@ public sealed class NativeCodexPluginMarketplaceTests
 {
     [Theory]
     [InlineData(
+        "powershell.exe",
         "UserPromptSubmit",
-        "{\"continue\":true,\"hookSpecificOutput\":{\"hookEventName\":\"UserPromptSubmit\",\"additionalContext\":\"Prior local context\"},\"systemMessage\":null}",
-        "{\"continue\":true,\"hookSpecificOutput\":{\"hookEventName\":\"UserPromptSubmit\",\"additionalContext\":\"Prior local context\"}}")]
+        "{\"prompt\":\"Yes - this is healthy.\"}")]
     [InlineData(
+        "pwsh",
         "UserPromptSubmit",
-        "{\"continue\":true,\"hookSpecificOutput\":null,\"systemMessage\":null}",
-        "{\"continue\":true}")]
+        "{\"prompt\":\"Yes - this is healthy.\"}")]
     [InlineData(
+        "powershell.exe",
+        "UserPromptSubmit",
+        "{\"prompt\":\"نعم 😀 — هذا صحي.\"}")]
+    [InlineData(
+        "pwsh",
+        "UserPromptSubmit",
+        "{\"prompt\":\"نعم 😀 — هذا صحي.\"}")]
+    [InlineData(
+        "powershell.exe",
         "PreCompact",
-        "{\"continue\":true,\"hookSpecificOutput\":null,\"systemMessage\":null}",
-        "{\"continue\":true}")]
+        "{\"prompt\":\"Yes - this is healthy.\"}")]
     [InlineData(
+        "pwsh",
         "Stop",
-        "{\"continue\":true,\"hookSpecificOutput\":null,\"systemMessage\":null}",
-        "{\"continue\":true}")]
-    [InlineData(
-        "Stop",
-        "{\"continue\":true,\"hookSpecificOutput\":null,\"systemMessage\":\"Native Codex hook ignored invalid input.\"}",
-        "{\"continue\":true,\"systemMessage\":\"Native Codex hook ignored invalid input.\"}")]
-    public async Task Generated_native_hook_adapter_emits_only_Codex_supported_fields(
+        "{\"prompt\":\"Yes - this is healthy.\"}")]
+    public async Task Generated_native_hook_adapter_posts_exact_utf8_bytes_and_preserves_supported_unicode_response(
+        string powershell,
         string eventName,
-        string loopbackResponse,
-        string expectedOutput)
+        string request)
     {
         var root = Path.Combine(Path.GetTempPath(), "FluxKnowledgeNativeHookAdapterTests", Guid.NewGuid().ToString("N"));
         try
@@ -42,7 +47,7 @@ public sealed class NativeCodexPluginMarketplaceTests
             var adapterPath = Path.Combine(root, "invoke-native-hook.ps1");
             var wrapperPath = Path.Combine(root, "invoke-with-stubbed-loopback.ps1");
             await File.WriteAllBytesAsync(adapterPath, NativeCodexPluginManifestWriter.RenderNativeHookAdapterUtf8());
-            await File.WriteAllTextAsync(wrapperPath, """
+            await WritePowerShellScriptAsync(wrapperPath, """
 param(
     [Parameter(Mandatory = $true)][string]$AdapterPath,
     [Parameter(Mandatory = $true)][string]$EventName
@@ -52,19 +57,69 @@ function Invoke-RestMethod {
         [string]$Method,
         [string]$Uri,
         [string]$ContentType,
-        [string]$Body,
+        [object]$Body,
         [int]$TimeoutSec
     )
+    $global:FluxTestNativeHookDispatched = $true
+    $global:FluxTestNativeHookContentType = $ContentType
+    $global:FluxTestNativeHookBodyType = $Body.GetType().FullName
+    if ($Body -is [byte[]]) {
+        $global:FluxTestNativeHookBodyBase64 = [Convert]::ToBase64String($Body)
+    }
     return $env:FLUX_TEST_NATIVE_HOOK_RESPONSE | ConvertFrom-Json
 }
-& $AdapterPath $EventName
+$global:FluxTestNativeHookDispatched = $false
+$global:FluxTestNativeHookContentType = $null
+$global:FluxTestNativeHookBodyType = $null
+$global:FluxTestNativeHookBodyBase64 = $null
+$adapterOutput = & $AdapterPath $EventName
+[ordered]@{
+    adapterOutput = ($adapterOutput -join "`n")
+    dispatched = $global:FluxTestNativeHookDispatched
+    contentType = $global:FluxTestNativeHookContentType
+    bodyType = $global:FluxTestNativeHookBodyType
+    bodyBase64 = $global:FluxTestNativeHookBodyBase64
+} | ConvertTo-Json -Compress
 """);
 
-            var result = await RunPowerShellAdapterAsync(wrapperPath, adapterPath, eventName, loopbackResponse);
+            var response = eventName == "Stop"
+                ? "{\"continue\":true,\"hookSpecificOutput\":null,\"systemMessage\":null}"
+                : """
+                    {"continue":false,"hookSpecificOutput":{"hookEventName":"ignored","additionalContext":"سياق 😀 — محلي"},"systemMessage":"حالة 😀 — سليمة","unsupported":"must not escape"}
+                    """;
+            var requestBytes = StrictUtf8.GetBytes(request);
+            var result = await RunPowerShellAdapterAsync(powershell, wrapperPath, adapterPath, eventName, response, requestBytes);
 
-            Assert.Equal(0, result.ExitCode);
-            Assert.Equal(string.Empty, result.Error.Trim());
-            Assert.Equal(expectedOutput, result.Output.Trim());
+            Assert.True(result.ExitCode == 0, StrictUtf8.GetString(result.Error));
+            Assert.Empty(result.Error);
+            using var captured = JsonDocument.Parse(StrictUtf8.GetString(result.Output));
+            var capturedRequest = captured.RootElement;
+            Assert.True(capturedRequest.GetProperty("dispatched").GetBoolean());
+            Assert.Equal("application/json; charset=utf-8", capturedRequest.GetProperty("contentType").GetString());
+            Assert.Equal("System.Byte[]", capturedRequest.GetProperty("bodyType").GetString());
+            Assert.Equal(requestBytes, Convert.FromBase64String(capturedRequest.GetProperty("bodyBase64").GetString()!));
+
+            using var output = JsonDocument.Parse(capturedRequest.GetProperty("adapterOutput").GetString()!);
+            Assert.Equal(eventName == "Stop", output.RootElement.GetProperty("continue").GetBoolean());
+            if (eventName == "UserPromptSubmit")
+            {
+                Assert.Equal("UserPromptSubmit", output.RootElement.GetProperty("hookSpecificOutput").GetProperty("hookEventName").GetString());
+                Assert.Equal("سياق 😀 — محلي", output.RootElement.GetProperty("hookSpecificOutput").GetProperty("additionalContext").GetString());
+            }
+            else
+            {
+                Assert.False(output.RootElement.TryGetProperty("hookSpecificOutput", out _));
+            }
+
+            if (eventName == "Stop")
+            {
+                Assert.False(output.RootElement.TryGetProperty("systemMessage", out _));
+            }
+            else
+            {
+                Assert.Equal("حالة 😀 — سليمة", output.RootElement.GetProperty("systemMessage").GetString());
+            }
+            Assert.False(output.RootElement.TryGetProperty("unsupported", out _));
         }
         finally
         {
@@ -72,8 +127,10 @@ function Invoke-RestMethod {
         }
     }
 
-    [Fact]
-    public async Task Generated_native_hook_adapter_preserves_the_fail_open_transport_response()
+    [Theory]
+    [InlineData("powershell.exe")]
+    [InlineData("pwsh")]
+    public async Task Generated_native_hook_adapter_fails_open_for_transport_errors(string powershell)
     {
         var root = Path.Combine(Path.GetTempPath(), "FluxKnowledgeNativeHookAdapterTests", Guid.NewGuid().ToString("N"));
         try
@@ -82,7 +139,7 @@ function Invoke-RestMethod {
             var adapterPath = Path.Combine(root, "invoke-native-hook.ps1");
             var wrapperPath = Path.Combine(root, "invoke-with-stubbed-loopback.ps1");
             await File.WriteAllBytesAsync(adapterPath, NativeCodexPluginManifestWriter.RenderNativeHookAdapterUtf8());
-            await File.WriteAllTextAsync(wrapperPath, """
+            await WritePowerShellScriptAsync(wrapperPath, """
 param(
     [Parameter(Mandatory = $true)][string]$AdapterPath,
     [Parameter(Mandatory = $true)][string]$EventName
@@ -92,19 +149,25 @@ function Invoke-RestMethod {
         [string]$Method,
         [string]$Uri,
         [string]$ContentType,
-        [string]$Body,
+        [object]$Body,
         [int]$TimeoutSec
     )
+    $global:FluxTestNativeHookDispatched = $true
     throw 'test loopback transport failure'
 }
-& $AdapterPath $EventName
+$global:FluxTestNativeHookDispatched = $false
+$adapterOutput = & $AdapterPath $EventName
+[ordered]@{ adapterOutput = ($adapterOutput -join "`n"); dispatched = $global:FluxTestNativeHookDispatched } | ConvertTo-Json -Compress
 """);
 
-            var result = await RunPowerShellAdapterAsync(wrapperPath, adapterPath, "Stop", "{}");
+            var result = await RunPowerShellAdapterAsync(
+                powershell, wrapperPath, adapterPath, "Stop", "{}", StrictUtf8.GetBytes("{}"));
 
-            Assert.Equal(0, result.ExitCode);
-            Assert.Equal(string.Empty, result.Error.Trim());
-            Assert.Equal("{\"continue\":true,\"systemMessage\":\"Native Codex hook transport unavailable; continuing.\"}", result.Output.Trim());
+            Assert.True(result.ExitCode == 0, StrictUtf8.GetString(result.Error));
+            Assert.Empty(result.Error);
+            using var captured = JsonDocument.Parse(StrictUtf8.GetString(result.Output));
+            Assert.True(captured.RootElement.GetProperty("dispatched").GetBoolean());
+            Assert.Equal("{\"continue\":true,\"systemMessage\":\"Native Codex hook transport unavailable; continuing.\"}", captured.RootElement.GetProperty("adapterOutput").GetString());
         }
         finally
         {
@@ -139,17 +202,60 @@ function Invoke-RestMethod {
         }
     }
 
+    [Theory]
+    [InlineData("powershell.exe")]
+    [InlineData("pwsh")]
+    public async Task Generated_native_hook_adapter_fails_open_without_dispatching_malformed_utf8(string powershell)
+    {
+        var root = Path.Combine(Path.GetTempPath(), "FluxKnowledgeNativeHookAdapterTests", Guid.NewGuid().ToString("N"));
+        try
+        {
+            Directory.CreateDirectory(root);
+            var adapterPath = Path.Combine(root, "invoke-native-hook.ps1");
+            var wrapperPath = Path.Combine(root, "invoke-with-stubbed-loopback.ps1");
+            await File.WriteAllBytesAsync(adapterPath, NativeCodexPluginManifestWriter.RenderNativeHookAdapterUtf8());
+            await WritePowerShellScriptAsync(wrapperPath, """
+param(
+    [Parameter(Mandatory = $true)][string]$AdapterPath,
+    [Parameter(Mandatory = $true)][string]$EventName
+)
+function Invoke-RestMethod {
+    $global:FluxTestNativeHookDispatched = $true
+    throw 'malformed input must not dispatch'
+}
+$global:FluxTestNativeHookDispatched = $false
+$adapterOutput = & $AdapterPath $EventName
+[ordered]@{ adapterOutput = ($adapterOutput -join "`n"); dispatched = $global:FluxTestNativeHookDispatched } | ConvertTo-Json -Compress
+""");
+
+            var result = await RunPowerShellAdapterAsync(
+                powershell, wrapperPath, adapterPath, "Stop", null, [0xC3, 0x28]);
+
+            Assert.True(result.ExitCode == 0, StrictUtf8.GetString(result.Error));
+            Assert.Empty(result.Error);
+            using var captured = JsonDocument.Parse(StrictUtf8.GetString(result.Output));
+            Assert.False(captured.RootElement.GetProperty("dispatched").GetBoolean());
+            Assert.Equal("{\"continue\":true,\"systemMessage\":\"Native Codex hook transport unavailable; continuing.\"}", captured.RootElement.GetProperty("adapterOutput").GetString());
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
     private static async Task<PowerShellResult> RunPowerShellAdapterAsync(
+        string powershell,
         string wrapperPath,
         string adapterPath,
         string eventName,
-        string loopbackResponse)
+        string? loopbackResponse,
+        byte[] input)
     {
         using var process = new Process
         {
             StartInfo = new ProcessStartInfo
             {
-                FileName = "pwsh",
+                FileName = powershell,
                 UseShellExecute = false,
                 RedirectStandardInput = true,
                 RedirectStandardOutput = true,
@@ -157,23 +263,43 @@ function Invoke-RestMethod {
             }
         };
         process.StartInfo.ArgumentList.Add("-NoProfile");
+        if (string.Equals(powershell, "powershell.exe", StringComparison.OrdinalIgnoreCase))
+        {
+            process.StartInfo.ArgumentList.Add("-ExecutionPolicy");
+            process.StartInfo.ArgumentList.Add("Bypass");
+        }
         process.StartInfo.ArgumentList.Add("-File");
         process.StartInfo.ArgumentList.Add(wrapperPath);
         process.StartInfo.ArgumentList.Add(adapterPath);
         process.StartInfo.ArgumentList.Add(eventName);
-        process.StartInfo.Environment["FLUX_TEST_NATIVE_HOOK_RESPONSE"] = loopbackResponse;
+        if (loopbackResponse is not null)
+        {
+            process.StartInfo.Environment["FLUX_TEST_NATIVE_HOOK_RESPONSE"] = loopbackResponse;
+        }
 
         process.Start();
-        await process.StandardInput.WriteAsync("{\"test\":true}");
+        var output = ReadAllBytesAsync(process.StandardOutput.BaseStream);
+        var error = ReadAllBytesAsync(process.StandardError.BaseStream);
+        await process.StandardInput.BaseStream.WriteAsync(input);
         process.StandardInput.Close();
-        var output = process.StandardOutput.ReadToEndAsync();
-        var error = process.StandardError.ReadToEndAsync();
         await process.WaitForExitAsync();
 
         return new PowerShellResult(process.ExitCode, await output, await error);
     }
 
-    private sealed record PowerShellResult(int ExitCode, string Output, string Error);
+    private static Task WritePowerShellScriptAsync(string path, string content) =>
+        File.WriteAllTextAsync(path, content, new UTF8Encoding(encoderShouldEmitUTF8Identifier: true));
+
+    private static async Task<byte[]> ReadAllBytesAsync(Stream stream)
+    {
+        await using var buffer = new MemoryStream();
+        await stream.CopyToAsync(buffer);
+        return buffer.ToArray();
+    }
+
+    private static readonly UTF8Encoding StrictUtf8 = new(false, true);
+
+    private sealed record PowerShellResult(int ExitCode, byte[] Output, byte[] Error);
 
     [Fact]
     public async Task Writer_creates_the_normalised_plugin_beneath_the_app_owned_marketplace_root()

@@ -278,9 +278,17 @@ public sealed class NativeCodexPluginManifestWriter
 
 private const string NativeHookAdapter = """
 param([Parameter(Mandatory = $true)][ValidateSet('UserPromptSubmit', 'PreCompact', 'Stop')][string]$EventName)
-$payload = [Console]::In.ReadToEnd()
 try {
-    $response = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:5137/native/v1/codex/hooks/$EventName" -ContentType 'application/json' -Body $payload -TimeoutSec 10
+    $utf8 = [System.Text.UTF8Encoding]::new($false, $true)
+    [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+    $reader = [System.IO.StreamReader]::new([Console]::OpenStandardInput(), $utf8, $false)
+    try {
+        $payload = $reader.ReadToEnd()
+    }
+    finally {
+        $reader.Dispose()
+    }
+    $response = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:5137/native/v1/codex/hooks/$EventName" -ContentType 'application/json; charset=utf-8' -Body $utf8.GetBytes($payload) -TimeoutSec 10
     $output = [ordered]@{ continue = if ($null -eq $response.continue) { $true } else { [bool]$response.continue } }
     if ($EventName -eq 'UserPromptSubmit' -and $null -ne $response.hookSpecificOutput) {
         $context = [string]$response.hookSpecificOutput.additionalContext
