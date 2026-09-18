@@ -155,7 +155,8 @@ public record RetainedProcessorDerivedChild(
     long ByteLength,
     string Classification,
     int OriginKind,
-    string Extension)
+    string Extension,
+    ISourceArtifactPublicationLease? PublicationLease = null)
 {
     // Compatibility projection for archive regressions; all values remain manifest-derived and opaque.
     public ArchiveMemberIdentity Identity => new(MemberFingerprint, SyntheticLocator, StableSourceIdentity);
@@ -165,8 +166,9 @@ public record RetainedProcessorDerivedChild(
         string contentSha256,
         string storeRelativePath,
         long byteLength,
-        string classification) => new(identity.MemberFingerprint, $"C:\\retained-archive-members\\{identity.MemberFingerprint}", identity.StableSourceIdentity,
-            contentSha256, storeRelativePath, byteLength, classification, OriginKind: 1, Extension: ".txt");
+        string classification,
+        ISourceArtifactPublicationLease? publicationLease = null) => new(identity.MemberFingerprint, $"C:\\retained-archive-members\\{identity.MemberFingerprint}", identity.StableSourceIdentity,
+            contentSha256, storeRelativePath, byteLength, classification, OriginKind: 1, Extension: ".txt", PublicationLease: publicationLease);
 }
 
 /// <summary>Compatibility constructor for archive callers; new processors use the generic manifest.</summary>

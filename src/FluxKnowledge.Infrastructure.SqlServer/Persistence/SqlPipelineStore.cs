@@ -299,7 +299,7 @@ public sealed class SqlPipelineStore(
     {
         await using var context = await contextFactory.CreateDbContextAsync(cancellationToken);
         return await context.IndexGenerations.AsNoTracking()
-            .Where(generation => generation.Id == indexGenerationId)
+            .Where(generation => generation.Id == indexGenerationId && generation.RetiredAtUtc == null)
             .Select(generation => new IndexGenerationDescriptor(generation.Id,
                 generation.ModelFingerprint, generation.Dimensions, generation.IndexPath,
                 generation.MetadataChecksum, generation.VectorCount))

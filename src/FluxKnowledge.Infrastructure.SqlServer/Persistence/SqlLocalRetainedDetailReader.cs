@@ -25,8 +25,9 @@ public sealed class SqlLocalRetainedDetailReader(
             from processorBranch in context.SourceProcessorBranches.AsNoTracking()
             join activity in context.SourceActivities.AsNoTracking() on processorBranch.SourceActivityId equals activity.Id
             join revision in context.SourceRevisions.AsNoTracking() on processorBranch.SourceRevisionId equals revision.Id
+            join root in context.SourceRootConfigurations.AsNoTracking() on revision.SourceRootId equals root.Id
             join artifact in context.SourceArtifacts.AsNoTracking() on revision.Id equals artifact.SourceRevisionId
-            where processorBranch.Id == branchId
+            where processorBranch.Id == branchId && root.State != (int)SourceRootState.Deleting
             select new
             {
                 processorBranch.Id,

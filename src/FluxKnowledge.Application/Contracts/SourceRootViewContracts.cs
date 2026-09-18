@@ -41,7 +41,12 @@ public sealed record SourceRootListProjection(
     int IndexedCount,
     int DeferredCount,
     int BlockedCount,
-    int ErrorCount);
+    int ErrorCount)
+{
+    public string? DeletionPhase { get; init; }
+
+    public string? DeletionReason { get; init; }
+}
 
 public sealed record SourceActivityReasonProjection(string State, string Reason, int Count);
 
@@ -68,6 +73,10 @@ public sealed record SourceRootDetailProjection(
     IReadOnlyList<SourceActivityReasonProjection> DeferredOrBlockedReasons,
     IReadOnlyList<DeferredContentReplayRequest> ReprocessableActivities)
 {
+    public string? DeletionPhase { get; init; }
+
+    public string? DeletionReason { get; init; }
+
     public bool CanReprocessDeferredContent => ReprocessableActivities.Count > 0;
 
     // Local operator UI only: source filenames must not enter public JSON payloads.

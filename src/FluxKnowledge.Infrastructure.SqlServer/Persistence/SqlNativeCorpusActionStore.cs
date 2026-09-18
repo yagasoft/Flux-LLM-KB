@@ -39,14 +39,14 @@ public sealed class SqlNativeCorpusActionStore(
         if (version is null || version.Length != 8) throw new NativeOperationException("target-not-found");
         var targets = new List<NativeTargetVersion> { new($"root:{id:D}", Convert.ToBase64String(version)) };
         var watch = await context.SourceRootWatchStates.AsNoTracking().Where(value => value.SourceRootId == id).Select(value => new { value.SourceRootId, value.RowVersion }).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
-        if (action is "watcher_set" or "root_disable")
+        if (action is "watcher_set" or "root_disable" or "root_pause" or "root_delete")
         {
             targets.Add(watch is null
                 ? new NativeTargetVersion($"watch:{id:D}", "absent")
                 : new NativeTargetVersion($"watch:{watch.SourceRootId:D}", Convert.ToBase64String(watch.RowVersion)));
             return targets;
         }
-        if (action is "root_update" or "source_sync")
+        if (action is "root_update" or "root_resume" or "source_sync")
         {
             targets.AddRange(await ResolveActiveControlTargetsAsync(context, id, cancellationToken).ConfigureAwait(false));
         }
@@ -151,7 +151,7 @@ public sealed class SqlNativeCorpusActionStore(
             {
                 "root_create" => new[] { "path", "displayName", "recursive", "followLinks", "maximumFileBytes", "reconciliationSeconds" },
                 "root_update" => new[] { "rootId", "displayName" },
-                "root_disable" or "source_sync" => new[] { "rootId" },
+                "root_disable" or "root_pause" or "root_resume" or "root_delete" or "source_sync" => new[] { "rootId" },
                 "watcher_set" => new[] { "rootId", "enabled" },
                 "job_retry" => new[] { "jobId" },
                 _ => throw new NativeOperationException("action-not-allowed")
@@ -165,7 +165,7 @@ public sealed class SqlNativeCorpusActionStore(
                     _ = OptionalLong(root, "maximumFileBytes", 16L * 1024 * 1024); _ = OptionalLong(root, "reconciliationSeconds", 900);
                     break;
                 case "root_update": _ = RequiredGuid(root, "rootId"); RequireSafeDisplayName(RequiredString(root, "displayName", 256)); break;
-                case "root_disable": case "source_sync": _ = RequiredGuid(root, "rootId"); break;
+                case "root_disable": case "root_pause": case "root_resume": case "root_delete": case "source_sync": _ = RequiredGuid(root, "rootId"); break;
                 case "watcher_set": _ = RequiredGuid(root, "rootId"); if (!root.TryGetProperty("enabled", out var enabled) || enabled.ValueKind is not (JsonValueKind.True or JsonValueKind.False)) throw new NativeOperationException("invalid-payload"); break;
                 case "job_retry": _ = RequiredGuid(root, "jobId"); break;
             }

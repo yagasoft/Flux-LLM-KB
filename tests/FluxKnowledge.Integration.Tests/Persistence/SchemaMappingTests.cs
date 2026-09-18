@@ -1256,17 +1256,14 @@ public sealed class NativeSchemaMigrationTests(NativeSqlServerFixture fixture)
                 StableKey = $"migration-test:{sourceId:N}",
                 CreatedAtUtc = now
             });
-            context.IndexGenerations.Add(new IndexGenerationEntity
-            {
-                Id = generationId,
-                ModelFingerprint = "migration-test:1",
-                Dimensions = 1,
-                IndexPath = "C:\\migration-test",
-                MetadataChecksum = new string('0', 64),
-                VectorCount = 1,
-                CreatedAtUtc = now
-            });
             await context.SaveChangesAsync();
+            await context.Database.ExecuteSqlInterpolatedAsync(
+                $"""
+                INSERT INTO [IndexGenerations]
+                    ([Id], [ModelFingerprint], [Dimensions], [IndexPath], [MetadataChecksum], [VectorCount], [CreatedAtUtc])
+                VALUES
+                    ({generationId}, {"migration-test:1"}, {1}, {"C:\\migration-test"}, {new string('0', 64)}, {1}, {now});
+                """);
             await SeedHistoricalPipelineRecordAsync(context, recordId, sourceId, new string('a', 64), now);
 
             var artifact = new ArtifactEntity
@@ -1320,16 +1317,13 @@ public sealed class NativeSchemaMigrationTests(NativeSqlServerFixture fixture)
             Assert.Equal(vectorId, membership.VectorId);
 
             var snapshotOnlyGenerationId = Guid.NewGuid();
-            context.IndexGenerations.Add(new IndexGenerationEntity
-            {
-                Id = snapshotOnlyGenerationId,
-                ModelFingerprint = "migration-test:1",
-                Dimensions = 1,
-                IndexPath = "C:\\migration-test-history",
-                MetadataChecksum = new string('1', 64),
-                VectorCount = 1,
-                CreatedAtUtc = now
-            });
+            await context.Database.ExecuteSqlInterpolatedAsync(
+                $"""
+                INSERT INTO [IndexGenerations]
+                    ([Id], [ModelFingerprint], [Dimensions], [IndexPath], [MetadataChecksum], [VectorCount], [CreatedAtUtc])
+                VALUES
+                    ({snapshotOnlyGenerationId}, {"migration-test:1"}, {1}, {"C:\\migration-test-history"}, {new string('1', 64)}, {1}, {now});
+                """);
             context.IndexGenerationVectors.Add(new IndexGenerationVectorEntity
             {
                 GenerationId = snapshotOnlyGenerationId,

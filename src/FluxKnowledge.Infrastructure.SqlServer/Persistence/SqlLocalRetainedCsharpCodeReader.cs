@@ -293,7 +293,8 @@ public sealed class SqlLocalRetainedCsharpCodeReader(
             from branch in context.SourceProcessorBranches.AsNoTracking()
             join activity in context.SourceActivities.AsNoTracking() on branch.SourceActivityId equals activity.Id
             join revision in context.SourceRevisions.AsNoTracking() on branch.SourceRevisionId equals revision.Id
-            where branch.Id == branchId
+            join root in context.SourceRootConfigurations.AsNoTracking() on revision.SourceRootId equals root.Id
+            where branch.Id == branchId && root.State != (int)SourceRootState.Deleting
             select new
             {
                 branch.SourceRevisionId,

@@ -5,6 +5,8 @@ namespace FluxKnowledge.Application.Sources;
 /// <summary>Temporarily keeps mutating hosted services quiescent while an IIS payload is validated.</summary>
 public interface IDeploymentValidationHold
 {
+    bool IsHeld { get; }
+
     ValueTask WaitUntilReleasedAsync(CancellationToken cancellationToken);
 }
 
@@ -15,34 +17,37 @@ public sealed class FileDeploymentValidationHold(LiveRootLayout liveRoot) : IDep
 
     public async ValueTask WaitUntilReleasedAsync(CancellationToken cancellationToken)
     {
-        while (IsHeld())
+        while (IsHeld)
         {
             await Task.Delay(PollingInterval, cancellationToken).ConfigureAwait(false);
         }
     }
 
-    private bool IsHeld()
+    public bool IsHeld
     {
-        try
+        get
         {
-            using var stream = new FileStream(_holdPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-            return true;
-        }
-        catch (FileNotFoundException)
-        {
-            return false;
-        }
-        catch (DirectoryNotFoundException)
-        {
-            return false;
-        }
-        catch (UnauthorizedAccessException)
-        {
-            return true;
-        }
-        catch (IOException)
-        {
-            return true;
+            try
+            {
+                using var stream = new FileStream(_holdPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                return true;
+            }
+            catch (FileNotFoundException)
+            {
+                return false;
+            }
+            catch (DirectoryNotFoundException)
+            {
+                return false;
+            }
+            catch (UnauthorizedAccessException)
+            {
+                return true;
+            }
+            catch (IOException)
+            {
+                return true;
+            }
         }
     }
 }
@@ -53,6 +58,8 @@ public static class DeploymentValidationHold
 
     private sealed class ReleasedDeploymentValidationHold : IDeploymentValidationHold
     {
+        public bool IsHeld => false;
+
         public ValueTask WaitUntilReleasedAsync(CancellationToken cancellationToken) => ValueTask.CompletedTask;
     }
 }

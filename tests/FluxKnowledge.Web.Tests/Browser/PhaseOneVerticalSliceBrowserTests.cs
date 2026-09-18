@@ -132,7 +132,8 @@ public sealed class PhaseOneVerticalSliceBrowserTests
             string ingressRoot,
             string indexRoot,
             Action<IServiceCollection>? configureServices = null,
-            bool strictProductionComposition = false)
+            bool strictProductionComposition = false,
+            bool sourceWorkersEnabled = false)
         {
             var builder = WebApplication.CreateBuilder(
                 new WebApplicationOptions
@@ -156,7 +157,8 @@ public sealed class PhaseOneVerticalSliceBrowserTests
                         : ingressRoot,
                     ["Usearch:RootPath"] = strictProductionComposition
                         ? LiveRootLayout.Production.IndexRoot
-                        : indexRoot
+                        : indexRoot,
+                    ["Worker:Enabled"] = sourceWorkersEnabled ? "true" : "false"
                 });
             if (strictProductionComposition)
             {

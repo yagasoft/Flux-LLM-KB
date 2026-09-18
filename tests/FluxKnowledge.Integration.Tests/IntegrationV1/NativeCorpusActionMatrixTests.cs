@@ -2,6 +2,8 @@ using System.Text.Json;
 using FluxKnowledge.Application.Contracts;
 using FluxKnowledge.Application.IntegrationV1;
 using FluxKnowledge.Application.IntegrationV1.Corpus;
+using FluxKnowledge.Application.Sources;
+using FluxKnowledge.Application.Workers;
 using FluxKnowledge.Domain.Sources;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
@@ -193,6 +195,150 @@ public sealed class NativeCorpusActionMatrixTests(NativeSqlServerFixture fixture
         Assert.False(await db.SourceRootWatchStates.AnyAsync(value => value.SourceRootId == root));
         var scanStore = new SqlSourceScanStore(SqlTestData.CreateFactory(_fixture), TimeProvider.System);
         Assert.Null(await scanStore.ClaimNextReleasedAsync("claim", DateTimeOffset.UtcNow.AddDays(1), TimeSpan.FromMinutes(1), CancellationToken.None));
+    }
+
+    [NativeSqlServerFact]
+    public async Task Root_pause_and_resume_preserve_held_control_and_reenable_the_existing_queued_scan()
+    {
+        var root = await SeedRootAsync();
+        var queued = await SeedControlAsync(root, 0, SourceScanRequestState.Released, SourceScanJobState.Pending);
+        var held = await SeedControlAsync(root, 1, SourceScanRequestState.Held, SourceScanJobState.Pending);
+        var service = CreateService();
+
+        await CommitAsync(service, "root_pause", new { rootId = root }, "root-pause");
+        await using (var paused = await SqlTestData.CreateFactory(_fixture).CreateDbContextAsync())
+        {
+            Assert.Equal((int)SourceRootState.Paused, (await paused.SourceRootConfigurations.SingleAsync(value => value.Id == root)).State);
+            Assert.Equal((int)SourceScanRequestState.Released, (await paused.SourceScanRequests.SingleAsync(value => value.Id == queued.requestId)).State);
+            Assert.Equal((int)SourceScanJobState.Pending, (await paused.SourceScanJobs.SingleAsync(value => value.Id == queued.jobId)).State);
+            Assert.False((await paused.SourceScanRequests.SingleAsync(value => value.Id == held.requestId)).IsReleased);
+            Assert.Equal((int)SourceScanRequestState.Held, (await paused.SourceScanRequests.SingleAsync(value => value.Id == held.requestId)).State);
+        }
+
+        var scanStore = new SqlSourceScanStore(SqlTestData.CreateFactory(_fixture), new FixedTimeProvider(Now));
+        Assert.Null(await scanStore.ClaimNextReleasedAsync("paused-claim", Now, TimeSpan.FromMinutes(1), CancellationToken.None));
+
+        await CommitAsync(service, "root_resume", new { rootId = root }, "root-resume");
+        var claim = await scanStore.ClaimNextReleasedAsync("resumed-claim", Now, TimeSpan.FromMinutes(1), CancellationToken.None);
+
+        Assert.NotNull(claim);
+        Assert.Equal(queued.jobId, claim.ControlJobId);
+        await using var resumed = await SqlTestData.CreateFactory(_fixture).CreateDbContextAsync();
+        Assert.Equal((int)SourceRootState.Enabled, (await resumed.SourceRootConfigurations.SingleAsync(value => value.Id == root)).State);
+        Assert.Equal(2, await resumed.SourceScanRequests.CountAsync(value => value.SourceRootId == root));
+        Assert.False((await resumed.SourceScanRequests.SingleAsync(value => value.Id == held.requestId)).IsReleased);
+        Assert.Equal((int)SourceScanRequestState.Held, (await resumed.SourceScanRequests.SingleAsync(value => value.Id == held.requestId)).State);
+    }
+
+    [NativeSqlServerFact]
+    public async Task Root_delete_durably_fences_the_root_and_refuses_other_lifecycle_mutations()
+    {
+        var root = await SeedRootAsync();
+        await CommitAsync(CreateService(), "root_delete", new { rootId = root }, "root-delete");
+
+        await using (var verification = await SqlTestData.CreateFactory(_fixture).CreateDbContextAsync())
+        {
+            Assert.Equal((int)SourceRootState.Deleting, (await verification.SourceRootConfigurations.SingleAsync(value => value.Id == root)).State);
+            var operation = await verification.SourceDeletionOperations.SingleAsync(value => value.SourceRootId == root);
+            Assert.Equal("accepted", operation.Phase);
+            Assert.Equal(0, operation.State);
+            Assert.Null(operation.ReasonCode);
+        }
+
+        var service = CreateService();
+        await Assert.ThrowsAsync<NativeOperationException>(() =>
+            CommitAsync(service, "root_resume", new { rootId = root }, "root-delete-resume"));
+        await Assert.ThrowsAsync<NativeOperationException>(() =>
+            CommitAsync(service, "source_sync", new { rootId = root }, "root-delete-sync"));
+    }
+
+    [NativeSqlServerFact]
+    public async Task Root_delete_retries_only_failed_file_cleanup_without_unfencing_the_root()
+    {
+        var root = await SeedRootAsync();
+        var service = CreateService();
+        await CommitAsync(service, "root_delete", new { rootId = root }, "root-delete-first");
+        await using (var setup = await SqlTestData.CreateFactory(_fixture).CreateDbContextAsync())
+        {
+            var operation = await setup.SourceDeletionOperations.SingleAsync(value => value.SourceRootId == root);
+            operation.State = 4;
+            operation.Phase = "attention";
+            operation.ReasonCode = "source-delete-file-cleanup-failed";
+            setup.SourceDeletionCleanupItems.Add(new SourceDeletionCleanupItemEntity
+            {
+                Id = Guid.NewGuid(),
+                SourceDeletionOperationId = operation.Id,
+                StorageKind = 2,
+                RelativePath = Guid.NewGuid().ToString("N"),
+                State = 2,
+                ReasonCode = "source-delete-index-io-failed",
+                CreatedAtUtc = Now,
+                UpdatedAtUtc = Now
+            });
+            await setup.SaveChangesAsync();
+        }
+
+        await CommitAsync(service, "root_delete", new { rootId = root }, "root-delete-retry");
+
+        await using var verification = await SqlTestData.CreateFactory(_fixture).CreateDbContextAsync();
+        Assert.Equal((int)SourceRootState.Deleting, (await verification.SourceRootConfigurations.SingleAsync(value => value.Id == root)).State);
+        var retried = await verification.SourceDeletionOperations.SingleAsync(value => value.SourceRootId == root);
+        Assert.Equal(0, retried.State);
+        Assert.Equal("cleanup-files", retried.Phase);
+        Assert.Null(retried.ReasonCode);
+        var item = await verification.SourceDeletionCleanupItems.SingleAsync(value => value.SourceDeletionOperationId == retried.Id);
+        Assert.Equal(0, item.State);
+        Assert.Null(item.ReasonCode);
+    }
+
+    [NativeSqlServerFact]
+    public async Task Root_delete_refuses_an_outlook_owned_root_before_fencing_or_creating_a_deletion_operation()
+    {
+        var root = await SeedRootAsync();
+        await using (var setup = await SqlTestData.CreateFactory(_fixture).CreateDbContextAsync())
+        {
+            setup.OutlookCaptureProfiles.Add(new OutlookCaptureProfileEntity
+            {
+                Id = Guid.NewGuid(),
+                SourceRootId = root,
+                DisplayName = "Delete refusal profile",
+                SpoolRoot = "C:\\outlook-spool",
+                IncrementalBasis = 0,
+                State = 0,
+                IsEnabled = false,
+                ConfigurationRevision = 1,
+                CadenceTicks = TimeSpan.FromMinutes(5).Ticks,
+                MaximumOverlapTicks = TimeSpan.FromMinutes(1).Ticks,
+                CreatedAtUtc = Now,
+                UpdatedAtUtc = Now
+            });
+            await setup.SaveChangesAsync();
+        }
+
+        await AssertReasonAsync("outlook-source-delete-unsupported", () =>
+            CommitAsync(CreateService(), "root_delete", new { rootId = root }, "root-delete-outlook"));
+
+        await using var verification = await SqlTestData.CreateFactory(_fixture).CreateDbContextAsync();
+        Assert.Equal((int)SourceRootState.Enabled, (await verification.SourceRootConfigurations.SingleAsync(value => value.Id == root)).State);
+        Assert.False(await verification.SourceDeletionOperations.AnyAsync(value => value.SourceRootId == root));
+    }
+
+    [NativeSqlServerFact]
+    public async Task Root_resume_notifies_both_local_pumps_after_its_durable_commit()
+    {
+        var root = await SeedRootAsync();
+        var outboxWake = new RecordingOutboxWakeSignal();
+        var sourceWake = new RecordingSourceWakeSignal();
+        var service = new NativeCorpusCommandService(
+            new NativeOperationService(new SqlNativeOperationStore(SqlTestData.CreateFactory(_fixture), new FixedTimeProvider(Now)), []),
+            new SqlNativeCorpusActionStore(SqlTestData.CreateFactory(_fixture), new TestPathPolicy(), new LocalPrivateContentDisclosure()),
+            outboxWake,
+            sourceWake);
+
+        await CommitAsync(service, "root_resume", new { rootId = root }, "root-resume-wake");
+
+        Assert.Equal(1, outboxWake.NotificationCount);
+        Assert.Equal(1, sourceWake.NotificationCount);
     }
 
     [NativeSqlServerFact]
@@ -658,7 +804,7 @@ public sealed class NativeCorpusActionMatrixTests(NativeSqlServerFixture fixture
     {
         await using var db = await SqlTestData.CreateFactory(_fixture).CreateDbContextAsync();
         await db.NativeOperationReceipts.ExecuteDeleteAsync(); await db.NativeOperationIntents.ExecuteDeleteAsync();
-        await db.SourceRootWatchStates.ExecuteDeleteAsync(); await db.SourceScanOutbox.ExecuteDeleteAsync(); await db.SourceScanJobs.ExecuteDeleteAsync(); await db.SourceScanRequests.ExecuteDeleteAsync(); await db.SourceRootConfigurations.ExecuteDeleteAsync();
+        await db.SourceRootWatchStates.ExecuteDeleteAsync(); await db.SourceScanOutbox.ExecuteDeleteAsync(); await db.SourceScanJobs.ExecuteDeleteAsync(); await db.SourceScanRequests.ExecuteDeleteAsync(); await db.OutlookCaptureProfiles.ExecuteDeleteAsync(); await db.SourceRootConfigurations.ExecuteDeleteAsync();
     }
 
     private async Task<string> AuthoritySnapshotAsync()
@@ -720,6 +866,20 @@ public sealed class NativeCorpusActionMatrixTests(NativeSqlServerFixture fixture
     }
 
     private sealed class FixedTimeProvider(DateTimeOffset value) : TimeProvider { public override DateTimeOffset GetUtcNow() => value; }
+    private sealed class RecordingOutboxWakeSignal : IOutboxWakeSignal
+    {
+        public int NotificationCount { get; private set; }
+        public void Notify() => NotificationCount++;
+        public ValueTask WaitAsync(CancellationToken cancellationToken) => ValueTask.CompletedTask;
+    }
+
+    private sealed class RecordingSourceWakeSignal : ISourceScanWakeSignal
+    {
+        public int NotificationCount { get; private set; }
+        public void Notify() => NotificationCount++;
+        public ValueTask WaitAsync(CancellationToken cancellationToken) => ValueTask.CompletedTask;
+    }
+
     private sealed class TestPathPolicy : ISourceRootPathPolicy { public SourceRootPathValidation ValidateAndCanonicalise(SourceRootCreateRequest request) => new(request.FullPath, new SourceRootPhysicalIdentity(request.FullPath, "C:\\", true, new string('a', 64)), new SourceRootPermissionEvidence(true, new string('b', 64), "{}")); }
     private sealed record ActionScenario(Guid RootId, Guid? JobId, object Payload);
     private sealed record CommitOutcome(NativeActionReceipt? Receipt, NativeOperationException? Error);

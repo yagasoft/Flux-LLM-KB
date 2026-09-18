@@ -10,5 +10,6 @@ public sealed class IndexGenerationEntity
     public long VectorCount { get; set; }
     public DateTimeOffset CreatedAtUtc { get; set; }
     public DateTimeOffset? ValidatedAtUtc { get; set; }
+    public DateTimeOffset? RetiredAtUtc { get; set; }
     public byte[] RowVersion { get; set; } = [];
 }

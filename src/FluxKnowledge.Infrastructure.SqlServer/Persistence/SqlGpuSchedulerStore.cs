@@ -1228,8 +1228,11 @@ public sealed class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecutorDispa
     {
         var readyState = (int)GpuMiniTaskExecutionState.Ready;
         var includeFutureDeferrals = wakeReason.HasFlag(GpuSchedulerWakeReason.CapacityReleased);
+        var enabledRootState = (int)FluxKnowledge.Domain.Sources.SourceRootState.Enabled;
         var eligibility = context.GpuMiniTasks.Where(task => task.ExecutionState == readyState &&
-            (includeFutureDeferrals || task.DeferredUntilUtc == null || task.DeferredUntilUtc <= now));
+            (includeFutureDeferrals || task.DeferredUntilUtc == null || task.DeferredUntilUtc <= now) &&
+            (task.ParentJob.PipelineRecord.SourceRevisionId == null ||
+             task.ParentJob.PipelineRecord.SourceRevision!.SourceRoot.State == enabledRootState));
 
         GpuMiniTaskEntity? head = null;
         foreach (var lane in Enum.GetValues<GpuPriorityLane>())

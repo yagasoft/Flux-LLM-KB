@@ -134,6 +134,27 @@ public sealed class SqlJobClaimStore(
                        OR
                        ([PublicState] = @processingState AND [LeaseExpiresAtUtc] <= @nowUtc)
                    )
+                   AND
+                   (
+                       NOT EXISTS
+                       (
+                           SELECT 1
+                           FROM [PipelineRecords] AS [record]
+                           WHERE [record].[Id] = [Jobs].[PipelineRecordId]
+                             AND [record].[SourceRevisionId] IS NOT NULL
+                       )
+                       OR EXISTS
+                       (
+                           SELECT 1
+                           FROM [PipelineRecords] AS [record]
+                           INNER JOIN [SourceRevisions] AS [revision]
+                               ON [revision].[Id] = [record].[SourceRevisionId]
+                           INNER JOIN [SourceRootConfigurations] AS [root]
+                               ON [root].[Id] = [revision].[SourceRootId]
+                           WHERE [record].[Id] = [Jobs].[PipelineRecordId]
+                             AND [root].[State] = @sourceRootEnabled
+                       )
+                   )
                     {{dispatchPredicate}}
                  ORDER BY [DueAtUtc], [Id]
              )
@@ -217,6 +238,7 @@ public sealed class SqlJobClaimStore(
         AddParameter(command, "@sourceDeferredCapability", SqlDbType.Int, (int)FluxKnowledge.Domain.Sources.ExecutionClass.DeferredCapability);
         AddParameter(command, "@sourceTextExtraction", SqlDbType.Int, (int)FluxKnowledge.Domain.Sources.SourceActivityKind.TextExtraction);
         AddParameter(command, "@sourceMetadataExtraction", SqlDbType.Int, (int)FluxKnowledge.Domain.Sources.SourceActivityKind.MetadataExtraction);
+        AddParameter(command, "@sourceRootEnabled", SqlDbType.Int, (int)FluxKnowledge.Domain.Sources.SourceRootState.Enabled);
         if (dispatchMessage is not null)
         {
             AddParameter(

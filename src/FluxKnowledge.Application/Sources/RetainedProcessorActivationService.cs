@@ -348,7 +348,20 @@ public sealed class RetainedProcessorActivationService
                     throw new RetainedProcessorException("office-document-input-too-large");
                 var retained = await _retainedSourceReader.ReadBytesAsync(claim.SourceRevisionId, cancellationToken).ConfigureAwait(false);
                 var completion = await process(claim, retained, _options, cancellationToken).ConfigureAwait(false);
-                if (await _branchStore.CommitAsync(claim, completion, cancellationToken).ConfigureAwait(false)) completed++;
+                try
+                {
+                    if (await _branchStore.CommitAsync(claim, completion, cancellationToken).ConfigureAwait(false)) completed++;
+                }
+                finally
+                {
+                    foreach (var publicationLease in completion.Members
+                                 .Select(member => member.PublicationLease)
+                                 .OfType<ISourceArtifactPublicationLease>()
+                                 .Distinct())
+                    {
+                        await publicationLease.DisposeAsync().ConfigureAwait(false);
+                    }
+                }
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {

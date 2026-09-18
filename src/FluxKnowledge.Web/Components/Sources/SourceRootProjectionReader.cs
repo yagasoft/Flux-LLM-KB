@@ -41,8 +41,20 @@ public sealed class SourceRootProjectionReader(
             .GroupBy(request => request.SourceRootId)
             .ToDictionary(group => group.Key, group => group.First());
         var summaries = await ReadStateSummariesAsync(context, rootIds, cancellationToken).ConfigureAwait(false);
+        var deletions = await context.SourceDeletionOperations.AsNoTracking()
+            .Where(operation => rootIds.Contains(operation.SourceRootId))
+            .ToDictionaryAsync(operation => operation.SourceRootId, cancellationToken)
+            .ConfigureAwait(false);
 
-        return roots.Select(root => ToListProjection(root, latestByRoot.GetValueOrDefault(root.Id), summaries.GetValueOrDefault(root.Id) ?? SourceStateSummary.Empty)).ToArray();
+        return roots.Select(root =>
+        {
+            var operation = deletions.GetValueOrDefault(root.Id);
+            return ToListProjection(root, latestByRoot.GetValueOrDefault(root.Id), summaries.GetValueOrDefault(root.Id) ?? SourceStateSummary.Empty) with
+            {
+                DeletionPhase = operation?.Phase,
+                DeletionReason = operation?.ReasonCode
+            };
+        }).ToArray();
     }
 
     public async ValueTask<SourceRootDetailProjection?> ReadRootAsync(Guid rootId, CancellationToken cancellationToken)
@@ -61,6 +73,9 @@ public sealed class SourceRootProjectionReader(
             .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
         var summary = (await ReadStateSummariesAsync(context, [rootId], cancellationToken).ConfigureAwait(false)).GetValueOrDefault(rootId)
             ?? SourceStateSummary.Empty;
+        var deletion = await context.SourceDeletionOperations.AsNoTracking()
+            .SingleOrDefaultAsync(operation => operation.SourceRootId == rootId, cancellationToken)
+            .ConfigureAwait(false);
         var revisions = await context.SourceRevisions.AsNoTracking()
             .Where(revision => revision.SourceRootId == rootId && revision.SuppressedAtUtc == null)
             .Select(revision => new SourceRevisionRow(
@@ -208,7 +223,9 @@ public sealed class SourceRootProjectionReader(
             reasons,
             replayActivities)
         {
-            Files = files
+            Files = files,
+            DeletionPhase = deletion?.Phase,
+            DeletionReason = deletion?.ReasonCode
         };
     }
 

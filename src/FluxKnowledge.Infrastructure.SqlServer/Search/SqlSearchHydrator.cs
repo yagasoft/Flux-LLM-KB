@@ -2,6 +2,7 @@ using FluxKnowledge.Application.Contracts;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Search;
 using FluxKnowledge.Domain.Common;
+using FluxKnowledge.Domain.Sources;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
 using Microsoft.EntityFrameworkCore;
 
@@ -40,7 +41,8 @@ public sealed class SqlSearchHydrator(IDbContextFactory<FluxKnowledgeDbContext> 
                       !vector.IsDeleted &&
                       !record.IsDeleted &&
                       (!record.SourceRevisionId.HasValue || context.SourceRevisions.Any(sourceRevision =>
-                          sourceRevision.Id == record.SourceRevisionId.Value && sourceRevision.SuppressedAtUtc == null && sourceRevision.OriginKind != 2)) &&
+                          sourceRevision.Id == record.SourceRevisionId.Value && sourceRevision.SuppressedAtUtc == null && sourceRevision.OriginKind != 2 &&
+                          context.SourceRootConfigurations.Any(root => root.Id == sourceRevision.SourceRootId && root.State != (int)SourceRootState.Deleting))) &&
                       vector.TextChunkContentHash == chunk.ContentHash &&
                       vector.SourceRevision == record.Revision &&
                       (record.SourceRevisionId.HasValue || record.Revision == context.PipelineRecords

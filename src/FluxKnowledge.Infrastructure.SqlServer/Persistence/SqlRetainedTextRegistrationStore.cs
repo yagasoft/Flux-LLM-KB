@@ -69,9 +69,12 @@ public sealed class SqlRetainedTextRegistrationStore(
         var candidates = await (
             from activity in context.SourceActivities.AsNoTracking()
             join revision in context.SourceRevisions.AsNoTracking() on activity.SourceRevisionId equals revision.Id
+            join root in context.SourceRootConfigurations.AsNoTracking() on revision.SourceRootId equals root.Id
             join artifact in context.SourceArtifacts.AsNoTracking() on revision.Id equals artifact.SourceRevisionId
             where activity.State == (int)SourceActivityState.Pending &&
                 activity.ExecutionClass == (int)ExecutionClass.InProcess &&
+                (root.State == (int)SourceRootState.Enabled ||
+                 context.OutlookCaptureProfiles.Any(profile => profile.SourceRootId == root.Id)) &&
                 (activity.ActivityKind == (int)SourceActivityKind.TextExtraction ||
                  activity.ActivityKind == (int)SourceActivityKind.MetadataExtraction) &&
                 activity.ResultingPipelineRecordId == null && revision.SuppressedAtUtc == null &&
@@ -157,11 +160,20 @@ public sealed class SqlRetainedTextRegistrationStore(
             .FromSqlInterpolated($"SELECT * FROM [SourceRevisions] WITH (UPDLOCK, HOLDLOCK) WHERE [Id] = {activity.SourceRevisionId.Value}")
             .SingleOrDefaultAsync(cancellationToken)
             .ConfigureAwait(false);
+        var sourceRoot = sourceRevision is null
+            ? null
+            : await context.SourceRootConfigurations
+                .FromSqlInterpolated($"SELECT * FROM [SourceRootConfigurations] WITH (UPDLOCK, HOLDLOCK) WHERE [Id] = {sourceRevision.SourceRootId}")
+                .SingleOrDefaultAsync(cancellationToken)
+                .ConfigureAwait(false);
         var artifact = await context.SourceArtifacts
             .FromSqlInterpolated($"SELECT * FROM [SourceArtifacts] WITH (UPDLOCK, HOLDLOCK, INDEX([IX_SourceArtifacts_SourceRevisionId])) WHERE [SourceRevisionId] = {activity.SourceRevisionId.Value}")
             .SingleOrDefaultAsync(cancellationToken)
             .ConfigureAwait(false);
-        if (sourceRevision is null || sourceRevision.SuppressedAtUtc is not null || artifact is null ||
+        if (sourceRevision is null || sourceRoot is null ||
+            (sourceRoot.State != (int)SourceRootState.Enabled &&
+             !await context.OutlookCaptureProfiles.AnyAsync(profile => profile.SourceRootId == sourceRoot.Id, cancellationToken).ConfigureAwait(false)) ||
+            sourceRevision.SuppressedAtUtc is not null || artifact is null ||
             !string.Equals(sourceRevision.Classification, AcceptedUtf8Classification, StringComparison.Ordinal) ||
             sourceRevision.ByteLength < 0 || sourceRevision.ByteLength > 16L * 1024 * 1024 ||
             artifact.ByteLength != sourceRevision.ByteLength ||
@@ -380,6 +392,7 @@ public sealed class SqlRetainedTextRegistrationStore(
         await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         var query = from activity in context.SourceActivities.AsNoTracking()
             join revision in context.SourceRevisions.AsNoTracking() on activity.SourceRevisionId equals revision.Id
+            join root in context.SourceRootConfigurations.AsNoTracking() on revision.SourceRootId equals root.Id
             join artifact in context.SourceArtifacts.AsNoTracking() on revision.Id equals artifact.SourceRevisionId
             join deferred in context.DeferredCapabilities.AsNoTracking() on new
             {
@@ -394,6 +407,8 @@ public sealed class SqlRetainedTextRegistrationStore(
             }
             where activity.State == (int)SourceActivityState.DeferredUnsupported &&
                 activity.ExecutionClass == (int)ExecutionClass.DeferredCapability &&
+                (root.State == (int)SourceRootState.Enabled ||
+                 context.OutlookCaptureProfiles.Any(profile => profile.SourceRootId == root.Id)) &&
                 revision.Classification == AcceptedUtf8Classification &&
                 activity.RequiredCapability == capability.ProcessorKind &&
                 activity.ProcessorVersion == capability.ProcessorVersion &&

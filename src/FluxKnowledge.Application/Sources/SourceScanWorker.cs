@@ -45,7 +45,17 @@ public sealed class SourceScanWorker(
                         "application/octet-stream",
                         file.ByteLength),
                     cancellationToken).ConfigureAwait(false);
-                revisionId = await scanStore.ConvergeRevisionAndArtifactAsync(sourceRoot, file, receipt, cancellationToken).ConfigureAwait(false);
+                try
+                {
+                    revisionId = await scanStore.ConvergeRevisionAndArtifactAsync(sourceRoot, file, receipt, cancellationToken).ConfigureAwait(false);
+                }
+                finally
+                {
+                    if (receipt.PublicationLease is not null)
+                    {
+                        await receipt.PublicationLease.DisposeAsync().ConfigureAwait(false);
+                    }
+                }
             }
             catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidDataException)
             {

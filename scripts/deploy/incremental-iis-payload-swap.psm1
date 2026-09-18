@@ -19,7 +19,8 @@ function Invoke-IncrementalApplicationPayloadSwap {
         [scriptblock]$StartApplication,
         [Parameter(Mandatory)]
         [scriptblock]$ValidateApplication,
-        [scriptblock]$ValidateRollbackApplication
+        [scriptblock]$ValidateRollbackApplication,
+        [scriptblock]$PrepareRollbackApplication
     )
 
     if (-not (Test-Path -LiteralPath $ApplicationRoot -PathType Container)) {
@@ -83,6 +84,9 @@ function Invoke-IncrementalApplicationPayloadSwap {
                 throw "The original application payload is unavailable for rollback."
             }
 
+            if ($null -ne $PrepareRollbackApplication) {
+                & $PrepareRollbackApplication
+            }
             & $StartApplication
             $poolStopped = $false
             & $ValidateRollbackApplication

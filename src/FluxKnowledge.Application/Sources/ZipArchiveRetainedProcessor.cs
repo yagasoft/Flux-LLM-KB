@@ -158,7 +158,7 @@ public sealed class ZipArchiveRetainedProcessor(IRetainedArtifactWriter artifact
                     throw new RetainedProcessorException("archive-member-not-utf8");
                 }
                 members.Add(RetainedProcessorDerivedChild.ArchiveMember(identity, receipt.ContentSha256, receipt.StoreRelativePath,
-                    receipt.ByteLength, "AcceptedUtf8Text"));
+                    receipt.ByteLength, "AcceptedUtf8Text", receipt.PublicationLease));
             }
             var receiptFingerprint = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(
                 string.Join("|", members.Select(member => $"completed:{member.MemberFingerprint}:{member.ContentSha256}:{member.ByteLength}")

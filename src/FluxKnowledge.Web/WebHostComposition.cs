@@ -293,14 +293,21 @@ public static class WebHostComposition
             provider.GetRequiredService<ILocalRetainedDetailReader>(),
             provider.GetRequiredService<ILocalPrivateContentDisclosure>(),
             provider.GetRequiredService<LocalRetainedCsharpCodeSearchCursorCodec>()));
-        services.AddSingleton<ISourceArtifactStore>(_ => new ContentAddressedSourceArtifactStore(
+        services.AddSingleton<SqlSourceArtifactPublicationGate>();
+        services.AddSingleton<ISourceArtifactPublicationGate>(provider => provider.GetRequiredService<SqlSourceArtifactPublicationGate>());
+        services.AddSingleton<ISourceArtifactStore>(provider => new ContentAddressedSourceArtifactStore(
             artifactRoot,
-            protectedRoots));
+            protectedRoots,
+            publicationGate: provider.GetRequiredService<ISourceArtifactPublicationGate>()));
+        services.AddSingleton<ISourceDeletionFileStore>(_ => new WindowsSourceDeletionFileStore(
+            artifactRoot,
+            indexRoot));
         services.AddScoped<IRetainedArtifactWriter>(provider => new SqlRetainedArtifactWriter(
             provider.GetRequiredService<IDbContextFactory<FluxKnowledgeDbContext>>(),
             artifactRoot,
             protectedRoots,
-            provider.GetRequiredService<PersistedOutlookSpoolRootPolicy>()));
+            provider.GetRequiredService<PersistedOutlookSpoolRootPolicy>(),
+            provider.GetRequiredService<ISourceArtifactPublicationGate>()));
         services.AddSingleton(ReadRetainedProcessorOptions(configuration, strictProductionPaths));
         services.AddSingleton<IEmbeddingProvider, DeterministicTokenHashEmbeddingProvider>();
         services.AddScoped<ISearchService, HybridSearchService>();
@@ -323,6 +330,9 @@ public static class WebHostComposition
         services.AddFluxKnowledgeOutboxWorkers();
         services.AddScoped<SqlSourceRootStore>();
         services.AddScoped<ISourceRootStore>(provider => provider.GetRequiredService<SqlSourceRootStore>());
+        services.AddScoped<SqlSourceDeletionStore>();
+        services.AddScoped<ISourceDeletionStore>(provider => provider.GetRequiredService<SqlSourceDeletionStore>());
+        services.AddScoped<SourceDeletionCoordinator>();
         services.AddScoped<SqlSourceActivityStore>();
         services.AddScoped<ISourceActivityStore>(provider => provider.GetRequiredService<SqlSourceActivityStore>());
         services.AddScoped<ISourceCapabilityStore>(provider => provider.GetRequiredService<SqlSourceActivityStore>());

@@ -76,14 +76,19 @@ public sealed class SqlDerivedIndexRecoveryStore(
                 candidate.IndexPath,
                 candidate.MetadataChecksum,
                 candidate.VectorCount,
-                candidate.ValidatedAtUtc))
+                candidate.ValidatedAtUtc,
+                candidate.RetiredAtUtc))
             .ToListAsync(cancellationToken)
             .ConfigureAwait(false);
         var generation = activeGenerationId is { } activeId
-            ? generations.Where(candidate => candidate.Id == activeId)
+            ? generations.Where(candidate => candidate.Id == activeId && candidate.RetiredAtUtc is null)
                 .Select(candidate => candidate.ToDescriptor())
                 .SingleOrDefault()
             : null;
+        if (activeGenerationId is not null && generation is null)
+        {
+            throw new InvalidOperationException("active-index-generation-retired-or-missing");
+        }
         var membership = activeGenerationId is null
             ? []
             : await (
@@ -115,7 +120,7 @@ public sealed class SqlDerivedIndexRecoveryStore(
         var recognisedDraftIds = await ReadRecognisedUnplacedDraftIdsAsync(
                 context,
                 activeGenerationId,
-                generations.Where(candidate => candidate.IndexPath == string.Empty).ToArray(),
+                generations.Where(candidate => candidate.RetiredAtUtc is null && candidate.IndexPath == string.Empty).ToArray(),
                 cancellationToken)
             .ConfigureAwait(false);
         referencedGenerationIds.UnionWith(recognisedDraftIds);
@@ -577,7 +582,8 @@ public sealed class SqlDerivedIndexRecoveryStore(
         string IndexPath,
         string MetadataChecksum,
         long VectorCount,
-        DateTimeOffset? ValidatedAtUtc)
+        DateTimeOffset? ValidatedAtUtc,
+        DateTimeOffset? RetiredAtUtc)
     {
         public IndexGenerationDescriptor ToDescriptor() =>
             new(Id, ModelFingerprint, Dimensions, IndexPath, MetadataChecksum, VectorCount);

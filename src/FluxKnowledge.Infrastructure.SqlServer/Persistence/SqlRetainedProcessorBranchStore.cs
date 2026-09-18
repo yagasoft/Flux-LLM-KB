@@ -15,6 +15,7 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
     : IRetainedProcessorBranchStore
 {
     private const string RetainedCsharpSchemaMigration = "20260820101021_CloseRetainedCsharpMixedOutcomes";
+    private const string SourceDeletionMigration = "20260918121829_AddSourceDeletionOperations";
     private const string RetainedBindingSafetyContract = "retained-binding";
     private const string RetainedBranchStoreHandler = "retained-processor-branch-store";
     private const string IgnorePolicyReason = "operator-action-ignore";
@@ -55,20 +56,20 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
                     AND NOT EXISTS (
                         SELECT 1
                         FROM (VALUES
-                            (N'TR_SourceProcessorCodeDocuments_Immutable', N'[dbo].[SourceProcessorCodeDocuments]', 0xFAAE7073D0D92C89C9A5C18C665CFC6BE8610F54FD9571412B891B07CF332E89),
-                            (N'TR_SourceProcessorCodeDocuments_InsertFence', N'[dbo].[SourceProcessorCodeDocuments]', 0x039A2B48703ACE38E66FA3D54AC823E1E8828DFFFFF44A9F583D426BD563B783),
-                            (N'TR_SourceProcessorCodeSymbols_Immutable', N'[dbo].[SourceProcessorCodeSymbols]', 0xFA4DD0857588D50FF86BFB042437EDC4C44FDBC4ADE777EC00355D508DEF95DE),
-                            (N'TR_SourceProcessorCodeSymbols_InsertFence', N'[dbo].[SourceProcessorCodeSymbols]', 0x6B3A69634DDD508654ECE0509CE3D7329B9F0612B6CD80B53BFAD5BCFBBBFAB5),
-                            (N'TR_SourceProcessorCodeReferences_Immutable', N'[dbo].[SourceProcessorCodeReferences]', 0x21299AB2365ADB4C62EF57ED1E1906BED8B2AC1F16D569A2E17DFC7EED254B41),
-                            (N'TR_SourceProcessorCodeReferences_InsertFence', N'[dbo].[SourceProcessorCodeReferences]', 0x84822A861517D868D0D4A0684A4963DB79AC4C6B4E7267672AD7A1B6C50B116E),
-                            (N'TR_SourceProcessorCodeDiagnostics_Immutable', N'[dbo].[SourceProcessorCodeDiagnostics]', 0xC88660B9635AAB26CE57D25261EC246723DFDB5FF44E7A79588E70EAC077F7AC),
-                            (N'TR_SourceProcessorCodeDiagnostics_InsertFence', N'[dbo].[SourceProcessorCodeDiagnostics]', 0x49817453CC1ADE9C2B17ED6397518FFAA85DF31EE19D7660ADAF5F0F960EEDF2),
-                            (N'TR_SourceProcessorCodeCompletionReceipts_Immutable', N'[dbo].[SourceProcessorCodeCompletionReceipts]', 0x33706FA83F97B6164227C28E8442092F0BBA3FBD41F3518E904726B181F3DAAF),
-                            (N'TR_SourceProcessorCodeCompletionReceipts_OutcomeFence', N'[dbo].[SourceProcessorCodeCompletionReceipts]', 0xF804A3BEE2176044E91A83CFEDDC6FA913069D7E7551339809E8C40EC435E9F1),
-                            (N'TR_SourceProcessorCodeCompletionReceipts_Closure', N'[dbo].[SourceProcessorCodeCompletionReceipts]', 0xB5DD4F58C1F8F582D47A1B470F34A1E37405ABAB97D905CA8416994D7DA910F6),
-                            (N'TR_SourceProcessorCodeBlockedDiagnostics_Immutable', N'[dbo].[SourceProcessorCodeBlockedDiagnostics]', 0x5F7B4B1750A6F2010932603B2F2B0B73ACF87FDD564E825D3E856AD20F376729),
-                            (N'TR_SourceProcessorCodeBlockedDiagnostics_InsertFence', N'[dbo].[SourceProcessorCodeBlockedDiagnostics]', 0x3568CE121C335934062F621988828F00E131985F9D0D6616DA2A73B9B3E553B6)
-                        ) AS [expected]([Name], [ParentObjectName], [DefinitionHash])
+                            (N'TR_SourceProcessorCodeDocuments_Immutable', N'[dbo].[SourceProcessorCodeDocuments]', 0xFAAE7073D0D92C89C9A5C18C665CFC6BE8610F54FD9571412B891B07CF332E89, 0x9A63AFA036A7144956F508C75502A9133B462520A891895FB0E789F1101E8E3E),
+                            (N'TR_SourceProcessorCodeDocuments_InsertFence', N'[dbo].[SourceProcessorCodeDocuments]', 0x039A2B48703ACE38E66FA3D54AC823E1E8828DFFFFF44A9F583D426BD563B783, 0x039A2B48703ACE38E66FA3D54AC823E1E8828DFFFFF44A9F583D426BD563B783),
+                            (N'TR_SourceProcessorCodeSymbols_Immutable', N'[dbo].[SourceProcessorCodeSymbols]', 0xFA4DD0857588D50FF86BFB042437EDC4C44FDBC4ADE777EC00355D508DEF95DE, 0x2DECAB8C99717263CA71F082131C848B70824FD3096284E8010FD2CF2089F96A),
+                            (N'TR_SourceProcessorCodeSymbols_InsertFence', N'[dbo].[SourceProcessorCodeSymbols]', 0x6B3A69634DDD508654ECE0509CE3D7329B9F0612B6CD80B53BFAD5BCFBBBFAB5, 0x6B3A69634DDD508654ECE0509CE3D7329B9F0612B6CD80B53BFAD5BCFBBBFAB5),
+                            (N'TR_SourceProcessorCodeReferences_Immutable', N'[dbo].[SourceProcessorCodeReferences]', 0x21299AB2365ADB4C62EF57ED1E1906BED8B2AC1F16D569A2E17DFC7EED254B41, 0x2BBDAC5AD9AEF86B16C8B0469BE93EE1A70B85CE79FEB23715D07AC36188D966),
+                            (N'TR_SourceProcessorCodeReferences_InsertFence', N'[dbo].[SourceProcessorCodeReferences]', 0x84822A861517D868D0D4A0684A4963DB79AC4C6B4E7267672AD7A1B6C50B116E, 0x84822A861517D868D0D4A0684A4963DB79AC4C6B4E7267672AD7A1B6C50B116E),
+                            (N'TR_SourceProcessorCodeDiagnostics_Immutable', N'[dbo].[SourceProcessorCodeDiagnostics]', 0xC88660B9635AAB26CE57D25261EC246723DFDB5FF44E7A79588E70EAC077F7AC, 0xDD7ABECFE4276442438826194332A82D8C689656D4F651746D85FF7086CF44F5),
+                            (N'TR_SourceProcessorCodeDiagnostics_InsertFence', N'[dbo].[SourceProcessorCodeDiagnostics]', 0x49817453CC1ADE9C2B17ED6397518FFAA85DF31EE19D7660ADAF5F0F960EEDF2, 0x49817453CC1ADE9C2B17ED6397518FFAA85DF31EE19D7660ADAF5F0F960EEDF2),
+                            (N'TR_SourceProcessorCodeCompletionReceipts_Immutable', N'[dbo].[SourceProcessorCodeCompletionReceipts]', 0x33706FA83F97B6164227C28E8442092F0BBA3FBD41F3518E904726B181F3DAAF, 0x995FE6BD17BE13EE37FB6B10D020206EA7114CD3904487058F2C4F1CCBEEB1FB),
+                            (N'TR_SourceProcessorCodeCompletionReceipts_OutcomeFence', N'[dbo].[SourceProcessorCodeCompletionReceipts]', 0xF804A3BEE2176044E91A83CFEDDC6FA913069D7E7551339809E8C40EC435E9F1, 0xF804A3BEE2176044E91A83CFEDDC6FA913069D7E7551339809E8C40EC435E9F1),
+                            (N'TR_SourceProcessorCodeCompletionReceipts_Closure', N'[dbo].[SourceProcessorCodeCompletionReceipts]', 0xB5DD4F58C1F8F582D47A1B470F34A1E37405ABAB97D905CA8416994D7DA910F6, 0xB5DD4F58C1F8F582D47A1B470F34A1E37405ABAB97D905CA8416994D7DA910F6),
+                            (N'TR_SourceProcessorCodeBlockedDiagnostics_Immutable', N'[dbo].[SourceProcessorCodeBlockedDiagnostics]', 0x5F7B4B1750A6F2010932603B2F2B0B73ACF87FDD564E825D3E856AD20F376729, 0xEC44FB21B78647D98A2403ED650819F137885E200598141B5328636F6763435B),
+                            (N'TR_SourceProcessorCodeBlockedDiagnostics_InsertFence', N'[dbo].[SourceProcessorCodeBlockedDiagnostics]', 0x3568CE121C335934062F621988828F00E131985F9D0D6616DA2A73B9B3E553B6, 0x3568CE121C335934062F621988828F00E131985F9D0D6616DA2A73B9B3E553B6)
+                        ) AS [expected]([Name], [ParentObjectName], [DefinitionHash], [DeletionDefinitionHash])
                         LEFT JOIN [sys].[triggers] AS [trigger]
                             ON [trigger].[name] = [expected].[Name]
                            AND [trigger].[parent_id] = OBJECT_ID([expected].[ParentObjectName])
@@ -77,7 +78,11 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
                         WHERE [trigger].[object_id] IS NULL
                            OR [trigger].[is_disabled] <> 0
                            OR [module].[definition] IS NULL
-                           OR HASHBYTES('SHA2_256', [module].[definition]) <> [expected].[DefinitionHash])
+                           OR HASHBYTES('SHA2_256', [module].[definition]) <> CASE
+                               WHEN EXISTS (SELECT 1 FROM [dbo].[__EFMigrationsHistory] WHERE [MigrationId] = @sourceDeletionMigration)
+                                   THEN [expected].[DeletionDefinitionHash]
+                               ELSE [expected].[DefinitionHash]
+                           END)
                     AND EXISTS (
                         SELECT 1 FROM sys.foreign_keys
                         WHERE [name] = N'FK_SourceProcessorCodeCompletionReceipts_SourceProcessorCodeDocuments_SuccessIdentity'
@@ -95,6 +100,10 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
             command.Parameters.Add(new SqlParameter("@migrationId", SqlDbType.NVarChar, 150)
             {
                 Value = RetainedCsharpSchemaMigration
+            });
+            command.Parameters.Add(new SqlParameter("@sourceDeletionMigration", SqlDbType.NVarChar, 150)
+            {
+                Value = SourceDeletionMigration
             });
             var ready = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
             return ready is int value && value == 1;
@@ -694,12 +703,19 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
         await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken).ConfigureAwait(false);
         var requested = await context.SourceProcessorForceRequests
             .FromSqlInterpolated($"""
-                SELECT TOP ({Math.Clamp(maximumCount, 1, RetainedProcessorOptions.MaximumAutomaticReplayBatchSize)}) *
-                FROM [SourceProcessorForceRequests] WITH (UPDLOCK, HOLDLOCK)
-                WHERE [State] = {(byte)OoxmlForceRequestState.Requested}
-                  AND [DescriptorFingerprint] = {processorFingerprint}
-                  AND [ClaimExpiresAtUtc] > TODATETIMEOFFSET(SYSUTCDATETIME(), '+00:00')
-                ORDER BY [RequestedAtUtc], [Id]
+                SELECT TOP ({Math.Clamp(maximumCount, 1, RetainedProcessorOptions.MaximumAutomaticReplayBatchSize)}) [force].*
+                FROM [SourceProcessorForceRequests] AS [force] WITH (UPDLOCK, HOLDLOCK)
+                INNER JOIN [SourceProcessorBranches] AS [branch] WITH (UPDLOCK, HOLDLOCK)
+                    ON [branch].[Id] = [force].[SourceProcessorBranchId]
+                INNER JOIN [SourceRevisions] AS [revision] WITH (UPDLOCK, HOLDLOCK)
+                    ON [revision].[Id] = [branch].[SourceRevisionId]
+                INNER JOIN [SourceRootConfigurations] AS [root] WITH (UPDLOCK, HOLDLOCK)
+                    ON [root].[Id] = [revision].[SourceRootId]
+                WHERE [force].[State] = {(byte)OoxmlForceRequestState.Requested}
+                  AND [force].[DescriptorFingerprint] = {processorFingerprint}
+                  AND [force].[ClaimExpiresAtUtc] > TODATETIMEOFFSET(SYSUTCDATETIME(), '+00:00')
+                  AND [root].[State] = {(int)SourceRootState.Enabled}
+                ORDER BY [force].[RequestedAtUtc], [force].[Id]
                 """)
             .ToListAsync(cancellationToken).ConfigureAwait(false);
         if (requested.Count == 0)
@@ -964,9 +980,11 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
         await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         var candidates = from activity in context.SourceActivities.AsNoTracking()
                       join revision in context.SourceRevisions.AsNoTracking() on activity.SourceRevisionId equals revision.Id
+                      join root in context.SourceRootConfigurations.AsNoTracking() on revision.SourceRootId equals root.Id
                       join artifact in context.SourceArtifacts.AsNoTracking() on revision.Id equals artifact.SourceRevisionId
                       where activity.State == (int)SourceActivityState.DeferredUnsupported &&
                             activity.ExecutionClass == (int)ExecutionClass.DeferredCapability &&
+                            root.State == (int)SourceRootState.Enabled &&
                             EF.Functions.Collate(artifact.ContentSha256, SchemaConfiguration.SchedulerFenceCollation) ==
                                 EF.Functions.Collate(activity.InputFingerprint, SchemaConfiguration.SchedulerFenceCollation) &&
                             EF.Functions.Collate(revision.ContentSha256, SchemaConfiguration.SchedulerFenceCollation) ==
@@ -1001,9 +1019,11 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
         await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         return await (from activity in context.SourceActivities.AsNoTracking()
                       join revision in context.SourceRevisions.AsNoTracking() on activity.SourceRevisionId equals revision.Id
+                      join root in context.SourceRootConfigurations.AsNoTracking() on revision.SourceRootId equals root.Id
                       join artifact in context.SourceArtifacts.AsNoTracking() on revision.Id equals artifact.SourceRevisionId
                       where activity.State == (int)SourceActivityState.DeferredUnsupported &&
                             activity.ExecutionClass == (int)ExecutionClass.DeferredCapability &&
+                            root.State == (int)SourceRootState.Enabled &&
                             extensions.Contains(revision.Extension.ToLower()) &&
                             EF.Functions.Collate(artifact.ContentSha256, SchemaConfiguration.SchedulerFenceCollation) ==
                                 EF.Functions.Collate(activity.InputFingerprint, SchemaConfiguration.SchedulerFenceCollation) &&
@@ -1022,9 +1042,11 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
         await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         return await (from activity in context.SourceActivities.AsNoTracking()
                       join revision in context.SourceRevisions.AsNoTracking() on activity.SourceRevisionId equals revision.Id
+                      join root in context.SourceRootConfigurations.AsNoTracking() on revision.SourceRootId equals root.Id
                       join artifact in context.SourceArtifacts.AsNoTracking() on revision.Id equals artifact.SourceRevisionId
                       where activity.State == (int)SourceActivityState.DeferredUnsupported &&
                             activity.ExecutionClass == (int)ExecutionClass.DeferredCapability &&
+                            root.State == (int)SourceRootState.Enabled &&
                             activity.RequiredCapability != "document-office-legacy-structural-extract" &&
                             new[] { ".doc", ".xls", ".ppt" }.Contains(revision.Extension.ToLower()) &&
                             EF.Functions.Collate(artifact.ContentSha256, SchemaConfiguration.SchedulerFenceCollation) ==
@@ -1345,6 +1367,11 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
                   INNER JOIN [SourceArtifacts] AS [artifact] WITH (UPDLOCK, HOLDLOCK)
                       ON [artifact].[SourceRevisionId] = [revision].[Id]
                   WHERE [revision].[Id] = [SourceProcessorBranches].[SourceRevisionId]
+                    AND EXISTS (
+                        SELECT 1
+                        FROM [SourceRootConfigurations] AS [root] WITH (UPDLOCK, HOLDLOCK)
+                        WHERE [root].[Id] = [revision].[SourceRootId]
+                          AND [root].[State] = {(int)SourceRootState.Enabled})
                     AND [revision].[Extension] = {".cs"}
                     AND [revision].[Classification] = {"AcceptedUtf8Text"}
                     AND [revision].[ContentSha256] COLLATE Latin1_General_100_BIN2 = [SourceProcessorBranches].[InputSha256] COLLATE Latin1_General_100_BIN2
@@ -1759,6 +1786,13 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
                       WHERE [activity].[Id] = [SourceProcessorBranches].[SourceActivityId]
                         AND [activity].[ActivityKind] <> {(int)SourceActivityKind.CodeParsing}
                         AND [activity].[State] <> {(int)SourceActivityState.CancelledSuperseded})
+                  AND EXISTS (
+                      SELECT 1
+                      FROM [SourceRevisions] AS [revision] WITH (UPDLOCK, HOLDLOCK)
+                      INNER JOIN [SourceRootConfigurations] AS [root] WITH (UPDLOCK, HOLDLOCK)
+                          ON [root].[Id] = [revision].[SourceRootId]
+                      WHERE [revision].[Id] = [SourceProcessorBranches].[SourceRevisionId]
+                        AND [root].[State] = {(int)SourceRootState.Enabled})
                 """)
             .OrderBy(value => value.CreatedAtUtc)
             .ThenBy(value => value.Id)

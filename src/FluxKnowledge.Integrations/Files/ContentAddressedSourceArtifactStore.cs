@@ -13,13 +13,15 @@ public sealed class ContentAddressedSourceArtifactStore : ISourceArtifactStore, 
     private readonly Func<CancellationToken, ValueTask>? _beforeSourceRead;
     private readonly Func<CancellationToken, ValueTask>? _beforeArtifactWrite;
     private readonly Action? _beforeShardCreation;
+    private readonly ISourceArtifactPublicationGate? _publicationGate;
 
     public ContentAddressedSourceArtifactStore(
         string configuredRoot,
         IEnumerable<string>? protectedRoots = null,
         Func<CancellationToken, ValueTask>? beforeSourceRead = null,
         Func<CancellationToken, ValueTask>? beforeArtifactWrite = null,
-        Action? beforeShardCreation = null)
+        Action? beforeShardCreation = null,
+        ISourceArtifactPublicationGate? publicationGate = null)
     {
         var effectiveProtectedRoots = protectedRoots?.ToArray();
         _root = ValidateRoot(configuredRoot, effectiveProtectedRoots);
@@ -30,6 +32,7 @@ public sealed class ContentAddressedSourceArtifactStore : ISourceArtifactStore, 
         _beforeSourceRead = beforeSourceRead;
         _beforeArtifactWrite = beforeArtifactWrite;
         _beforeShardCreation = beforeShardCreation;
+        _publicationGate = publicationGate;
     }
 
     public async ValueTask<SourceArtifactReceipt> PutFileAsync(
@@ -48,6 +51,9 @@ public sealed class ContentAddressedSourceArtifactStore : ISourceArtifactStore, 
         EnsureSnapshotCurrent(snapshot);
         var hash = snapshot.ContentSha256.ToLowerInvariant();
         var relativePath = Path.Combine("sha256", hash[..2], $"{hash}.bin");
+        var publicationLease = await AcquirePublicationLeaseAsync(hash, cancellationToken).ConfigureAwait(false);
+        try
+        {
         using var destination = EnsureArtifactDestinationDirectory(hash);
         var finalPath = Path.Combine(destination.Path, $"{hash}.bin");
         await RunBeforeArtifactWriteAsync(destination, cancellationToken).ConfigureAwait(false);
@@ -61,7 +67,7 @@ public sealed class ContentAddressedSourceArtifactStore : ISourceArtifactStore, 
 
             EnsureSnapshotCurrent(snapshot);
             await VerifyExistingAsync(finalPath, hash, snapshot.ByteLength, cancellationToken).ConfigureAwait(false);
-            return Receipt(metadata, hash, relativePath, existing: true);
+            return Receipt(metadata, hash, relativePath, existing: true, publicationLease);
         }
 
         var temporaryPath = Path.Combine(Path.GetDirectoryName(finalPath)!, $".{hash}.{Guid.NewGuid():N}.tmp");
@@ -79,12 +85,12 @@ public sealed class ContentAddressedSourceArtifactStore : ISourceArtifactStore, 
             {
                 EnsureRootCurrent();
                 File.Move(temporaryPath, finalPath, overwrite: false);
-                return Receipt(metadata, hash, relativePath, existing: false);
+                return Receipt(metadata, hash, relativePath, existing: false, publicationLease);
             }
             catch (IOException) when (File.Exists(finalPath))
             {
                 await VerifyExistingAsync(finalPath, hash, snapshot.ByteLength, cancellationToken).ConfigureAwait(false);
-                return Receipt(metadata, hash, relativePath, existing: true);
+                return Receipt(metadata, hash, relativePath, existing: true, publicationLease);
             }
         }
         finally
@@ -93,6 +99,12 @@ public sealed class ContentAddressedSourceArtifactStore : ISourceArtifactStore, 
             {
                 File.Delete(temporaryPath);
             }
+        }
+        }
+        catch
+        {
+            await DisposePublicationLeaseAsync(publicationLease).ConfigureAwait(false);
+            throw;
         }
     }
 
@@ -115,13 +127,16 @@ public sealed class ContentAddressedSourceArtifactStore : ISourceArtifactStore, 
         }
 
         var relativePath = Path.Combine("sha256", actualHash[..2], $"{actualHash}.bin");
+        var publicationLease = await AcquirePublicationLeaseAsync(actualHash, cancellationToken).ConfigureAwait(false);
+        try
+        {
         using var destination = EnsureArtifactDestinationDirectory(actualHash);
         var finalPath = Path.Combine(destination.Path, $"{actualHash}.bin");
         await RunBeforeArtifactWriteAsync(destination, cancellationToken).ConfigureAwait(false);
         if (File.Exists(finalPath))
         {
             await VerifyExistingAsync(finalPath, actualHash, content.Length, cancellationToken).ConfigureAwait(false);
-            return Receipt(metadata, actualHash, relativePath, existing: true);
+            return Receipt(metadata, actualHash, relativePath, existing: true, publicationLease);
         }
 
         var temporaryPath = Path.Combine(
@@ -147,12 +162,12 @@ public sealed class ContentAddressedSourceArtifactStore : ISourceArtifactStore, 
             {
                 EnsureRootCurrent();
                 File.Move(temporaryPath, finalPath, overwrite: false);
-                return Receipt(metadata, actualHash, relativePath, existing: false);
+                return Receipt(metadata, actualHash, relativePath, existing: false, publicationLease);
             }
             catch (IOException) when (File.Exists(finalPath))
             {
                 await VerifyExistingAsync(finalPath, actualHash, content.Length, cancellationToken).ConfigureAwait(false);
-                return Receipt(metadata, actualHash, relativePath, existing: true);
+                return Receipt(metadata, actualHash, relativePath, existing: true, publicationLease);
             }
         }
         finally
@@ -161,6 +176,12 @@ public sealed class ContentAddressedSourceArtifactStore : ISourceArtifactStore, 
             {
                 File.Delete(temporaryPath);
             }
+        }
+        }
+        catch
+        {
+            await DisposePublicationLeaseAsync(publicationLease).ConfigureAwait(false);
+            throw;
         }
     }
 
@@ -182,18 +203,20 @@ public sealed class ContentAddressedSourceArtifactStore : ISourceArtifactStore, 
 
         EnsureRootCurrent();
         var temporaryPath = Path.Combine(_root, $".stream.{Guid.NewGuid():N}.tmp");
+        ISourceArtifactPublicationLease? publicationLease = null;
         try
         {
             var streamed = await CopyStreamAndHashAsync(content, temporaryPath, maximumByteLength, cancellationToken).ConfigureAwait(false);
             var metadata = new SourceArtifactMetadata(streamed.Hash, "application/octet-stream", streamed.Length);
             var relativePath = Path.Combine("sha256", streamed.Hash[..2], $"{streamed.Hash}.bin");
+            publicationLease = await AcquirePublicationLeaseAsync(streamed.Hash, cancellationToken).ConfigureAwait(false);
             using var destination = EnsureArtifactDestinationDirectory(streamed.Hash);
             var finalPath = Path.Combine(destination.Path, $"{streamed.Hash}.bin");
             await RunBeforeArtifactWriteAsync(destination, cancellationToken).ConfigureAwait(false);
             if (File.Exists(finalPath))
             {
                 await VerifyExistingAsync(finalPath, streamed.Hash, streamed.Length, cancellationToken).ConfigureAwait(false);
-                return Receipt(metadata, streamed.Hash, relativePath, existing: true);
+                return Receipt(metadata, streamed.Hash, relativePath, existing: true, publicationLease);
             }
 
             await VerifyExistingAsync(temporaryPath, streamed.Hash, streamed.Length, cancellationToken).ConfigureAwait(false);
@@ -201,13 +224,18 @@ public sealed class ContentAddressedSourceArtifactStore : ISourceArtifactStore, 
             {
                 EnsureRootCurrent();
                 File.Move(temporaryPath, finalPath, overwrite: false);
-                return Receipt(metadata, streamed.Hash, relativePath, existing: false);
+                return Receipt(metadata, streamed.Hash, relativePath, existing: false, publicationLease);
             }
             catch (IOException) when (File.Exists(finalPath))
             {
                 await VerifyExistingAsync(finalPath, streamed.Hash, streamed.Length, cancellationToken).ConfigureAwait(false);
-                return Receipt(metadata, streamed.Hash, relativePath, existing: true);
+                return Receipt(metadata, streamed.Hash, relativePath, existing: true, publicationLease);
             }
+        }
+        catch
+        {
+            await DisposePublicationLeaseAsync(publicationLease).ConfigureAwait(false);
+            throw;
         }
         finally
         {
@@ -222,8 +250,29 @@ public sealed class ContentAddressedSourceArtifactStore : ISourceArtifactStore, 
         SourceArtifactMetadata metadata,
         string hash,
         string relativePath,
-        bool existing) =>
-        new(SourceArtifactId.New(), hash, relativePath, metadata.ByteLength, existing);
+        bool existing,
+        ISourceArtifactPublicationLease? publicationLease) =>
+        new(SourceArtifactId.New(), hash, relativePath, metadata.ByteLength, existing, publicationLease);
+
+    private ValueTask<ISourceArtifactPublicationLease?> AcquirePublicationLeaseAsync(
+        string contentSha256,
+        CancellationToken cancellationToken) =>
+        _publicationGate is null
+            ? ValueTask.FromResult<ISourceArtifactPublicationLease?>(null)
+            : AcquireConfiguredPublicationLeaseAsync(contentSha256, cancellationToken);
+
+    private async ValueTask<ISourceArtifactPublicationLease?> AcquireConfiguredPublicationLeaseAsync(
+        string contentSha256,
+        CancellationToken cancellationToken) =>
+        await _publicationGate!.AcquireSharedAsync(contentSha256, cancellationToken).ConfigureAwait(false);
+
+    private static async ValueTask DisposePublicationLeaseAsync(ISourceArtifactPublicationLease? publicationLease)
+    {
+        if (publicationLease is not null)
+        {
+            await publicationLease.DisposeAsync().ConfigureAwait(false);
+        }
+    }
 
     private static void EnsureSnapshotCurrent(SourceDiscoveredFile snapshot)
     {

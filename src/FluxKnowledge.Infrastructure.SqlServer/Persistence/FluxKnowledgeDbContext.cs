@@ -29,6 +29,8 @@ public sealed class FluxKnowledgeDbContext(DbContextOptions<FluxKnowledgeDbConte
     public DbSet<NativeWorkerInstanceEntity> NativeWorkerInstances => Set<NativeWorkerInstanceEntity>();
     public DbSet<NativeWorkerLifecycleEvidenceEntity> NativeWorkerLifecycleEvidence => Set<NativeWorkerLifecycleEvidenceEntity>();
     public DbSet<SourceRootConfigurationEntity> SourceRootConfigurations => Set<SourceRootConfigurationEntity>();
+    public DbSet<SourceDeletionOperationEntity> SourceDeletionOperations => Set<SourceDeletionOperationEntity>();
+    public DbSet<SourceDeletionCleanupItemEntity> SourceDeletionCleanupItems => Set<SourceDeletionCleanupItemEntity>();
     public DbSet<SourceRootWatchStateEntity> SourceRootWatchStates => Set<SourceRootWatchStateEntity>();
     public DbSet<SourceScanRequestEntity> SourceScanRequests => Set<SourceScanRequestEntity>();
     public DbSet<SourceScanJobEntity> SourceScanJobs => Set<SourceScanJobEntity>();

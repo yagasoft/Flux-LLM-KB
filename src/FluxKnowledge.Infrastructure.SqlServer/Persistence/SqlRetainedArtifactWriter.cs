@@ -1,4 +1,5 @@
 using System.Text;
+using System.Collections.Concurrent;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Operations;
 using FluxKnowledge.Application.Sources;
@@ -13,10 +14,12 @@ public sealed class SqlRetainedArtifactWriter(
     IDbContextFactory<FluxKnowledgeDbContext> contextFactory,
     string artifactRoot,
     IEnumerable<string>? protectedRoots = null,
-    PersistedOutlookSpoolRootPolicy? outlookSpoolPolicy = null) : IRetainedArtifactWriter
+    PersistedOutlookSpoolRootPolicy? outlookSpoolPolicy = null,
+    ISourceArtifactPublicationGate? publicationGate = null) : IRetainedArtifactWriter, IAsyncDisposable, IDisposable
 {
     private readonly string _artifactRoot = ContentAddressedSourceArtifactStore.ValidateRoot(artifactRoot, protectedRoots);
     private readonly string[] _protectedRoots = protectedRoots?.ToArray() ?? [];
+    private readonly ConcurrentDictionary<TrackingPublicationLease, byte> _publicationLeases = new();
 
     public async ValueTask<RetainedArtifactWriteReceipt> WriteAsync(
         SourceRevisionId parentSourceRevisionId,
@@ -48,15 +51,59 @@ public sealed class SqlRetainedArtifactWriter(
         var selectedProtectedRoots = privateRoot is null
             ? _protectedRoots
             : [.. _protectedRoots, _artifactRoot];
-        using var store = new ContentAddressedSourceArtifactStore(selectedRoot, selectedProtectedRoots);
+        using var store = new ContentAddressedSourceArtifactStore(
+            selectedRoot,
+            selectedProtectedRoots,
+            publicationGate: privateRoot is null ? publicationGate : null);
         using var classified = new BoundedClassifyingReadStream(content, maximumByteLength);
         var receipt = await store.PutStreamAsync(classified, maximumByteLength, cancellationToken).ConfigureAwait(false);
+        ISourceArtifactPublicationLease? retainedLease = null;
+        if (receipt.PublicationLease is not null)
+        {
+            var trackingLease = new TrackingPublicationLease(receipt.PublicationLease, _publicationLeases);
+            if (!_publicationLeases.TryAdd(trackingLease, 0))
+            {
+                await trackingLease.DisposeAsync().ConfigureAwait(false);
+                throw new InvalidOperationException("The retained artifact publication lease could not be tracked.");
+            }
+            retainedLease = trackingLease;
+        }
         return new RetainedArtifactWriteReceipt(
             receipt.ContentSha256,
             receipt.StoreRelativePath,
             receipt.ByteLength,
             classified.IsUtf8Text,
-            classified.IsNestedArchive);
+            classified.IsNestedArchive,
+            retainedLease);
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        foreach (var lease in _publicationLeases.Keys)
+        {
+            await lease.DisposeAsync().ConfigureAwait(false);
+        }
+    }
+
+    public void Dispose() => DisposeAsync().AsTask().GetAwaiter().GetResult();
+
+    private sealed class TrackingPublicationLease(
+        ISourceArtifactPublicationLease inner,
+        ConcurrentDictionary<TrackingPublicationLease, byte> owner) : ISourceArtifactPublicationLease
+    {
+        private ISourceArtifactPublicationLease? _inner = inner;
+
+        public async ValueTask DisposeAsync()
+        {
+            var lease = Interlocked.Exchange(ref _inner, null);
+            if (lease is null)
+            {
+                return;
+            }
+
+            _ = owner.TryRemove(this, out _);
+            await lease.DisposeAsync().ConfigureAwait(false);
+        }
     }
 
     private sealed class BoundedClassifyingReadStream(Stream inner, long maximumByteLength) : Stream

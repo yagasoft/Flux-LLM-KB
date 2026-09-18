@@ -26,7 +26,7 @@
             <div class="table-scroll">
                 <table>
                     <caption class="visually-hidden">Configured local source roots</caption>
-                    <thead><tr><th>Name</th><th>Canonical path</th><th>State</th><th>Last scan</th><th>Indexed</th><th>Deferred</th><th>Blocked</th><th>Errors</th><th>Details</th></tr></thead>
+                    <thead><tr><th>Name</th><th>Canonical path</th><th>State</th><th>Last scan</th><th>Indexed</th><th>Deferred</th><th>Blocked</th><th>Errors</th><th>Actions</th><th>Details</th></tr></thead>
                     <tbody>
                     @foreach (var root in PageState.Roots)
                     {
@@ -34,6 +34,7 @@
                             <td>@root.DisplayName</td><td class="diagnostic-value">@root.CanonicalPath</td><td>@root.State</td>
                             <td>@(root.LastScanCompletedAtUtc?.LocalDateTime.ToString() ?? "Not scanned")</td>
                             <td>@root.IndexedCount</td><td>@root.DeferredCount</td><td>@root.BlockedCount</td><td>@root.ErrorCount</td>
+                            <td><SourceLifecycleControls RootId="root.Id" State="@root.State" DisplayName="@root.DisplayName" CanonicalPath="@root.CanonicalPath" OwnedItemEstimate="@root.IndexedCount" DeletionPhase="@root.DeletionPhase" DeletionReason="@root.DeletionReason" OnCommitted="ReloadAsync" /></td>
                             <td><a href="@($"/sources/{root.Id}")">View</a></td>
                         </tr>
                     }

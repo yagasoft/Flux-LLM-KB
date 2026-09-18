@@ -80,6 +80,27 @@ public sealed class SqlOutboxStore(
                    AND [DueAtUtc] <= @nowUtc
                    AND ([LeaseExpiresAtUtc] IS NULL OR [LeaseExpiresAtUtc] <= @nowUtc)
                    AND [Operation] IN ({operationParameters})
+                   AND
+                   (
+                       NOT EXISTS
+                       (
+                           SELECT 1
+                           FROM [PipelineRecords] AS [record]
+                           WHERE [record].[Id] = [OutboxMessages].[PipelineRecordId]
+                             AND [record].[SourceRevisionId] IS NOT NULL
+                       )
+                       OR EXISTS
+                       (
+                           SELECT 1
+                           FROM [PipelineRecords] AS [record]
+                           INNER JOIN [SourceRevisions] AS [revision]
+                               ON [revision].[Id] = [record].[SourceRevisionId]
+                           INNER JOIN [SourceRootConfigurations] AS [root]
+                               ON [root].[Id] = [revision].[SourceRootId]
+                           WHERE [record].[Id] = [OutboxMessages].[PipelineRecordId]
+                             AND [root].[State] = @sourceRootEnabled
+                       )
+                   )
                  ORDER BY [DueAtUtc], [CreatedAtUtc], [Id]
              )
              UPDATE [candidate]
@@ -113,6 +134,11 @@ public sealed class SqlOutboxStore(
             SqlDbType.DateTimeOffset,
             nowUtc.Add(leaseDuration));
         AddParameter(command, "@leaseOwner", SqlDbType.NVarChar, leaseOwner, 256);
+        AddParameter(
+            command,
+            "@sourceRootEnabled",
+            SqlDbType.Int,
+            (int)FluxKnowledge.Domain.Sources.SourceRootState.Enabled);
         for (var index = 0; index < operations.Length; index++)
         {
             AddParameter(

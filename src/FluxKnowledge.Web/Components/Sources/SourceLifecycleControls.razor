@@ -1,0 +1,128 @@
+@using System.Text.Json
+@using FluxKnowledge.Application.IntegrationV1
+@using FluxKnowledge.Application.IntegrationV1.Corpus
+@inject NativeCorpusCommandService CorpusCommands
+
+<div class="source-lifecycle-controls">
+    @if (IsDeleting)
+    {
+        <span role="status">Deletion is in progress (@(DeletionPhase ?? "pending")). New source work is fenced.@if (DeletionReason is { } reason) { <text> Reason: @reason.</text> }</span>
+        <button type="button" @onclick="RetryDeleteAsync" disabled="@_submitting">Retry cleanup</button>
+    }
+    else
+    {
+        <button type="button" @onclick="ExecuteLifecycleAsync" disabled="@_submitting">
+            @ButtonLabel
+        </button>
+        <button type="button" @onclick="ShowDeleteConfirmation" disabled="@_submitting">Delete</button>
+    }
+    @if (_showDeleteConfirmation)
+    {
+        <section aria-label="Confirm source deletion">
+            <p><strong>Delete @DisplayName?</strong> This removes its owned pipeline, index and retained app storage. It does not delete files from @CanonicalPath.</p>
+            <p>Estimated indexed items: @OwnedItemEstimate.</p>
+            <label>Type DELETE to confirm <input @bind="_deleteConfirmation" @bind:event="oninput" autocomplete="off" /></label>
+            <button type="button" @onclick="DeleteAsync" disabled="@(_submitting || !IsDeleteConfirmed)">Confirm delete</button>
+            <button type="button" @onclick="CancelDelete" disabled="@_submitting">Cancel</button>
+        </section>
+    }
+    @if (_message is { } message)
+    {
+        <span role="status" aria-live="polite">@message</span>
+    }
+</div>
+
+@code {
+    [Parameter, EditorRequired] public Guid RootId { get; set; }
+
+    [Parameter, EditorRequired] public string State { get; set; } = string.Empty;
+
+    [Parameter, EditorRequired] public string DisplayName { get; set; } = string.Empty;
+
+    [Parameter, EditorRequired] public string CanonicalPath { get; set; } = string.Empty;
+
+    [Parameter] public int OwnedItemEstimate { get; set; }
+
+    [Parameter] public string? DeletionPhase { get; set; }
+
+    [Parameter] public string? DeletionReason { get; set; }
+
+    [Parameter] public EventCallback OnCommitted { get; set; }
+
+    private bool _submitting;
+    private string? _message;
+    private string? _idempotencyKey;
+    private bool _showDeleteConfirmation;
+    private string _deleteConfirmation = string.Empty;
+
+    private bool IsPaused => string.Equals(State, "Paused", StringComparison.Ordinal);
+
+    private bool IsDeleting => string.Equals(State, "Deleting", StringComparison.Ordinal);
+
+    private string Action => IsPaused ? "root_resume" : "root_pause";
+
+    private string ButtonLabel => IsPaused ? "Resume" : "Pause";
+
+    private bool IsDeleteConfirmed => string.Equals(_deleteConfirmation, "DELETE", StringComparison.Ordinal);
+
+    private void ShowDeleteConfirmation()
+    {
+        _showDeleteConfirmation = true;
+        _deleteConfirmation = string.Empty;
+        _message = null;
+    }
+
+    private void CancelDelete()
+    {
+        _showDeleteConfirmation = false;
+        _deleteConfirmation = string.Empty;
+    }
+
+    private Task ExecuteLifecycleAsync() => ExecuteAsync(Action, isDelete: false);
+
+    private Task RetryDeleteAsync() => ExecuteAsync("root_delete", isDelete: true);
+
+    private Task DeleteAsync() => ExecuteAsync("root_delete", isDelete: true);
+
+    private async Task ExecuteAsync(string action, bool isDelete)
+    {
+        _submitting = true;
+        _message = null;
+        _idempotencyKey ??= $"web-source-lifecycle:{action}:{RootId:D}:{Guid.NewGuid():N}";
+        try
+        {
+            using var document = JsonDocument.Parse(JsonSerializer.Serialize(new { rootId = RootId }));
+            var mutation = new NativeCorpusMutation(action, document.RootElement.Clone());
+            var preview = await CorpusCommands.PreviewAsync(mutation, "web", CancellationToken.None);
+            var receipt = await CorpusCommands.CommitAsync(
+                mutation,
+                preview.ConfirmationId,
+                _idempotencyKey,
+                "web",
+                CancellationToken.None);
+            _message = receipt.WasReplay
+                ? "The source lifecycle change was already recorded."
+                : isDelete
+                    ? "The source deletion was accepted. Cleanup continues in the background."
+                    : IsPaused
+                    ? "The source was resumed."
+                    : "The source was paused.";
+            _idempotencyKey = null;
+            _showDeleteConfirmation = false;
+            _deleteConfirmation = string.Empty;
+            await OnCommitted.InvokeAsync();
+        }
+        catch (NativeOperationException exception)
+        {
+            _message = $"Source lifecycle change was refused: {exception.ReasonCode}.";
+        }
+        catch (InvalidOperationException exception)
+        {
+            _message = $"Source lifecycle change could not be completed: {exception.Message}.";
+        }
+        finally
+        {
+            _submitting = false;
+        }
+    }
+}

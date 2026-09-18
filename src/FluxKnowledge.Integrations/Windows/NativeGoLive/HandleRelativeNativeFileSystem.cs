@@ -82,12 +82,16 @@ internal sealed partial class HandleRelativeNativeFileSystem
     }
 
     internal VerifiedNativeDirectory OpenDirectory(string absolutePath) =>
-        OpenDirectory(absolutePath, NativeMethods.DirectoryReadAccess);
+        OpenDirectory(absolutePath, NativeMethods.DirectoryReadAccess, NativeMethods.DirectoryReadAccess);
+
+    /// <summary>Opens an existing directory chain without demanding creation rights from an ancestor.</summary>
+    internal VerifiedNativeDirectory OpenReadOnlyDirectory(string absolutePath) =>
+        OpenDirectory(absolutePath, NativeMethods.DirectoryReadOnlyAccess, NativeMethods.DirectoryReadOnlyAccess);
 
     internal VerifiedNativeDirectory OpenDirectoryForSecurity(string absolutePath) =>
-        OpenDirectory(absolutePath, NativeMethods.DirectorySecurityAccess);
+        OpenDirectory(absolutePath, NativeMethods.DirectorySecurityAccess, NativeMethods.DirectoryReadAccess);
 
-    private VerifiedNativeDirectory OpenDirectory(string absolutePath, uint finalAccess)
+    private VerifiedNativeDirectory OpenDirectory(string absolutePath, uint finalAccess, uint traversalAccess)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(absolutePath);
         if (!Path.IsPathFullyQualified(absolutePath) ||
@@ -108,7 +112,7 @@ internal sealed partial class HandleRelativeNativeFileSystem
             root,
             string.Equals(canonicalPath, root, StringComparison.OrdinalIgnoreCase)
                 ? finalAccess
-                : NativeMethods.DirectoryReadAccess);
+                : traversalAccess);
         try
         {
             EnsureSafeDirectory(current);
@@ -125,7 +129,7 @@ internal sealed partial class HandleRelativeNativeFileSystem
                     var next = NativeMethods.OpenRelative(
                         current,
                         component,
-                        index == components.Length - 1 ? finalAccess : NativeMethods.DirectoryReadAccess,
+                        index == components.Length - 1 ? finalAccess : traversalAccess,
                         NativeMethods.ShareReadWrite,
                         NativeMethods.FileOpen,
                         NativeMethods.DirectoryOpenOptions);
@@ -214,13 +218,23 @@ internal sealed partial class HandleRelativeNativeFileSystem
     }
 
     internal VerifiedNativeDirectory OpenDirectory(VerifiedNativeDirectory parent, string literalChild)
+        => OpenDirectory(parent, literalChild, NativeMethods.DirectoryReadAccess);
+
+    /// <summary>Opens one existing literal child without demanding child-creation rights from its parent.</summary>
+    internal VerifiedNativeDirectory OpenReadOnlyDirectory(VerifiedNativeDirectory parent, string literalChild) =>
+        OpenDirectory(parent, literalChild, NativeMethods.DirectoryReadOnlyAccess);
+
+    private VerifiedNativeDirectory OpenDirectory(
+        VerifiedNativeDirectory parent,
+        string literalChild,
+        uint desiredAccess)
     {
         EnsureVerifiedParent(parent);
         EnsureLiteralChild(literalChild);
         var handle = NativeMethods.OpenRelative(
             parent.Handle,
             literalChild,
-            NativeMethods.DirectoryReadAccess,
+            desiredAccess,
             NativeMethods.ShareReadWrite,
             NativeMethods.FileOpen,
             NativeMethods.DirectoryOpenOptions);
@@ -1057,7 +1071,8 @@ internal sealed partial class HandleRelativeNativeFileSystem
         internal const uint ShareRead = FileShareRead;
         internal const uint ShareReadWrite = FileShareRead | FileShareWrite;
         internal const uint ShareAll = FileShareRead | FileShareWrite | FileShareDelete;
-        internal const uint DirectoryReadAccess = FileListDirectory | FileAddSubdirectory | FileReadAttributes | Synchronize;
+        internal const uint DirectoryReadOnlyAccess = FileListDirectory | FileReadAttributes | Synchronize;
+        internal const uint DirectoryReadAccess = DirectoryReadOnlyAccess | FileAddSubdirectory;
         internal const uint DirectorySecurityAccess = DirectoryReadAccess | WriteDac;
         internal const uint FileReadAccess = FileReadData | FileReadAttributes | Synchronize;
         internal const uint FileAttributesAccess = FileReadAttributes | Synchronize;

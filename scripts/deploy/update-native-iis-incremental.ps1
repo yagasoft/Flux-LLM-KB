@@ -6,6 +6,8 @@ param(
     [string]$DeployRoot = "I:\FluxKnowledge\App",
     [ValidateRange(10, 300)]
     [int]$ReadinessTimeoutSeconds = 120,
+    [switch]$ApplyMigrations,
+    [switch]$DeferReadinessForScopedRemediation,
     [switch]$PlanOnly,
     [switch]$Apply
 )
@@ -16,6 +18,9 @@ $CanonicalDeployRoot = "$CanonicalLiveRoot\App"
 $CanonicalRecoveryRoot = "$CanonicalLiveRoot\Recovery"
 $IncrementalRecoveryRoot = "$CanonicalRecoveryRoot\IncrementalUpdates"
 $ValidationHoldPath = "$CanonicalLiveRoot\Runtime\deployment-validation-hold.json"
+$SourceDeletionMigrationBaseline = "20260826160702_AddEmptyCatalogueReadiness"
+$SourceDeletionMigrationTarget = "20260918121829_AddSourceDeletionOperations"
+$SourceDeletionMigrationScriptSha256 = "355F7B8499D0CE333E6FA50142B76C9F7B6CA92B3057A5F1A740C794756ABC90"
 
 function Assert-CanonicalPath {
     param(
@@ -124,6 +129,37 @@ function Invoke-RequiredLoopbackProbes {
     }
 }
 
+function Invoke-ScopedReadinessRemediationProbes {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Origin,
+        [Parameter(Mandatory)]
+        [int]$TimeoutSeconds
+    )
+
+    foreach ($path in @("/health/live", "/api/index-health")) {
+        $response = Invoke-FixedLoopbackProbe -Uri "$Origin$path" -TimeoutSeconds $TimeoutSeconds
+        $response.Dispose()
+    }
+
+    $readinessWasUnavailable = $false
+    try {
+        $response = Invoke-FixedLoopbackProbe -Uri "$Origin/health/ready" -TimeoutSeconds $TimeoutSeconds
+        $response.Dispose()
+    }
+    catch {
+        if ($_.Exception.Message -ceq "The fixed-loopback endpoint returned HTTP 503; exact HTTP 200 is required.") {
+            $readinessWasUnavailable = $true
+        }
+        else {
+            throw
+        }
+    }
+    if (-not $readinessWasUnavailable) {
+        throw "Scoped readiness remediation requires readiness to return exact HTTP 503."
+    }
+}
+
 function New-DeploymentValidationHold {
     param(
         [Parameter(Mandatory)][string]$Path,
@@ -188,6 +224,122 @@ function ConvertTo-DeploymentValidationConnectionString {
         $normalised,
         '(?i)(^|;)\s*Connect Retry Count\s*=',
         '$1ConnectRetryCount=')
+}
+
+function Get-DeploymentSqlConnectionString {
+    $configurationPath = "$CanonicalLiveRoot\Config\appsettings.Production.json"
+    if (-not (Test-Path -LiteralPath $configurationPath -PathType Leaf)) {
+        throw "The production configuration required for SQL deployment validation is missing."
+    }
+    $configuration = Get-Content -LiteralPath $configurationPath -Raw | ConvertFrom-Json
+    $connectionString = $configuration.ConnectionStrings.FluxKnowledge
+    if ([string]::IsNullOrWhiteSpace($connectionString)) {
+        throw "The production connection string required for SQL deployment validation is missing."
+    }
+    return ConvertTo-DeploymentValidationConnectionString -ConnectionString $connectionString
+}
+
+function Get-AppliedMigrationIds {
+    $connection = [System.Data.SqlClient.SqlConnection]::new((Get-DeploymentSqlConnectionString))
+    try {
+        $connection.Open()
+        $permission = $connection.CreateCommand()
+        try {
+            $permission.CommandText = "SELECT HAS_PERMS_BY_NAME(DB_NAME(), 'DATABASE', 'ALTER');"
+            if ($permission.ExecuteScalar() -ne 1) {
+                throw "The production SQL principal lacks ALTER permission required for the reviewed source-deletion migration."
+            }
+        }
+        finally {
+            $permission.Dispose()
+        }
+        $command = $connection.CreateCommand()
+        try {
+            $command.CommandText = "SELECT [MigrationId] FROM [dbo].[__EFMigrationsHistory] ORDER BY [MigrationId];"
+            $reader = $command.ExecuteReader()
+            try {
+                $ids = [System.Collections.Generic.List[string]]::new()
+                while ($reader.Read()) { $ids.Add($reader.GetString(0)) }
+                return @($ids)
+            }
+            finally { $reader.Dispose() }
+        }
+        finally { $command.Dispose() }
+    }
+    finally { $connection.Dispose() }
+}
+
+function Assert-SourceDeletionMigrationBaseline {
+    param([Parameter(Mandatory)][string[]]$AppliedMigrationIds)
+
+    if ($AppliedMigrationIds.Count -eq 0 -or $AppliedMigrationIds[-1] -cne $SourceDeletionMigrationBaseline -or
+        $AppliedMigrationIds -contains $SourceDeletionMigrationTarget) {
+        throw "The production migration history is not at the reviewed source-deletion baseline."
+    }
+}
+
+function New-SourceDeletionMigrationScript {
+    param(
+        [Parameter(Mandatory)][string]$SourceRoot,
+        [Parameter(Mandatory)][ValidateSet("up", "down")][string]$Direction,
+        [Parameter(Mandatory)][string]$OutputPath
+    )
+
+    $project = Join-Path $SourceRoot "src\FluxKnowledge.Infrastructure.SqlServer\FluxKnowledge.Infrastructure.SqlServer.csproj"
+    $startup = Join-Path $SourceRoot "src\FluxKnowledge.Web\FluxKnowledge.Web.csproj"
+    $from = if ($Direction -ceq "up") { $SourceDeletionMigrationBaseline } else { $SourceDeletionMigrationTarget }
+    $to = if ($Direction -ceq "up") { $SourceDeletionMigrationTarget } else { $SourceDeletionMigrationBaseline }
+    & dotnet ef migrations script $from $to --configuration Release --project $project --startup-project $startup --no-build --output $OutputPath
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $OutputPath -PathType Leaf)) {
+        throw "Generating the reviewed source-deletion migration script failed."
+    }
+    $hash = (Get-FileHash -LiteralPath $OutputPath -Algorithm SHA256).Hash
+    if ($Direction -ceq "up" -and $hash -cne $SourceDeletionMigrationScriptSha256) {
+        throw "The generated source-deletion migration script does not match the reviewed SHA-256."
+    }
+    return [pscustomobject]@{ From = $from; To = $to; Path = $OutputPath; Sha256 = $hash }
+}
+
+function Invoke-GeneratedSqlScript {
+    param([Parameter(Mandatory)][string]$Path)
+
+    $script = Get-Content -LiteralPath $Path -Raw
+    $connection = [System.Data.SqlClient.SqlConnection]::new((Get-DeploymentSqlConnectionString))
+    try {
+        $connection.Open()
+        foreach ($batch in [regex]::Split($script, "(?im)^\s*GO\s*(?:--.*)?$|(?=^\s*ALTER\s+TRIGGER\b)|(?<=END;)(?=\s*(?:INSERT\s+INTO\s+\[__EFMigrationsHistory\]|COMMIT;))") | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) {
+            $command = $connection.CreateCommand()
+            try {
+                $command.CommandTimeout = 120
+                $command.CommandText = $batch
+                [void]$command.ExecuteNonQuery()
+            }
+            finally { $command.Dispose() }
+        }
+    }
+    finally { $connection.Dispose() }
+}
+
+function Assert-SourceDeletionMigrationRollbackSafe {
+    $connection = [System.Data.SqlClient.SqlConnection]::new((Get-DeploymentSqlConnectionString))
+    try {
+        $connection.Open()
+        $command = $connection.CreateCommand()
+        try {
+            $command.CommandText = @"
+SELECT CONVERT(int, CASE WHEN
+    NOT EXISTS (SELECT 1 FROM [dbo].[SourceDeletionOperations])
+    AND NOT EXISTS (SELECT 1 FROM [dbo].[SourceDeletionCleanupItems])
+    AND NOT EXISTS (SELECT 1 FROM [dbo].[IndexGenerations] WHERE [RetiredAtUtc] IS NOT NULL)
+THEN 1 ELSE 0 END);
+"@
+            if ($command.ExecuteScalar() -ne 1) {
+                throw "The source-deletion migration cannot be reversed after lifecycle state has been created."
+            }
+        }
+        finally { $command.Dispose() }
+    }
+    finally { $connection.Dispose() }
 }
 
 function Get-RetainedPipelineStateBaseline {
@@ -316,6 +468,9 @@ if ($SiteName -cne "FluxKnowledge") {
 if ($PlanOnly -and $Apply) {
     throw "-PlanOnly cannot be combined with -Apply."
 }
+if ($DeferReadinessForScopedRemediation -and $ApplyMigrations) {
+    throw "-DeferReadinessForScopedRemediation cannot be combined with -ApplyMigrations."
+}
 
 . (Join-Path $PSScriptRoot "loopback-deployment-safety.ps1")
 Import-Module (Join-Path $PSScriptRoot "incremental-iis-payload-swap.psm1") -Force -ErrorAction Stop
@@ -325,19 +480,53 @@ if ($loopbackOrigin.Origin -cne "http://127.0.0.1:5137") {
 }
 
 if ($PlanOnly) {
+    $migrationPlan = $null
+    if ($ApplyMigrations) {
+        if ([string]::IsNullOrWhiteSpace($SourceRoot)) {
+            $SourceRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+        }
+        $SourceRoot = (Resolve-Path -LiteralPath $SourceRoot -ErrorAction Stop).Path
+        $migrationPath = Join-Path $SourceRoot ("src\FluxKnowledge.Infrastructure.SqlServer\Persistence\Migrations\{0}.cs" -f $SourceDeletionMigrationTarget)
+        if (-not (Test-Path -LiteralPath $migrationPath -PathType Leaf)) {
+            throw "The reviewed source-deletion migration is missing from SourceRoot."
+        }
+        $history = Get-AppliedMigrationIds
+        Assert-SourceDeletionMigrationBaseline -AppliedMigrationIds $history
+        $migrationPlan = [ordered]@{
+            baseline = $SourceDeletionMigrationBaseline
+            target = $SourceDeletionMigrationTarget
+            current_history = @($history)
+            migration_file_sha256 = (Get-FileHash -LiteralPath $migrationPath -Algorithm SHA256).Hash
+            generated_script_sha256 = $SourceDeletionMigrationScriptSha256
+            required_permission = "DATABASE ALTER"
+            rollback = "before validation-hold release only; only when no lifecycle or retired-generation state exists"
+        }
+    }
     [ordered]@{
         mode = "plan-only"
         site_name = "FluxKnowledge"
         site_url = "http://127.0.0.1:5137"
         application_root = $CanonicalDeployRoot
         recovery_root = $CanonicalRecoveryRoot
-        migrations = $false
+        migrations = [bool]$ApplyMigrations
+        migration_plan = $migrationPlan
         clean_slate = $false
         preserved = @("Config", "Data", "Runtime", "Recovery", "CodexPlugin")
         payload_acl = "inherit-from-live-root"
         rollback = "automatic-application-payload-restore"
         deployment_validation_hold = $true
-        candidate_validation = "held-loopback-probes-and-unchanged-retained-pipeline-state"
+        candidate_validation = if ($DeferReadinessForScopedRemediation) {
+            "held-live-and-index-health probes, exact-ready-503 and unchanged-retained-pipeline-state"
+        }
+        else {
+            "held-loopback-probes-and-unchanged-retained-pipeline-state"
+        }
+        readiness_remediation = if ($DeferReadinessForScopedRemediation) {
+            "requires exact readiness HTTP 503; post-activation readiness remains pending"
+        }
+        else {
+            $null
+        }
     } | ConvertTo-Json -Depth 3
     exit 0
 }
@@ -360,6 +549,16 @@ if ($LASTEXITCODE -ne 0) {
 }
 if (-not [string]::IsNullOrWhiteSpace($sourceStatus)) {
     throw "SourceRoot has uncommitted changes; incremental IIS deployment requires an immutable committed payload."
+}
+$migrationPlan = $null
+if ($ApplyMigrations) {
+    $migrationPath = Join-Path $SourceRoot ("src\FluxKnowledge.Infrastructure.SqlServer\Persistence\Migrations\{0}.cs" -f $SourceDeletionMigrationTarget)
+    if (-not (Test-Path -LiteralPath $migrationPath -PathType Leaf)) {
+        throw "The reviewed source-deletion migration is missing from SourceRoot."
+    }
+    $history = Get-AppliedMigrationIds
+    Assert-SourceDeletionMigrationBaseline -AppliedMigrationIds $history
+    $migrationPlan = [ordered]@{ Applied = $false; RollbackVerified = $true; Up = $null; Down = $null }
 }
 $commit = (& git -C $SourceRoot rev-parse HEAD 2>&1 | Out-String).Trim()
 if ($LASTEXITCODE -ne 0 -or $commit -notmatch "^[0-9a-f]{40}$") {
@@ -402,19 +601,23 @@ try {
     $candidateRoot = Join-Path $releaseRoot "candidate"
     $previousRoot = Join-Path $releaseRoot "previous"
     $failedRoot = Join-Path $releaseRoot "failed"
-    $deploymentValidation = @{ HoldCreated = $false; Baseline = $null }
+    $deploymentValidation = @{ HoldCreated = $false; Baseline = $null; MigrationsApplied = $false; RollbackVerified = $true }
 
     & dotnet publish $webProject -c Release --no-restore --nologo -o $candidateRoot
     if ($LASTEXITCODE -ne 0) {
         throw "Publishing the incremental IIS candidate failed."
     }
     Test-ApplicationPayload -Path $candidateRoot
+    if ($ApplyMigrations) {
+        $migrationPlan.Up = New-SourceDeletionMigrationScript -SourceRoot $SourceRoot -Direction up -OutputPath (Join-Path $releaseRoot "source-deletion-up.sql")
+        $migrationPlan.Down = New-SourceDeletionMigrationScript -SourceRoot $SourceRoot -Direction down -OutputPath (Join-Path $releaseRoot "source-deletion-down.sql")
+    }
 
     $manifest = [ordered]@{
         commit = $commit
         staged_at_utc = [DateTime]::UtcNow.ToString("O")
         application_root = $CanonicalDeployRoot
-        migrations = $false
+        migrations = [bool]$ApplyMigrations
         clean_slate = $false
     } | ConvertTo-Json
     [IO.File]::WriteAllText((Join-Path $releaseRoot "manifest.json"), $manifest, [Text.UTF8Encoding]::new($false))
@@ -437,24 +640,58 @@ try {
             if ($null -eq $deploymentValidation.Baseline) {
                 $deploymentValidation.Baseline = Get-RetainedPipelineStateBaseline
             }
+            if ($ApplyMigrations -and -not $deploymentValidation.MigrationsApplied) {
+                Assert-SourceDeletionMigrationBaseline -AppliedMigrationIds (Get-AppliedMigrationIds)
+                $deploymentValidation.RollbackVerified = $false
+                Invoke-GeneratedSqlScript -Path $migrationPlan.Up.Path
+                $postMigrationHistory = Get-AppliedMigrationIds
+                if ($postMigrationHistory[-1] -cne $SourceDeletionMigrationTarget) {
+                    throw "The reviewed source-deletion migration was not recorded as the active schema target."
+                }
+                $deploymentValidation.MigrationsApplied = $true
+            }
         } `
         -StartApplication {
             Start-WebAppPool -Name $SiteName
             Wait-IisAppPoolState -Name $SiteName -ExpectedState "Started" -TimeoutSeconds $ReadinessTimeoutSeconds
         } `
         -ValidateApplication {
-            Invoke-RequiredLoopbackProbes -Origin $loopbackOrigin.Origin -TimeoutSeconds $ReadinessTimeoutSeconds
+            if ($DeferReadinessForScopedRemediation) {
+                Invoke-ScopedReadinessRemediationProbes -Origin $loopbackOrigin.Origin -TimeoutSeconds $ReadinessTimeoutSeconds
+            }
+            else {
+                Invoke-RequiredLoopbackProbes -Origin $loopbackOrigin.Origin -TimeoutSeconds $ReadinessTimeoutSeconds
+            }
             Assert-RetainedPipelineStateUnchanged `
                 -Baseline $deploymentValidation.Baseline `
                 -Current (Get-RetainedPipelineStateBaseline)
         } `
         -ValidateRollbackApplication {
-            Invoke-RequiredLoopbackProbes -Origin $loopbackOrigin.Origin -TimeoutSeconds $ReadinessTimeoutSeconds
+            if ($DeferReadinessForScopedRemediation) {
+                Invoke-ScopedReadinessRemediationProbes -Origin $loopbackOrigin.Origin -TimeoutSeconds $ReadinessTimeoutSeconds
+            }
+            else {
+                Invoke-RequiredLoopbackProbes -Origin $loopbackOrigin.Origin -TimeoutSeconds $ReadinessTimeoutSeconds
+            }
+        } `
+        -PrepareRollbackApplication {
+            if ($ApplyMigrations -and $deploymentValidation.MigrationsApplied) {
+                Assert-SourceDeletionMigrationRollbackSafe
+                Invoke-GeneratedSqlScript -Path $migrationPlan.Down.Path
+                Assert-SourceDeletionMigrationBaseline -AppliedMigrationIds (Get-AppliedMigrationIds)
+                $deploymentValidation.MigrationsApplied = $false
+                $deploymentValidation.RollbackVerified = $true
+            }
         }
 
     Remove-DeploymentValidationHold -Path $ValidationHoldPath -ReleaseId $releaseId
     $deploymentValidation.HoldCreated = $false
-    Invoke-RequiredLoopbackProbes -Origin $loopbackOrigin.Origin -TimeoutSeconds $ReadinessTimeoutSeconds
+    if ($DeferReadinessForScopedRemediation) {
+        Invoke-ScopedReadinessRemediationProbes -Origin $loopbackOrigin.Origin -TimeoutSeconds $ReadinessTimeoutSeconds
+    }
+    else {
+        Invoke-RequiredLoopbackProbes -Origin $loopbackOrigin.Origin -TimeoutSeconds $ReadinessTimeoutSeconds
+    }
 
     [ordered]@{
         ok = $true
@@ -462,13 +699,26 @@ try {
         commit = $commit
         release_root = $releaseRoot
         rollback_payload = $swap.PreviousPayload
-        migrations = $false
+        migrations = [bool]$ApplyMigrations
+        migration = if ($ApplyMigrations) { [ordered]@{ target = $SourceDeletionMigrationTarget; script_sha256 = $migrationPlan.Up.Sha256 } } else { $null }
         clean_slate = $false
-        deployment_validation_hold = "released-after-unchanged-state-validation"
+        deployment_validation_hold = if ($DeferReadinessForScopedRemediation) {
+            "released-after-unchanged-state-validation; readiness remediation pending"
+        }
+        else {
+            "released-after-unchanged-state-validation"
+        }
+        readiness_remediation = if ($DeferReadinessForScopedRemediation) {
+            "pending scoped source remediation"
+        }
+        else {
+            $null
+        }
     } | ConvertTo-Json -Depth 3
 }
 finally {
-    if ($leaseAcquired -and $null -ne $deploymentValidation -and $deploymentValidation.HoldCreated) {
+    if ($leaseAcquired -and $null -ne $deploymentValidation -and $deploymentValidation.HoldCreated -and
+        (-not $ApplyMigrations -or $deploymentValidation.RollbackVerified)) {
         Remove-DeploymentValidationHold -Path $ValidationHoldPath -ReleaseId $releaseId
     }
     if ($leaseAcquired) {

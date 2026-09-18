@@ -179,6 +179,25 @@ filesystem watcher, when enabled, only supplies a coalesced wake hint. The
 recommended default is periodic reconciliation every 15 minutes with manual
 scan available.
 
+### Source lifecycle
+
+Local source roots support durable `Paused` and `Deleting` states through the
+same native preview, confirmation, idempotency and row-version fencing contract
+used by source mutations. Pause stops new source admission while preserving
+already-indexed content; Resume coalesces one reconciliation wake. Deleting
+roots are fenced from new work and excluded from corpus, search and retained
+detail projections before their owned graph is removed.
+
+Deletion is resumable rather than a direct cascade: SQL retains one
+root-scoped operation and exact physical cleanup targets until all app-owned
+content-addressed blobs and retired USearch generation directories have been
+removed through no-follow, handle-relative Windows operations. Shared blobs are
+kept after a surviving-reference check. Outlook-bound roots and roots with GPU
+execution ownership are refused before fencing. Source originals, model stores,
+application releases and unrelated roots are never deletion targets. A failed
+physical cleanup leaves the root in `Deleting` with an auditable reason and a
+scoped retry path.
+
 ### Source preservation and activity planning
 
 Each discovered source revision retains canonical path and root identity,

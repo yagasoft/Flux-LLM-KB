@@ -32,6 +32,38 @@ public sealed class CorpusProjectionIntegrationTests(NativeSqlServerFixture fixt
     }
 
     [NativeSqlServerFact]
+    public async Task Deleting_source_is_withheld_from_corpus_pages_details_and_folders_before_physical_cleanup()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var rootId = Guid.NewGuid();
+        var revisionId = Guid.NewGuid();
+        var identityId = Guid.NewGuid();
+        var recordId = Guid.NewGuid();
+        await using (var db = Context())
+        {
+            var root = Root(rootId, now);
+            root.State = (int)SourceRootState.Deleting;
+            var record = Record(recordId, identityId, now);
+            record.SourceRevisionId = revisionId;
+            db.SourceRootConfigurations.Add(root);
+            db.SourceRevisions.Add(Revision(rootId, "C:\\corpus\\withheld\\entry.txt", now, revisionId));
+            db.SourceIdentities.Add(Identity(identityId, "withheld"));
+            db.PipelineRecords.Add(record);
+            db.Artifacts.Add(Artifact(recordId, now, "withheld text"));
+            await db.SaveChangesAsync();
+        }
+
+        var reader = new SqlCorpusProjectionReader(Factory());
+        var page = await reader.ReadPageAsync(new CorpusQuery(PageSize: 50), CancellationToken.None);
+        var detail = await reader.ReadDetailAsync(recordId, CancellationToken.None);
+        var folders = await reader.ReadFoldersAsync(rootId, null, CancellationToken.None);
+
+        Assert.DoesNotContain(page.Items, item => item.PipelineRecordId == recordId);
+        Assert.Null(detail);
+        Assert.Empty(folders);
+    }
+
+    [NativeSqlServerFact]
     public async Task Activity_state_uses_the_activity_linked_to_the_record_when_a_revision_has_multiple_activities()
     {
         var now = DateTimeOffset.UtcNow; var root = Guid.NewGuid(); var identity = Guid.NewGuid(); var otherIdentity = Guid.NewGuid(); var revision = Guid.NewGuid(); var record = Guid.NewGuid(); var other = Guid.NewGuid();

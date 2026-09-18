@@ -48,6 +48,16 @@ if ($plan.mode -ne "plan-only" -or
     throw "The incremental IIS plan is not restricted to the existing application payload and loopback site."
 }
 
+$remediationPlanOutput = & pwsh -NoProfile -File $deploymentScript -SourceRoot $SourceRoot -PlanOnly -DeferReadinessForScopedRemediation 2>&1 | Out-String
+if ($LASTEXITCODE -ne 0) {
+    throw "The scoped readiness-remediation deployment plan failed: $remediationPlanOutput"
+}
+$remediationPlan = $remediationPlanOutput | ConvertFrom-Json
+if ($remediationPlan.migrations -ne $false -or
+    $remediationPlan.readiness_remediation -ne "requires exact readiness HTTP 503; post-activation readiness remains pending") {
+    throw "The scoped readiness-remediation plan is not explicitly restricted to the unready, no-migration repair path."
+}
+
 $deploymentScriptText = Get-Content -LiteralPath $deploymentScript -Raw
 $requiredDeploymentValidationSteps = @(
     'New-DeploymentValidationHold',
@@ -94,6 +104,35 @@ if ($deploymentScriptText -match [regex]::Escape('.ApplicationName =')) {
     throw "The incremental IIS updater uses the unsupported legacy SQL-client ApplicationName property."
 }
 $normalisedSqlClientConnection.Dispose()
+$generatedSqlSplitter = [regex]::Match(
+    $deploymentScriptText,
+    '\[regex\]::Split\(\$script,\s*"(?<pattern>[^"]+)"\)')
+if (-not $generatedSqlSplitter.Success) {
+    throw "The incremental IIS updater no longer exposes its generated-SQL batch splitter for contract validation."
+}
+$generatedSqlBatches = @(
+    [regex]::Split("SELECT 1;`r`nGO`r`nSELECT 2;", $generatedSqlSplitter.Groups['pattern'].Value) |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+if ($generatedSqlBatches.Count -ne 2 -or
+    $generatedSqlBatches[0].Trim() -ne 'SELECT 1;' -or
+    $generatedSqlBatches[1].Trim() -ne 'SELECT 2;') {
+    throw "The incremental IIS updater does not split generated SQL batches on GO."
+}
+$triggerBatches = @(
+    [regex]::Split(@"
+BEGIN TRANSACTION;
+ALTER TRIGGER [dbo].[One] ON [dbo].[One] AFTER UPDATE AS BEGIN SELECT 1; END;
+ALTER TRIGGER [dbo].[Two] ON [dbo].[Two] AFTER UPDATE AS BEGIN SELECT 2; END;
+COMMIT;
+GO
+"@, $generatedSqlSplitter.Groups['pattern'].Value) |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+if ($triggerBatches.Count -ne 4 -or
+    -not $triggerBatches[1].TrimStart().StartsWith('ALTER TRIGGER [dbo].[One]', [StringComparison]::Ordinal) -or
+    -not $triggerBatches[2].TrimStart().StartsWith('ALTER TRIGGER [dbo].[Two]', [StringComparison]::Ordinal) -or
+    -not $triggerBatches[3].TrimStart().StartsWith('COMMIT;', [StringComparison]::Ordinal)) {
+    throw "The incremental IIS updater does not isolate ALTER TRIGGER statements and post-trigger migration work into their required SQL batches."
+}
 $holdCreatedAt = $deploymentScriptText.IndexOf('New-DeploymentValidationHold -Path $ValidationHoldPath -ReleaseId $releaseId')
 $candidateStartedAt = $deploymentScriptText.IndexOf('Start-WebAppPool -Name $SiteName', $holdCreatedAt)
 $probedAt = $deploymentScriptText.IndexOf('Invoke-RequiredLoopbackProbes -Origin $loopbackOrigin.Origin -TimeoutSeconds $ReadinessTimeoutSeconds', $candidateStartedAt)
@@ -110,6 +149,23 @@ if ($preflightStart -lt 0 -or $preflightEnd -lt $preflightStart) {
 }
 if ($deploymentScriptText.Substring($preflightStart, $preflightEnd - $preflightStart) -match [regex]::Escape('Invoke-RequiredLoopbackProbes')) {
     throw 'The incremental IIS updater requires a failing payload to pass health probes before its held recovery candidate can start.'
+}
+foreach ($requiredScopedRemediationStep in @(
+    '[switch]$DeferReadinessForScopedRemediation',
+    'Invoke-ScopedReadinessRemediationProbes',
+    'exact HTTP 503',
+    'readiness remediation pending')) {
+    if ($deploymentScriptText -notmatch [regex]::Escape($requiredScopedRemediationStep)) {
+        throw "The scoped readiness-remediation deployment path is missing $requiredScopedRemediationStep."
+    }
+}
+$scopedRemediationWithMigrations = Invoke-ExpectedRejection -Arguments @(
+    '-SourceRoot', $SourceRoot,
+    '-PlanOnly',
+    '-ApplyMigrations',
+    '-DeferReadinessForScopedRemediation')
+if ($scopedRemediationWithMigrations.ExitCode -eq 0 -or $scopedRemediationWithMigrations.Output -notmatch 'cannot be combined with -ApplyMigrations') {
+    throw "The scoped readiness-remediation path permits schema migration."
 }
 
 $ordinary = Invoke-ExpectedRejection -Arguments @('-SourceRoot', $SourceRoot)

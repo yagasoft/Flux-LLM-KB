@@ -894,6 +894,31 @@ public sealed class RetainedCsharpCodeLifecycleCorrectionIntegrationTests(
     }
 
     [NativeSqlServerFact]
+    public async Task Source_deletion_migration_downgrades_to_the_original_csharp_writer_contract_and_reapplies()
+    {
+        await using var database = await fixture.CreateRetainedCsharpPreviousMigrationDatabaseAsync();
+        await using var context = database.CreateContext();
+        var migrator = context.GetService<IMigrator>();
+        var writer = new SqlRetainedProcessorBranchStore(
+            new ConnectionFactory(database.ConnectionString),
+            TimeProvider.System);
+
+        await migrator.MigrateAsync();
+        Assert.Contains("20260918121829_AddSourceDeletionOperations", await context.Database
+            .SqlQuery<string>($"SELECT [MigrationId] AS [Value] FROM [__EFMigrationsHistory]").ToArrayAsync());
+        Assert.True(await writer.IsRetainedCsharpCodeWriterReadyAsync(CancellationToken.None));
+
+        await migrator.MigrateAsync("20260826160702_AddEmptyCatalogueReadiness");
+
+        Assert.DoesNotContain("20260918121829_AddSourceDeletionOperations", await context.Database
+            .SqlQuery<string>($"SELECT [MigrationId] AS [Value] FROM [__EFMigrationsHistory]").ToArrayAsync());
+        Assert.True(await writer.IsRetainedCsharpCodeWriterReadyAsync(CancellationToken.None));
+
+        await migrator.MigrateAsync();
+        Assert.True(await writer.IsRetainedCsharpCodeWriterReadyAsync(CancellationToken.None));
+    }
+
+    [NativeSqlServerFact]
     public async Task Persisted_private_facts_withhold_secret_content_and_hard_denials_are_exact()
     {
         const string sentinel = "secret-content-sentinel";

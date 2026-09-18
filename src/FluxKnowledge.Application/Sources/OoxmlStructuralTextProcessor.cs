@@ -1079,7 +1079,7 @@ public sealed class OoxmlStructuralTextProcessor(IRetainedArtifactWriter artifac
             if (receipt.ByteLength != segment.Length || !receipt.IsUtf8Text || receipt.IsNestedArchive)
                 throw new RetainedProcessorException("office-document-part-unsupported");
             children.Add(new RetainedProcessorDerivedChild(fingerprint, $"retained-office-structural-segment:{fingerprint}", identity,
-                receipt.ContentSha256, receipt.StoreRelativePath, receipt.ByteLength, "AcceptedUtf8Text", OriginKind: 2, Extension: ".txt"));
+                receipt.ContentSha256, receipt.StoreRelativePath, receipt.ByteLength, "AcceptedUtf8Text", OriginKind: 2, Extension: ".txt", PublicationLease: receipt.PublicationLease));
             offset += length;
             ordinal++;
         }

@@ -1,6 +1,8 @@
 using System.Text.Json;
 using FluxKnowledge.Application.Contracts;
 using FluxKnowledge.Application.Ports;
+using FluxKnowledge.Application.Sources;
+using FluxKnowledge.Application.Workers;
 
 namespace FluxKnowledge.Application.IntegrationV1.Corpus;
 
@@ -14,32 +16,69 @@ public sealed class NativeCorpusCommandService
         ["root_create"] = "Queue source-root creation.",
         ["root_update"] = "Update the selected source root and queue reconciliation.",
         ["root_disable"] = "Disable the selected source root.",
+        ["root_pause"] = "Pause the selected source root.",
+        ["root_resume"] = "Resume the selected source root and queue reconciliation.",
+        ["root_delete"] = "Delete the selected local source root and its owned data.",
         ["source_sync"] = "Queue source synchronisation.",
         ["watcher_set"] = "Set persisted watcher state.",
         ["job_retry"] = "Queue a supported job retry."
     };
     private readonly NativeOperationService _operations;
+    private readonly IOutboxWakeSignal? _outboxWakeSignal;
+    private readonly ISourceScanWakeSignal? _sourceScanWakeSignal;
+    private readonly IDeploymentValidationHold? _deploymentValidationHold;
 
-    public NativeCorpusCommandService(NativeOperationService operations, INativeCorpusActionStore actionStore)
-        : this((operations ?? throw new ArgumentNullException(nameof(operations))).Store, actionStore)
+    public NativeCorpusCommandService(
+        NativeOperationService operations,
+        INativeCorpusActionStore actionStore,
+        IOutboxWakeSignal? outboxWakeSignal = null,
+        ISourceScanWakeSignal? sourceScanWakeSignal = null,
+        IDeploymentValidationHold? deploymentValidationHold = null)
+        : this((operations ?? throw new ArgumentNullException(nameof(operations))).Store, actionStore, outboxWakeSignal, sourceScanWakeSignal, deploymentValidationHold)
     {
     }
 
-    public NativeCorpusCommandService(INativeOperationStore operationStore, INativeCorpusActionStore actionStore)
+    public NativeCorpusCommandService(
+        INativeOperationStore operationStore,
+        INativeCorpusActionStore actionStore,
+        IOutboxWakeSignal? outboxWakeSignal = null,
+        ISourceScanWakeSignal? sourceScanWakeSignal = null,
+        IDeploymentValidationHold? deploymentValidationHold = null)
     {
         ArgumentNullException.ThrowIfNull(operationStore);
         ArgumentNullException.ThrowIfNull(actionStore);
+        _outboxWakeSignal = outboxWakeSignal;
+        _sourceScanWakeSignal = sourceScanWakeSignal;
+        _deploymentValidationHold = deploymentValidationHold;
         _operations = new NativeOperationService(operationStore, Effects.Select(pair => new NativeActionDefinition(
             pair.Key, pair.Value,
             (payload, token) => actionStore.ResolveTargetsAsync(pair.Key, payload, token),
             (payload, targets, token) => actionStore.CreateCommitOperationAsync(pair.Key, payload, targets, token))));
     }
 
-    public ValueTask<NativeActionPreview> PreviewAsync(NativeCorpusMutation command, string surface, CancellationToken cancellationToken) =>
-        _operations.PreviewAsync(ToPreview(command, surface), cancellationToken);
+    public ValueTask<NativeActionPreview> PreviewAsync(NativeCorpusMutation command, string surface, CancellationToken cancellationToken)
+    {
+        ThrowIfDeploymentValidationHeld();
+        return _operations.PreviewAsync(ToPreview(command, surface), cancellationToken);
+    }
 
-    public ValueTask<NativeActionReceipt> CommitAsync(NativeCorpusMutation command, string confirmationId, string idempotencyKey, string surface, CancellationToken cancellationToken) =>
-        _operations.CommitAsync(new NativeActionCommitRequest(Action(command), Payload(command), confirmationId, idempotencyKey, surface), cancellationToken);
+    public async ValueTask<NativeActionReceipt> CommitAsync(NativeCorpusMutation command, string confirmationId, string idempotencyKey, string surface, CancellationToken cancellationToken)
+    {
+        ThrowIfDeploymentValidationHeld();
+        var action = Action(command);
+        var receipt = await _operations.CommitAsync(
+            new NativeActionCommitRequest(action, Payload(command), confirmationId, idempotencyKey, surface),
+            cancellationToken).ConfigureAwait(false);
+        if (action is "root_resume" or "root_delete")
+        {
+            // A durable replay can follow a process stop immediately after the
+            // original commit; duplicate bounded wake signals are safe.
+            _outboxWakeSignal?.Notify();
+            _sourceScanWakeSignal?.Notify();
+        }
+
+        return receipt;
+    }
 
     private static NativeActionPreviewRequest ToPreview(NativeCorpusMutation command, string surface) => new(Action(command), Payload(command), surface);
     private static string Action(NativeCorpusMutation command)
@@ -48,6 +87,14 @@ public sealed class NativeCorpusCommandService
         var action = NativeOperationCanonicalization.CanonicalizeAction(command.Action);
         if (!Effects.ContainsKey(action)) throw new NativeOperationException("action-not-allowed");
         return action;
+    }
+
+    private void ThrowIfDeploymentValidationHeld()
+    {
+        if (_deploymentValidationHold?.IsHeld == true)
+        {
+            throw new NativeOperationException("deployment-validation-held");
+        }
     }
     private static string Payload(NativeCorpusMutation command) => NativeOperationCanonicalization.CanonicalizeJson(command.Payload.GetRawText());
 }

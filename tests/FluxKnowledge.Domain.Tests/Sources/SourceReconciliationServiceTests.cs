@@ -104,6 +104,50 @@ public sealed class SourceReconciliationServiceTests
         Assert.Equal(0, control.ClaimAttempts);
     }
 
+    [Fact]
+    public async Task Wake_runs_a_queued_scan_without_waiting_for_the_reconciliation_cadence()
+    {
+        var claim = Claim();
+        var control = new WakeControlStore(claim);
+        var scanner = new CompletingScanner(new SourceScanResult(claim.SourceRoot.Id, claim.ScanRequest.Id, 1, 0, 0, 0));
+        var wake = new ChannelSourceScanWakeSignal();
+        var services = new ServiceCollection();
+        services.AddSingleton<ISourceScanControlStore>(control);
+        services.AddSingleton<ISourceScanner>(scanner);
+        await using var provider = services.BuildServiceProvider();
+        var service = new SourceReconciliationService(
+            provider.GetRequiredService<IServiceScopeFactory>(),
+            wake,
+            TimeProvider.System);
+
+        try
+        {
+            await service.StartAsync(CancellationToken.None);
+            await control.InitialClaimFinished.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            wake.Notify();
+
+            await scanner.Scanned.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            await WaitUntilAsync(() => control.ClaimAttempts == 3, TimeSpan.FromSeconds(2));
+        }
+        finally
+        {
+            await service.StopAsync(CancellationToken.None);
+        }
+
+        Assert.Equal(3, control.ClaimAttempts);
+    }
+
+    private static async Task WaitUntilAsync(Func<bool> condition, TimeSpan timeout)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        while (!condition() && DateTime.UtcNow < deadline)
+        {
+            await Task.Delay(10);
+        }
+
+        Assert.True(condition(), "The reconciliation loop did not complete its expected claim cycle.");
+    }
+
     private static async Task RunAsync(RecordingControlStore control, ISourceScanner scanner)
     {
         var services = new ServiceCollection();
@@ -225,5 +269,45 @@ public sealed class SourceReconciliationServiceTests
             return ValueTask.FromResult<ClaimedSourceWatchBatch?>(new ClaimedSourceWatchBatch(SourceRootId.New(), DateTimeOffset.UnixEpoch, DateTimeOffset.UnixEpoch, 1, 1, leaseOwner, 1));
         }
         public ValueTask ReleaseScanAsync(ClaimedSourceWatchBatch batch, CancellationToken cancellationToken) { Released++; return ValueTask.CompletedTask; }
+    }
+
+    private sealed class WakeControlStore(ClaimedSourceScan claim) : ISourceScanControlStore
+    {
+        private int _claimCount;
+        public int ClaimAttempts { get; private set; }
+        public TaskCompletionSource InitialClaimFinished { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public ValueTask<ClaimedSourceScan?> ClaimNextReleasedAsync(
+            string leaseOwner,
+            DateTimeOffset nowUtc,
+            TimeSpan leaseDuration,
+            CancellationToken cancellationToken)
+        {
+            ClaimAttempts++;
+            if (_claimCount++ == 0)
+            {
+                InitialClaimFinished.TrySetResult();
+                return ValueTask.FromResult<ClaimedSourceScan?>(null);
+            }
+
+            return ValueTask.FromResult<ClaimedSourceScan?>(_claimCount == 2 ? claim : null);
+        }
+
+        public ValueTask CompleteAsync(ClaimedSourceScan claim, SourceScanResult result, string? failureReason, CancellationToken cancellationToken) =>
+            ValueTask.CompletedTask;
+    }
+
+    private sealed class CompletingScanner(SourceScanResult result) : ISourceScanner
+    {
+        public TaskCompletionSource Scanned { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public ValueTask<SourceScanResult> ScanAsync(
+            SourceRootConfiguration sourceRoot,
+            SourceScanRequest scanRequest,
+            CancellationToken cancellationToken)
+        {
+            Scanned.TrySetResult();
+            return ValueTask.FromResult(result);
+        }
     }
 }

@@ -142,7 +142,7 @@ public sealed class UsearchGenerationBuilder : IIndexGenerationPublisher
         var vectors = await store.ReadEligibleVectorsAsync(cancellationToken);
         if (vectors.Count == 0)
         {
-            throw new IndexGenerationValidationException("The current SQL corpus has no eligible vectors.");
+            throw new NoEligibleVectorsException();
         }
 
         var dimensions = vectors[0].Dimensions;

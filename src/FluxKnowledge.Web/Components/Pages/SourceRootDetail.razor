@@ -10,13 +10,14 @@
 
 @if (PageState.Detail is null)
 {
-    <p role="status">Loading source root…</p>
+    <p role="status">@(_loaded ? "Source deleted." : "Loading source root…")</p>
 }
 else
 {
     <section aria-labelledby="source-root-heading">
         <h1 id="source-root-heading">@PageState.Detail.DisplayName</h1>
         <p class="diagnostic-value">@PageState.Detail.CanonicalPath</p>
+        <SourceLifecycleControls RootId="PageState.Detail.Id" State="@PageState.Detail.State" DisplayName="@PageState.Detail.DisplayName" CanonicalPath="@PageState.Detail.CanonicalPath" OwnedItemEstimate="@PageState.Detail.DiscoveredCount" DeletionPhase="@PageState.Detail.DeletionPhase" DeletionReason="@PageState.Detail.DeletionReason" OnCommitted="ReloadAsync" />
         <dl class="status-grid">
             <div><dt>Root state</dt><dd>@PageState.Detail.State</dd></div>
             <div><dt>Scan progress</dt><dd>@PageState.Detail.ScanState</dd></div>
@@ -98,9 +99,14 @@ else
     private readonly CancellationTokenSource _stopping = new();
     private StatusEventSubscription? _subscription;
     private string? _replayMessage;
+    private bool _loaded;
 
-    protected override async Task OnParametersSetAsync() =>
+    protected override async Task OnParametersSetAsync()
+    {
+        _loaded = false;
         await PageState.LoadAsync(RootId, _stopping.Token);
+        _loaded = true;
+    }
 
     protected override Task OnInitializedAsync()
     {
@@ -114,6 +120,9 @@ else
         var result = await PageState.ReprocessDeferredContentAsync(_stopping.Token);
         _replayMessage = result.Message;
     }
+
+    private Task ReloadAsync() => InvokeAsync(async () =>
+        await PageState.LoadAsync(RootId, _stopping.Token));
 
     private async Task ObserveAsync(StatusEventSubscription subscription, CancellationToken cancellationToken)
     {

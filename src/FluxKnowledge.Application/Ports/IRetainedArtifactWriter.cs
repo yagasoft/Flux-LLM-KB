@@ -17,4 +17,5 @@ public sealed record RetainedArtifactWriteReceipt(
     string StoreRelativePath,
     long ByteLength,
     bool IsUtf8Text,
-    bool IsNestedArchive);
+    bool IsNestedArchive,
+    ISourceArtifactPublicationLease? PublicationLease = null);

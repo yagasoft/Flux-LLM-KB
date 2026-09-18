@@ -75,7 +75,7 @@ public sealed class TarArchiveRetainedProcessor(IRetainedArtifactWriter artifact
                     throw new RetainedProcessorException("archive-member-not-utf8");
                 }
                 members.Add(RetainedProcessorDerivedChild.ArchiveMember(prepared[ordinal].Identity, receipt.ContentSha256, receipt.StoreRelativePath,
-                    receipt.ByteLength, "AcceptedUtf8Text"));
+                    receipt.ByteLength, "AcceptedUtf8Text", receipt.PublicationLease));
                 ordinal++;
             }
             if (ordinal != prepared.Count)

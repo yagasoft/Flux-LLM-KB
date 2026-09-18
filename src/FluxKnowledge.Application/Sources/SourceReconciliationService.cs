@@ -54,6 +54,7 @@ public sealed class SourceReconciliationService(
             var timerTask = timer.WaitForNextTickAsync(waitCancellation.Token).AsTask();
             var wakeTask = wakeSignal.WaitAsync(waitCancellation.Token).AsTask();
             var completed = await Task.WhenAny(timerTask, wakeTask).ConfigureAwait(false);
+            var woke = completed == wakeTask;
             await completed.ConfigureAwait(false);
             await waitCancellation.CancelAsync().ConfigureAwait(false);
             try
@@ -65,7 +66,7 @@ public sealed class SourceReconciliationService(
                 // The unselected wait was deliberately cancelled before the next loop.
             }
             var released = await PumpDueWatchBatchesAsync(stoppingToken).ConfigureAwait(false);
-            if (released > 0 || timeProvider.GetUtcNow() >= nextReconciliationAtUtc)
+            if (woke || released > 0 || timeProvider.GetUtcNow() >= nextReconciliationAtUtc)
             {
                 await RunAvailableAsync(stoppingToken).ConfigureAwait(false);
                 nextReconciliationAtUtc = timeProvider.GetUtcNow().Add(DefaultCadence);
@@ -83,6 +84,11 @@ public sealed class SourceReconciliationService(
         while (!cancellationToken.IsCancellationRequested)
         {
             using var scope = scopeFactory.CreateScope();
+            var deletion = scope.ServiceProvider.GetService<SourceDeletionCoordinator>();
+            if (deletion is not null && await deletion.RunOneAsync(cancellationToken).ConfigureAwait(false))
+            {
+                continue;
+            }
             var control = scope.ServiceProvider.GetRequiredService<ISourceScanControlStore>();
             ClaimedSourceScan? claim;
             try

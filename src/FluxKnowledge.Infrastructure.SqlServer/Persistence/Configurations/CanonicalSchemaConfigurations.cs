@@ -437,6 +437,7 @@ public sealed class IndexGenerationConfiguration : IEntityTypeConfiguration<Inde
         builder.Property(entity => entity.MetadataChecksum).HasMaxLength(64).IsUnicode(false).IsFixedLength().IsRequired();
         builder.Property(entity => entity.CreatedAtUtc).HasColumnType("datetimeoffset(7)");
         builder.Property(entity => entity.ValidatedAtUtc).HasColumnType("datetimeoffset(7)");
+        builder.Property(entity => entity.RetiredAtUtc).HasColumnType("datetimeoffset(7)");
         SchemaConfiguration.ConfigureRowVersion(builder.Property(entity => entity.RowVersion));
     }
 }
@@ -970,6 +971,47 @@ public sealed class SourceRootConfigurationConfiguration : IEntityTypeConfigurat
         builder.Property(entity => entity.UpdatedAtUtc).HasColumnType("datetimeoffset(7)");
         SchemaConfiguration.ConfigureRowVersion(builder.Property(entity => entity.RowVersion));
         builder.HasIndex(entity => entity.CanonicalPathFingerprint).IsUnique();
+    }
+}
+
+public sealed class SourceDeletionOperationConfiguration : IEntityTypeConfiguration<SourceDeletionOperationEntity>
+{
+    public void Configure(EntityTypeBuilder<SourceDeletionOperationEntity> builder)
+    {
+        builder.ToTable("SourceDeletionOperations");
+        builder.HasKey(entity => entity.Id);
+        builder.Property(entity => entity.Id).ValueGeneratedNever();
+        builder.Property(entity => entity.Phase).HasMaxLength(64).IsRequired().UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(entity => entity.ReasonCode).HasMaxLength(256).UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(entity => entity.LeaseExpiresAtUtc).HasColumnType("datetimeoffset(7)");
+        builder.Property(entity => entity.CreatedAtUtc).HasColumnType("datetimeoffset(7)");
+        builder.Property(entity => entity.UpdatedAtUtc).HasColumnType("datetimeoffset(7)");
+        SchemaConfiguration.ConfigureRowVersion(builder.Property(entity => entity.RowVersion));
+        builder.HasIndex(entity => entity.SourceRootId).IsUnique();
+    }
+}
+
+public sealed class SourceDeletionCleanupItemConfiguration : IEntityTypeConfiguration<SourceDeletionCleanupItemEntity>
+{
+    public void Configure(EntityTypeBuilder<SourceDeletionCleanupItemEntity> builder)
+    {
+        builder.ToTable("SourceDeletionCleanupItems", table =>
+        {
+            table.HasCheckConstraint("CK_SourceDeletionCleanupItems_StorageKind", "[StorageKind] IN (1, 2)");
+            table.HasCheckConstraint("CK_SourceDeletionCleanupItems_State", "[State] IN (0, 1, 2)");
+            table.HasCheckConstraint("CK_SourceDeletionCleanupItems_ByteLength", "[ByteLength] IS NULL OR [ByteLength] >= 0");
+            table.HasCheckConstraint("CK_SourceDeletionCleanupItems_ContentSha256", "[ContentSha256] IS NULL OR ([ContentSha256] NOT LIKE '%[^0-9a-f]%' AND LEN([ContentSha256]) = 64)");
+        });
+        builder.HasKey(value => value.Id);
+        builder.Property(value => value.Id).ValueGeneratedNever();
+        builder.Property(value => value.RelativePath).HasMaxLength(2048).IsRequired();
+        builder.Property(value => value.ContentSha256).HasColumnType("char(64)").IsUnicode(false).IsFixedLength().HasMaxLength(64).UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(value => value.ReasonCode).HasMaxLength(256).UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(value => value.CreatedAtUtc).HasColumnType("datetimeoffset(7)");
+        builder.Property(value => value.UpdatedAtUtc).HasColumnType("datetimeoffset(7)");
+        SchemaConfiguration.ConfigureRowVersion(builder.Property(value => value.RowVersion));
+        builder.HasIndex(value => new { value.SourceDeletionOperationId, value.StorageKind, value.RelativePath }).IsUnique();
+        builder.HasOne(value => value.SourceDeletionOperation).WithMany().HasForeignKey(value => value.SourceDeletionOperationId).OnDelete(DeleteBehavior.Restrict);
     }
 }
 

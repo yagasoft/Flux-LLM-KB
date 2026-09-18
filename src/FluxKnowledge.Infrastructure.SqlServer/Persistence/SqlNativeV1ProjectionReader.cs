@@ -7,6 +7,7 @@ using FluxKnowledge.Application.IntegrationV1.Operations;
 using FluxKnowledge.Application.Contracts;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Visibility;
+using FluxKnowledge.Domain.Sources;
 using Microsoft.EntityFrameworkCore;
 
 namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
@@ -42,12 +43,18 @@ public sealed class SqlNativeV1ProjectionReader(
         await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         if (query.View == "status")
         {
-            return new { completed = await context.SourceProcessorCodeCompletionReceipts.AsNoTracking().CountAsync(cancellationToken).ConfigureAwait(false), branches = await context.SourceProcessorBranches.AsNoTracking().CountAsync(cancellationToken).ConfigureAwait(false) };
+            var visibleBranches = context.SourceProcessorBranches.AsNoTracking().Where(branch =>
+                context.SourceRevisions.Any(revision => revision.Id == branch.SourceRevisionId &&
+                    context.SourceRootConfigurations.Any(root => root.Id == revision.SourceRootId && root.State != (int)SourceRootState.Deleting)));
+            return new { completed = await context.SourceProcessorCodeCompletionReceipts.AsNoTracking().CountAsync(receipt => visibleBranches.Any(branch => branch.Id == receipt.SourceProcessorBranchId), cancellationToken).ConfigureAwait(false), branches = await visibleBranches.CountAsync(cancellationToken).ConfigureAwait(false) };
         }
         if (query.View == "symbols")
         {
             var source = context.SourceProcessorCodeSymbols.AsNoTracking()
-                .Where(value => query.BranchId == null || value.DocumentId == query.BranchId);
+                .Where(value => query.BranchId == null || value.DocumentId == query.BranchId)
+                .Where(value => context.SourceProcessorCodeDocuments.Any(document => document.SourceProcessorBranchId == value.DocumentId &&
+                    context.SourceRevisions.Any(revision => revision.Id == document.SourceRevisionId &&
+                        context.SourceRootConfigurations.Any(root => root.Id == revision.SourceRootId && root.State != (int)SourceRootState.Deleting))));
             if (query.Continuation is { Id: Guid afterDocumentId, Ordinal: int afterOrdinal })
             {
                 source = source.Where(value => value.DocumentId.CompareTo(afterDocumentId) > 0 ||
@@ -59,7 +66,10 @@ public sealed class SqlNativeV1ProjectionReader(
         }
         var needle = NativeV1ContractLimits.CanonicalizeCodeQuery(query.Query);
         var matchesSource = context.SourceProcessorCodeSymbols.AsNoTracking()
-            .Where(value => value.QualifiedName.Contains(needle) && (query.BranchId == null || value.DocumentId == query.BranchId));
+            .Where(value => value.QualifiedName.Contains(needle) && (query.BranchId == null || value.DocumentId == query.BranchId))
+            .Where(value => context.SourceProcessorCodeDocuments.Any(document => document.SourceProcessorBranchId == value.DocumentId &&
+                context.SourceRevisions.Any(revision => revision.Id == document.SourceRevisionId &&
+                    context.SourceRootConfigurations.Any(root => root.Id == revision.SourceRootId && root.State != (int)SourceRootState.Deleting))));
         if (query.Continuation is { Id: Guid afterMatchDocumentId, Ordinal: int afterMatchOrdinal })
         {
             matchesSource = matchesSource.Where(value => value.DocumentId.CompareTo(afterMatchDocumentId) > 0 ||
@@ -191,7 +201,8 @@ public sealed class SqlNativeV1ProjectionReader(
     private async ValueTask<object> ReadAssetsAsync(FluxKnowledgeDbContext context, NativeCorpusQuery query, CancellationToken cancellationToken)
     {
         var source = context.SourceRevisions.AsNoTracking()
-            .Where(value => query.RootId == null || value.SourceRootId == query.RootId);
+            .Where(value => query.RootId == null || value.SourceRootId == query.RootId)
+            .Where(value => context.SourceRootConfigurations.Any(root => root.Id == value.SourceRootId && root.State != (int)SourceRootState.Deleting));
         if (query.Continuation is { Id: Guid afterId, Timestamp: DateTimeOffset afterDiscoveredAt })
         {
             source = source.Where(value => value.DiscoveredAtUtc < afterDiscoveredAt ||
@@ -207,6 +218,8 @@ public sealed class SqlNativeV1ProjectionReader(
     {
         var source = context.SourceProcessorBranches.AsNoTracking()
             .Where(value => query.BranchId == null || value.Id == query.BranchId)
+            .Where(value => context.SourceRevisions.Any(revision => revision.Id == value.SourceRevisionId &&
+                context.SourceRootConfigurations.Any(root => root.Id == revision.SourceRootId && root.State != (int)SourceRootState.Deleting)))
             .Where(value => query.RootId == null || context.SourceRevisions.Any(revision =>
                 revision.Id == value.SourceRevisionId && revision.SourceRootId == query.RootId));
         if (query.Continuation is { Id: Guid afterId, Timestamp: DateTimeOffset afterUpdatedAt })
@@ -294,7 +307,10 @@ public sealed class SqlNativeV1ProjectionReader(
     private static async ValueTask<object> ReadBranchDetailAsync(FluxKnowledgeDbContext context, ILocalRetainedDetailReader retainedDetails, Guid? branchId, CancellationToken cancellationToken)
     {
         if (branchId is null) throw new NativeOperationException("invalid-query");
-        var branch = await context.SourceProcessorBranches.AsNoTracking().Where(value => value.Id == branchId).Select(value => new { value.Id, value.SourceRevisionId, value.InputSha256, value.State, value.AttemptCount, value.CompletionReceiptFingerprint }).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+        var branch = await context.SourceProcessorBranches.AsNoTracking().Where(value => value.Id == branchId)
+            .Where(value => context.SourceRevisions.Any(revision => revision.Id == value.SourceRevisionId &&
+                context.SourceRootConfigurations.Any(root => root.Id == revision.SourceRootId && root.State != (int)SourceRootState.Deleting)))
+            .Select(value => new { value.Id, value.SourceRevisionId, value.InputSha256, value.State, value.AttemptCount, value.CompletionReceiptFingerprint }).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
         if (branch is null) return new { reasonCode = "retained-branch-not-found" };
         try
         {

@@ -5,6 +5,7 @@ using FluxKnowledge.Application.IntegrationV1.Code;
 using FluxKnowledge.Application.Contracts;
 using FluxKnowledge.Application.Knowledge;
 using FluxKnowledge.Application.Ports;
+using FluxKnowledge.Domain.Gpu;
 using FluxKnowledge.Domain.Knowledge;
 using FluxKnowledge.Domain.Sources;
 using System.Security.Cryptography;
@@ -550,6 +551,10 @@ public sealed class SqlNativeOperationStore(
         }
         var rootIdValue = RequiredGuid(payload, "rootId"); var root = await context.SourceRootConfigurations.SingleOrDefaultAsync(value => value.Id == rootIdValue, cancellationToken);
         FenceOne(targets, "root", rootIdValue, root?.RowVersion);
+        if (root?.State == (int)SourceRootState.Deleting && operation.Action != "root_delete")
+        {
+            throw new NativeOperationException("source-deleting");
+        }
         if (operation.Action == "root_update")
         {
             root!.DisplayName = String(payload, "displayName", 256); root.ConfigurationRevision++; root.UpdatedAtUtc = now;
@@ -558,7 +563,7 @@ public sealed class SqlNativeOperationStore(
             await EnqueueAsync(context, targets, rootIdValue, actor, now, requestKind: 1, configuration, cancellationToken);
             return;
         }
-        if (operation.Action == "root_disable")
+        if (operation.Action is "root_disable" or "root_pause")
         {
             var watch = await context.SourceRootWatchStates.SingleOrDefaultAsync(value => value.SourceRootId == rootIdValue, cancellationToken);
             FenceExpectedTarget(targets, "watch", rootIdValue, watch?.RowVersion);
@@ -568,6 +573,117 @@ public sealed class SqlNativeOperationStore(
                 context.SourceRootWatchStates.Remove(watch);
             }
             root!.State = (int)SourceRootState.Paused; root.ConfigurationRevision++; root.UpdatedAtUtc = now; return;
+        }
+        if (operation.Action == "root_delete")
+        {
+            var watch = await context.SourceRootWatchStates.SingleOrDefaultAsync(value => value.SourceRootId == rootIdValue, cancellationToken);
+            FenceExpectedTarget(targets, "watch", rootIdValue, watch?.RowVersion);
+            if (await context.OutlookCaptureProfiles.AnyAsync(value => value.SourceRootId == rootIdValue, cancellationToken))
+            {
+                throw new NativeOperationException("outlook-source-delete-unsupported");
+            }
+            var deletingRevisionIds = await context.SourceRevisions
+                .Where(value => value.SourceRootId == rootIdValue)
+                .Select(value => value.Id)
+                .ToArrayAsync(cancellationToken);
+            var deletingRecordCount = await context.PipelineRecords
+                .CountAsync(value => value.SourceRevisionId.HasValue && deletingRevisionIds.Contains(value.SourceRevisionId.Value), cancellationToken);
+            var deletingJobIds = await context.Jobs
+                .Where(value => value.PipelineRecord.SourceRevisionId.HasValue && deletingRevisionIds.Contains(value.PipelineRecord.SourceRevisionId.Value))
+                .Select(value => value.Id)
+                .ToArrayAsync(cancellationToken);
+            // GPU work has its own execution and receipt graph.  A source deletion does
+            // not own that graph, including terminal tasks, so reject it before fencing
+            // the source rather than leaving partially retained external execution state.
+            if (deletingJobIds.Length > 0 && await context.GpuMiniTasks.AnyAsync(value =>
+                    deletingJobIds.Contains(value.ParentJobId), cancellationToken))
+            {
+                throw new NativeOperationException("source-delete-external-execution-owned");
+            }
+            if (watch is not null)
+            {
+                if (watch.LeaseOwner is not null && watch.LeaseExpiresAtUtc > now) throw new NativeOperationException("operation-fenced");
+                context.SourceRootWatchStates.Remove(watch);
+            }
+            if (root!.State != (int)SourceRootState.Deleting)
+            {
+                root.State = (int)SourceRootState.Deleting;
+                root.ConfigurationRevision++;
+                root.UpdatedAtUtc = now;
+            }
+            var existingDeletion = await context.SourceDeletionOperations.SingleOrDefaultAsync(value => value.SourceRootId == rootIdValue, cancellationToken);
+            if (existingDeletion is null)
+            {
+                var sourceArtifacts = deletingRevisionIds.Length == 0
+                    ? []
+                    : await context.SourceArtifacts
+                        .Where(value => deletingRevisionIds.Contains(value.SourceRevisionId))
+                        .Select(value => new { value.StoreRelativePath, value.ContentSha256, value.ByteLength })
+                        .ToArrayAsync(cancellationToken);
+                var distinctSourceArtifacts = sourceArtifacts
+                    .DistinctBy(value => new { value.StoreRelativePath, value.ContentSha256, value.ByteLength })
+                    .ToArray();
+                var sharedArtifactCount = 0;
+                foreach (var artifact in distinctSourceArtifacts)
+                {
+                    if (await context.SourceArtifacts.AnyAsync(value =>
+                            !deletingRevisionIds.Contains(value.SourceRevisionId) &&
+                            value.StoreRelativePath == artifact.StoreRelativePath &&
+                            value.ContentSha256 == artifact.ContentSha256 &&
+                            value.ByteLength == artifact.ByteLength,
+                        cancellationToken))
+                    {
+                        sharedArtifactCount++;
+                    }
+                }
+                context.SourceDeletionOperations.Add(new SourceDeletionOperationEntity
+                {
+                    Id = Guid.NewGuid(),
+                    SourceRootId = rootIdValue,
+                    State = 0,
+                    Phase = "accepted",
+                    PipelineRecordCount = deletingRecordCount,
+                    SourceArtifactCount = distinctSourceArtifacts.Length,
+                    SharedArtifactCount = sharedArtifactCount,
+                    CreatedAtUtc = now,
+                    UpdatedAtUtc = now
+                });
+            }
+            else if (existingDeletion.State == 1)
+            {
+                throw new NativeOperationException("source-delete-in-progress");
+            }
+            else if (existingDeletion.State == 4)
+            {
+                var hasFailedFileCleanup = await context.SourceDeletionCleanupItems.AnyAsync(item =>
+                    item.SourceDeletionOperationId == existingDeletion.Id && item.State == 2, cancellationToken);
+                if (hasFailedFileCleanup)
+                {
+                    await context.SourceDeletionCleanupItems
+                        .Where(item => item.SourceDeletionOperationId == existingDeletion.Id && item.State == 2)
+                        .ExecuteUpdateAsync(setters => setters
+                            .SetProperty(item => item.State, 0)
+                            .SetProperty(item => item.ReasonCode, (string?)null)
+                            .SetProperty(item => item.UpdatedAtUtc, now), cancellationToken);
+                }
+                existingDeletion.State = 0;
+                existingDeletion.Phase = hasFailedFileCleanup ? "cleanup-files" : "accepted";
+                existingDeletion.ReasonCode = null;
+                existingDeletion.UpdatedAtUtc = now;
+            }
+            return;
+        }
+        if (operation.Action == "root_resume")
+        {
+            if (root!.State != (int)SourceRootState.Enabled)
+            {
+                root.State = (int)SourceRootState.Enabled;
+                root.ConfigurationRevision++;
+                root.UpdatedAtUtc = now;
+            }
+            await EnqueueAsync(context, targets, rootIdValue, actor, now, requestKind: 0,
+                SourceRootControlConfiguration.From(root), cancellationToken, preserveHeldControls: true);
+            return;
         }
         if (operation.Action == "watcher_set")
         {
@@ -597,11 +713,14 @@ public sealed class SqlNativeOperationStore(
         DateTimeOffset now,
         int requestKind,
         SourceRootControlConfiguration configuration,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool preserveHeldControls = false)
     {
         var active = await ReadActiveControlsAsync(context, rootId, cancellationToken);
         EnsureActiveControlTargets(targets, rootId, active);
-        var coalescible = active.Where(control => control.Request.RequestKind == requestKind && IsCoalescible(control, now)).ToArray();
+        var coalescible = active.Where(control => control.Request.RequestKind == requestKind &&
+            IsCoalescible(control, now) &&
+            (!preserveHeldControls || control.Request.State != (int)SourceScanRequestState.Held)).ToArray();
         if (coalescible.Length > 1)
         {
             throw new NativeOperationException("operation-fenced");

@@ -102,6 +102,28 @@ public sealed class SourceScanWorkerTests
     }
 
     [Fact]
+    public async Task Scan_holds_the_publication_lease_until_the_source_reference_converges()
+    {
+        var root = SourceRootConfiguration.Create(Path.GetFullPath(Path.GetTempPath()), "test", true, false, 16 * 1024 * 1024);
+        var request = SourceScanRequest.CreateHeld(root.Id, "test").Release(DateTimeOffset.UtcNow);
+        var file = new SourceDiscoveredFile(
+            Path.Combine(root.CanonicalPath, "report.txt"), "report.txt", "test:report", "text"u8.ToArray(), true,
+            new string('a', 64), 4, DateTimeOffset.UtcNow,
+            new SourceClassificationResult(SourceClassification.AcceptedUtf8Text, "text", null));
+        var lease = new RecordingPublicationLease();
+        var revisions = new RecordingScanStore(onConverge: () => Assert.False(lease.Disposed));
+
+        await new SourceScanWorker(
+                new ReturningEnumerator(file),
+                revisions,
+                new LeasingArtifactStore(lease),
+                new RecordingActivityStore())
+            .ScanAsync(root, request, CancellationToken.None);
+
+        Assert.True(lease.Disposed);
+    }
+
+    [Fact]
     public async Task Scan_routes_accepted_csharp_to_the_inert_writer_not_ready_holding_activity()
     {
         var root = SourceRootConfiguration.Create(Path.GetFullPath(Path.GetTempPath()), "test", true, false, 16 * 1024 * 1024);
@@ -293,7 +315,7 @@ public sealed class SourceScanWorkerTests
         }
     }
 
-    private sealed class RecordingScanStore(List<string>? events = null) : ISourceScanStore
+    private sealed class RecordingScanStore(List<string>? events = null, Action? onConverge = null) : ISourceScanStore
     {
         public int SuppressionCalls { get; private set; }
         public int EvidenceCalls { get; private set; }
@@ -303,6 +325,7 @@ public sealed class SourceScanWorkerTests
         public ValueTask<SourceRevisionId> ConvergeRevisionAndArtifactAsync(SourceRootConfiguration sourceRoot, SourceDiscoveredFile file, SourceArtifactReceipt receipt, CancellationToken cancellationToken)
         {
             events?.Add("converge");
+            onConverge?.Invoke();
             return ValueTask.FromResult(SourceRevisionId.New());
         }
 
@@ -347,6 +370,27 @@ public sealed class SourceScanWorkerTests
 
         public ValueTask<SourceArtifactReceipt> PutFileAsync(SourceDiscoveredFile snapshot, SourceArtifactMetadata metadata, CancellationToken cancellationToken) =>
             ValueTask.FromException<SourceArtifactReceipt>(exception);
+    }
+
+    private sealed class LeasingArtifactStore(RecordingPublicationLease lease) : ISourceArtifactStore
+    {
+        public ValueTask<SourceArtifactReceipt> PutAsync(ReadOnlyMemory<byte> content, SourceArtifactMetadata metadata, CancellationToken cancellationToken) =>
+            ValueTask.FromResult(new SourceArtifactReceipt(
+                SourceArtifactId.New(), metadata.ContentSha256, "sha256\\aa\\x.bin", metadata.ByteLength, false, lease));
+
+        public ValueTask<SourceArtifactReceipt> PutFileAsync(SourceDiscoveredFile snapshot, SourceArtifactMetadata metadata, CancellationToken cancellationToken) =>
+            PutAsync(snapshot.ClassificationBuffer, metadata, cancellationToken);
+    }
+
+    private sealed class RecordingPublicationLease : ISourceArtifactPublicationLease
+    {
+        public bool Disposed { get; private set; }
+
+        public ValueTask DisposeAsync()
+        {
+            Disposed = true;
+            return ValueTask.CompletedTask;
+        }
     }
 
     private sealed class RecordingActivityStore(List<string>? events = null) : ISourceActivityStore

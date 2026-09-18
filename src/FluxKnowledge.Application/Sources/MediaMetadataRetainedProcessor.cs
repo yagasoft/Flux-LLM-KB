@@ -161,7 +161,8 @@ public sealed class MediaMetadataRetainedProcessor(
             receipt.ByteLength,
             "AcceptedUtf8Text",
             OriginKind: 3,
-            Extension: ".json");
+            Extension: ".json",
+            PublicationLease: receipt.PublicationLease);
         return new RetainedProcessorCompletion([child], Hash($"{child.MemberFingerprint}:{child.ContentSha256}:{child.ByteLength}"));
     }
 

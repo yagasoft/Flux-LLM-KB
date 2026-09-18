@@ -1,5 +1,6 @@
 using FluxKnowledge.Domain.Common;
 using FluxKnowledge.Domain.Sources;
+using FluxKnowledge.Application.Ports;
 
 namespace FluxKnowledge.Application.Contracts;
 
@@ -74,7 +75,8 @@ public sealed record SourceArtifactReceipt(
     string ContentSha256,
     string StoreRelativePath,
     long ByteLength,
-    bool ExistingArtifact);
+    bool ExistingArtifact,
+    ISourceArtifactPublicationLease? PublicationLease = null);
 
 public sealed record SourceRetentionConvergence(
     SourceRevisionId SourceRevisionId,
