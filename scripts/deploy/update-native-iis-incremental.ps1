@@ -140,6 +140,14 @@ function New-DeploymentValidationHold {
         $stream = [IO.File]::Open($Path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::Read)
     }
     catch [IO.IOException] {
+        Assert-NotReparsePoint `
+            -Path $Path `
+            -Message "The deployment-validation hold cannot be a reparse point."
+        $expected = $ReleaseId | ConvertTo-Json -Compress
+        $actual = [IO.File]::ReadAllText($Path, [Text.Encoding]::UTF8)
+        if ([string]::Equals($actual, $expected, [StringComparison]::Ordinal)) {
+            return $false
+        }
         throw "A deployment-validation hold already exists; inspect and remove it through the recovery procedure before retrying."
     }
     try {
@@ -149,6 +157,7 @@ function New-DeploymentValidationHold {
     finally {
         $stream.Dispose()
     }
+    return $true
 }
 
 function Remove-DeploymentValidationHold {
@@ -421,9 +430,13 @@ try {
         -StopApplication {
             Stop-WebAppPool -Name $SiteName
             Wait-IisAppPoolState -Name $SiteName -ExpectedState "Stopped" -TimeoutSeconds $ReadinessTimeoutSeconds
-            New-DeploymentValidationHold -Path $ValidationHoldPath -ReleaseId $releaseId
-            $deploymentValidation.HoldCreated = $true
-            $deploymentValidation.Baseline = Get-RetainedPipelineStateBaseline
+            [void](New-DeploymentValidationHold -Path $ValidationHoldPath -ReleaseId $releaseId)
+            if (-not $deploymentValidation.HoldCreated) {
+                $deploymentValidation.HoldCreated = $true
+            }
+            if ($null -eq $deploymentValidation.Baseline) {
+                $deploymentValidation.Baseline = Get-RetainedPipelineStateBaseline
+            }
         } `
         -StartApplication {
             Start-WebAppPool -Name $SiteName
