@@ -8,6 +8,8 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Storage;
 using System.Data;
 using FluxKnowledge.Application.Documents;
+using FluxKnowledge.Application.Workers;
+using FluxKnowledge.Domain.Pipeline;
 
 namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
 
@@ -1780,6 +1782,7 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
                   AND [ProcessorFingerprint] <> {RetainedCsharpCodeProcessor.Capability.ProcessorFingerprint}
                   AND [ProcessorFingerprint] <> {VsdxStructuralTextProcessor.Capability.ProcessorFingerprint}
                   AND [ProcessorFingerprint] <> {PdfDocumentProcessor.Capability.ProcessorFingerprint}
+                  AND [ProcessorFingerprint] <> {VisioDocumentInputProcessor.Capability.ProcessorFingerprint}
                   AND NOT EXISTS (
                       SELECT 1
                       FROM [SourceProcessorForceRequests] AS [force] WITH (UPDLOCK, HOLDLOCK)
@@ -2397,7 +2400,66 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
                       SELECT 1 FROM [SourceActivityRelations] WITH (UPDLOCK, HOLDLOCK)
                       WHERE [PredecessorActivityId] = [SourceActivities].[Id])
                 """).ToListAsync(cancellationToken).ConfigureAwait(false);
-            var predecessors = terminalLegacyBranches.Concat(deferredDocumentActivities).ToArray();
+            var terminalStructuralVsdx = descriptor.Id == VisioDocumentInputProcessor.Capability.Id
+                ? await (from branch in context.SourceProcessorBranches
+                         join activity in context.SourceActivities on branch.SourceActivityId equals activity.Id
+                         where branch.SourceRevisionId == revision.Id && branch.InputSha256 == request.ExpectedInputSha256 &&
+                               branch.ProcessorVersion == DocumentProcessingInput.Vsdx.ParentProcessorVersion &&
+                               branch.ProcessorFingerprint == DocumentProcessingInput.Vsdx.ParentProcessorFingerprint &&
+                               (branch.State == (int)RetainedProcessorBranchState.Completed || branch.State == (int)RetainedProcessorBranchState.Blocked) &&
+                                activity.SourceRevisionId == revision.Id && activity.InputFingerprint == request.ExpectedInputSha256 &&
+                                activity.ExecutionClass == (int)ExecutionClass.InProcess &&
+                                activity.ProcessorVersion == DocumentProcessingInput.Vsdx.ParentProcessorVersion &&
+                                (activity.State == (int)SourceActivityState.Completed ||
+                                 activity.State == (int)SourceActivityState.FailedTerminal ||
+                                 branch.State == (int)RetainedProcessorBranchState.Blocked &&
+                                 activity.State == (int)SourceActivityState.Pending &&
+                                 context.SourceProcessorAttempts.Any(attempt =>
+                                     attempt.BranchId == branch.Id &&
+                                     attempt.LeaseGeneration == branch.LeaseGeneration &&
+                                     attempt.FinishedAtUtc != null &&
+                                     attempt.OutcomeCode == "office-document-container-invalid")) &&
+                                !context.SourceActivityRelations.Any(relation => relation.PredecessorActivityId == activity.Id)
+                         select activity).ToListAsync(cancellationToken).ConfigureAwait(false)
+                : [];
+            var terminalFailedVisioV1 = descriptor.Id == VisioDocumentInputProcessor.Capability.Id
+                ? await (from branch in context.SourceProcessorBranches
+                         join activity in context.SourceActivities on branch.SourceActivityId equals activity.Id
+                         join member in context.SourceProcessorBranchMembers on branch.Id equals member.BranchId
+                         join record in context.PipelineRecords on member.ChildSourceRevisionId equals record.SourceRevisionId
+                         join job in context.Jobs on new { RecordId = record.Id, record.Revision }
+                             equals new { RecordId = job.PipelineRecordId, Revision = job.SourceRevision }
+                         where branch.SourceRevisionId == revision.Id &&
+                               branch.InputSha256 == request.ExpectedInputSha256 &&
+                               branch.ProcessorVersion == "phase-6-vsdx-visio-v1" &&
+                               branch.ProcessorFingerprint == "phase-6-vsdx-retained-visio-v1" &&
+                               branch.State == (int)RetainedProcessorBranchState.Completed &&
+                               activity.SourceRevisionId == revision.Id &&
+                               activity.ActivityKind == (int)SourceActivityKind.TextExtraction &&
+                               activity.ExecutionClass == (int)ExecutionClass.InProcess &&
+                               activity.ProcessorVersion == "phase-6-vsdx-visio-v1" &&
+                               activity.InputFingerprint == request.ExpectedInputSha256 &&
+                               (activity.State == (int)SourceActivityState.Pending ||
+                                activity.State == (int)SourceActivityState.Completed) &&
+                               !context.SourceActivityRelations.Any(relation => relation.PredecessorActivityId == activity.Id) &&
+                               member.Disposition == "completed" &&
+                               member.ChildSourceRevisionId != null &&
+                               record.ContentHash == request.ExpectedInputSha256 &&
+                               !record.IsDeleted &&
+                               job.Stage == (int)PipelineStage.Extract &&
+                               job.Operation == PipelineOperations.ExtractVisio &&
+                               job.PublicState == (int)FluxKnowledge.Domain.Jobs.PublicJobState.Failed &&
+                               job.Reason == "visio-document-connection-invalid" &&
+                               !context.DocumentPublications.Any(publication =>
+                                   publication.PipelineRecordId == record.Id &&
+                                   publication.PipelineRecordRevision == record.Revision)
+                         select activity).Distinct().ToListAsync(cancellationToken).ConfigureAwait(false)
+                : [];
+            var predecessors = terminalLegacyBranches
+                .Concat(deferredDocumentActivities)
+                .Concat(terminalStructuralVsdx)
+                .Concat(terminalFailedVisioV1)
+                .ToArray();
             if (predecessors.Length != 1)
             {
                 return DocumentReprocessRequestResult.NotEligible;
@@ -2560,6 +2622,11 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
 
     private static bool TryGetExactDocumentDescriptor(string fingerprint, out SourceCapabilityDescriptor descriptor)
     {
+        if (string.Equals(fingerprint, VisioDocumentInputProcessor.Capability.ProcessorFingerprint, StringComparison.Ordinal))
+        {
+            descriptor = VisioDocumentInputProcessor.Capability;
+            return true;
+        }
         if (string.Equals(fingerprint, VsdxStructuralTextProcessor.Capability.ProcessorFingerprint, StringComparison.Ordinal))
         {
             descriptor = VsdxStructuralTextProcessor.Capability;
@@ -2576,6 +2643,7 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
     }
 
     private static bool HasExpectedDocumentExtension(string extension, SourceCapabilityDescriptor descriptor) =>
+        (descriptor.Id == VisioDocumentInputProcessor.Capability.Id && string.Equals(extension, ".vsdx", StringComparison.OrdinalIgnoreCase)) ||
         (descriptor.Id == VsdxStructuralTextProcessor.Capability.Id && string.Equals(extension, ".vsdx", StringComparison.OrdinalIgnoreCase)) ||
         (descriptor.Id == PdfDocumentProcessor.Capability.Id && string.Equals(extension, ".pdf", StringComparison.OrdinalIgnoreCase));
 

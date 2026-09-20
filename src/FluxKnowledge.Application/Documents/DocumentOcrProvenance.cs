@@ -33,7 +33,16 @@ public sealed record DocumentBlockProvenance(
     int? Left,
     int? Top,
     int? Width,
-    int? Height);
+    int? Height,
+    int? ShapeId = null,
+    int? ParentShapeId = null,
+    int? MasterId = null,
+    string? MasterShapeId = null,
+    IReadOnlyDictionary<string, string>? Data = null,
+    int? ConnectorFromShapeId = null,
+    int? ConnectorToShapeId = null,
+    string? BeginArrow = null,
+    string? EndArrow = null);
 
 public sealed record DocumentPageProvenance(
     int PageIndex,
@@ -41,7 +50,9 @@ public sealed record DocumentPageProvenance(
     int Length,
     string Method,
     int? OrientationDegrees,
-    IReadOnlyList<DocumentBlockProvenance> Blocks);
+    IReadOnlyList<DocumentBlockProvenance> Blocks,
+    int? VisioPageId = null,
+    bool? IsBackground = null);
 
 public sealed record DocumentProvenance(int Version, IReadOnlyList<DocumentPageProvenance> Pages);
 
@@ -228,7 +239,8 @@ public static class DocumentOcrProvenance
         if (provenance is null || provenance.Version != MetadataVersion || provenance.Pages is null ||
             provenance.Pages.Count == 0 || provenance.Pages.Select(static page => page.PageIndex).Distinct().Count() != provenance.Pages.Count ||
             provenance.Pages.Any(static page => page.PageIndex < 0 || page.StartOffset < 0 || page.Length < 0 ||
-                page.Method is not ("native" or "ocr") || page.Blocks is null))
+            page.Method is not ("native" or "ocr" or "visio") || page.Blocks is null ||
+            page.Blocks.Any(block => !IsValidBlock(block, page))))
         {
             throw new InvalidOperationException("document-ocr-metadata-invalid");
         }
@@ -259,9 +271,15 @@ public static class DocumentOcrProvenance
             }
 
             var pageStart = normalised.Length;
-            var pageText = Normalise(text.Substring(page.StartOffset, page.Length));
-            normalised.Append(pageText);
-            normalisedPages.Add(page with { StartOffset = pageStart, Length = pageText.Length });
+            var pageText = text.Substring(page.StartOffset, page.Length);
+            var normalisedPage = NormalisePageAndBlocks(pageText, page.StartOffset, page.Blocks);
+            normalised.Append(normalisedPage.Text);
+            normalisedPages.Add(page with
+            {
+                StartOffset = pageStart,
+                Length = normalisedPage.Text.Length,
+                Blocks = normalisedPage.Blocks.Select(block => block with { StartOffset = pageStart + block.StartOffset }).ToArray()
+            });
         }
 
         var normalisedText = normalised.ToString();
@@ -272,6 +290,44 @@ public static class DocumentOcrProvenance
     }
 
     private static bool IsSupportedKind(string kind) => kind is "text" or "table" or "title" or "header" or "footer" or "figure";
+
+    private static bool IsValidBlock(DocumentBlockProvenance block, DocumentPageProvenance page) =>
+        block is not null && block.StartOffset >= page.StartOffset && block.Length >= 0 &&
+        block.StartOffset <= page.StartOffset + page.Length &&
+        block.Length <= page.StartOffset + page.Length - block.StartOffset &&
+        (block.Method is "ocr" or "visio" or "native") &&
+        (block.Method != "visio" || (block.Kind == "shape" && block.ShapeId is >= 0));
+
+    private static (string Text, IReadOnlyList<DocumentBlockProvenance> Blocks) NormalisePageAndBlocks(
+        string pageText,
+        int pageOriginalStart,
+        IReadOnlyList<DocumentBlockProvenance> blocks)
+    {
+        if (blocks.Count == 0)
+        {
+            return (Normalise(pageText), blocks);
+        }
+
+        var ordered = blocks.OrderBy(static block => block.StartOffset).ToArray();
+        var remapped = new List<DocumentBlockProvenance>(ordered.Length);
+        var current = 0;
+        foreach (var block in ordered)
+        {
+            var blockStart = block.StartOffset - pageOriginalStart;
+            if (blockStart < current || blockStart > pageText.Length || block.Length > pageText.Length - blockStart)
+            {
+                throw new InvalidOperationException("document-ocr-metadata-offset-invalid");
+            }
+
+            // Map original boundaries into the normalised *whole page*. Normalising every
+            // block separately changes CRLF at a block boundary into two newlines.
+            var normalisedBlockStart = Normalise(pageText[..blockStart]).Length;
+            var normalisedBlockEnd = Normalise(pageText[..(blockStart + block.Length)]).Length;
+            remapped.Add(block with { StartOffset = normalisedBlockStart, Length = normalisedBlockEnd - normalisedBlockStart });
+            current = blockStart + block.Length;
+        }
+        return (Normalise(pageText), remapped);
+    }
 
     private static void AppendBounded(StringBuilder builder, string value, ref int utf8Bytes)
     {

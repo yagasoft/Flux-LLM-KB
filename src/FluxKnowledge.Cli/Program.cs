@@ -30,6 +30,8 @@ internal static class CliProgram
                 args.Skip(1).ToArray(),
                 Console.Out,
                 Console.Error),
+            "documents" when args.ElementAtOrDefault(1) == "run-visio" => await VisioDocumentCommand.ExecuteFromEnvironmentAsync(
+                args.Skip(1).ToArray(), Console.Out, Console.Error),
             "documents" => await DocumentReprocessCommand.ExecuteFromEnvironmentAsync(
                 args.Skip(1).ToArray(),
                 Console.Out,

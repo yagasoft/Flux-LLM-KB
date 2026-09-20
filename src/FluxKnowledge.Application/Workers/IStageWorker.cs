@@ -9,6 +9,7 @@ public static class PipelineOperations
 {
     public const string ExtractUtf8 = "extract utf-8";
     public const string ExtractDocument = "extract document";
+    public const string ExtractVisio = "extract document visio interactive";
     public const string NormaliseText = "normalise text";
     public const string CanonicalIndex = "canonical index";
     public const string Embed = "embed";

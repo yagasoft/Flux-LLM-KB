@@ -1,8 +1,10 @@
 using System.Data;
 using System.Security.Cryptography;
 using System.Text;
+using FluxKnowledge.Application.Indexing;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Domain.Jobs;
+using FluxKnowledge.Domain.Pipeline;
 using FluxKnowledge.Domain.Sources;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
 using FluxKnowledge.Infrastructure.SqlServer.Workers;
@@ -265,6 +267,7 @@ public sealed class SqlSourceDeletionStore(
                 context,
                 operation,
                 revisionIds,
+                recordIds,
                 targetVectorIds,
                 retireAllGenerations: survivorGeneration is null,
                 cancellationToken).ConfigureAwait(false);
@@ -439,6 +442,7 @@ public sealed class SqlSourceDeletionStore(
         FluxKnowledgeDbContext context,
         SourceDeletionOperationEntity operation,
         IReadOnlyCollection<Guid> revisionIds,
+        IReadOnlyCollection<Guid> recordIds,
         IReadOnlyCollection<long> targetVectorIds,
         bool retireAllGenerations,
         CancellationToken cancellationToken)
@@ -478,14 +482,28 @@ public sealed class SqlSourceDeletionStore(
             });
         }
 
+        var ownedGenerationIds = recordIds.Count == 0
+            ? []
+            : (await context.Artifacts.Where(artifact =>
+                    recordIds.Contains(artifact.PipelineRecordId) &&
+                    artifact.Stage == (int)PipelineStage.Embed &&
+                    artifact.ContentType == EmbedDraftDefaults.ArtifactContentType)
+                .Select(artifact => artifact.SearchText)
+                .ToArrayAsync(cancellationToken).ConfigureAwait(false))
+                .Select(value => Guid.TryParse(value, out var generationId) ? generationId : Guid.Empty)
+                .Where(static generationId => generationId != Guid.Empty)
+                .Distinct()
+                .ToArray();
         var generations = retireAllGenerations
             ? await context.IndexGenerations.ToArrayAsync(cancellationToken).ConfigureAwait(false)
-            : targetVectorIds.Count == 0
+            : targetVectorIds.Count == 0 && ownedGenerationIds.Length == 0
                 ? []
                 : await (
-                    from membership in context.IndexGenerationVectors
-                    join generation in context.IndexGenerations on membership.GenerationId equals generation.Id
-                    where targetVectorIds.Contains(membership.VectorId)
+                    from generation in context.IndexGenerations
+                    where ownedGenerationIds.Contains(generation.Id) ||
+                          context.IndexGenerationVectors.Any(membership =>
+                              membership.GenerationId == generation.Id &&
+                              targetVectorIds.Contains(membership.VectorId))
                     select generation)
                 .Distinct()
                 .ToArrayAsync(cancellationToken).ConfigureAwait(false);
@@ -621,7 +639,9 @@ public sealed class SqlSourceDeletionStore(
                 context.SourceScanRequests.Any(request => request.Id == value.SourceScanRequestId && request.SourceRootId == rootId), cancellationToken)
             .ConfigureAwait(false) ||
         await context.Jobs.AnyAsync(value => recordIds.Contains(value.PipelineRecordId) &&
-                value.LeaseOwner != null && value.LeaseExpiresAtUtc > now, cancellationToken)
+                ((value.LeaseOwner != null && value.LeaseExpiresAtUtc > now) ||
+                 (value.Operation == FluxKnowledge.Application.Workers.PipelineOperations.ExtractVisio &&
+                  value.PublicState == (int)FluxKnowledge.Domain.Jobs.PublicJobState.WorkerProcessing)), cancellationToken)
             .ConfigureAwait(false) ||
         await context.OutboxMessages.AnyAsync(value => recordIds.Contains(value.PipelineRecordId) && value.LeaseOwner != null && value.LeaseExpiresAtUtc > now, cancellationToken)
             .ConfigureAwait(false) ||

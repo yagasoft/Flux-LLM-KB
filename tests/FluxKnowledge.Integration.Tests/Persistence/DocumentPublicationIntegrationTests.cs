@@ -1,4 +1,5 @@
 using FluxKnowledge.Application.Pipeline;
+using FluxKnowledge.Application.Documents;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Workers;
 using FluxKnowledge.Domain.Common;
@@ -116,14 +117,55 @@ public sealed class DocumentPublicationIntegrationTests(NativeSqlServerFixture f
             .SingleAsync());
     }
 
+    [NativeSqlServerFact]
+    public async Task Visio_successor_replaces_only_its_original_owner_and_retains_last_good_until_publish()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var rootId = Guid.NewGuid();
+        var ownerId = Guid.NewGuid();
+        DocumentCandidate current;
+        DocumentCandidate visio;
+        await using (var setup = Context())
+        {
+            setup.SourceRootConfigurations.Add(new SourceRootConfigurationEntity
+            {
+                Id = rootId, CanonicalPath = "C:\\visio-publication", DisplayName = "Visio publication", State = 0,
+                IncludePatternsJson = "[]", ExcludePatternsJson = "[]", AllowedClassificationsJson = "[]",
+                MaximumFileBytes = 1024 * 1024, ReconciliationCadenceSeconds = 900, ConfigurationRevision = 1,
+                CreatedAtUtc = now, UpdatedAtUtc = now
+            });
+            setup.SourceRevisions.Add(new SourceRevisionEntity
+            {
+                Id = ownerId, SourceRootId = rootId, StableSourceIdentity = "visio-publication", Revision = 1,
+                ContentSha256 = new string('a', 64), CanonicalPath = "C:\\visio-publication\\public.vsdx",
+                Classification = "VsdxDocumentContainer", Extension = ".vsdx", ByteLength = 4, DiscoveredAtUtc = now
+            });
+            current = SeedCandidate(setup, rootId, ownerId, now, "current-structural", 0);
+            visio = SeedCandidate(setup, rootId, ownerId, now, "visio-successor", 1, DocumentProcessingInput.Visio);
+            await setup.SaveChangesAsync();
+        }
+        var store = new SqlStageTransitionStore(SqlTestData.CreateFactory(_fixture));
+        await PublishAsync(store, current, now);
+        await AssertSelectedAsync(current, ownerId);
+        await PublishAsync(store, visio, now.AddMinutes(2));
+        await AssertSelectedAsync(visio, ownerId);
+        await using var check = Context();
+        Assert.Single(await check.DocumentPublications.ToListAsync());
+        Assert.Equal((int)RetainedProcessorBranchState.Completed,
+            (await check.SourceProcessorBranches.SingleAsync(row => row.Id == current.BranchId)).State);
+        Assert.Equal(2, await check.Artifacts.CountAsync(row => row.Stage == (int)PipelineStage.Publish));
+    }
+
     private static DocumentCandidate SeedCandidate(
         FluxKnowledgeDbContext context,
         Guid rootId,
         Guid ownerRevisionId,
         DateTimeOffset now,
         string name,
-        int sequence)
+        int sequence,
+        DocumentProcessingContract? contract = null)
     {
+        contract ??= DocumentProcessingInput.Vsdx;
         var inputRevisionId = Guid.NewGuid();
         var identityId = Guid.NewGuid();
         var recordId = Guid.NewGuid();
@@ -142,7 +184,7 @@ public sealed class DocumentPublicationIntegrationTests(NativeSqlServerFixture f
         {
             Id = inputRevisionId, SourceRootId = rootId, StableSourceIdentity = $"document-input:{name}", Revision = 1,
             ContentSha256 = new string('a', 64), CanonicalPath = $"C:\\retained\\{name}.vsdx",
-            ParentSourceRevisionId = ownerRevisionId, Classification = "DocumentProcessingInput", Extension = ".vsdx",
+            ParentSourceRevisionId = ownerRevisionId, Classification = contract.Classification, Extension = ".vsdx",
             OriginKind = 2, ByteLength = 4, DiscoveredAtUtc = now
         });
         context.PipelineRecords.Add(new PipelineRecordEntity
@@ -162,14 +204,14 @@ public sealed class DocumentPublicationIntegrationTests(NativeSqlServerFixture f
             new SourceActivityEntity
             {
                 Id = inputActivityId, SourceRevisionId = inputRevisionId, ActivityKind = (int)SourceActivityKind.DocumentParsing,
-                ExecutionClass = 1, ProcessorVersion = "phase-6-vsdx-document-v1", InputFingerprint = new string('a', 64),
+                ExecutionClass = 1, ProcessorVersion = contract.ProcessorVersion, InputFingerprint = new string('a', 64),
                 State = (int)SourceActivityState.Completed, ResultingPipelineRecordId = recordId, ResultingPipelineRecordRevision = 1,
                 CreatedAtUtc = now, UpdatedAtUtc = now
             });
         context.SourceProcessorBranches.Add(new SourceProcessorBranchEntity
         {
             Id = branchId, SourceActivityId = ownerActivityId, SourceRevisionId = ownerRevisionId, InputSha256 = new string('a', 64),
-            ProcessorVersion = "phase-6-vsdx-structural-v1", ProcessorFingerprint = "phase-6-vsdx-retained-structural-v1",
+            ProcessorVersion = contract.ParentProcessorVersion, ProcessorFingerprint = contract.ParentProcessorFingerprint,
             State = (int)RetainedProcessorBranchState.Completed, CompletedMemberCount = 1,
             CreatedAtUtc = now.AddMinutes(sequence), UpdatedAtUtc = now.AddMinutes(sequence)
         });

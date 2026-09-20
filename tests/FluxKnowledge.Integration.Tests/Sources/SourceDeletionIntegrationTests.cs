@@ -37,6 +37,39 @@ public sealed class SourceDeletionIntegrationTests(NativeSqlServerFixture fixtur
     public Task DisposeAsync() => Task.CompletedTask;
 
     [NativeSqlServerFact]
+    public async Task Expired_interactive_Visio_job_blocks_deletion_until_cleanup_is_proven()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var deleting = await SeedRootAsync("visio-expired", SourceRootState.Deleting, now);
+        var operationId = Guid.NewGuid();
+        await using (var setup = CreateContext())
+        {
+            await setup.Jobs.Where(row => row.Id == deleting.JobId).ExecuteUpdateAsync(set => set
+                .SetProperty(row => row.Operation, "extract document visio interactive")
+                .SetProperty(row => row.PublicState, (int)FluxKnowledge.Domain.Jobs.PublicJobState.WorkerProcessing)
+                .SetProperty(row => row.LeaseOwner, "desktop-terminated")
+                .SetProperty(row => row.LeaseExpiresAtUtc, now.AddMinutes(-1)));
+            setup.SourceDeletionOperations.Add(new SourceDeletionOperationEntity
+            {
+                Id = operationId, SourceRootId = deleting.RootId, State = 0, Phase = "accepted",
+                CreatedAtUtc = now, UpdatedAtUtc = now
+            });
+            await setup.SaveChangesAsync();
+        }
+        var coordinator = new SourceDeletionCoordinator(new SqlSourceDeletionStore(SqlTestData.CreateFactory(_fixture), TimeProvider.System));
+        Assert.False(await coordinator.RunOneAsync(default));
+        await using var check = CreateContext();
+        Assert.True(await check.SourceRootConfigurations.AnyAsync(row => row.Id == deleting.RootId));
+        Assert.Equal("draining", (await check.SourceDeletionOperations.SingleAsync(row => row.Id == operationId)).Phase);
+        // Recovery may release this fence only after the exact desktop process has exited.
+        await check.Jobs.Where(row => row.Id == deleting.JobId).ExecuteUpdateAsync(set => set
+            .SetProperty(row => row.PublicState, (int)FluxKnowledge.Domain.Jobs.PublicJobState.Failed)
+            .SetProperty(row => row.LeaseOwner, (string?)null));
+        Assert.True(await coordinator.RunOneAsync(default));
+        Assert.False(await check.SourceRootConfigurations.AnyAsync(row => row.Id == deleting.RootId));
+    }
+
+    [NativeSqlServerFact]
     public async Task Claim_next_allows_an_empty_queue_when_sql_retry_is_enabled()
     {
         var store = new SqlSourceDeletionStore(new RetryingContextFactory(_fixture.ConnectionString), TimeProvider.System);
@@ -880,6 +913,98 @@ public sealed class SourceDeletionIntegrationTests(NativeSqlServerFixture fixtur
             .Select(row => row.VectorId)
             .ToArrayAsync());
         Assert.Equal("completed", (await verification.SourceDeletionOperations.SingleAsync(row => row.Id == operationId)).Phase);
+    }
+
+    [NativeSqlServerFact]
+    public async Task Coordinator_retires_an_owned_unplaced_embedding_draft_without_vectors()
+    {
+        var now = DateTimeOffset.Parse("2026-09-18T11:55:00+00:00");
+        var deleting = await SeedRootAsync("draft-deleting", SourceRootState.Deleting, now);
+        var survivor = await SeedRootAsync("draft-survivor", SourceRootState.Enabled, now);
+        var activeGenerationId = Guid.NewGuid();
+        var survivorGenerationId = Guid.NewGuid();
+        var ownedDraftId = Guid.NewGuid();
+        var operationId = Guid.NewGuid();
+        await using (var setup = CreateContext())
+        {
+            setup.IndexGenerations.AddRange(
+                new IndexGenerationEntity
+                {
+                    Id = activeGenerationId,
+                    ModelFingerprint = "source-deletion-test:1",
+                    Dimensions = 1,
+                    IndexPath = "draft-active",
+                    MetadataChecksum = new string('a', 64),
+                    VectorCount = 2,
+                    CreatedAtUtc = now,
+                    ValidatedAtUtc = now
+                },
+                new IndexGenerationEntity
+                {
+                    Id = ownedDraftId,
+                    ModelFingerprint = "source-deletion-test:1",
+                    Dimensions = 1,
+                    IndexPath = string.Empty,
+                    MetadataChecksum = new string('0', 64),
+                    VectorCount = 1,
+                    CreatedAtUtc = now
+                });
+            setup.Artifacts.Add(new ArtifactEntity
+            {
+                Id = Guid.NewGuid(),
+                PipelineRecordId = deleting.RecordId,
+                SourceRevision = 1,
+                Stage = (int)FluxKnowledge.Domain.Pipeline.PipelineStage.Embed,
+                ContentHash = new string('d', 64),
+                ContentType = "application/vnd.fluxknowledge.embedding-set+binary",
+                SearchText = ownedDraftId.ToString("D"),
+                CreatedAtUtc = now
+            });
+            setup.SourceDeletionOperations.Add(new SourceDeletionOperationEntity
+            {
+                Id = operationId,
+                SourceRootId = deleting.RootId,
+                State = 0,
+                Phase = "accepted",
+                CreatedAtUtc = now,
+                UpdatedAtUtc = now
+            });
+            await setup.SaveChangesAsync();
+        }
+
+        var deletingVector = await AddVectorAsync(deleting, activeGenerationId, "remove draft owner", now);
+        var survivorVector = await AddVectorAsync(survivor, activeGenerationId, "retain draft survivor", now);
+        await using (var setup = CreateContext())
+        {
+            setup.IndexGenerationVectors.AddRange(
+                new IndexGenerationVectorEntity { GenerationId = activeGenerationId, VectorId = deletingVector.VectorId },
+                new IndexGenerationVectorEntity { GenerationId = activeGenerationId, VectorId = survivorVector.VectorId });
+            var indexState = await setup.IndexState.SingleAsync(row => row.Id == 1);
+            indexState.ActiveIndexGenerationId = activeGenerationId;
+            indexState.EmptyCatalogueValidatedAtUtc = null;
+            await setup.SaveChangesAsync();
+        }
+
+        var candidate = new IndexGenerationCandidateSnapshot(
+            new IndexGenerationDescriptor(
+                survivorGenerationId,
+                "source-deletion-test:1",
+                1,
+                "draft-survivor-generation",
+                ComputeMetadataChecksum("source-deletion-test:1", 1, [Canonical(survivorVector)]),
+                1),
+            [Canonical(survivorVector)]);
+        var coordinator = new SourceDeletionCoordinator(
+            new SqlSourceDeletionStore(SqlTestData.CreateFactory(_fixture), TimeProvider.System),
+            new FixedGenerationPublisher(candidate),
+            new SuccessfulFileStore());
+
+        Assert.True(await coordinator.RunOneAsync(CancellationToken.None));
+
+        await using var verification = CreateContext();
+        Assert.NotNull((await verification.IndexGenerations.SingleAsync(row => row.Id == ownedDraftId)).RetiredAtUtc);
+        Assert.False(await verification.Artifacts.AnyAsync(row => row.PipelineRecordId == deleting.RecordId));
+        Assert.NotNull(await verification.SourceRootConfigurations.SingleOrDefaultAsync(row => row.Id == survivor.RootId));
     }
 
     [NativeSqlServerFact]

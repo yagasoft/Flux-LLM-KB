@@ -13,6 +13,9 @@ public static class DocumentProcessingInput
 {
     public const string Classification = "DocumentProcessingInput";
     public const string PdfClassification = "PdfDocumentProcessingInput";
+    public const string VisioClassification = "VisioDocumentProcessingInput";
+    public const string VisioProcessorVersion = "phase-6-vsdx-visio-document-v2";
+    public const string VisioProcessorFingerprint = "phase-6-vsdx-visio-input-v2";
     public const string VsdxProcessorVersion = "phase-6-vsdx-document-v1";
     public const string VsdxProcessorFingerprint = "phase-6-vsdx-document-input-v1";
     public const string VsdxOutputContract = "pipeline:extract-document-vsdx";
@@ -36,6 +39,13 @@ public static class DocumentProcessingInput
         "phase-6-pdf-structural-v1",
         "phase-6-pdf-retained-structural-v1");
 
+    public static readonly DocumentProcessingContract Visio = new(
+        VisioClassification, ".vsdx", VisioProcessorVersion, VisioProcessorFingerprint,
+        "phase-6-vsdx-visio-v2", "phase-6-vsdx-retained-visio-v2");
+
+    public static RetainedProcessorDerivedChild CreateVisioChild(RetainedProcessorClaim claim, RetainedSourceBytes retained) =>
+        CreateChild(claim, retained, Visio);
+
     public static RetainedProcessorDerivedChild CreateVsdxChild(
         RetainedProcessorClaim claim,
         RetainedSourceBytes retained)
@@ -58,6 +68,13 @@ public static class DocumentProcessingInput
         string extension,
         out DocumentProcessingContract contract)
     {
+        if (string.Equals(classification, Visio.Classification, StringComparison.Ordinal) &&
+            string.Equals(extension, Visio.Extension, StringComparison.OrdinalIgnoreCase))
+        {
+            contract = Visio;
+            return true;
+        }
+
         if (string.Equals(classification, Vsdx.Classification, StringComparison.Ordinal) &&
             string.Equals(extension, Vsdx.Extension, StringComparison.OrdinalIgnoreCase))
         {

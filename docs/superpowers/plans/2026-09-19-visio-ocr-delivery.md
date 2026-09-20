@@ -1,5 +1,37 @@
 # Interactive Visio and English OCR implementation plan
 
+## Visio continuation: 20 September 2026
+
+The user has now authorised finishing the remaining interactive Visio slice in
+`codex/visio-delivery`, based on the completed OCR release `6f27e69`. Preserve the
+OCR implementation/settings and the separate proof worktree. The delivery is
+one exact `documents run-visio` command, with its own retained-input fingerprint
+and Extract operation, then the existing Normalise/index/Publish pipeline.
+No migration, runtime installation, model access, new stage or resident Office
+service is required. Existing terminal structural attempts and the last good
+publication remain intact; repeated exact requests converge on one successor.
+
+The independent ownership design review requires durable dispatch ownership,
+expiry and source-state checks; exclusion from ordinary worker claims; a held
+owned-process handle and kill-on-close job before document open; and a deletion
+fence which survives an expired desktop lease until cleanup is proven. An exact
+recovery command may settle a paused/deleting source only after proving that no
+previous Visio execution remains. Unknown cleanup stays nonterminal. Retained
+ZIP checks and strict UTF-8 are unchanged. No private text is written to logs.
+
+Validate focused disposable-SQL and generated-document tests, then actual
+interactive repeated extraction, the Release/full-suite gate and one final
+independent review. Deploy through the unchanged generic updater's reviewed
+PlanOnly/Apply flow, then process only the authorised retained VSDX revision and
+verify original identity, provenance, search, idempotency and process cleanup.
+Do not recreate sources, rescan a root or change watch-test. Rollback stops new
+desktop invocations and proves drain before application restoration; there is no
+schema rollback. Deployment failure uses the updater's automatic payload restore;
+a later explicit restore requires its separately reviewed supported mechanism.
+
+This section supersedes only the obsolete worktree/unimplemented Visio checkpoint
+below. The OCR delivery and its recorded limitations remain unchanged.
+
 ## Delivery checkpoint: 20 September 2026
 
 The user's later direction prioritised completing the frozen English PDF OCR

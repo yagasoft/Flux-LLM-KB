@@ -57,7 +57,36 @@ The deployed PDF route has passed scoped native-text and scanned-page live
 publication/search checks. Page/block provenance is retained in artefact metadata;
 the current public search response does not expose those page fields. See the
 [delivery evidence](operations/2026-09-20-english-ocr-live-delivery.md) for the
-repeated-text fidelity limitation and the remaining interactive Visio boundary.
+repeated-text fidelity limitation. Interactive Visio delivery is recorded
+separately in [its operational evidence](operations/2026-09-20-interactive-visio-delivery.md).
+
+## Interactive Visio document processing
+
+`documents run-visio` is a trusted local, on-demand desktop command bound to one
+retained VSDX revision, expected hash and Visio processor fingerprint. It prepares
+one document input and claims a distinct operation in the existing Extract stage.
+IIS does not register its worker; generic job claims exclude it. Visio interprets
+the document through its object model, with ordered pages, shapes/groups, expanded
+text, shape data and connections retained as document/page/shape provenance.
+Package members are never independent corpus documents.
+
+The adapter requires the logged-in Windows session and installed Visio. It refuses
+an existing Visio session, opens retained bytes read-only with macros/events
+disabled and refresh declined, and never deliberately follows links or activates
+embedded objects. It is not supported as unattended Office automation and does not
+claim OS-level network isolation. A positively identified process is assigned to
+a kill-on-close job before document open. Results require proven process cleanup
+and current SQL ownership/source fences. Deletion waits for a processing Visio job
+even after lease expiry; unknown cleanup does not silently release that fence.
+
+The existing successor relation preserves terminal predecessor records. The last
+good document remains selected until its replacement reaches Publish. A repeated
+exact command is idempotent, not a reset of a terminal failed attempt. This route
+does not activate OCR, access models or change PDF processing. The deployed v2
+processor uses a distinct immutable capability identity. Its failed-v1 successor
+path accepts only the exact retained v1 connector-classification failure;
+unrelated failed results are not eligible for that path. Fresh structural and
+deferred predecessors retain their existing eligibility.
 
 ## Phase 2 local scheduler and native worker supervision
 

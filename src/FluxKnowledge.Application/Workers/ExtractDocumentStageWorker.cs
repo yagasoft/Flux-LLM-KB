@@ -34,7 +34,8 @@ public sealed class ExtractDocumentStageWorker(
             workItem.Job.Stage,
             cancellationToken).ConfigureAwait(false);
         if (source.RetainedSourceRevisionId is null || source.RetainedSourceClassification is null || source.RetainedSourceExtension is null ||
-            !DocumentProcessingInput.TryGetContract(source.RetainedSourceClassification, source.RetainedSourceExtension, out var contract))
+            !DocumentProcessingInput.TryGetContract(source.RetainedSourceClassification, source.RetainedSourceExtension, out var contract) ||
+            contract == DocumentProcessingInput.Visio)
         {
             await FailAsync("document-input-invalid", "The document pipeline record has no retained document input.", cancellationToken)
                 .ConfigureAwait(false);

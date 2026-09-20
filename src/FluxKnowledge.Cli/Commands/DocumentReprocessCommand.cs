@@ -167,13 +167,16 @@ internal sealed class LocalDocumentReprocessExecutor(
     IRetainedSourceReader sourceReader,
     SourceCapabilityService capabilityService,
     VsdxStructuralTextProcessor vsdxProcessor,
-    PdfDocumentProcessor pdfProcessor) : IDocumentReprocessExecutor
+    PdfDocumentProcessor pdfProcessor,
+    VisioDocumentInputProcessor? visioProcessor = null) : IDocumentReprocessExecutor
 {
     public async ValueTask<DocumentReprocessCommandResult> ExecuteAsync(
         DocumentReprocessRequest request,
         CancellationToken cancellationToken)
     {
-        var descriptor = string.Equals(request.ExpectedProcessorFingerprint, VsdxStructuralTextProcessor.Capability.ProcessorFingerprint, StringComparison.Ordinal)
+        var descriptor = visioProcessor is not null && request.ExpectedProcessorFingerprint == VisioDocumentInputProcessor.Capability.ProcessorFingerprint
+            ? VisioDocumentInputProcessor.Capability
+            : string.Equals(request.ExpectedProcessorFingerprint, VsdxStructuralTextProcessor.Capability.ProcessorFingerprint, StringComparison.Ordinal)
             ? VsdxStructuralTextProcessor.Capability
             : PdfDocumentProcessor.Capability;
         var registration = await capabilityService.RegisterAsync(descriptor, cancellationToken).ConfigureAwait(false);
@@ -216,7 +219,9 @@ internal sealed class LocalDocumentReprocessExecutor(
             }
 
             var retained = await sourceReader.ReadBytesAsync(claim.SourceRevisionId, cancellationToken).ConfigureAwait(false);
-            var completion = descriptor.Id == VsdxStructuralTextProcessor.Capability.Id
+            var completion = descriptor.Id == VisioDocumentInputProcessor.Capability.Id
+                ? await visioProcessor!.ProcessAsync(claim, retained, cancellationToken).ConfigureAwait(false)
+                : descriptor.Id == VsdxStructuralTextProcessor.Capability.Id
                 ? await vsdxProcessor.ProcessAsync(claim, retained, new RetainedProcessorOptions(), cancellationToken).ConfigureAwait(false)
                 : await pdfProcessor.ProcessAsync(claim, retained, new RetainedProcessorOptions(), cancellationToken).ConfigureAwait(false);
             try

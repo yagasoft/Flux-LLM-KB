@@ -5,6 +5,7 @@ using FluxKnowledge.Application.Sources;
 using FluxKnowledge.Application.Indexing;
 using FluxKnowledge.Application.Pipeline;
 using FluxKnowledge.Application.Ports;
+using FluxKnowledge.Application.Workers;
 using FluxKnowledge.Domain.Common;
 using FluxKnowledge.Domain.Jobs;
 using FluxKnowledge.Domain.Pipeline;
@@ -69,7 +70,8 @@ public sealed class SqlStageTransitionStore : IStageTransitionStore
     {
         await using var transaction = await context.Database
             .BeginTransactionAsync(
-                request.IndexingOutput?.ActivateGeneration is null && request.Artifact.Stage != PipelineStage.Publish
+                request.IndexingOutput?.ActivateGeneration is null && request.Artifact.Stage != PipelineStage.Publish &&
+                request.CurrentJob.Operation != PipelineOperations.ExtractVisio
                     ? IsolationLevel.ReadCommitted
                     : IsolationLevel.Serializable,
                 cancellationToken)
@@ -86,6 +88,28 @@ public sealed class SqlStageTransitionStore : IStageTransitionStore
                 .ConfigureAwait(false);
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
             return existing;
+        }
+
+        if (request.CurrentJob.Operation == PipelineOperations.ExtractVisio)
+        {
+            var now = _timeProvider.GetUtcNow();
+            if (validated.DispatchMessage.LeaseExpiresAtUtc <= now ||
+                !await context.Jobs.AnyAsync(job => job.Id == request.CurrentJob.JobId.Value &&
+                    job.LeaseExpiresAtUtc > now, cancellationToken).ConfigureAwait(false))
+            {
+                throw new InvalidOperationException("visio-lease-expired");
+            }
+            var eligible = await (from input in context.SourceRevisions
+                join owner in context.SourceRevisions on input.ParentSourceRevisionId equals owner.Id
+                join root in context.SourceRootConfigurations on owner.SourceRootId equals root.Id
+                where input.Id == validated.PipelineRecord.SourceRevisionId && input.SourceRootId == owner.SourceRootId &&
+                    input.SuppressedAtUtc == null && owner.SuppressedAtUtc == null &&
+                    root.State == (int)SourceRootState.Enabled
+                select input.Id).AnyAsync(cancellationToken).ConfigureAwait(false);
+            if (!eligible)
+            {
+                throw new InvalidOperationException("visio-source-unavailable");
+            }
         }
 
         context.Artifacts.Add(

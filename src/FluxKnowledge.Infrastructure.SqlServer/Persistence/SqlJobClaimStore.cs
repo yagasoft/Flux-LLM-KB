@@ -102,12 +102,27 @@ public sealed class SqlJobClaimStore(
         }
 
         var dispatchPredicate = dispatchMessage is null
-            ? string.Empty
+            ? "AND [Operation] <> @visioOperation"
             : """
                 AND [PipelineRecordId] = @pipelineRecordId
                 AND [SourceRevision] = @sourceRevision
                 AND [Stage] = @stage
                 AND [Operation] = @operation
+                AND (@operation <> @visioOperation OR EXISTS
+                (
+                    SELECT 1 FROM [OutboxMessages] AS [dispatch] WITH (UPDLOCK, HOLDLOCK)
+                    WHERE [dispatch].[Id] = @dispatchId
+                      AND [dispatch].[PipelineRecordId] = [Jobs].[PipelineRecordId]
+                      AND [dispatch].[SourceRevision] = [Jobs].[SourceRevision]
+                      AND [dispatch].[Stage] = [Jobs].[Stage]
+                      AND [dispatch].[Operation] = @operation
+                      AND [dispatch].[DispatchedAtUtc] IS NULL
+                      AND [dispatch].[LeaseOwner] = @dispatchOwner
+                      AND [dispatch].[LeaseGeneration] = @dispatchLeaseGeneration
+                      AND [dispatch].[DispatchGeneration] = @dispatchGeneration
+                      AND [dispatch].[IdempotencyKey] = @dispatchKey
+                      AND [dispatch].[LeaseExpiresAtUtc] > @nowUtc
+                ))
               """;
         var sql =
             $$"""
@@ -191,7 +206,7 @@ public sealed class SqlJobClaimStore(
              INNER JOIN @claimed AS [claimed]
                  ON [activity].[ResultingPipelineRecordId] = [claimed].[PipelineRecordId]
                 AND [activity].[ResultingPipelineRecordRevision] = [claimed].[SourceRevision]
-             WHERE [claimed].[Operation] IN (@extractOperation, @documentExtractOperation)
+             WHERE [claimed].[Operation] IN (@extractOperation, @documentExtractOperation, @visioOperation)
                AND [claimed].[Stage] = @extractStage
                AND
                (
@@ -230,6 +245,7 @@ public sealed class SqlJobClaimStore(
         AddParameter(command, "@processingState", SqlDbType.Int, (int)processingState);
         AddParameter(command, "@extractOperation", SqlDbType.NVarChar, PipelineOperations.ExtractUtf8, 128);
         AddParameter(command, "@documentExtractOperation", SqlDbType.NVarChar, PipelineOperations.ExtractDocument, 128);
+        AddParameter(command, "@visioOperation", SqlDbType.NVarChar, PipelineOperations.ExtractVisio, 128);
         AddParameter(command, "@extractStage", SqlDbType.Int, (int)PipelineStage.Extract);
         AddParameter(command, "@sourcePending", SqlDbType.Int, (int)FluxKnowledge.Domain.Sources.SourceActivityState.Pending);
         AddParameter(command, "@sourceRunning", SqlDbType.Int, (int)FluxKnowledge.Domain.Sources.SourceActivityState.Running);
@@ -243,6 +259,11 @@ public sealed class SqlJobClaimStore(
         AddParameter(command, "@sourceRootEnabled", SqlDbType.Int, (int)FluxKnowledge.Domain.Sources.SourceRootState.Enabled);
         if (dispatchMessage is not null)
         {
+            AddParameter(command, "@dispatchId", SqlDbType.UniqueIdentifier, dispatchMessage.DispatchMessageId.Value);
+            AddParameter(command, "@dispatchOwner", SqlDbType.NVarChar, dispatchMessage.LeaseOwner, 256);
+            AddParameter(command, "@dispatchLeaseGeneration", SqlDbType.BigInt, dispatchMessage.LeaseGeneration);
+            AddParameter(command, "@dispatchGeneration", SqlDbType.BigInt, dispatchMessage.DispatchGeneration);
+            AddParameter(command, "@dispatchKey", SqlDbType.NVarChar, dispatchMessage.IdempotencyKey, 512);
             AddParameter(
                 command,
                 "@pipelineRecordId",

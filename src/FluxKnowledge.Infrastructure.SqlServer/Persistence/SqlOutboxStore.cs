@@ -1,5 +1,6 @@
 using System.Data;
 using FluxKnowledge.Application.Ports;
+using FluxKnowledge.Application.Documents;
 using FluxKnowledge.Application.Workers;
 using FluxKnowledge.Domain.Common;
 using FluxKnowledge.Domain.Jobs;
@@ -37,11 +38,24 @@ public sealed class SqlOutboxStore(
         await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
     }
 
-    public async ValueTask<ClaimedDispatchMessage?> ClaimNextDueAsync(
+    public ValueTask<ClaimedDispatchMessage?> ClaimNextDueAsync(
         string leaseOwner,
         DateTimeOffset nowUtc,
         TimeSpan leaseDuration,
         IReadOnlyCollection<string> registeredOperations,
+        CancellationToken cancellationToken) =>
+        ClaimCoreAsync(leaseOwner, nowUtc, leaseDuration, registeredOperations, null, null, cancellationToken);
+
+    public ValueTask<ClaimedDispatchMessage?> ClaimVisioDocumentAsync(
+        DocumentReprocessRequest request, Guid branchId, string leaseOwner, DateTimeOffset nowUtc,
+        TimeSpan leaseDuration, CancellationToken cancellationToken) =>
+        request.ExpectedProcessorFingerprint == DocumentProcessingInput.Visio.ParentProcessorFingerprint
+            ? ClaimCoreAsync(leaseOwner, nowUtc, leaseDuration, [PipelineOperations.ExtractVisio], request, branchId, cancellationToken)
+            : ValueTask.FromResult<ClaimedDispatchMessage?>(null);
+
+    private async ValueTask<ClaimedDispatchMessage?> ClaimCoreAsync(
+        string leaseOwner, DateTimeOffset nowUtc, TimeSpan leaseDuration,
+        IReadOnlyCollection<string> registeredOperations, DocumentReprocessRequest? exactRequest, Guid? branchId,
         CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(leaseOwner);
@@ -65,6 +79,26 @@ public sealed class SqlOutboxStore(
         var operationParameters = string.Join(
             ", ",
             Enumerable.Range(0, operations.Length).Select(index => $"@operation{index}"));
+        var exactPredicate = exactRequest is null ? string.Empty : """
+            AND EXISTS (
+                SELECT 1 FROM [PipelineRecords] AS [record]
+                INNER JOIN [SourceRevisions] AS [input] ON [input].[Id] = [record].[SourceRevisionId]
+                INNER JOIN [SourceRevisions] AS [owner] ON [owner].[Id] = [input].[ParentSourceRevisionId]
+                INNER JOIN [SourceProcessorBranchMembers] AS [member] ON [member].[ChildSourceRevisionId] = [input].[Id]
+                INNER JOIN [SourceProcessorBranches] AS [branch] ON [branch].[Id] = [member].[BranchId]
+                WHERE [record].[Id] = [OutboxMessages].[PipelineRecordId] AND [record].[IsDeleted] = 0
+                  AND [record].[Revision] = [OutboxMessages].[SourceRevision]
+                  AND [record].[ContentHash] = @inputHash AND [input].[ContentSha256] = @inputHash
+                  AND [input].[Classification] = @inputClassification AND [input].[Extension] = '.vsdx'
+                  AND [input].[OriginKind] = 2 AND [input].[SuppressedAtUtc] IS NULL
+                  AND [owner].[Id] = @ownerRevisionId AND [owner].[ContentSha256] = @inputHash
+                  AND [owner].[ParentSourceRevisionId] IS NULL AND [owner].[SuppressedAtUtc] IS NULL
+                  AND [owner].[SourceRootId] = [input].[SourceRootId]
+                  AND [branch].[Id] = @branchId AND [branch].[SourceRevisionId] = @ownerRevisionId
+                  AND [branch].[InputSha256] = @inputHash AND [branch].[ProcessorFingerprint] = @processorFingerprint
+                  AND [branch].[ProcessorVersion] = @processorVersion AND [branch].[State] = 2
+                  AND [member].[Disposition] = 'completed')
+            """;
         var sql =
             $"""
              SET TRANSACTION ISOLATION LEVEL READ COMMITTED;
@@ -80,6 +114,7 @@ public sealed class SqlOutboxStore(
                    AND [DueAtUtc] <= @nowUtc
                    AND ([LeaseExpiresAtUtc] IS NULL OR [LeaseExpiresAtUtc] <= @nowUtc)
                    AND [Operation] IN ({operationParameters})
+                   {exactPredicate}
                    AND
                    (
                        NOT EXISTS
@@ -134,6 +169,15 @@ public sealed class SqlOutboxStore(
             SqlDbType.DateTimeOffset,
             nowUtc.Add(leaseDuration));
         AddParameter(command, "@leaseOwner", SqlDbType.NVarChar, leaseOwner, 256);
+        if (exactRequest is not null)
+        {
+            AddParameter(command, "@ownerRevisionId", SqlDbType.UniqueIdentifier, exactRequest.SourceRevisionId.Value);
+            AddParameter(command, "@branchId", SqlDbType.UniqueIdentifier, branchId!.Value);
+            AddParameter(command, "@inputHash", SqlDbType.VarChar, exactRequest.ExpectedInputSha256, 64);
+            AddParameter(command, "@inputClassification", SqlDbType.NVarChar, DocumentProcessingInput.VisioClassification, 128);
+            AddParameter(command, "@processorFingerprint", SqlDbType.NVarChar, exactRequest.ExpectedProcessorFingerprint, 256);
+            AddParameter(command, "@processorVersion", SqlDbType.NVarChar, DocumentProcessingInput.Visio.ParentProcessorVersion, 256);
+        }
         AddParameter(
             command,
             "@sourceRootEnabled",

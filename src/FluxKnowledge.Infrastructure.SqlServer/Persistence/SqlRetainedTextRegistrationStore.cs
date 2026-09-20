@@ -50,6 +50,40 @@ public sealed class SqlRetainedTextRegistrationStore(
         }).ConfigureAwait(false);
     }
 
+    /// <summary>Links only the completed input branch named by the interactive desktop request.</summary>
+    public async ValueTask<Guid?> RegisterVisioBranchAsync(
+        DocumentReprocessRequest request, Guid branchId, CancellationToken cancellationToken)
+    {
+        if (request.ExpectedProcessorFingerprint != DocumentProcessingInput.Visio.ParentProcessorFingerprint)
+        {
+            return null;
+        }
+        await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        var activity = await (from branch in context.SourceProcessorBranches
+                              join member in context.SourceProcessorBranchMembers on branch.Id equals member.BranchId
+                              join input in context.SourceRevisions on member.ChildSourceRevisionId equals input.Id
+                              join row in context.SourceActivities on member.ChildSourceActivityId equals row.Id
+                              where branch.Id == branchId && branch.SourceRevisionId == request.SourceRevisionId.Value &&
+                                    branch.InputSha256 == request.ExpectedInputSha256 && branch.State == (int)RetainedProcessorBranchState.Completed &&
+                                    branch.ProcessorFingerprint == request.ExpectedProcessorFingerprint &&
+                                    branch.ProcessorVersion == DocumentProcessingInput.Visio.ParentProcessorVersion &&
+                                    member.Disposition == "completed" && input.ParentSourceRevisionId == branch.SourceRevisionId &&
+                                    input.ContentSha256 == request.ExpectedInputSha256 && input.Classification == DocumentProcessingInput.VisioClassification &&
+                                    input.Extension == ".vsdx" && input.OriginKind == 2 && row.SourceRevisionId == input.Id &&
+                                    row.ProcessorVersion == DocumentProcessingInput.VisioProcessorVersion &&
+                                    row.DescriptorFingerprint == DocumentProcessingInput.VisioProcessorFingerprint
+                              select row).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+        if (activity is null) return null;
+        if (activity.ResultingPipelineRecordId is not null) return activity.ResultingPipelineRecordId;
+        var restored = SourceActivity.Restore(new SourceActivityId(activity.Id), new SourceRevisionId(activity.SourceRevisionId),
+            (SourceActivityKind)activity.ActivityKind, (ExecutionClass)activity.ExecutionClass, activity.ProcessorVersion,
+            activity.InputFingerprint, activity.RequiredCapability, (SourceActivityState)activity.State, activity.Reason,
+            descriptorFingerprint: activity.DescriptorFingerprint);
+        _ = await RegisterAsync(restored, cancellationToken).ConfigureAwait(false);
+        return await context.SourceActivities.AsNoTracking().Where(row => row.Id == activity.Id)
+            .Select(row => row.ResultingPipelineRecordId).SingleAsync(cancellationToken).ConfigureAwait(false);
+    }
+
     public async ValueTask<int> ReplayAsync(
         RegisteredSourceCapability capability,
         Guid? rootId,
@@ -353,7 +387,8 @@ public sealed class SqlRetainedTextRegistrationStore(
             deferredCapability.ClaimedAtUtc = now;
             deferredCapability.ClaimedProcessorVersion = replayCapability!.ProcessorVersion;
         }
-        var extractOperation = isDocumentInput ? PipelineOperations.ExtractDocument : PipelineOperations.ExtractUtf8;
+        var extractOperation = documentContract == DocumentProcessingInput.Visio ? PipelineOperations.ExtractVisio :
+            isDocumentInput ? PipelineOperations.ExtractDocument : PipelineOperations.ExtractUtf8;
         var jobId = Guid.NewGuid();
         context.Jobs.Add(new JobEntity
         {
@@ -401,6 +436,8 @@ public sealed class SqlRetainedTextRegistrationStore(
          activity.Kind == SourceActivityKind.DocumentParsing &&
          ((activity.ProcessorVersion == DocumentProcessingInput.VsdxProcessorVersion &&
            activity.DescriptorFingerprint == DocumentProcessingInput.VsdxProcessorFingerprint) ||
+          (activity.ProcessorVersion == DocumentProcessingInput.VisioProcessorVersion &&
+           activity.DescriptorFingerprint == DocumentProcessingInput.VisioProcessorFingerprint) ||
           (activity.ProcessorVersion == DocumentProcessingInput.PdfProcessorVersion &&
            activity.DescriptorFingerprint == DocumentProcessingInput.PdfProcessorFingerprint)));
 
