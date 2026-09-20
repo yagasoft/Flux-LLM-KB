@@ -12,6 +12,16 @@
           "Microsoft.TestPlatform.TestHost": "18.8.1"
         }
       },
+      "SkiaSharp": {
+        "type": "Direct",
+        "requested": "[3.119.1, )",
+        "resolved": "3.119.1",
+        "contentHash": "+Ru1BTSZQne3Vp+vbSb50Ke3Nlc3ZnItxx4+751J9WZ8YzLKAV/n+9DAo4zFTyeCI//ueT63c+VybmTTpYBEiw==",
+        "dependencies": {
+          "SkiaSharp.NativeAssets.Win32": "3.119.1",
+          "SkiaSharp.NativeAssets.macOS": "3.119.1"
+        }
+      },
       "xunit": {
         "type": "Direct",
         "requested": "[2.9.3, )",
@@ -48,6 +58,30 @@
           "Microsoft.Identity.Client": "4.73.1",
           "Microsoft.Identity.Client.Extensions.Msal": "4.73.1"
         }
+      },
+      "HarfBuzzSharp": {
+        "type": "Transitive",
+        "resolved": "8.3.1.2",
+        "contentHash": "fqZTo17dEIn/u/YZ1A6avsmF8BYoLSvDsHm+uDp38wortckHWZhJ5pMwJW97xTeOZ9/oxqwUQfRMkf6ni9s5Gw==",
+        "dependencies": {
+          "HarfBuzzSharp.NativeAssets.Win32": "8.3.1.2",
+          "HarfBuzzSharp.NativeAssets.macOS": "8.3.1.2"
+        }
+      },
+      "HarfBuzzSharp.NativeAssets.macOS": {
+        "type": "Transitive",
+        "resolved": "8.3.1.2",
+        "contentHash": "+0NtlZSQA540z6VpVoajXldvAOuj5D+BWceh70U3YApxcpUKD/5hjdbdzvyhRaTSTCSZNjRxeaWpBpgJ1U1YcQ=="
+      },
+      "HarfBuzzSharp.NativeAssets.Win32": {
+        "type": "Transitive",
+        "resolved": "8.3.1.2",
+        "contentHash": "qmYJsYtOPVeLg7NQoKO5fq1oc5mRKzdgxBXWICx0R03epZ1RIsuzgWRFhVNN0br3c+J+9rIQhy0SXdBwVv0ebA=="
+      },
+      "Microsoft.AI.DirectML": {
+        "type": "Transitive",
+        "resolved": "1.15.4",
+        "contentHash": "UblWBtQxcXcxwcn+jh0pfbq4zv2b6w7ThJ35qUV9gd8niGofrFWzVqZ6yqYDMiE+IJf8LRpG+H1cZpswceOeiA=="
       },
       "Microsoft.Bcl.AsyncInterfaces": {
         "type": "Transitive",
@@ -172,6 +206,19 @@
           "Microsoft.IdentityModel.Logging": "7.7.1"
         }
       },
+      "Microsoft.ML.OnnxRuntime.Managed": {
+        "type": "Transitive",
+        "resolved": "1.24.4",
+        "contentHash": "e5jsEo0HcCKDMkuRsMSievKoMv10Odv4MGmxbCin8SEm4Pto1qTpwti47xRwMtk9I/zVvfAiFIWquOq/0+22DA==",
+        "dependencies": {
+          "System.Numerics.Tensors": "9.0.0"
+        }
+      },
+      "Microsoft.NETCore.Platforms": {
+        "type": "Transitive",
+        "resolved": "1.1.0",
+        "contentHash": "kz0PEW2lhqygehI/d6XsPCQzD7ff7gUJaVGPVETX611eadGsA3A877GdSlU0LRVMCTH/+P3o2iDTak+S08V2+A=="
+      },
       "Microsoft.SqlServer.Server": {
         "type": "Transitive",
         "resolved": "1.0.0",
@@ -188,6 +235,60 @@
         "contentHash": "FaQHPDTUOcE+SFTjssNPfrub2lT9Zyon4J2W/KLHt/efLJACb1TCeWXyOgh0D/4Q1e4n+S3E6mOKud+9nLZlEA==",
         "dependencies": {
           "Microsoft.TestPlatform.ObjectModel": "18.8.1"
+        }
+      },
+      "NETStandard.Library": {
+        "type": "Transitive",
+        "resolved": "2.0.0",
+        "contentHash": "7jnbRU+L08FXKMxqUflxEXtVymWvNOrS8yHgu9s6EM8Anr6T/wIX4nZ08j/u3Asz+tCufp3YVwFSEvFTPYmBPA==",
+        "dependencies": {
+          "Microsoft.NETCore.Platforms": "1.1.0"
+        }
+      },
+      "SkiaSharp.HarfBuzz": {
+        "type": "Transitive",
+        "resolved": "3.119.1",
+        "contentHash": "+Lu9kCmxgEJVUeIljhEOgrB4dr4iwPP08jgswKk3bGPUwInmqDGUUriMoYD9prFlVa0wOWDLG/hfl3HIHNJHRg==",
+        "dependencies": {
+          "HarfBuzzSharp": "8.3.1.2",
+          "SkiaSharp": "3.119.1"
+        }
+      },
+      "SkiaSharp.NativeAssets.macOS": {
+        "type": "Transitive",
+        "resolved": "3.119.1",
+        "contentHash": "6hR3BdLhApjDxR1bFrJ7/lMydPfI01s3K+3WjIXFUlfC0MFCFCwRzv+JtzIkW9bDXs7XUVQS+6EVf0uzCasnGQ=="
+      },
+      "SkiaSharp.NativeAssets.Win32": {
+        "type": "Transitive",
+        "resolved": "3.119.1",
+        "contentHash": "8C4GSXVJqSr0y3Tyyv5jz6MJSTVUyYkMjeKrzK+VyZPGLo89MNoUEclVuYahzOCDdtbfXrd2HtxXfDuvoSXrUw=="
+      },
+      "Syncfusion.Compression.Net.Core": {
+        "type": "Transitive",
+        "resolved": "34.1.29",
+        "contentHash": "rNiHvLWqdandafVwWx+tsvzUaoxe4PXXlHdBS9+2Zwwo/e4uPlJAu/75Q3Ki50wfGyjzBHUBCH45T5K69mu+WA=="
+      },
+      "Syncfusion.Licensing": {
+        "type": "Transitive",
+        "resolved": "34.1.29",
+        "contentHash": "CpGsf9AKD/1sRlRh1+XnaYB4lgoovFZZiwjVHym8I+1AZpwDaUtlZDb4OwmOZdqHqb8h7gw2o0qKVo1s/GP+ZA=="
+      },
+      "Syncfusion.SkiaSharpHelper.Net.Core": {
+        "type": "Transitive",
+        "resolved": "34.1.29",
+        "contentHash": "tnVHh+AwTKwQ9cB5BnHEEhoIiYlZxftY5asB4L+okM1yM4bC52DdJVD2Uc9UDe1mtXask84b+iKt9SqJPt4jCQ==",
+        "dependencies": {
+          "SkiaSharp.HarfBuzz": "3.119.1",
+          "Syncfusion.Compression.Net.Core": "34.1.29"
+        }
+      },
+      "Syncfusion.Telemetry": {
+        "type": "Transitive",
+        "resolved": "34.1.29",
+        "contentHash": "BMgsnOPYrSZemIM4Xz2DjbwM1dI2Ro+2Qn9MYuHeu8+hk6HQ/8NEAed1IoMbQZVse0Dfqjqh1JDSefX/4gJgdw==",
+        "dependencies": {
+          "NETStandard.Library": "2.0.0"
         }
       },
       "System.ClientModel": {
@@ -219,6 +320,11 @@
         "type": "Transitive",
         "resolved": "8.0.1",
         "contentHash": "BVYuec3jV23EMRDeR7Dr1/qhx7369dZzJ9IWy2xylvb4YfXsrUxspWc4UWYid/tj4zZK58uGZqn2WQiaDMhmAg=="
+      },
+      "System.Numerics.Tensors": {
+        "type": "Transitive",
+        "resolved": "9.0.0",
+        "contentHash": "hyJB4UlpAi19Xr9AXzu2NuagKC4lPfHObNMEAA0HmqFz2rX7wKgzeYzO/jM/eBHDhnUGFFEjk5cOoJaxqg5J4A=="
       },
       "System.Security.Cryptography.Pkcs": {
         "type": "Transitive",
@@ -290,7 +396,9 @@
       "fluxknowledge.infrastructure.inference": {
         "type": "Project",
         "dependencies": {
-          "FluxKnowledge.Application": "[1.0.0, )"
+          "FluxKnowledge.Application": "[1.0.0, )",
+          "Microsoft.ML.OnnxRuntime.DirectML": "[1.24.4, )",
+          "SkiaSharp": "[3.119.1, )"
         }
       },
       "fluxknowledge.infrastructure.sqlserver": {
@@ -306,7 +414,10 @@
         "dependencies": {
           "FluxKnowledge.Application": "[1.0.0, )",
           "Microsoft.Data.SqlClient": "[6.1.1, )",
-          "Microsoft.EntityFrameworkCore.SqlServer": "[10.0.10, )"
+          "Microsoft.EntityFrameworkCore.SqlServer": "[10.0.10, )",
+          "SkiaSharp": "[3.119.1, )",
+          "Syncfusion.Pdf.Net.Core": "[34.1.29, )",
+          "Syncfusion.PdfToImageConverter.Net.Core": "[34.1.29, )"
         }
       },
       "fluxknowledge.nativeworker.protocol": {
@@ -356,6 +467,38 @@
         "dependencies": {
           "Microsoft.Data.SqlClient": "6.1.1",
           "Microsoft.EntityFrameworkCore.Relational": "10.0.10"
+        }
+      },
+      "Microsoft.ML.OnnxRuntime.DirectML": {
+        "type": "CentralTransitive",
+        "requested": "[1.24.4, )",
+        "resolved": "1.24.4",
+        "contentHash": "rXEy9biJdgr55TdDaHrhl35K0FRXRCbvyRUv4S4C3jTxyxrqSh8YcEp5bzw4S9UlcqQKNfpb3sE+VWvO2DZY6A==",
+        "dependencies": {
+          "Microsoft.AI.DirectML": "1.15.4",
+          "Microsoft.ML.OnnxRuntime.Managed": "1.24.4"
+        }
+      },
+      "Syncfusion.Pdf.Net.Core": {
+        "type": "CentralTransitive",
+        "requested": "[34.1.29, )",
+        "resolved": "34.1.29",
+        "contentHash": "8ONFfARgbi+t2ROk6b8nC4W+98vIw11ENA5LsWobZwrFG94gAbtTJJioAdQra310aNimm5QL7qzxqHNC9PuUBQ==",
+        "dependencies": {
+          "Syncfusion.Compression.Net.Core": "34.1.29",
+          "Syncfusion.Licensing": "34.1.29",
+          "Syncfusion.Telemetry": "34.1.29"
+        }
+      },
+      "Syncfusion.PdfToImageConverter.Net.Core": {
+        "type": "CentralTransitive",
+        "requested": "[34.1.29, )",
+        "resolved": "34.1.29",
+        "contentHash": "vTvlkQv4fyaTHrTzGtgmKnqUJGxhqXJ67+5swurNLhz82GXYwrdHQIRoVGjpKwh3hj70yH0D7XmA/FCgs46o8Q==",
+        "dependencies": {
+          "SkiaSharp": "3.119.1",
+          "Syncfusion.Licensing": "34.1.29",
+          "Syncfusion.SkiaSharpHelper.Net.Core": "34.1.29"
         }
       }
     }

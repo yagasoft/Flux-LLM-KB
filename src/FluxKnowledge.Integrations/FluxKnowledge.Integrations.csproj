@@ -8,11 +8,20 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.Data.SqlClient" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.SqlServer" />
+    <PackageReference Include="SkiaSharp" />
+    <PackageReference Include="Syncfusion.Pdf.Net.Core" />
+    <PackageReference Include="Syncfusion.PdfToImageConverter.Net.Core" />
   </ItemGroup>
   <ItemGroup>
     <Reference Include="Microsoft.Web.Administration">
       <HintPath>$(windir)\System32\inetsrv\Microsoft.Web.Administration.dll</HintPath>
       <Private>true</Private>
     </Reference>
+  </ItemGroup>
+  <ItemGroup>
+    <None Update="Documents\paddleocr_vl_executor.py">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </None>
   </ItemGroup>
 </Project>

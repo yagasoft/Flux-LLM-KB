@@ -182,6 +182,67 @@ public sealed class ZipArchiveRetainedProcessor(IRetainedArtifactWriter artifact
         _ = ValidateSafePackageMetadata(bytes, maximumEntries);
     }
 
+    /// <summary>Applies the ZIP container safety contract without classifying or emitting members.</summary>
+    internal static async ValueTask ValidateSafeArchiveAsync(
+        RetainedSourceBytes retained,
+        RetainedProcessorOptions options,
+        CancellationToken cancellationToken)
+    {
+        if (retained.ByteLength > options.MaximumCompressedInputBytes || retained.Bytes.Length > options.MaximumCompressedInputBytes)
+        {
+            throw new RetainedProcessorException("archive-input-too-large");
+        }
+        if (!IsZipSignature(retained.Bytes))
+        {
+            throw new RetainedProcessorException("archive-signature-invalid");
+        }
+
+        try
+        {
+            var centralEntries = ValidateSafePackageMetadata(retained.Bytes, options.MaximumEntryCount);
+            using var input = new MemoryStream(retained.Bytes, writable: false);
+            using var archive = new ZipArchive(input, ZipArchiveMode.Read, leaveOpen: false);
+            if (archive.Entries.Count > options.MaximumEntryCount)
+            {
+                throw new RetainedProcessorException("archive-entry-count-limit");
+            }
+            if (centralEntries.Count != archive.Entries.Count)
+            {
+                throw new RetainedProcessorException("archive-entry-unsupported");
+            }
+
+            long expandedTotal = 0;
+            var paths = new HashSet<string>(StringComparer.Ordinal);
+            for (var index = 0; index < archive.Entries.Count; index++)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var entry = archive.Entries[index];
+                var centralEntry = centralEntries[index];
+                var path = ValidateEntryPath(IsDirectory(entry) ? entry.FullName.TrimEnd('/', '\\') : entry.FullName, options.MaximumLogicalPathLength);
+                if (IsDirectory(entry)) continue;
+                ValidateEntry(entry, options, centralEntry);
+                expandedTotal = checked(expandedTotal + entry.Length);
+                if (expandedTotal > options.MaximumExpandedBytes)
+                {
+                    throw new RetainedProcessorException("archive-expanded-total-limit");
+                }
+                if (!paths.Add(path))
+                {
+                    throw new RetainedProcessorException("archive-member-identity-conflict");
+                }
+                await using var preflightStream = entry.Open();
+                if (IsZipSignature(await ReadPrefixAsync(preflightStream, cancellationToken).ConfigureAwait(false)))
+                {
+                    throw new RetainedProcessorException("nested-archive-depth-limit");
+                }
+            }
+        }
+        catch (InvalidDataException exception)
+        {
+            throw new RetainedProcessorException("archive-entry-unsupported", innerException: exception);
+        }
+    }
+
     private static IReadOnlyList<CentralDirectoryEntry> ValidateSafePackageMetadata(ReadOnlySpan<byte> bytes, int maximumEntries)
     {
         var entries = ReadCentralDirectory(bytes);

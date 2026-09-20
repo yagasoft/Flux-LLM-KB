@@ -78,7 +78,7 @@ The user-approved limits are exactly double the prior proposal:
 | --- | ---: |
 | Retained document input | 134,217,728 bytes (128 MiB) |
 | Expanded package XML total | 268,435,456 bytes (256 MiB) |
-| XML elements | 200,000 |
+| XML elements | 500,000 |
 | XML nesting depth | 128 |
 | Extracted UTF-8 structural text | 33,554,432 bytes (32 MiB) |
 | Automatic replay batch | 16 branches |
@@ -87,7 +87,7 @@ The active parser validates the immutable retained-artifact checksum before
 format inspection. It applies all limits before allocating unbounded memory or
 creating a child revision. Package parsing treats malformed metadata,
 encryption, unsupported streams, recursive/linked content and parser exceptions
-as untrusted-boundary outcomes. No action may increase these limits.
+as untrusted-boundary outcomes. No action may increase these limits further.
 
 Open XML packages additionally have a maximum of 512 entries, 8,192
 relationships, a 32 MiB uncompressed selected-part limit, 512 logical path

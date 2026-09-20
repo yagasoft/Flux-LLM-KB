@@ -5,6 +5,7 @@ using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Domain.Jobs;
 using FluxKnowledge.Domain.Sources;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
+using FluxKnowledge.Infrastructure.SqlServer.Workers;
 using Microsoft.EntityFrameworkCore;
 
 namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
@@ -16,12 +17,13 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
 /// </summary>
 public sealed class SqlSourceDeletionStore(
     IDbContextFactory<FluxKnowledgeDbContext> contextFactory,
-    TimeProvider timeProvider) : ISourceDeletionStore
+    TimeProvider timeProvider,
+    PaddleOcrVlmExecutionRegistry? localOcrExecutions = null) : ISourceDeletionStore
 {
     private static readonly TimeSpan LeaseDuration = TimeSpan.FromMinutes(15);
 
     public SqlSourceDeletionStore(IDbContextFactory<FluxKnowledgeDbContext> contextFactory)
-        : this(contextFactory, TimeProvider.System)
+        : this(contextFactory, TimeProvider.System, null)
     {
     }
 
@@ -154,11 +156,48 @@ public sealed class SqlSourceDeletionStore(
                 .Select(value => value.Id)
                 .ToArrayAsync(cancellationToken)
                 .ConfigureAwait(false);
-            if (recordIds.Length > 0 && await context.GpuMiniTasks.AnyAsync(value =>
-                    context.Jobs.Any(job => job.Id == value.ParentJobId && recordIds.Contains(job.PipelineRecordId)),
-                    cancellationToken).ConfigureAwait(false))
+            var sourceGpuTaskIds = recordIds.Length == 0
+                ? []
+                : await context.GpuMiniTasks.Where(value =>
+                        context.Jobs.Any(job => job.Id == value.ParentJobId && recordIds.Contains(job.PipelineRecordId)))
+                    .Select(value => value.Id)
+                    .ToArrayAsync(cancellationToken)
+                    .ConfigureAwait(false);
+            var localOcrTaskIds = recordIds.Length == 0
+                ? []
+                : await context.DocumentOcrRequests.Where(value => recordIds.Contains(value.PipelineRecordId))
+                    .Select(value => value.MiniTaskId)
+                    .ToArrayAsync(cancellationToken)
+                    .ConfigureAwait(false);
+            var localOcrTaskSet = localOcrTaskIds.ToHashSet();
+            if (sourceGpuTaskIds.Any(taskId => !localOcrTaskSet.Contains(taskId)))
             {
                 return await RefuseAsync(context, transaction, operation, "source-delete-external-execution-owned", cancellationToken).ConfigureAwait(false);
+            }
+            var activeLocalOcrTaskIds = sourceGpuTaskIds.Length == 0
+                ? []
+                : await context.GpuMiniTasks.Where(value =>
+                        sourceGpuTaskIds.Contains(value.Id) &&
+                        value.ExecutionState == (int)Domain.Gpu.GpuMiniTaskExecutionState.Active)
+                    .Select(value => value.Id)
+                    .ToArrayAsync(cancellationToken)
+                    .ConfigureAwait(false);
+            if (activeLocalOcrTaskIds.Length > 0)
+            {
+                var cancellationRequested = localOcrExecutions is not null &&
+                    activeLocalOcrTaskIds.Any(localOcrExecutions.RequestCancellation);
+                if (!cancellationRequested)
+                {
+                    return await RefuseAsync(context, transaction, operation, "source-delete-external-execution-owned", cancellationToken).ConfigureAwait(false);
+                }
+
+                operation.State = 0;
+                ReleaseLease(operation);
+                operation.Phase = "draining";
+                operation.UpdatedAtUtc = timeProvider.GetUtcNow();
+                await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+                await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+                return new SourceDeletionRunResult(false, operation.Phase);
             }
             if (await HasActiveWorkAsync(context, root.Id, revisionIds, recordIds, timeProvider.GetUtcNow(), cancellationToken).ConfigureAwait(false))
             {
@@ -636,6 +675,8 @@ public sealed class SqlSourceDeletionStore(
             : await context.TextChunks.Where(value => artifactIds.Contains(value.ArtifactId))
                 .Select(value => value.Id).ToArrayAsync(cancellationToken).ConfigureAwait(false);
 
+        await DeleteOwnedLocalOcrExecutionGraphAsync(context, recordIds, cancellationToken).ConfigureAwait(false);
+
         await context.AuditEvents.Where(value => value.SourceRootId == rootId ||
                 (value.SourceScanRequestId.HasValue && scanRequestIds.Contains(value.SourceScanRequestId.Value)) ||
                 (value.SourceRevisionId.HasValue && revisionIds.Contains(value.SourceRevisionId.Value)) ||
@@ -648,6 +689,18 @@ public sealed class SqlSourceDeletionStore(
             .ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
         await context.SourceRootWatchStates.Where(value => value.SourceRootId == rootId).ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
         await context.SourceScanRequests.Where(value => value.SourceRootId == rootId).ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
+
+        // A publication binds the physical document owner, its hidden document input,
+        // retained-processor branch, and the selected pipeline revision.  Remove only
+        // publications wholly owned by this fenced source before deleting any of those
+        // principals; cross-root dependencies were refused before this graph is reached.
+        if (revisionIds.Count > 0)
+        {
+            await context.DocumentPublications.Where(value =>
+                    revisionIds.Contains(value.OwnerSourceRevisionId) ||
+                    revisionIds.Contains(value.DocumentInputSourceRevisionId))
+                .ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
+        }
 
         if (branchIds.Length > 0)
         {
@@ -725,6 +778,73 @@ public sealed class SqlSourceDeletionStore(
                     !context.SourceRevisions.Any(child => child.ParentSourceRevisionId == value.Id)).ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false) > 0)
             {
             }
+        }
+    }
+
+    private static async Task DeleteOwnedLocalOcrExecutionGraphAsync(
+        FluxKnowledgeDbContext context,
+        IReadOnlyCollection<Guid> recordIds,
+        CancellationToken cancellationToken)
+    {
+        if (recordIds.Count == 0)
+        {
+            return;
+        }
+
+        var miniTaskIds = await context.DocumentOcrRequests
+            .Where(request => recordIds.Contains(request.PipelineRecordId))
+            .Select(request => request.MiniTaskId)
+            .ToArrayAsync(cancellationToken)
+            .ConfigureAwait(false);
+        var batchIds = miniTaskIds.Length == 0
+            ? []
+            : await context.GpuMiniTasks.Where(task => miniTaskIds.Contains(task.Id) && task.BatchId.HasValue)
+                .Select(task => task.BatchId!.Value)
+                .Distinct()
+                .ToArrayAsync(cancellationToken)
+                .ConfigureAwait(false);
+        if (batchIds.Length > 0 &&
+            await context.GpuMiniTasks.AnyAsync(
+                    task => task.BatchId.HasValue && batchIds.Contains(task.BatchId.Value) && !miniTaskIds.Contains(task.Id),
+                    cancellationToken).ConfigureAwait(false))
+        {
+            throw new InvalidOperationException("source-delete-local-ocr-shared-batch");
+        }
+        if (batchIds.Length > 0 &&
+            await context.GpuCapacitySlots.AnyAsync(slot => slot.ActiveBatchId.HasValue && batchIds.Contains(slot.ActiveBatchId.Value), cancellationToken)
+                .ConfigureAwait(false))
+        {
+            throw new InvalidOperationException("source-delete-local-ocr-active-batch");
+        }
+
+        if (batchIds.Length > 0)
+        {
+            await context.GpuExecutorEvidence.Where(value => batchIds.Contains(value.BatchId))
+                .ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
+            await context.GpuExecutorResultReceipts.Where(value => batchIds.Contains(value.BatchId))
+                .ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
+            await context.GpuExecutorDispatches.Where(value => batchIds.Contains(value.BatchId))
+                .ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
+            await context.GpuSchedulerOperationReceipts.Where(value => value.BatchId.HasValue && batchIds.Contains(value.BatchId.Value))
+                .ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        if (miniTaskIds.Length > 0)
+        {
+            await context.DocumentOcrRequests.Where(value => miniTaskIds.Contains(value.MiniTaskId))
+                .ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
+            await context.GpuMiniTasks.Where(value => miniTaskIds.Contains(value.Id))
+                .ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
+        }
+        // A malformed or pre-scheduler request can lack its mini task. It is still owned by
+        // the fenced record and must not survive after the parent record is removed.
+        await context.DocumentOcrRequests.Where(value => recordIds.Contains(value.PipelineRecordId))
+            .ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
+
+        if (batchIds.Length > 0)
+        {
+            await context.GpuBatches.Where(value => batchIds.Contains(value.Id))
+                .ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
         }
     }
 

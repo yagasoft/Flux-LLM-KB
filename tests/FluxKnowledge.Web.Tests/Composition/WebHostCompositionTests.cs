@@ -2,6 +2,7 @@ using System.Net;
 using System.Security.Cryptography;
 using System.Collections.Immutable;
 using FluxKnowledge.Application.Gpu;
+using FluxKnowledge.Application.Documents;
 using FluxKnowledge.Application.Contracts;
 using FluxKnowledge.Application.Pipeline;
 using FluxKnowledge.Application.Sources;
@@ -16,6 +17,8 @@ using FluxKnowledge.Infrastructure.SqlServer.Provisioning;
 using FluxKnowledge.Infrastructure.SqlServer.Workers;
 using FluxKnowledge.Infrastructure.Usearch;
 using FluxKnowledge.Integrations.Files;
+using FluxKnowledge.Integrations.Documents;
+using FluxKnowledge.Integrations.Models;
 using FluxKnowledge.Integrations.Outlook;
 using FluxKnowledge.Web;
 using FluxKnowledge.Web.Components.Status;
@@ -129,6 +132,42 @@ public sealed class WebHostCompositionTests : IDisposable
             WebHostComposition.ReadNativeGoLiveRuntimeOptions(configuration));
 
         Assert.Contains("runtime-provider-not-ready:model", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Production_composition_allows_only_the_complete_fixed_local_ocr_runtime()
+    {
+        var configuration = new ConfigurationBuilder()
+            .AddConfiguration(CreateProductionConfiguration())
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Runtime:Model:Enabled"] = "true",
+                ["Runtime:Gpu:Enabled"] = "true",
+                ["Runtime:Ocr:Enabled"] = "true"
+            })
+            .Build();
+        using var host = new HostBuilder().Build();
+        var services = new ServiceCollection();
+        services.AddSingleton(host.Services.GetRequiredService<IHostApplicationLifetime>());
+
+        WebHostComposition.AddProductionFluxKnowledgeServicesForTests(services, configuration);
+
+        using var provider = services.BuildServiceProvider(new ServiceProviderOptions
+        {
+            ValidateScopes = true,
+            ValidateOnBuild = true
+        });
+        using var scope = provider.CreateScope();
+        Assert.IsType<PaddleOcrVlmAdmissionGate>(provider.GetRequiredService<IGpuAdmissionGate>());
+        Assert.IsType<PaddleOcrVlmModelGate>(provider.GetRequiredService<PaddleOcrVlmModelGate>());
+        Assert.IsType<PaddleOcrVlmLocalExecutor>(scope.ServiceProvider.GetRequiredService<IDocumentOcrExecutor>());
+        Assert.IsType<SqlDocumentOcrStore>(scope.ServiceProvider.GetRequiredService<IDocumentOcrHandoff>());
+        Assert.IsType<SqlDocumentOcrStore>(scope.ServiceProvider.GetRequiredService<IDocumentOcrResultReader>());
+        Assert.Contains(provider.GetServices<IHostedService>(), service => service is PaddleOcrVlmCapacityBootstrapService);
+        Assert.Contains(provider.GetServices<IHostedService>(), service => service is GpuSchedulerService);
+        Assert.Contains(provider.GetServices<IHostedService>(), service => service is GpuExecutorDispatchRecoveryService);
+        Assert.Contains(provider.GetServices<IHostedService>(), service => service is PaddleOcrVlmCompletionRecoveryService);
+        WebHostComposition.ValidateNativeGoLiveComposition(services, configuration);
     }
 
     [Fact]
@@ -666,6 +705,7 @@ public sealed class WebHostCompositionTests : IDisposable
             workers.OrderBy(worker => worker.Operation, StringComparer.Ordinal),
             worker => Assert.IsType<CanonicalIndexStageWorker>(worker),
             worker => Assert.IsType<EmbedStageWorker>(worker),
+            worker => Assert.IsType<ExtractDocumentStageWorker>(worker),
             worker => Assert.IsType<ExtractUtf8StageWorker>(worker),
             worker => Assert.IsType<NormaliseTextStageWorker>(worker),
             worker => Assert.IsType<PublishStageWorker>(worker));
@@ -765,6 +805,7 @@ public sealed class WebHostCompositionTests : IDisposable
                 .OrderBy(worker => worker.Operation, StringComparer.Ordinal),
             worker => Assert.IsType<CanonicalIndexStageWorker>(worker),
             worker => Assert.IsType<EmbedStageWorker>(worker),
+            worker => Assert.IsType<ExtractDocumentStageWorker>(worker),
             worker => Assert.IsType<ExtractUtf8StageWorker>(worker),
             worker => Assert.IsType<NormaliseTextStageWorker>(worker),
             worker => Assert.IsType<PublishStageWorker>(worker));

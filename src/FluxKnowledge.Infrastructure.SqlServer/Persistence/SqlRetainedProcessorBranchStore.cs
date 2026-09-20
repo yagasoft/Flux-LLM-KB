@@ -7,6 +7,7 @@ using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Storage;
 using System.Data;
+using FluxKnowledge.Application.Documents;
 
 namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
 
@@ -971,6 +972,8 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
         var extensions = capability.ProcessorKind switch
         {
             "document-ooxml-structural-extract" => new[] { ".docx", ".xlsx", ".pptx" },
+            "document-vsdx-structural-extract" => new[] { ".vsdx" },
+            "document-pdf-structural-extract" => new[] { ".pdf" },
             "retained-csharp-code" => new[] { ".cs" },
             "media-metadata" => new[] { ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tif", ".tiff", ".webp", ".mp3", ".wav", ".mov", ".mp4", ".m4v" },
             "archive-zip-expand" => Array.Empty<string>(),
@@ -991,7 +994,7 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
                                 EF.Functions.Collate(activity.InputFingerprint, SchemaConfiguration.SchedulerFenceCollation) &&
                             !context.SourceProcessorBranches.Any(branch => branch.SourceActivityId == activity.Id)
                       select new { activity, revision, artifact };
-        if (capability.ProcessorKind == "document-ooxml-structural-extract")
+        if (capability.ProcessorKind is "document-ooxml-structural-extract" or "document-vsdx-structural-extract" or "document-pdf-structural-extract")
             candidates = candidates.Where(value => extensions.Contains(value.revision.Extension.ToLower()));
         else if (capability.ProcessorKind == "media-metadata")
             candidates = candidates.Where(value => extensions.Contains(value.revision.Extension.ToLower()));
@@ -1005,7 +1008,7 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
                 value.activity.RequiredCapability == RetainedCsharpCodeProcessor.ProcessorKind &&
                 value.activity.Reason == "csharp-code-writer-not-ready");
         else if (capability.ProcessorKind == "archive-zip-expand")
-            candidates = candidates.Where(value => !new[] { ".docx", ".xlsx", ".pptx", ".doc", ".xls", ".ppt" }.Contains(value.revision.Extension.ToLower()));
+            candidates = candidates.Where(value => !new[] { ".docx", ".xlsx", ".pptx", ".vsdx", ".doc", ".xls", ".ppt" }.Contains(value.revision.Extension.ToLower()));
         return await candidates.OrderBy(value => value.activity.CreatedAtUtc).ThenBy(value => value.activity.Id)
             .Select(value => new RetainedProcessorPromotionCandidate(value.activity.Id, new SourceRevisionId(value.activity.SourceRevisionId), value.activity.InputFingerprint, value.revision.Extension))
             .Take(Math.Clamp(maximumCount, 1, RetainedProcessorOptions.MaximumAutomaticReplayBatchSize)).ToListAsync(cancellationToken).ConfigureAwait(false);
@@ -1775,6 +1778,8 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
                    OR ([State] = {(int)RetainedProcessorBranchState.Running} AND [LeaseExpiresAtUtc] < TODATETIMEOFFSET(SYSUTCDATETIME(), '+00:00')))
                   AND ({processorFingerprint} IS NULL OR [ProcessorFingerprint] = {processorFingerprint})
                   AND [ProcessorFingerprint] <> {RetainedCsharpCodeProcessor.Capability.ProcessorFingerprint}
+                  AND [ProcessorFingerprint] <> {VsdxStructuralTextProcessor.Capability.ProcessorFingerprint}
+                  AND [ProcessorFingerprint] <> {PdfDocumentProcessor.Capability.ProcessorFingerprint}
                   AND NOT EXISTS (
                       SELECT 1
                       FROM [SourceProcessorForceRequests] AS [force] WITH (UPDLOCK, HOLDLOCK)
@@ -1847,7 +1852,22 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
                 """)
             .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
         if (branch is null) return false;
-        var parent = await context.SourceRevisions.SingleAsync(value => value.Id == branch.SourceRevisionId, cancellationToken).ConfigureAwait(false);
+        var parent = await context.SourceRevisions.FromSqlInterpolated($"""
+            SELECT *
+            FROM [SourceRevisions] WITH (UPDLOCK, HOLDLOCK)
+            WHERE [Id] = {branch.SourceRevisionId}
+              AND [SuppressedAtUtc] IS NULL
+            """).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+        if (parent is null) return false;
+        var parentArtifact = await context.SourceArtifacts.SingleOrDefaultAsync(
+            value => value.SourceRevisionId == parent.Id,
+            cancellationToken).ConfigureAwait(false);
+        if (parentArtifact is null ||
+            !string.Equals(parentArtifact.ContentSha256, parent.ContentSha256, StringComparison.Ordinal) ||
+            parentArtifact.ByteLength != parent.ByteLength)
+        {
+            throw new InvalidOperationException("The retained document parent artifact is not bound to its source revision.");
+        }
         var memberOutcomes = completion.MemberOutcomes ?? [];
         var memberFingerprints = new HashSet<string>(StringComparer.Ordinal);
         if (completion.Members.Any(member => !memberFingerprints.Add(member.MemberFingerprint)) ||
@@ -1857,6 +1877,19 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
         }
         foreach (var member in completion.Members)
         {
+            var isDocumentInput = DocumentProcessingInput.TryGetContract(
+                member.Classification, member.Extension, out var documentContract);
+            if (isDocumentInput &&
+                (branch.ProcessorFingerprint != documentContract.ParentProcessorFingerprint ||
+                 branch.ProcessorVersion != documentContract.ParentProcessorVersion ||
+                 completion.Members.Count != 1 ||
+                 member.OriginKind != 2 ||
+                 !string.IsNullOrEmpty(member.StoreRelativePath) ||
+                 !string.Equals(member.ContentSha256, parentArtifact.ContentSha256, StringComparison.Ordinal) ||
+                 member.ByteLength != parentArtifact.ByteLength))
+            {
+                throw new InvalidOperationException("A document processing input must be the exact retained document parent artifact.");
+            }
             var child = await context.SourceRevisions.SingleOrDefaultAsync(value =>
                 value.ParentSourceRevisionId == parent.Id && value.StableSourceIdentity == member.StableSourceIdentity, cancellationToken).ConfigureAwait(false);
             if (child is null)
@@ -1871,14 +1904,20 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
                 };
                 context.SourceRevisions.Add(child);
                 context.SourceArtifacts.Add(new SourceArtifactEntity { Id = Guid.NewGuid(), SourceRevisionId = child.Id, ContentSha256 = member.ContentSha256,
-                    StoreRelativePath = member.StoreRelativePath, ByteLength = member.ByteLength, ChecksumVerifiedAtUtc = now, ReferenceCount = 1 });
+                    StoreRelativePath = isDocumentInput ? parentArtifact.StoreRelativePath : member.StoreRelativePath,
+                    ByteLength = member.ByteLength, ChecksumVerifiedAtUtc = now, ReferenceCount = 1 });
             }
+            var childActivityKind = isDocumentInput ? SourceActivityKind.DocumentParsing : SourceActivityKind.TextExtraction;
+            var childProcessorVersion = isDocumentInput ? documentContract.ProcessorVersion : "phase-3a-v1";
+            var childDescriptorFingerprint = isDocumentInput ? documentContract.ProcessorFingerprint : SourceActivityEntity.LegacyDescriptorFingerprint;
             var childActivity = await context.SourceActivities.SingleOrDefaultAsync(value => value.SourceRevisionId == child.Id &&
-                value.ActivityKind == (int)SourceActivityKind.TextExtraction && value.ProcessorVersion == "phase-3a-v1" && value.InputFingerprint == member.ContentSha256, cancellationToken).ConfigureAwait(false);
+                value.ActivityKind == (int)childActivityKind && value.ProcessorVersion == childProcessorVersion &&
+                value.DescriptorFingerprint == childDescriptorFingerprint && value.InputFingerprint == member.ContentSha256, cancellationToken).ConfigureAwait(false);
             if (childActivity is null)
             {
-                childActivity = new SourceActivityEntity { Id = Guid.NewGuid(), SourceRevisionId = child.Id, ActivityKind = (int)SourceActivityKind.TextExtraction,
-                    ExecutionClass = (int)ExecutionClass.InProcess, ProcessorVersion = "phase-3a-v1", InputFingerprint = member.ContentSha256,
+                childActivity = new SourceActivityEntity { Id = Guid.NewGuid(), SourceRevisionId = child.Id, ActivityKind = (int)childActivityKind,
+                    ExecutionClass = (int)ExecutionClass.InProcess, ProcessorVersion = childProcessorVersion,
+                    DescriptorFingerprint = childDescriptorFingerprint, InputFingerprint = member.ContentSha256,
                     State = (int)SourceActivityState.Pending, CreatedAtUtc = now, UpdatedAtUtc = now };
                 context.SourceActivities.Add(childActivity);
             }
@@ -2251,6 +2290,307 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
             return new ArchiveZipMemberEncodingFailureReconciliationResult(true, false, successorBranch.Id);
         }, cancellationToken).ConfigureAwait(false);
     }
+
+    /// <summary>
+    /// Creates one document-owned successor for an explicitly named retained VSDX or PDF
+    /// source. The predecessor is retained as immutable historical ownership.
+    /// </summary>
+    public async ValueTask<DocumentReprocessRequestResult> RequestDocumentReprocessAsync(
+        DocumentReprocessRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (!TryGetExactDocumentDescriptor(request.ExpectedProcessorFingerprint, out var descriptor) ||
+            request.SourceRevisionId.Value == Guid.Empty || !IsCanonicalSha256(request.ExpectedInputSha256))
+        {
+            return DocumentReprocessRequestResult.NotEligible;
+        }
+
+        return await ExecuteWithRetryAsync(async () =>
+        {
+            await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+            await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken).ConfigureAwait(false);
+            var revision = await context.SourceRevisions.FromSqlInterpolated($"""
+                SELECT * FROM [SourceRevisions] WITH (UPDLOCK, HOLDLOCK)
+                WHERE [Id] = {request.SourceRevisionId.Value}
+                  AND [ContentSha256] = {request.ExpectedInputSha256}
+                  AND [SuppressedAtUtc] IS NULL
+                  AND [ParentSourceRevisionId] IS NULL
+                """).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+            if (revision is null || !HasExpectedDocumentExtension(revision.Extension, descriptor))
+            {
+                return DocumentReprocessRequestResult.NotEligible;
+            }
+
+            var root = await context.SourceRootConfigurations.FromSqlInterpolated($"""
+                SELECT * FROM [SourceRootConfigurations] WITH (UPDLOCK, HOLDLOCK)
+                WHERE [Id] = {revision.SourceRootId}
+                  AND [State] = {(int)SourceRootState.Enabled}
+                """).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+            var artifact = await context.SourceArtifacts.FromSqlInterpolated($"""
+                SELECT * FROM [SourceArtifacts] WITH (UPDLOCK, HOLDLOCK)
+                WHERE [SourceRevisionId] = {revision.Id}
+                  AND [ContentSha256] = {request.ExpectedInputSha256}
+                  AND [ByteLength] = {revision.ByteLength}
+                """).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+            if (root is null || artifact is null ||
+                !await IsExactDocumentDescriptorRunnableAsync(context, descriptor, cancellationToken).ConfigureAwait(false))
+            {
+                return DocumentReprocessRequestResult.NotEligible;
+            }
+
+            const string reasonCode = "superseded-by-exact-document-reprocess-v1";
+            var existing = await (from relation in context.SourceActivityRelations
+                                  join existingActivity in context.SourceActivities on relation.SuccessorActivityId equals existingActivity.Id
+                                  join existingBranch in context.SourceProcessorBranches on existingActivity.Id equals existingBranch.SourceActivityId
+                                  where existingActivity.SourceRevisionId == revision.Id &&
+                                        relation.RelationshipKind == "superseded-by-retained-processor" &&
+                                        relation.ReasonCode == reasonCode &&
+                                        existingBranch.InputSha256 == request.ExpectedInputSha256 &&
+                                        existingBranch.ProcessorVersion == descriptor.ProcessorVersion &&
+                                        existingBranch.ProcessorFingerprint == descriptor.ProcessorFingerprint
+                                  select existingBranch).ToListAsync(cancellationToken).ConfigureAwait(false);
+            if (existing.Count == 1)
+            {
+                await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+                return new DocumentReprocessRequestResult(false, true, existing[0].Id);
+            }
+            if (existing.Count != 0 || await context.SourceProcessorBranches.AnyAsync(value =>
+                    value.SourceRevisionId == revision.Id &&
+                    value.InputSha256 == request.ExpectedInputSha256 &&
+                    value.ProcessorFingerprint == descriptor.ProcessorFingerprint &&
+                    (value.State == (int)RetainedProcessorBranchState.Pending || value.State == (int)RetainedProcessorBranchState.Running), cancellationToken).ConfigureAwait(false))
+            {
+                return DocumentReprocessRequestResult.NotEligible;
+            }
+
+            var terminalLegacyBranches = await (from branch in context.SourceProcessorBranches
+                                                join activity in context.SourceActivities on branch.SourceActivityId equals activity.Id
+                                                where branch.SourceRevisionId == revision.Id &&
+                                                      branch.InputSha256 == request.ExpectedInputSha256 &&
+                                                      branch.State == (int)RetainedProcessorBranchState.Blocked &&
+                                                      branch.ProcessorVersion == "phase-5-zip-v1" &&
+                                                      branch.ProcessorFingerprint == "phase-5-zip-retained-archive-v1" &&
+                                                      activity.SourceRevisionId == revision.Id &&
+                                                      activity.ActivityKind == (int)SourceActivityKind.ArchiveExpansion &&
+                                                      activity.ExecutionClass == (int)ExecutionClass.InProcess &&
+                                                      activity.ProcessorVersion == "phase-5-zip-v1" &&
+                                                      activity.InputFingerprint == request.ExpectedInputSha256 &&
+                                                      !context.SourceActivityRelations.Any(relation =>
+                                                          relation.PredecessorActivityId == activity.Id) &&
+                                                      context.SourceProcessorAttempts.Any(attempt =>
+                                                          attempt.BranchId == branch.Id &&
+                                                          attempt.LeaseGeneration == branch.LeaseGeneration &&
+                                                          attempt.FinishedAtUtc != null &&
+                                                          attempt.OutcomeCode == "archive-member-not-utf8")
+                                                select activity).ToListAsync(cancellationToken).ConfigureAwait(false);
+            var deferredDocumentActivities = await context.SourceActivities.FromSqlInterpolated($"""
+                SELECT * FROM [SourceActivities] WITH (UPDLOCK, HOLDLOCK)
+                WHERE [SourceRevisionId] = {revision.Id}
+                  AND [ActivityKind] = {(int)SourceActivityKind.DocumentParsing}
+                  AND [ExecutionClass] = {(int)ExecutionClass.DeferredCapability}
+                  AND [InputFingerprint] = {request.ExpectedInputSha256}
+                  AND [State] = {(int)SourceActivityState.DeferredUnsupported}
+                  AND NOT EXISTS (
+                      SELECT 1 FROM [SourceProcessorBranches] WITH (UPDLOCK, HOLDLOCK)
+                      WHERE [SourceActivityId] = [SourceActivities].[Id])
+                  AND NOT EXISTS (
+                      SELECT 1 FROM [SourceActivityRelations] WITH (UPDLOCK, HOLDLOCK)
+                      WHERE [PredecessorActivityId] = [SourceActivities].[Id])
+                """).ToListAsync(cancellationToken).ConfigureAwait(false);
+            var predecessors = terminalLegacyBranches.Concat(deferredDocumentActivities).ToArray();
+            if (predecessors.Length != 1)
+            {
+                return DocumentReprocessRequestResult.NotEligible;
+            }
+
+            var predecessor = predecessors[0];
+            var now = await DatabaseUtcNowAsync(context, cancellationToken).ConfigureAwait(false);
+            var successorActivity = new SourceActivityEntity
+            {
+                Id = Guid.NewGuid(),
+                SourceRevisionId = revision.Id,
+                ActivityKind = (int)descriptor.AcceptedActivityKind,
+                ExecutionClass = (int)ExecutionClass.InProcess,
+                ProcessorVersion = descriptor.ProcessorVersion,
+                InputFingerprint = request.ExpectedInputSha256,
+                DescriptorFingerprint = SourceActivityEntity.LegacyDescriptorFingerprint,
+                State = (int)SourceActivityState.Pending,
+                CreatedAtUtc = now,
+                UpdatedAtUtc = now
+            };
+            var successorBranch = new SourceProcessorBranchEntity
+            {
+                Id = Guid.NewGuid(),
+                SourceActivityId = successorActivity.Id,
+                SourceRevisionId = revision.Id,
+                InputSha256 = request.ExpectedInputSha256,
+                ProcessorVersion = descriptor.ProcessorVersion,
+                ProcessorFingerprint = descriptor.ProcessorFingerprint,
+                State = (int)RetainedProcessorBranchState.Pending,
+                CreatedAtUtc = now,
+                UpdatedAtUtc = now
+            };
+            context.SourceActivities.Add(successorActivity);
+            context.SourceProcessorBranches.Add(successorBranch);
+            context.SourceActivityRelations.Add(new SourceActivityRelationEntity
+            {
+                Id = Guid.NewGuid(),
+                PredecessorActivityId = predecessor.Id,
+                SuccessorActivityId = successorActivity.Id,
+                RelationshipKind = "superseded-by-retained-processor",
+                ReasonCode = reasonCode,
+                CreatedAtUtc = now
+            });
+            OperatorEventAppender.Add(context, new OperatorEventDraft(
+                "retained_processor.document_reprocess_requested", "retained_processor", "information", "trusted-local-cli",
+                now, SourceRootId: revision.SourceRootId, SourceRevisionId: revision.Id, SourceActivityId: successorActivity.Id,
+                CorrelationId: $"retained-processor:{successorBranch.Id:N}",
+                Details: new { kind = EventKind(descriptor.ProcessorFingerprint), predecessorActivityId = predecessor.Id, successorBranchId = successorBranch.Id }));
+            await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            return new DocumentReprocessRequestResult(true, false, successorBranch.Id);
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Claims one exact document-owned successor and no other processor work.</summary>
+    public async ValueTask<RetainedProcessorClaim?> ClaimDocumentBranchAsync(
+        Guid branchId,
+        SourceRevisionId expectedSourceRevisionId,
+        string expectedInputSha256,
+        string expectedProcessorFingerprint,
+        string leaseOwner,
+        CancellationToken cancellationToken)
+    {
+        if (branchId == Guid.Empty || expectedSourceRevisionId.Value == Guid.Empty ||
+            !IsCanonicalSha256(expectedInputSha256) || string.IsNullOrWhiteSpace(leaseOwner) ||
+            !TryGetExactDocumentDescriptor(expectedProcessorFingerprint, out var descriptor))
+        {
+            return null;
+        }
+
+        return await ExecuteWithRetryAsync(async () =>
+        {
+            await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+            await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken).ConfigureAwait(false);
+            var branch = await context.SourceProcessorBranches.FromSqlInterpolated($"""
+                SELECT * FROM [SourceProcessorBranches] WITH (UPDLOCK, HOLDLOCK)
+                WHERE [Id] = {branchId}
+                  AND [SourceRevisionId] = {expectedSourceRevisionId.Value}
+                  AND [InputSha256] = {expectedInputSha256}
+                  AND [ProcessorVersion] = {descriptor.ProcessorVersion}
+                  AND [ProcessorFingerprint] = {descriptor.ProcessorFingerprint}
+                """).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+            if (branch is null)
+            {
+                return null;
+            }
+
+            var revision = await context.SourceRevisions.FromSqlInterpolated($"""
+                SELECT * FROM [SourceRevisions] WITH (UPDLOCK, HOLDLOCK)
+                WHERE [Id] = {expectedSourceRevisionId.Value}
+                  AND [ContentSha256] = {expectedInputSha256}
+                  AND [SuppressedAtUtc] IS NULL
+                  AND [ParentSourceRevisionId] IS NULL
+                """).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+            var root = revision is null ? null : await context.SourceRootConfigurations.FromSqlInterpolated($"""
+                SELECT * FROM [SourceRootConfigurations] WITH (UPDLOCK, HOLDLOCK)
+                WHERE [Id] = {revision.SourceRootId}
+                  AND [State] = {(int)SourceRootState.Enabled}
+                """).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+            var artifact = revision is null ? null : await context.SourceArtifacts.FromSqlInterpolated($"""
+                SELECT * FROM [SourceArtifacts] WITH (UPDLOCK, HOLDLOCK)
+                WHERE [SourceRevisionId] = {expectedSourceRevisionId.Value}
+                  AND [ContentSha256] = {expectedInputSha256}
+                  AND [ByteLength] = {revision.ByteLength}
+                """).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+            if (revision is null || root is null || artifact is null || !HasExpectedDocumentExtension(revision.Extension, descriptor) ||
+                !await IsExactDocumentDescriptorRunnableAsync(context, descriptor, cancellationToken).ConfigureAwait(false) ||
+                !await context.SourceActivityRelations.AnyAsync(value =>
+                    value.SuccessorActivityId == branch.SourceActivityId &&
+                    value.RelationshipKind == "superseded-by-retained-processor" &&
+                    value.ReasonCode == "superseded-by-exact-document-reprocess-v1", cancellationToken).ConfigureAwait(false))
+            {
+                return null;
+            }
+
+            var now = await DatabaseUtcNowAsync(context, cancellationToken).ConfigureAwait(false);
+            if (branch.State == (int)RetainedProcessorBranchState.Running)
+            {
+                if (branch.LeaseExpiresAtUtc is null || branch.LeaseExpiresAtUtc >= now)
+                {
+                    return null;
+                }
+
+                if (await context.Database.ExecuteSqlInterpolatedAsync($"""
+                    UPDATE [SourceProcessorAttempts]
+                    SET [FinishedAtUtc] = {now}, [OutcomeCode] = {"lease-expired-reconciled"}
+                    WHERE [BranchId] = {branch.Id}
+                      AND [LeaseGeneration] = {branch.LeaseGeneration}
+                      AND [FinishedAtUtc] IS NULL;
+                    """, cancellationToken).ConfigureAwait(false) != 1)
+                {
+                    throw new InvalidOperationException("The expired document reprocess attempt is missing or already finalised.");
+                }
+            }
+            else if (branch.State != (int)RetainedProcessorBranchState.Pending)
+            {
+                return null;
+            }
+
+            var expiry = now.AddMinutes(5);
+            branch.State = (int)RetainedProcessorBranchState.Running;
+            branch.LeaseOwner = leaseOwner;
+            branch.LeaseExpiresAtUtc = expiry;
+            branch.LeaseGeneration++;
+            branch.AttemptCount++;
+            branch.UpdatedAtUtc = now;
+            context.SourceProcessorAttempts.Add(new SourceProcessorAttemptEntity
+            {
+                Id = Guid.NewGuid(),
+                BranchId = branch.Id,
+                LeaseGeneration = branch.LeaseGeneration,
+                StartedAtUtc = now
+            });
+            await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            return new RetainedProcessorClaim(branch.Id, expectedSourceRevisionId, revision.StableSourceIdentity,
+                expectedInputSha256, leaseOwner, branch.LeaseGeneration, expiry);
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static bool TryGetExactDocumentDescriptor(string fingerprint, out SourceCapabilityDescriptor descriptor)
+    {
+        if (string.Equals(fingerprint, VsdxStructuralTextProcessor.Capability.ProcessorFingerprint, StringComparison.Ordinal))
+        {
+            descriptor = VsdxStructuralTextProcessor.Capability;
+            return true;
+        }
+        if (string.Equals(fingerprint, PdfDocumentProcessor.Capability.ProcessorFingerprint, StringComparison.Ordinal))
+        {
+            descriptor = PdfDocumentProcessor.Capability;
+            return true;
+        }
+
+        descriptor = default!;
+        return false;
+    }
+
+    private static bool HasExpectedDocumentExtension(string extension, SourceCapabilityDescriptor descriptor) =>
+        (descriptor.Id == VsdxStructuralTextProcessor.Capability.Id && string.Equals(extension, ".vsdx", StringComparison.OrdinalIgnoreCase)) ||
+        (descriptor.Id == PdfDocumentProcessor.Capability.Id && string.Equals(extension, ".pdf", StringComparison.OrdinalIgnoreCase));
+
+    private static async ValueTask<bool> IsExactDocumentDescriptorRunnableAsync(
+        FluxKnowledgeDbContext context,
+        SourceCapabilityDescriptor descriptor,
+        CancellationToken cancellationToken) =>
+        await context.SourceCapabilities.AsNoTracking().AnyAsync(value =>
+            value.Id == descriptor.Id &&
+            value.ProcessorKind == descriptor.ProcessorKind &&
+            value.ProcessorVersion == descriptor.ProcessorVersion &&
+            value.ProcessorFingerprint == descriptor.ProcessorFingerprint &&
+            value.ExecutionClass == (int)ExecutionClass.InProcess &&
+            value.OutputContract == descriptor.OutputContract &&
+            value.IsRunnable, cancellationToken).ConfigureAwait(false);
 
     private static string EventKind(string? processorFingerprint) => processorFingerprint switch
     {

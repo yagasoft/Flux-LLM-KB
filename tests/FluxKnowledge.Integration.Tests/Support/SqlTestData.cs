@@ -38,6 +38,15 @@ internal static class SqlTestData
                 .UseSqlServer(fixture.ConnectionString)
                 .Options);
         await context.AuditEvents.ExecuteDeleteAsync();
+        await context.DocumentPublications.ExecuteDeleteAsync();
+        await context.OperatorActionOperationLedger.ExecuteDeleteAsync();
+        await context.SourceProcessorActionIgnoreHeads.ExecuteDeleteAsync();
+        await context.OperatorActionActionLedger.ExecuteDeleteAsync();
+        await context.SourceProcessorForceRequests.ExecuteDeleteAsync();
+        await context.SourceProcessorAttempts.ExecuteDeleteAsync();
+        await context.SourceProcessorBranchMembers.ExecuteDeleteAsync();
+        await context.SourceProcessorBranches.ExecuteDeleteAsync();
+        await context.SourceActivityRelations.ExecuteDeleteAsync();
         await context.SourceActivities.ExecuteDeleteAsync();
         await context.GpuSchedulerOperationReceipts.ExecuteDeleteAsync();
         await context.NativeWorkerLifecycleEvidence.ExecuteDeleteAsync();
@@ -45,6 +54,7 @@ internal static class SqlTestData
         await context.GpuExecutorEvidence.ExecuteDeleteAsync();
         await context.GpuExecutorResultReceipts.ExecuteDeleteAsync();
         await context.GpuExecutorDispatches.ExecuteDeleteAsync();
+        await context.DocumentOcrRequests.ExecuteDeleteAsync();
         await context.GpuMiniTasks.ExecuteDeleteAsync();
         await context.GpuCapacitySlots
             .Where(slot => slot.ActiveBatchId != null)

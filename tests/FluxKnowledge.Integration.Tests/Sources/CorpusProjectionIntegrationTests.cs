@@ -64,6 +64,82 @@ public sealed class CorpusProjectionIntegrationTests(NativeSqlServerFixture fixt
     }
 
     [NativeSqlServerFact]
+    public async Task Selected_document_input_is_projected_once_as_its_physical_vsdx_owner()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var rootId = Guid.NewGuid();
+        var ownerRevisionId = Guid.NewGuid();
+        var documentInputRevisionId = Guid.NewGuid();
+        var ownerActivityId = Guid.NewGuid();
+        var documentActivityId = Guid.NewGuid();
+        var branchId = Guid.NewGuid();
+        var sourceIdentityId = Guid.NewGuid();
+        var recordId = Guid.NewGuid();
+        await using (var db = Context())
+        {
+            db.SourceRootConfigurations.Add(Root(rootId, now));
+            db.SourceIdentities.Add(Identity(sourceIdentityId, "hidden-document-input"));
+            db.SourceRevisions.AddRange(
+                new SourceRevisionEntity
+                {
+                    Id = ownerRevisionId, SourceRootId = rootId, StableSourceIdentity = "architecture",
+                    Revision = 1, ContentSha256 = new string('a', 64), CanonicalPath = "C:\\corpus\\diagrams\\architecture.vsdx",
+                    Classification = "VsdxDocumentContainer", Extension = ".vsdx", ByteLength = 101, DiscoveredAtUtc = now
+                },
+                new SourceRevisionEntity
+                {
+                    Id = documentInputRevisionId, SourceRootId = rootId, StableSourceIdentity = "hidden-document-input",
+                    Revision = 1, ContentSha256 = new string('a', 64), CanonicalPath = "C:\\retained\\hidden-document-input.vsdx",
+                    ParentSourceRevisionId = ownerRevisionId, Classification = "DocumentProcessingInput", Extension = ".vsdx",
+                    OriginKind = 2, ByteLength = 101, DiscoveredAtUtc = now
+                });
+            var record = Record(recordId, sourceIdentityId, now);
+            record.SourceRevisionId = documentInputRevisionId;
+            record.CurrentStage = 3;
+            db.PipelineRecords.Add(record);
+            db.SourceActivities.AddRange(
+                new SourceActivityEntity
+                {
+                    Id = ownerActivityId, SourceRevisionId = ownerRevisionId, ActivityKind = 1, ExecutionClass = 1,
+                    ProcessorVersion = "phase-6-vsdx-structural-v1", InputFingerprint = new string('b', 64),
+                    State = (int)SourceActivityState.Completed, CreatedAtUtc = now, UpdatedAtUtc = now
+                },
+                new SourceActivityEntity
+                {
+                    Id = documentActivityId, SourceRevisionId = documentInputRevisionId, ActivityKind = (int)SourceActivityKind.DocumentParsing, ExecutionClass = 1,
+                    ProcessorVersion = "phase-6-vsdx-document-v1", InputFingerprint = new string('c', 64),
+                    State = (int)SourceActivityState.Completed, ResultingPipelineRecordId = recordId, ResultingPipelineRecordRevision = 1,
+                    CreatedAtUtc = now, UpdatedAtUtc = now
+                });
+            db.SourceProcessorBranches.Add(new SourceProcessorBranchEntity
+            {
+                Id = branchId, SourceActivityId = ownerActivityId, SourceRevisionId = ownerRevisionId,
+                InputSha256 = new string('a', 64), ProcessorVersion = "phase-6-vsdx-structural-v1",
+                ProcessorFingerprint = "phase-6-vsdx-retained-structural-v1", State = (int)RetainedProcessorBranchState.Completed,
+                CreatedAtUtc = now, UpdatedAtUtc = now
+            });
+            db.DocumentPublications.Add(new DocumentPublicationEntity
+            {
+                OwnerSourceRevisionId = ownerRevisionId, DocumentInputSourceRevisionId = documentInputRevisionId,
+                SourceProcessorBranchId = branchId, PipelineRecordId = recordId, PipelineRecordRevision = 1,
+                ProcessorFingerprint = "phase-6-vsdx-retained-structural-v1", PublishedAtUtc = now
+            });
+            db.Artifacts.Add(Artifact(recordId, now, "selected document text"));
+            await db.SaveChangesAsync();
+        }
+
+        var page = await new SqlCorpusProjectionReader(Factory()).ReadPageAsync(new CorpusQuery(), CancellationToken.None);
+        var entry = Assert.Single(page.Items, item => item.PipelineRecordId == recordId);
+
+        Assert.Equal("diagrams\\architecture.vsdx", entry.Entry);
+        Assert.Equal("architecture.vsdx", entry.FileName);
+        Assert.Equal("Corpus\\diagrams", entry.Location);
+        Assert.Equal("VsdxDocumentContainer", entry.SourceClassification);
+        Assert.Equal("Indexed", entry.SourceActivityState);
+        Assert.DoesNotContain(page.Items, item => item.Entry.Contains("hidden-document-input", StringComparison.Ordinal));
+    }
+
+    [NativeSqlServerFact]
     public async Task Activity_state_uses_the_activity_linked_to_the_record_when_a_revision_has_multiple_activities()
     {
         var now = DateTimeOffset.UtcNow; var root = Guid.NewGuid(); var identity = Guid.NewGuid(); var otherIdentity = Guid.NewGuid(); var revision = Guid.NewGuid(); var record = Guid.NewGuid(); var other = Guid.NewGuid();

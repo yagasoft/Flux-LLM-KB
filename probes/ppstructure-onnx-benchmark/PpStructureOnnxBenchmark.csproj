@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../src/FluxKnowledge.Application/FluxKnowledge.Application.csproj" />
+    <ProjectReference Include="../../src/FluxKnowledge.Infrastructure.Inference/FluxKnowledge.Infrastructure.Inference.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="../../src/FluxKnowledge.Integrations/Windows/NativeGoLive/HandleRelativeNativeFileSystem.cs" Link="Native/HandleRelativeNativeFileSystem.cs" />
+    <Compile Include="../../src/FluxKnowledge.Integrations/Windows/NativeGoLive/HandleRelativeNativeFileSystem.ModelStore.cs" Link="Native/HandleRelativeNativeFileSystem.ModelStore.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="ppstructure_driver.py" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

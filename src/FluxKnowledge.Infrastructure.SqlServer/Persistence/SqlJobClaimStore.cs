@@ -191,12 +191,12 @@ public sealed class SqlJobClaimStore(
              INNER JOIN @claimed AS [claimed]
                  ON [activity].[ResultingPipelineRecordId] = [claimed].[PipelineRecordId]
                 AND [activity].[ResultingPipelineRecordRevision] = [claimed].[SourceRevision]
-             WHERE [claimed].[Operation] = @extractOperation
+             WHERE [claimed].[Operation] IN (@extractOperation, @documentExtractOperation)
                AND [claimed].[Stage] = @extractStage
                AND
                (
                    ([activity].[ExecutionClass] = @sourceInProcess AND
-                    [activity].[ActivityKind] IN (@sourceTextExtraction, @sourceMetadataExtraction) AND
+                    [activity].[ActivityKind] IN (@sourceTextExtraction, @sourceMetadataExtraction, @sourceDocumentParsing) AND
                     [activity].[State] IN (@sourcePending, @sourceRunning, @sourceFailedRetryable))
                    OR
                    ([activity].[ExecutionClass] = @sourceDeferredCapability AND
@@ -229,6 +229,7 @@ public sealed class SqlJobClaimStore(
         AddParameter(command, "@queuedState", SqlDbType.Int, (int)queuedState);
         AddParameter(command, "@processingState", SqlDbType.Int, (int)processingState);
         AddParameter(command, "@extractOperation", SqlDbType.NVarChar, PipelineOperations.ExtractUtf8, 128);
+        AddParameter(command, "@documentExtractOperation", SqlDbType.NVarChar, PipelineOperations.ExtractDocument, 128);
         AddParameter(command, "@extractStage", SqlDbType.Int, (int)PipelineStage.Extract);
         AddParameter(command, "@sourcePending", SqlDbType.Int, (int)FluxKnowledge.Domain.Sources.SourceActivityState.Pending);
         AddParameter(command, "@sourceRunning", SqlDbType.Int, (int)FluxKnowledge.Domain.Sources.SourceActivityState.Running);
@@ -238,6 +239,7 @@ public sealed class SqlJobClaimStore(
         AddParameter(command, "@sourceDeferredCapability", SqlDbType.Int, (int)FluxKnowledge.Domain.Sources.ExecutionClass.DeferredCapability);
         AddParameter(command, "@sourceTextExtraction", SqlDbType.Int, (int)FluxKnowledge.Domain.Sources.SourceActivityKind.TextExtraction);
         AddParameter(command, "@sourceMetadataExtraction", SqlDbType.Int, (int)FluxKnowledge.Domain.Sources.SourceActivityKind.MetadataExtraction);
+        AddParameter(command, "@sourceDocumentParsing", SqlDbType.Int, (int)FluxKnowledge.Domain.Sources.SourceActivityKind.DocumentParsing);
         AddParameter(command, "@sourceRootEnabled", SqlDbType.Int, (int)FluxKnowledge.Domain.Sources.SourceRootState.Enabled);
         if (dispatchMessage is not null)
         {

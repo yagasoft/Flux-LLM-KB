@@ -44,6 +44,9 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Migrations
                     b.Property<DateTimeOffset>("CreatedAtUtc")
                         .HasColumnType("datetimeoffset(7)");
 
+                    b.Property<string>("DocumentMetadataJson")
+                        .HasColumnType("nvarchar(max)");
+
                     b.Property<Guid>("PipelineRecordId")
                         .HasColumnType("uniqueidentifier");
 
@@ -66,6 +69,8 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Migrations
                     b.ToTable("Artifacts", null, t =>
                         {
                             t.HasCheckConstraint("CK_Artifacts_ContentHash", "LEN([ContentHash]) = 64 AND [ContentHash] COLLATE Latin1_General_100_BIN2 NOT LIKE '%[^0-9a-f]%'");
+
+                            t.HasCheckConstraint("CK_Artifacts_DocumentMetadataJson_Bounded", "[DocumentMetadataJson] IS NULL OR DATALENGTH([DocumentMetadataJson]) <= 4194304");
                         });
                 });
 
@@ -195,6 +200,135 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Migrations
                         .IsUnique();
 
                     b.ToTable("DeferredCapabilities", (string)null);
+                });
+
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.DocumentOcrRequestEntity", b =>
+                {
+                    b.Property<Guid>("MiniTaskId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("ContentSha256")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .IsUnicode(false)
+                        .HasColumnType("char(64)")
+                        .IsFixedLength()
+                        .UseCollation("Latin1_General_100_BIN2");
+
+                    b.Property<DateTimeOffset>("CreatedAtUtc")
+                        .HasColumnType("datetimeoffset(7)");
+
+                    b.Property<string>("ModelRuntimeKey")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)")
+                        .UseCollation("Latin1_General_100_BIN2");
+
+                    b.Property<Guid>("ParentJobId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("PipelineRecordId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("RequestedPageIndexesJson")
+                        .IsRequired()
+                        .HasMaxLength(8192)
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<byte[]>("ResultDigest")
+                        .HasColumnType("varbinary(max)");
+
+                    b.Property<string>("ResultJson")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<Guid>("RetainedSourceRevisionId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<byte[]>("RowVersion")
+                        .IsConcurrencyToken()
+                        .IsRequired()
+                        .ValueGeneratedOnAddOrUpdate()
+                        .HasColumnType("rowversion");
+
+                    b.Property<string>("SettingsFingerprint")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)")
+                        .UseCollation("Latin1_General_100_BIN2");
+
+                    b.Property<long>("SourceRevision")
+                        .HasColumnType("bigint");
+
+                    b.Property<int>("State")
+                        .HasColumnType("int");
+
+                    b.Property<DateTimeOffset>("UpdatedAtUtc")
+                        .HasColumnType("datetimeoffset(7)");
+
+                    b.HasKey("MiniTaskId");
+
+                    b.HasIndex("ParentJobId", "State");
+
+                    b.HasIndex("PipelineRecordId", "SourceRevision", "State");
+
+                    b.ToTable("DocumentOcrRequests", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_DocumentOcrRequests_ContentSha256", "LEN([ContentSha256]) = 64 AND [ContentSha256] COLLATE Latin1_General_100_BIN2 NOT LIKE '%[^0-9a-f]%'");
+
+                            t.HasCheckConstraint("CK_DocumentOcrRequests_ModelRuntimeKey_NoTrailingWhitespace", "DATALENGTH([ModelRuntimeKey]) > 0 AND UNICODE(RIGHT([ModelRuntimeKey], 1)) NOT IN (9, 10, 11, 12, 13, 32, 133, 160, 5760, 8192, 8193, 8194, 8195, 8196, 8197, 8198, 8199, 8200, 8201, 8202, 8232, 8233, 8239, 8287, 12288)");
+
+                            t.HasCheckConstraint("CK_DocumentOcrRequests_RequestedPages_Bounded", "DATALENGTH([RequestedPageIndexesJson]) > 0 AND DATALENGTH([RequestedPageIndexesJson]) <= 8192");
+
+                            t.HasCheckConstraint("CK_DocumentOcrRequests_ResultDigest_Length", "[ResultDigest] IS NULL OR DATALENGTH([ResultDigest]) = 32");
+
+                            t.HasCheckConstraint("CK_DocumentOcrRequests_ResultJson_Bounded", "[ResultJson] IS NULL OR DATALENGTH([ResultJson]) <= 4194304");
+
+                            t.HasCheckConstraint("CK_DocumentOcrRequests_SettingsFingerprint_NoTrailingWhitespace", "DATALENGTH([SettingsFingerprint]) > 0 AND UNICODE(RIGHT([SettingsFingerprint], 1)) NOT IN (9, 10, 11, 12, 13, 32, 133, 160, 5760, 8192, 8193, 8194, 8195, 8196, 8197, 8198, 8199, 8200, 8201, 8202, 8232, 8233, 8239, 8287, 12288)");
+                        });
+                });
+
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.DocumentPublicationEntity", b =>
+                {
+                    b.Property<Guid>("OwnerSourceRevisionId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("DocumentInputSourceRevisionId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("PipelineRecordId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<long>("PipelineRecordRevision")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("ProcessorFingerprint")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)")
+                        .UseCollation("Latin1_General_100_BIN2");
+
+                    b.Property<DateTimeOffset>("PublishedAtUtc")
+                        .HasColumnType("datetimeoffset(7)");
+
+                    b.Property<byte[]>("RowVersion")
+                        .IsConcurrencyToken()
+                        .IsRequired()
+                        .ValueGeneratedOnAddOrUpdate()
+                        .HasColumnType("rowversion");
+
+                    b.Property<Guid>("SourceProcessorBranchId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.HasKey("OwnerSourceRevisionId");
+
+                    b.HasIndex("DocumentInputSourceRevisionId");
+
+                    b.HasIndex("SourceProcessorBranchId");
+
+                    b.HasIndex("PipelineRecordId", "PipelineRecordRevision", "DocumentInputSourceRevisionId")
+                        .IsUnique();
+
+                    b.ToTable("DocumentPublications", (string)null);
                 });
 
             modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.GpuBatchEntity", b =>
@@ -4189,6 +4323,34 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Migrations
                     b.HasOne("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.SourceRevisionEntity", null)
                         .WithMany()
                         .HasForeignKey("SourceRevisionId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.DocumentPublicationEntity", b =>
+                {
+                    b.HasOne("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.SourceRevisionEntity", null)
+                        .WithMany()
+                        .HasForeignKey("DocumentInputSourceRevisionId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.SourceRevisionEntity", null)
+                        .WithMany()
+                        .HasForeignKey("OwnerSourceRevisionId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.SourceProcessorBranchEntity", null)
+                        .WithMany()
+                        .HasForeignKey("SourceProcessorBranchId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.PipelineRecordEntity", null)
+                        .WithMany()
+                        .HasForeignKey("PipelineRecordId", "PipelineRecordRevision")
+                        .HasPrincipalKey("Id", "Revision")
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
                 });

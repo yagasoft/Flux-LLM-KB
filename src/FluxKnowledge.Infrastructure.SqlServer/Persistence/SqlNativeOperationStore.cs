@@ -5,6 +5,7 @@ using FluxKnowledge.Application.IntegrationV1.Code;
 using FluxKnowledge.Application.Contracts;
 using FluxKnowledge.Application.Knowledge;
 using FluxKnowledge.Application.Ports;
+using FluxKnowledge.Application.Documents;
 using FluxKnowledge.Domain.Gpu;
 using FluxKnowledge.Domain.Knowledge;
 using FluxKnowledge.Domain.Sources;
@@ -592,11 +593,20 @@ public sealed class SqlNativeOperationStore(
                 .Where(value => value.PipelineRecord.SourceRevisionId.HasValue && deletingRevisionIds.Contains(value.PipelineRecord.SourceRevisionId.Value))
                 .Select(value => value.Id)
                 .ToArrayAsync(cancellationToken);
-            // GPU work has its own execution and receipt graph.  A source deletion does
-            // not own that graph, including terminal tasks, so reject it before fencing
-            // the source rather than leaving partially retained external execution state.
-            if (deletingJobIds.Length > 0 && await context.GpuMiniTasks.AnyAsync(value =>
-                    deletingJobIds.Contains(value.ParentJobId), cancellationToken))
+            // The deletion coordinator can drain the exact local OCR graph. Unknown
+            // or cross-source GPU ownership must still be refused before fencing.
+            if (deletingJobIds.Length > 0 && await context.GpuMiniTasks.AnyAsync(task =>
+                    deletingJobIds.Contains(task.ParentJobId) &&
+                    !context.DocumentOcrRequests.Any(request =>
+                        request.MiniTaskId == task.Id && request.ParentJobId == task.ParentJobId &&
+                        request.SourceRevision == task.SourceRevision &&
+                        request.ModelRuntimeKey == PaddleOcrVlmRuntimeContract.ModelRuntimeKey &&
+                        request.ModelRuntimeKey == task.ModelRuntimeKey &&
+                        request.SettingsFingerprint == task.SettingsFingerprint &&
+                        deletingRevisionIds.Contains(request.RetainedSourceRevisionId) &&
+                        context.Jobs.Any(job => job.Id == task.ParentJobId &&
+                            job.PipelineRecordId == request.PipelineRecordId && job.SourceRevision == request.SourceRevision)),
+                    cancellationToken))
             {
                 throw new NativeOperationException("source-delete-external-execution-owned");
             }

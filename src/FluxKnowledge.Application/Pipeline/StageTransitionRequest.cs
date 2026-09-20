@@ -11,7 +11,8 @@ public sealed record StageArtifact(
     string ContentHash,
     string ContentType,
     string SearchText,
-    DateTimeOffset CreatedAtUtc);
+    DateTimeOffset CreatedAtUtc,
+    string? DocumentMetadataJson = null);
 
 public sealed record IndexingStageOutput(
     IReadOnlyList<CanonicalTextChunk>? Chunks = null,

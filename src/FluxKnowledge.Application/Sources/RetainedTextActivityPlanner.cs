@@ -33,5 +33,5 @@ public sealed class RetainedTextActivityPlanner(
     private static bool IsSupportedInProcessTextActivity(SourceActivity activity) =>
         activity.ExecutionClass == ExecutionClass.InProcess &&
         activity.State == SourceActivityState.Pending &&
-        activity.Kind is SourceActivityKind.TextExtraction or SourceActivityKind.MetadataExtraction;
+        activity.Kind is SourceActivityKind.TextExtraction or SourceActivityKind.MetadataExtraction or SourceActivityKind.DocumentParsing;
 }

@@ -209,6 +209,32 @@ public sealed class ZipArchiveRetainedProcessorTests
     }
 
     [Fact]
+    public async Task Safe_archive_indexes_only_its_utf8_text_member_and_records_a_non_utf8_member_as_skipped()
+    {
+        var writer = new RecordingStreamWriter();
+        var archive = CreateZip(
+        [
+            ("notes.txt", Encoding.UTF8.GetBytes("permitted text")),
+            ("media/preview.bin", new byte[] { 0xff, 0xfe, 0x00, 0x80 })
+        ]);
+        var hash = Convert.ToHexStringLower(SHA256.HashData(archive));
+        var claim = new RetainedProcessorClaim(Guid.NewGuid(), SourceRevisionId.New(), "parent", hash, "owner", 1, DateTimeOffset.UtcNow.AddMinutes(5));
+
+        var completion = await new ZipArchiveRetainedProcessor(writer).ProcessAsync(
+            claim,
+            new RetainedSourceBytes(claim.SourceRevisionId, archive, hash, archive.Length),
+            new RetainedProcessorOptions(),
+            CancellationToken.None);
+
+        var member = Assert.Single(completion.Members);
+        Assert.Equal("AcceptedUtf8Text", member.Classification);
+        Assert.Equal(Encoding.UTF8.GetByteCount("permitted text"), writer.BytesWritten);
+        var skipped = Assert.Single(completion.MemberOutcomes ?? []);
+        Assert.Equal("skipped", skipped.Disposition);
+        Assert.Equal("archive-member-not-utf8", skipped.ReasonCode);
+    }
+
+    [Fact]
     public async Task Office_style_zip_member_at_the_measured_169_to_1_limit_is_processed()
     {
         var content = "<PageContents><Text>" + new string('x', 12_065) + "</Text></PageContents>";

@@ -108,6 +108,9 @@ public sealed class NativeSqlServerFixture : IAsyncLifetime
     internal async Task<PreviousMigrationDatabase> CreateRetainedCsharpLifecyclePreviousMigrationDatabaseAsync()
         => await CreateMigrationDatabaseAsync("20260820070404_HardenRetainedCsharpLifecycle").ConfigureAwait(false);
 
+    internal async Task<PreviousMigrationDatabase> CreateDocumentOcrPreviousMigrationDatabaseAsync()
+        => await CreateMigrationDatabaseAsync("20260918193207_AddDocumentPublicationSelector").ConfigureAwait(false);
+
     private async Task<PreviousMigrationDatabase> CreateMigrationDatabaseAsync(string targetMigration)
     {
         if (string.IsNullOrWhiteSpace(_serverConnectionString))

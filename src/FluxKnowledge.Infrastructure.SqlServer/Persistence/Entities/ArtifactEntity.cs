@@ -9,6 +9,7 @@ public sealed class ArtifactEntity
     public string ContentHash { get; set; } = string.Empty;
     public string ContentType { get; set; } = string.Empty;
     public string SearchText { get; set; } = string.Empty;
+    public string? DocumentMetadataJson { get; set; }
     public DateTimeOffset CreatedAtUtc { get; set; }
     public PipelineRecordEntity PipelineRecord { get; set; } = null!;
 }

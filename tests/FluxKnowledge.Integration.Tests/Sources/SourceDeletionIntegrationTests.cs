@@ -1,8 +1,16 @@
 using FluxKnowledge.Application.Sources;
 using FluxKnowledge.Application.Ports;
+using FluxKnowledge.Application.Documents;
+using FluxKnowledge.Application.Contracts;
+using FluxKnowledge.Application.IntegrationV1;
+using FluxKnowledge.Application.IntegrationV1.Corpus;
+using FluxKnowledge.Infrastructure.SqlServer.Visibility;
+using System.Text.Json;
+using FluxKnowledge.Domain.Gpu;
 using FluxKnowledge.Domain.Sources;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
+using FluxKnowledge.Infrastructure.SqlServer.Workers;
 using FluxKnowledge.Integration.Tests.Support;
 using Microsoft.EntityFrameworkCore;
 using Xunit;
@@ -126,6 +134,97 @@ public sealed class SourceDeletionIntegrationTests(NativeSqlServerFixture fixtur
         Assert.Equal("completed", receipt.Phase);
         Assert.Equal(3, receipt.State);
         Assert.Null(receipt.ReasonCode);
+    }
+
+    [NativeSqlServerFact]
+    public async Task Coordinator_removes_a_document_publication_before_its_owned_branch_record_and_revisions()
+    {
+        var now = DateTimeOffset.Parse("2026-09-18T11:02:00+00:00");
+        var deleting = await SeedRootAsync("document-publication", SourceRootState.Deleting, now);
+        var operationId = Guid.NewGuid();
+        var documentInputRevisionId = Guid.NewGuid();
+        var documentIdentityId = Guid.NewGuid();
+        var documentRecordId = Guid.NewGuid();
+        var ownerActivityId = Guid.NewGuid();
+        var documentActivityId = Guid.NewGuid();
+        var branchId = Guid.NewGuid();
+        await using (var setup = CreateContext())
+        {
+            setup.SourceDeletionOperations.Add(new SourceDeletionOperationEntity
+            {
+                Id = operationId, SourceRootId = deleting.RootId, State = 0, Phase = "accepted",
+                CreatedAtUtc = now, UpdatedAtUtc = now
+            });
+            setup.SourceIdentities.Add(new SourceIdentityEntity
+            {
+                Id = documentIdentityId, SourceKind = "retained local source", StableKey = "document-input",
+                CreatedAtUtc = now
+            });
+            setup.SourceRevisions.Add(new SourceRevisionEntity
+            {
+                Id = documentInputRevisionId, SourceRootId = deleting.RootId, StableSourceIdentity = "document-input",
+                Revision = 1, ContentSha256 = new string('a', 64),
+                CanonicalPath = $"C:\\retained\\{documentInputRevisionId:N}.vsdx", ParentSourceRevisionId = deleting.RevisionId,
+                Classification = "DocumentProcessingInput", Extension = ".vsdx", OriginKind = 2, ByteLength = 4,
+                DiscoveredAtUtc = now
+            });
+            setup.PipelineRecords.Add(new PipelineRecordEntity
+            {
+                Id = documentRecordId, SourceIdentityId = documentIdentityId, SourceRevisionId = documentInputRevisionId,
+                Revision = 1, ContentHash = new string('a', 64), RootLineageRecordId = documentRecordId,
+                CurrentStage = 3, RegisteredAtUtc = now
+            });
+            setup.SourceActivities.AddRange(
+                new SourceActivityEntity
+                {
+                    Id = ownerActivityId, SourceRevisionId = deleting.RevisionId,
+                    ActivityKind = (int)SourceActivityKind.ArchiveExpansion, ExecutionClass = 1,
+                    ProcessorVersion = "phase-6-vsdx-structural-v1", InputFingerprint = new string('a', 64),
+                    State = (int)SourceActivityState.Completed, CreatedAtUtc = now, UpdatedAtUtc = now
+                },
+                new SourceActivityEntity
+                {
+                    Id = documentActivityId, SourceRevisionId = documentInputRevisionId,
+                    ActivityKind = (int)SourceActivityKind.DocumentParsing, ExecutionClass = 1,
+                    ProcessorVersion = "phase-6-vsdx-document-v1", InputFingerprint = new string('a', 64),
+                    State = (int)SourceActivityState.Completed, ResultingPipelineRecordId = documentRecordId,
+                    ResultingPipelineRecordRevision = 1, CreatedAtUtc = now, UpdatedAtUtc = now
+                });
+            setup.SourceProcessorBranches.Add(new SourceProcessorBranchEntity
+            {
+                Id = branchId, SourceActivityId = ownerActivityId, SourceRevisionId = deleting.RevisionId,
+                InputSha256 = new string('a', 64), ProcessorVersion = "phase-6-vsdx-structural-v1",
+                ProcessorFingerprint = "phase-6-vsdx-retained-structural-v1",
+                State = (int)RetainedProcessorBranchState.Completed, CreatedAtUtc = now, UpdatedAtUtc = now
+            });
+            setup.SourceProcessorBranchMembers.Add(new SourceProcessorBranchMemberEntity
+            {
+                Id = Guid.NewGuid(), BranchId = branchId, MemberFingerprint = new string('b', 64),
+                ChildSourceRevisionId = documentInputRevisionId, ChildSourceActivityId = documentActivityId,
+                Disposition = "completed", ByteLength = 4, CreatedAtUtc = now
+            });
+            setup.DocumentPublications.Add(new DocumentPublicationEntity
+            {
+                OwnerSourceRevisionId = deleting.RevisionId, DocumentInputSourceRevisionId = documentInputRevisionId,
+                SourceProcessorBranchId = branchId, PipelineRecordId = documentRecordId, PipelineRecordRevision = 1,
+                ProcessorFingerprint = "phase-6-vsdx-retained-structural-v1", PublishedAtUtc = now
+            });
+            await setup.SaveChangesAsync();
+        }
+
+        var coordinator = new SourceDeletionCoordinator(new SqlSourceDeletionStore(
+            SqlTestData.CreateFactory(_fixture), TimeProvider.System));
+
+        Assert.True(await coordinator.RunOneAsync(CancellationToken.None));
+
+        await using var verification = CreateContext();
+        Assert.Null(await verification.SourceRootConfigurations.SingleOrDefaultAsync(value => value.Id == deleting.RootId));
+        Assert.DoesNotContain(await verification.DocumentPublications.ToListAsync(), value =>
+            value.OwnerSourceRevisionId == deleting.RevisionId || value.DocumentInputSourceRevisionId == documentInputRevisionId);
+        Assert.DoesNotContain(await verification.SourceProcessorBranches.ToListAsync(), value => value.Id == branchId);
+        Assert.DoesNotContain(await verification.PipelineRecords.ToListAsync(), value => value.Id == documentRecordId);
+        Assert.Equal("completed", await verification.SourceDeletionOperations.Where(value => value.Id == operationId)
+            .Select(value => value.Phase).SingleAsync());
     }
 
     [NativeSqlServerFact]
@@ -319,6 +418,145 @@ public sealed class SourceDeletionIntegrationTests(NativeSqlServerFixture fixtur
         Assert.Equal(4, operation.State);
         Assert.Equal("attention", operation.Phase);
         Assert.Equal("source-delete-external-execution-owned", operation.ReasonCode);
+    }
+
+    [NativeSqlServerTheory]
+    [InlineData("matching")]
+    [InlineData("missing")]
+    [InlineData("other-source")]
+    [InlineData("other-runtime")]
+    public async Task Public_delete_accepts_only_exact_source_bound_local_ocr_work(string binding)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var deleting = await SeedRootAsync("public-ocr-deleting", SourceRootState.Enabled, now);
+        var control = await SeedRootAsync("public-ocr-control", SourceRootState.Enabled, now);
+        var taskId = Guid.NewGuid();
+        await using (var setup = CreateContext())
+        {
+            AddLocalOcrTask(setup, deleting, taskId, GpuMiniTaskExecutionState.Completed, now);
+            AddLocalOcrTask(setup, control, Guid.NewGuid(), GpuMiniTaskExecutionState.Completed, now);
+            var request = setup.DocumentOcrRequests.Local.Single(value => value.MiniTaskId == taskId);
+            if (binding == "missing") setup.DocumentOcrRequests.Remove(request);
+            if (binding == "other-runtime") request.ModelRuntimeKey = "unknown-runtime";
+            if (binding == "other-source")
+            {
+                request.PipelineRecordId = control.RecordId;
+                request.RetainedSourceRevisionId = control.RevisionId;
+            }
+            await setup.SaveChangesAsync();
+        }
+        var factory = SqlTestData.CreateFactory(_fixture);
+        var service = new NativeCorpusCommandService(
+            new SqlNativeOperationStore(factory, TimeProvider.System),
+            new SqlNativeCorpusActionStore(factory, new NoRootCreationPolicy(), new LocalPrivateContentDisclosure()));
+        var mutation = new NativeCorpusMutation("root_delete", JsonSerializer.SerializeToElement(new { rootId = deleting.RootId }));
+        var preview = await service.PreviewAsync(mutation, "test", CancellationToken.None);
+        if (binding == "matching")
+        {
+            var receipt = await service.CommitAsync(mutation, preview.ConfirmationId, $"delete-ocr:{deleting.RootId:N}", "test", CancellationToken.None);
+            Assert.Equal("completed", receipt.Outcome);
+            Assert.True(await new SourceDeletionCoordinator(new SqlSourceDeletionStore(factory, TimeProvider.System)).RunOneAsync(CancellationToken.None));
+        }
+        else
+        {
+            var failure = await Assert.ThrowsAsync<NativeOperationException>(() => service.CommitAsync(
+                mutation, preview.ConfirmationId, $"delete-ocr:{deleting.RootId:N}", "test", CancellationToken.None).AsTask());
+            Assert.Equal("source-delete-external-execution-owned", failure.ReasonCode);
+        }
+        await using var verification = CreateContext();
+        Assert.Equal(binding != "matching", await verification.SourceRootConfigurations.AnyAsync(value => value.Id == deleting.RootId));
+        Assert.Equal(binding != "matching", await verification.GpuMiniTasks.AnyAsync(value => value.Id == taskId));
+        Assert.True(await verification.SourceRootConfigurations.AnyAsync(value => value.Id == control.RootId));
+        Assert.True(await verification.DocumentOcrRequests.AnyAsync(value => value.PipelineRecordId == control.RecordId));
+        Assert.True(await verification.GpuMiniTasks.AnyAsync(value => value.ParentJobId == control.JobId));
+    }
+
+    private sealed class NoRootCreationPolicy : ISourceRootPathPolicy
+    {
+        public SourceRootPathValidation ValidateAndCanonicalise(SourceRootCreateRequest request) => throw new NotSupportedException();
+    }
+
+    [NativeSqlServerFact]
+    public async Task Coordinator_purges_only_completed_local_ocr_execution_owned_by_the_deleting_source()
+    {
+        var now = DateTimeOffset.Parse("2026-09-20T15:30:00+00:00");
+        var deleting = await SeedRootAsync("local-ocr-deleting", SourceRootState.Deleting, now);
+        var control = await SeedRootAsync("local-ocr-control", SourceRootState.Enabled, now);
+        var operationId = Guid.NewGuid();
+        var deletingTaskId = Guid.NewGuid();
+        var orphanedDeletingRequestId = Guid.NewGuid();
+        var controlTaskId = Guid.NewGuid();
+        await using (var setup = CreateContext())
+        {
+            setup.SourceDeletionOperations.Add(new SourceDeletionOperationEntity
+            {
+                Id = operationId,
+                SourceRootId = deleting.RootId,
+                State = 0,
+                Phase = "accepted",
+                CreatedAtUtc = now,
+                UpdatedAtUtc = now
+            });
+            AddLocalOcrTask(setup, deleting, deletingTaskId, GpuMiniTaskExecutionState.Completed, now);
+            AddLocalOcrRequest(setup, deleting, orphanedDeletingRequestId, now);
+            AddLocalOcrTask(setup, control, controlTaskId, GpuMiniTaskExecutionState.Completed, now);
+            await setup.SaveChangesAsync();
+        }
+
+        var coordinator = new SourceDeletionCoordinator(
+            new SqlSourceDeletionStore(SqlTestData.CreateFactory(_fixture), TimeProvider.System));
+
+        Assert.True(await coordinator.RunOneAsync(CancellationToken.None));
+
+        await using var verification = CreateContext();
+        Assert.Null(await verification.SourceRootConfigurations.SingleOrDefaultAsync(value => value.Id == deleting.RootId));
+        Assert.Null(await verification.DocumentOcrRequests.SingleOrDefaultAsync(value => value.MiniTaskId == deletingTaskId));
+        Assert.Null(await verification.DocumentOcrRequests.SingleOrDefaultAsync(value => value.MiniTaskId == orphanedDeletingRequestId));
+        Assert.Null(await verification.GpuMiniTasks.SingleOrDefaultAsync(value => value.Id == deletingTaskId));
+        Assert.NotNull(await verification.SourceRootConfigurations.SingleOrDefaultAsync(value => value.Id == control.RootId));
+        Assert.NotNull(await verification.DocumentOcrRequests.SingleOrDefaultAsync(value => value.MiniTaskId == controlTaskId));
+        Assert.NotNull(await verification.GpuMiniTasks.SingleOrDefaultAsync(value => value.Id == controlTaskId));
+        Assert.Equal("completed", await verification.SourceDeletionOperations.Where(value => value.Id == operationId)
+            .Select(value => value.Phase).SingleAsync());
+    }
+
+    [NativeSqlServerFact]
+    public async Task Coordinator_requests_cooperative_stop_before_deleting_an_active_local_ocr_execution()
+    {
+        var now = DateTimeOffset.Parse("2026-09-20T15:35:00+00:00");
+        var deleting = await SeedRootAsync("local-ocr-active", SourceRootState.Deleting, now);
+        var operationId = Guid.NewGuid();
+        var miniTaskId = Guid.NewGuid();
+        await using (var setup = CreateContext())
+        {
+            setup.SourceDeletionOperations.Add(new SourceDeletionOperationEntity
+            {
+                Id = operationId,
+                SourceRootId = deleting.RootId,
+                State = 0,
+                Phase = "accepted",
+                CreatedAtUtc = now,
+                UpdatedAtUtc = now
+            });
+            AddLocalOcrTask(setup, deleting, miniTaskId, GpuMiniTaskExecutionState.Active, now);
+            await setup.SaveChangesAsync();
+        }
+
+        var executions = new PaddleOcrVlmExecutionRegistry();
+        using var execution = executions.Begin(miniTaskId);
+        var coordinator = new SourceDeletionCoordinator(new SqlSourceDeletionStore(
+            SqlTestData.CreateFactory(_fixture), TimeProvider.System, executions));
+
+        Assert.False(await coordinator.RunOneAsync(CancellationToken.None));
+        Assert.True(execution.IsCancellationRequested);
+
+        await using var verification = CreateContext();
+        Assert.NotNull(await verification.SourceRootConfigurations.SingleOrDefaultAsync(value => value.Id == deleting.RootId));
+        Assert.NotNull(await verification.DocumentOcrRequests.SingleOrDefaultAsync(value => value.MiniTaskId == miniTaskId));
+        Assert.NotNull(await verification.GpuMiniTasks.SingleOrDefaultAsync(value => value.Id == miniTaskId));
+        var operation = await verification.SourceDeletionOperations.SingleAsync(value => value.Id == operationId);
+        Assert.Equal(0, operation.State);
+        Assert.Equal("draining", operation.Phase);
     }
 
     [NativeSqlServerFact]
@@ -813,6 +1051,52 @@ public sealed class SourceDeletionIntegrationTests(NativeSqlServerFixture fixtur
             .Options);
 
     private sealed record SeededRoot(Guid RootId, Guid RevisionId, Guid RecordId, Guid JobId);
+
+    private static void AddLocalOcrTask(
+        FluxKnowledgeDbContext context,
+        SeededRoot root,
+        Guid miniTaskId,
+        GpuMiniTaskExecutionState executionState,
+        DateTimeOffset now)
+    {
+        context.GpuMiniTasks.Add(new GpuMiniTaskEntity
+        {
+            Id = miniTaskId,
+            ParentJobId = root.JobId,
+            SourceRevision = 1,
+            PriorityLane = 0,
+            ModelRuntimeKey = PaddleOcrVlmRuntimeContract.ModelRuntimeKey,
+            SettingsFingerprint = PaddleOcrVlmRuntimeContract.SettingsFingerprint,
+            EstimatedBytes = PaddleOcrVlmRuntimeContract.EstimatedDocumentBytes,
+            IdempotencyKey = $"source-delete-local-ocr:{root.RecordId:N}:{miniTaskId:N}",
+            ExecutionState = (int)executionState,
+            CreatedAtUtc = now
+        });
+        AddLocalOcrRequest(context, root, miniTaskId, now);
+    }
+
+    private static void AddLocalOcrRequest(
+        FluxKnowledgeDbContext context,
+        SeededRoot root,
+        Guid miniTaskId,
+        DateTimeOffset now)
+    {
+        context.DocumentOcrRequests.Add(new DocumentOcrRequestEntity
+        {
+            MiniTaskId = miniTaskId,
+            ParentJobId = root.JobId,
+            PipelineRecordId = root.RecordId,
+            SourceRevision = 1,
+            RetainedSourceRevisionId = root.RevisionId,
+            ContentSha256 = new string('a', 64),
+            RequestedPageIndexesJson = "[0]",
+            ModelRuntimeKey = PaddleOcrVlmRuntimeContract.ModelRuntimeKey,
+            SettingsFingerprint = PaddleOcrVlmRuntimeContract.SettingsFingerprint,
+            State = (int)DocumentOcrRequestState.Pending,
+            CreatedAtUtc = now,
+            UpdatedAtUtc = now
+        });
+    }
 
     private async Task<VectorEntity> AddVectorAsync(SeededRoot root, Guid generationId, string content, DateTimeOffset now)
     {

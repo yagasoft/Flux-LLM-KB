@@ -387,12 +387,19 @@ public sealed class ArtifactConfiguration : IEntityTypeConfiguration<ArtifactEnt
     {
         builder.ToTable(
             "Artifacts",
-            table => table.HasCheckConstraint("CK_Artifacts_ContentHash", SchemaConfiguration.Sha256Check));
+            table =>
+            {
+                table.HasCheckConstraint("CK_Artifacts_ContentHash", SchemaConfiguration.Sha256Check);
+                table.HasCheckConstraint(
+                    "CK_Artifacts_DocumentMetadataJson_Bounded",
+                    "[DocumentMetadataJson] IS NULL OR DATALENGTH([DocumentMetadataJson]) <= 4194304");
+            });
         builder.HasKey(entity => entity.Id).HasName("PK_Artifacts");
         builder.Property(entity => entity.Id).ValueGeneratedNever();
         SchemaConfiguration.ConfigureHash(builder.Property(entity => entity.ContentHash));
         builder.Property(entity => entity.ContentType).HasMaxLength(256).IsRequired();
         builder.Property(entity => entity.SearchText).HasColumnType("nvarchar(max)").IsRequired();
+        builder.Property(entity => entity.DocumentMetadataJson).HasColumnType("nvarchar(max)");
         builder.Property(entity => entity.CreatedAtUtc).HasColumnType("datetimeoffset(7)");
         builder.HasAlternateKey(entity => new { entity.Id, entity.SourceRevision });
         builder.HasIndex(entity => new { entity.PipelineRecordId, entity.SourceRevision, entity.Stage }).IsUnique();
@@ -401,6 +408,47 @@ public sealed class ArtifactConfiguration : IEntityTypeConfiguration<ArtifactEnt
             .HasForeignKey(entity => new { entity.PipelineRecordId, entity.SourceRevision })
             .HasPrincipalKey(entity => new { entity.Id, entity.Revision })
             .OnDelete(DeleteBehavior.Restrict);
+    }
+}
+
+public sealed class DocumentOcrRequestConfiguration : IEntityTypeConfiguration<DocumentOcrRequestEntity>
+{
+    public void Configure(EntityTypeBuilder<DocumentOcrRequestEntity> builder)
+    {
+        builder.ToTable(
+            "DocumentOcrRequests",
+            table =>
+            {
+                table.HasCheckConstraint("CK_DocumentOcrRequests_ContentSha256", SchemaConfiguration.Sha256CheckFor("ContentSha256"));
+                table.HasCheckConstraint(
+                    "CK_DocumentOcrRequests_RequestedPages_Bounded",
+                    "DATALENGTH([RequestedPageIndexesJson]) > 0 AND DATALENGTH([RequestedPageIndexesJson]) <= 8192");
+                table.HasCheckConstraint(
+                    "CK_DocumentOcrRequests_ResultJson_Bounded",
+                    "[ResultJson] IS NULL OR DATALENGTH([ResultJson]) <= 4194304");
+                table.HasCheckConstraint(
+                    "CK_DocumentOcrRequests_ResultDigest_Length",
+                    "[ResultDigest] IS NULL OR DATALENGTH([ResultDigest]) = 32");
+                table.HasCheckConstraint(
+                    "CK_DocumentOcrRequests_ModelRuntimeKey_NoTrailingWhitespace",
+                    SchemaConfiguration.NoTrailingWhitespaceCheckFor("ModelRuntimeKey", nullable: false));
+                table.HasCheckConstraint(
+                    "CK_DocumentOcrRequests_SettingsFingerprint_NoTrailingWhitespace",
+                    SchemaConfiguration.NoTrailingWhitespaceCheckFor("SettingsFingerprint", nullable: false));
+            });
+        builder.HasKey(entity => entity.MiniTaskId);
+        builder.Property(entity => entity.MiniTaskId).ValueGeneratedNever();
+        SchemaConfiguration.ConfigureHash(builder.Property(entity => entity.ContentSha256));
+        builder.Property(entity => entity.ContentSha256).UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(entity => entity.RequestedPageIndexesJson).HasMaxLength(8192).IsRequired();
+        builder.Property(entity => entity.ModelRuntimeKey).HasMaxLength(256).IsRequired().UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(entity => entity.SettingsFingerprint).HasMaxLength(256).IsRequired().UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(entity => entity.ResultJson).HasColumnType("nvarchar(max)");
+        builder.Property(entity => entity.CreatedAtUtc).HasColumnType("datetimeoffset(7)");
+        builder.Property(entity => entity.UpdatedAtUtc).HasColumnType("datetimeoffset(7)");
+        SchemaConfiguration.ConfigureRowVersion(builder.Property(entity => entity.RowVersion));
+        builder.HasIndex(entity => new { entity.PipelineRecordId, entity.SourceRevision, entity.State });
+        builder.HasIndex(entity => new { entity.ParentJobId, entity.State });
     }
 }
 
@@ -1658,6 +1706,26 @@ public sealed class SourceArtifactConfiguration : IEntityTypeConfiguration<Sourc
         builder.HasIndex(entity => entity.SourceRevisionId).IsUnique();
         builder.HasIndex(entity => entity.ContentSha256);
         builder.HasOne(entity => entity.SourceRevision).WithMany().HasForeignKey(entity => entity.SourceRevisionId).OnDelete(DeleteBehavior.Restrict);
+    }
+}
+
+public sealed class DocumentPublicationConfiguration : IEntityTypeConfiguration<DocumentPublicationEntity>
+{
+    public void Configure(EntityTypeBuilder<DocumentPublicationEntity> builder)
+    {
+        builder.ToTable("DocumentPublications");
+        builder.HasKey(value => value.OwnerSourceRevisionId);
+        builder.Property(value => value.OwnerSourceRevisionId).ValueGeneratedNever();
+        builder.Property(value => value.PipelineRecordRevision).IsRequired();
+        builder.Property(value => value.ProcessorFingerprint).HasMaxLength(256).IsRequired().UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(value => value.PublishedAtUtc).HasColumnType("datetimeoffset(7)");
+        SchemaConfiguration.ConfigureRowVersion(builder.Property(value => value.RowVersion));
+        builder.HasIndex(value => new { value.PipelineRecordId, value.PipelineRecordRevision, value.DocumentInputSourceRevisionId }).IsUnique();
+        builder.HasOne<SourceRevisionEntity>().WithMany().HasForeignKey(value => value.OwnerSourceRevisionId).OnDelete(DeleteBehavior.Restrict);
+        builder.HasOne<SourceRevisionEntity>().WithMany().HasForeignKey(value => value.DocumentInputSourceRevisionId).OnDelete(DeleteBehavior.Restrict);
+        builder.HasOne<SourceProcessorBranchEntity>().WithMany().HasForeignKey(value => value.SourceProcessorBranchId).OnDelete(DeleteBehavior.Restrict);
+        builder.HasOne<PipelineRecordEntity>().WithMany().HasForeignKey(value => new { value.PipelineRecordId, value.PipelineRecordRevision })
+            .HasPrincipalKey(value => new { value.Id, value.Revision }).OnDelete(DeleteBehavior.Restrict);
     }
 }
 

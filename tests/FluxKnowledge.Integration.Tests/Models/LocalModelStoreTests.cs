@@ -1,4 +1,6 @@
 using System.Text.Json;
+using System.Security.AccessControl;
+using System.Security.Principal;
 using FluxKnowledge.Application.Models;
 using FluxKnowledge.Infrastructure.Inference.Models;
 using FluxKnowledge.Integrations.Models;
@@ -9,6 +11,45 @@ namespace FluxKnowledge.Integration.Tests.Models;
 
 public sealed class LocalModelStoreTests
 {
+    [Fact]
+    public async Task Read_only_manifest_and_artifact_directories_allow_verification_and_separate_receipts()
+    {
+        if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("This permission test requires Windows.");
+        await using var fixture = await LocalModelFixture.CreateAsync();
+        var manifest = await fixture.SeedCompleteBundleAsync();
+        var manifestDirectory = Directory.CreateDirectory(Path.Combine(fixture.ModelRoot, "manifests"));
+        var manifestPath = Path.Combine(manifestDirectory.FullName, "synthetic.json");
+        await File.WriteAllTextAsync(manifestPath, "{}");
+        var directories = new[] { manifestDirectory, new DirectoryInfo(Path.Combine(fixture.ModelRoot, "artifacts")) };
+        var originalAcls = new DirectorySecurity[directories.Length];
+        for (var index = 0; index < directories.Length; index++) originalAcls[index] = directories[index].GetAccessControl();
+        using var identity = WindowsIdentity.GetCurrent();
+        var deny = new FileSystemAccessRule(identity.User!, FileSystemRights.Write,
+            InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+            PropagationFlags.None, AccessControlType.Deny);
+        try
+        {
+            foreach (var directory in directories)
+            {
+                var acl = directory.GetAccessControl();
+                acl.AddAccessRule(deny);
+                directory.SetAccessControl(acl);
+            }
+            Assert.Throws<UnauthorizedAccessException>(() => Directory.CreateDirectory(Path.Combine(manifestDirectory.FullName, "not-permitted")));
+
+            var bytes = await WindowsModelVerificationFiles.ReadLocalManifestAsync(manifestPath, 1024, CancellationToken.None);
+            Assert.Equal("{}", System.Text.Encoding.UTF8.GetString(bytes));
+            var result = await fixture.Store.ResolveAsync(manifest, CancellationToken.None);
+            using var lease = result.Lease;
+            Assert.True(result.Succeeded, result.ReasonCode);
+            Assert.True(result.ReceiptPersisted);
+        }
+        finally
+        {
+            for (var index = 0; index < directories.Length; index++) directories[index].SetAccessControl(originalAcls[index]);
+        }
+    }
+
     [Fact]
     public async Task Complete_bundle_returns_a_held_lease_and_an_immutable_receipt()
     {

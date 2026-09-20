@@ -3,6 +3,7 @@ using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Workers;
 using FluxKnowledge.Domain.Jobs;
 using FluxKnowledge.Domain.Pipeline;
+using FluxKnowledge.Domain.Sources;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
 using FluxKnowledge.Infrastructure.SqlServer.Workers;
 using FluxKnowledge.Integrations.Files;
@@ -35,6 +36,7 @@ public sealed class OutboxPumpTests(NativeSqlServerFixture fixture)
         services.AddSingleton<TimeProvider>(clock);
         services.AddSingleton<IUtf8FileSourceReader>(
             new Utf8FileSourceReader(new LocalIngressOptions([ingressRoot])));
+        services.AddScoped<IRetainedSourceReader, UnreachableRetainedSourceReader>();
         services.AddFluxKnowledgeOutboxWorkers();
         await using var provider = services.BuildServiceProvider();
         var registration = new RegisterUtf8FileHandler(
@@ -116,5 +118,14 @@ public sealed class OutboxPumpTests(NativeSqlServerFixture fixture)
     private sealed class FixedTimeProvider(DateTimeOffset utcNow) : TimeProvider
     {
         public override DateTimeOffset GetUtcNow() => utcNow;
+    }
+
+    private sealed class UnreachableRetainedSourceReader : IRetainedSourceReader
+    {
+        public ValueTask<RetainedSourceBytes> ReadBytesAsync(SourceRevisionId sourceRevisionId, CancellationToken cancellationToken) =>
+            throw new Xunit.Sdk.XunitException("The UTF-8 pump path must not read a retained document.");
+
+        public ValueTask<Utf8FileSource> ReadUtf8Async(SourceRevisionId sourceRevisionId, CancellationToken cancellationToken) =>
+            throw new Xunit.Sdk.XunitException("The UTF-8 pump path must not read a retained document.");
     }
 }

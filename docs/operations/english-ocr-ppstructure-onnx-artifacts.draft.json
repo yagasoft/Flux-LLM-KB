@@ -1,0 +1,104 @@
+{
+  "status": "unapproved-candidate-only",
+  "purpose": "Metadata-only candidate inventory for an English PP-StructureV3 ONNX Runtime pipeline. Not executable and not acquisition authority.",
+  "runtime": {
+    "engine": "onnxruntime",
+    "formula_recognition": false,
+    "source": "https://raw.githubusercontent.com/PaddlePaddle/PaddleX/ffb64904d23708863ff5b8da312a5cbd52a7f462/paddlex/configs/pipelines/PP-StructureV3.yaml",
+    "registry_source": "https://github.com/paddlepaddle/PaddleX/blob/v3.7.2/paddlex/inference/utils/official_models.py",
+    "note": "Pinned PaddleX v3.7.2 config selects SLANeXt_wired for wired tables and SLANet_plus for wireless tables. The current registry uses explicit model names with the _onnx suffix for ONNX repositories. PP-OCRv6 model names are registry entries, but the PP-StructureV3 ocr_version enum remains PP-OCRv3/PP-OCRv4/PP-OCRv5; use explicit det/rec model names rather than assuming ocr_version=PP-OCRv6. Runtime dependencies and exact installed-version compatibility remain unresolved."
+  },
+  "required_roles": [
+    {
+      "role": "layout",
+      "model": "PP-DocLayout_plus-L_onnx",
+      "repository": "PaddlePaddle/PP-DocLayout_plus-L_onnx",
+      "revision": "feb74619326f634e0e883218598096a3733ad9f7",
+      "state": "reusable-local-J-artifact",
+      "files": [
+        {"name": "inference.onnx", "bytes": 129736329, "sha256": "77afb2caa74dd13240d087d2eced91d7fcd2caebd16006a0a66162fc8707ff0e", "git_blob_sha1": "e8e1cbfbbfdbece0ecbef4246d7bba2d47c6280c"},
+        {"name": "inference.yml", "bytes": 1838, "git_blob_sha1": "9a236587eae068a1e7906fd158f712dc41400563"}
+      ]
+    },
+    {
+      "role": "block_layout",
+      "model": "PP-DocBlockLayout_onnx",
+      "repository": "PaddlePaddle/PP-DocBlockLayout_onnx",
+      "revision": "bcbfaadf1a9b7197def8c01337cd5bbbef261fbd",
+      "state": "missing-from-bounded-local-caches",
+      "files": [
+        {"name": "inference.onnx", "bytes": 129353461, "sha256": "faeca9767c960700376a3dfc3cad1d2cdce3bb035b06287a69806e7430938288", "git_blob_sha1": "42dad7f56e2ac7d57eefb21c1ae6c39083584b9d"},
+        {"name": "inference.yml", "bytes": 1619, "git_blob_sha1": "839c3a803bec5e9022bd987e62aa791ebf4fd39c"}
+      ]
+    },
+    {
+      "role": "table_classification",
+      "model": "PP-LCNet_x1_0_table_cls_onnx",
+      "repository": "PaddlePaddle/PP-LCNet_x1_0_table_cls_onnx",
+      "revision": "605f623b09f67a562bae77e781d5d5266f14905a",
+      "state": "missing-from-bounded-local-caches",
+      "files": [
+        {"name": "inference.onnx", "bytes": 6777817, "sha256": "f8e4cb1b58a29bebd36852edcb238b53e0acefa75116a8a4db443f13dbc72b0b", "git_blob_sha1": "4bb897a97ed73caa53a1f0fd120dcf1b438f5655"},
+        {"name": "inference.yml", "bytes": 762, "git_blob_sha1": "45dabf8130517cbfa1acaf439809fd461ad13069"}
+      ]
+    },
+    {
+      "role": "wired_table_structure",
+      "model": "SLANeXt_wired_onnx",
+      "repository": "PaddlePaddle/SLANeXt_wired_onnx",
+      "revision": "04356de883011f433f83e5098793f3a501a9af6e",
+      "state": "missing-from-bounded-local-caches",
+      "files": [
+        {"name": "inference.onnx", "bytes": 367743373, "sha256": "0a6e063b56e35a434eb6669eb2342113c6bd76a6ce5acaa0331f370c9e00732f", "git_blob_sha1": "c868d4cecd91044fce4254728df02da374fb1715"},
+        {"name": "inference.yml", "bytes": 2066, "git_blob_sha1": "a9491bff55efffa29a39b952d2c9f73037c5a641"}
+      ]
+    },
+    {
+      "role": "wired_table_cell_detection",
+      "model": "RT-DETR-L_wired_table_cell_det_onnx",
+      "repository": "PaddlePaddle/RT-DETR-L_wired_table_cell_det_onnx",
+      "revision": "b2c0720b5fe6f1c0dd40f8a7993a3f28e04252f8",
+      "state": "missing-from-bounded-local-caches",
+      "files": [
+        {"name": "inference.onnx", "bytes": 129353461, "sha256": "bf5490020512a31f43813d90feadae9526a2c3474ffe807571f2c23594f5958f", "git_blob_sha1": "4c3ea41625c13b42cd746b7166e52d484ea0862d"},
+        {"name": "inference.yml", "bytes": 1630, "git_blob_sha1": "12e2375734e7c34de26ae979aa40b5424571fb42"}
+      ]
+    },
+    {
+      "role": "wireless_table_cell_detection",
+      "model": "RT-DETR-L_wireless_table_cell_det_onnx",
+      "repository": "PaddlePaddle/RT-DETR-L_wireless_table_cell_det_onnx",
+      "revision": "94c021be206064f0136ef1383fbd4b68b168fa61",
+      "state": "missing-from-bounded-local-caches",
+      "files": [
+        {"name": "inference.onnx", "bytes": 129353461, "sha256": "47515940ec5c37156e09aa9acb20c4e7e22456cad6ce49473661f1762fb46a78", "git_blob_sha1": "758d518e4f543800873361555f54acc622d6ab4e"},
+        {"name": "inference.yml", "bytes": 1633, "git_blob_sha1": "acbe633a4a077a1558fdd8796c65bf8ff396d6ec"}
+      ]
+    },
+    {
+      "role": "wireless_table_structure",
+      "model": "SLANet_plus_onnx",
+      "repository": "PaddlePaddle/SLANet_plus_onnx",
+      "revision": "7dbe640e127602bf506815e822c09758de73c482",
+      "state": "reusable-local-J-artifact",
+      "files": [
+        {"name": "inference.onnx", "bytes": 7782138, "sha256": "7790c0c13ce064782c9d22ebeb16b4da8216f83d3ba576da962c106ef58386da", "git_blob_sha1": "76da55381470e049247d2cbd548e4bdb9cb28e44"},
+        {"name": "inference.yml", "bytes": 2035, "git_blob_sha1": "9d57e936f02d62335817f936d6e779e811f56d2a"}
+      ]
+    }
+  ],
+  "accounting": {
+    "required_bundle_count": 7,
+    "required_file_count": 14,
+    "missing_bundle_count": 5,
+    "missing_file_count": 10,
+    "missing_onnx_bytes": 762581573,
+    "missing_config_bytes": 7710,
+    "distinct_missing_transfer_bytes": 762589283,
+    "missing_payload_deduplication": "none among the five missing ONNX payloads or their configs by the recorded immutable hashes",
+    "reusable_existing_structural_bytes": 137522340,
+    "reusable_existing_structural_files": 4,
+    "cache_scope_checked": ["J:\\Models", "legacy PaddleX official-model cache", "legacy Hugging Face hub cache", "legacy PaddleOCR cache", "E:\\FluxPackageCache", "E:\\Temp\\pip-cache", "E:\\Codex Workspaces"],
+    "cache_result": "No exact candidate files for the five missing ONNX bundles were found in the bounded local-cache scope; this is not a download authorisation."
+  }
+}

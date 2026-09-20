@@ -15,7 +15,11 @@ public sealed record NativeGoLiveRuntimeConfiguration(
     bool VisionEnabled,
     bool AsrEnabled,
     bool FfmpegEnabled,
-    bool NetworkParsingEnabled);
+    bool NetworkParsingEnabled)
+{
+    /// <summary>The only provisioned runtime activation is the fixed, all-local document OCR trio.</summary>
+    public bool LocalOcrEnabled => ModelRuntimeEnabled && GpuEnabled && OcrEnabled;
+}
 
 /// <summary>Defines the provisioned operational and inert provider capabilities of the native go-live runtime.</summary>
 public static class NativeGoLiveRuntimeOptions
@@ -66,9 +70,12 @@ public static class NativeGoLiveRuntimeOptions
             throw new InvalidOperationException("retained-ingress-required");
         }
 
-        ValidateUnprovisionedProvider(options.ModelRuntimeEnabled, "model");
-        ValidateUnprovisionedProvider(options.GpuEnabled, "gpu");
-        ValidateUnprovisionedProvider(options.OcrEnabled, "ocr");
+        if (!options.LocalOcrEnabled)
+        {
+            ValidateUnprovisionedProvider(options.ModelRuntimeEnabled, "model");
+            ValidateUnprovisionedProvider(options.GpuEnabled, "gpu");
+            ValidateUnprovisionedProvider(options.OcrEnabled, "ocr");
+        }
         ValidateUnprovisionedProvider(options.VisionEnabled, "vision");
         ValidateUnprovisionedProvider(options.AsrEnabled, "asr");
         ValidateUnprovisionedProvider(options.FfmpegEnabled, "ffmpeg");

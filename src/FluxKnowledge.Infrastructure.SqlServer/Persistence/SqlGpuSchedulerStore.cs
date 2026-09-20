@@ -1136,7 +1136,7 @@ public sealed class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecutorDispa
 
         var miniTask = new GpuMiniTaskEntity
         {
-            Id = Guid.NewGuid(),
+            Id = request.MiniTaskId ?? Guid.NewGuid(),
             ParentJobId = parent.JobId.Value,
             SourceRevision = parent.SourceRevision,
             PriorityLane = (int)request.PriorityLane,
@@ -1216,6 +1216,11 @@ public sealed class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecutorDispa
             request.ParentJob.LeaseGeneration <= 0)
         {
             throw new ArgumentException("GPU hand-off requires a valid claimed parent Job and memory estimate.", nameof(request));
+        }
+
+        if (request.MiniTaskId == Guid.Empty)
+        {
+            throw new ArgumentException("A supplied GPU mini-task ID cannot be empty.", nameof(request));
         }
     }
 
@@ -2047,7 +2052,8 @@ public sealed class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecutorDispa
         GpuMiniTaskHandoffRequest request,
         CancellationToken cancellationToken)
     {
-        if (existing.ParentJobId != request.ParentJob.JobId.Value ||
+        if ((request.MiniTaskId is { } requestedMiniTaskId && existing.Id != requestedMiniTaskId) ||
+            existing.ParentJobId != request.ParentJob.JobId.Value ||
             existing.SourceRevision != request.ParentJob.SourceRevision ||
             existing.PriorityLane != (int)request.PriorityLane ||
             !string.Equals(existing.ModelRuntimeKey, request.ModelRuntimeKey, StringComparison.Ordinal) ||

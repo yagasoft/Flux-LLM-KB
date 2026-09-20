@@ -30,13 +30,17 @@ internal static class CliProgram
                 args.Skip(1).ToArray(),
                 Console.Out,
                 Console.Error),
+            "documents" => await DocumentReprocessCommand.ExecuteFromEnvironmentAsync(
+                args.Skip(1).ToArray(),
+                Console.Out,
+                Console.Error),
             _ => WriteUsage()
         };
     }
 
     private static int WriteUsage()
     {
-        Console.Error.WriteLine("Usage: FluxKnowledge.Cli <knowledge|code|corpus|operations|codex|csharp-code|fresh-start|validate-sql|models>");
+        Console.Error.WriteLine("Usage: FluxKnowledge.Cli <knowledge|code|corpus|operations|codex|csharp-code|fresh-start|validate-sql|models|documents>");
         return 2;
     }
 }

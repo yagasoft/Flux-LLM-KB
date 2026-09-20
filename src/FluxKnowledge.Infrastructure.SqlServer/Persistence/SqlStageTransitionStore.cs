@@ -1,5 +1,7 @@
 using System.Data;
 using System.Text.Json;
+using FluxKnowledge.Application.Documents;
+using FluxKnowledge.Application.Sources;
 using FluxKnowledge.Application.Indexing;
 using FluxKnowledge.Application.Pipeline;
 using FluxKnowledge.Application.Ports;
@@ -67,7 +69,7 @@ public sealed class SqlStageTransitionStore : IStageTransitionStore
     {
         await using var transaction = await context.Database
             .BeginTransactionAsync(
-                request.IndexingOutput?.ActivateGeneration is null
+                request.IndexingOutput?.ActivateGeneration is null && request.Artifact.Stage != PipelineStage.Publish
                     ? IsolationLevel.ReadCommitted
                     : IsolationLevel.Serializable,
                 cancellationToken)
@@ -96,6 +98,7 @@ public sealed class SqlStageTransitionStore : IStageTransitionStore
                 ContentHash = request.Artifact.ContentHash,
                 ContentType = request.Artifact.ContentType,
                 SearchText = request.Artifact.SearchText,
+                DocumentMetadataJson = request.Artifact.DocumentMetadataJson,
                 CreatedAtUtc = request.Artifact.CreatedAtUtc
             });
         WriteIndexingOutput(context, request);
@@ -152,6 +155,7 @@ public sealed class SqlStageTransitionStore : IStageTransitionStore
         if (request.Artifact.Stage == PipelineStage.Publish && request.NextStage is null)
         {
             var now = _timeProvider.GetUtcNow();
+            await PublishDocumentIfApplicableAsync(context, validated.PipelineRecord, now, cancellationToken).ConfigureAwait(false);
             var completingActivities = await context.SourceActivities
                 .Include(value => value.SourceRevision)
                 .Where(value => value.ResultingPipelineRecordId == request.CurrentJob.PipelineRecordId.Value &&
@@ -562,6 +566,122 @@ public sealed class SqlStageTransitionStore : IStageTransitionStore
             nextJobId,
             nextDispatchMessageId,
             ExistingTransition: true);
+    }
+
+    private static async ValueTask PublishDocumentIfApplicableAsync(
+        FluxKnowledgeDbContext context,
+        PipelineRecordEntity record,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        if (record.SourceRevisionId is not { } inputRevisionId)
+        {
+            return;
+        }
+
+        var input = await context.SourceRevisions.SingleOrDefaultAsync(
+            value => value.Id == inputRevisionId,
+            cancellationToken).ConfigureAwait(false);
+        if (input is null ||
+            !DocumentProcessingInput.TryGetContract(input.Classification, input.Extension, out var documentContract) ||
+            input.ParentSourceRevisionId is not { } ownerRevisionId)
+        {
+            return;
+        }
+
+        // Publish is the final externally visible mutation for a retained document.  A source
+        // pause, suppression, or deletion that committed after this worker was claimed must win
+        // over its stale claim.  The enclosing Publish transaction is serializable, so this read
+        // is also the publication fence against a concurrent root-state transition.
+        var sourceIsPublishable = await (
+                from candidate in context.SourceRevisions
+                join owner in context.SourceRevisions on candidate.ParentSourceRevisionId equals owner.Id
+                join root in context.SourceRootConfigurations on owner.SourceRootId equals root.Id
+                where candidate.Id == inputRevisionId &&
+                      candidate.SourceRootId == owner.SourceRootId &&
+                      candidate.SuppressedAtUtc == null &&
+                      owner.SuppressedAtUtc == null &&
+                      root.State == (int)SourceRootState.Enabled
+                select root.Id)
+            .AnyAsync(cancellationToken)
+            .ConfigureAwait(false);
+        if (!sourceIsPublishable)
+        {
+            throw new InvalidOperationException("document-publication-source-unavailable");
+        }
+
+        var binding = await (
+            from member in context.SourceProcessorBranchMembers
+            join branch in context.SourceProcessorBranches on member.BranchId equals branch.Id
+            where member.ChildSourceRevisionId == inputRevisionId &&
+                  member.Disposition == "completed" &&
+                  branch.SourceRevisionId == ownerRevisionId &&
+                  branch.State == (int)RetainedProcessorBranchState.Completed
+            select branch).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+        if (binding is null ||
+            binding.ProcessorFingerprint != documentContract.ParentProcessorFingerprint ||
+            binding.ProcessorVersion != documentContract.ParentProcessorVersion)
+        {
+            throw new InvalidOperationException("The document publication has no exact completed retained-processor binding.");
+        }
+
+        var existing = await context.DocumentPublications.FromSqlInterpolated($"""
+            SELECT * FROM [DocumentPublications] WITH (UPDLOCK, HOLDLOCK)
+            WHERE [OwnerSourceRevisionId] = {ownerRevisionId}
+            """).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+        if (existing is not null)
+        {
+            var existingBranch = await context.SourceProcessorBranches.SingleOrDefaultAsync(
+                value => value.Id == existing.SourceProcessorBranchId,
+                cancellationToken).ConfigureAwait(false);
+            if (existingBranch is not null && existingBranch.CreatedAtUtc > binding.CreatedAtUtc)
+            {
+                return;
+            }
+        }
+
+        if (existing is null)
+        {
+            context.DocumentPublications.Add(new DocumentPublicationEntity
+            {
+                OwnerSourceRevisionId = ownerRevisionId,
+                DocumentInputSourceRevisionId = inputRevisionId,
+                SourceProcessorBranchId = binding.Id,
+                PipelineRecordId = record.Id,
+                PipelineRecordRevision = record.Revision,
+                ProcessorFingerprint = binding.ProcessorFingerprint,
+                PublishedAtUtc = now
+            });
+        }
+        else
+        {
+            existing.DocumentInputSourceRevisionId = inputRevisionId;
+            existing.SourceProcessorBranchId = binding.Id;
+            existing.PipelineRecordId = record.Id;
+            existing.PipelineRecordRevision = record.Revision;
+            existing.ProcessorFingerprint = binding.ProcessorFingerprint;
+            existing.PublishedAtUtc = now;
+        }
+
+        var retiredMemberRevisionIds = await context.SourceRevisions
+            .Where(value => value.ParentSourceRevisionId == ownerRevisionId && value.OriginKind == 1 && value.SuppressedAtUtc == null)
+            .Select(value => value.Id).ToArrayAsync(cancellationToken).ConfigureAwait(false);
+        if (retiredMemberRevisionIds.Length == 0)
+        {
+            return;
+        }
+
+        await context.SourceRevisions.Where(value => retiredMemberRevisionIds.Contains(value.Id))
+            .ExecuteUpdateAsync(setters => setters.SetProperty(value => value.SuppressedAtUtc, now), cancellationToken).ConfigureAwait(false);
+        var retiredPipelineRecordIds = await context.PipelineRecords
+            .Where(value => value.SourceRevisionId.HasValue && retiredMemberRevisionIds.Contains(value.SourceRevisionId.Value))
+            .Select(value => value.Id).ToArrayAsync(cancellationToken).ConfigureAwait(false);
+        await context.PipelineRecords.Where(value => retiredPipelineRecordIds.Contains(value.Id))
+            .ExecuteUpdateAsync(setters => setters.SetProperty(value => value.IsDeleted, true), cancellationToken).ConfigureAwait(false);
+        await context.Vectors.Where(vector => context.TextChunks.Any(chunk => chunk.Id == vector.TextChunkId &&
+                context.Artifacts.Any(artifact => artifact.Id == chunk.ArtifactId &&
+                    artifact.SourceRevision == chunk.SourceRevision && retiredPipelineRecordIds.Contains(artifact.PipelineRecordId))))
+            .ExecuteUpdateAsync(setters => setters.SetProperty(value => value.IsDeleted, true), cancellationToken).ConfigureAwait(false);
     }
 
     private async Task MarkDispatchCompleteAsync(

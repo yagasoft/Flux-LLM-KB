@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using FluxKnowledge.Application.Contracts;
+using FluxKnowledge.Application.Documents;
 using FluxKnowledge.Application.Indexing;
 using FluxKnowledge.Application.Pipeline;
 using FluxKnowledge.Application.Ports;
@@ -76,6 +77,112 @@ public sealed class StageWorkerTests
     }
 
     [Fact]
+    public async Task Document_extract_routes_native_pdf_text_to_normalisation_without_a_model_provider()
+    {
+        var transitions = new RecordingTransitionStore();
+        var retainedRevisionId = SourceRevisionId.New();
+        var pdf = new StubPdfDocumentExtractor(new DocumentExtractionResult(
+            "native PDF text",
+            IsComplete: true,
+            [],
+            [new DocumentExtractedPage(0, "native PDF text", RequiresOcr: false)]));
+        var ocr = new RecordingDocumentOcrHandoff(DocumentOcrHandoffResult.Refused("pdf-ocr-required"));
+        var worker = new ExtractDocumentStageWorker(
+            new RetainedSourceReader(retainedRevisionId, new string('a', 64), "pdf bytes"),
+            new StubPipelineReader(
+                new string('a', 64),
+                inputText: null,
+                retainedRevisionId,
+                DocumentProcessingInput.Pdf.Classification,
+                DocumentProcessingInput.Pdf.Extension),
+            new VsdxDocumentExtractor(),
+            pdf,
+            ocr,
+            new EmptyDocumentOcrResultReader(),
+            CreateTransitionService(transitions),
+            new FixedTimeProvider());
+
+        await worker.ExecuteAsync(CreateWork(PipelineStage.Extract, PipelineOperations.ExtractDocument), CancellationToken.None);
+
+        var transition = Assert.Single(transitions.Transitions);
+        Assert.Equal("native PDF text", transition.Artifact.SearchText);
+        Assert.Equal(PipelineStage.Normalise, transition.NextStage);
+        Assert.Equal(0, Assert.Single(DocumentOcrProvenance.Parse(
+            Assert.IsType<string>(transition.Artifact.DocumentMetadataJson)).Pages).PageIndex);
+        Assert.Equal(1, pdf.Calls);
+        Assert.Empty(transitions.Failures);
+    }
+
+    [Fact]
+    public async Task Document_extract_keeps_a_blank_pdf_out_of_the_pipeline_until_ocr_is_available()
+    {
+        var transitions = new RecordingTransitionStore();
+        var retainedRevisionId = SourceRevisionId.New();
+        var pdf = new StubPdfDocumentExtractor(new DocumentExtractionResult(string.Empty, IsComplete: false, ["pdf-ocr-required"]));
+        var ocr = new RecordingDocumentOcrHandoff(DocumentOcrHandoffResult.Refused("pdf-ocr-required"));
+        var worker = new ExtractDocumentStageWorker(
+            new RetainedSourceReader(retainedRevisionId, new string('a', 64), "pdf bytes"),
+            new StubPipelineReader(
+                new string('a', 64),
+                inputText: null,
+                retainedRevisionId,
+                DocumentProcessingInput.Pdf.Classification,
+                DocumentProcessingInput.Pdf.Extension),
+            new VsdxDocumentExtractor(),
+            pdf,
+            ocr,
+            new EmptyDocumentOcrResultReader(),
+            CreateTransitionService(transitions),
+            new FixedTimeProvider());
+
+        await worker.ExecuteAsync(CreateWork(PipelineStage.Extract, PipelineOperations.ExtractDocument), CancellationToken.None);
+
+        var failure = Assert.Single(transitions.Failures);
+        Assert.Equal("pdf-ocr-required", failure.Reason);
+        Assert.Equal(1, pdf.Calls);
+        Assert.Empty(transitions.Transitions);
+    }
+
+    [Fact]
+    public async Task Document_extract_hands_only_uncovered_pdf_pages_to_ocr_without_emitting_an_extract_artifact()
+    {
+        var transitions = new RecordingTransitionStore();
+        var retainedRevisionId = SourceRevisionId.New();
+        var pdf = new StubPdfDocumentExtractor(new DocumentExtractionResult(
+            "native first page",
+            IsComplete: false,
+            ["pdf-ocr-required"],
+            [
+                new DocumentExtractedPage(0, "native first page", RequiresOcr: false),
+                new DocumentExtractedPage(1, string.Empty, RequiresOcr: true)
+            ]));
+        var ocr = new RecordingDocumentOcrHandoff(DocumentOcrHandoffResult.Queued(Guid.NewGuid()));
+        var worker = new ExtractDocumentStageWorker(
+            new RetainedSourceReader(retainedRevisionId, new string('a', 64), "pdf bytes"),
+            new StubPipelineReader(
+                new string('a', 64),
+                inputText: null,
+                retainedRevisionId,
+                DocumentProcessingInput.Pdf.Classification,
+                DocumentProcessingInput.Pdf.Extension),
+            new VsdxDocumentExtractor(),
+            pdf,
+            ocr,
+            new EmptyDocumentOcrResultReader(),
+            CreateTransitionService(transitions),
+            new FixedTimeProvider());
+
+        await worker.ExecuteAsync(CreateWork(PipelineStage.Extract, PipelineOperations.ExtractDocument), CancellationToken.None);
+
+        var request = Assert.Single(ocr.Requests);
+        Assert.Equal(retainedRevisionId, request.RetainedSourceRevisionId);
+        Assert.Equal(new string('a', 64), request.ContentSha256);
+        Assert.Equal([1], request.PageIndexes);
+        Assert.Empty(transitions.Transitions);
+        Assert.Empty(transitions.Failures);
+    }
+
+    [Fact]
     public async Task Normalise_uses_form_kc_and_lf_then_queues_canonical_index()
     {
         var transitions = new RecordingTransitionStore();
@@ -93,6 +200,42 @@ public sealed class StageWorkerTests
         Assert.Equal("café\nline\n", transition.Artifact.SearchText);
         Assert.Equal(PipelineStage.CanonicalIndex, transition.NextStage);
         Assert.Equal(PipelineOperations.CanonicalIndex, transition.NextOperation);
+    }
+
+    [Fact]
+    public async Task Normalise_preserves_document_page_provenance_after_text_normalisation()
+    {
+        var extracted = DocumentOcrProvenance.Merge(
+            new DocumentExtractionResult(
+                "cafe\u0301",
+                IsComplete: false,
+                ["pdf-ocr-required"],
+                [
+                    new DocumentExtractedPage(0, "cafe\u0301", RequiresOcr: false),
+                    new DocumentExtractedPage(1, string.Empty, RequiresOcr: true)
+                ]),
+            new DocumentOcrExecutionResult(
+                true,
+                "document-ocr-complete",
+                [new DocumentOcrPageResult(1, 0, [new DocumentOcrBlock("text", 1, 1, 10, 10, "second")])]));
+        var transitions = new RecordingTransitionStore();
+        var worker = new NormaliseTextStageWorker(
+            new StubPipelineReader(
+                new string('a', 64),
+                extracted.Text,
+                inputDocumentMetadataJson: extracted.MetadataJson),
+            CreateTransitionService(transitions),
+            new FixedTimeProvider());
+
+        await worker.ExecuteAsync(CreateWork(PipelineStage.Normalise, PipelineOperations.NormaliseText), CancellationToken.None);
+
+        var transition = Assert.Single(transitions.Transitions);
+        Assert.Equal("café\n\nsecond", transition.Artifact.SearchText);
+        var provenance = DocumentOcrProvenance.Parse(Assert.IsType<string>(transition.Artifact.DocumentMetadataJson));
+        Assert.Collection(
+            provenance.Pages.OrderBy(static page => page.PageIndex),
+            page => Assert.Equal(4, page.Length),
+            page => Assert.Equal(6, page.StartOffset));
     }
 
     [Fact]
@@ -206,7 +349,10 @@ public sealed class StageWorkerTests
     private sealed class StubPipelineReader(
         string registeredHash,
         string? inputText,
-        SourceRevisionId? retainedSourceRevisionId = null)
+        SourceRevisionId? retainedSourceRevisionId = null,
+        string? retainedSourceClassification = null,
+        string? retainedSourceExtension = null,
+        string? inputDocumentMetadataJson = null)
         : IPipelineStageReader
     {
         public ValueTask<PipelineStageSource> ReadStageSourceAsync(
@@ -221,7 +367,36 @@ public sealed class StageWorkerTests
                     "C:\\ingress\\a.txt",
                     registeredHash,
                     inputText,
-                    retainedSourceRevisionId));
+                    retainedSourceRevisionId,
+                    retainedSourceClassification,
+                    retainedSourceExtension,
+                    inputDocumentMetadataJson));
+    }
+
+    private sealed class StubPdfDocumentExtractor(DocumentExtractionResult result) : IPdfDocumentExtractor
+    {
+        public int Calls { get; private set; }
+
+        public ValueTask<DocumentExtractionResult> ExtractAsync(
+            RetainedSourceBytes retained,
+            CancellationToken cancellationToken)
+        {
+            Calls++;
+            return ValueTask.FromResult(result);
+        }
+    }
+
+    private sealed class RecordingDocumentOcrHandoff(DocumentOcrHandoffResult result) : IDocumentOcrHandoff
+    {
+        public List<DocumentOcrHandoffRequest> Requests { get; } = [];
+
+        public ValueTask<DocumentOcrHandoffResult> HandoffAsync(
+            DocumentOcrHandoffRequest request,
+            CancellationToken cancellationToken)
+        {
+            Requests.Add(request);
+            return ValueTask.FromResult(result);
+        }
     }
 
     private sealed class ThrowingSourceReader : IUtf8FileSourceReader

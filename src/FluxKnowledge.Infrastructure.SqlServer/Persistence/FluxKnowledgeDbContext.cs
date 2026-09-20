@@ -12,6 +12,7 @@ public sealed class FluxKnowledgeDbContext(DbContextOptions<FluxKnowledgeDbConte
     public DbSet<JobAttemptEntity> JobAttempts => Set<JobAttemptEntity>();
     public DbSet<OutboxMessageEntity> OutboxMessages => Set<OutboxMessageEntity>();
     public DbSet<ArtifactEntity> Artifacts => Set<ArtifactEntity>();
+    public DbSet<DocumentPublicationEntity> DocumentPublications => Set<DocumentPublicationEntity>();
     public DbSet<TextChunkEntity> TextChunks => Set<TextChunkEntity>();
     public DbSet<VectorEntity> Vectors => Set<VectorEntity>();
     public DbSet<IndexGenerationEntity> IndexGenerations => Set<IndexGenerationEntity>();
@@ -26,6 +27,7 @@ public sealed class FluxKnowledgeDbContext(DbContextOptions<FluxKnowledgeDbConte
     public DbSet<GpuExecutorDispatchEntity> GpuExecutorDispatches => Set<GpuExecutorDispatchEntity>();
     public DbSet<GpuExecutorResultReceiptEntity> GpuExecutorResultReceipts => Set<GpuExecutorResultReceiptEntity>();
     public DbSet<GpuExecutorEvidenceEntity> GpuExecutorEvidence => Set<GpuExecutorEvidenceEntity>();
+    public DbSet<DocumentOcrRequestEntity> DocumentOcrRequests => Set<DocumentOcrRequestEntity>();
     public DbSet<NativeWorkerInstanceEntity> NativeWorkerInstances => Set<NativeWorkerInstanceEntity>();
     public DbSet<NativeWorkerLifecycleEvidenceEntity> NativeWorkerLifecycleEvidence => Set<NativeWorkerLifecycleEvidenceEntity>();
     public DbSet<SourceRootConfigurationEntity> SourceRootConfigurations => Set<SourceRootConfigurationEntity>();

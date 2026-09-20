@@ -1266,23 +1266,22 @@ public sealed class NativeSchemaMigrationTests(NativeSqlServerFixture fixture)
                 """);
             await SeedHistoricalPipelineRecordAsync(context, recordId, sourceId, new string('a', 64), now);
 
-            var artifact = new ArtifactEntity
-            {
-                Id = Guid.NewGuid(),
-                PipelineRecordId = recordId,
-                SourceRevision = 1,
-                Stage = 1,
-                ContentHash = new string('b', 64),
-                ContentType = "text/plain",
-                SearchText = "migration test",
-                CreatedAtUtc = now
-            };
-            context.Artifacts.Add(artifact);
-            await context.SaveChangesAsync();
+            // This database intentionally predates later artifact columns. Seed its
+            // historical shape directly rather than using the current EF model.
+            var artifactId = Guid.NewGuid();
+            await context.Database.ExecuteSqlInterpolatedAsync(
+                $"""
+                INSERT INTO [Artifacts]
+                    ([Id], [PipelineRecordId], [SourceRevision], [Stage], [ContentHash],
+                     [ContentType], [SearchText], [CreatedAtUtc])
+                VALUES
+                    ({artifactId}, {recordId}, {1L}, {1}, {new string('b', 64)},
+                     {"text/plain"}, {"migration test"}, {now});
+                """);
 
             var chunk = new TextChunkEntity
             {
-                ArtifactId = artifact.Id,
+                ArtifactId = artifactId,
                 SourceRevision = 1,
                 Ordinal = 0,
                 StartOffset = 0,
@@ -1353,6 +1352,34 @@ public sealed class NativeSchemaMigrationTests(NativeSqlServerFixture fixture)
             candidate => candidate.VectorId == vectorId);
         Assert.Equal(new string('c', 64), migratedVector.TextChunkContentHash);
         Assert.Equal(new string('d', 64), migratedVector.PayloadChecksum);
+    }
+
+    [NativeSqlServerFact]
+    public async Task Document_ocr_schema_migration_round_trips_up_down_and_up_again()
+    {
+        await using var database = await fixture.CreateDocumentOcrPreviousMigrationDatabaseAsync();
+
+        await using (var upgrade = database.CreateContext())
+        {
+            await upgrade.GetService<IMigrator>().MigrateAsync();
+        }
+
+        await AssertDocumentOcrSchemaAsync(database.ConnectionString, expected: true);
+
+        await using (var downgrade = database.CreateContext())
+        {
+            await downgrade.GetService<IMigrator>()
+                .MigrateAsync("20260918193207_AddDocumentPublicationSelector");
+        }
+
+        await AssertDocumentOcrSchemaAsync(database.ConnectionString, expected: false);
+
+        await using (var reapply = database.CreateContext())
+        {
+            await reapply.GetService<IMigrator>().MigrateAsync();
+        }
+
+        await AssertDocumentOcrSchemaAsync(database.ConnectionString, expected: true);
     }
 
     [NativeSqlServerFact]
@@ -1641,6 +1668,38 @@ public sealed class NativeSchemaMigrationTests(NativeSqlServerFixture fixture)
                  ({recordId}, {sourceId}, {1L}, {contentHash}, {recordId},
                   NULL, {1}, {false}, {false}, {now});
              """);
+
+    private static async Task AssertDocumentOcrSchemaAsync(string connectionString, bool expected)
+    {
+        await using var connection = new SqlConnection(connectionString);
+        await connection.OpenAsync();
+        await using var command = new SqlCommand(
+            """
+            SELECT
+                (SELECT COUNT(*) FROM sys.tables WHERE [object_id] = OBJECT_ID(N'[DocumentOcrRequests]')),
+                (SELECT COUNT(*) FROM sys.columns
+                 WHERE [object_id] = OBJECT_ID(N'[Artifacts]') AND [name] = N'DocumentMetadataJson'),
+                (SELECT COUNT(*) FROM sys.check_constraints
+                 WHERE [parent_object_id] = OBJECT_ID(N'[Artifacts]')
+                   AND [name] = N'CK_Artifacts_DocumentMetadataJson_Bounded'),
+                (SELECT COUNT(*) FROM sys.indexes
+                 WHERE [object_id] = OBJECT_ID(N'[DocumentOcrRequests]')
+                   AND [name] IN (
+                       N'IX_DocumentOcrRequests_ParentJobId_State',
+                       N'IX_DocumentOcrRequests_PipelineRecordId_SourceRevision_State')),
+                (SELECT COUNT(*) FROM [__EFMigrationsHistory]
+                 WHERE [MigrationId] = N'20260920122758_AddDocumentOcrRequestsAndArtifactMetadata');
+            """,
+            connection);
+        await using var reader = await command.ExecuteReaderAsync();
+        Assert.True(await reader.ReadAsync());
+        var expectedCount = expected ? 1 : 0;
+        Assert.Equal(expectedCount, reader.GetInt32(0));
+        Assert.Equal(expectedCount, reader.GetInt32(1));
+        Assert.Equal(expectedCount, reader.GetInt32(2));
+        Assert.Equal(expected ? 2 : 0, reader.GetInt32(3));
+        Assert.Equal(expectedCount, reader.GetInt32(4));
+    }
 
     private sealed class DirectContextFactory(string connectionString) : IDbContextFactory<FluxKnowledgeDbContext>
     {

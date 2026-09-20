@@ -2,6 +2,7 @@ using System.Data;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using FluxKnowledge.Application.Documents;
 using FluxKnowledge.Application.Pipeline;
 using FluxKnowledge.Application.Operations;
 using FluxKnowledge.Application.Ports;
@@ -27,6 +28,7 @@ public sealed class SqlRetainedTextRegistrationStore(
     private const string AcceptedUtf8Classification = "AcceptedUtf8Text";
     private const string AcceptedMimePolicy = "[\"text/plain\"]";
     private const string ExtractUtf8OutputContract = "pipeline:extract-utf8";
+    private const long MaximumDocumentInputBytes = 128L * 1024 * 1024;
     private readonly string? _retainedArtifactRoot = string.IsNullOrWhiteSpace(retainedArtifactRoot)
         ? null
         : Path.TrimEndingDirectorySeparator(Path.GetFullPath(retainedArtifactRoot));
@@ -75,11 +77,21 @@ public sealed class SqlRetainedTextRegistrationStore(
                 activity.ExecutionClass == (int)ExecutionClass.InProcess &&
                 (root.State == (int)SourceRootState.Enabled ||
                  context.OutlookCaptureProfiles.Any(profile => profile.SourceRootId == root.Id)) &&
-                (activity.ActivityKind == (int)SourceActivityKind.TextExtraction ||
-                 activity.ActivityKind == (int)SourceActivityKind.MetadataExtraction) &&
+                ((activity.ActivityKind == (int)SourceActivityKind.TextExtraction ||
+                  activity.ActivityKind == (int)SourceActivityKind.MetadataExtraction) &&
+                 revision.Classification == AcceptedUtf8Classification &&
+                 revision.ByteLength >= 0 && revision.ByteLength <= 16L * 1024 * 1024 ||
+                 activity.ActivityKind == (int)SourceActivityKind.DocumentParsing &&
+                 ((activity.ProcessorVersion == DocumentProcessingInput.VsdxProcessorVersion &&
+                   activity.DescriptorFingerprint == DocumentProcessingInput.VsdxProcessorFingerprint &&
+                   revision.Classification == DocumentProcessingInput.Classification &&
+                   revision.Extension == ".vsdx") ||
+                  (activity.ProcessorVersion == DocumentProcessingInput.PdfProcessorVersion &&
+                   activity.DescriptorFingerprint == DocumentProcessingInput.PdfProcessorFingerprint &&
+                   revision.Classification == DocumentProcessingInput.PdfClassification &&
+                   revision.Extension == ".pdf")) &&
+                 revision.ByteLength >= 0 && revision.ByteLength <= MaximumDocumentInputBytes) &&
                 activity.ResultingPipelineRecordId == null && revision.SuppressedAtUtc == null &&
-                revision.Classification == AcceptedUtf8Classification &&
-                revision.ByteLength >= 0 && revision.ByteLength <= 16L * 1024 * 1024 &&
                 artifact.ByteLength == revision.ByteLength &&
                 EF.Functions.Collate(artifact.ContentSha256, SchemaConfiguration.SchedulerFenceCollation) ==
                     EF.Functions.Collate(revision.ContentSha256, SchemaConfiguration.SchedulerFenceCollation) &&
@@ -95,7 +107,8 @@ public sealed class SqlRetainedTextRegistrationStore(
         {
             var activity = SourceActivity.Restore(new SourceActivityId(candidate.Id), new SourceRevisionId(candidate.SourceRevisionId),
                 (SourceActivityKind)candidate.ActivityKind, (ExecutionClass)candidate.ExecutionClass, candidate.ProcessorVersion,
-                candidate.InputFingerprint, candidate.RequiredCapability, (SourceActivityState)candidate.State, candidate.Reason);
+                candidate.InputFingerprint, candidate.RequiredCapability, (SourceActivityState)candidate.State, candidate.Reason,
+                descriptorFingerprint: candidate.DescriptorFingerprint);
             if (await RegisterAsync(activity, cancellationToken).ConfigureAwait(false))
             {
                 offered++;
@@ -137,7 +150,8 @@ public sealed class SqlRetainedTextRegistrationStore(
                 durable.RequiredCapability,
                 (SourceActivityState)durable.State,
                 durable.Reason,
-                durable.ResultingPipelineRecordId is not null && durable.ResultingPipelineRecordRevision is not null);
+                durable.ResultingPipelineRecordId is not null && durable.ResultingPipelineRecordRevision is not null,
+                durable.DescriptorFingerprint);
             if (!string.Equals(activity.IdempotencyKey, request.ActivityIdempotencyKey, StringComparison.Ordinal))
             {
                 return false;
@@ -170,12 +184,35 @@ public sealed class SqlRetainedTextRegistrationStore(
             .FromSqlInterpolated($"SELECT * FROM [SourceArtifacts] WITH (UPDLOCK, HOLDLOCK, INDEX([IX_SourceArtifacts_SourceRevisionId])) WHERE [SourceRevisionId] = {activity.SourceRevisionId.Value}")
             .SingleOrDefaultAsync(cancellationToken)
             .ConfigureAwait(false);
+        DocumentProcessingContract? documentContract = null;
+        if (sourceRevision is not null && DocumentProcessingInput.TryGetContract(
+                sourceRevision.Classification, sourceRevision.Extension, out var resolvedDocumentContract))
+        {
+            documentContract = resolvedDocumentContract;
+        }
+        var isDocumentInput = documentContract is not null &&
+            activity.Kind == SourceActivityKind.DocumentParsing &&
+            activity.ProcessorVersion == documentContract.ProcessorVersion &&
+            activity.DescriptorFingerprint == documentContract.ProcessorFingerprint;
+        var isUtf8Input = sourceRevision is not null &&
+            sourceRevision.Classification == AcceptedUtf8Classification &&
+            activity.Kind is SourceActivityKind.TextExtraction or SourceActivityKind.MetadataExtraction;
+        var documentInputBound = isDocumentInput && await context.SourceProcessorBranchMembers.AnyAsync(member =>
+            member.ChildSourceRevisionId == sourceRevision!.Id && member.Disposition == "completed" &&
+            context.SourceProcessorBranches.Any(branch =>
+                branch.Id == member.BranchId &&
+                branch.SourceRevisionId == sourceRevision.ParentSourceRevisionId &&
+                branch.ProcessorVersion == documentContract!.ParentProcessorVersion &&
+                branch.ProcessorFingerprint == documentContract!.ParentProcessorFingerprint &&
+                branch.State == (int)RetainedProcessorBranchState.Completed), cancellationToken).ConfigureAwait(false);
+        var maximumInputBytes = isDocumentInput ? MaximumDocumentInputBytes : 16L * 1024 * 1024;
         if (sourceRevision is null || sourceRoot is null ||
             (sourceRoot.State != (int)SourceRootState.Enabled &&
              !await context.OutlookCaptureProfiles.AnyAsync(profile => profile.SourceRootId == sourceRoot.Id, cancellationToken).ConfigureAwait(false)) ||
             sourceRevision.SuppressedAtUtc is not null || artifact is null ||
-            !string.Equals(sourceRevision.Classification, AcceptedUtf8Classification, StringComparison.Ordinal) ||
-            sourceRevision.ByteLength < 0 || sourceRevision.ByteLength > 16L * 1024 * 1024 ||
+            (!isUtf8Input && !isDocumentInput) ||
+            (isDocumentInput && !documentInputBound) ||
+            sourceRevision.ByteLength < 0 || sourceRevision.ByteLength > maximumInputBytes ||
             artifact.ByteLength != sourceRevision.ByteLength ||
             !string.Equals(sourceRevision.ContentSha256, activity.InputFingerprint, StringComparison.Ordinal) ||
             !string.Equals(artifact.ContentSha256, sourceRevision.ContentSha256, StringComparison.Ordinal) ||
@@ -316,6 +353,7 @@ public sealed class SqlRetainedTextRegistrationStore(
             deferredCapability.ClaimedAtUtc = now;
             deferredCapability.ClaimedProcessorVersion = replayCapability!.ProcessorVersion;
         }
+        var extractOperation = isDocumentInput ? PipelineOperations.ExtractDocument : PipelineOperations.ExtractUtf8;
         var jobId = Guid.NewGuid();
         context.Jobs.Add(new JobEntity
         {
@@ -323,7 +361,7 @@ public sealed class SqlRetainedTextRegistrationStore(
             PipelineRecordId = recordId,
             SourceRevision = revision,
             Stage = (int)PipelineStage.Extract,
-            Operation = PipelineOperations.ExtractUtf8,
+            Operation = extractOperation,
             PublicState = (int)FluxKnowledge.Domain.Jobs.PublicJobState.WorkerQueued,
             DueAtUtc = now
         });
@@ -334,7 +372,7 @@ public sealed class SqlRetainedTextRegistrationStore(
             PipelineRecordId = recordId,
             SourceRevision = revision,
             Stage = (int)PipelineStage.Extract,
-            Operation = PipelineOperations.ExtractUtf8,
+            Operation = extractOperation,
             DispatchGeneration = 0,
             IdempotencyKey = $"{recordId:N}:{revision}:{(int)PipelineStage.Extract}:0",
             DueAtUtc = now,
@@ -359,7 +397,12 @@ public sealed class SqlRetainedTextRegistrationStore(
     private static bool IsSupported(SourceActivity activity) =>
         activity.ExecutionClass == ExecutionClass.InProcess &&
         activity.State == SourceActivityState.Pending &&
-        activity.Kind is SourceActivityKind.TextExtraction or SourceActivityKind.MetadataExtraction;
+        (activity.Kind is SourceActivityKind.TextExtraction or SourceActivityKind.MetadataExtraction ||
+         activity.Kind == SourceActivityKind.DocumentParsing &&
+         ((activity.ProcessorVersion == DocumentProcessingInput.VsdxProcessorVersion &&
+           activity.DescriptorFingerprint == DocumentProcessingInput.VsdxProcessorFingerprint) ||
+          (activity.ProcessorVersion == DocumentProcessingInput.PdfProcessorVersion &&
+           activity.DescriptorFingerprint == DocumentProcessingInput.PdfProcessorFingerprint)));
 
     private static bool MatchesImmutable(SourceActivityEntity entity, SourceActivity activity) =>
         entity.SourceRevisionId == activity.SourceRevisionId.Value &&
@@ -371,7 +414,7 @@ public sealed class SqlRetainedTextRegistrationStore(
     private static bool IsReplayEligible(SourceActivityEntity activity, RegisteredSourceCapability? capability) =>
         capability is null
             ? activity.State == (int)SourceActivityState.Pending && activity.ExecutionClass == (int)ExecutionClass.InProcess &&
-                activity.ActivityKind is (int)SourceActivityKind.TextExtraction or (int)SourceActivityKind.MetadataExtraction
+                activity.ActivityKind is (int)SourceActivityKind.TextExtraction or (int)SourceActivityKind.MetadataExtraction or (int)SourceActivityKind.DocumentParsing
             : capability.IsRunnable && capability.ExecutionClass == ExecutionClass.InProcess &&
                 activity.State == (int)SourceActivityState.DeferredUnsupported &&
                 activity.ExecutionClass == (int)ExecutionClass.DeferredCapability &&
@@ -434,7 +477,8 @@ public sealed class SqlRetainedTextRegistrationStore(
             activity.Id,
             SourceActivity.Restore(new SourceActivityId(activity.Id), new SourceRevisionId(activity.SourceRevisionId),
                 (SourceActivityKind)activity.ActivityKind, (ExecutionClass)activity.ExecutionClass, activity.ProcessorVersion,
-                activity.InputFingerprint, activity.RequiredCapability, (SourceActivityState)activity.State, activity.Reason).IdempotencyKey,
+                activity.InputFingerprint, activity.RequiredCapability, (SourceActivityState)activity.State, activity.Reason,
+                descriptorFingerprint: activity.DescriptorFingerprint).IdempotencyKey,
             activity.RequiredCapability!, capability.Id, capability.ProcessorVersion, capability.ProcessorFingerprint)).ToArray();
     }
 

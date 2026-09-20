@@ -130,6 +130,27 @@ public interface IRetainedProcessorBranchStore
         CancellationToken cancellationToken);
 
     /// <summary>
+    /// Creates or replays one exact document processor successor for a retained source revision.
+    /// This is deliberately not a source-wide replay selector.
+    /// </summary>
+    ValueTask<DocumentReprocessRequestResult> RequestDocumentReprocessAsync(
+        DocumentReprocessRequest request,
+        CancellationToken cancellationToken) =>
+        ValueTask.FromResult(DocumentReprocessRequestResult.NotEligible);
+
+    /// <summary>
+    /// Claims only the named document successor. It must never claim unrelated work.
+    /// </summary>
+    ValueTask<RetainedProcessorClaim?> ClaimDocumentBranchAsync(
+        Guid branchId,
+        SourceRevisionId expectedSourceRevisionId,
+        string expectedInputSha256,
+        string expectedProcessorFingerprint,
+        string leaseOwner,
+        CancellationToken cancellationToken) =>
+        ValueTask.FromResult<RetainedProcessorClaim?>(null);
+
+    /// <summary>
     /// Creates a v2 ZIP successor for one explicitly named v1 terminal branch whose only
     /// fixed condition is an invalid UTF-8 member. The terminal branch is immutable.
     /// </summary>
@@ -204,6 +225,21 @@ public sealed record ArchiveZipMemberEncodingFailureReconciliationResult(
     public bool Accepted => Created || WasReplay;
 
     public static ArchiveZipMemberEncodingFailureReconciliationResult NotEligible { get; } = new(false, false, null);
+}
+
+public sealed record DocumentReprocessRequest(
+    SourceRevisionId SourceRevisionId,
+    string ExpectedInputSha256,
+    string ExpectedProcessorFingerprint);
+
+public sealed record DocumentReprocessRequestResult(
+    bool Created,
+    bool WasReplay,
+    Guid? SuccessorBranchId)
+{
+    public bool Accepted => Created || WasReplay;
+
+    public static DocumentReprocessRequestResult NotEligible { get; } = new(false, false, null);
 }
 
 public sealed record RetainedCsharpCodeCompletionWriteResult(

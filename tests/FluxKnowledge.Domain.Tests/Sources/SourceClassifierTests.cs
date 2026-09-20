@@ -78,9 +78,9 @@ public sealed class SourceClassifierTests
 
     public static TheoryData<string, byte[], string> BinarySignatureReasons() => new()
     {
-        { "document.pdf", "%PDF-1.7"u8.ToArray(), "pdf-parser-unavailable" },
+        { "document.pdf", "%PDF-1.7"u8.ToArray(), "pdf-document-extraction-pending" },
         { "legacy.doc", new byte[] { 0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1 }, "legacy-office-binary-parser-unavailable" },
-        { "diagram.vsdx", new byte[] { 0x50, 0x4b, 0x03, 0x04 }, "archive-zip-expansion-pending" },
+        { "diagram.vsdx", new byte[] { 0x50, 0x4b, 0x03, 0x04 }, "vsdx-structural-extraction-pending" },
         { "document.docx", new byte[] { 0x50, 0x4b, 0x03, 0x04 }, "ooxml-structural-extraction-pending" },
         { "photo.jpg", new byte[] { 0xff, 0xd8, 0xff, 0xe0 }, "media-metadata-extraction-pending" }
     };

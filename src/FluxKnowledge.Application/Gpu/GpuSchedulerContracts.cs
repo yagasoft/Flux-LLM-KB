@@ -9,7 +9,8 @@ public sealed record GpuMiniTaskHandoffRequest(
     string ModelRuntimeKey,
     string SettingsFingerprint,
     long EstimatedBytes,
-    string IdempotencyKey);
+    string IdempotencyKey,
+    Guid? MiniTaskId = null);
 
 public sealed record GpuMiniTaskHandoffResult(
     Guid MiniTaskId,

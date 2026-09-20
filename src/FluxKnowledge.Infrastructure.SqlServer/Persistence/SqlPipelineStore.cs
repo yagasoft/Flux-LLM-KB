@@ -200,7 +200,15 @@ public sealed class SqlPipelineStore(
                 {
                     identity.StableKey,
                     record.ContentHash,
-                    record.SourceRevisionId
+                    record.SourceRevisionId,
+                    SourceClassification = record.SourceRevisionId == null
+                        ? null
+                        : context.SourceRevisions.Where(revision => revision.Id == record.SourceRevisionId.Value)
+                            .Select(revision => revision.Classification).SingleOrDefault(),
+                    SourceExtension = record.SourceRevisionId == null
+                        ? null
+                        : context.SourceRevisions.Where(revision => revision.Id == record.SourceRevisionId.Value)
+                            .Select(revision => revision.Extension).SingleOrDefault()
                 })
             .SingleOrDefaultAsync(cancellationToken)
             .ConfigureAwait(false);
@@ -211,18 +219,21 @@ public sealed class SqlPipelineStore(
         }
 
         string? inputText = null;
+        string? inputDocumentMetadataJson = null;
         if (stage > PipelineStage.Extract)
         {
             var inputStage = (PipelineStage)((int)stage - 1);
-            inputText = await context.Artifacts.AsNoTracking()
+            var input = await context.Artifacts.AsNoTracking()
                 .Where(
                     artifact =>
                         artifact.PipelineRecordId == pipelineRecordId.Value &&
                         artifact.SourceRevision == sourceRevision &&
                         artifact.Stage == (int)inputStage)
-                .Select(artifact => artifact.SearchText)
+                .Select(artifact => new { artifact.SearchText, artifact.DocumentMetadataJson })
                 .SingleOrDefaultAsync(cancellationToken)
                 .ConfigureAwait(false);
+            inputText = input?.SearchText;
+            inputDocumentMetadataJson = input?.DocumentMetadataJson;
         }
 
         return new PipelineStageSource(
@@ -231,7 +242,10 @@ public sealed class SqlPipelineStore(
             source.StableKey,
             source.ContentHash,
             inputText,
-            source.SourceRevisionId is null ? null : new FluxKnowledge.Domain.Sources.SourceRevisionId(source.SourceRevisionId.Value));
+            source.SourceRevisionId is null ? null : new FluxKnowledge.Domain.Sources.SourceRevisionId(source.SourceRevisionId.Value),
+            source.SourceClassification,
+            source.SourceExtension,
+            inputDocumentMetadataJson);
     }
 
     public async ValueTask<IReadOnlyList<CanonicalTextChunk>> ReadChunksAsync(

@@ -3,6 +3,7 @@ using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Xml;
+using FluxKnowledge.Application.Documents;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Domain.Sources;
 
@@ -12,11 +13,13 @@ namespace FluxKnowledge.Application.Sources;
 /// Bounded, retained-only structural extraction for Open XML packages. It neither evaluates
 /// formulas nor follows relationships, links, macros, embedded objects or external resources.
 /// </summary>
-public sealed class OoxmlStructuralTextProcessor(IRetainedArtifactWriter artifactWriter) : ILocalSourceCapabilityHandler
+public sealed class OoxmlStructuralTextProcessor : ILocalSourceCapabilityHandler
 {
+    private readonly IRetainedArtifactWriter _artifactWriter;
+    private readonly SourceCapabilityDescriptor _descriptor;
     private const long MaximumInputBytes = 128L * 1024 * 1024;
     private const long MaximumExpandedXmlBytes = 256L * 1024 * 1024;
-    private const int MaximumElements = 200_000;
+    private const int MaximumElements = 500_000;
     private const int MaximumDepth = 128;
     private const long MaximumTextBytes = 32L * 1024 * 1024;
     private const long MaximumChildTextBytes = 16L * 1024 * 1024;
@@ -25,16 +28,23 @@ public sealed class OoxmlStructuralTextProcessor(IRetainedArtifactWriter artifac
     private const long MaximumSelectedPartBytes = 32L * 1024 * 1024;
     private const int MaximumPathLength = 512;
     private const int MaximumCompressionRatio = 169;
+    private static readonly UTF8Encoding StrictUtf8 = new(false, true);
     private const string OfficeDocumentRelationshipType = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument";
     private const string WorksheetRelationshipType = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet";
     private const string SlideRelationshipType = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide";
     private const string SharedStringsRelationshipType = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings";
+    private const string VisioDocumentRelationshipType = "http://schemas.microsoft.com/visio/2010/relationships/document";
+    private const string VisioPagesRelationshipType = "http://schemas.microsoft.com/visio/2010/relationships/pages";
+    private const string VisioPageRelationshipType = "http://schemas.microsoft.com/visio/2010/relationships/page";
+    private const string VisioMastersRelationshipType = "http://schemas.microsoft.com/visio/2010/relationships/masters";
+    private const string VisioMasterRelationshipType = "http://schemas.microsoft.com/visio/2010/relationships/master";
     private const string ContentTypesNamespace = "http://schemas.openxmlformats.org/package/2006/content-types";
     private const string RelationshipsNamespace = "http://schemas.openxmlformats.org/package/2006/relationships";
     private const string WordprocessingNamespace = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
     private const string SpreadsheetNamespace = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
     private const string PresentationNamespace = "http://schemas.openxmlformats.org/presentationml/2006/main";
     private const string OfficeRelationshipNamespace = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+    private const string VisioNamespace = "http://schemas.microsoft.com/office/visio/2012/main";
 
     public static readonly SourceCapabilityDescriptor Capability = new(
         new Guid("3d72bf21-5358-482d-a6a9-576ff23012a3"),
@@ -46,7 +56,18 @@ public sealed class OoxmlStructuralTextProcessor(IRetainedArtifactWriter artifac
         "OoxmlDocumentContainer",
         "retained:document-ooxml-structural-extract");
 
-    public SourceCapabilityDescriptor Descriptor => Capability;
+    public OoxmlStructuralTextProcessor(IRetainedArtifactWriter artifactWriter)
+        : this(artifactWriter, Capability)
+    {
+    }
+
+    internal OoxmlStructuralTextProcessor(IRetainedArtifactWriter artifactWriter, SourceCapabilityDescriptor descriptor)
+    {
+        _artifactWriter = artifactWriter;
+        _descriptor = descriptor;
+    }
+
+    public SourceCapabilityDescriptor Descriptor => _descriptor;
 
     /// <summary>Promotion is extension-led; package confirmation stays inside the bounded processor.</summary>
     public static bool IsLikelyOoxml(RetainedProcessorPromotionCandidate candidate, ReadOnlySpan<byte> _) =>
@@ -72,12 +93,81 @@ public sealed class OoxmlStructuralTextProcessor(IRetainedArtifactWriter artifac
             throw new RetainedProcessorException("office-document-container-invalid");
         }
 
+        var extraction = await ExtractStructuralTextAsync(retained.Bytes, requireVsdx: false, cancellationToken).ConfigureAwait(false);
+        return await WriteChildrenAsync(claim, extraction.Text, cancellationToken).ConfigureAwait(false);
+    }
+
+    internal static async ValueTask<string> ExtractVsdxTextAsync(
+        ReadOnlyMemory<byte> bytes,
+        CancellationToken cancellationToken) =>
+        (await ExtractVsdxAsync(bytes, cancellationToken).ConfigureAwait(false)).Text;
+
+    internal static async ValueTask<DocumentExtractionResult> ExtractVsdxAsync(
+        ReadOnlyMemory<byte> bytes,
+        CancellationToken cancellationToken)
+    {
+        var extraction = await ExtractStructuralTextAsync(bytes, requireVsdx: true, cancellationToken).ConfigureAwait(false);
+        return new DocumentExtractionResult(extraction.Text, extraction.Warnings.Count == 0, extraction.Warnings);
+    }
+
+    internal static async ValueTask ValidateVsdxSemanticTextPartsUtf8Async(
+        byte[] bytes,
+        CancellationToken cancellationToken)
+    {
         try
         {
-            using var input = new MemoryStream(retained.Bytes, writable: false);
+            using var input = new MemoryStream(bytes, writable: false);
+            using var package = new ZipArchive(input, ZipArchiveMode.Read, leaveOpen: false);
+            var buffer = new byte[128 * 1024];
+            var chars = new char[StrictUtf8.GetMaxCharCount(buffer.Length)];
+            foreach (var entry in package.Entries)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (!IsVsdxSemanticTextPart(entry.FullName))
+                {
+                    continue;
+                }
+
+                var decoder = StrictUtf8.GetDecoder();
+                await using var stream = entry.Open();
+                int read;
+                while ((read = await stream.ReadAsync(buffer, cancellationToken).ConfigureAwait(false)) != 0)
+                {
+                    decoder.Convert(buffer.AsSpan(0, read), chars, flush: false, out _, out _, out _);
+                }
+                decoder.Convert(ReadOnlySpan<byte>.Empty, chars, flush: true, out _, out _, out _);
+            }
+        }
+        catch (DecoderFallbackException exception)
+        {
+            throw new RetainedProcessorException("archive-member-not-utf8", innerException: exception);
+        }
+    }
+
+    private static async ValueTask<StructuralExtraction> ExtractStructuralTextAsync(
+        ReadOnlyMemory<byte> bytes,
+        bool requireVsdx,
+        CancellationToken cancellationToken)
+    {
+        if (bytes.Length > MaximumInputBytes)
+        {
+            throw new RetainedProcessorException("office-document-input-too-large");
+        }
+        if (!ZipArchiveRetainedProcessor.IsZipSignature(bytes.Span))
+        {
+            if (IsEncryptedCompoundOfficeWrapper(bytes.Span))
+            {
+                throw new RetainedProcessorException("office-document-encrypted");
+            }
+            throw new RetainedProcessorException("office-document-container-invalid");
+        }
+
+        try
+        {
+            using var input = new MemoryStream(bytes.ToArray(), writable: false);
             using var package = new ZipArchive(input, ZipArchiveMode.Read, leaveOpen: false);
             if (package.Entries.Count > MaximumEntries) throw new RetainedProcessorException("office-document-container-invalid");
-            try { ZipArchiveRetainedProcessor.ValidateSafeCentralDirectory(retained.Bytes, MaximumEntries); }
+            try { ZipArchiveRetainedProcessor.ValidateSafeCentralDirectory(bytes.Span, MaximumEntries); }
             catch (RetainedProcessorException error) when (error.OutcomeCode == "archive-entry-encrypted") { throw new RetainedProcessorException("office-document-encrypted", innerException: error); }
             catch (RetainedProcessorException error) { throw new RetainedProcessorException("office-document-container-invalid", innerException: error); }
 
@@ -106,8 +196,13 @@ public sealed class OoxmlStructuralTextProcessor(IRetainedArtifactWriter artifac
                 if (IsXmlPart(entry.FullName)) ScanXmlPart(entry, xmlBudget, cancellationToken);
             }
             var selected = ValidatePackageTopology(entriesByPath, cancellationToken);
+            if (requireVsdx && selected is not VisioTopology)
+            {
+                throw new RetainedProcessorException("office-document-container-invalid");
+            }
 
             var text = new StructuralTextBuffer();
+            var warnings = new HashSet<string>(StringComparer.Ordinal);
             switch (selected)
             {
                 case WordTopology word:
@@ -124,11 +219,21 @@ public sealed class OoxmlStructuralTextProcessor(IRetainedArtifactWriter artifac
                     foreach (var slide in presentation.Slides)
                         await AppendStructuralTextAsync(slide, text, cancellationToken).ConfigureAwait(false);
                     break;
+                case VisioTopology visio:
+                    foreach (var page in visio.Pages)
+                    {
+                        text.Append($"Page: {page.Name}\n");
+                        if (await AppendVisioPageTextAsync(page.Part, visio.MasterShapes, text, cancellationToken).ConfigureAwait(false))
+                        {
+                            warnings.Add("vsdx-master-reference-unresolved");
+                        }
+                    }
+                    break;
                 default:
                     throw new RetainedProcessorException("office-document-container-invalid");
             }
             if (text.Length == 0) throw new RetainedProcessorException("office-document-part-unsupported");
-            return await WriteChildrenAsync(claim, text.Value, cancellationToken).ConfigureAwait(false);
+            return new StructuralExtraction(text.Value, warnings.ToArray());
         }
         catch (RetainedProcessorException) { throw; }
         catch (XmlException exception) { throw new RetainedProcessorException("office-document-xml-invalid", innerException: exception); }
@@ -138,6 +243,11 @@ public sealed class OoxmlStructuralTextProcessor(IRetainedArtifactWriter artifac
 
     private static bool IsXmlPart(string path) => path.EndsWith(".xml", StringComparison.OrdinalIgnoreCase) ||
         path.EndsWith(".rels", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsVsdxSemanticTextPart(string path) =>
+        path.Equals("[Content_Types].xml", StringComparison.OrdinalIgnoreCase) ||
+        path.Equals("_rels/.rels", StringComparison.OrdinalIgnoreCase) ||
+        path.StartsWith("visio/", StringComparison.OrdinalIgnoreCase) && IsXmlPart(path);
 
     // This validates only the bounded CFB header, FAT/DIFAT map and directory chain needed to recognise
     // an OOXML encryption wrapper. It deliberately does not inspect arbitrary sectors or legacy content.
@@ -681,7 +791,8 @@ public sealed class OoxmlStructuralTextProcessor(IRetainedArtifactWriter artifac
         if (mainPart is null || !entriesByPath.ContainsKey(mainPart)) throw new RetainedProcessorException("office-document-container-invalid");
         if (family is null) throw new RetainedProcessorException("office-document-container-invalid");
         var rootTargets = ReadRelationshipTargets(rootRelationships, "", cancellationToken);
-        if (!rootTargets.Values.Any(target => target.Type == OfficeDocumentRelationshipType &&
+        var mainRelationshipType = family == OoxmlFamily.Visio ? VisioDocumentRelationshipType : OfficeDocumentRelationshipType;
+        if (!rootTargets.Values.Any(target => target.Type == mainRelationshipType &&
             string.Equals(target.Target, mainPart, StringComparison.OrdinalIgnoreCase)))
             throw new RetainedProcessorException("office-document-container-invalid");
 
@@ -694,6 +805,8 @@ public sealed class OoxmlStructuralTextProcessor(IRetainedArtifactWriter artifac
             return ResolveWorkbookParts(entriesByPath, partContentTypes, cancellationToken);
         if (family == OoxmlFamily.Presentation)
             return ResolvePresentationParts(entriesByPath, partContentTypes, cancellationToken);
+        if (family == OoxmlFamily.Visio)
+            return ResolveVisioParts(entriesByPath, partContentTypes, cancellationToken);
         throw new RetainedProcessorException("office-document-container-invalid");
     }
 
@@ -758,6 +871,235 @@ public sealed class OoxmlStructuralTextProcessor(IRetainedArtifactWriter artifac
         return new PresentationTopology(parts);
     }
 
+    private static VisioTopology ResolveVisioParts(
+        IReadOnlyDictionary<string, ZipArchiveEntry> entriesByPath,
+        IReadOnlyDictionary<string, string> contentTypes,
+        CancellationToken cancellationToken)
+    {
+        if (!entriesByPath.TryGetValue("visio/document.xml", out var document) ||
+            !entriesByPath.TryGetValue("visio/_rels/document.xml.rels", out var documentRelationships) ||
+            !contentTypes.TryGetValue("visio/document.xml", out var documentType) ||
+            documentType != "application/vnd.ms-visio.drawing.main+xml")
+        {
+            throw new RetainedProcessorException("office-document-container-invalid");
+        }
+
+        RequirePartRoot(document, "VisioDocument", VisioNamespace, cancellationToken);
+        var documentTargets = ReadRelationshipTargets(documentRelationships, "visio/document.xml", cancellationToken);
+        var pagesTargets = documentTargets.Values.Where(target =>
+            target.Type == VisioPagesRelationshipType && string.Equals(target.Target, "visio/pages/pages.xml", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (pagesTargets.Length != 1 || !entriesByPath.TryGetValue(pagesTargets[0].Target, out var pages) ||
+            !entriesByPath.TryGetValue("visio/pages/_rels/pages.xml.rels", out var pagesRelationships) ||
+            !contentTypes.TryGetValue(pagesTargets[0].Target, out var pagesType) || pagesType != "application/vnd.ms-visio.pages+xml")
+        {
+            throw new RetainedProcessorException("office-document-container-invalid");
+        }
+
+        RequirePartRoot(pages, "Pages", VisioNamespace, cancellationToken);
+        var pageTargets = ReadRelationshipTargets(pagesRelationships, "visio/pages/pages.xml", cancellationToken);
+        var pageReferences = ReadVisioPages(pages, cancellationToken);
+        var masterShapes = ResolveVisioMasterShapes(entriesByPath, contentTypes, documentTargets, cancellationToken);
+        var result = new List<VisioPage>(pageReferences.Count);
+        foreach (var pageReference in pageReferences)
+        {
+            if (!pageTargets.TryGetValue(pageReference.RelationshipId, out var target) || target.Type != VisioPageRelationshipType ||
+                !target.Target.StartsWith("visio/pages/page", StringComparison.OrdinalIgnoreCase) ||
+                !target.Target.EndsWith(".xml", StringComparison.OrdinalIgnoreCase) ||
+                !entriesByPath.TryGetValue(target.Target, out var page) ||
+                !contentTypes.TryGetValue(target.Target, out var pageType) || pageType != "application/vnd.ms-visio.page+xml")
+            {
+                throw new RetainedProcessorException("office-document-container-invalid");
+            }
+            RequirePartRoot(page, "PageContents", VisioNamespace, cancellationToken);
+            result.Add(new VisioPage(pageReference.Name, page));
+        }
+        return new VisioTopology(result, masterShapes);
+    }
+
+    private static IReadOnlyDictionary<string, IReadOnlyDictionary<string, MasterShapeDefinition>> ResolveVisioMasterShapes(
+        IReadOnlyDictionary<string, ZipArchiveEntry> entriesByPath,
+        IReadOnlyDictionary<string, string> contentTypes,
+        IReadOnlyDictionary<string, RelationshipTarget> documentTargets,
+        CancellationToken cancellationToken)
+    {
+        var mastersTargets = documentTargets.Values.Where(target => target.Type == VisioMastersRelationshipType).ToArray();
+        if (mastersTargets.Length == 0)
+        {
+            return new Dictionary<string, IReadOnlyDictionary<string, MasterShapeDefinition>>(StringComparer.Ordinal);
+        }
+        if (mastersTargets.Length != 1 || !string.Equals(mastersTargets[0].Target, "visio/masters/masters.xml", StringComparison.OrdinalIgnoreCase) ||
+            !entriesByPath.TryGetValue(mastersTargets[0].Target, out var masters) ||
+            !entriesByPath.TryGetValue("visio/masters/_rels/masters.xml.rels", out var mastersRelationships) ||
+            !contentTypes.TryGetValue(mastersTargets[0].Target, out var mastersType) || mastersType != "application/vnd.ms-visio.masters+xml")
+        {
+            throw new RetainedProcessorException("office-document-container-invalid");
+        }
+
+        RequirePartRoot(masters, "Masters", VisioNamespace, cancellationToken);
+        var masterTargets = ReadRelationshipTargets(mastersRelationships, "visio/masters/masters.xml", cancellationToken);
+        var result = new Dictionary<string, IReadOnlyDictionary<string, MasterShapeDefinition>>(StringComparer.Ordinal);
+        foreach (var masterReference in ReadVisioMasterReferences(masters, cancellationToken))
+        {
+            if (!masterTargets.TryGetValue(masterReference.RelationshipId, out var target) ||
+                target.Type != VisioMasterRelationshipType ||
+                !target.Target.StartsWith("visio/masters/master", StringComparison.OrdinalIgnoreCase) ||
+                !target.Target.EndsWith(".xml", StringComparison.OrdinalIgnoreCase) ||
+                !entriesByPath.TryGetValue(target.Target, out var master) ||
+                !contentTypes.TryGetValue(target.Target, out var masterType) || masterType != "application/vnd.ms-visio.master+xml")
+            {
+                throw new RetainedProcessorException("office-document-container-invalid");
+            }
+
+            RequirePartRoot(master, "MasterContents", VisioNamespace, cancellationToken);
+            if (!result.TryAdd(masterReference.Id, ReadVisioMasterShapes(master, cancellationToken)))
+            {
+                throw new RetainedProcessorException("office-document-container-invalid");
+            }
+        }
+        return result;
+    }
+
+    private static IReadOnlyList<VisioMasterReference> ReadVisioMasterReferences(ZipArchiveEntry masters, CancellationToken cancellationToken)
+    {
+        var references = new List<VisioMasterReference>();
+        var knownIds = new HashSet<string>(StringComparer.Ordinal);
+        var knownRelationshipIds = new HashSet<string>(StringComparer.Ordinal);
+        using var reader = CreateReader(masters.Open());
+        string? masterId = null;
+        string? relationshipId = null;
+        var masterDepth = -1;
+        while (reader.Read())
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (reader.NodeType == XmlNodeType.Element && reader.LocalName == "Master" && reader.NamespaceURI == VisioNamespace)
+            {
+                if (masterId is not null || reader.Depth != 1)
+                {
+                    throw new RetainedProcessorException("office-document-container-invalid");
+                }
+                masterId = reader.GetAttribute("ID");
+                if (reader.IsEmptyElement || string.IsNullOrWhiteSpace(masterId) || !knownIds.Add(masterId))
+                {
+                    throw new RetainedProcessorException("office-document-container-invalid");
+                }
+                relationshipId = null;
+                masterDepth = reader.Depth;
+                continue;
+            }
+            if (reader.NodeType == XmlNodeType.Element && masterId is not null && reader.Depth == masterDepth + 1 &&
+                reader.LocalName == "Rel" && reader.NamespaceURI == VisioNamespace)
+            {
+                if (relationshipId is not null)
+                {
+                    throw new RetainedProcessorException("office-document-container-invalid");
+                }
+                relationshipId = reader.GetAttribute("id", OfficeRelationshipNamespace);
+                if (string.IsNullOrWhiteSpace(relationshipId) || !knownRelationshipIds.Add(relationshipId))
+                {
+                    throw new RetainedProcessorException("office-document-container-invalid");
+                }
+                continue;
+            }
+            if (reader.NodeType == XmlNodeType.EndElement && masterId is not null && reader.Depth == masterDepth &&
+                reader.LocalName == "Master" && reader.NamespaceURI == VisioNamespace)
+            {
+                if (relationshipId is null)
+                {
+                    throw new RetainedProcessorException("office-document-container-invalid");
+                }
+                references.Add(new VisioMasterReference(masterId, relationshipId));
+                masterId = null;
+                relationshipId = null;
+                masterDepth = -1;
+            }
+        }
+        if (masterId is not null)
+        {
+            throw new RetainedProcessorException("office-document-container-invalid");
+        }
+        return references;
+    }
+
+    private static IReadOnlyDictionary<string, MasterShapeDefinition> ReadVisioMasterShapes(ZipArchiveEntry master, CancellationToken cancellationToken)
+    {
+        var results = new Dictionary<string, MasterShapeDefinition>(StringComparer.Ordinal);
+        using var reader = CreateReader(master.Open());
+        var shapes = new Stack<VisioShape>();
+        VisioShape? textShape = null;
+        var textDepth = -1;
+        while (reader.Read())
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (reader.NodeType == XmlNodeType.Element)
+            {
+                if (reader.LocalName == "Shape" && reader.NamespaceURI == VisioNamespace)
+                {
+                    var id = reader.GetAttribute("ID");
+                    if (string.IsNullOrWhiteSpace(id))
+                    {
+                        throw new RetainedProcessorException("office-document-container-invalid");
+                    }
+                    var shape = new VisioShape(reader.Depth, id, null, null);
+                    if (reader.IsEmptyElement)
+                    {
+                        if (!results.TryAdd(shape.Name, new MasterShapeDefinition(null)))
+                        {
+                            throw new RetainedProcessorException("office-document-container-invalid");
+                        }
+                    }
+                    else
+                    {
+                        shapes.Push(shape);
+                    }
+                }
+                else if (shapes.Count > 0 && reader.LocalName == "Text" && reader.NamespaceURI == VisioNamespace)
+                {
+                    if (textShape is not null)
+                    {
+                        throw new RetainedProcessorException("office-document-container-invalid");
+                    }
+                    var shape = shapes.Peek();
+                    shape.HasLocalText = true;
+                    if (!reader.IsEmptyElement)
+                    {
+                        shape.Text = new StringBuilder();
+                        textShape = shape;
+                        textDepth = reader.Depth;
+                    }
+                }
+            }
+            else if (reader.NodeType is XmlNodeType.Text or XmlNodeType.CDATA)
+            {
+                textShape?.Text?.Append(reader.Value);
+            }
+            else if (reader.NodeType == XmlNodeType.EndElement)
+            {
+                if (textShape is not null && reader.Depth == textDepth && reader.LocalName == "Text" && reader.NamespaceURI == VisioNamespace)
+                {
+                    textShape = null;
+                    textDepth = -1;
+                }
+                if (shapes.Count > 0 && reader.Depth == shapes.Peek().Depth && reader.LocalName == "Shape" && reader.NamespaceURI == VisioNamespace)
+                {
+                    if (textShape is not null)
+                    {
+                        throw new RetainedProcessorException("office-document-xml-invalid");
+                    }
+                    var shape = shapes.Pop();
+                    if (!results.TryAdd(shape.Name, new MasterShapeDefinition(shape.Text?.ToString())))
+                    {
+                        throw new RetainedProcessorException("office-document-container-invalid");
+                    }
+                }
+            }
+        }
+        if (textShape is not null || shapes.Count != 0)
+        {
+            throw new RetainedProcessorException("office-document-xml-invalid");
+        }
+        return results;
+    }
+
     private static Dictionary<string, RelationshipTarget> ReadRelationshipTargets(ZipArchiveEntry relationshipsEntry, string ownerPart, CancellationToken cancellationToken)
     {
         var targets = new Dictionary<string, RelationshipTarget>(StringComparer.Ordinal);
@@ -800,6 +1142,66 @@ public sealed class OoxmlStructuralTextProcessor(IRetainedArtifactWriter artifac
         return identifiers;
     }
 
+    private static IReadOnlyList<VisioPageReference> ReadVisioPages(ZipArchiveEntry pages, CancellationToken cancellationToken)
+    {
+        var results = new List<VisioPageReference>();
+        var relationshipIds = new HashSet<string>(StringComparer.Ordinal);
+        using var reader = CreateReader(pages.Open());
+        string? pageName = null;
+        string? relationshipId = null;
+        var pageDepth = -1;
+        while (reader.Read())
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (reader.NodeType == XmlNodeType.Element && reader.LocalName == "Page" && reader.NamespaceURI == VisioNamespace)
+            {
+                if (pageName is not null || reader.Depth != 1)
+                {
+                    throw new RetainedProcessorException("office-document-container-invalid");
+                }
+                pageName = reader.GetAttribute("Name");
+                if (reader.IsEmptyElement || string.IsNullOrWhiteSpace(pageName) || pageName.Length > MaximumPathLength)
+                {
+                    throw new RetainedProcessorException("office-document-container-invalid");
+                }
+                relationshipId = null;
+                pageDepth = reader.Depth;
+                continue;
+            }
+            if (reader.NodeType == XmlNodeType.Element && pageName is not null && reader.Depth == pageDepth + 1 &&
+                reader.LocalName == "Rel" && reader.NamespaceURI == VisioNamespace)
+            {
+                if (relationshipId is not null)
+                {
+                    throw new RetainedProcessorException("office-document-container-invalid");
+                }
+                relationshipId = reader.GetAttribute("id", OfficeRelationshipNamespace);
+                if (string.IsNullOrWhiteSpace(relationshipId) || !relationshipIds.Add(relationshipId))
+                {
+                    throw new RetainedProcessorException("office-document-container-invalid");
+                }
+                continue;
+            }
+            if (reader.NodeType == XmlNodeType.EndElement && pageName is not null && reader.Depth == pageDepth &&
+                reader.LocalName == "Page" && reader.NamespaceURI == VisioNamespace)
+            {
+                if (relationshipId is null)
+                {
+                    throw new RetainedProcessorException("office-document-container-invalid");
+                }
+                results.Add(new VisioPageReference(pageName, relationshipId));
+                pageName = null;
+                relationshipId = null;
+                pageDepth = -1;
+            }
+        }
+        if (pageName is not null)
+        {
+            throw new RetainedProcessorException("office-document-container-invalid");
+        }
+        return results;
+    }
+
     private static void RequirePartRoot(ZipArchiveEntry entry, string localName, string namespaceUri, CancellationToken cancellationToken)
     {
         using var reader = CreateReader(entry.Open());
@@ -819,6 +1221,7 @@ public sealed class OoxmlStructuralTextProcessor(IRetainedArtifactWriter artifac
         ("/word/document.xml", "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml") => OoxmlFamily.Word,
         ("/xl/workbook.xml", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml") => OoxmlFamily.Workbook,
         ("/ppt/presentation.xml", "application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml") => OoxmlFamily.Presentation,
+        ("/visio/document.xml", "application/vnd.ms-visio.drawing.main+xml") => OoxmlFamily.Visio,
         _ => null
     };
 
@@ -1001,6 +1404,93 @@ public sealed class OoxmlStructuralTextProcessor(IRetainedArtifactWriter artifac
         if (cellDepth >= 0 || value is not null) throw new RetainedProcessorException("office-document-xml-invalid");
     }
 
+    private static async ValueTask<bool> AppendVisioPageTextAsync(
+        ZipArchiveEntry entry,
+        IReadOnlyDictionary<string, IReadOnlyDictionary<string, MasterShapeDefinition>> masterShapes,
+        StructuralTextBuffer text,
+        CancellationToken cancellationToken)
+    {
+        using var reader = CreateReader(entry.Open());
+        var shapes = new Stack<VisioShape>();
+        StringBuilder? value = null;
+        var textDepth = -1;
+        var hasUnresolvedMasterReference = false;
+        while (await reader.ReadAsync().ConfigureAwait(false))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (reader.NodeType == XmlNodeType.Element)
+            {
+                if (reader.LocalName == "Shape" && reader.NamespaceURI == VisioNamespace)
+                {
+                    var name = reader.GetAttribute("NameU") ?? reader.GetAttribute("Name") ?? reader.GetAttribute("ID") ?? "Shape";
+                    var shape = new VisioShape(reader.Depth, name, reader.GetAttribute("Master"), reader.GetAttribute("MasterShape"));
+                    if (reader.IsEmptyElement)
+                    {
+                        hasUnresolvedMasterReference |= AppendInheritedMasterText(shape, masterShapes, text);
+                    }
+                    else
+                    {
+                        shapes.Push(shape);
+                    }
+                }
+                else if (shapes.Count > 0 && reader.LocalName == "Text" && reader.NamespaceURI == VisioNamespace)
+                {
+                    if (value is not null) throw new RetainedProcessorException("office-document-container-invalid");
+                    shapes.Peek().HasLocalText = true;
+                    if (!reader.IsEmptyElement)
+                    {
+                        value = new StringBuilder();
+                        textDepth = reader.Depth;
+                    }
+                }
+            }
+            else if (reader.NodeType is XmlNodeType.Text or XmlNodeType.CDATA)
+            {
+                value?.Append(reader.Value);
+            }
+            else if (reader.NodeType == XmlNodeType.EndElement)
+            {
+                if (value is not null && reader.Depth == textDepth && reader.LocalName == "Text" && reader.NamespaceURI == VisioNamespace)
+                {
+                    if (value.Length > 0)
+                    {
+                        text.Append($"{shapes.Peek().Name}: {value}\n");
+                    }
+                    value = null;
+                    textDepth = -1;
+                }
+                if (shapes.Count > 0 && reader.Depth == shapes.Peek().Depth && reader.LocalName == "Shape" && reader.NamespaceURI == VisioNamespace)
+                {
+                    if (value is not null) throw new RetainedProcessorException("office-document-xml-invalid");
+                    var shape = shapes.Pop();
+                    hasUnresolvedMasterReference |= AppendInheritedMasterText(shape, masterShapes, text);
+                }
+            }
+        }
+        if (value is not null || shapes.Count != 0) throw new RetainedProcessorException("office-document-xml-invalid");
+        return hasUnresolvedMasterReference;
+    }
+
+    private static bool AppendInheritedMasterText(
+        VisioShape shape,
+        IReadOnlyDictionary<string, IReadOnlyDictionary<string, MasterShapeDefinition>> masterShapes,
+        StructuralTextBuffer text)
+    {
+        if (shape.HasLocalText || shape.MasterId is null || shape.MasterShapeId is null)
+        {
+            return false;
+        }
+        if (!masterShapes.TryGetValue(shape.MasterId, out var master) || !master.TryGetValue(shape.MasterShapeId, out var inherited))
+        {
+            return true;
+        }
+        if (!string.IsNullOrEmpty(inherited.Text))
+        {
+            text.Append($"{shape.Name}: {inherited.Text}\n");
+        }
+        return false;
+    }
+
     private static bool IsStructuralTextElement(string partPath, string localName, string namespaceUri)
     {
         return (partPath.StartsWith("word/", StringComparison.OrdinalIgnoreCase) && namespaceUri == WordprocessingNamespace ||
@@ -1038,12 +1528,29 @@ public sealed class OoxmlStructuralTextProcessor(IRetainedArtifactWriter artifac
         }
     }
 
-    private enum OoxmlFamily { Word, Workbook, Presentation }
+    private enum OoxmlFamily { Word, Workbook, Presentation, Visio }
 
     private abstract record OoxmlTopology;
     private sealed record WordTopology(ZipArchiveEntry Document) : OoxmlTopology;
     private sealed record WorkbookTopology(ZipArchiveEntry? SharedStrings, IReadOnlyList<ZipArchiveEntry> Worksheets) : OoxmlTopology;
     private sealed record PresentationTopology(IReadOnlyList<ZipArchiveEntry> Slides) : OoxmlTopology;
+    private sealed record VisioTopology(
+        IReadOnlyList<VisioPage> Pages,
+        IReadOnlyDictionary<string, IReadOnlyDictionary<string, MasterShapeDefinition>> MasterShapes) : OoxmlTopology;
+    private sealed record VisioPage(string Name, ZipArchiveEntry Part);
+    private sealed record VisioPageReference(string Name, string RelationshipId);
+    private sealed record VisioMasterReference(string Id, string RelationshipId);
+    private sealed record StructuralExtraction(string Text, IReadOnlyList<string> Warnings);
+    private sealed class VisioShape(int depth, string name, string? masterId, string? masterShapeId)
+    {
+        public int Depth { get; } = depth;
+        public string Name { get; } = name;
+        public string? MasterId { get; } = masterId;
+        public string? MasterShapeId { get; } = masterShapeId;
+        public bool HasLocalText { get; set; }
+        public StringBuilder? Text { get; set; }
+    }
+    private sealed record MasterShapeDefinition(string? Text);
     private sealed record RelationshipTarget(string Target, string Type);
 
     private static XmlReader CreateReader(Stream stream) => XmlReader.Create(stream, new XmlReaderSettings
@@ -1072,10 +1579,10 @@ public sealed class OoxmlStructuralTextProcessor(IRetainedArtifactWriter artifac
             while (length > 0 && offset + length < bytes.Length && (bytes[offset + length] & 0xC0) == 0x80) length--;
             if (length == 0) throw new RetainedProcessorException("office-document-text-limit");
             var segment = bytes.AsMemory(offset, length).ToArray();
-            var fingerprint = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes($"office-segment:{claim.ParentStableIdentity.Length}:{claim.ParentStableIdentity}:{Capability.ProcessorFingerprint}:{ordinal}")));
+            var fingerprint = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes($"office-segment:{claim.ParentStableIdentity.Length}:{claim.ParentStableIdentity}:{_descriptor.ProcessorFingerprint}:{ordinal}")));
             var identity = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes($"office-segment-identity:{claim.ParentStableIdentity.Length}:{claim.ParentStableIdentity}:{fingerprint}")));
             await using var stream = new MemoryStream(segment, writable: false);
-            var receipt = await artifactWriter.WriteAsync(claim.SourceRevisionId, stream, MaximumChildTextBytes, cancellationToken).ConfigureAwait(false);
+            var receipt = await _artifactWriter.WriteAsync(claim.SourceRevisionId, stream, MaximumChildTextBytes, cancellationToken).ConfigureAwait(false);
             if (receipt.ByteLength != segment.Length || !receipt.IsUtf8Text || receipt.IsNestedArchive)
                 throw new RetainedProcessorException("office-document-part-unsupported");
             children.Add(new RetainedProcessorDerivedChild(fingerprint, $"retained-office-structural-segment:{fingerprint}", identity,
@@ -1092,4 +1599,51 @@ public sealed class OoxmlStructuralTextProcessor(IRetainedArtifactWriter artifac
 public sealed class OoxmlStructuralTextCapabilityHandler : ILocalSourceCapabilityHandler
 {
     public SourceCapabilityDescriptor Descriptor => OoxmlStructuralTextProcessor.Capability;
+}
+
+/// <summary>Versioned VSDX capability which reuses the bounded package parser without changing OOXML ownership history.</summary>
+public sealed class VsdxStructuralTextProcessor(IRetainedArtifactWriter artifactWriter) : ILocalSourceCapabilityHandler
+{
+    public static readonly SourceCapabilityDescriptor Capability = new(
+        new Guid("26af01a2-d371-4769-a04d-70c5f2e55a1d"),
+        "document-vsdx-structural-extract",
+        "phase-6-vsdx-structural-v1",
+        ExecutionClass.InProcess,
+        "phase-6-vsdx-retained-structural-v1",
+        SourceActivityKind.TextExtraction,
+        "VsdxDocumentContainer",
+        "retained:document-vsdx-structural-extract");
+
+    public SourceCapabilityDescriptor Descriptor => Capability;
+
+    public static bool IsLikelyVsdx(RetainedProcessorPromotionCandidate candidate, ReadOnlySpan<byte> _) =>
+        candidate.Extension.Equals(".vsdx", StringComparison.OrdinalIgnoreCase);
+
+    public async ValueTask<RetainedProcessorCompletion> ProcessAsync(
+        RetainedProcessorClaim claim,
+        RetainedSourceBytes retained,
+        RetainedProcessorOptions options,
+        CancellationToken cancellationToken)
+    {
+        _ = artifactWriter;
+        _ = options;
+        if (!string.Equals(retained.ContentSha256, claim.InputSha256, StringComparison.Ordinal) ||
+            !string.Equals(Convert.ToHexStringLower(SHA256.HashData(retained.Bytes)), claim.InputSha256, StringComparison.Ordinal))
+        {
+            throw new RetainedProcessorException("retained-artifact-checksum-invalid");
+        }
+
+        await ZipArchiveRetainedProcessor.ValidateSafeArchiveAsync(retained, options, cancellationToken).ConfigureAwait(false);
+        await OoxmlStructuralTextProcessor.ValidateVsdxSemanticTextPartsUtf8Async(retained.Bytes, cancellationToken).ConfigureAwait(false);
+        _ = await OoxmlStructuralTextProcessor.ExtractVsdxTextAsync(retained.Bytes, cancellationToken).ConfigureAwait(false);
+        var input = DocumentProcessingInput.CreateVsdxChild(claim, retained);
+        var receiptFingerprint = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(
+            $"completed:{input.MemberFingerprint}:{input.ContentSha256}:{input.ByteLength}")));
+        return new RetainedProcessorCompletion([input], receiptFingerprint);
+    }
+}
+
+public sealed class VsdxStructuralTextCapabilityHandler : ILocalSourceCapabilityHandler
+{
+    public SourceCapabilityDescriptor Descriptor => VsdxStructuralTextProcessor.Capability;
 }

@@ -42,6 +42,32 @@ public sealed class SqlGpuTaskHandoffTests(NativeSqlServerFixture fixture)
     }
 
     [NativeSqlServerFact]
+    public async Task Handoff_uses_the_source_bound_mini_task_id_and_replay_cannot_substitute_it()
+    {
+        var (factory, _, request) = await CreateClaimedRequestAsync("handoff:source-bound-id");
+        var expectedMiniTaskId = Guid.NewGuid();
+        var store = new SqlGpuSchedulerStore(factory);
+
+        var first = await store.GpuTaskHandoffAsync(
+            request with { MiniTaskId = expectedMiniTaskId },
+            CancellationToken.None);
+
+        Assert.True(first.Committed);
+        Assert.Equal(expectedMiniTaskId, first.MiniTaskId);
+
+        var replay = await store.GpuTaskHandoffAsync(
+            request with { MiniTaskId = expectedMiniTaskId },
+            CancellationToken.None);
+
+        Assert.True(replay.IsIdempotentReplay);
+        Assert.Equal(expectedMiniTaskId, replay.MiniTaskId);
+        await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            await store.GpuTaskHandoffAsync(
+                request with { MiniTaskId = Guid.NewGuid() },
+                CancellationToken.None));
+    }
+
+    [NativeSqlServerFact]
     public async Task Handoff_failure_after_task_insert_rolls_back_task_parent_and_wake_evidence()
     {
         var (factory, claim, request) = await CreateClaimedRequestAsync("handoff:rollback");

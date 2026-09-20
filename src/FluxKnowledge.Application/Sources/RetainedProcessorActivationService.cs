@@ -13,6 +13,8 @@ public sealed class RetainedProcessorActivationService
     private readonly ZipArchiveRetainedProcessor _zipProcessor;
     private readonly TarArchiveRetainedProcessor? _tarProcessor;
     private readonly OoxmlStructuralTextProcessor? _ooxmlProcessor;
+    private readonly VsdxStructuralTextProcessor? _vsdxProcessor;
+    private readonly PdfDocumentProcessor? _pdfProcessor;
     private readonly RetainedCsharpCodeProcessor? _csharpProcessor;
     private readonly MediaMetadataRetainedProcessor? _mediaMetadataProcessor;
     private readonly RetainedProcessorOptions _options;
@@ -36,8 +38,10 @@ public sealed class RetainedProcessorActivationService
         TarArchiveRetainedProcessor? tarProcessor = null,
         IStatusEventPublisher? statusEvents = null,
         OoxmlStructuralTextProcessor? ooxmlProcessor = null,
+        VsdxStructuralTextProcessor? vsdxProcessor = null,
         RetainedCsharpCodeProcessor? csharpProcessor = null,
-        MediaMetadataRetainedProcessor? mediaMetadataProcessor = null)
+        MediaMetadataRetainedProcessor? mediaMetadataProcessor = null,
+        PdfDocumentProcessor? pdfProcessor = null)
     {
         _ = timeProvider;
         _capabilityService = capabilityService;
@@ -46,6 +50,8 @@ public sealed class RetainedProcessorActivationService
         _zipProcessor = zipProcessor;
         _tarProcessor = tarProcessor;
         _ooxmlProcessor = ooxmlProcessor;
+        _vsdxProcessor = vsdxProcessor;
+        _pdfProcessor = pdfProcessor;
         _csharpProcessor = csharpProcessor;
         _mediaMetadataProcessor = mediaMetadataProcessor;
         _options = options;

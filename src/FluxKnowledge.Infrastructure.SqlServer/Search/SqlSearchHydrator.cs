@@ -4,6 +4,7 @@ using FluxKnowledge.Application.Search;
 using FluxKnowledge.Domain.Common;
 using FluxKnowledge.Domain.Sources;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
+using FluxKnowledge.Infrastructure.SqlServer.Persistence.Configurations;
 using Microsoft.EntityFrameworkCore;
 
 namespace FluxKnowledge.Infrastructure.SqlServer.Search;
@@ -37,11 +38,32 @@ public sealed class SqlSearchHydrator(IDbContextFactory<FluxKnowledgeDbContext> 
                     equals new { PipelineRecordId = record.Id, SourceRevision = record.Revision }
                 join source in context.SourceIdentities.AsNoTracking()
                     on record.SourceIdentityId equals source.Id
+                join revisionValue in context.SourceRevisions.AsNoTracking()
+                    on record.SourceRevisionId equals revisionValue.Id into revisions
+                from revision in revisions.DefaultIfEmpty()
+                join publicationValue in context.DocumentPublications.AsNoTracking() on new
+                {
+                    PipelineRecordId = record.Id,
+                    PipelineRecordRevision = record.Revision,
+                    DocumentInputSourceRevisionId = revision.Id
+                } equals new
+                {
+                    publicationValue.PipelineRecordId,
+                    publicationValue.PipelineRecordRevision,
+                    publicationValue.DocumentInputSourceRevisionId
+                } into publications
+                from publication in publications.DefaultIfEmpty()
+                join ownerValue in context.SourceRevisions.AsNoTracking()
+                    on publication.OwnerSourceRevisionId equals ownerValue.Id into owners
+                from owner in owners.DefaultIfEmpty()
                 where vectorIds.Contains(vector.VectorId) &&
                       !vector.IsDeleted &&
                       !record.IsDeleted &&
                       (!record.SourceRevisionId.HasValue || context.SourceRevisions.Any(sourceRevision =>
-                          sourceRevision.Id == record.SourceRevisionId.Value && sourceRevision.SuppressedAtUtc == null && sourceRevision.OriginKind != 2 &&
+                          sourceRevision.Id == record.SourceRevisionId && sourceRevision.SuppressedAtUtc == null &&
+                          (sourceRevision.OriginKind != 2 || context.DocumentPublications.Any(document =>
+                              document.PipelineRecordId == record.Id && document.PipelineRecordRevision == record.Revision &&
+                              document.DocumentInputSourceRevisionId == sourceRevision.Id)) &&
                           context.SourceRootConfigurations.Any(root => root.Id == sourceRevision.SourceRootId && root.State != (int)SourceRootState.Deleting))) &&
                       vector.TextChunkContentHash == chunk.ContentHash &&
                       vector.SourceRevision == record.Revision &&
@@ -52,7 +74,9 @@ public sealed class SqlSearchHydrator(IDbContextFactory<FluxKnowledgeDbContext> 
                     vector.VectorId,
                     record.Id,
                     record.Revision,
-                    source.StableKey,
+                    publication == null
+                        ? EF.Functions.Collate(source.StableKey, SchemaConfiguration.SchedulerFenceCollation)
+                        : EF.Functions.Collate(owner.CanonicalPath, SchemaConfiguration.SchedulerFenceCollation),
                     chunk.Content))
             .ToListAsync(cancellationToken)
             .ConfigureAwait(false);

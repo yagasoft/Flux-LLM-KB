@@ -84,6 +84,21 @@ public sealed class HybridSearchIntegrationTests : IClassFixture<NativeSqlServer
             hit.Snippet.Contains("private ooxml sentinel", StringComparison.Ordinal));
     }
 
+    [NativeSqlServerFact]
+    public async Task Full_text_search_returns_the_selected_document_once_under_its_physical_owner()
+    {
+        await using var environment = await SearchEnvironment.CreateAsync(_fixture, includePublishedDocument: true);
+        await environment.WaitForLexicalCandidateAsync("document retrieval sentinel");
+
+        var response = await environment.Service.SearchAsync(
+            new SearchRequest("document retrieval sentinel", 5, "local_first", null, null, null),
+            CancellationToken.None);
+
+        var hit = Assert.Single(response.Results, value => value.SourceIdentity == "C:/ingress/architecture.vsdx");
+        Assert.Contains("document retrieval sentinel", hit.Snippet, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains(hit.Explanation, value => value.StartsWith("lexical:", StringComparison.Ordinal));
+    }
+
     private sealed class SearchEnvironment : IAsyncDisposable
     {
         private readonly ServiceProvider _provider;
@@ -98,14 +113,16 @@ public sealed class HybridSearchIntegrationTests : IClassFixture<NativeSqlServer
         private IServiceScope Scope { get; }
         public HybridSearchService Service { get; }
 
-        public async Task WaitForLexicalCandidateAsync()
+        public Task WaitForLexicalCandidateAsync() => WaitForLexicalCandidateAsync("restart");
+
+        public async Task WaitForLexicalCandidateAsync(string query)
         {
             var deadline = DateTimeOffset.UtcNow.AddSeconds(10);
             var lexicalSearch = Scope.ServiceProvider.GetRequiredService<ILexicalSearch>();
             while (DateTimeOffset.UtcNow < deadline)
             {
                 var candidates = await lexicalSearch
-                    .SearchAsync("restart", 5, CancellationToken.None)
+                    .SearchAsync(query, 5, CancellationToken.None)
                     .ConfigureAwait(false);
                 if (candidates.Count == 1)
                 {
@@ -118,10 +135,13 @@ public sealed class HybridSearchIntegrationTests : IClassFixture<NativeSqlServer
             throw new TimeoutException("The SQL Server Full-Text index did not publish the current candidate in time.");
         }
 
-        public static async Task<SearchEnvironment> CreateAsync(NativeSqlServerFixture fixture, bool includePrivateStructuralChild = false)
+        public static async Task<SearchEnvironment> CreateAsync(
+            NativeSqlServerFixture fixture,
+            bool includePrivateStructuralChild = false,
+            bool includePublishedDocument = false)
         {
             await SqlTestData.ClearPipelineAsync(fixture);
-            var candidateIds = await SearchFixtureData.SeedAsync(fixture, includePrivateStructuralChild);
+            var candidateIds = await SearchFixtureData.SeedAsync(fixture, includePrivateStructuralChild, includePublishedDocument);
             var services = new ServiceCollection();
             services.AddSingleton(SqlTestData.CreateFactory(fixture));
             services.AddSingleton<IEmbeddingProvider, DeterministicTokenHashEmbeddingProvider>();
@@ -177,7 +197,10 @@ public sealed class HybridSearchIntegrationTests : IClassFixture<NativeSqlServer
         private const string OldHash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
         private const string ChunkHash = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
 
-        public static async Task<IReadOnlyList<long>> SeedAsync(NativeSqlServerFixture fixture, bool includePrivateStructuralChild)
+        public static async Task<IReadOnlyList<long>> SeedAsync(
+            NativeSqlServerFixture fixture,
+            bool includePrivateStructuralChild,
+            bool includePublishedDocument)
         {
             await using var context = await SqlTestData.CreateFactory(fixture).CreateDbContextAsync();
             var now = DateTimeOffset.UtcNow;
@@ -189,7 +212,7 @@ public sealed class HybridSearchIntegrationTests : IClassFixture<NativeSqlServer
                 Dimensions = 1,
                 IndexPath = "C:/test-index",
                 MetadataChecksum = CurrentHash,
-                VectorCount = 3,
+                VectorCount = includePublishedDocument ? 4 : 3,
                 CreatedAtUtc = now,
                 ValidatedAtUtc = now
             });
@@ -212,6 +235,66 @@ public sealed class HybridSearchIntegrationTests : IClassFixture<NativeSqlServer
 
             context.SourceIdentities.AddRange(guideSource, deletedSource, staleSource);
             context.PipelineRecords.AddRange(guideOld, guideCurrent, deletedRecord, staleRecord, staleCurrent);
+            VectorEntity? publishedDocumentVector = null;
+            if (includePublishedDocument)
+            {
+                var documentRoot = new SourceRootConfigurationEntity
+                {
+                    Id = Guid.NewGuid(), CanonicalPath = "C:/ingress", DisplayName = "ingress", State = 0,
+                    Recursive = true, IncludePatternsJson = "[]", ExcludePatternsJson = "[]", MaximumFileBytes = 1024,
+                    AllowedClassificationsJson = "[]", ReconciliationCadenceSeconds = 60, ConfigurationRevision = 1,
+                    CreatedAtUtc = now, UpdatedAtUtc = now
+                };
+                var ownerRevision = new SourceRevisionEntity
+                {
+                    Id = Guid.NewGuid(), SourceRootId = documentRoot.Id, StableSourceIdentity = "architecture.vsdx",
+                    Revision = 1, ContentSha256 = CurrentHash, CanonicalPath = "C:/ingress/architecture.vsdx",
+                    Classification = "VsdxDocumentContainer", Extension = ".vsdx", ByteLength = 1, DiscoveredAtUtc = now
+                };
+                var inputRevision = new SourceRevisionEntity
+                {
+                    Id = Guid.NewGuid(), SourceRootId = documentRoot.Id, StableSourceIdentity = "hidden-architecture-input",
+                    Revision = 1, ContentSha256 = CurrentHash, CanonicalPath = "C:/retained/architecture.vsdx",
+                    ParentSourceRevisionId = ownerRevision.Id, Classification = "DocumentProcessingInput", Extension = ".vsdx",
+                    OriginKind = 2, ByteLength = 1, DiscoveredAtUtc = now
+                };
+                var documentSource = new SourceIdentityEntity
+                {
+                    Id = Guid.NewGuid(), SourceKind = "local file", StableKey = "hidden-architecture-input", CreatedAtUtc = now
+                };
+                var documentRecord = new PipelineRecordEntity
+                {
+                    Id = Guid.NewGuid(), SourceIdentityId = documentSource.Id, SourceRevisionId = inputRevision.Id,
+                    Revision = 1, ContentHash = CurrentHash, RootLineageRecordId = Guid.Empty, RegisteredAtUtc = now
+                };
+                documentRecord.RootLineageRecordId = documentRecord.Id;
+                var ownerActivity = new SourceActivityEntity
+                {
+                    Id = Guid.NewGuid(), SourceRevisionId = ownerRevision.Id, ActivityKind = 1, ExecutionClass = 1,
+                    ProcessorVersion = "document-test", InputFingerprint = CurrentHash, State = 2,
+                    CreatedAtUtc = now, UpdatedAtUtc = now
+                };
+                var branch = new SourceProcessorBranchEntity
+                {
+                    Id = Guid.NewGuid(), SourceActivityId = ownerActivity.Id, SourceRevisionId = ownerRevision.Id,
+                    InputSha256 = CurrentHash, ProcessorVersion = "document-test", ProcessorFingerprint = CurrentHash,
+                    State = 2, CreatedAtUtc = now, UpdatedAtUtc = now
+                };
+                publishedDocumentVector = AddVector(
+                    context, documentRecord, "document retrieval sentinel", generationId, now, isDeleted: false);
+                context.SourceRootConfigurations.Add(documentRoot);
+                context.SourceRevisions.AddRange(ownerRevision, inputRevision);
+                context.SourceIdentities.Add(documentSource);
+                context.PipelineRecords.Add(documentRecord);
+                context.SourceActivities.Add(ownerActivity);
+                context.SourceProcessorBranches.Add(branch);
+                context.DocumentPublications.Add(new DocumentPublicationEntity
+                {
+                    OwnerSourceRevisionId = ownerRevision.Id, DocumentInputSourceRevisionId = inputRevision.Id,
+                    SourceProcessorBranchId = branch.Id, PipelineRecordId = documentRecord.Id, PipelineRecordRevision = 1,
+                    ProcessorFingerprint = CurrentHash, PublishedAtUtc = now
+                });
+            }
             if (includePrivateStructuralChild)
             {
                 var privateRoot = new SourceRootConfigurationEntity { Id = Guid.NewGuid(), CanonicalPath = "C:/retained-private", DisplayName = "private", State = 0, Recursive = false,
@@ -227,10 +310,14 @@ public sealed class HybridSearchIntegrationTests : IClassFixture<NativeSqlServer
                 context.SourceIdentities.Add(privateSource);
                 context.PipelineRecords.Add(privateRecord);
                 await context.SaveChangesAsync();
-                return [currentVector.VectorId, privateVector.VectorId];
+                return publishedDocumentVector is null
+                    ? [currentVector.VectorId, privateVector.VectorId]
+                    : [currentVector.VectorId, publishedDocumentVector.VectorId, privateVector.VectorId];
             }
             await context.SaveChangesAsync();
-            return [currentVector.VectorId, deletedVector.VectorId, staleVector.VectorId, 999999L];
+            return publishedDocumentVector is null
+                ? [currentVector.VectorId, deletedVector.VectorId, staleVector.VectorId, 999999L]
+                : [currentVector.VectorId, deletedVector.VectorId, staleVector.VectorId, publishedDocumentVector.VectorId, 999999L];
         }
 
         private static VectorEntity AddVector(

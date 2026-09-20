@@ -95,7 +95,7 @@ internal sealed partial class HandleRelativeNativeFileSystem
             throw new NativeModelPathException();
         }
 
-        var rootHandle = NativeMethods.OpenAbsoluteDirectory(rootPath);
+        var rootHandle = NativeMethods.OpenAbsoluteDirectory(rootPath, NativeMethods.DirectoryReadOnlyAccess);
         NativeModelDirectoryChain? chain = null;
         try
         {
@@ -299,7 +299,7 @@ internal sealed partial class HandleRelativeNativeFileSystem
         var handle = NativeMethods.OpenRelative(
             parent.Handle,
             literalChild,
-            NativeMethods.DirectoryReadAccess,
+            NativeMethods.DirectoryReadOnlyAccess,
             NativeMethods.ShareReadWrite,
             NativeMethods.FileOpen,
             NativeMethods.DirectoryOpenOptions);

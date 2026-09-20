@@ -1,6 +1,7 @@
 using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Text;
+using FluxKnowledge.Application.Documents;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Pipeline;
 using FluxKnowledge.Application.Sources;
@@ -50,6 +51,232 @@ public sealed class OoxmlStructuralTextProcessorTests
         Assert.Equal(".txt", child.Extension);
         Assert.Contains(expectedText, writer.Text, StringComparison.Ordinal);
         Assert.DoesNotContain(expectedText, child.SyntheticLocator, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Vsdx_validates_semantic_parts_and_creates_one_internal_document_input_when_an_inert_member_is_not_utf8()
+    {
+        var archive = CreateVsdxWithInertBinaryMember();
+        var hash = Convert.ToHexStringLower(SHA256.HashData(archive));
+        var claim = new RetainedProcessorClaim(Guid.NewGuid(), SourceRevisionId.New(), "parent", hash, "owner", 1, DateTimeOffset.UtcNow.AddMinutes(5));
+        var writer = new RecordingWriter();
+
+        var completion = await new VsdxStructuralTextProcessor(writer).ProcessAsync(
+            claim, new RetainedSourceBytes(claim.SourceRevisionId, archive, hash, archive.Length),
+            new RetainedProcessorOptions(), CancellationToken.None);
+
+        var child = Assert.Single(completion.Members);
+        Assert.Equal(2, child.OriginKind);
+        Assert.Equal("DocumentProcessingInput", child.Classification);
+        Assert.Equal(".vsdx", child.Extension);
+        Assert.Equal(hash, child.ContentSha256);
+        Assert.Equal(archive.Length, child.ByteLength);
+        Assert.Equal(string.Empty, child.StoreRelativePath);
+        Assert.Equal(0, writer.BytesWritten);
+    }
+
+    [Fact]
+    public async Task Vsdx_extractor_ignores_self_closing_shapes_and_empty_text_nodes()
+    {
+        const string visio = "http://schemas.microsoft.com/office/visio/2012/main";
+        var archive = CreateVsdxWithInertBinaryMember(pageXml:
+            $"<PageContents xmlns='{visio}'><Shapes><Shape ID='1' NameU='Empty'/><Shape ID='2' NameU='Blank'><Text/></Shape><Shape ID='3' NameU='Gateway'><Text>Gateway label</Text></Shape></Shapes></PageContents>");
+        var hash = Convert.ToHexStringLower(SHA256.HashData(archive));
+
+        var result = await new VsdxDocumentExtractor().ExtractAsync(
+            new RetainedSourceBytes(SourceRevisionId.New(), archive, hash, archive.Length), CancellationToken.None);
+
+        Assert.True(result.IsComplete);
+        Assert.Contains("Gateway: Gateway label", result.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("Empty:", result.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("Blank:", result.Text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Vsdx_extractor_resolves_a_page_through_its_relationship()
+    {
+        var archive = CreateVsdxWithInertBinaryMember();
+        var hash = Convert.ToHexStringLower(SHA256.HashData(archive));
+
+        var result = await new VsdxDocumentExtractor().ExtractAsync(
+            new RetainedSourceBytes(SourceRevisionId.New(), archive, hash, archive.Length), CancellationToken.None);
+
+        Assert.True(result.IsComplete);
+        Assert.Contains("Gateway: Gateway", result.Text, StringComparison.Ordinal);
+    }
+
+    public static IEnumerable<object[]> MalformedVsdxPageTopologies =>
+    [
+        ["<Pages xmlns='http://schemas.microsoft.com/office/visio/2012/main' xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships'><Page ID='1' Name='Current architecture'><Wrapper><Rel r:id='rIdPage1'/></Wrapper></Page></Pages>"],
+        ["<Pages xmlns='http://schemas.microsoft.com/office/visio/2012/main' xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships'><Page ID='1' Name='Current architecture'><Rel r:id='rIdPage1'/><Rel r:id='rIdPage1'/></Page></Pages>"],
+        ["<Pages xmlns='http://schemas.microsoft.com/office/visio/2012/main' xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships'><Page ID='outer' Name='Outer'><Page ID='1' Name='Current architecture'><Rel r:id='rIdPage1'/></Page></Page></Pages>"],
+        ["<Pages xmlns='http://schemas.microsoft.com/office/visio/2012/main' xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships'><Wrapper><Page ID='1' Name='Current architecture'><Rel r:id='rIdPage1'/></Page></Wrapper></Pages>"]
+    ];
+
+    [Theory]
+    [MemberData(nameof(MalformedVsdxPageTopologies))]
+    public async Task Vsdx_with_malformed_page_relationship_topology_is_rejected_before_writing_a_child(string pagesXml)
+    {
+        var archive = CreateVsdxWithInertBinaryMember(pagesXml: pagesXml);
+        var hash = Convert.ToHexStringLower(SHA256.HashData(archive));
+        var claim = new RetainedProcessorClaim(Guid.NewGuid(), SourceRevisionId.New(), "parent", hash, "owner", 1, DateTimeOffset.UtcNow.AddMinutes(5));
+        var writer = new RecordingWriter();
+
+        var error = await Assert.ThrowsAsync<RetainedProcessorException>(() => new VsdxStructuralTextProcessor(writer).ProcessAsync(
+            claim, new RetainedSourceBytes(claim.SourceRevisionId, archive, hash, archive.Length),
+            new RetainedProcessorOptions(), CancellationToken.None).AsTask());
+
+        Assert.Equal("office-document-container-invalid", error.OutcomeCode);
+        Assert.Equal(0, writer.BytesWritten);
+    }
+
+    [Fact]
+    public async Task Vsdx_extractor_inherits_master_text_and_prefers_a_local_text_override()
+    {
+        var archive = CreateVsdxWithMasterShapes();
+        var hash = Convert.ToHexStringLower(SHA256.HashData(archive));
+
+        var result = await new VsdxDocumentExtractor().ExtractAsync(
+            new RetainedSourceBytes(SourceRevisionId.New(), archive, hash, archive.Length), CancellationToken.None);
+
+        Assert.True(result.IsComplete);
+        Assert.Empty(result.Warnings);
+        Assert.Contains("Inherited gateway: inherited label", result.Text, StringComparison.Ordinal);
+        Assert.Contains("Local gateway: local override", result.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("Local gateway: inherited label", result.Text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Vsdx_extractor_resolves_a_nonordinal_master_id_through_its_relationship()
+    {
+        var archive = CreateVsdxWithMasterShapes(masterId: "1000", referencedMasterId: "1000");
+        var hash = Convert.ToHexStringLower(SHA256.HashData(archive));
+
+        var result = await new VsdxDocumentExtractor().ExtractAsync(
+            new RetainedSourceBytes(SourceRevisionId.New(), archive, hash, archive.Length), CancellationToken.None);
+
+        Assert.True(result.IsComplete);
+        Assert.Contains("Inherited gateway: inherited label", result.Text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Vsdx_with_multiple_direct_master_relationships_is_rejected_before_writing_a_child()
+    {
+        var archive = CreateVsdxWithMasterShapes(additionalMasterRelationshipId: "rIdMaster2");
+        var hash = Convert.ToHexStringLower(SHA256.HashData(archive));
+        var claim = new RetainedProcessorClaim(Guid.NewGuid(), SourceRevisionId.New(), "parent", hash, "owner", 1, DateTimeOffset.UtcNow.AddMinutes(5));
+        var writer = new RecordingWriter();
+
+        var error = await Assert.ThrowsAsync<RetainedProcessorException>(() => new VsdxStructuralTextProcessor(writer).ProcessAsync(
+            claim, new RetainedSourceBytes(claim.SourceRevisionId, archive, hash, archive.Length),
+            new RetainedProcessorOptions(), CancellationToken.None).AsTask());
+
+        Assert.Equal("office-document-container-invalid", error.OutcomeCode);
+        Assert.Equal(0, writer.BytesWritten);
+    }
+
+    [Fact]
+    public async Task Vsdx_with_a_nested_master_is_rejected_before_writing_a_child()
+    {
+        var archive = CreateVsdxWithMasterShapes(nestedMaster: true);
+        var hash = Convert.ToHexStringLower(SHA256.HashData(archive));
+        var claim = new RetainedProcessorClaim(Guid.NewGuid(), SourceRevisionId.New(), "parent", hash, "owner", 1, DateTimeOffset.UtcNow.AddMinutes(5));
+        var writer = new RecordingWriter();
+
+        var error = await Assert.ThrowsAsync<RetainedProcessorException>(() => new VsdxStructuralTextProcessor(writer).ProcessAsync(
+            claim, new RetainedSourceBytes(claim.SourceRevisionId, archive, hash, archive.Length),
+            new RetainedProcessorOptions(), CancellationToken.None).AsTask());
+
+        Assert.Equal("office-document-container-invalid", error.OutcomeCode);
+        Assert.Equal(0, writer.BytesWritten);
+    }
+
+    [Fact]
+    public async Task Vsdx_extractor_reports_an_unresolved_master_reference_as_incomplete()
+    {
+        var archive = CreateVsdxWithMasterShapes(referencedMasterId: "404");
+        var hash = Convert.ToHexStringLower(SHA256.HashData(archive));
+
+        var result = await new VsdxDocumentExtractor().ExtractAsync(
+            new RetainedSourceBytes(SourceRevisionId.New(), archive, hash, archive.Length), CancellationToken.None);
+
+        Assert.False(result.IsComplete);
+        Assert.Contains("vsdx-master-reference-unresolved", result.Warnings);
+        Assert.DoesNotContain("Inherited gateway:", result.Text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Vsdx_with_an_unsafe_package_path_is_rejected_before_writing_a_child()
+    {
+        var archive = CreateVsdxWithInertBinaryMember("../unsafe.xml");
+        var hash = Convert.ToHexStringLower(SHA256.HashData(archive));
+        var claim = new RetainedProcessorClaim(Guid.NewGuid(), SourceRevisionId.New(), "parent", hash, "owner", 1, DateTimeOffset.UtcNow.AddMinutes(5));
+        var writer = new RecordingWriter();
+
+        var error = await Assert.ThrowsAsync<RetainedProcessorException>(() => new VsdxStructuralTextProcessor(writer).ProcessAsync(
+            claim, new RetainedSourceBytes(claim.SourceRevisionId, archive, hash, archive.Length),
+            new RetainedProcessorOptions(), CancellationToken.None).AsTask());
+
+        Assert.Equal("archive-entry-path-invalid", error.OutcomeCode);
+        Assert.Equal(0, writer.BytesWritten);
+    }
+
+    [Fact]
+    public async Task Vsdx_with_a_nested_member_is_rejected_with_the_existing_archive_reason_before_writing_a_child()
+    {
+        var archive = CreateVsdxWithInertBinaryMember("visio/media/nested.zip", CreateZip("inner.txt", "nested"));
+        var hash = Convert.ToHexStringLower(SHA256.HashData(archive));
+        var claim = new RetainedProcessorClaim(Guid.NewGuid(), SourceRevisionId.New(), "parent", hash, "owner", 1, DateTimeOffset.UtcNow.AddMinutes(5));
+        var writer = new RecordingWriter();
+
+        var error = await Assert.ThrowsAsync<RetainedProcessorException>(() => new VsdxStructuralTextProcessor(writer).ProcessAsync(
+            claim, new RetainedSourceBytes(claim.SourceRevisionId, archive, hash, archive.Length),
+            new RetainedProcessorOptions(), CancellationToken.None).AsTask());
+
+        Assert.Equal("nested-archive-depth-limit", error.OutcomeCode);
+        Assert.Equal(0, writer.BytesWritten);
+    }
+
+    [Fact]
+    public async Task Vsdx_with_a_utf16_semantic_part_is_refused_before_writing_a_child()
+    {
+        const string visio = "http://schemas.microsoft.com/office/visio/2012/main";
+        var encoding = new UnicodeEncoding(bigEndian: false, byteOrderMark: true);
+        var utf16 = encoding.GetPreamble().Concat(encoding.GetBytes(
+            $"<PageContents xmlns='{visio}'><Shapes><Shape ID='1' NameU='Gateway'><Text>must not decode</Text></Shape></Shapes></PageContents>")).ToArray();
+        var archive = CreateVsdxWithInertBinaryMember(pageBytes: utf16);
+        var hash = Convert.ToHexStringLower(SHA256.HashData(archive));
+        var claim = new RetainedProcessorClaim(Guid.NewGuid(), SourceRevisionId.New(), "parent", hash, "owner", 1, DateTimeOffset.UtcNow.AddMinutes(5));
+        var writer = new RecordingWriter();
+
+        var error = await Assert.ThrowsAsync<RetainedProcessorException>(() => new VsdxStructuralTextProcessor(writer).ProcessAsync(
+            claim, new RetainedSourceBytes(claim.SourceRevisionId, archive, hash, archive.Length),
+            new RetainedProcessorOptions(), CancellationToken.None).AsTask());
+
+        Assert.Equal("archive-member-not-utf8", error.OutcomeCode);
+        Assert.Equal(0, writer.BytesWritten);
+    }
+
+    [Fact]
+    public async Task Pdf_signature_creates_one_internal_document_input_without_emitting_text()
+    {
+        var bytes = "%PDF-1.7\n% retained PDF document input"u8.ToArray();
+        var hash = Convert.ToHexStringLower(SHA256.HashData(bytes));
+        var claim = new RetainedProcessorClaim(Guid.NewGuid(), SourceRevisionId.New(), "pdf-parent", hash, "owner", 1, DateTimeOffset.UtcNow.AddMinutes(5));
+        var writer = new RecordingWriter();
+
+        var completion = await new PdfDocumentProcessor(writer).ProcessAsync(
+            claim, new RetainedSourceBytes(claim.SourceRevisionId, bytes, hash, bytes.Length),
+            new RetainedProcessorOptions(), CancellationToken.None);
+
+        var child = Assert.Single(completion.Members);
+        Assert.Equal(2, child.OriginKind);
+        Assert.Equal(DocumentProcessingInput.PdfClassification, child.Classification);
+        Assert.Equal(".pdf", child.Extension);
+        Assert.Equal(hash, child.ContentSha256);
+        Assert.Equal(bytes.Length, child.ByteLength);
+        Assert.Equal(string.Empty, child.StoreRelativePath);
+        Assert.Equal(0, writer.BytesWritten);
     }
 
     [Fact]
@@ -794,6 +1021,28 @@ public sealed class OoxmlStructuralTextProcessorTests
     }
 
     [Fact]
+    public async Task Automatic_activation_never_promotes_or_claims_vsdx_or_pdf_document_processors()
+    {
+        var branches = new NoAutomaticDocumentBranches();
+        var activation = new RetainedProcessorActivationService(
+            new SourceCapabilityService(new RecordingCapabilityStore(), new LocalSourceCapabilityHandlerRegistry(
+            [
+                new OoxmlStructuralTextCapabilityHandler(),
+                new VsdxStructuralTextCapabilityHandler(),
+                new PdfDocumentCapabilityHandler()
+            ])),
+            branches, new LegacyReader(SourceRevisionId.New(), [], new string('a', 64)), new ZipArchiveRetainedProcessor(null!),
+            new RetainedProcessorOptions { OoxmlDocumentStructuralExtractEnabled = true }, TimeProvider.System,
+            ooxmlProcessor: new OoxmlStructuralTextProcessor(null!),
+            vsdxProcessor: new VsdxStructuralTextProcessor(null!),
+            pdfProcessor: new PdfDocumentProcessor(null!));
+
+        await activation.RunOnceAsync(CancellationToken.None);
+
+        Assert.Equal([OoxmlStructuralTextProcessor.Capability], branches.ReadCapabilities);
+    }
+
+    [Fact]
     public async Task Ooxml_cancellation_records_a_fenced_retry_without_processing_source_data()
     {
         var branches = new CancellationBranches();
@@ -811,9 +1060,56 @@ public sealed class OoxmlStructuralTextProcessorTests
     }
 
     [Fact]
+    public async Task Ooxml_unselected_xml_above_200k_and_below_500k_is_processed_with_the_package_wide_bound()
+    {
+        var archive = CreateWordPackageWithAdditionalXml("customXml/item1.xml", "<root>" + string.Concat(Enumerable.Range(0, 200_001).Select(index => $"<x>{index:D6}</x>")) + "</root>");
+        var hash = Convert.ToHexStringLower(SHA256.HashData(archive));
+        var claim = new RetainedProcessorClaim(Guid.NewGuid(), SourceRevisionId.New(), "parent", hash, "owner", 1, DateTimeOffset.UtcNow.AddMinutes(5));
+        var writer = new RecordingWriter();
+
+        var completion = await new OoxmlStructuralTextProcessor(writer).ProcessAsync(
+            claim, new RetainedSourceBytes(claim.SourceRevisionId, archive, hash, archive.Length), new RetainedProcessorOptions(), CancellationToken.None);
+
+        Assert.Single(completion.Members);
+        Assert.Contains("safe", writer.Text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Vsdx_unselected_xml_above_200k_and_below_500k_is_processed_with_the_package_wide_bound()
+    {
+        var xml = "<root>" + string.Concat(Enumerable.Range(0, 200_001).Select(index => $"<x>{index:D6}</x>")) + "</root>";
+        var archive = CreateVsdxWithInertBinaryMember("customXml/item1.xml", Encoding.UTF8.GetBytes(xml));
+        var hash = Convert.ToHexStringLower(SHA256.HashData(archive));
+        var claim = new RetainedProcessorClaim(Guid.NewGuid(), SourceRevisionId.New(), "parent", hash, "owner", 1, DateTimeOffset.UtcNow.AddMinutes(5));
+        var writer = new RecordingWriter();
+
+        var completion = await new VsdxStructuralTextProcessor(writer).ProcessAsync(
+            claim, new RetainedSourceBytes(claim.SourceRevisionId, archive, hash, archive.Length), new RetainedProcessorOptions(), CancellationToken.None);
+
+        Assert.Single(completion.Members);
+        Assert.Equal(0, writer.BytesWritten);
+    }
+
+    [Fact]
+    public async Task Vsdx_unselected_xml_above_500k_is_rejected_before_document_output()
+    {
+        var xml = "<root>" + string.Concat(Enumerable.Range(0, 500_000).Select(index => $"<x>{index:D6}</x>")) + "</root>";
+        var archive = CreateVsdxWithInertBinaryMember("customXml/item1.xml", Encoding.UTF8.GetBytes(xml));
+        var hash = Convert.ToHexStringLower(SHA256.HashData(archive));
+        var claim = new RetainedProcessorClaim(Guid.NewGuid(), SourceRevisionId.New(), "parent", hash, "owner", 1, DateTimeOffset.UtcNow.AddMinutes(5));
+        var writer = new RecordingWriter();
+
+        var error = await Assert.ThrowsAsync<RetainedProcessorException>(() => new VsdxStructuralTextProcessor(writer).ProcessAsync(
+            claim, new RetainedSourceBytes(claim.SourceRevisionId, archive, hash, archive.Length), new RetainedProcessorOptions(), CancellationToken.None).AsTask());
+
+        Assert.Equal("office-document-element-limit", error.OutcomeCode);
+        Assert.Equal(0, writer.BytesWritten);
+    }
+
+    [Fact]
     public async Task Unselected_xml_counts_against_the_package_wide_element_bound_before_any_child_write()
     {
-        var archive = CreateWordPackageWithAdditionalXml("customXml/item1.xml", "<root>" + string.Concat(Enumerable.Range(0, 200_000).Select(index => $"<x>{index:D6}</x>")) + "</root>");
+        var archive = CreateWordPackageWithAdditionalXml("customXml/item1.xml", "<root>" + string.Concat(Enumerable.Range(0, 500_000).Select(index => $"<x>{index:D6}</x>")) + "</root>");
         var hash = Convert.ToHexStringLower(SHA256.HashData(archive));
         var claim = new RetainedProcessorClaim(Guid.NewGuid(), SourceRevisionId.New(), "parent", hash, "owner", 1, DateTimeOffset.UtcNow.AddMinutes(5));
         var writer = new RecordingWriter();
@@ -1000,6 +1296,69 @@ public sealed class OoxmlStructuralTextProcessorTests
                 WriteEntry(archive, "ppt/_rels/presentation.xml.rels", $"<Relationships><Relationship Id='rId1' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide' Target='{name[4..]}' /></Relationships>");
             }
             WriteEntry(archive, name, value);
+        }
+        return buffer.ToArray();
+    }
+
+    private static byte[] CreateVsdxWithInertBinaryMember(
+        string inertMemberPath = "visio/media/binary-sentinel.bin",
+        byte[]? inertMemberBytes = null,
+        string? pageXml = null,
+        byte[]? pageBytes = null,
+        string? pagesXml = null)
+    {
+        const string visio = "http://schemas.microsoft.com/office/visio/2012/main";
+        using var buffer = new MemoryStream();
+        using (var archive = new ZipArchive(buffer, ZipArchiveMode.Create, true))
+        {
+            WriteEntry(archive, "[Content_Types].xml", "<Types><Override PartName='/visio/document.xml' ContentType='application/vnd.ms-visio.drawing.main+xml'/><Override PartName='/visio/pages/pages.xml' ContentType='application/vnd.ms-visio.pages+xml'/><Override PartName='/visio/pages/page1.xml' ContentType='application/vnd.ms-visio.page+xml'/></Types>");
+            WriteEntry(archive, "_rels/.rels", "<Relationships><Relationship Id='rId1' Type='http://schemas.microsoft.com/visio/2010/relationships/document' Target='visio/document.xml'/></Relationships>");
+            WriteEntry(archive, "visio/document.xml", $"<VisioDocument xmlns='{visio}' xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships'><Pages r:id='rIdPages'/></VisioDocument>");
+            WriteEntry(archive, "visio/_rels/document.xml.rels", "<Relationships><Relationship Id='rIdPages' Type='http://schemas.microsoft.com/visio/2010/relationships/pages' Target='pages/pages.xml'/></Relationships>");
+            WriteEntry(archive, "visio/pages/pages.xml", pagesXml ?? $"<Pages xmlns='{visio}' xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships'><Page ID='1' Name='Current architecture'><Rel r:id='rIdPage1'/></Page></Pages>");
+            WriteEntry(archive, "visio/pages/_rels/pages.xml.rels", "<Relationships><Relationship Id='rIdPage1' Type='http://schemas.microsoft.com/visio/2010/relationships/page' Target='page1.xml'/></Relationships>");
+            if (pageBytes is null)
+            {
+                WriteEntry(archive, "visio/pages/page1.xml", pageXml ?? $"<PageContents xmlns='{visio}'><Shapes><Shape ID='1' NameU='Gateway'><Text>Gateway</Text></Shape></Shapes></PageContents>");
+            }
+            else
+            {
+                WriteEntry(archive, "visio/pages/page1.xml", pageBytes);
+            }
+            using (var binary = archive.CreateEntry(inertMemberPath).Open())
+            {
+                binary.Write(inertMemberBytes ?? [0xff, 0xfe, 0xfd, 0x00, 0x01]);
+            }
+        }
+        return buffer.ToArray();
+    }
+
+    private static byte[] CreateVsdxWithMasterShapes(
+        string referencedMasterId = "1",
+        string masterId = "1",
+        string? additionalMasterRelationshipId = null,
+        bool nestedMaster = false)
+    {
+        const string visio = "http://schemas.microsoft.com/office/visio/2012/main";
+        const string officeRelationships = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+        using var buffer = new MemoryStream();
+        using (var archive = new ZipArchive(buffer, ZipArchiveMode.Create, true))
+        {
+            WriteEntry(archive, "[Content_Types].xml", "<Types><Override PartName='/visio/document.xml' ContentType='application/vnd.ms-visio.drawing.main+xml'/><Override PartName='/visio/pages/pages.xml' ContentType='application/vnd.ms-visio.pages+xml'/><Override PartName='/visio/pages/page1.xml' ContentType='application/vnd.ms-visio.page+xml'/><Override PartName='/visio/masters/masters.xml' ContentType='application/vnd.ms-visio.masters+xml'/><Override PartName='/visio/masters/master1.xml' ContentType='application/vnd.ms-visio.master+xml'/></Types>");
+            WriteEntry(archive, "_rels/.rels", "<Relationships><Relationship Id='rId1' Type='http://schemas.microsoft.com/visio/2010/relationships/document' Target='visio/document.xml'/></Relationships>");
+            WriteEntry(archive, "visio/document.xml", $"<VisioDocument xmlns='{visio}' xmlns:r='{officeRelationships}'><Pages r:id='rIdPages'/><Masters r:id='rIdMasters'/></VisioDocument>");
+            WriteEntry(archive, "visio/_rels/document.xml.rels", "<Relationships><Relationship Id='rIdPages' Type='http://schemas.microsoft.com/visio/2010/relationships/pages' Target='pages/pages.xml'/><Relationship Id='rIdMasters' Type='http://schemas.microsoft.com/visio/2010/relationships/masters' Target='masters/masters.xml'/></Relationships>");
+            WriteEntry(archive, "visio/pages/pages.xml", $"<Pages xmlns='{visio}' xmlns:r='{officeRelationships}'><Page ID='1' Name='Current architecture'><Rel r:id='rIdPage1'/></Page></Pages>");
+            WriteEntry(archive, "visio/pages/_rels/pages.xml.rels", "<Relationships><Relationship Id='rIdPage1' Type='http://schemas.microsoft.com/visio/2010/relationships/page' Target='page1.xml'/></Relationships>");
+            WriteEntry(archive, "visio/pages/page1.xml", $"<PageContents xmlns='{visio}'><Shapes><Shape ID='1' NameU='Inherited gateway' Master='{referencedMasterId}' MasterShape='10'/><Shape ID='2' NameU='Local gateway' Master='{referencedMasterId}' MasterShape='10'><Text>local override</Text></Shape></Shapes></PageContents>");
+            var additionalMasterRelationship = additionalMasterRelationshipId is null ? string.Empty : $"<Rel r:id='{additionalMasterRelationshipId}'/>";
+            var additionalMasterTarget = additionalMasterRelationshipId is null ? string.Empty : $"<Relationship Id='{additionalMasterRelationshipId}' Type='http://schemas.microsoft.com/visio/2010/relationships/master' Target='master1.xml'/>";
+            var masterContent = nestedMaster
+                ? $"<Master ID='outer' NameU='Outer'><Master ID='{masterId}' NameU='Gateway'><Rel r:id='rIdMaster1'/></Master></Master>"
+                : $"<Master ID='{masterId}' NameU='Gateway'><Rel r:id='rIdMaster1'/>{additionalMasterRelationship}</Master>";
+            WriteEntry(archive, "visio/masters/masters.xml", $"<Masters xmlns='{visio}' xmlns:r='{officeRelationships}'>{masterContent}</Masters>");
+            WriteEntry(archive, "visio/masters/_rels/masters.xml.rels", $"<Relationships><Relationship Id='rIdMaster1' Type='http://schemas.microsoft.com/visio/2010/relationships/master' Target='master1.xml'/>{additionalMasterTarget}</Relationships>");
+            WriteEntry(archive, "visio/masters/master1.xml", $"<MasterContents xmlns='{visio}'><Shapes><Shape ID='10' NameU='Gateway'><Text>inherited label</Text></Shape></Shapes></MasterContents>");
         }
         return buffer.ToArray();
     }
@@ -1555,6 +1914,12 @@ public sealed class OoxmlStructuralTextProcessorTests
         writer.Write(CanonicaliseOoxmlFixture(value));
     }
 
+    private static void WriteEntry(ZipArchive archive, string name, byte[] value, CompressionLevel compressionLevel = CompressionLevel.Optimal)
+    {
+        using var stream = archive.CreateEntry(name, compressionLevel).Open();
+        stream.Write(value);
+    }
+
     private static void WriteRawEntry(ZipArchive archive, string name, string value)
     {
         using var writer = new StreamWriter(archive.CreateEntry(name).Open(), Encoding.UTF8, leaveOpen: false);
@@ -1695,6 +2060,46 @@ public sealed class OoxmlStructuralTextProcessorTests
             Failure = failure;
             return ValueTask.FromResult(true);
         }
+    }
+
+    private sealed class NoAutomaticDocumentBranches : IRetainedProcessorBranchStore
+    {
+        public List<SourceCapabilityDescriptor> ReadCapabilities { get; } = [];
+
+        public ValueTask<IReadOnlyList<RetainedProcessorPromotionCandidate>> ReadPromotionCandidatesAsync(
+            int maximumCount,
+            SourceCapabilityDescriptor capability,
+            CancellationToken cancellationToken)
+        {
+            ReadCapabilities.Add(capability);
+            if (capability != OoxmlStructuralTextProcessor.Capability)
+            {
+                throw new Xunit.Sdk.XunitException("VSDX and PDF can run only through the exact document reprocess command.");
+            }
+
+            return ValueTask.FromResult<IReadOnlyList<RetainedProcessorPromotionCandidate>>([]);
+        }
+
+        public ValueTask<IReadOnlyList<RetainedProcessorPromotionCandidate>> ReadPromotionCandidatesAsync(int maximumCount, CancellationToken cancellationToken) =>
+            ValueTask.FromResult<IReadOnlyList<RetainedProcessorPromotionCandidate>>([]);
+
+        public ValueTask<bool> PromoteAsync(RetainedProcessorPromotionCandidate candidate, SourceCapabilityDescriptor capability, CancellationToken cancellationToken) =>
+            ValueTask.FromResult(false);
+
+        public ValueTask<bool> BlockPromotionAsync(RetainedProcessorPromotionCandidate candidate, string outcomeCode, CancellationToken cancellationToken) =>
+            ValueTask.FromResult(false);
+
+        public ValueTask<IReadOnlyList<RetainedProcessorClaim>> ClaimAsync(string leaseOwner, int maximumCount, CancellationToken cancellationToken) =>
+            ValueTask.FromResult<IReadOnlyList<RetainedProcessorClaim>>([]);
+
+        public ValueTask<bool> CommitAsync(RetainedProcessorClaim claim, RetainedProcessorCompletion completion, CancellationToken cancellationToken) =>
+            ValueTask.FromResult(false);
+
+        public ValueTask<bool> RetryAsync(RetainedProcessorClaim claim, string outcomeCode, CancellationToken cancellationToken) =>
+            ValueTask.FromResult(false);
+
+        public ValueTask<bool> FailAsync(RetainedProcessorClaim claim, RetainedProcessorFailure failure, CancellationToken cancellationToken) =>
+            ValueTask.FromResult(false);
     }
 
     private sealed class OverlimitInspectionReader(SourceRevisionId sourceRevisionId, string hash) : IRetainedSourceReader

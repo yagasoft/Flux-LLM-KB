@@ -5,6 +5,10 @@ using System.Text.Json;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Operations;
 using FluxKnowledge.Application.Sources;
+using FluxKnowledge.Application.Documents;
+using FluxKnowledge.Application.Pipeline;
+using FluxKnowledge.Application.Workers;
+using FluxKnowledge.Cli.Commands;
 using FluxKnowledge.Domain.Sources;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
@@ -22,7 +26,7 @@ public sealed class ZipArchiveReplayIntegrationTests(NativeSqlServerFixture fixt
     private readonly NativeSqlServerFixture _fixture = fixture;
 
     [NativeSqlServerFact]
-    public async Task Vsdx_style_zip_with_a_non_utf8_member_completes_and_offers_only_utf8_text_to_the_pipeline()
+    public async Task Safe_zip_with_a_non_utf8_member_completes_and_offers_only_utf8_text_to_the_pipeline()
     {
         var root = Path.Combine(Path.GetTempPath(), $"flux-zip-vsdx-member-skip-{Guid.NewGuid():N}");
         Directory.CreateDirectory(root);
@@ -37,7 +41,7 @@ public sealed class ZipArchiveReplayIntegrationTests(NativeSqlServerFixture fixt
             var relativePath = Path.Combine("sha256", hash[..2], $"{hash}.bin");
             Directory.CreateDirectory(Path.Combine(root, "sha256", hash[..2]));
             await File.WriteAllBytesAsync(Path.Combine(root, relativePath), zip);
-            var seeded = await SeedDeferredZipAsync(hash, zip.Length, relativePath, extension: ".vsdx");
+            var seeded = await SeedDeferredZipAsync(hash, zip.Length, relativePath, extension: ".zip");
 
             var result = await CreateActivation(root).RunOnceAsync(CancellationToken.None);
 
@@ -258,6 +262,240 @@ public sealed class ZipArchiveReplayIntegrationTests(NativeSqlServerFixture fixt
         {
             if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
         }
+    }
+
+    [NativeSqlServerFact]
+    public async Task Named_vsdx_reprocess_creates_one_exact_successor_without_mutating_the_terminal_archive_branch()
+    {
+        const string hash = "d7b157427727a3509dc34a77445a3abed1bf05da9d079d795502d344fadf2a0d";
+        var seeded = await SeedDeferredZipAsync(hash, 4, Path.Combine("sha256", hash[..2], $"{hash}.bin"), extension: ".vsdx");
+        var factory = new ContextFactory(_fixture.ConnectionString);
+        var store = new SqlRetainedProcessorBranchStore(factory, TimeProvider.System);
+        var legacy = LegacyZipV1Capability();
+        var capabilities = new SourceCapabilityService(
+            new SqlSourceActivityStore(factory, TimeProvider.System),
+            new LocalSourceCapabilityHandlerRegistry([new VsdxStructuralTextCapabilityHandler()]));
+        await capabilities.RegisterAsync(VsdxStructuralTextProcessor.Capability, CancellationToken.None);
+        Assert.True(await store.PromoteAsync(
+            new RetainedProcessorPromotionCandidate(seeded.LegacyActivityId, new SourceRevisionId(seeded.SourceRevisionId), hash, ".vsdx"),
+            legacy,
+            CancellationToken.None));
+        var legacyClaim = Assert.Single(await store.ClaimAsync("historical-vsdx", 1, legacy.ProcessorFingerprint, CancellationToken.None));
+        Assert.True(await store.FailAsync(legacyClaim, new RetainedProcessorFailure("archive-member-not-utf8", []), CancellationToken.None));
+
+        var result = await store.RequestDocumentReprocessAsync(
+            new DocumentReprocessRequest(new SourceRevisionId(seeded.SourceRevisionId), hash, VsdxStructuralTextProcessor.Capability.ProcessorFingerprint),
+            CancellationToken.None);
+
+        Assert.True(result.Created);
+        var successorBranchId = Assert.IsType<Guid>(result.SuccessorBranchId);
+        var replay = await store.RequestDocumentReprocessAsync(
+            new DocumentReprocessRequest(new SourceRevisionId(seeded.SourceRevisionId), hash, VsdxStructuralTextProcessor.Capability.ProcessorFingerprint),
+            CancellationToken.None);
+        Assert.True(replay.WasReplay);
+        Assert.Equal(successorBranchId, replay.SuccessorBranchId);
+        var concurrentClaims = await Task.WhenAll(
+            store.ClaimDocumentBranchAsync(successorBranchId, new SourceRevisionId(seeded.SourceRevisionId), hash,
+                VsdxStructuralTextProcessor.Capability.ProcessorFingerprint, "document-first", CancellationToken.None).AsTask(),
+            store.ClaimDocumentBranchAsync(successorBranchId, new SourceRevisionId(seeded.SourceRevisionId), hash,
+                VsdxStructuralTextProcessor.Capability.ProcessorFingerprint, "document-second", CancellationToken.None).AsTask());
+        var claim = Assert.Single(concurrentClaims.OfType<RetainedProcessorClaim>());
+        Assert.Empty(await store.ClaimAsync("ordinary-document-claim", 1, VsdxStructuralTextProcessor.Capability.ProcessorFingerprint, CancellationToken.None));
+        await using var verification = CreateContext();
+        var predecessor = await verification.SourceProcessorBranches.SingleAsync(value => value.Id == legacyClaim.BranchId);
+        Assert.Equal((int)RetainedProcessorBranchState.Blocked, predecessor.State);
+        Assert.Equal(legacyClaim.LeaseGeneration, predecessor.LeaseGeneration);
+        Assert.Equal("archive-member-not-utf8", (await verification.SourceProcessorAttempts.SingleAsync(value => value.BranchId == predecessor.Id)).OutcomeCode);
+        var successor = await verification.SourceProcessorBranches.SingleAsync(value => value.Id == successorBranchId);
+        Assert.Equal(VsdxStructuralTextProcessor.Capability.ProcessorFingerprint, successor.ProcessorFingerprint);
+        Assert.Equal((int)RetainedProcessorBranchState.Running, successor.State);
+        Assert.Equal(claim.LeaseGeneration, successor.LeaseGeneration);
+        Assert.Equal(predecessor.SourceActivityId, (await verification.SourceActivityRelations.SingleAsync(value => value.SuccessorActivityId == successor.SourceActivityId)).PredecessorActivityId);
+    }
+
+    [NativeSqlServerFact]
+    public async Task Named_vsdx_reprocess_refuses_a_terminal_predecessor_already_owned_by_zip_reconciliation()
+    {
+        const string hash = "b4bb92557d83bc26c5f476b792c9e2d251bd83aa872a6b9cb21bb04771d6c61e";
+        var seeded = await SeedDeferredZipAsync(hash, 4, Path.Combine("sha256", hash[..2], $"{hash}.bin"), extension: ".vsdx");
+        var factory = new ContextFactory(_fixture.ConnectionString);
+        var store = new SqlRetainedProcessorBranchStore(factory, TimeProvider.System);
+        var legacy = LegacyZipV1Capability();
+        var capabilities = new SourceCapabilityService(
+            new SqlSourceActivityStore(factory, TimeProvider.System),
+            new LocalSourceCapabilityHandlerRegistry([new VsdxStructuralTextCapabilityHandler()]));
+        await capabilities.RegisterAsync(VsdxStructuralTextProcessor.Capability, CancellationToken.None);
+        Assert.True(await store.PromoteAsync(
+            new RetainedProcessorPromotionCandidate(seeded.LegacyActivityId, new SourceRevisionId(seeded.SourceRevisionId), hash, ".vsdx"),
+            legacy,
+            CancellationToken.None));
+        var legacyClaim = Assert.Single(await store.ClaimAsync("historical-vsdx", 1, legacy.ProcessorFingerprint, CancellationToken.None));
+        Assert.True(await store.FailAsync(legacyClaim, new RetainedProcessorFailure("archive-member-not-utf8", []), CancellationToken.None));
+        Assert.True((await store.ReconcileArchiveZipMemberNotUtf8Async(legacyClaim.BranchId, CancellationToken.None)).Created);
+
+        var result = await store.RequestDocumentReprocessAsync(
+            new DocumentReprocessRequest(new SourceRevisionId(seeded.SourceRevisionId), hash, VsdxStructuralTextProcessor.Capability.ProcessorFingerprint),
+            CancellationToken.None);
+
+        Assert.False(result.Accepted);
+        await using var verification = CreateContext();
+        Assert.Single(await verification.SourceActivityRelations.Where(value => value.PredecessorActivityId == seeded.LegacyActivityId).ToListAsync());
+        var zipSuccessor = Assert.Single(await verification.SourceProcessorBranches.Where(value => value.SourceRevisionId == seeded.SourceRevisionId &&
+            value.ProcessorFingerprint == ZipArchiveRetainedProcessor.Capability.ProcessorFingerprint).ToListAsync());
+        Assert.Empty(await verification.SourceProcessorBranches.Where(value => value.SourceRevisionId == seeded.SourceRevisionId &&
+            value.ProcessorFingerprint == VsdxStructuralTextProcessor.Capability.ProcessorFingerprint).ToListAsync());
+        zipSuccessor.State = (int)RetainedProcessorBranchState.Blocked;
+        await verification.SaveChangesAsync();
+    }
+
+    [NativeSqlServerFact]
+    public async Task Exact_pdf_command_creates_one_document_input_and_offers_only_its_existing_document_pipeline_activity()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"flux-exact-pdf-reprocess-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            var bytes = "%PDF-1.7\n% exact local command sentinel"u8.ToArray();
+            var hash = Convert.ToHexStringLower(SHA256.HashData(bytes));
+            var relativePath = Path.Combine("sha256", hash[..2], $"{hash}.bin");
+            Directory.CreateDirectory(Path.Combine(root, "sha256", hash[..2]));
+            await File.WriteAllBytesAsync(Path.Combine(root, relativePath), bytes);
+            var seeded = await SeedDeferredZipAsync(hash, bytes.Length, relativePath, extension: ".pdf");
+            var factory = new ContextFactory(_fixture.ConnectionString);
+            using var reader = new SqlRetainedSourceReader(factory, root);
+            var executor = new LocalDocumentReprocessExecutor(
+                new SqlRetainedProcessorBranchStore(factory, TimeProvider.System),
+                reader,
+                new SourceCapabilityService(
+                    new SqlSourceActivityStore(factory, TimeProvider.System),
+                    new LocalSourceCapabilityHandlerRegistry(
+                    [
+                        new VsdxStructuralTextCapabilityHandler(),
+                        new PdfDocumentCapabilityHandler()
+                    ])),
+                new VsdxStructuralTextProcessor(null!),
+                new PdfDocumentProcessor(null!));
+            using var output = new StringWriter();
+            using var error = new StringWriter();
+
+            var exitCode = await DocumentReprocessCommand.ExecuteAsync(
+                ["reprocess", "--source-revision", seeded.SourceRevisionId.ToString("D"), "--expected-input-sha256", hash,
+                    "--expected-processor-fingerprint", PdfDocumentProcessor.Capability.ProcessorFingerprint],
+                executor,
+                output,
+                error);
+
+            Assert.Equal(0, exitCode);
+            Assert.Empty(error.ToString());
+            await using var verification = CreateContext();
+            var branch = await verification.SourceProcessorBranches.SingleAsync(value => value.SourceRevisionId == seeded.SourceRevisionId);
+            Assert.Equal((int)RetainedProcessorBranchState.Completed, branch.State);
+            var child = await verification.SourceRevisions.SingleAsync(value => value.ParentSourceRevisionId == seeded.SourceRevisionId);
+            Assert.Equal(DocumentProcessingInput.PdfClassification, child.Classification);
+            var childActivity = await verification.SourceActivities.SingleAsync(value => value.SourceRevisionId == child.Id);
+            Assert.Equal((int)SourceActivityKind.DocumentParsing, childActivity.ActivityKind);
+
+            var offered = await new SqlRetainedTextRegistrationStore(factory, TimeProvider.System)
+                .OfferUnlinkedInProcessActivitiesAsync(CancellationToken.None);
+
+            Assert.Equal(1, offered);
+            var record = await verification.PipelineRecords.SingleAsync(value => value.SourceRevisionId == child.Id);
+            Assert.Equal(PipelineOperations.ExtractDocument, await verification.Jobs
+                .Where(value => value.PipelineRecordId == record.Id)
+                .Select(value => value.Operation)
+                .SingleAsync());
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [NativeSqlServerTheory]
+    [InlineData(SourceRootState.Paused)]
+    [InlineData(SourceRootState.Deleting)]
+    public async Task Exact_document_reprocess_refuses_a_non_enabled_source_root(SourceRootState state)
+    {
+        const string hash = "9ed0a21087940c9987de4fe6185c6e4880712bf627b673e363393510b4b20e35";
+        var seeded = await SeedDeferredZipAsync(hash, 4, Path.Combine("sha256", hash[..2], $"{hash}.bin"), extension: ".pdf");
+        var factory = new ContextFactory(_fixture.ConnectionString);
+        var capabilities = new SourceCapabilityService(
+            new SqlSourceActivityStore(factory, TimeProvider.System),
+            new LocalSourceCapabilityHandlerRegistry([new PdfDocumentCapabilityHandler()]));
+        await capabilities.RegisterAsync(PdfDocumentProcessor.Capability, CancellationToken.None);
+        await using (var mutation = CreateContext())
+        {
+            (await mutation.SourceRootConfigurations.SingleAsync(value => value.Id == seeded.RootId)).State = (int)state;
+            await mutation.SaveChangesAsync();
+        }
+
+        var result = await new SqlRetainedProcessorBranchStore(factory, TimeProvider.System).RequestDocumentReprocessAsync(
+            new DocumentReprocessRequest(new SourceRevisionId(seeded.SourceRevisionId), hash, PdfDocumentProcessor.Capability.ProcessorFingerprint),
+            CancellationToken.None);
+
+        Assert.False(result.Accepted);
+        await using var verification = CreateContext();
+        Assert.Empty(await verification.SourceProcessorBranches.Where(value => value.SourceRevisionId == seeded.SourceRevisionId).ToListAsync());
+    }
+
+    [NativeSqlServerFact]
+    public async Task Exact_document_reprocess_refuses_a_suppressed_source_revision()
+    {
+        const string hash = "be65964d8d6ced1015ab2a4b31cb6201d50eefc59af303c7f60d55a754c82280";
+        var seeded = await SeedDeferredZipAsync(hash, 4, Path.Combine("sha256", hash[..2], $"{hash}.bin"), extension: ".pdf");
+        var factory = new ContextFactory(_fixture.ConnectionString);
+        var capabilities = new SourceCapabilityService(
+            new SqlSourceActivityStore(factory, TimeProvider.System),
+            new LocalSourceCapabilityHandlerRegistry([new PdfDocumentCapabilityHandler()]));
+        await capabilities.RegisterAsync(PdfDocumentProcessor.Capability, CancellationToken.None);
+        await using (var mutation = CreateContext())
+        {
+            (await mutation.SourceRevisions.SingleAsync(value => value.Id == seeded.SourceRevisionId)).SuppressedAtUtc = DateTimeOffset.UtcNow;
+            await mutation.SaveChangesAsync();
+        }
+
+        var result = await new SqlRetainedProcessorBranchStore(factory, TimeProvider.System).RequestDocumentReprocessAsync(
+            new DocumentReprocessRequest(new SourceRevisionId(seeded.SourceRevisionId), hash, PdfDocumentProcessor.Capability.ProcessorFingerprint),
+            CancellationToken.None);
+
+        Assert.False(result.Accepted);
+        await using var verification = CreateContext();
+        Assert.Empty(await verification.SourceProcessorBranches.Where(value => value.SourceRevisionId == seeded.SourceRevisionId).ToListAsync());
+    }
+
+    [NativeSqlServerFact]
+    public async Task Exact_document_reprocess_does_not_publish_a_document_child_after_its_owner_is_suppressed()
+    {
+        var bytes = "%PDF-1.7\n% suppression fence"u8.ToArray();
+        var hash = Convert.ToHexStringLower(SHA256.HashData(bytes));
+        var seeded = await SeedDeferredZipAsync(hash, bytes.Length, Path.Combine("sha256", hash[..2], $"{hash}.bin"), extension: ".pdf");
+        var factory = new ContextFactory(_fixture.ConnectionString);
+        var store = new SqlRetainedProcessorBranchStore(factory, TimeProvider.System);
+        var capabilities = new SourceCapabilityService(
+            new SqlSourceActivityStore(factory, TimeProvider.System),
+            new LocalSourceCapabilityHandlerRegistry([new PdfDocumentCapabilityHandler()]));
+        await capabilities.RegisterAsync(PdfDocumentProcessor.Capability, CancellationToken.None);
+        var requested = await store.RequestDocumentReprocessAsync(
+            new DocumentReprocessRequest(new SourceRevisionId(seeded.SourceRevisionId), hash, PdfDocumentProcessor.Capability.ProcessorFingerprint),
+            CancellationToken.None);
+        var branchId = Assert.IsType<Guid>(requested.SuccessorBranchId);
+        var claim = Assert.IsType<RetainedProcessorClaim>(await store.ClaimDocumentBranchAsync(branchId,
+            new SourceRevisionId(seeded.SourceRevisionId), hash, PdfDocumentProcessor.Capability.ProcessorFingerprint,
+            "suppression-fence", CancellationToken.None));
+
+        await new SqlSourceScanStore(factory, TimeProvider.System).SuppressUnseenAsync(
+            new SourceRootId(seeded.RootId), new HashSet<SourceRevisionId>(), CancellationToken.None);
+        var completion = await new PdfDocumentProcessor(null!).ProcessAsync(
+            claim, new RetainedSourceBytes(claim.SourceRevisionId, bytes, hash, bytes.Length),
+            new RetainedProcessorOptions(), CancellationToken.None);
+
+        Assert.False(await store.CommitAsync(claim, completion, CancellationToken.None));
+        await using var verification = CreateContext();
+        Assert.NotNull((await verification.SourceRevisions.SingleAsync(value => value.Id == seeded.SourceRevisionId)).SuppressedAtUtc);
+        Assert.Empty(await verification.SourceRevisions.Where(value => value.ParentSourceRevisionId == seeded.SourceRevisionId).ToListAsync());
+        Assert.Empty(await verification.SourceProcessorBranchMembers.Where(value => value.BranchId == branchId).ToListAsync());
+        Assert.Equal((int)RetainedProcessorBranchState.Running,
+            (await verification.SourceProcessorBranches.SingleAsync(value => value.Id == branchId)).State);
     }
 
     [NativeSqlServerFact]

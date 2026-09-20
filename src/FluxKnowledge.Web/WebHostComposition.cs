@@ -1,4 +1,7 @@
 using FluxKnowledge.Application.Pipeline;
+using FluxKnowledge.Application.Documents;
+using FluxKnowledge.Application.Gpu;
+using FluxKnowledge.Application.Models;
 using FluxKnowledge.Application.Contracts;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Sources;
@@ -13,6 +16,7 @@ using FluxKnowledge.Application.IntegrationV1.Corpus;
 using FluxKnowledge.Application.IntegrationV1.Operations;
 using FluxKnowledge.Application.Operations;
 using FluxKnowledge.Infrastructure.Inference;
+using FluxKnowledge.Infrastructure.Inference.Models;
 using FluxKnowledge.Infrastructure.SqlServer;
 using FluxKnowledge.Infrastructure.SqlServer.Configuration;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
@@ -20,11 +24,14 @@ using FluxKnowledge.Infrastructure.SqlServer.Visibility;
 using FluxKnowledge.Infrastructure.SqlServer.Workers;
 using FluxKnowledge.Infrastructure.Usearch;
 using FluxKnowledge.Integrations.Files;
+using FluxKnowledge.Integrations.Documents;
+using FluxKnowledge.Integrations.Models;
 using FluxKnowledge.Integrations.Outlook;
 using FluxKnowledge.Web.Components.Status;
 using FluxKnowledge.Web.Components.Sources;
 using FluxKnowledge.Web.Components.Outlook;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using FluxKnowledge.Web.Components.OperatorActions;
 using FluxKnowledge.Web.Configuration;
 using Microsoft.EntityFrameworkCore;
@@ -89,8 +96,8 @@ public static class WebHostComposition
     internal static bool IsIsolatedTestComposition => _isolatedTestLayout is not null;
 
     /// <summary>
-    /// Runs before the published Web host is built. It permits only the provisioned source-worker
-    /// and Outlook-capture hosted services, while rejecting every unprovisioned runtime provider.
+    /// Runs before the published Web host is built. It permits only the provisioned source-worker,
+    /// Outlook-capture, and explicit fixed local OCR hosted services.
     /// It starts no listener.
     /// </summary>
     internal static void ValidateNativeGoLiveComposition(
@@ -110,6 +117,13 @@ public static class WebHostComposition
         }
         if (runtime.OutlookEnabled)
             allowedHostedServiceTypes.Add(typeof(OutlookCaptureRecoveryService));
+        if (runtime.LocalOcrEnabled)
+        {
+            allowedHostedServiceTypes.Add(typeof(PaddleOcrVlmCapacityBootstrapService));
+            allowedHostedServiceTypes.Add(typeof(GpuSchedulerService));
+            allowedHostedServiceTypes.Add(typeof(GpuExecutorDispatchRecoveryService));
+            allowedHostedServiceTypes.Add(typeof(PaddleOcrVlmCompletionRecoveryService));
+        }
         var hostedServiceTypes = services
             .Where(descriptor => descriptor.ServiceType == typeof(IHostedService))
             .Select(HostedServiceType)
@@ -117,10 +131,9 @@ public static class WebHostComposition
         if (hostedServiceTypes.Length != allowedHostedServiceTypes.Count ||
             hostedServiceTypes.Any(type => type is null || !allowedHostedServiceTypes.Remove(type)))
             throw new InvalidOperationException("native-go-live-hosted-service-registered");
-        var prohibited = new[]
-        {
-            typeof(GpuSchedulerService)
-        };
+        var prohibited = runtime.LocalOcrEnabled
+            ? []
+            : new[] { typeof(GpuSchedulerService) };
         if (services.Any(descriptor => prohibited.Contains(descriptor.ServiceType) ||
                                        descriptor.ImplementationType is not null && prohibited.Contains(descriptor.ImplementationType)))
             throw new InvalidOperationException("native-go-live-prohibited-service-registered");
@@ -330,7 +343,10 @@ public static class WebHostComposition
         services.AddFluxKnowledgeOutboxWorkers();
         services.AddScoped<SqlSourceRootStore>();
         services.AddScoped<ISourceRootStore>(provider => provider.GetRequiredService<SqlSourceRootStore>());
-        services.AddScoped<SqlSourceDeletionStore>();
+        services.AddScoped<SqlSourceDeletionStore>(provider => new SqlSourceDeletionStore(
+            provider.GetRequiredService<IDbContextFactory<FluxKnowledgeDbContext>>(),
+            provider.GetRequiredService<TimeProvider>(),
+            provider.GetService<PaddleOcrVlmExecutionRegistry>()));
         services.AddScoped<ISourceDeletionStore>(provider => provider.GetRequiredService<SqlSourceDeletionStore>());
         services.AddScoped<SourceDeletionCoordinator>();
         services.AddScoped<SqlSourceActivityStore>();
@@ -389,7 +405,16 @@ public static class WebHostComposition
         services.AddScoped<LocalOperatorConnectionContext>();
         services.AddScoped<ILocalOperatorPolicy, LocalOperatorPolicy>();
         services.AddScoped<OperatorActionPageState>();
+        var localOcrEnabled = nativeRuntimeOptions?.LocalOcrEnabled == true;
+        if (localOcrEnabled)
+        {
+            AddFixedLocalOcrServices(services);
+        }
         services.AddFluxKnowledgeGpuScheduler();
+        if (localOcrEnabled)
+        {
+            services.AddSingleton<IHostedService, PaddleOcrVlmCompletionRecoveryService>();
+        }
         services.AddScoped<IProjectionReader, SqlProjectionReader>();
         services.AddScoped<ICorpusProjectionReader, SqlCorpusProjectionReader>();
         services.AddScoped<IOperatorEventProjectionReader, SqlOperatorEventProjectionReader>();
@@ -410,11 +435,14 @@ public static class WebHostComposition
         IServiceCollection services,
         NativeGoLiveRuntimeConfiguration runtime)
     {
-        var unapprovedHostedServiceTypes = new HashSet<Type>
+        var unapprovedHostedServiceTypes = new HashSet<Type>();
+        if (!runtime.LocalOcrEnabled)
         {
-            typeof(GpuSchedulerService),
-            typeof(GpuExecutorDispatchRecoveryService)
-        };
+            unapprovedHostedServiceTypes.Add(typeof(GpuSchedulerService));
+            unapprovedHostedServiceTypes.Add(typeof(GpuExecutorDispatchRecoveryService));
+            unapprovedHostedServiceTypes.Add(typeof(PaddleOcrVlmCapacityBootstrapService));
+            unapprovedHostedServiceTypes.Add(typeof(PaddleOcrVlmCompletionRecoveryService));
+        }
         if (!runtime.OutlookEnabled)
             unapprovedHostedServiceTypes.Add(typeof(OutlookCaptureRecoveryService));
         for (var index = services.Count - 1; index >= 0; index--)
@@ -427,6 +455,40 @@ public static class WebHostComposition
                 services.RemoveAt(index);
             }
         }
+    }
+
+    private static void AddFixedLocalOcrServices(IServiceCollection services)
+    {
+        PaddleOcrVlmRuntimeContract.AssertFrozenSettings();
+        services.TryAddSingleton<ILocalModelStore>(
+            _ => new LocalModelStore(WindowsModelVerificationFiles.OpenProduction));
+        services.AddSingleton<PaddleOcrVlmModelGate>();
+        services.AddScoped<IPdfPageRasterizer, SyncfusionPdfPageRasterizer>();
+        services.AddScoped<IDocumentOcrExecutor, PaddleOcrVlmLocalExecutor>();
+        services.AddScoped<SqlDocumentOcrStore>(provider => new SqlDocumentOcrStore(
+            provider.GetRequiredService<IDbContextFactory<FluxKnowledgeDbContext>>(),
+            provider.GetRequiredService<GpuSchedulerCoordinator>(),
+            provider.GetRequiredService<TimeProvider>()));
+        services.Replace(ServiceDescriptor.Scoped<IDocumentOcrHandoff>(provider =>
+            provider.GetRequiredService<SqlDocumentOcrStore>()));
+        services.Replace(ServiceDescriptor.Scoped<IDocumentOcrResultReader>(provider =>
+            provider.GetRequiredService<SqlDocumentOcrStore>()));
+        services.AddSingleton(new GpuSchedulerOptions(
+            maxBatchItems: 1,
+            maxBatchEstimatedBytes: PaddleOcrVlmRuntimeContract.EstimatedDocumentBytes,
+            capacityDeferralCap: TimeSpan.FromMinutes(5),
+            fallbackInterval: TimeSpan.FromMinutes(1),
+            unresponsiveDiagnosticAge: TimeSpan.FromMinutes(10)));
+        services.Replace(ServiceDescriptor.Singleton<IGpuAdmissionGate, PaddleOcrVlmAdmissionGate>());
+        services.AddSingleton<PaddleOcrVlmCompletionCoordinator>();
+        services.AddSingleton<PaddleOcrVlmExecutionRegistry>();
+        services.AddSingleton<PaddleOcrVlmCancellationCoordinator>();
+        services.AddSingleton<PaddleOcrVlmExecutorAdapter>();
+        services.AddSingleton<IGpuExecutorAdapter>(provider =>
+            provider.GetRequiredService<PaddleOcrVlmExecutorAdapter>());
+        // Register before the generic scheduler hosted service so the durable slot exists before
+        // its first admission round. The bootstrap never overwrites a reserved/uncertain slot.
+        services.AddSingleton<IHostedService, PaddleOcrVlmCapacityBootstrapService>();
     }
 
     private static IReadOnlyList<string> ReadConfiguredSafetyRoots(IConfiguration configuration) =>

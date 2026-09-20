@@ -8,6 +8,7 @@ namespace FluxKnowledge.Application.Workers;
 public static class PipelineOperations
 {
     public const string ExtractUtf8 = "extract utf-8";
+    public const string ExtractDocument = "extract document";
     public const string NormaliseText = "normalise text";
     public const string CanonicalIndex = "canonical index";
     public const string Embed = "embed";
@@ -24,7 +25,10 @@ public sealed record PipelineStageSource(
     string CanonicalPath,
     string RegisteredContentHash,
     string? InputText,
-    SourceRevisionId? RetainedSourceRevisionId = null);
+    SourceRevisionId? RetainedSourceRevisionId = null,
+    string? RetainedSourceClassification = null,
+    string? RetainedSourceExtension = null,
+    string? InputDocumentMetadataJson = null);
 
 public interface IPipelineStageReader
 {

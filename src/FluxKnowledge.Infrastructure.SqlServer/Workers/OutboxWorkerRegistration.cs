@@ -1,9 +1,11 @@
 using FluxKnowledge.Application.Contracts;
+using FluxKnowledge.Application.Documents;
 using FluxKnowledge.Application.Pipeline;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Sources;
 using FluxKnowledge.Application.Visibility;
 using FluxKnowledge.Application.Workers;
+using FluxKnowledge.Integrations.Documents;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.Diagnostics;
@@ -56,6 +58,8 @@ public static class OutboxWorkerServiceCollectionExtensions
         services.TryAddEnumerable(ServiceDescriptor.Singleton<ILocalSourceCapabilityHandler, ZipArchiveRetainedCapabilityHandler>());
         services.TryAddEnumerable(ServiceDescriptor.Singleton<ILocalSourceCapabilityHandler, TarArchiveRetainedCapabilityHandler>());
         services.TryAddEnumerable(ServiceDescriptor.Singleton<ILocalSourceCapabilityHandler, OoxmlStructuralTextCapabilityHandler>());
+        services.TryAddEnumerable(ServiceDescriptor.Singleton<ILocalSourceCapabilityHandler, VsdxStructuralTextCapabilityHandler>());
+        services.TryAddEnumerable(ServiceDescriptor.Singleton<ILocalSourceCapabilityHandler, PdfDocumentCapabilityHandler>());
         services.TryAddEnumerable(ServiceDescriptor.Singleton<ILocalSourceCapabilityHandler, RetainedCsharpCodeCapabilityHandler>());
         services.TryAddEnumerable(ServiceDescriptor.Singleton<ILocalSourceCapabilityHandler, MediaMetadataCapabilityHandler>());
         services.TryAddSingleton<ILocalSourceCapabilityHandlerRegistry>(provider => new LocalSourceCapabilityHandlerRegistry(
@@ -88,6 +92,8 @@ public static class OutboxWorkerServiceCollectionExtensions
         services.TryAddScoped<ZipArchiveRetainedProcessor>();
         services.TryAddScoped<TarArchiveRetainedProcessor>();
         services.TryAddScoped<OoxmlStructuralTextProcessor>();
+        services.TryAddScoped<VsdxStructuralTextProcessor>();
+        services.TryAddScoped<PdfDocumentProcessor>();
         services.TryAddScoped<MediaMetadataRetainedProcessor>();
         services.TryAddScoped(provider => new RetainedCsharpCodeProcessor(
             provider.GetRequiredService<IRetainedSourceReader>(),
@@ -111,8 +117,15 @@ public static class OutboxWorkerServiceCollectionExtensions
                 provider.GetRequiredService<TimeProvider>()));
         services.TryAddScoped<StageTransitionService>();
         services.TryAddScoped<RegisterUtf8FileHandler>();
+        services.TryAddScoped<VsdxDocumentExtractor>();
+        services.TryAddSingleton<SyncfusionLicenceRegistration>();
+        services.TryAddScoped<IPdfDocumentExtractor, SyncfusionPdfDocumentExtractor>();
+        services.TryAddScoped<IDocumentOcrHandoff, UnavailableDocumentOcrHandoff>();
+        services.TryAddScoped<IDocumentOcrResultReader, EmptyDocumentOcrResultReader>();
         services.TryAddEnumerable(
             ServiceDescriptor.Scoped<IStageWorker, ExtractUtf8StageWorker>());
+        services.TryAddEnumerable(
+            ServiceDescriptor.Scoped<IStageWorker, ExtractDocumentStageWorker>());
         services.TryAddEnumerable(
             ServiceDescriptor.Scoped<IStageWorker, NormaliseTextStageWorker>());
         services.TryAddScoped<OutboxWorkerRegistration>();

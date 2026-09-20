@@ -31,12 +31,16 @@ public sealed class SqlFullTextSearch(IDbContextFactory<FluxKnowledgeDbContext> 
                    AND [artifact].[SourceRevision] = [record].[Revision]
                  LEFT JOIN [SourceRevisions] AS [retained]
                     ON [record].[SourceRevisionId] = [retained].[Id]
+                 LEFT JOIN [DocumentPublications] AS [publication]
+                    ON [publication].[PipelineRecordId] = [record].[Id]
+                   AND [publication].[PipelineRecordRevision] = [record].[Revision]
+                   AND [publication].[DocumentInputSourceRevisionId] = [retained].[Id]
                  LEFT JOIN [SourceRootConfigurations] AS [root]
                     ON [retained].[SourceRootId] = [root].[Id]
                  WHERE [vector].[IsDeleted] = 0
                    AND [record].[IsDeleted] = 0
                    AND ([record].[SourceRevisionId] IS NULL OR [retained].[SuppressedAtUtc] IS NULL)
-                   AND ([record].[SourceRevisionId] IS NULL OR [retained].[OriginKind] <> 2)
+                   AND ([record].[SourceRevisionId] IS NULL OR [retained].[OriginKind] <> 2 OR [publication].[OwnerSourceRevisionId] IS NOT NULL)
                    AND ([root].[Id] IS NULL OR [root].[State] <> {(int)SourceRootState.Deleting})
                    AND [vector].[TextChunkContentHash] = [chunk].[ContentHash]
                    AND ([record].[SourceRevisionId] IS NOT NULL OR [record].[Revision] = (

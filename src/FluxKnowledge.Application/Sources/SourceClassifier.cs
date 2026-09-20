@@ -127,7 +127,7 @@ public static class SourceClassifier
 
     private static string BinarySignatureReason(string extension, ReadOnlySpan<byte> bytes)
     {
-        if (bytes.StartsWith("%PDF-"u8)) return "pdf-parser-unavailable";
+        if (bytes.StartsWith("%PDF-"u8)) return "pdf-document-extraction-pending";
         if (bytes.StartsWith(new byte[] { 0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1 }))
         {
             return extension.Equals(".doc", StringComparison.OrdinalIgnoreCase) ||
@@ -142,6 +142,8 @@ public static class SourceClassifier
                    extension.Equals(".xlsx", StringComparison.OrdinalIgnoreCase) ||
                    extension.Equals(".pptx", StringComparison.OrdinalIgnoreCase)
                 ? "ooxml-structural-extraction-pending"
+                : extension.Equals(".vsdx", StringComparison.OrdinalIgnoreCase)
+                    ? "vsdx-structural-extraction-pending"
                 : "archive-zip-expansion-pending";
         }
         if (TarArchiveRetainedProcessor.IsTarSignature(bytes)) return "archive-tar-expansion-pending";
