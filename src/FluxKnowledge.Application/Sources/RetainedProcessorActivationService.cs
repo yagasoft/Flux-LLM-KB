@@ -15,10 +15,12 @@ public sealed class RetainedProcessorActivationService
     private readonly OoxmlStructuralTextProcessor? _ooxmlProcessor;
     private readonly VisioDocumentInputProcessor? _visioProcessor;
     private readonly PdfDocumentProcessor? _pdfProcessor;
+    private readonly ImageDocumentInputProcessor? _imageProcessor;
     private readonly RetainedCsharpCodeProcessor? _csharpProcessor;
     private readonly MediaMetadataRetainedProcessor? _mediaMetadataProcessor;
     private readonly RetainedProcessorOptions _options;
     private readonly IStatusEventPublisher? _statusEvents;
+    private readonly ISourceScanWakeSignal? _sourceScanWakeSignal;
 
     private int EffectiveAutomaticReplayBatchSize => Math.Min(
         RetainedProcessorOptions.MaximumAutomaticReplayBatchSize,
@@ -41,7 +43,9 @@ public sealed class RetainedProcessorActivationService
         VisioDocumentInputProcessor? visioProcessor = null,
         RetainedCsharpCodeProcessor? csharpProcessor = null,
         MediaMetadataRetainedProcessor? mediaMetadataProcessor = null,
-        PdfDocumentProcessor? pdfProcessor = null)
+        PdfDocumentProcessor? pdfProcessor = null,
+        ImageDocumentInputProcessor? imageProcessor = null,
+        ISourceScanWakeSignal? sourceScanWakeSignal = null)
     {
         _ = timeProvider;
         _capabilityService = capabilityService;
@@ -52,10 +56,12 @@ public sealed class RetainedProcessorActivationService
         _ooxmlProcessor = ooxmlProcessor;
         _visioProcessor = visioProcessor;
         _pdfProcessor = pdfProcessor;
+        _imageProcessor = imageProcessor;
         _csharpProcessor = csharpProcessor;
         _mediaMetadataProcessor = mediaMetadataProcessor;
         _options = options;
         _statusEvents = statusEvents;
+        _sourceScanWakeSignal = sourceScanWakeSignal;
     }
 
     public async ValueTask<RetainedProcessorActivationResult> RunOnceAsync(CancellationToken cancellationToken)
@@ -95,6 +101,19 @@ public sealed class RetainedProcessorActivationService
             runs.Add(await RunProcessorAsync(PdfDocumentProcessor.Capability, PdfDocumentProcessor.IsLikelyPdf,
                 _pdfProcessor.ProcessAsync, "pdf", cancellationToken).ConfigureAwait(false));
         }
+        if (_options.ImageDocumentOcrEnabled)
+        {
+            var image = _imageProcessor ?? throw new InvalidOperationException("The explicitly enabled image OCR processor is not registered.");
+            runs.Add(await RunProcessorAsync(ImageDocumentInputProcessor.Capability, ImageDocumentInputProcessor.IsLikelyImage,
+                image.ProcessAsync, "image", cancellationToken).ConfigureAwait(false));
+        }
+        else if (_imageProcessor is not null)
+        {
+            _ = await _capabilityService.RegisterAsync(
+                ImageDocumentInputProcessor.Capability,
+                enabled: false,
+                cancellationToken).ConfigureAwait(false);
+        }
         if (_options.MediaMetadataEnabled)
         {
             var media = _mediaMetadataProcessor ?? throw new InvalidOperationException("The explicitly enabled media metadata processor is not registered.");
@@ -133,6 +152,10 @@ public sealed class RetainedProcessorActivationService
         var result = effectiveRuns.Length == 1 ? effectiveRuns[0] : new RetainedProcessorActivationResult("retained-archives", effectiveRuns.Sum(result => result.PromotedBranches),
             effectiveRuns.Sum(result => result.ClaimedBranches), effectiveRuns.Sum(result => result.CompletedBranches),
             effectiveRuns.Sum(result => result.FailedBranches), true);
+        if (result.CompletedBranches > 0)
+        {
+            _sourceScanWakeSignal?.Notify();
+        }
         if (result.PromotedBranches + result.ClaimedBranches + result.CompletedBranches + result.FailedBranches > 0 && _statusEvents is not null)
         {
             await _statusEvents.PublishAsync(new StatusChanged(null, "source", DateTimeOffset.UtcNow), cancellationToken).ConfigureAwait(false);

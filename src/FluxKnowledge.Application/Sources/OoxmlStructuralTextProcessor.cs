@@ -21,8 +21,7 @@ public sealed class OoxmlStructuralTextProcessor : ILocalSourceCapabilityHandler
     private const long MaximumExpandedXmlBytes = 256L * 1024 * 1024;
     private const int MaximumElements = 500_000;
     private const int MaximumDepth = 128;
-    private const long MaximumTextBytes = 32L * 1024 * 1024;
-    private const long MaximumChildTextBytes = 16L * 1024 * 1024;
+    internal const long MaximumTextBytes = 200L * 1024 * 1024;
     private const int MaximumEntries = 512;
     private const int MaximumRelationships = 8_192;
     private const long MaximumSelectedPartBytes = 32L * 1024 * 1024;
@@ -232,7 +231,6 @@ public sealed class OoxmlStructuralTextProcessor : ILocalSourceCapabilityHandler
                 default:
                     throw new RetainedProcessorException("office-document-container-invalid");
             }
-            if (text.Length == 0) throw new RetainedProcessorException("office-document-part-unsupported");
             return new StructuralExtraction(text.Value, warnings.ToArray());
         }
         catch (RetainedProcessorException) { throw; }
@@ -1569,29 +1567,46 @@ public sealed class OoxmlStructuralTextProcessor : ILocalSourceCapabilityHandler
         var utf8 = new UTF8Encoding(false, true);
         var bytes = utf8.GetBytes(text);
         if (bytes.LongLength > MaximumTextBytes) throw new RetainedProcessorException("office-document-text-limit");
-        var children = new List<RetainedProcessorDerivedChild>();
-        var offset = 0;
-        var ordinal = 0;
-        while (offset < bytes.Length)
+        if (bytes.Length == 0)
         {
-            if (ordinal == 2) throw new RetainedProcessorException("office-document-text-limit");
-            var length = Math.Min((int)MaximumChildTextBytes, bytes.Length - offset);
-            while (length > 0 && offset + length < bytes.Length && (bytes[offset + length] & 0xC0) == 0x80) length--;
-            if (length == 0) throw new RetainedProcessorException("office-document-text-limit");
-            var segment = bytes.AsMemory(offset, length).ToArray();
-            var fingerprint = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes($"office-segment:{claim.ParentStableIdentity.Length}:{claim.ParentStableIdentity}:{_descriptor.ProcessorFingerprint}:{ordinal}")));
-            var identity = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes($"office-segment-identity:{claim.ParentStableIdentity.Length}:{claim.ParentStableIdentity}:{fingerprint}")));
-            await using var stream = new MemoryStream(segment, writable: false);
-            var receipt = await _artifactWriter.WriteAsync(claim.SourceRevisionId, stream, MaximumChildTextBytes, cancellationToken).ConfigureAwait(false);
-            if (receipt.ByteLength != segment.Length || !receipt.IsUtf8Text || receipt.IsNestedArchive)
-                throw new RetainedProcessorException("office-document-part-unsupported");
-            children.Add(new RetainedProcessorDerivedChild(fingerprint, $"retained-office-structural-segment:{fingerprint}", identity,
-                receipt.ContentSha256, receipt.StoreRelativePath, receipt.ByteLength, "AcceptedUtf8Text", OriginKind: 2, Extension: ".txt", PublicationLease: receipt.PublicationLease));
-            offset += length;
-            ordinal++;
+            var fingerprint = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(
+                $"office-no-content:{claim.ParentStableIdentity.Length}:{claim.ParentStableIdentity}:{_descriptor.ProcessorFingerprint}")));
+            var outcome = new RetainedProcessorMemberOutcome(
+                fingerprint,
+                0,
+                "skipped",
+                "office-document-no-extractable-text");
+            var terminalReceipt = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(
+                $"{outcome.MemberFingerprint}:{outcome.ByteLength}:{outcome.Disposition}:{outcome.ReasonCode}")));
+            return new RetainedProcessorCompletion([], terminalReceipt, [outcome]);
         }
-        var receiptFingerprint = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(string.Join("|", children.Select(child => $"{child.MemberFingerprint}:{child.ContentSha256}:{child.ByteLength}")))));
-        return new RetainedProcessorCompletion(children, receiptFingerprint);
+
+        var childFingerprint = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(
+            $"office-document-text:{claim.ParentStableIdentity.Length}:{claim.ParentStableIdentity}:{_descriptor.ProcessorFingerprint}")));
+        var identity = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(
+            $"office-document-text-identity:{claim.ParentStableIdentity.Length}:{claim.ParentStableIdentity}:{childFingerprint}")));
+        await using var stream = new MemoryStream(bytes, writable: false);
+        var receipt = await _artifactWriter.WriteAsync(
+            claim.SourceRevisionId,
+            stream,
+            MaximumTextBytes,
+            cancellationToken).ConfigureAwait(false);
+        if (receipt.ByteLength != bytes.Length || !receipt.IsUtf8Text || receipt.IsNestedArchive)
+            throw new RetainedProcessorException("office-document-part-unsupported");
+        var child = new RetainedProcessorDerivedChild(
+            childFingerprint,
+            $"retained-office-structural-text:{childFingerprint}",
+            identity,
+            receipt.ContentSha256,
+            receipt.StoreRelativePath,
+            receipt.ByteLength,
+            "AcceptedUtf8Text",
+            OriginKind: 2,
+            Extension: ".txt",
+            PublicationLease: receipt.PublicationLease);
+        var receiptFingerprint = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(
+            $"{child.MemberFingerprint}:{child.ContentSha256}:{child.ByteLength}")));
+        return new RetainedProcessorCompletion([child], receiptFingerprint);
     }
 }
 

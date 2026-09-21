@@ -9,6 +9,12 @@ public sealed class SourceCapabilityService(
 {
     public async ValueTask<RegisteredSourceCapability> RegisterAsync(
         SourceCapabilityDescriptor descriptor,
+        CancellationToken cancellationToken) =>
+        await RegisterAsync(descriptor, enabled: true, cancellationToken).ConfigureAwait(false);
+
+    public async ValueTask<RegisteredSourceCapability> RegisterAsync(
+        SourceCapabilityDescriptor descriptor,
+        bool enabled,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(descriptor);
@@ -19,7 +25,7 @@ public sealed class SourceCapabilityService(
             descriptor.ProcessorVersion,
             descriptor.ExecutionClass,
             descriptor.ProcessorFingerprint,
-            descriptor.ExecutionClass == ExecutionClass.InProcess && handlers.Matches(descriptor),
+            enabled && descriptor.ExecutionClass == ExecutionClass.InProcess && handlers.Matches(descriptor),
             descriptor.AcceptedActivityKind,
             descriptor.AcceptedClassification,
             descriptor.OutputContract);

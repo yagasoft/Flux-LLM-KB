@@ -77,6 +77,35 @@ public sealed class ZipArchiveRetainedProcessorTests
     }
 
     [Fact]
+    public async Task Disabling_image_ocr_reconciles_an_earlier_runnable_capability_before_other_routing()
+    {
+        var capabilities = new RecordingCapabilities();
+        var image = new ImageDocumentInputProcessor();
+        var capabilityService = new SourceCapabilityService(
+            capabilities,
+            new LocalSourceCapabilityHandlerRegistry([image]));
+        _ = await capabilityService.RegisterAsync(ImageDocumentInputProcessor.Capability, CancellationToken.None);
+        var branches = new RecordingReconciliationBranches();
+        var activation = new RetainedProcessorActivationService(
+            capabilityService,
+            branches,
+            new ThrowingReader(),
+            new ZipArchiveRetainedProcessor(null!),
+            new RetainedProcessorOptions { ImageDocumentOcrEnabled = false },
+            TimeProvider.System,
+            imageProcessor: image);
+
+        var result = await activation.RunOnceAsync(CancellationToken.None);
+
+        Assert.False(result.Enabled);
+        Assert.Collection(
+            capabilities.Registered,
+            enabled => Assert.True(enabled.IsRunnable),
+            disabled => Assert.False(disabled.IsRunnable));
+        Assert.False(branches.OtherOperationCalled);
+    }
+
+    [Fact]
     public async Task Hosted_zip_activation_preserves_the_configured_shared_sixteen_claim_limit()
     {
         var branches = new RecordingClaimBudgetBranches(forceClaimCount: 0);
@@ -186,6 +215,35 @@ public sealed class ZipArchiveRetainedProcessorTests
         Assert.Equal(1, result.FailedBranches);
         Assert.Equal("retained-artifact-transient", branches.RetryOutcomeCode);
         Assert.Null(branches.Failure);
+    }
+
+    [Fact]
+    public async Task Completed_retained_processor_work_wakes_source_registration_immediately()
+    {
+        var archive = CreateZip("document.txt", "ready for registration");
+        var hash = Convert.ToHexStringLower(SHA256.HashData(archive));
+        var claim = new RetainedProcessorClaim(
+            Guid.NewGuid(), SourceRevisionId.New(), "parent", hash, "owner", 1,
+            DateTimeOffset.UtcNow.AddMinutes(5));
+        var branches = new ClaimingBranches(claim, commitSucceeds: true);
+        var writer = new RecordingStreamWriter();
+        var processor = new ZipArchiveRetainedProcessor(writer);
+        var wakeSignal = new RecordingSourceScanWakeSignal();
+        var activation = new RetainedProcessorActivationService(
+            new SourceCapabilityService(
+                new RecordingCapabilities(),
+                new LocalSourceCapabilityHandlerRegistry([processor])),
+            branches,
+            new RetainedBytesReader(new RetainedSourceBytes(claim.SourceRevisionId, archive, hash, archive.Length)),
+            processor,
+            new RetainedProcessorOptions { ArchiveZipExpandEnabled = true },
+            TimeProvider.System,
+            sourceScanWakeSignal: wakeSignal);
+
+        var result = await activation.RunOnceAsync(CancellationToken.None);
+
+        Assert.Equal(1, result.CompletedBranches);
+        Assert.True(wakeSignal.Notified);
     }
 
     [Fact]
@@ -527,9 +585,13 @@ public sealed class ZipArchiveRetainedProcessorTests
     private sealed class ClaimingBranches : IRetainedProcessorBranchStore
     {
         private readonly RetainedProcessorClaim _claim;
+        private readonly bool _commitSucceeds;
 
-        public ClaimingBranches(RetainedProcessorClaim? claim = null) =>
+        public ClaimingBranches(RetainedProcessorClaim? claim = null, bool commitSucceeds = false)
+        {
             _claim = claim ?? new RetainedProcessorClaim(Guid.NewGuid(), SourceRevisionId.New(), "parent", new string('a', 64), "owner", 1, DateTimeOffset.UtcNow.AddMinutes(5));
+            _commitSucceeds = commitSucceeds;
+        }
 
         public string? RetryOutcomeCode { get; private set; }
         public RetainedProcessorFailure? Failure { get; private set; }
@@ -537,9 +599,16 @@ public sealed class ZipArchiveRetainedProcessorTests
         public ValueTask<bool> PromoteAsync(RetainedProcessorPromotionCandidate candidate, SourceCapabilityDescriptor capability, CancellationToken cancellationToken) => ValueTask.FromResult(false);
         public ValueTask<bool> BlockPromotionAsync(RetainedProcessorPromotionCandidate candidate, string outcomeCode, CancellationToken cancellationToken) => ValueTask.FromResult(false);
         public ValueTask<IReadOnlyList<RetainedProcessorClaim>> ClaimAsync(string leaseOwner, int maximumCount, CancellationToken cancellationToken) => ValueTask.FromResult<IReadOnlyList<RetainedProcessorClaim>>([_claim]);
-        public ValueTask<bool> CommitAsync(RetainedProcessorClaim claim, RetainedProcessorCompletion completion, CancellationToken cancellationToken) => ValueTask.FromResult(false);
+        public ValueTask<bool> CommitAsync(RetainedProcessorClaim claim, RetainedProcessorCompletion completion, CancellationToken cancellationToken) => ValueTask.FromResult(_commitSucceeds);
         public ValueTask<bool> RetryAsync(RetainedProcessorClaim claim, string outcomeCode, CancellationToken cancellationToken) { RetryOutcomeCode = outcomeCode; return ValueTask.FromResult(true); }
         public ValueTask<bool> FailAsync(RetainedProcessorClaim claim, RetainedProcessorFailure failure, CancellationToken cancellationToken) { Failure = failure; return ValueTask.FromResult(true); }
+    }
+
+    private sealed class RecordingSourceScanWakeSignal : ISourceScanWakeSignal
+    {
+        public bool Notified { get; private set; }
+        public void Notify() => Notified = true;
+        public ValueTask WaitAsync(CancellationToken cancellationToken) => ValueTask.CompletedTask;
     }
 
     private sealed class RecordingClaimBudgetBranches : IRetainedProcessorBranchStore

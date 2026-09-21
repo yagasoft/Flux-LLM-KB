@@ -976,6 +976,7 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
             "document-ooxml-structural-extract" => new[] { ".docx", ".xlsx", ".pptx" },
             "document-vsdx-structural-extract" or "document-vsdx-visio-extract" => new[] { ".vsdx" },
             "document-pdf-structural-extract" => new[] { ".pdf" },
+            "document-image-ocr-extract" => new[] { ".jpg", ".jpeg", ".png" },
             "retained-csharp-code" => new[] { ".cs" },
             "media-metadata" => new[] { ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tif", ".tiff", ".webp", ".mp3", ".wav", ".mov", ".mp4", ".m4v" },
             "archive-zip-expand" => Array.Empty<string>(),
@@ -996,10 +997,15 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
                                 EF.Functions.Collate(activity.InputFingerprint, SchemaConfiguration.SchedulerFenceCollation) &&
                             !context.SourceProcessorBranches.Any(branch => branch.SourceActivityId == activity.Id)
                       select new { activity, revision, artifact };
-        if (capability.ProcessorKind is "document-ooxml-structural-extract" or "document-vsdx-structural-extract" or "document-vsdx-visio-extract" or "document-pdf-structural-extract")
+        if (capability.ProcessorKind is "document-ooxml-structural-extract" or "document-vsdx-structural-extract" or "document-vsdx-visio-extract" or "document-pdf-structural-extract" or "document-image-ocr-extract")
             candidates = candidates.Where(value => extensions.Contains(value.revision.Extension.ToLower()));
         else if (capability.ProcessorKind == "media-metadata")
-            candidates = candidates.Where(value => extensions.Contains(value.revision.Extension.ToLower()));
+        {
+            var imageOcrRunnable = await IsImageOcrRunnableAsync(context, cancellationToken).ConfigureAwait(false);
+            candidates = candidates.Where(value =>
+                extensions.Contains(value.revision.Extension.ToLower()) &&
+                (!imageOcrRunnable || !new[] { ".jpg", ".jpeg", ".png" }.Contains(value.revision.Extension.ToLower())));
+        }
         else if (capability.ProcessorKind == "retained-csharp-code")
             candidates = candidates.Where(value =>
                 value.revision.Extension.ToLower() == ".cs" &&
@@ -1133,11 +1139,17 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
             var legacy = await context.SourceActivities.SingleOrDefaultAsync(value => value.Id == candidate.LegacyActivityId, cancellationToken).ConfigureAwait(false);
             if (legacy is null || legacy.State != (int)SourceActivityState.DeferredUnsupported ||
                 await context.SourceProcessorBranches.AnyAsync(value => value.SourceActivityId == legacy.Id, cancellationToken).ConfigureAwait(false)) return false;
+            if (capability.ProcessorKind == MediaMetadataRetainedProcessor.Capability.ProcessorKind &&
+                await IsImageOcrRunnableAsync(context, cancellationToken).ConfigureAwait(false) &&
+                await context.SourceRevisions.AnyAsync(value =>
+                    value.Id == legacy.SourceRevisionId &&
+                    new[] { ".jpg", ".jpeg", ".png" }.Contains(value.Extension.ToLower()), cancellationToken).ConfigureAwait(false))
+            {
+                return false;
+            }
             var successor = new SourceActivityEntity { Id = Guid.NewGuid(), SourceRevisionId = legacy.SourceRevisionId, ActivityKind = (int)capability.AcceptedActivityKind,
                 ExecutionClass = (int)ExecutionClass.InProcess, ProcessorVersion = capability.ProcessorVersion, InputFingerprint = legacy.InputFingerprint,
-                DescriptorFingerprint = capability.ProcessorKind == RetainedCsharpCodeProcessor.ProcessorKind
-                    ? capability.ProcessorFingerprint
-                    : SourceActivityEntity.LegacyDescriptorFingerprint,
+                DescriptorFingerprint = capability.ProcessorFingerprint,
                 State = (int)SourceActivityState.Pending, CreatedAtUtc = timeProvider.GetUtcNow(), UpdatedAtUtc = timeProvider.GetUtcNow() };
             var supersessionReason = $"superseded-by-{capability.ProcessorKind}";
             legacy.State = (int)SourceActivityState.CancelledSuperseded; legacy.Reason = supersessionReason; legacy.UpdatedAtUtc = timeProvider.GetUtcNow();
@@ -1152,6 +1164,18 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
             return true;
         }).ConfigureAwait(false);
     }
+
+    private static ValueTask<bool> IsImageOcrRunnableAsync(
+        FluxKnowledgeDbContext context,
+        CancellationToken cancellationToken) => new(context.SourceCapabilities.AsNoTracking().AnyAsync(value =>
+            value.Id == ImageDocumentInputProcessor.Capability.Id &&
+            value.ProcessorKind == ImageDocumentInputProcessor.Capability.ProcessorKind &&
+            value.ProcessorVersion == ImageDocumentInputProcessor.Capability.ProcessorVersion &&
+            value.ProcessorFingerprint == ImageDocumentInputProcessor.Capability.ProcessorFingerprint &&
+            value.ExecutionClass == (int)ExecutionClass.InProcess &&
+            value.OutputContract == ImageDocumentInputProcessor.Capability.OutputContract &&
+            value.IsRunnable,
+            cancellationToken));
 
     private async ValueTask<bool> PromoteRetainedCsharpAsync(
         RetainedProcessorPromotionCandidate candidate,
@@ -1877,6 +1901,23 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
             memberOutcomes.Any(outcome => !memberFingerprints.Add(outcome.MemberFingerprint)))
         {
             throw new InvalidOperationException("A retained processor completion contains conflicting member dispositions.");
+        }
+        var logicalMembers = completion.Members.Where(member => member.OriginKind is 2 or 3).ToArray();
+        var isOoxmlBranch =
+            string.Equals(branch.ProcessorVersion, OoxmlStructuralTextProcessor.Capability.ProcessorVersion, StringComparison.Ordinal) &&
+            string.Equals(branch.ProcessorFingerprint, OoxmlStructuralTextProcessor.Capability.ProcessorFingerprint, StringComparison.Ordinal);
+        var isExplicitOoxmlNoContent = isOoxmlBranch &&
+            completion.Members.Count == 0 &&
+            memberOutcomes.Count == 1 &&
+            memberOutcomes[0].Disposition == "skipped" &&
+            memberOutcomes[0].ByteLength == 0 &&
+            memberOutcomes[0].ReasonCode == "office-document-no-extractable-text";
+        if ((logicalMembers.Length != 0 || isOoxmlBranch) &&
+            !isExplicitOoxmlNoContent &&
+            (completion.Members.Count != 1 || logicalMembers.Length != 1 || memberOutcomes.Count != 0))
+        {
+            throw new InvalidOperationException(
+                "A logical document processor must produce exactly one child or one explicit no-content outcome.");
         }
         foreach (var member in completion.Members)
         {
@@ -2637,6 +2678,11 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
             descriptor = PdfDocumentProcessor.Capability;
             return true;
         }
+        if (string.Equals(fingerprint, ImageDocumentInputProcessor.Capability.ProcessorFingerprint, StringComparison.Ordinal))
+        {
+            descriptor = ImageDocumentInputProcessor.Capability;
+            return true;
+        }
 
         descriptor = default!;
         return false;
@@ -2645,7 +2691,11 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
     private static bool HasExpectedDocumentExtension(string extension, SourceCapabilityDescriptor descriptor) =>
         (descriptor.Id == VisioDocumentInputProcessor.Capability.Id && string.Equals(extension, ".vsdx", StringComparison.OrdinalIgnoreCase)) ||
         (descriptor.Id == VsdxStructuralTextProcessor.Capability.Id && string.Equals(extension, ".vsdx", StringComparison.OrdinalIgnoreCase)) ||
-        (descriptor.Id == PdfDocumentProcessor.Capability.Id && string.Equals(extension, ".pdf", StringComparison.OrdinalIgnoreCase));
+        (descriptor.Id == PdfDocumentProcessor.Capability.Id && string.Equals(extension, ".pdf", StringComparison.OrdinalIgnoreCase)) ||
+        (descriptor.Id == ImageDocumentInputProcessor.Capability.Id &&
+         (string.Equals(extension, ".jpg", StringComparison.OrdinalIgnoreCase) ||
+          string.Equals(extension, ".jpeg", StringComparison.OrdinalIgnoreCase) ||
+          string.Equals(extension, ".png", StringComparison.OrdinalIgnoreCase)));
 
     private static async ValueTask<bool> IsExactDocumentDescriptorRunnableAsync(
         FluxKnowledgeDbContext context,

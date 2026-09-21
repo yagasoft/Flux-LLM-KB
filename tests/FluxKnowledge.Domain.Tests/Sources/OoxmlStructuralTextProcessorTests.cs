@@ -49,6 +49,7 @@ public sealed class OoxmlStructuralTextProcessorTests
         var child = Assert.Single(completion.Members);
         Assert.Equal(2, child.OriginKind);
         Assert.Equal(".txt", child.Extension);
+        Assert.Equal(200L * 1024 * 1024, writer.MaximumByteLength);
         Assert.Contains(expectedText, writer.Text, StringComparison.Ordinal);
         Assert.DoesNotContain(expectedText, child.SyntheticLocator, StringComparison.Ordinal);
     }
@@ -277,6 +278,29 @@ public sealed class OoxmlStructuralTextProcessorTests
         Assert.Equal(bytes.Length, child.ByteLength);
         Assert.Equal(string.Empty, child.StoreRelativePath);
         Assert.Equal(0, writer.BytesWritten);
+    }
+
+    [Theory]
+    [InlineData(".jpg")]
+    [InlineData(".png")]
+    public async Task Image_signature_creates_one_internal_document_input_without_emitting_text(string extension)
+    {
+        var bytes = extension == ".png"
+            ? new byte[] { 0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1 }
+            : new byte[] { 0xff, 0xd8, 0xff, 0xe0, 1 };
+        var hash = Convert.ToHexStringLower(SHA256.HashData(bytes));
+        var claim = new RetainedProcessorClaim(Guid.NewGuid(), SourceRevisionId.New(), "image-parent", hash, "owner", 1, DateTimeOffset.UtcNow.AddMinutes(5));
+
+        var completion = await new ImageDocumentInputProcessor().ProcessAsync(
+            claim, new RetainedSourceBytes(claim.SourceRevisionId, bytes, hash, bytes.Length),
+            new RetainedProcessorOptions(), CancellationToken.None);
+
+        var child = Assert.Single(completion.Members);
+        Assert.Equal(2, child.OriginKind);
+        Assert.Equal(DocumentProcessingInput.ImageClassification, child.Classification);
+        Assert.Equal(extension, child.Extension);
+        Assert.Equal(hash, child.ContentSha256);
+        Assert.Equal(string.Empty, child.StoreRelativePath);
     }
 
     [Fact]
@@ -949,10 +973,13 @@ public sealed class OoxmlStructuralTextProcessorTests
         var hash = Convert.ToHexStringLower(SHA256.HashData(archive));
         var claim = new RetainedProcessorClaim(Guid.NewGuid(), SourceRevisionId.New(), "parent", hash, "owner", 1, DateTimeOffset.UtcNow.AddMinutes(5));
 
-        var error = await Assert.ThrowsAsync<RetainedProcessorException>(() => new OoxmlStructuralTextProcessor(new RecordingWriter()).ProcessAsync(
-            claim, new RetainedSourceBytes(claim.SourceRevisionId, archive, hash, archive.Length), new RetainedProcessorOptions(), CancellationToken.None).AsTask());
+        var completion = await new OoxmlStructuralTextProcessor(new RecordingWriter()).ProcessAsync(
+            claim, new RetainedSourceBytes(claim.SourceRevisionId, archive, hash, archive.Length), new RetainedProcessorOptions(), CancellationToken.None);
 
-        Assert.Equal("office-document-part-unsupported", error.OutcomeCode);
+        Assert.Empty(completion.Members);
+        var outcome = Assert.Single(completion.MemberOutcomes!);
+        Assert.Equal("skipped", outcome.Disposition);
+        Assert.Equal("office-document-no-extractable-text", outcome.ReasonCode);
     }
 
     [Fact]
@@ -1230,7 +1257,7 @@ public sealed class OoxmlStructuralTextProcessorTests
     }
 
     [Fact]
-    public async Task Exact_32_mib_workbook_text_is_split_into_two_private_16_mib_children()
+    public async Task Exact_32_mib_workbook_text_is_retained_as_one_logical_document_child()
     {
         var archive = CreateWorkbookWithTwoMaximumTextSheets();
         var hash = Convert.ToHexStringLower(SHA256.HashData(archive));
@@ -1240,9 +1267,32 @@ public sealed class OoxmlStructuralTextProcessorTests
         var completion = await new OoxmlStructuralTextProcessor(writer).ProcessAsync(
             claim, new RetainedSourceBytes(claim.SourceRevisionId, archive, hash, archive.Length), new RetainedProcessorOptions(), CancellationToken.None);
 
-        Assert.Equal(2, completion.Members.Count);
-        Assert.Equal([16 * 1024 * 1024, 16 * 1024 * 1024], writer.Lengths);
-        Assert.All(completion.Members, member => Assert.Equal(16L * 1024 * 1024, member.ByteLength));
+        var child = Assert.Single(completion.Members);
+        Assert.Equal([32 * 1024 * 1024], writer.Lengths);
+        Assert.Equal(32L * 1024 * 1024, child.ByteLength);
+        Assert.Empty(completion.MemberOutcomes ?? []);
+    }
+
+    [Fact]
+    public async Task Empty_ooxml_text_is_a_terminal_auditable_no_content_outcome()
+    {
+        var archive = CreateZip(
+            "word/document.xml",
+            "<w:document xmlns:w='w'><w:body><w:p><w:r><w:t></w:t></w:r></w:p></w:body></w:document>");
+        var hash = Convert.ToHexStringLower(SHA256.HashData(archive));
+        var claim = new RetainedProcessorClaim(Guid.NewGuid(), SourceRevisionId.New(), "parent", hash, "owner", 1, DateTimeOffset.UtcNow.AddMinutes(5));
+        var writer = new RecordingWriter();
+
+        var completion = await new OoxmlStructuralTextProcessor(writer).ProcessAsync(
+            claim, new RetainedSourceBytes(claim.SourceRevisionId, archive, hash, archive.Length),
+            new RetainedProcessorOptions(), CancellationToken.None);
+
+        Assert.Empty(completion.Members);
+        var outcome = Assert.Single(completion.MemberOutcomes ?? []);
+        Assert.Equal("skipped", outcome.Disposition);
+        Assert.Equal("office-document-no-extractable-text", outcome.ReasonCode);
+        Assert.Equal(0, outcome.ByteLength);
+        Assert.Equal(0, writer.BytesWritten);
     }
 
     [Fact]
@@ -1942,8 +1992,10 @@ public sealed class OoxmlStructuralTextProcessorTests
     {
         public int BytesWritten { get; private set; }
         public string Text { get; private set; } = string.Empty;
+        public long MaximumByteLength { get; private set; }
         public async ValueTask<RetainedArtifactWriteReceipt> WriteAsync(SourceRevisionId parentSourceRevisionId, Stream content, long maximumByteLength, CancellationToken cancellationToken)
         {
+            MaximumByteLength = maximumByteLength;
             using var buffer = new MemoryStream();
             await content.CopyToAsync(buffer, cancellationToken);
             var bytes = buffer.ToArray();

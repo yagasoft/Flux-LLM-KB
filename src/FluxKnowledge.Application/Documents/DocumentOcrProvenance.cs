@@ -18,7 +18,10 @@ public sealed record DocumentOcrBlock(
 public sealed record DocumentOcrPageResult(
     int PageIndex,
     int OrientationDegrees,
-    IReadOnlyList<DocumentOcrBlock> Blocks);
+    IReadOnlyList<DocumentOcrBlock> Blocks,
+    int? SourceWidth = null,
+    int? SourceHeight = null,
+    string? SourceTransform = null);
 
 public sealed record DocumentOcrExecutionResult(
     bool Succeeded,
@@ -52,7 +55,10 @@ public sealed record DocumentPageProvenance(
     int? OrientationDegrees,
     IReadOnlyList<DocumentBlockProvenance> Blocks,
     int? VisioPageId = null,
-    bool? IsBackground = null);
+    bool? IsBackground = null,
+    int? SourceWidth = null,
+    int? SourceHeight = null,
+    string? SourceTransform = null);
 
 public sealed record DocumentProvenance(int Version, IReadOnlyList<DocumentPageProvenance> Pages);
 
@@ -183,7 +189,11 @@ public static class DocumentOcrProvenance
 
             var ocrPage = ocrPages[page.PageIndex];
             if (ocrPage.OrientationDegrees is not (0 or 90 or 180 or 270) || ocrPage.Blocks is null ||
-                ocrPage.Blocks.Count > MaximumBlocksPerPage)
+                ocrPage.Blocks.Count > MaximumBlocksPerPage ||
+                ocrPage.SourceWidth.HasValue != ocrPage.SourceHeight.HasValue ||
+                ocrPage.SourceWidth is <= 0 || ocrPage.SourceHeight is <= 0 ||
+                (ocrPage.SourceTransform is not null &&
+                 (ocrPage.SourceWidth is null || ocrPage.SourceTransform is not ("identity" or "rotate-90" or "rotate-180" or "rotate-270"))))
             {
                 throw new InvalidOperationException("document-ocr-page-result-invalid");
             }
@@ -221,7 +231,10 @@ public static class DocumentOcrProvenance
                 text.Length - pageStart,
                 "ocr",
                 ocrPage.OrientationDegrees,
-                blocks));
+                blocks,
+                SourceWidth: ocrPage.SourceWidth,
+                SourceHeight: ocrPage.SourceHeight,
+                SourceTransform: ocrPage.SourceTransform));
         }
 
         var mergedText = text.ToString();
@@ -240,6 +253,8 @@ public static class DocumentOcrProvenance
             provenance.Pages.Count == 0 || provenance.Pages.Select(static page => page.PageIndex).Distinct().Count() != provenance.Pages.Count ||
             provenance.Pages.Any(static page => page.PageIndex < 0 || page.StartOffset < 0 || page.Length < 0 ||
             page.Method is not ("native" or "ocr" or "visio") || page.Blocks is null ||
+            page.SourceWidth is <= 0 || page.SourceHeight is <= 0 ||
+            (page.SourceTransform is not null && page.SourceTransform is not ("identity" or "rotate-90" or "rotate-180" or "rotate-270")) ||
             page.Blocks.Any(block => !IsValidBlock(block, page))))
         {
             throw new InvalidOperationException("document-ocr-metadata-invalid");

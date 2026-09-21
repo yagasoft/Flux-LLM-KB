@@ -133,7 +133,11 @@ public sealed class PaddleOcrVlmLocalExecutor : IDocumentOcrExecutor
                     .ConfigureAwait(false);
                 phase = "provider-result";
                 result = processResult.Succeeded
-                    ? await ReadResultAsync(outputPath, expectedPages, cancellationToken).ConfigureAwait(false)
+                    ? await ReadResultAsync(
+                        outputPath,
+                        expectedPages,
+                        rasters.ToDictionary(static page => page.PageIndex),
+                        cancellationToken).ConfigureAwait(false)
                     : Refused(processResult.ReasonCode);
             }
         }
@@ -210,6 +214,7 @@ public sealed class PaddleOcrVlmLocalExecutor : IDocumentOcrExecutor
     private static async ValueTask<DocumentOcrExecutionResult> ReadResultAsync(
         string outputPath,
         IReadOnlyList<int> expectedPages,
+        IReadOnlyDictionary<int, PdfRasterizedPage> rasters,
         CancellationToken cancellationToken)
     {
         var output = new FileInfo(outputPath);
@@ -294,7 +299,17 @@ public sealed class PaddleOcrVlmLocalExecutor : IDocumentOcrExecutor
                     block.Text));
             }
 
-            pages.Add(new DocumentOcrPageResult(page.PageIndex, page.OrientationDegrees, blocks));
+            if (!rasters.TryGetValue(page.PageIndex, out var raster))
+            {
+                return Refused("document-ocr-provider-result-invalid");
+            }
+            pages.Add(new DocumentOcrPageResult(
+                page.PageIndex,
+                (page.OrientationDegrees + raster.SourceOrientationDegrees) % 360,
+                blocks,
+                raster.SourceWidth,
+                raster.SourceHeight,
+                raster.SourceTransform));
         }
 
         return new DocumentOcrExecutionResult(true, "document-ocr-complete", pages);

@@ -22,6 +22,10 @@ public static class DocumentProcessingInput
     public const string PdfProcessorVersion = "phase-6-pdf-document-v1";
     public const string PdfProcessorFingerprint = "phase-6-pdf-document-input-v1";
     public const string PdfOutputContract = "pipeline:extract-document-pdf";
+    public const string ImageClassification = "ImageDocumentProcessingInput";
+    public const string ImageProcessorVersion = "phase-6-image-document-v1";
+    public const string ImageProcessorFingerprint = "phase-6-image-document-input-v1";
+    public const string ImageOutputContract = "pipeline:extract-document-image";
 
     public static readonly DocumentProcessingContract Vsdx = new(
         Classification,
@@ -43,6 +47,12 @@ public static class DocumentProcessingInput
         VisioClassification, ".vsdx", VisioProcessorVersion, VisioProcessorFingerprint,
         "phase-6-vsdx-visio-v2", "phase-6-vsdx-retained-visio-v2");
 
+    public static readonly DocumentProcessingContract Jpeg = new(
+        ImageClassification, ".jpg", ImageProcessorVersion, ImageProcessorFingerprint,
+        "phase-6-image-ocr-v1", "phase-6-image-retained-ocr-v1");
+
+    public static readonly DocumentProcessingContract Png = Jpeg with { Extension = ".png" };
+
     public static RetainedProcessorDerivedChild CreateVisioChild(RetainedProcessorClaim claim, RetainedSourceBytes retained) =>
         CreateChild(claim, retained, Visio);
 
@@ -62,6 +72,14 @@ public static class DocumentProcessingInput
     {
         return CreateChild(claim, retained, Pdf);
     }
+
+    public static RetainedProcessorDerivedChild CreateImageChild(
+        RetainedProcessorClaim claim,
+        RetainedSourceBytes retained,
+        string extension) => CreateChild(
+            claim,
+            retained,
+            string.Equals(extension, ".png", StringComparison.OrdinalIgnoreCase) ? Png : Jpeg);
 
     public static bool TryGetContract(
         string classification,
@@ -86,6 +104,16 @@ public static class DocumentProcessingInput
             string.Equals(extension, Pdf.Extension, StringComparison.OrdinalIgnoreCase))
         {
             contract = Pdf;
+            return true;
+        }
+
+
+        if (string.Equals(classification, ImageClassification, StringComparison.Ordinal) &&
+            (string.Equals(extension, Jpeg.Extension, StringComparison.OrdinalIgnoreCase) ||
+             string.Equals(extension, ".jpeg", StringComparison.OrdinalIgnoreCase) ||
+             string.Equals(extension, Png.Extension, StringComparison.OrdinalIgnoreCase)))
+        {
+            contract = string.Equals(extension, Png.Extension, StringComparison.OrdinalIgnoreCase) ? Png : Jpeg;
             return true;
         }
 

@@ -5,6 +5,7 @@ using FluxKnowledge.Application.Documents;
 using FluxKnowledge.Application.Models;
 using FluxKnowledge.Application.Operations;
 using FluxKnowledge.Application.Ports;
+using FluxKnowledge.Application.Sources;
 using FluxKnowledge.Domain.Sources;
 using FluxKnowledge.Infrastructure.Inference.Models;
 using FluxKnowledge.Integrations.Documents;
@@ -12,6 +13,7 @@ using FluxKnowledge.Integrations.Models;
 using FluxKnowledge.Integrations.Windows.NativeGoLive;
 using Syncfusion.Pdf;
 using Syncfusion.Pdf.Graphics;
+using SkiaSharp;
 using Xunit;
 
 namespace FluxKnowledge.Integration.Tests.Documents;
@@ -54,7 +56,7 @@ public sealed class PaddleOcrVlmLocalExecutorTests : IDisposable
     [Fact]
     public async Task Local_executor_passes_only_selected_rendered_pages_to_the_fixed_process_and_removes_temporary_files()
     {
-        var rasterizer = new RecordingRasterizer();
+        var rasterizer = new RecordingRasterizer(90, 1200, 800, "rotate-90");
         var runner = new RecordingProcessRunner();
         using var gate = CreateGate();
         var layout = LiveRootLayout.CreateForIsolatedTests(_root);
@@ -66,6 +68,10 @@ public sealed class PaddleOcrVlmLocalExecutorTests : IDisposable
         Assert.True(result.Succeeded, result.ReasonCode);
         var page = Assert.Single(result.Pages);
         Assert.Equal(2, page.PageIndex);
+        Assert.Equal(90, page.OrientationDegrees);
+        Assert.Equal(1200, page.SourceWidth);
+        Assert.Equal(800, page.SourceHeight);
+        Assert.Equal("rotate-90", page.SourceTransform);
         Assert.Equal("OCR evidence", Assert.Single(page.Blocks).Text);
         Assert.Equal(1, rasterizer.Calls);
         Assert.Equal([2], rasterizer.PageSelections.Single());
@@ -75,6 +81,55 @@ public sealed class PaddleOcrVlmLocalExecutorTests : IDisposable
         var executionRoot = Path.Combine(layout.TempRoot, "document-ocr");
         Assert.True(Directory.Exists(executionRoot));
         Assert.Empty(Directory.EnumerateDirectories(executionRoot));
+    }
+
+    [Fact]
+    public async Task Document_rasterizer_accepts_one_retained_png_as_page_zero()
+    {
+        using var bitmap = new SKBitmap(320, 120);
+        using (var canvas = new SKCanvas(bitmap))
+        {
+            canvas.Clear(SKColors.White);
+            using var paint = new SKPaint { Color = SKColors.Black };
+            canvas.DrawRect(20, 20, 280, 80, paint);
+        }
+        using var image = SKImage.FromBitmap(bitmap);
+        using var encoded = image.Encode(SKEncodedImageFormat.Png, 100);
+        var bytes = encoded.ToArray();
+        var hash = Convert.ToHexStringLower(SHA256.HashData(bytes));
+        var retained = new RetainedSourceBytes(SourceRevisionId.New(), bytes, hash, bytes.Length);
+
+        var pages = await new SyncfusionPdfPageRasterizer(new SyncfusionLicenceRegistration())
+            .RenderAsync(retained, CancellationToken.None, new HashSet<int> { 0 });
+
+        var page = Assert.Single(pages);
+        Assert.Equal(0, page.PageIndex);
+        using var decoded = SKBitmap.Decode(page.PngBytes);
+        Assert.Equal(320, decoded.Width);
+        Assert.Equal(120, decoded.Height);
+    }
+
+    [Fact]
+    public async Task Document_rasterizer_records_jpeg_exif_rotation_and_rejects_mirroring()
+    {
+        using var bitmap = new SKBitmap(80, 40);
+        using var image = SKImage.FromBitmap(bitmap);
+        using var encoded = image.Encode(SKEncodedImageFormat.Jpeg, 90);
+        var rasterizer = new SyncfusionPdfPageRasterizer(new SyncfusionLicenceRegistration());
+
+        var rotated = Assert.Single(await rasterizer.RenderAsync(
+            CreateRetained(WithExifOrientation(encoded.ToArray(), 6)), CancellationToken.None, new HashSet<int> { 0 }));
+
+        Assert.Equal(90, rotated.SourceOrientationDegrees);
+        Assert.Equal(80, rotated.SourceWidth);
+        Assert.Equal(40, rotated.SourceHeight);
+        Assert.Equal("rotate-90", rotated.SourceTransform);
+        using var rotatedBitmap = SKBitmap.Decode(rotated.PngBytes);
+        Assert.Equal(40, rotatedBitmap.Width);
+        Assert.Equal(80, rotatedBitmap.Height);
+        var refusal = await Assert.ThrowsAsync<RetainedProcessorException>(async () => await rasterizer.RenderAsync(
+            CreateRetained(WithExifOrientation(encoded.ToArray(), 2)), CancellationToken.None, new HashSet<int> { 0 }));
+        Assert.Equal("image-document-orientation-unsupported", refusal.OutcomeCode);
     }
 
     [Fact]
@@ -115,6 +170,45 @@ public sealed class PaddleOcrVlmLocalExecutorTests : IDisposable
             {
                 Directory.Delete(root, recursive: true);
             }
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "local-ocr")]
+    public async Task Fixed_local_gpu_ocr_reads_a_retained_english_image_when_explicitly_requested()
+    {
+        if (!string.Equals(Environment.GetEnvironmentVariable("FLUX_KB_RUN_LOCAL_PADDLE_OCR"), "1", StringComparison.Ordinal))
+            return;
+
+        var root = Path.Combine(Path.GetTempPath(), $"FluxKnowledgeLocalImageOcr_{Guid.NewGuid():N}");
+        try
+        {
+            var layout = LiveRootLayout.CreateForIsolatedTests(root);
+            Directory.CreateDirectory(layout.TempRoot);
+            using var gate = new PaddleOcrVlmModelGate(new LocalModelStore(WindowsModelVerificationFiles.OpenProduction));
+            var executor = new PaddleOcrVlmLocalExecutor(
+                new SyncfusionPdfPageRasterizer(new SyncfusionLicenceRegistration()), gate, layout);
+            using var bitmap = new SKBitmap(1400, 360);
+            using (var canvas = new SKCanvas(bitmap))
+            using (var paint = new SKPaint { Color = SKColors.Black, IsAntialias = true })
+            using (var font = new SKFont(SKTypeface.Default, 96))
+            {
+                canvas.Clear(SKColors.White);
+                canvas.DrawText("Flux Image OCR 2026", 80, 210, SKTextAlign.Left, font, paint);
+            }
+            using var image = SKImage.FromBitmap(bitmap);
+            using var encoded = image.Encode(SKEncodedImageFormat.Png, 100);
+
+            var result = await executor.ExecuteAsync(CreateRetained(encoded.ToArray()), [0], CancellationToken.None);
+
+            Assert.True(result.Succeeded, result.ReasonCode);
+            var text = string.Join('\n', result.Pages.SelectMany(static page => page.Blocks).Select(static block => block.Text));
+            Assert.Contains("Flux", text, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("2026", text, StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
         }
     }
 
@@ -292,7 +386,30 @@ public sealed class PaddleOcrVlmLocalExecutorTests : IDisposable
         return output.ToArray();
     }
 
-    private sealed class RecordingRasterizer : IPdfPageRasterizer
+    private static byte[] WithExifOrientation(byte[] jpeg, ushort orientation)
+    {
+        var exif = new byte[]
+        {
+            0xff, 0xe1, 0x00, 0x22,
+            (byte)'E', (byte)'x', (byte)'i', (byte)'f', 0x00, 0x00,
+            (byte)'I', (byte)'I', 0x2a, 0x00, 0x08, 0x00, 0x00, 0x00,
+            0x01, 0x00,
+            0x12, 0x01, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00,
+            (byte)orientation, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00
+        };
+        var result = new byte[jpeg.Length + exif.Length];
+        jpeg.AsSpan(0, 2).CopyTo(result);
+        exif.CopyTo(result, 2);
+        jpeg.AsSpan(2).CopyTo(result.AsSpan(2 + exif.Length));
+        return result;
+    }
+
+    private sealed class RecordingRasterizer(
+        int sourceOrientationDegrees = 0,
+        int? sourceWidth = null,
+        int? sourceHeight = null,
+        string? sourceTransform = null) : IPdfPageRasterizer
     {
         public int Calls { get; private set; }
         public List<IReadOnlyList<int>> PageSelections { get; } = [];
@@ -306,7 +423,13 @@ public sealed class PaddleOcrVlmLocalExecutorTests : IDisposable
             var selectedPages = pageIndexes ?? throw new Xunit.Sdk.XunitException("The executor must select explicit OCR pages.");
             PageSelections.Add(selectedPages.Order().ToArray());
             return ValueTask.FromResult<IReadOnlyList<PdfRasterizedPage>>(
-                selectedPages.Order().Select(index => new PdfRasterizedPage(index, [137, 80, 78, 71])).ToArray());
+                selectedPages.Order().Select(index => new PdfRasterizedPage(
+                    index,
+                    [137, 80, 78, 71],
+                    sourceOrientationDegrees,
+                    sourceWidth,
+                    sourceHeight,
+                    sourceTransform)).ToArray());
         }
     }
 

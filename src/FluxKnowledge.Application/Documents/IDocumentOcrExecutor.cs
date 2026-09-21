@@ -3,7 +3,7 @@ using FluxKnowledge.Application.Ports;
 namespace FluxKnowledge.Application.Documents;
 
 /// <summary>
-/// Runs the fixed local document OCR implementation for explicitly selected retained PDF pages.
+/// Runs the fixed local document OCR implementation for explicitly selected retained document pages.
 /// Implementations receive bytes only and cannot choose a source, provider, or acquisition path.
 /// </summary>
 public interface IDocumentOcrExecutor

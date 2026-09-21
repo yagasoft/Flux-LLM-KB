@@ -60,6 +60,39 @@ public sealed class ExtractDocumentStageWorker(
 
         try
         {
+            if (contract.ProcessorFingerprint == DocumentProcessingInput.ImageProcessorFingerprint)
+            {
+                var imageExtraction = new DocumentExtractionResult(
+                    string.Empty,
+                    IsComplete: false,
+                    ["image-ocr-required"],
+                    [new DocumentExtractedPage(0, string.Empty, RequiresOcr: true)]);
+                var completedImageOcr = await documentOcrResults.ReadCompletedAsync(
+                    workItem.Job, retained.ContentSha256, cancellationToken).ConfigureAwait(false);
+                if (completedImageOcr is not null)
+                {
+                    if (!completedImageOcr.Succeeded)
+                    {
+                        await FailAsync(completedImageOcr.ReasonCode, null, cancellationToken).ConfigureAwait(false);
+                        return;
+                    }
+                    var mergedImage = DocumentOcrProvenance.Merge(imageExtraction, completedImageOcr);
+                    await TransitionAsync(mergedImage.Text, mergedImage.MetadataJson).ConfigureAwait(false);
+                    return;
+                }
+
+                var imageHandoff = await documentOcrHandoff.HandoffAsync(
+                    new DocumentOcrHandoffRequest(
+                        workItem.Job,
+                        source.RetainedSourceRevisionId!,
+                        retained.ContentSha256,
+                        [0]),
+                    cancellationToken).ConfigureAwait(false);
+                if (!imageHandoff.Scheduled)
+                    await FailAsync(imageHandoff.ReasonCode, null, cancellationToken).ConfigureAwait(false);
+                return;
+            }
+
             var result = contract == DocumentProcessingInput.Vsdx
                 ? await vsdxExtractor.ExtractAsync(retained, cancellationToken).ConfigureAwait(false)
                 : await pdfExtractor.ExtractAsync(retained, cancellationToken).ConfigureAwait(false);

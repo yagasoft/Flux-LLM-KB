@@ -1,6 +1,7 @@
 using FluxKnowledge.Application.Pipeline;
 using FluxKnowledge.Application.Documents;
 using FluxKnowledge.Application.Ports;
+using FluxKnowledge.Application.Sources;
 using FluxKnowledge.Application.Workers;
 using FluxKnowledge.Domain.Common;
 using FluxKnowledge.Domain.Jobs;
@@ -46,12 +47,9 @@ public sealed class DocumentPublicationIntegrationTests(NativeSqlServerFixture f
             });
 
             stale = SeedCandidate(setup, rootId, ownerRevisionId, now, "stale", 0);
-            var current = SeedCandidate(setup, rootId, ownerRevisionId, now, "current", 1);
-            var successor = SeedCandidate(setup, rootId, ownerRevisionId, now, "successor", 2);
+            var successor = SeedCandidate(
+                setup, rootId, ownerRevisionId, now, "successor", 1, DocumentProcessingInput.Visio);
             await setup.SaveChangesAsync();
-
-            await PublishAsync(new SqlStageTransitionStore(SqlTestData.CreateFactory(_fixture)), current, now.AddMinutes(3));
-            await AssertSelectedAsync(current, ownerRevisionId);
 
             await PublishAsync(new SqlStageTransitionStore(SqlTestData.CreateFactory(_fixture)), successor, now.AddMinutes(4));
             await AssertSelectedAsync(successor, ownerRevisionId);
@@ -85,7 +83,8 @@ public sealed class DocumentPublicationIntegrationTests(NativeSqlServerFixture f
                 Classification = "VsdxDocumentContainer", Extension = ".vsdx", ByteLength = 4, DiscoveredAtUtc = now
             });
             current = SeedCandidate(setup, rootId, ownerRevisionId, now, "current-before-pause", 0);
-            claimedBeforePause = SeedCandidate(setup, rootId, ownerRevisionId, now, "claimed-before-pause", 1);
+            claimedBeforePause = SeedCandidate(
+                setup, rootId, ownerRevisionId, now, "claimed-before-pause", 1, DocumentProcessingInput.Visio);
             await setup.SaveChangesAsync();
         }
 
@@ -156,6 +155,181 @@ public sealed class DocumentPublicationIntegrationTests(NativeSqlServerFixture f
         Assert.Equal(2, await check.Artifacts.CountAsync(row => row.Stage == (int)PipelineStage.Publish));
     }
 
+    [NativeSqlServerFact]
+    public async Task Ooxml_single_text_child_publishes_its_owner_without_suppressing_archive_members()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var rootId = Guid.NewGuid();
+        var ownerId = Guid.NewGuid();
+        var archiveMemberId = Guid.NewGuid();
+        DocumentCandidate candidate;
+        await using (var setup = Context())
+        {
+            setup.SourceRootConfigurations.Add(new SourceRootConfigurationEntity
+            {
+                Id = rootId, CanonicalPath = "C:\\ooxml-publication", DisplayName = "OOXML publication", State = 0,
+                IncludePatternsJson = "[]", ExcludePatternsJson = "[]", AllowedClassificationsJson = "[]",
+                MaximumFileBytes = 256 * 1024 * 1024, ReconciliationCadenceSeconds = 900, ConfigurationRevision = 1,
+                CreatedAtUtc = now, UpdatedAtUtc = now
+            });
+            setup.SourceRevisions.AddRange(
+                new SourceRevisionEntity
+                {
+                    Id = ownerId, SourceRootId = rootId, StableSourceIdentity = "ooxml-publication", Revision = 1,
+                    ContentSha256 = new string('a', 64), CanonicalPath = "C:\\ooxml-publication\\public.docx",
+                    Classification = "OoxmlDocumentContainer", Extension = ".docx", ByteLength = 4, DiscoveredAtUtc = now
+                },
+                new SourceRevisionEntity
+                {
+                    Id = archiveMemberId, SourceRootId = rootId, StableSourceIdentity = "ooxml-package-member", Revision = 1,
+                    ContentSha256 = new string('f', 64), CanonicalPath = "C:\\retained\\document.xml",
+                    ParentSourceRevisionId = ownerId, Classification = "AcceptedUtf8Text", Extension = ".xml",
+                    OriginKind = 1, ByteLength = 4, DiscoveredAtUtc = now
+                });
+            if (!await setup.SourceCapabilities.AnyAsync(value => value.Id == OoxmlStructuralTextProcessor.Capability.Id))
+            {
+                setup.SourceCapabilities.Add(new SourceCapabilityEntity
+                {
+                    Id = OoxmlStructuralTextProcessor.Capability.Id,
+                    ProcessorKind = OoxmlStructuralTextProcessor.Capability.ProcessorKind,
+                    ProcessorVersion = OoxmlStructuralTextProcessor.Capability.ProcessorVersion,
+                    ProcessorFingerprint = OoxmlStructuralTextProcessor.Capability.ProcessorFingerprint,
+                    ExecutionClass = (int)ExecutionClass.InProcess,
+                    AcceptedClassificationsJson = "[\"OoxmlDocumentContainer\"]",
+                    OutputContract = OoxmlStructuralTextProcessor.Capability.OutputContract,
+                    IsRunnable = true, RegisteredBy = "test", RegisteredAtUtc = now
+                });
+            }
+            candidate = SeedCandidate(setup, rootId, ownerId, now, "ooxml-text", 0, ooxmlText: true);
+            await setup.SaveChangesAsync();
+        }
+
+        await PublishAsync(new SqlStageTransitionStore(SqlTestData.CreateFactory(_fixture)), candidate, now.AddMinutes(1));
+
+        await AssertSelectedAsync(candidate, ownerId);
+        await using var verification = Context();
+        Assert.False(await verification.SourceRevisions.Where(value => value.Id == archiveMemberId)
+            .Select(value => value.SuppressedAtUtc.HasValue).SingleAsync());
+    }
+
+    [NativeSqlServerTheory]
+    [InlineData("owner-input")]
+    [InlineData("child-input")]
+    [InlineData("unrelated-member-activity")]
+    public async Task Publication_rejects_mismatched_owner_and_child_bindings(string mismatch)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var rootId = Guid.NewGuid();
+        var ownerId = Guid.NewGuid();
+        DocumentCandidate candidate;
+        await using (var setup = Context())
+        {
+            setup.SourceRootConfigurations.Add(new SourceRootConfigurationEntity
+            {
+                Id = rootId, CanonicalPath = "C:\\binding-publication", DisplayName = "Binding publication", State = 0,
+                IncludePatternsJson = "[]", ExcludePatternsJson = "[]", AllowedClassificationsJson = "[]",
+                MaximumFileBytes = 256 * 1024 * 1024, ReconciliationCadenceSeconds = 900, ConfigurationRevision = 1,
+                CreatedAtUtc = now, UpdatedAtUtc = now
+            });
+            setup.SourceRevisions.Add(new SourceRevisionEntity
+            {
+                Id = ownerId, SourceRootId = rootId, StableSourceIdentity = "binding-publication", Revision = 1,
+                ContentSha256 = new string('a', 64), CanonicalPath = "C:\\binding-publication\\public.docx",
+                Classification = "OoxmlDocumentContainer", Extension = ".docx", ByteLength = 4, DiscoveredAtUtc = now
+            });
+            if (!await setup.SourceCapabilities.AnyAsync(value => value.Id == OoxmlStructuralTextProcessor.Capability.Id))
+            {
+                setup.SourceCapabilities.Add(new SourceCapabilityEntity
+                {
+                    Id = OoxmlStructuralTextProcessor.Capability.Id,
+                    ProcessorKind = OoxmlStructuralTextProcessor.Capability.ProcessorKind,
+                    ProcessorVersion = OoxmlStructuralTextProcessor.Capability.ProcessorVersion,
+                    ProcessorFingerprint = OoxmlStructuralTextProcessor.Capability.ProcessorFingerprint,
+                    ExecutionClass = (int)ExecutionClass.InProcess,
+                    AcceptedClassificationsJson = "[\"OoxmlDocumentContainer\"]",
+                    OutputContract = OoxmlStructuralTextProcessor.Capability.OutputContract,
+                    IsRunnable = true, RegisteredBy = "test", RegisteredAtUtc = now
+                });
+            }
+            candidate = SeedCandidate(setup, rootId, ownerId, now, "binding", 0, ooxmlText: true);
+            var ownerActivity = setup.SourceActivities.Local.Single(value =>
+                value.Id == setup.SourceProcessorBranches.Local.Single(branch => branch.Id == candidate.BranchId).SourceActivityId);
+            var member = setup.SourceProcessorBranchMembers.Local.Single(value => value.BranchId == candidate.BranchId);
+            var childActivity = setup.SourceActivities.Local.Single(value => value.Id == member.ChildSourceActivityId);
+            if (mismatch == "owner-input")
+            {
+                ownerActivity.InputFingerprint = new string('f', 64);
+            }
+            else if (mismatch == "child-input")
+            {
+                childActivity.InputFingerprint = new string('f', 64);
+            }
+            else
+            {
+                var unrelated = new SourceActivityEntity
+                {
+                    Id = Guid.NewGuid(), SourceRevisionId = candidate.InputRevisionId,
+                    ActivityKind = (int)SourceActivityKind.TextExtraction, ExecutionClass = (int)ExecutionClass.InProcess,
+                    ProcessorVersion = "unrelated", InputFingerprint = new string('a', 64),
+                    DescriptorFingerprint = new string('f', 64), State = (int)SourceActivityState.Completed,
+                    CreatedAtUtc = now, UpdatedAtUtc = now
+                };
+                setup.SourceActivities.Add(unrelated);
+                member.ChildSourceActivityId = unrelated.Id;
+            }
+            await setup.SaveChangesAsync();
+        }
+
+        var failure = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            PublishAsync(new SqlStageTransitionStore(SqlTestData.CreateFactory(_fixture)), candidate, now.AddMinutes(1)));
+
+        Assert.Equal("The document publication has no exact completed retained-processor binding.", failure.Message);
+        await using var verification = Context();
+        Assert.Empty(await verification.DocumentPublications.ToListAsync());
+    }
+
+    [NativeSqlServerFact]
+    public async Task Image_publication_preserves_independent_archive_members()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var rootId = Guid.NewGuid();
+        var ownerId = Guid.NewGuid();
+        var archiveMemberId = Guid.NewGuid();
+        DocumentCandidate candidate;
+        await using (var setup = Context())
+        {
+            setup.SourceRootConfigurations.Add(new SourceRootConfigurationEntity
+            {
+                Id = rootId, CanonicalPath = "C:\\image-publication", DisplayName = "Image publication", State = 0,
+                IncludePatternsJson = "[]", ExcludePatternsJson = "[]", AllowedClassificationsJson = "[]",
+                MaximumFileBytes = 64 * 1024 * 1024, ReconciliationCadenceSeconds = 900, ConfigurationRevision = 1,
+                CreatedAtUtc = now, UpdatedAtUtc = now
+            });
+            setup.SourceRevisions.AddRange(
+                new SourceRevisionEntity
+                {
+                    Id = ownerId, SourceRootId = rootId, StableSourceIdentity = "image-owner", Revision = 1,
+                    ContentSha256 = new string('a', 64), CanonicalPath = "C:\\image-publication\\scan.png",
+                    Classification = "DeferredCapability", Extension = ".png", ByteLength = 4, DiscoveredAtUtc = now
+                },
+                new SourceRevisionEntity
+                {
+                    Id = archiveMemberId, SourceRootId = rootId, StableSourceIdentity = "independent-member", Revision = 1,
+                    ContentSha256 = new string('f', 64), CanonicalPath = "C:\\retained\\notes.txt",
+                    ParentSourceRevisionId = ownerId, Classification = "AcceptedUtf8Text", Extension = ".txt",
+                    OriginKind = 1, ByteLength = 4, DiscoveredAtUtc = now
+                });
+            candidate = SeedCandidate(setup, rootId, ownerId, now, "image", 0, DocumentProcessingInput.Png);
+            await setup.SaveChangesAsync();
+        }
+
+        await PublishAsync(new SqlStageTransitionStore(SqlTestData.CreateFactory(_fixture)), candidate, now.AddMinutes(1));
+
+        await using var verification = Context();
+        Assert.False(await verification.SourceRevisions.Where(value => value.Id == archiveMemberId)
+            .Select(value => value.SuppressedAtUtc.HasValue).SingleAsync());
+    }
+
     private static DocumentCandidate SeedCandidate(
         FluxKnowledgeDbContext context,
         Guid rootId,
@@ -163,7 +337,8 @@ public sealed class DocumentPublicationIntegrationTests(NativeSqlServerFixture f
         DateTimeOffset now,
         string name,
         int sequence,
-        DocumentProcessingContract? contract = null)
+        DocumentProcessingContract? contract = null,
+        bool ooxmlText = false)
     {
         contract ??= DocumentProcessingInput.Vsdx;
         var inputRevisionId = Guid.NewGuid();
@@ -174,8 +349,17 @@ public sealed class DocumentPublicationIntegrationTests(NativeSqlServerFixture f
         var branchId = Guid.NewGuid();
         var jobId = Guid.NewGuid();
         var dispatchId = Guid.NewGuid();
-        var inputFingerprint = new string((char)('b' + sequence), 64);
         var leaseExpiresAtUtc = now.AddMinutes(30);
+        var classification = ooxmlText ? "AcceptedUtf8Text" : contract.Classification;
+        var extension = ooxmlText ? ".txt" : contract.Extension;
+        var inputActivityKind = ooxmlText ? SourceActivityKind.TextExtraction : SourceActivityKind.DocumentParsing;
+        var inputProcessorVersion = ooxmlText ? "phase-3a-v1" : contract.ProcessorVersion;
+        var parentProcessorVersion = ooxmlText
+            ? OoxmlStructuralTextProcessor.Capability.ProcessorVersion
+            : contract.ParentProcessorVersion;
+        var parentProcessorFingerprint = ooxmlText
+            ? OoxmlStructuralTextProcessor.Capability.ProcessorFingerprint
+            : contract.ParentProcessorFingerprint;
         context.SourceIdentities.Add(new SourceIdentityEntity
         {
             Id = identityId, SourceKind = "retained local source", StableKey = $"document-input:{name}", CreatedAtUtc = now
@@ -184,8 +368,14 @@ public sealed class DocumentPublicationIntegrationTests(NativeSqlServerFixture f
         {
             Id = inputRevisionId, SourceRootId = rootId, StableSourceIdentity = $"document-input:{name}", Revision = 1,
             ContentSha256 = new string('a', 64), CanonicalPath = $"C:\\retained\\{name}.vsdx",
-            ParentSourceRevisionId = ownerRevisionId, Classification = contract.Classification, Extension = ".vsdx",
+            ParentSourceRevisionId = ownerRevisionId, Classification = classification, Extension = extension,
             OriginKind = 2, ByteLength = 4, DiscoveredAtUtc = now
+        });
+        context.SourceArtifacts.Add(new SourceArtifactEntity
+        {
+            Id = Guid.NewGuid(), SourceRevisionId = inputRevisionId, ContentSha256 = new string('a', 64),
+            StoreRelativePath = Path.Combine("sha256", "aa", $"{new string('a', 64)}.bin"),
+            ByteLength = 4, ChecksumVerifiedAtUtc = now, ReferenceCount = 1
         });
         context.PipelineRecords.Add(new PipelineRecordEntity
         {
@@ -197,21 +387,21 @@ public sealed class DocumentPublicationIntegrationTests(NativeSqlServerFixture f
             new SourceActivityEntity
             {
                 Id = ownerActivityId, SourceRevisionId = ownerRevisionId, ActivityKind = (int)SourceActivityKind.ArchiveExpansion,
-                ExecutionClass = 1, ProcessorVersion = $"branch-{name}", InputFingerprint = inputFingerprint,
-                DescriptorFingerprint = new string((char)('e' + sequence), 64), State = (int)SourceActivityState.Completed,
+                ExecutionClass = 1, ProcessorVersion = parentProcessorVersion, InputFingerprint = new string('a', 64),
+                DescriptorFingerprint = parentProcessorFingerprint, State = (int)SourceActivityState.Completed,
                 CreatedAtUtc = now, UpdatedAtUtc = now
             },
             new SourceActivityEntity
             {
-                Id = inputActivityId, SourceRevisionId = inputRevisionId, ActivityKind = (int)SourceActivityKind.DocumentParsing,
-                ExecutionClass = 1, ProcessorVersion = contract.ProcessorVersion, InputFingerprint = new string('a', 64),
+                Id = inputActivityId, SourceRevisionId = inputRevisionId, ActivityKind = (int)inputActivityKind,
+                ExecutionClass = 1, ProcessorVersion = inputProcessorVersion, InputFingerprint = new string('a', 64),
                 State = (int)SourceActivityState.Completed, ResultingPipelineRecordId = recordId, ResultingPipelineRecordRevision = 1,
                 CreatedAtUtc = now, UpdatedAtUtc = now
             });
         context.SourceProcessorBranches.Add(new SourceProcessorBranchEntity
         {
             Id = branchId, SourceActivityId = ownerActivityId, SourceRevisionId = ownerRevisionId, InputSha256 = new string('a', 64),
-            ProcessorVersion = contract.ParentProcessorVersion, ProcessorFingerprint = contract.ParentProcessorFingerprint,
+            ProcessorVersion = parentProcessorVersion, ProcessorFingerprint = parentProcessorFingerprint,
             State = (int)RetainedProcessorBranchState.Completed, CompletedMemberCount = 1,
             CreatedAtUtc = now.AddMinutes(sequence), UpdatedAtUtc = now.AddMinutes(sequence)
         });

@@ -336,6 +336,62 @@ public sealed class RetainedTextPipelineIntegrationTests(NativeSqlServerFixture 
     }
 
     [NativeSqlServerFact]
+    public async Task Retained_reader_accepts_text_above_16_mib_only_for_the_single_completed_ooxml_child()
+    {
+        const int byteLength = 16 * 1024 * 1024 + 1;
+        var bytes = Enumerable.Repeat((byte)'x', byteLength).ToArray();
+        var hash = Convert.ToHexStringLower(SHA256.HashData(bytes));
+        var root = Path.Combine(Path.GetTempPath(), $"flux-retained-ooxml-{Guid.NewGuid():N}");
+        var relative = Path.Combine("sha256", hash[..2], $"{hash}.bin");
+        Directory.CreateDirectory(Path.Combine(root, "sha256", hash[..2]));
+        await File.WriteAllBytesAsync(Path.Combine(root, relative), bytes);
+        try
+        {
+            var revisionId = await SeedRevisionAsync(hash, bytes.Length, relative);
+            await BindCompletedOoxmlChildAsync(revisionId, hash);
+
+            var source = await new SqlRetainedSourceReader(new ContextFactory(_fixture.ConnectionString), root)
+                .ReadUtf8Async(new SourceRevisionId(revisionId), CancellationToken.None);
+
+            Assert.Equal(byteLength, source.Text.Length);
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [NativeSqlServerFact]
+    public async Task Retained_registration_rejects_large_text_with_forged_ooxml_origin_but_accepts_exact_branch_binding()
+    {
+        const int byteLength = 16 * 1024 * 1024 + 1;
+        var hash = new string('f', 64);
+        var revisionId = await SeedRevisionAsync(hash, byteLength, Path.Combine("sha256", "ff", $"{hash}.bin"));
+        var activity = SourceActivity.Create(new SourceRevisionId(revisionId), SourceActivityKind.TextExtraction,
+            ExecutionClass.InProcess, "phase-3a-v1", hash, null, null);
+        await using (var setup = CreateContext())
+        {
+            var revision = await setup.SourceRevisions.SingleAsync(value => value.Id == revisionId);
+            revision.OriginKind = 2;
+            setup.SourceActivities.Add(new SourceActivityEntity
+            {
+                Id = activity.Id.Value, SourceRevisionId = revisionId, ActivityKind = (int)activity.Kind,
+                ExecutionClass = (int)activity.ExecutionClass, ProcessorVersion = activity.ProcessorVersion,
+                InputFingerprint = activity.InputFingerprint, State = (int)activity.State,
+                CreatedAtUtc = DateTimeOffset.UtcNow, UpdatedAtUtc = DateTimeOffset.UtcNow
+            });
+            await setup.SaveChangesAsync();
+        }
+
+        var store = new SqlRetainedTextRegistrationStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System);
+        Assert.False(await store.RegisterAsync(activity, CancellationToken.None));
+
+        await BindCompletedOoxmlChildAsync(revisionId, hash, activity.Id.Value);
+
+        Assert.True(await store.RegisterAsync(activity, CancellationToken.None));
+    }
+
+    [NativeSqlServerFact]
     public async Task Planning_the_same_retained_activity_twice_creates_one_pipeline_job_and_outbox_link()
     {
         const string hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -613,6 +669,16 @@ public sealed class RetainedTextPipelineIntegrationTests(NativeSqlServerFixture 
         Assert.Single(await store.ClaimAsync(
             "automatic-pdf-preparation", 1, PdfDocumentProcessor.Capability.ProcessorFingerprint, CancellationToken.None));
 
+        await using var promoted = CreateContext();
+        var promotedIds = await promoted.SourceActivityRelations
+            .Where(value => value.PredecessorActivityId == vsdxActivityId || value.PredecessorActivityId == pdfActivityId)
+            .Select(value => value.SuccessorActivityId)
+            .ToArrayAsync();
+        Assert.Equal(2, promotedIds.Length);
+        Assert.All(
+            await promoted.SourceActivities.Where(value => promotedIds.Contains(value.Id)).ToArrayAsync(),
+            value => Assert.NotEqual(SourceActivityEntity.LegacyDescriptorFingerprint, value.DescriptorFingerprint));
+
         SourceActivityEntity DeferredActivity(Guid id, Guid revisionId, string hash) => new()
         {
             Id = id, SourceRevisionId = revisionId, ActivityKind = (int)SourceActivityKind.DocumentParsing,
@@ -620,6 +686,69 @@ public sealed class RetainedTextPipelineIntegrationTests(NativeSqlServerFixture 
             InputFingerprint = hash, State = (int)SourceActivityState.DeferredUnsupported,
             CreatedAtUtc = now, UpdatedAtUtc = now
         };
+    }
+
+    [NativeSqlServerFact]
+    public async Task Runnable_image_ocr_excludes_supported_images_from_metadata_selection_and_promotion()
+    {
+        const string imageHash = "4444444444444444444444444444444444444444444444444444444444444444";
+        var revisionId = await SeedRevisionAsync(
+            imageHash,
+            4,
+            Path.Combine("sha256", "44", $"{imageHash}.bin"),
+            "DeferredCapability",
+            ".png");
+        var activityId = Guid.NewGuid();
+        var now = DateTimeOffset.UtcNow;
+        await using (var setup = CreateContext())
+        {
+            setup.SourceActivities.Add(new SourceActivityEntity
+            {
+                Id = activityId,
+                SourceRevisionId = revisionId,
+                ActivityKind = (int)SourceActivityKind.DocumentParsing,
+                ExecutionClass = (int)ExecutionClass.DeferredCapability,
+                ProcessorVersion = "phase-3a-v1",
+                InputFingerprint = imageHash,
+                State = (int)SourceActivityState.DeferredUnsupported,
+                CreatedAtUtc = now,
+                UpdatedAtUtc = now
+            });
+            var imageCapability = await setup.SourceCapabilities.SingleOrDefaultAsync(value =>
+                value.Id == ImageDocumentInputProcessor.Capability.Id);
+            if (imageCapability is null)
+            {
+                setup.SourceCapabilities.Add(new SourceCapabilityEntity
+                {
+                    Id = ImageDocumentInputProcessor.Capability.Id,
+                    ProcessorKind = ImageDocumentInputProcessor.Capability.ProcessorKind,
+                    ProcessorVersion = ImageDocumentInputProcessor.Capability.ProcessorVersion,
+                    ProcessorFingerprint = ImageDocumentInputProcessor.Capability.ProcessorFingerprint,
+                    ExecutionClass = (int)ExecutionClass.InProcess,
+                    AcceptedClassificationsJson = "[\"ImageDocumentContainer\"]",
+                    OutputContract = ImageDocumentInputProcessor.Capability.OutputContract,
+                    IsRunnable = true,
+                    RegisteredBy = "test",
+                    RegisteredAtUtc = now
+                });
+            }
+            else
+            {
+                imageCapability.IsRunnable = true;
+            }
+            await setup.SaveChangesAsync();
+        }
+
+        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System);
+        var imageCandidate = Assert.Single(await store.ReadPromotionCandidatesAsync(
+            16, ImageDocumentInputProcessor.Capability, CancellationToken.None));
+
+        Assert.Empty(await store.ReadPromotionCandidatesAsync(
+            16, MediaMetadataRetainedProcessor.Capability, CancellationToken.None));
+        Assert.False(await store.PromoteAsync(
+            imageCandidate, MediaMetadataRetainedProcessor.Capability, CancellationToken.None));
+        Assert.True(await store.PromoteAsync(
+            imageCandidate, ImageDocumentInputProcessor.Capability, CancellationToken.None));
     }
 
     private async Task<Guid> SeedRevisionAsync(string hash, int byteLength, string relativePath, string classification = "AcceptedUtf8Text", string extension = ".txt")
@@ -648,6 +777,65 @@ public sealed class RetainedTextPipelineIntegrationTests(NativeSqlServerFixture 
         });
         await context.SaveChangesAsync();
         return revisionId;
+    }
+
+    private async Task BindCompletedOoxmlChildAsync(Guid childRevisionId, string childHash, Guid? childActivityId = null)
+    {
+        await using var context = CreateContext();
+        var child = await context.SourceRevisions.SingleAsync(value => value.Id == childRevisionId);
+        var sourceRootId = child.SourceRootId;
+        var childByteLength = child.ByteLength;
+        context.Entry(child).State = EntityState.Detached;
+        var parentId = Guid.NewGuid();
+        var parentHash = new string('a', 64);
+        child.ParentSourceRevisionId = parentId;
+        var now = DateTimeOffset.UtcNow;
+        context.SourceRevisions.Add(new SourceRevisionEntity
+        {
+            Id = parentId, SourceRootId = sourceRootId, StableSourceIdentity = $"ooxml-parent:{parentId:N}", Revision = 1,
+            ContentSha256 = parentHash, CanonicalPath = $"C:\\retained-tests\\{parentId:N}.docx",
+            Classification = "OoxmlDocumentContainer", Extension = ".docx", ByteLength = 4,
+            DiscoveredAtUtc = now, DiscoveryEvidenceJson = "{}"
+        });
+        var ownerActivityId = Guid.NewGuid();
+        var effectiveChildActivityId = childActivityId ?? Guid.NewGuid();
+        context.SourceActivities.Add(new SourceActivityEntity
+        {
+            Id = ownerActivityId, SourceRevisionId = parentId, ActivityKind = (int)SourceActivityKind.TextExtraction,
+            ExecutionClass = (int)ExecutionClass.InProcess,
+            ProcessorVersion = OoxmlStructuralTextProcessor.Capability.ProcessorVersion,
+            DescriptorFingerprint = OoxmlStructuralTextProcessor.Capability.ProcessorFingerprint,
+            InputFingerprint = parentHash, State = (int)SourceActivityState.Completed,
+            CreatedAtUtc = now, UpdatedAtUtc = now
+        });
+        if (childActivityId is null)
+        {
+            context.SourceActivities.Add(new SourceActivityEntity
+            {
+                Id = effectiveChildActivityId, SourceRevisionId = childRevisionId,
+                ActivityKind = (int)SourceActivityKind.TextExtraction, ExecutionClass = (int)ExecutionClass.InProcess,
+                ProcessorVersion = "phase-3a-v1", InputFingerprint = childHash,
+                State = (int)SourceActivityState.Completed, CreatedAtUtc = now, UpdatedAtUtc = now
+            });
+        }
+        var branchId = Guid.NewGuid();
+        context.SourceProcessorBranches.Add(new SourceProcessorBranchEntity
+        {
+            Id = branchId, SourceActivityId = ownerActivityId, SourceRevisionId = parentId, InputSha256 = parentHash,
+            ProcessorVersion = OoxmlStructuralTextProcessor.Capability.ProcessorVersion,
+            ProcessorFingerprint = OoxmlStructuralTextProcessor.Capability.ProcessorFingerprint,
+            State = (int)RetainedProcessorBranchState.Completed, CompletedMemberCount = 1,
+            CreatedAtUtc = now, UpdatedAtUtc = now
+        });
+        context.SourceProcessorBranchMembers.Add(new SourceProcessorBranchMemberEntity
+        {
+            Id = Guid.NewGuid(), BranchId = branchId, MemberFingerprint = childHash,
+            ChildSourceRevisionId = childRevisionId, ChildSourceActivityId = effectiveChildActivityId,
+            Disposition = "completed", ByteLength = childByteLength, CreatedAtUtc = now
+        });
+        await context.SaveChangesAsync();
+        await context.Database.ExecuteSqlInterpolatedAsync(
+            $"UPDATE [SourceRevisions] SET [ParentSourceRevisionId] = {parentId}, [OriginKind] = {2} WHERE [Id] = {childRevisionId}");
     }
 
     private FluxKnowledgeDbContext CreateContext() => new(

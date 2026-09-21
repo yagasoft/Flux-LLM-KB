@@ -609,7 +609,11 @@ public sealed class SqlDocumentOcrStore(
         if (string.IsNullOrWhiteSpace(result.ReasonCode) || result.ReasonCode.Length > 128 || result.Pages is null ||
             result.Pages.Select(static page => page.PageIndex).Distinct().Count() != result.Pages.Count ||
             result.Pages.Any(static page => page.PageIndex < 0 || page.OrientationDegrees is not (0 or 90 or 180 or 270) ||
-                page.Blocks is null || page.Blocks.Count > DocumentOcrProvenance.MaximumBlocksPerPage))
+                page.Blocks is null || page.Blocks.Count > DocumentOcrProvenance.MaximumBlocksPerPage ||
+                page.SourceWidth.HasValue != page.SourceHeight.HasValue ||
+                page.SourceWidth is <= 0 || page.SourceHeight is <= 0 ||
+                (page.SourceTransform is not null &&
+                 (page.SourceWidth is null || page.SourceTransform is not ("identity" or "rotate-90" or "rotate-180" or "rotate-270")))))
         {
             throw new InvalidOperationException("document-ocr-result-invalid");
         }

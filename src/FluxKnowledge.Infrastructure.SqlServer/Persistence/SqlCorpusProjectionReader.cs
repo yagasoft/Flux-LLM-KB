@@ -92,7 +92,7 @@ public sealed class SqlCorpusProjectionReader(IDbContextFactory<FluxKnowledgeDbC
                 ) AS [latest]
                 WHERE [revision].[SourceRootId] = {sourceRootId}
                   AND [revision].[SuppressedAtUtc] IS NULL
-                  AND [revision].[OriginKind] <> 2
+                  AND [revision].[OriginKind] NOT IN (2, 3)
                   AND LEFT([revision].[CanonicalPath], LEN([root].[CanonicalPath]) + 1) = [root].[CanonicalPath] + N'\'
             ), [Scoped] AS (
                 SELECT *, CASE WHEN {normalisedFolder} = N'' THEN [RelativePath]
@@ -176,7 +176,7 @@ public sealed class SqlCorpusProjectionReader(IDbContextFactory<FluxKnowledgeDbC
         from owner in owners.DefaultIfEmpty()
         join ownerRootValue in context.SourceRootConfigurations.AsNoTracking() on owner.SourceRootId equals ownerRootValue.Id into ownerRoots
         from ownerRoot in ownerRoots.DefaultIfEmpty()
-        where (revision == null || revision.OriginKind != 2 || publication != null) &&
+        where (revision == null || revision.OriginKind != 2 && revision.OriginKind != 3 || publication != null) &&
               (root == null || root.State != (int)SourceRootState.Deleting)
         let latestEvent = context.AuditEvents.Where(e => e.PipelineRecordId == record.Id || (revision != null && e.SourceRevisionId == revision.Id))
             .Select(e => (DateTimeOffset?)e.OccurredAtUtc).Max()
@@ -274,7 +274,7 @@ public sealed class SqlCorpusProjectionReader(IDbContextFactory<FluxKnowledgeDbC
              AND [publication].[PipelineRecordRevision] = [record].[Revision]
              AND [publication].[DocumentInputSourceRevisionId] = [revision].[Id]
             LEFT JOIN [SourceRootConfigurations] AS [root] ON [root].[Id] = [revision].[SourceRootId]
-            WHERE ([record].[SourceRevisionId] IS NULL OR [revision].[OriginKind] <> 2 OR [publication].[OwnerSourceRevisionId] IS NOT NULL)
+            WHERE ([record].[SourceRevisionId] IS NULL OR [revision].[OriginKind] NOT IN (2, 3) OR [publication].[OwnerSourceRevisionId] IS NOT NULL)
               AND ([root].[Id] IS NULL OR [root].[State] <> {(int)SourceRootState.Deleting})
             """).Select(candidate => candidate.PipelineRecordId).ToArrayAsync(cancellationToken).ConfigureAwait(false);
         if (candidates.Length > 0)
@@ -287,7 +287,7 @@ public sealed class SqlCorpusProjectionReader(IDbContextFactory<FluxKnowledgeDbC
             .Where(artifact => artifact.SearchText != null && artifact.SearchText.Contains(search))
             .Join(context.PipelineRecords.AsNoTracking(), artifact => new { artifact.PipelineRecordId, artifact.SourceRevision }, record => new { PipelineRecordId = record.Id, SourceRevision = record.Revision }, (artifact, record) => new { record.Id, record.Revision, record.SourceRevisionId })
             .Where(record => record.SourceRevisionId == null || context.SourceRevisions.AsNoTracking().Any(revision =>
-                revision.Id == record.SourceRevisionId && (revision.OriginKind != 2 || context.DocumentPublications.AsNoTracking().Any(publication =>
+                revision.Id == record.SourceRevisionId && ((revision.OriginKind != 2 && revision.OriginKind != 3) || context.DocumentPublications.AsNoTracking().Any(publication =>
                     publication.PipelineRecordId == record.Id && publication.PipelineRecordRevision == record.Revision &&
                     publication.DocumentInputSourceRevisionId == revision.Id)) &&
                 context.SourceRootConfigurations.AsNoTracking().Any(root => root.Id == revision.SourceRootId && root.State != (int)SourceRootState.Deleting)))

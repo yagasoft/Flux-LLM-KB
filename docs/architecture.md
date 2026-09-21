@@ -35,13 +35,21 @@ activation flags must be enabled together. The model gate verifies and holds
 the actual J-drive files consumed by the offline Python process; missing or
 invalid artefacts refuse execution without acquisition or another-drive fallback.
 
-PDF pages with no native text and visible content enter the existing durable
-GPU scheduler. An exclusive dispatch acknowledgement precedes inference. A
+PDF pages with no native text and visible content, plus checksum-verified
+single-frame JPEG/PNG documents, enter the existing durable GPU scheduler.
+Images are bounded to 64 MiB, 25 megapixels and a 6,000-pixel edge, normalised
+for encoded orientation and represented as page zero. An exclusive dispatch acknowledgement precedes inference. A
 bounded, source-bound result continues the original document through normalisation,
 indexing and publication with page/block provenance. Native-text pages retain
 their text. A page containing both native text and an image is not currently
 region-OCRed; scanned text embedded on such a page can therefore be omitted.
-Internal document parts do not become independent corpus entries.
+Internal document parts do not become independent corpus entries. OOXML
+structural extraction likewise publishes one logical UTF-8 result under the
+original DOCX/XLSX/PPTX identity; its extracted-text allowance is 200 MiB while
+ordinary retained UTF-8 remains capped at 16 MiB and package security bounds
+remain unchanged. Completing any retained processor wakes the existing source
+registration loop, so newly emitted children do not wait for its 15-minute
+fallback reconciliation cadence.
 
 Pause, suppression and deletion fence continuation and publication. If inference
 ends but its result cannot be accepted, the exact reservation is released as

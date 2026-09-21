@@ -321,7 +321,10 @@ public static class WebHostComposition
             protectedRoots,
             provider.GetRequiredService<PersistedOutlookSpoolRootPolicy>(),
             provider.GetRequiredService<ISourceArtifactPublicationGate>()));
-        services.AddSingleton(ReadRetainedProcessorOptions(configuration, strictProductionPaths));
+        services.AddSingleton(ReadRetainedProcessorOptions(
+            configuration,
+            strictProductionPaths,
+            nativeRuntimeOptions?.LocalOcrEnabled == true));
         services.AddSingleton<IEmbeddingProvider, DeterministicTokenHashEmbeddingProvider>();
         services.AddScoped<ISearchService, HybridSearchService>();
         services.AddScoped<SqlNativeOperationStore>();
@@ -512,7 +515,8 @@ public static class WebHostComposition
 
     internal static RetainedProcessorOptions ReadRetainedProcessorOptions(
         IConfiguration configuration,
-        bool enableImplementedProcessorsByDefault = false)
+        bool enableImplementedProcessorsByDefault = false,
+        bool imageDocumentOcrEnabled = false)
     {
         var section = RetainedProcessorOptions.ConfigurationSectionName;
         var configuredBatchSize = configuration[$"{section}:AutomaticReplayBatchSize"];
@@ -536,6 +540,7 @@ public static class WebHostComposition
             OoxmlDocumentStructuralExtractEnabled = ReadProcessorEnabled(configuration, $"{section}:OoxmlDocumentStructuralExtractEnabled", enableImplementedProcessorsByDefault),
             CsharpCodeEnabled = ReadProcessorEnabled(configuration, $"{section}:CsharpCodeEnabled", true),
             MediaMetadataEnabled = ReadProcessorEnabled(configuration, $"{section}:MediaMetadataEnabled", enableImplementedProcessorsByDefault),
+            ImageDocumentOcrEnabled = imageDocumentOcrEnabled,
             AutomaticReplayBatchSize = batchSize
         };
     }

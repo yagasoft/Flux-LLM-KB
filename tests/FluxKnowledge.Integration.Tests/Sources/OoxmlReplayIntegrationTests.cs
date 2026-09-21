@@ -24,6 +24,43 @@ public sealed class OoxmlReplayIntegrationTests(NativeSqlServerFixture fixture) 
     public Task DisposeAsync() => Task.CompletedTask;
 
     [NativeSqlServerFact]
+    public async Task Ooxml_branch_refuses_multiple_logical_document_children_before_persisting_any_member()
+    {
+        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System);
+        var seeded = await PromoteOoxmlBranchAsync(store, '9');
+        var claim = Assert.Single(await store.ClaimAsync(
+            "multiple-logical-output-owner",
+            1,
+            OoxmlStructuralTextProcessor.Capability.ProcessorFingerprint,
+            CancellationToken.None));
+        var members = Enumerable.Range(0, 2).Select(index => new RetainedProcessorDerivedChild(
+            new string((char)('a' + index), 64),
+            $"retained-office-structural-text:{index}",
+            new string((char)('c' + index), 64),
+            new string((char)('e' + index), 64),
+            $"sha256\\{index}\\child.bin",
+            4,
+            "AcceptedUtf8Text",
+            OriginKind: 2,
+            Extension: ".txt")).ToArray();
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() => store.CommitAsync(
+            claim,
+            new RetainedProcessorCompletion(members, new string('f', 64)),
+            CancellationToken.None).AsTask());
+
+        Assert.Equal("A logical document processor must produce exactly one child or one explicit no-content outcome.", error.Message);
+        await using var verification = CreateContext();
+        Assert.Empty(await verification.SourceProcessorBranchMembers
+            .Where(value => value.BranchId == claim.BranchId)
+            .ToListAsync());
+        Assert.Equal((int)RetainedProcessorBranchState.Running,
+            await verification.SourceProcessorBranches.Where(value => value.Id == claim.BranchId)
+                .Select(value => value.State).SingleAsync());
+        Assert.Equal(seeded.RevisionId, claim.SourceRevisionId.Value);
+    }
+
+    [NativeSqlServerFact]
     public async Task Explicit_activation_replays_retained_docx_xlsx_and_pptx_from_every_source_family_without_the_missing_source_original()
     {
         var privateRoot = Path.Combine(Path.GetTempPath(), $"flux-ooxml-retained-{Guid.NewGuid():N}");
@@ -67,7 +104,7 @@ public sealed class OoxmlReplayIntegrationTests(NativeSqlServerFixture fixture) 
                 Assert.Equal((int)RetainedProcessorBranchState.Completed, branch.State);
                 var child = await verification.SourceRevisions.SingleAsync(value => value.ParentSourceRevisionId == seed.RevisionId);
                 Assert.Equal(2, child.OriginKind);
-                Assert.StartsWith("retained-office-structural-segment:", child.CanonicalPath, StringComparison.Ordinal);
+                Assert.StartsWith("retained-office-structural-text:", child.CanonicalPath, StringComparison.Ordinal);
                 Assert.Single(await verification.SourceActivities.Where(value => value.SourceRevisionId == child.Id).ToListAsync());
                 if (seed.Text == "outlook retained sentinel")
                 {

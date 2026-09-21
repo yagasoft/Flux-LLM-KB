@@ -53,18 +53,11 @@ public sealed class SourceReconciliationService(
             using var waitCancellation = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
             var timerTask = timer.WaitForNextTickAsync(waitCancellation.Token).AsTask();
             var wakeTask = wakeSignal.WaitAsync(waitCancellation.Token).AsTask();
-            var completed = await Task.WhenAny(timerTask, wakeTask).ConfigureAwait(false);
-            var woke = completed == wakeTask;
-            await completed.ConfigureAwait(false);
-            await waitCancellation.CancelAsync().ConfigureAwait(false);
-            try
-            {
-                await Task.WhenAll(timerTask, wakeTask).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException) when (!stoppingToken.IsCancellationRequested)
-            {
-                // The unselected wait was deliberately cancelled before the next loop.
-            }
+            var woke = await WaitForTimerOrWakeAsync(
+                timerTask,
+                wakeTask,
+                waitCancellation,
+                stoppingToken).ConfigureAwait(false);
             var released = await PumpDueWatchBatchesAsync(stoppingToken).ConfigureAwait(false);
             if (woke || released > 0 || timeProvider.GetUtcNow() >= nextReconciliationAtUtc)
             {
@@ -72,6 +65,27 @@ public sealed class SourceReconciliationService(
                 nextReconciliationAtUtc = timeProvider.GetUtcNow().Add(DefaultCadence);
             }
         }
+    }
+
+    internal static async Task<bool> WaitForTimerOrWakeAsync(
+        Task<bool> timerTask,
+        Task wakeTask,
+        CancellationTokenSource waitCancellation,
+        CancellationToken stoppingToken)
+    {
+        var completed = await Task.WhenAny(timerTask, wakeTask).ConfigureAwait(false);
+        await completed.ConfigureAwait(false);
+        await waitCancellation.CancelAsync().ConfigureAwait(false);
+        try
+        {
+            await Task.WhenAll(timerTask, wakeTask).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (!stoppingToken.IsCancellationRequested)
+        {
+            // The unselected wait was deliberately cancelled before the next loop.
+        }
+
+        return wakeTask.IsCompletedSuccessfully;
     }
 
     public Task<int> PumpDueWatchBatchesAsync(CancellationToken cancellationToken) =>

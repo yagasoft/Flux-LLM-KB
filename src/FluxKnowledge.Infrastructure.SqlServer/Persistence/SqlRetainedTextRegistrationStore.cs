@@ -29,6 +29,8 @@ public sealed class SqlRetainedTextRegistrationStore(
     private const string AcceptedMimePolicy = "[\"text/plain\"]";
     private const string ExtractUtf8OutputContract = "pipeline:extract-utf8";
     private const long MaximumDocumentInputBytes = 128L * 1024 * 1024;
+    private const long MaximumAcceptedUtf8TextBytes = 16L * 1024 * 1024;
+    private const long MaximumOoxmlTextBytes = 200L * 1024 * 1024;
     private readonly string? _retainedArtifactRoot = string.IsNullOrWhiteSpace(retainedArtifactRoot)
         ? null
         : Path.TrimEndingDirectorySeparator(Path.GetFullPath(retainedArtifactRoot));
@@ -113,8 +115,29 @@ public sealed class SqlRetainedTextRegistrationStore(
                  context.OutlookCaptureProfiles.Any(profile => profile.SourceRootId == root.Id)) &&
                 ((activity.ActivityKind == (int)SourceActivityKind.TextExtraction ||
                   activity.ActivityKind == (int)SourceActivityKind.MetadataExtraction) &&
-                 revision.Classification == AcceptedUtf8Classification &&
-                 revision.ByteLength >= 0 && revision.ByteLength <= 16L * 1024 * 1024 ||
+                 revision.Classification == AcceptedUtf8Classification && revision.ByteLength >= 0 &&
+                 (revision.ByteLength <= MaximumAcceptedUtf8TextBytes ||
+                  revision.ByteLength <= MaximumOoxmlTextBytes && revision.OriginKind == 2 &&
+                  context.SourceProcessorBranchMembers.Any(member =>
+                      member.ChildSourceRevisionId == revision.Id && member.ChildSourceActivityId == activity.Id &&
+                      member.Disposition == "completed" && member.ByteLength == revision.ByteLength &&
+                      context.SourceProcessorBranches.Any(branch =>
+                          branch.Id == member.BranchId && branch.SourceRevisionId == revision.ParentSourceRevisionId &&
+                          branch.State == (int)RetainedProcessorBranchState.Completed && branch.CompletedMemberCount == 1 &&
+                           branch.ProcessorVersion == OoxmlStructuralTextProcessor.Capability.ProcessorVersion &&
+                           branch.ProcessorFingerprint == OoxmlStructuralTextProcessor.Capability.ProcessorFingerprint &&
+                           context.SourceRevisions.Any(parent => parent.Id == branch.SourceRevisionId &&
+                               parent.ContentSha256 == branch.InputSha256 && parent.SourceRootId == revision.SourceRootId) &&
+                           context.SourceActivities.Any(ownerActivity =>
+                               ownerActivity.Id == branch.SourceActivityId &&
+                               ownerActivity.SourceRevisionId == branch.SourceRevisionId &&
+                               EF.Functions.Collate(ownerActivity.InputFingerprint, SchemaConfiguration.SchedulerFenceCollation) ==
+                                   EF.Functions.Collate(branch.InputSha256, SchemaConfiguration.SchedulerFenceCollation) &&
+                               EF.Functions.Collate(ownerActivity.ProcessorVersion, SchemaConfiguration.SchedulerFenceCollation) ==
+                                   EF.Functions.Collate(branch.ProcessorVersion, SchemaConfiguration.SchedulerFenceCollation) &&
+                               EF.Functions.Collate(ownerActivity.DescriptorFingerprint, SchemaConfiguration.SchedulerFenceCollation) ==
+                                   EF.Functions.Collate(branch.ProcessorFingerprint, SchemaConfiguration.SchedulerFenceCollation)) &&
+                           context.SourceProcessorBranchMembers.Count(other => other.BranchId == branch.Id) == 1))) ||
                  activity.ActivityKind == (int)SourceActivityKind.DocumentParsing &&
                  ((activity.ProcessorVersion == DocumentProcessingInput.VsdxProcessorVersion &&
                    activity.DescriptorFingerprint == DocumentProcessingInput.VsdxProcessorFingerprint &&
@@ -123,7 +146,11 @@ public sealed class SqlRetainedTextRegistrationStore(
                   (activity.ProcessorVersion == DocumentProcessingInput.PdfProcessorVersion &&
                    activity.DescriptorFingerprint == DocumentProcessingInput.PdfProcessorFingerprint &&
                    revision.Classification == DocumentProcessingInput.PdfClassification &&
-                   revision.Extension == ".pdf")) &&
+                   revision.Extension == ".pdf") ||
+                  (activity.ProcessorVersion == DocumentProcessingInput.ImageProcessorVersion &&
+                   activity.DescriptorFingerprint == DocumentProcessingInput.ImageProcessorFingerprint &&
+                   revision.Classification == DocumentProcessingInput.ImageClassification &&
+                   (revision.Extension == ".jpg" || revision.Extension == ".jpeg" || revision.Extension == ".png"))) &&
                  revision.ByteLength >= 0 && revision.ByteLength <= MaximumDocumentInputBytes) &&
                 activity.ResultingPipelineRecordId == null && revision.SuppressedAtUtc == null &&
                 artifact.ByteLength == revision.ByteLength &&
@@ -231,6 +258,28 @@ public sealed class SqlRetainedTextRegistrationStore(
         var isUtf8Input = sourceRevision is not null &&
             sourceRevision.Classification == AcceptedUtf8Classification &&
             activity.Kind is SourceActivityKind.TextExtraction or SourceActivityKind.MetadataExtraction;
+        var isBoundOoxmlText = isUtf8Input && sourceRevision!.OriginKind == 2 &&
+            await context.SourceProcessorBranchMembers.AnyAsync(member =>
+                member.ChildSourceRevisionId == sourceRevision.Id && member.ChildSourceActivityId == activity.Id.Value &&
+                member.Disposition == "completed" && member.ByteLength == sourceRevision.ByteLength &&
+                context.SourceProcessorBranches.Any(branch =>
+                    branch.Id == member.BranchId && branch.SourceRevisionId == sourceRevision.ParentSourceRevisionId &&
+                    branch.State == (int)RetainedProcessorBranchState.Completed && branch.CompletedMemberCount == 1 &&
+                    branch.ProcessorVersion == OoxmlStructuralTextProcessor.Capability.ProcessorVersion &&
+                     branch.ProcessorFingerprint == OoxmlStructuralTextProcessor.Capability.ProcessorFingerprint &&
+                     context.SourceRevisions.Any(parent => parent.Id == branch.SourceRevisionId &&
+                         parent.ContentSha256 == branch.InputSha256 && parent.SourceRootId == sourceRevision.SourceRootId) &&
+                     context.SourceActivities.Any(ownerActivity =>
+                         ownerActivity.Id == branch.SourceActivityId &&
+                         ownerActivity.SourceRevisionId == branch.SourceRevisionId &&
+                         EF.Functions.Collate(ownerActivity.InputFingerprint, SchemaConfiguration.SchedulerFenceCollation) ==
+                             EF.Functions.Collate(branch.InputSha256, SchemaConfiguration.SchedulerFenceCollation) &&
+                         EF.Functions.Collate(ownerActivity.ProcessorVersion, SchemaConfiguration.SchedulerFenceCollation) ==
+                             EF.Functions.Collate(branch.ProcessorVersion, SchemaConfiguration.SchedulerFenceCollation) &&
+                         EF.Functions.Collate(ownerActivity.DescriptorFingerprint, SchemaConfiguration.SchedulerFenceCollation) ==
+                             EF.Functions.Collate(branch.ProcessorFingerprint, SchemaConfiguration.SchedulerFenceCollation)) &&
+                     context.SourceProcessorBranchMembers.Count(other => other.BranchId == branch.Id) == 1),
+                cancellationToken).ConfigureAwait(false);
         var documentInputBound = isDocumentInput && await context.SourceProcessorBranchMembers.AnyAsync(member =>
             member.ChildSourceRevisionId == sourceRevision!.Id && member.Disposition == "completed" &&
             context.SourceProcessorBranches.Any(branch =>
@@ -239,7 +288,9 @@ public sealed class SqlRetainedTextRegistrationStore(
                 branch.ProcessorVersion == documentContract!.ParentProcessorVersion &&
                 branch.ProcessorFingerprint == documentContract!.ParentProcessorFingerprint &&
                 branch.State == (int)RetainedProcessorBranchState.Completed), cancellationToken).ConfigureAwait(false);
-        var maximumInputBytes = isDocumentInput ? MaximumDocumentInputBytes : 16L * 1024 * 1024;
+        var maximumInputBytes = isDocumentInput
+            ? MaximumDocumentInputBytes
+            : isBoundOoxmlText ? MaximumOoxmlTextBytes : MaximumAcceptedUtf8TextBytes;
         if (sourceRevision is null || sourceRoot is null ||
             (sourceRoot.State != (int)SourceRootState.Enabled &&
              !await context.OutlookCaptureProfiles.AnyAsync(profile => profile.SourceRootId == sourceRoot.Id, cancellationToken).ConfigureAwait(false)) ||
@@ -439,7 +490,9 @@ public sealed class SqlRetainedTextRegistrationStore(
           (activity.ProcessorVersion == DocumentProcessingInput.VisioProcessorVersion &&
            activity.DescriptorFingerprint == DocumentProcessingInput.VisioProcessorFingerprint) ||
           (activity.ProcessorVersion == DocumentProcessingInput.PdfProcessorVersion &&
-           activity.DescriptorFingerprint == DocumentProcessingInput.PdfProcessorFingerprint)));
+           activity.DescriptorFingerprint == DocumentProcessingInput.PdfProcessorFingerprint) ||
+          (activity.ProcessorVersion == DocumentProcessingInput.ImageProcessorVersion &&
+           activity.DescriptorFingerprint == DocumentProcessingInput.ImageProcessorFingerprint)));
 
     private static bool MatchesImmutable(SourceActivityEntity entity, SourceActivity activity) =>
         entity.SourceRevisionId == activity.SourceRevisionId.Value &&
@@ -596,6 +649,7 @@ public sealed class SqlRetainedSourceReader(
     private readonly PhysicalDirectoryLease _rootLease = PhysicalFileIdentity.OpenDirectoryLease(artifactRoot);
     private const long MaximumAcceptedBinaryBytes = 128L * 1024 * 1024;
     private const long MaximumAcceptedUtf8TextBytes = 16L * 1024 * 1024;
+    private const long MaximumOoxmlTextBytes = 200L * 1024 * 1024;
 
     public async ValueTask<RetainedSourceBytes> ReadBytesAsync(SourceRevisionId sourceRevisionId, CancellationToken cancellationToken)
     {
@@ -653,8 +707,11 @@ public sealed class SqlRetainedSourceReader(
 
     public async ValueTask<Utf8FileSource> ReadUtf8Async(SourceRevisionId sourceRevisionId, CancellationToken cancellationToken)
     {
-        var verified = await ReadVerifiedAsync(sourceRevisionId, cancellationToken).ConfigureAwait(false);
-        if (verified.ByteLength > MaximumAcceptedUtf8TextBytes)
+        var maximumTextBytes = await IsCompletedOoxmlTextChildAsync(sourceRevisionId, cancellationToken).ConfigureAwait(false)
+            ? MaximumOoxmlTextBytes
+            : MaximumAcceptedUtf8TextBytes;
+        var verified = await ReadVerifiedAsync(sourceRevisionId, maximumTextBytes, cancellationToken).ConfigureAwait(false);
+        if (verified.ByteLength > maximumTextBytes)
         {
             throw new InvalidDataException("The retained artifact exceeds the accepted UTF-8 text limit.");
         }
@@ -675,7 +732,55 @@ public sealed class SqlRetainedSourceReader(
         }
     }
 
-    private async ValueTask<VerifiedRetainedSource> ReadVerifiedAsync(SourceRevisionId sourceRevisionId, CancellationToken cancellationToken)
+    private async ValueTask<bool> IsCompletedOoxmlTextChildAsync(
+        SourceRevisionId sourceRevisionId,
+        CancellationToken cancellationToken)
+    {
+        await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        return await context.SourceProcessorBranchMembers.AsNoTracking().AnyAsync(member =>
+            member.ChildSourceRevisionId == sourceRevisionId.Value && member.ChildSourceActivityId != null &&
+            member.Disposition == "completed" &&
+            context.SourceRevisions.Any(child =>
+                child.Id == member.ChildSourceRevisionId && child.OriginKind == 2 &&
+                child.Classification == "AcceptedUtf8Text" && child.Extension == ".txt" &&
+                child.ParentSourceRevisionId != null && child.ByteLength == member.ByteLength &&
+                context.SourceArtifacts.Any(artifact =>
+                    artifact.SourceRevisionId == child.Id &&
+                    EF.Functions.Collate(artifact.ContentSha256, SchemaConfiguration.SchedulerFenceCollation) ==
+                        EF.Functions.Collate(child.ContentSha256, SchemaConfiguration.SchedulerFenceCollation) &&
+                    artifact.ByteLength == child.ByteLength) &&
+                context.SourceActivities.Any(childActivity =>
+                    childActivity.Id == member.ChildSourceActivityId &&
+                    childActivity.SourceRevisionId == child.Id &&
+                    EF.Functions.Collate(childActivity.InputFingerprint, SchemaConfiguration.SchedulerFenceCollation) ==
+                        EF.Functions.Collate(child.ContentSha256, SchemaConfiguration.SchedulerFenceCollation)) &&
+                context.SourceProcessorBranches.Any(branch =>
+                    branch.Id == member.BranchId && branch.SourceRevisionId == child.ParentSourceRevisionId &&
+                    branch.State == (int)RetainedProcessorBranchState.Completed && branch.CompletedMemberCount == 1 &&
+                    branch.ProcessorVersion == OoxmlStructuralTextProcessor.Capability.ProcessorVersion &&
+                    branch.ProcessorFingerprint == OoxmlStructuralTextProcessor.Capability.ProcessorFingerprint &&
+                    context.SourceRevisions.Any(parent => parent.Id == branch.SourceRevisionId &&
+                        parent.ContentSha256 == branch.InputSha256 && parent.SourceRootId == child.SourceRootId) &&
+                    context.SourceActivities.Any(ownerActivity =>
+                        ownerActivity.Id == branch.SourceActivityId &&
+                        ownerActivity.SourceRevisionId == branch.SourceRevisionId &&
+                        EF.Functions.Collate(ownerActivity.InputFingerprint, SchemaConfiguration.SchedulerFenceCollation) ==
+                            EF.Functions.Collate(branch.InputSha256, SchemaConfiguration.SchedulerFenceCollation) &&
+                        EF.Functions.Collate(ownerActivity.ProcessorVersion, SchemaConfiguration.SchedulerFenceCollation) ==
+                            EF.Functions.Collate(branch.ProcessorVersion, SchemaConfiguration.SchedulerFenceCollation) &&
+                        EF.Functions.Collate(ownerActivity.DescriptorFingerprint, SchemaConfiguration.SchedulerFenceCollation) ==
+                            EF.Functions.Collate(branch.ProcessorFingerprint, SchemaConfiguration.SchedulerFenceCollation)) &&
+                    context.SourceProcessorBranchMembers.Count(other => other.BranchId == branch.Id) == 1)),
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    private async ValueTask<VerifiedRetainedSource> ReadVerifiedAsync(SourceRevisionId sourceRevisionId, CancellationToken cancellationToken) =>
+        await ReadVerifiedAsync(sourceRevisionId, MaximumAcceptedBinaryBytes, cancellationToken).ConfigureAwait(false);
+
+    private async ValueTask<VerifiedRetainedSource> ReadVerifiedAsync(
+        SourceRevisionId sourceRevisionId,
+        long maximumByteLength,
+        CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(sourceRevisionId);
         await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
@@ -727,7 +832,7 @@ public sealed class SqlRetainedSourceReader(
                 source.ContentSha256,
                 selectedArtifactRoot,
                 selectedRootLease);
-            if (source.ByteLength < 0 || source.ByteLength > MaximumAcceptedBinaryBytes)
+            if (source.ByteLength < 0 || source.ByteLength > maximumByteLength)
             {
                 throw new InvalidDataException("The retained artifact exceeds the accepted retained-byte limit.");
             }

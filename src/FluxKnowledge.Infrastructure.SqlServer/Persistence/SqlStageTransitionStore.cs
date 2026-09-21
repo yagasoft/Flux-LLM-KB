@@ -11,6 +11,7 @@ using FluxKnowledge.Domain.Jobs;
 using FluxKnowledge.Domain.Pipeline;
 using FluxKnowledge.Domain.Sources;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
+using FluxKnowledge.Infrastructure.SqlServer.Persistence.Configurations;
 using Microsoft.EntityFrameworkCore;
 
 namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
@@ -606,9 +607,15 @@ public sealed class SqlStageTransitionStore : IStageTransitionStore
         var input = await context.SourceRevisions.SingleOrDefaultAsync(
             value => value.Id == inputRevisionId,
             cancellationToken).ConfigureAwait(false);
-        if (input is null ||
-            !DocumentProcessingInput.TryGetContract(input.Classification, input.Extension, out var documentContract) ||
-            input.ParentSourceRevisionId is not { } ownerRevisionId)
+        if (input is null || input.ParentSourceRevisionId is not { } ownerRevisionId)
+        {
+            return;
+        }
+        var isDocumentInput = DocumentProcessingInput.TryGetContract(
+            input.Classification, input.Extension, out var documentContract);
+        var isLogicalText = input.OriginKind is 2 or 3 &&
+            input.Classification == "AcceptedUtf8Text" && input.Extension == ".txt";
+        if (!isDocumentInput && !isLogicalText)
         {
             return;
         }
@@ -636,15 +643,50 @@ public sealed class SqlStageTransitionStore : IStageTransitionStore
 
         var binding = await (
             from member in context.SourceProcessorBranchMembers
-            join branch in context.SourceProcessorBranches on member.BranchId equals branch.Id
+            join candidateBranch in context.SourceProcessorBranches on member.BranchId equals candidateBranch.Id
+            join childActivity in context.SourceActivities on member.ChildSourceActivityId equals childActivity.Id
+            join ownerActivity in context.SourceActivities on candidateBranch.SourceActivityId equals ownerActivity.Id
+            join childArtifact in context.SourceArtifacts on member.ChildSourceRevisionId equals childArtifact.SourceRevisionId
+            join ownerRevision in context.SourceRevisions on candidateBranch.SourceRevisionId equals ownerRevision.Id
             where member.ChildSourceRevisionId == inputRevisionId &&
                   member.Disposition == "completed" &&
-                  branch.SourceRevisionId == ownerRevisionId &&
-                  branch.State == (int)RetainedProcessorBranchState.Completed
-            select branch).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
-        if (binding is null ||
-            binding.ProcessorFingerprint != documentContract.ParentProcessorFingerprint ||
-            binding.ProcessorVersion != documentContract.ParentProcessorVersion)
+                  member.ByteLength == input.ByteLength &&
+                  childActivity.SourceRevisionId == inputRevisionId &&
+                  EF.Functions.Collate(childActivity.InputFingerprint, SchemaConfiguration.SchedulerFenceCollation) ==
+                      EF.Functions.Collate(input.ContentSha256, SchemaConfiguration.SchedulerFenceCollation) &&
+                  childActivity.ResultingPipelineRecordId == record.Id &&
+                  childActivity.ResultingPipelineRecordRevision == record.Revision &&
+                  EF.Functions.Collate(record.ContentHash, SchemaConfiguration.SchedulerFenceCollation) ==
+                      EF.Functions.Collate(input.ContentSha256, SchemaConfiguration.SchedulerFenceCollation) &&
+                  EF.Functions.Collate(childArtifact.ContentSha256, SchemaConfiguration.SchedulerFenceCollation) ==
+                      EF.Functions.Collate(input.ContentSha256, SchemaConfiguration.SchedulerFenceCollation) &&
+                  childArtifact.ByteLength == input.ByteLength &&
+                  candidateBranch.SourceRevisionId == ownerRevisionId &&
+                  ownerRevision.SourceRootId == input.SourceRootId &&
+                  EF.Functions.Collate(candidateBranch.InputSha256, SchemaConfiguration.SchedulerFenceCollation) ==
+                      EF.Functions.Collate(ownerRevision.ContentSha256, SchemaConfiguration.SchedulerFenceCollation) &&
+                  candidateBranch.State == (int)RetainedProcessorBranchState.Completed &&
+                  candidateBranch.CompletedMemberCount == 1 &&
+                  context.SourceProcessorBranchMembers.Count(other => other.BranchId == candidateBranch.Id) == 1 &&
+                  ownerActivity.SourceRevisionId == ownerRevisionId &&
+                  EF.Functions.Collate(ownerActivity.InputFingerprint, SchemaConfiguration.SchedulerFenceCollation) ==
+                      EF.Functions.Collate(candidateBranch.InputSha256, SchemaConfiguration.SchedulerFenceCollation) &&
+                  EF.Functions.Collate(ownerActivity.ProcessorVersion, SchemaConfiguration.SchedulerFenceCollation) ==
+                      EF.Functions.Collate(candidateBranch.ProcessorVersion, SchemaConfiguration.SchedulerFenceCollation) &&
+                  EF.Functions.Collate(ownerActivity.DescriptorFingerprint, SchemaConfiguration.SchedulerFenceCollation) ==
+                      EF.Functions.Collate(candidateBranch.ProcessorFingerprint, SchemaConfiguration.SchedulerFenceCollation)
+            select new { Branch = candidateBranch, OwnerActivity = ownerActivity }).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+        if (binding is null)
+        {
+            throw new InvalidOperationException("The document publication has no exact completed retained-processor binding.");
+        }
+        var branch = binding.Branch;
+        var exactBinaryBinding = isDocumentInput &&
+            branch.ProcessorFingerprint == documentContract.ParentProcessorFingerprint &&
+            branch.ProcessorVersion == documentContract.ParentProcessorVersion;
+        var exactLogicalBinding = isLogicalText &&
+            await HasExpectedLogicalProducerAsync(context, branch, cancellationToken).ConfigureAwait(false);
+        if (!exactBinaryBinding && !exactLogicalBinding)
         {
             throw new InvalidOperationException("The document publication has no exact completed retained-processor binding.");
         }
@@ -658,7 +700,17 @@ public sealed class SqlStageTransitionStore : IStageTransitionStore
             var existingBranch = await context.SourceProcessorBranches.SingleOrDefaultAsync(
                 value => value.Id == existing.SourceProcessorBranchId,
                 cancellationToken).ConfigureAwait(false);
-            if (existingBranch is not null && existingBranch.CreatedAtUtc > binding.CreatedAtUtc)
+            var existingInput = await context.SourceRevisions.SingleOrDefaultAsync(
+                value => value.Id == existing.DocumentInputSourceRevisionId, cancellationToken).ConfigureAwait(false);
+            var existingPriority = existingInput?.OriginKind == 3 ? 1 : 2;
+            var candidatePriority = input.OriginKind == 3 ? 1 : 2;
+            if (existingBranch is not null &&
+                (existingPriority > candidatePriority ||
+                 existingPriority == candidatePriority &&
+                 (existingBranch.CreatedAtUtc > branch.CreatedAtUtc ||
+                  existingBranch.CreatedAtUtc == branch.CreatedAtUtc &&
+                  (string.CompareOrdinal(existingBranch.Id.ToString("N"), branch.Id.ToString("N")) > 0 ||
+                   existingBranch.Id == branch.Id && existing.PipelineRecordRevision >= record.Revision))))
             {
                 return;
             }
@@ -670,21 +722,31 @@ public sealed class SqlStageTransitionStore : IStageTransitionStore
             {
                 OwnerSourceRevisionId = ownerRevisionId,
                 DocumentInputSourceRevisionId = inputRevisionId,
-                SourceProcessorBranchId = binding.Id,
+                SourceProcessorBranchId = branch.Id,
                 PipelineRecordId = record.Id,
                 PipelineRecordRevision = record.Revision,
-                ProcessorFingerprint = binding.ProcessorFingerprint,
+                ProcessorFingerprint = branch.ProcessorFingerprint,
                 PublishedAtUtc = now
             });
         }
         else
         {
             existing.DocumentInputSourceRevisionId = inputRevisionId;
-            existing.SourceProcessorBranchId = binding.Id;
+            existing.SourceProcessorBranchId = branch.Id;
             existing.PipelineRecordId = record.Id;
             existing.PipelineRecordRevision = record.Revision;
-            existing.ProcessorFingerprint = binding.ProcessorFingerprint;
+            existing.ProcessorFingerprint = branch.ProcessorFingerprint;
             existing.PublishedAtUtc = now;
+        }
+
+        var retiresLegacyArchiveMembers = isDocumentInput &&
+            documentContract is not null &&
+            (documentContract == DocumentProcessingInput.Vsdx ||
+             documentContract == DocumentProcessingInput.Visio ||
+             documentContract == DocumentProcessingInput.Pdf);
+        if (!retiresLegacyArchiveMembers)
+        {
+            return;
         }
 
         var retiredMemberRevisionIds = await context.SourceRevisions
@@ -706,6 +768,31 @@ public sealed class SqlStageTransitionStore : IStageTransitionStore
                 context.Artifacts.Any(artifact => artifact.Id == chunk.ArtifactId &&
                     artifact.SourceRevision == chunk.SourceRevision && retiredPipelineRecordIds.Contains(artifact.PipelineRecordId))))
             .ExecuteUpdateAsync(setters => setters.SetProperty(value => value.IsDeleted, true), cancellationToken).ConfigureAwait(false);
+    }
+
+    private static ValueTask<bool> HasExpectedLogicalProducerAsync(
+        FluxKnowledgeDbContext context,
+        SourceProcessorBranchEntity branch,
+        CancellationToken cancellationToken)
+    {
+        var expected = branch.ProcessorVersion == OoxmlStructuralTextProcessor.Capability.ProcessorVersion &&
+                       branch.ProcessorFingerprint == OoxmlStructuralTextProcessor.Capability.ProcessorFingerprint
+            ? OoxmlStructuralTextProcessor.Capability
+            : branch.ProcessorVersion == MediaMetadataRetainedProcessor.Capability.ProcessorVersion &&
+              branch.ProcessorFingerprint == MediaMetadataRetainedProcessor.Capability.ProcessorFingerprint
+                ? MediaMetadataRetainedProcessor.Capability
+                : null;
+        return expected is null
+            ? ValueTask.FromResult(false)
+            : new ValueTask<bool>(context.SourceCapabilities.AnyAsync(capability =>
+                capability.Id == expected.Id &&
+                capability.ProcessorKind == expected.ProcessorKind &&
+                capability.IsRunnable &&
+                capability.ExecutionClass == (int)ExecutionClass.InProcess &&
+                capability.ProcessorVersion == expected.ProcessorVersion &&
+                capability.ProcessorFingerprint == expected.ProcessorFingerprint &&
+                capability.OutputContract == expected.OutputContract,
+                cancellationToken));
     }
 
     private async Task MarkDispatchCompleteAsync(

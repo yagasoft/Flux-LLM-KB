@@ -1,6 +1,7 @@
 using FluxKnowledge.Application.Documents;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Sources;
+using SkiaSharp;
 using Syncfusion.PdfToImageConverter;
 
 namespace FluxKnowledge.Integrations.Documents;
@@ -29,7 +30,7 @@ public sealed class SyncfusionPdfPageRasterizer(
         }
         if (!retained.Bytes.AsSpan().StartsWith("%PDF-"u8))
         {
-            throw new RetainedProcessorException("pdf-document-container-invalid");
+            return RenderImage(retained, pageIndexes, cancellationToken);
         }
 
         licenceRegistration.EnsureRegistered();
@@ -79,6 +80,84 @@ public sealed class SyncfusionPdfPageRasterizer(
         catch (Exception exception) when (exception is not OperationCanceledException and not OutOfMemoryException and not StackOverflowException)
         {
             throw new RetainedProcessorException("pdf-ocr-rasterization-failed");
+        }
+    }
+
+    private static IReadOnlyList<PdfRasterizedPage> RenderImage(
+        RetainedSourceBytes retained,
+        IReadOnlySet<int>? pageIndexes,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (retained.ByteLength > ImageDocumentInputProcessor.MaximumInputBytes ||
+            pageIndexes is not null && (pageIndexes.Count != 1 || !pageIndexes.Contains(0)))
+            throw new RetainedProcessorException("image-ocr-page-selection-invalid");
+        var bytes = retained.Bytes.AsSpan();
+        if (!bytes.StartsWith(new byte[] { 0xff, 0xd8, 0xff }) &&
+            !bytes.StartsWith(new byte[] { 0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a }))
+            throw new RetainedProcessorException("image-document-container-invalid");
+        try
+        {
+            using var input = new MemoryStream(retained.Bytes, writable: false);
+            using var codec = SKCodec.Create(input) ?? throw new RetainedProcessorException("image-document-container-invalid");
+            if (codec.FrameCount > 1)
+                throw new RetainedProcessorException("image-document-multiframe-unsupported");
+            var info = codec.Info;
+            if (info.Width <= 0 || info.Height <= 0 || info.Width > 6000 || info.Height > 6000 ||
+                (long)info.Width * info.Height > 25_000_000)
+                throw new RetainedProcessorException("image-document-dimensions-exceeded");
+
+            using var decoded = new SKBitmap(new SKImageInfo(info.Width, info.Height, SKColorType.Bgra8888, SKAlphaType.Premul));
+            if (codec.GetPixels(decoded.Info, decoded.GetPixels()) != SKCodecResult.Success)
+                throw new RetainedProcessorException("image-document-decode-failed");
+
+            var (sourceOrientationDegrees, sourceTransform, swapsAxes) = codec.EncodedOrigin switch
+            {
+                SKEncodedOrigin.TopLeft => (0, "identity", false),
+                SKEncodedOrigin.RightTop => (90, "rotate-90", true),
+                SKEncodedOrigin.BottomRight => (180, "rotate-180", false),
+                SKEncodedOrigin.LeftBottom => (270, "rotate-270", true),
+                _ => throw new RetainedProcessorException("image-document-orientation-unsupported")
+            };
+            using var oriented = new SKBitmap(
+                swapsAxes ? info.Height : info.Width,
+                swapsAxes ? info.Width : info.Height,
+                SKColorType.Bgra8888,
+                SKAlphaType.Premul);
+            using (var canvas = new SKCanvas(oriented))
+            {
+                ApplyOrientation(canvas, codec.EncodedOrigin, info.Width, info.Height);
+                canvas.DrawBitmap(decoded, 0, 0);
+                canvas.Flush();
+            }
+            using var image = SKImage.FromBitmap(oriented);
+            using var encoded = image.Encode(SKEncodedImageFormat.Png, 100) ??
+                throw new RetainedProcessorException("image-ocr-rasterization-failed");
+            var png = encoded.ToArray();
+            if (png.Length == 0 || png.Length > MaximumPagePngBytes)
+                throw new RetainedProcessorException("image-ocr-raster-page-output-too-large");
+            return [new PdfRasterizedPage(0, png, sourceOrientationDegrees, info.Width, info.Height, sourceTransform)];
+        }
+        catch (RetainedProcessorException)
+        {
+            throw;
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException and not OutOfMemoryException and not StackOverflowException)
+        {
+            throw new RetainedProcessorException("image-ocr-rasterization-failed");
+        }
+    }
+
+    private static void ApplyOrientation(SKCanvas canvas, SKEncodedOrigin origin, int width, int height)
+    {
+        switch (origin)
+        {
+            case SKEncodedOrigin.BottomRight:
+                canvas.Translate(width, height); canvas.RotateDegrees(180); break;
+            case SKEncodedOrigin.RightTop:
+                canvas.Translate(height, 0); canvas.RotateDegrees(90); break;
+            case SKEncodedOrigin.LeftBottom:
+                canvas.Translate(0, width); canvas.RotateDegrees(-90); break;
         }
     }
 

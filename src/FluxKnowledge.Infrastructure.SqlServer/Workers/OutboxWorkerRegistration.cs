@@ -60,6 +60,7 @@ public static class OutboxWorkerServiceCollectionExtensions
         services.TryAddEnumerable(ServiceDescriptor.Singleton<ILocalSourceCapabilityHandler, OoxmlStructuralTextCapabilityHandler>());
         services.TryAddEnumerable(ServiceDescriptor.Singleton<ILocalSourceCapabilityHandler, VisioDocumentInputProcessor>());
         services.TryAddEnumerable(ServiceDescriptor.Singleton<ILocalSourceCapabilityHandler, PdfDocumentCapabilityHandler>());
+        services.TryAddEnumerable(ServiceDescriptor.Singleton<ILocalSourceCapabilityHandler, ImageDocumentInputCapabilityHandler>());
         services.TryAddEnumerable(ServiceDescriptor.Singleton<ILocalSourceCapabilityHandler, RetainedCsharpCodeCapabilityHandler>());
         services.TryAddEnumerable(ServiceDescriptor.Singleton<ILocalSourceCapabilityHandler, MediaMetadataCapabilityHandler>());
         services.TryAddSingleton<ILocalSourceCapabilityHandlerRegistry>(provider => new LocalSourceCapabilityHandlerRegistry(
@@ -94,6 +95,7 @@ public static class OutboxWorkerServiceCollectionExtensions
         services.TryAddScoped<OoxmlStructuralTextProcessor>();
         services.TryAddScoped<VisioDocumentInputProcessor>();
         services.TryAddScoped<PdfDocumentProcessor>();
+        services.TryAddScoped<ImageDocumentInputProcessor>();
         services.TryAddScoped<MediaMetadataRetainedProcessor>();
         services.TryAddScoped(provider => new RetainedCsharpCodeProcessor(
             provider.GetRequiredService<IRetainedSourceReader>(),

@@ -2,6 +2,7 @@ using FluxKnowledge.Application.Contracts;
 using FluxKnowledge.Application.Documents;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Sources;
+using FluxKnowledge.Domain.Jobs;
 using FluxKnowledge.Domain.Pipeline;
 using FluxKnowledge.Domain.Sources;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
@@ -132,6 +133,118 @@ public sealed class SourceRootProjectionReaderIntegrationTests(NativeSqlServerFi
         Assert.Equal(recordId, file.CorpusPipelineRecordId);
         Assert.DoesNotContain(detail.DeferredOrBlockedReasons,
             value => value.Reason == "vsdx-structural-extraction-pending");
+    }
+
+    [NativeSqlServerFact]
+    public async Task Logical_document_statuses_show_no_content_metadata_only_and_failed_replacement_truthfully()
+    {
+        var now = DateTimeOffset.Parse("2026-09-21T04:00:00+00:00");
+        var rootId = Guid.NewGuid();
+        var noContentOwnerId = Guid.NewGuid();
+        var metadataOwnerId = Guid.NewGuid();
+        var failedOwnerId = Guid.NewGuid();
+        var blockedOwnerId = Guid.NewGuid();
+        Guid blockedLastGoodRecordId;
+        var factory = new TestDbContextFactory(_fixture.ConnectionString);
+        await using (var setup = factory.CreateDbContext())
+        {
+            setup.SourceRootConfigurations.Add(new SourceRootConfigurationEntity
+            {
+                Id = rootId, CanonicalPath = $"E:\\logical-status-tests\\{rootId:N}", DisplayName = "Logical status",
+                State = (int)SourceRootState.Enabled, Recursive = true, IncludePatternsJson = "[]",
+                ExcludePatternsJson = "[]", AllowedClassificationsJson = "[]", MaximumFileBytes = 256L * 1024 * 1024,
+                ReconciliationCadenceSeconds = 900, ConfigurationRevision = 1, CreatedAtUtc = now, UpdatedAtUtc = now
+            });
+            setup.SourceRevisions.AddRange(
+                Owner(noContentOwnerId, "empty.docx", "OoxmlDocumentContainer"),
+                Owner(metadataOwnerId, "scan.png", "DeferredCapability"),
+                Owner(failedOwnerId, "replacement.pdf", "PdfDocumentContainer"),
+                Owner(blockedOwnerId, "blocked-before-child.pdf", "PdfDocumentContainer"));
+
+            var noContentActivity = BranchActivity(noContentOwnerId, OoxmlStructuralTextProcessor.Capability);
+            var noContentBranch = Branch(noContentOwnerId, noContentActivity.Id, OoxmlStructuralTextProcessor.Capability, now);
+            noContentBranch.CompletedMemberCount = 0;
+            setup.SourceActivities.Add(noContentActivity);
+            setup.SourceProcessorBranches.Add(noContentBranch);
+            setup.SourceProcessorBranchMembers.Add(new SourceProcessorBranchMemberEntity
+            {
+                Id = Guid.NewGuid(), BranchId = noContentBranch.Id, MemberFingerprint = new string('1', 64),
+                Disposition = "skipped", ReasonCode = "office-document-no-extractable-text", CreatedAtUtc = now
+            });
+
+            AddPublishedChild(
+                setup, metadataOwnerId, OriginKind: 3, MediaMetadataRetainedProcessor.Capability, now, "metadata");
+            AddPublishedChild(
+                setup, failedOwnerId, OriginKind: 2, PdfDocumentProcessor.Capability, now, "last-good");
+            var failedChild = AddChild(
+                setup, failedOwnerId, OriginKind: 2, ImageDocumentInputProcessor.Capability, now.AddMinutes(1), "failed");
+            setup.Jobs.Add(new JobEntity
+            {
+                Id = Guid.NewGuid(), PipelineRecordId = failedChild.RecordId, SourceRevision = 1,
+                Stage = (int)PipelineStage.Extract, Operation = "extract-document",
+                PublicState = (int)PublicJobState.Failed, Reason = "document-ocr-provider-refused", DueAtUtc = now
+            });
+            var lastGoodBeforeBlocked = AddPublishedChild(
+                setup, blockedOwnerId, OriginKind: 2, PdfDocumentProcessor.Capability, now, "last-good");
+            blockedLastGoodRecordId = lastGoodBeforeBlocked.RecordId;
+            var blockedActivity = BranchActivity(blockedOwnerId, ImageDocumentInputProcessor.Capability);
+            var blockedBranch = Branch(
+                blockedOwnerId,
+                blockedActivity.Id,
+                ImageDocumentInputProcessor.Capability,
+                now.AddMinutes(1));
+            blockedBranch.State = (int)RetainedProcessorBranchState.Blocked;
+            blockedBranch.CompletedMemberCount = 0;
+            blockedBranch.LeaseGeneration = 1;
+            blockedBranch.AttemptCount = 1;
+            blockedActivity.CreatedAtUtc = now.AddMinutes(1);
+            blockedActivity.UpdatedAtUtc = now.AddMinutes(1);
+            setup.SourceActivities.Add(blockedActivity);
+            setup.SourceProcessorBranches.Add(blockedBranch);
+            setup.SourceProcessorAttempts.Add(new SourceProcessorAttemptEntity
+            {
+                Id = Guid.NewGuid(), BranchId = blockedBranch.Id, LeaseGeneration = 1,
+                StartedAtUtc = now.AddMinutes(1), FinishedAtUtc = now.AddMinutes(1),
+                OutcomeCode = "retained-artifact-checksum-invalid"
+            });
+            setup.SourceScanRequests.Add(new SourceScanRequestEntity
+            {
+                Id = Guid.NewGuid(), SourceRootId = rootId, RequestKind = 0, RequestedBy = "test", RequestedAtUtc = now,
+                IsReleased = true, ReleasedAtUtc = now, State = (int)SourceScanRequestState.Completed, DiscoveredFileCount = 4
+            });
+            await setup.SaveChangesAsync();
+
+            SourceRevisionEntity Owner(Guid id, string fileName, string classification) => new()
+            {
+                Id = id, SourceRootId = rootId, StableSourceIdentity = $"owner:{id:N}", Revision = 1,
+                ContentSha256 = new string('a', 64), CanonicalPath = $"E:\\logical-status-tests\\{rootId:N}\\{fileName}",
+                Classification = classification, Extension = Path.GetExtension(fileName), ByteLength = 4, DiscoveredAtUtc = now
+            };
+        }
+
+        var reader = new SourceRootProjectionReader(factory, new NoPathPolicy(), new NoEnumeration(),
+            new LocalSourceCapabilityHandlerRegistry([]));
+        var detail = await reader.ReadRootAsync(rootId, CancellationToken.None);
+
+        Assert.NotNull(detail);
+        var noContent = Assert.Single(detail.Files, value => value.FileName == "empty.docx");
+        Assert.Equal("Completed", noContent.Status);
+        Assert.Equal("office-document-no-extractable-text", noContent.Reason);
+        Assert.Null(noContent.CorpusPipelineRecordId);
+        var metadata = Assert.Single(detail.Files, value => value.FileName == "scan.png");
+        Assert.Equal("Metadata only", metadata.Status);
+        Assert.Equal("media-metadata-only", metadata.Reason);
+        var failed = Assert.Single(detail.Files, value => value.FileName == "replacement.pdf");
+        Assert.Equal("Failed", failed.Status);
+        Assert.Equal("document-ocr-provider-refused", failed.Reason);
+        Assert.NotNull(failed.CorpusPipelineRecordId);
+        var blocked = Assert.Single(detail.Files, value => value.FileName == "blocked-before-child.pdf");
+        Assert.Equal("Blocked", blocked.Status);
+        Assert.Equal("retained-artifact-checksum-invalid", blocked.Reason);
+        Assert.Equal(blockedLastGoodRecordId, blocked.CorpusPipelineRecordId);
+        Assert.Equal(0, detail.IndexedCount);
+        Assert.Equal(1, detail.BlockedCount);
+        Assert.Equal(1, detail.ErrorCount);
     }
 
     [NativeSqlServerFact]
@@ -576,6 +689,100 @@ public sealed class SourceRootProjectionReaderIntegrationTests(NativeSqlServerFi
             value.Reason == "office-document-part-unsupported" || value.Reason == "historic-pdf-parser-unavailable");
     }
 
+    private static SourceActivityEntity BranchActivity(
+        Guid ownerId,
+        SourceCapabilityDescriptor capability) => new()
+    {
+        Id = Guid.NewGuid(), SourceRevisionId = ownerId, ActivityKind = (int)capability.AcceptedActivityKind,
+        ExecutionClass = (int)ExecutionClass.InProcess, ProcessorVersion = capability.ProcessorVersion,
+        DescriptorFingerprint = capability.ProcessorFingerprint, InputFingerprint = new string('a', 64),
+        State = (int)SourceActivityState.Completed, CreatedAtUtc = DateTimeOffset.UnixEpoch,
+        UpdatedAtUtc = DateTimeOffset.UnixEpoch
+    };
+
+    private static SourceProcessorBranchEntity Branch(
+        Guid ownerId,
+        Guid activityId,
+        SourceCapabilityDescriptor capability,
+        DateTimeOffset createdAtUtc) => new()
+    {
+        Id = Guid.NewGuid(), SourceActivityId = activityId, SourceRevisionId = ownerId,
+        InputSha256 = new string('a', 64), ProcessorVersion = capability.ProcessorVersion,
+        ProcessorFingerprint = capability.ProcessorFingerprint, State = (int)RetainedProcessorBranchState.Completed,
+        CompletedMemberCount = 1, CreatedAtUtc = createdAtUtc, UpdatedAtUtc = createdAtUtc
+    };
+
+    private static LogicalChild AddChild(
+        FluxKnowledgeDbContext setup,
+        Guid ownerId,
+        int OriginKind,
+        SourceCapabilityDescriptor capability,
+        DateTimeOffset createdAtUtc,
+        string name)
+    {
+        var childId = Guid.NewGuid();
+        var activity = BranchActivity(ownerId, capability);
+        var branch = Branch(ownerId, activity.Id, capability, createdAtUtc);
+        var childActivityId = Guid.NewGuid();
+        var identityId = Guid.NewGuid();
+        var recordId = Guid.NewGuid();
+        var childHash = new string(name switch { "metadata" => 'b', "last-good" => 'c', _ => 'd' }, 64);
+        setup.SourceActivities.AddRange(activity, new SourceActivityEntity
+        {
+            Id = childActivityId, SourceRevisionId = childId, ActivityKind = (int)SourceActivityKind.TextExtraction,
+            ExecutionClass = (int)ExecutionClass.InProcess, ProcessorVersion = "phase-3a-v1",
+            InputFingerprint = childHash, State = (int)SourceActivityState.Completed,
+            ResultingPipelineRecordId = recordId, ResultingPipelineRecordRevision = 1,
+            CreatedAtUtc = createdAtUtc, UpdatedAtUtc = createdAtUtc
+        });
+        setup.SourceProcessorBranches.Add(branch);
+        setup.SourceRevisions.Add(new SourceRevisionEntity
+        {
+            Id = childId, SourceRootId = setup.SourceRevisions.Local.Single(value => value.Id == ownerId).SourceRootId,
+            StableSourceIdentity = $"child:{name}:{childId:N}", Revision = 1, ContentSha256 = childHash,
+            CanonicalPath = $"retained://{name}/{childId:N}", ParentSourceRevisionId = ownerId, Classification = "AcceptedUtf8Text",
+            Extension = OriginKind == 3 ? ".json" : ".txt", OriginKind = OriginKind, ByteLength = 4,
+            DiscoveredAtUtc = createdAtUtc
+        });
+        setup.SourceProcessorBranchMembers.Add(new SourceProcessorBranchMemberEntity
+        {
+            Id = Guid.NewGuid(), BranchId = branch.Id, MemberFingerprint = new string('c', 64),
+            ChildSourceRevisionId = childId, ChildSourceActivityId = childActivityId,
+            Disposition = "completed", ByteLength = 4, CreatedAtUtc = createdAtUtc
+        });
+        setup.SourceIdentities.Add(new SourceIdentityEntity
+        {
+            Id = identityId, SourceKind = "retained local source", StableKey = $"logical:{name}:{childId:N}",
+            CreatedAtUtc = createdAtUtc
+        });
+        setup.PipelineRecords.Add(new PipelineRecordEntity
+        {
+            Id = recordId, SourceIdentityId = identityId, SourceRevisionId = childId, Revision = 1,
+            ContentHash = childHash, RootLineageRecordId = recordId,
+            CurrentStage = (int)PipelineStage.Publish, RegisteredAtUtc = createdAtUtc
+        });
+        return new LogicalChild(branch.Id, childId, recordId);
+    }
+
+    private static LogicalChild AddPublishedChild(
+        FluxKnowledgeDbContext setup,
+        Guid ownerId,
+        int OriginKind,
+        SourceCapabilityDescriptor capability,
+        DateTimeOffset createdAtUtc,
+        string name)
+    {
+        var child = AddChild(setup, ownerId, OriginKind, capability, createdAtUtc, name);
+        setup.DocumentPublications.Add(new DocumentPublicationEntity
+        {
+            OwnerSourceRevisionId = ownerId, DocumentInputSourceRevisionId = child.ChildId,
+            SourceProcessorBranchId = child.BranchId, PipelineRecordId = child.RecordId,
+            PipelineRecordRevision = 1, ProcessorFingerprint = capability.ProcessorFingerprint,
+            PublishedAtUtc = createdAtUtc
+        });
+        return child;
+    }
+
     private static SourceRevisionEntity Revision(
         Guid id,
         Guid rootId,
@@ -646,4 +853,6 @@ public sealed class SourceRootProjectionReaderIntegrationTests(NativeSqlServerFi
             yield break;
         }
     }
+
+    private sealed record LogicalChild(Guid BranchId, Guid ChildId, Guid RecordId);
 }

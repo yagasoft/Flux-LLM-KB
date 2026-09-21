@@ -137,6 +137,22 @@ public sealed class SourceReconciliationServiceTests
         Assert.Equal(3, control.ClaimAttempts);
     }
 
+    [Fact]
+    public async Task Simultaneous_timer_and_wake_completion_preserves_the_consumed_wake()
+    {
+        using var waitCancellation = new CancellationTokenSource();
+        var timer = Task.FromResult(true);
+        var wake = Task.CompletedTask;
+
+        var woke = await SourceReconciliationService.WaitForTimerOrWakeAsync(
+            timer,
+            wake,
+            waitCancellation,
+            CancellationToken.None);
+
+        Assert.True(woke);
+    }
+
     private static async Task WaitUntilAsync(Func<bool> condition, TimeSpan timeout)
     {
         var deadline = DateTime.UtcNow + timeout;
