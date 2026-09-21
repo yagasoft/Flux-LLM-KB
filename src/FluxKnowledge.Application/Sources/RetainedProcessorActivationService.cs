@@ -13,7 +13,7 @@ public sealed class RetainedProcessorActivationService
     private readonly ZipArchiveRetainedProcessor _zipProcessor;
     private readonly TarArchiveRetainedProcessor? _tarProcessor;
     private readonly OoxmlStructuralTextProcessor? _ooxmlProcessor;
-    private readonly VsdxStructuralTextProcessor? _vsdxProcessor;
+    private readonly VisioDocumentInputProcessor? _visioProcessor;
     private readonly PdfDocumentProcessor? _pdfProcessor;
     private readonly RetainedCsharpCodeProcessor? _csharpProcessor;
     private readonly MediaMetadataRetainedProcessor? _mediaMetadataProcessor;
@@ -38,7 +38,7 @@ public sealed class RetainedProcessorActivationService
         TarArchiveRetainedProcessor? tarProcessor = null,
         IStatusEventPublisher? statusEvents = null,
         OoxmlStructuralTextProcessor? ooxmlProcessor = null,
-        VsdxStructuralTextProcessor? vsdxProcessor = null,
+        VisioDocumentInputProcessor? visioProcessor = null,
         RetainedCsharpCodeProcessor? csharpProcessor = null,
         MediaMetadataRetainedProcessor? mediaMetadataProcessor = null,
         PdfDocumentProcessor? pdfProcessor = null)
@@ -50,7 +50,7 @@ public sealed class RetainedProcessorActivationService
         _zipProcessor = zipProcessor;
         _tarProcessor = tarProcessor;
         _ooxmlProcessor = ooxmlProcessor;
-        _vsdxProcessor = vsdxProcessor;
+        _visioProcessor = visioProcessor;
         _pdfProcessor = pdfProcessor;
         _csharpProcessor = csharpProcessor;
         _mediaMetadataProcessor = mediaMetadataProcessor;
@@ -80,6 +80,20 @@ public sealed class RetainedProcessorActivationService
             var ooxml = _ooxmlProcessor ?? throw new InvalidOperationException("The explicitly enabled OOXML processor is not registered.");
             runs.Add(await RunProcessorAsync(OoxmlStructuralTextProcessor.Capability, OoxmlStructuralTextProcessor.IsLikelyOoxml,
                 ooxml.ProcessAsync, "ooxml", cancellationToken).ConfigureAwait(false));
+        }
+        if (_visioProcessor is not null)
+        {
+            runs.Add(await RunProcessorAsync(VisioDocumentInputProcessor.Capability,
+                static (candidate, bytes) =>
+                    string.Equals(candidate.Extension, ".vsdx", StringComparison.OrdinalIgnoreCase) &&
+                    ZipArchiveRetainedProcessor.IsZipSignature(bytes),
+                (claim, retained, _, token) => _visioProcessor.ProcessAsync(claim, retained, token),
+                "visio", cancellationToken).ConfigureAwait(false));
+        }
+        if (_pdfProcessor is not null)
+        {
+            runs.Add(await RunProcessorAsync(PdfDocumentProcessor.Capability, PdfDocumentProcessor.IsLikelyPdf,
+                _pdfProcessor.ProcessAsync, "pdf", cancellationToken).ConfigureAwait(false));
         }
         if (_options.MediaMetadataEnabled)
         {

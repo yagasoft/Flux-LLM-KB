@@ -9,6 +9,7 @@ using FluxKnowledge.Domain.Pipeline;
 using FluxKnowledge.Domain.Sources;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
+using FluxKnowledge.Infrastructure.SqlServer.Workers;
 using FluxKnowledge.Integration.Tests.Support;
 using Microsoft.EntityFrameworkCore;
 using Xunit;
@@ -387,6 +388,73 @@ public sealed class VisioScopedPipelineIntegrationTests(NativeSqlServerFixture f
     }
 
     [NativeSqlServerFact]
+    public async Task Scheduled_selection_skips_a_terminal_failure_and_selects_the_next_prepared_document()
+    {
+        var first = (await SeedAsync(RetainedProcessorBranchState.Blocked)).Request;
+        var factory = SqlTestData.CreateFactory(fixture);
+        var firstBranch = await CompleteCurrentPreparationAsync(first, factory);
+        await new SqlRetainedTextRegistrationStore(factory, TimeProvider.System).RegisterVisioBranchAsync(first, firstBranch, default);
+        await using (var fail = await factory.CreateDbContextAsync())
+        {
+            await fail.Jobs.Where(job => job.Operation == PipelineOperations.ExtractVisio)
+                .ExecuteUpdateAsync(set => set.SetProperty(job => job.PublicState, (int)FluxKnowledge.Domain.Jobs.PublicJobState.Failed));
+        }
+
+        var second = (await SeedAsync(RetainedProcessorBranchState.Blocked)).Request;
+        await CompleteCurrentPreparationAsync(second, factory);
+
+        var selected = await VisioDocumentPipelineRunner.ReadNextRequestAsync(factory, default);
+
+        Assert.NotNull(selected);
+        Assert.Equal(second.SourceRevisionId, selected.SourceRevisionId);
+    }
+
+    [NativeSqlServerTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Scheduled_selection_drains_an_expired_execution_for_a_deleting_or_suppressed_source(bool suppressOwner)
+    {
+        var request = (await SeedAsync(RetainedProcessorBranchState.Blocked)).Request;
+        var factory = SqlTestData.CreateFactory(fixture);
+        var branchId = await CompleteCurrentPreparationAsync(request, factory);
+        await new SqlRetainedTextRegistrationStore(factory, TimeProvider.System).RegisterVisioBranchAsync(request, branchId, default);
+        var now = DateTimeOffset.UtcNow.AddSeconds(1);
+        var dispatch = (await new SqlOutboxStore(factory).ClaimVisioDocumentAsync(
+            request, branchId, "desktop", now, TimeSpan.FromMinutes(12), default))!;
+        Assert.NotNull(await new SqlJobClaimStore(factory).ClaimForDispatchAsync(
+            dispatch, "desktop", now, TimeSpan.FromMinutes(12), default));
+        await using (var drain = await factory.CreateDbContextAsync())
+        {
+            if (suppressOwner)
+            {
+                await drain.SourceRevisions.Where(revision => revision.Id == request.SourceRevisionId.Value)
+                    .ExecuteUpdateAsync(set => set.SetProperty(revision => revision.SuppressedAtUtc, DateTimeOffset.UtcNow));
+            }
+            else
+            {
+                await drain.SourceRootConfigurations.ExecuteUpdateAsync(set => set.SetProperty(
+                    root => root.State, (int)SourceRootState.Deleting));
+            }
+            await drain.Jobs.ExecuteUpdateAsync(set => set.SetProperty(
+                job => job.LeaseExpiresAtUtc, DateTimeOffset.UtcNow.AddMinutes(-1)));
+            await drain.OutboxMessages.ExecuteUpdateAsync(set => set.SetProperty(
+                message => message.LeaseExpiresAtUtc, DateTimeOffset.UtcNow.AddMinutes(-1)));
+        }
+
+        var selected = await VisioDocumentPipelineRunner.ReadNextRequestAsync(factory, default);
+
+        Assert.NotNull(selected);
+        Assert.Equal(request.SourceRevisionId, selected.SourceRevisionId);
+        using var reader = new SqlRetainedSourceReader(factory, Path.GetTempPath());
+        Assert.Equal(0, await VisioDocumentPipelineRunner.ExecuteAsync(
+            request, factory, reader, new UnavailableVisioExtractor(), TextWriter.Null, default, Path.GetTempPath()));
+        await using var settled = await factory.CreateDbContextAsync();
+        Assert.Equal((int)FluxKnowledge.Domain.Jobs.PublicJobState.Failed,
+            await settled.Jobs.Where(job => job.Operation == PipelineOperations.ExtractVisio)
+                .Select(job => job.PublicState).SingleAsync());
+    }
+
+    [NativeSqlServerFact]
     public async Task Exact_branch_links_one_document_and_never_claims_a_different_owner_or_branch()
     {
         var (request, _) = await SeedAsync(RetainedProcessorBranchState.Blocked);
@@ -439,7 +507,7 @@ public sealed class VisioScopedPipelineIntegrationTests(NativeSqlServerFixture f
         await using var context = await SqlTestData.CreateFactory(fixture).CreateDbContextAsync();
         context.SourceRootConfigurations.Add(new SourceRootConfigurationEntity
         {
-            Id = rootId, CanonicalPath = "C:\\visio-scope", DisplayName = "Visio scope", State = (int)SourceRootState.Enabled,
+            Id = rootId, CanonicalPath = $"C:\\visio-scope\\{rootId:N}", DisplayName = "Visio scope", State = (int)SourceRootState.Enabled,
             Recursive = true, IncludePatternsJson = "[]", ExcludePatternsJson = "[]", AllowedClassificationsJson = "[]",
             MaximumFileBytes = 1024 * 1024, ReconciliationCadenceSeconds = 900, ConfigurationRevision = 1,
             CreatedAtUtc = now, UpdatedAtUtc = now
@@ -468,14 +536,41 @@ public sealed class VisioScopedPipelineIntegrationTests(NativeSqlServerFixture f
             ProcessorVersion = "phase-6-vsdx-structural-v1", ProcessorFingerprint = "phase-6-vsdx-retained-structural-v1",
             State = (int)state, CreatedAtUtc = now, UpdatedAtUtc = now
         });
-        context.SourceCapabilities.Add(new SourceCapabilityEntity
+        if (!await context.SourceCapabilities.AnyAsync(row => row.Id == CapabilityId))
         {
-            Id = CapabilityId, ProcessorKind = "document-vsdx-visio-extract", ProcessorVersion = "phase-6-vsdx-visio-v2",
-            ProcessorFingerprint = Fingerprint, ExecutionClass = (int)ExecutionClass.InProcess,
-            OutputContract = "retained:document-vsdx-visio-extract", IsRunnable = true,
-            RegisteredBy = "visio-test", RegisteredAtUtc = now
-        });
+            context.SourceCapabilities.Add(new SourceCapabilityEntity
+            {
+                Id = CapabilityId, ProcessorKind = "document-vsdx-visio-extract", ProcessorVersion = "phase-6-vsdx-visio-v2",
+                ProcessorFingerprint = Fingerprint, ExecutionClass = (int)ExecutionClass.InProcess,
+                OutputContract = "retained:document-vsdx-visio-extract", IsRunnable = true,
+                RegisteredBy = "visio-test", RegisteredAtUtc = now
+            });
+        }
         await context.SaveChangesAsync();
         return (new DocumentReprocessRequest(new SourceRevisionId(revisionId), hash, Fingerprint), branchId);
+    }
+
+    private static async Task<Guid> CompleteCurrentPreparationAsync(
+        DocumentReprocessRequest request,
+        IDbContextFactory<FluxKnowledgeDbContext> factory)
+    {
+        var branches = new SqlRetainedProcessorBranchStore(factory, TimeProvider.System);
+        var branchId = (await branches.RequestDocumentReprocessAsync(request, default)).SuccessorBranchId!.Value;
+        var claim = (await branches.ClaimDocumentBranchAsync(branchId, request.SourceRevisionId,
+            request.ExpectedInputSha256, request.ExpectedProcessorFingerprint, "desktop", default))!;
+        var child = DocumentProcessingInput.CreateVisioChild(claim,
+            new RetainedSourceBytes(request.SourceRevisionId, [1, 2, 3, 4], request.ExpectedInputSha256, 4));
+        Assert.True(await branches.CommitAsync(claim, new RetainedProcessorCompletion([child], new string('c', 64)), default));
+        return branchId;
+    }
+
+    private sealed class UnavailableVisioExtractor : IVisioDocumentExtractor
+    {
+        public string? GetUnavailableReason() => "visio-unavailable-for-test";
+
+        public ValueTask<VisioDocumentResult> ExtractAsync(
+            RetainedSourceBytes retained,
+            CancellationToken cancellationToken) =>
+            ValueTask.FromException<VisioDocumentResult>(new InvalidOperationException("Extraction must not run during recovery."));
     }
 }

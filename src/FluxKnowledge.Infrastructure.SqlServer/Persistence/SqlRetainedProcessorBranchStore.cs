@@ -974,7 +974,7 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
         var extensions = capability.ProcessorKind switch
         {
             "document-ooxml-structural-extract" => new[] { ".docx", ".xlsx", ".pptx" },
-            "document-vsdx-structural-extract" => new[] { ".vsdx" },
+            "document-vsdx-structural-extract" or "document-vsdx-visio-extract" => new[] { ".vsdx" },
             "document-pdf-structural-extract" => new[] { ".pdf" },
             "retained-csharp-code" => new[] { ".cs" },
             "media-metadata" => new[] { ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tif", ".tiff", ".webp", ".mp3", ".wav", ".mov", ".mp4", ".m4v" },
@@ -996,7 +996,7 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
                                 EF.Functions.Collate(activity.InputFingerprint, SchemaConfiguration.SchedulerFenceCollation) &&
                             !context.SourceProcessorBranches.Any(branch => branch.SourceActivityId == activity.Id)
                       select new { activity, revision, artifact };
-        if (capability.ProcessorKind is "document-ooxml-structural-extract" or "document-vsdx-structural-extract" or "document-pdf-structural-extract")
+        if (capability.ProcessorKind is "document-ooxml-structural-extract" or "document-vsdx-structural-extract" or "document-vsdx-visio-extract" or "document-pdf-structural-extract")
             candidates = candidates.Where(value => extensions.Contains(value.revision.Extension.ToLower()));
         else if (capability.ProcessorKind == "media-metadata")
             candidates = candidates.Where(value => extensions.Contains(value.revision.Extension.ToLower()));
@@ -1781,8 +1781,8 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
                   AND ({processorFingerprint} IS NULL OR [ProcessorFingerprint] = {processorFingerprint})
                   AND [ProcessorFingerprint] <> {RetainedCsharpCodeProcessor.Capability.ProcessorFingerprint}
                   AND [ProcessorFingerprint] <> {VsdxStructuralTextProcessor.Capability.ProcessorFingerprint}
-                  AND [ProcessorFingerprint] <> {PdfDocumentProcessor.Capability.ProcessorFingerprint}
-                  AND [ProcessorFingerprint] <> {VisioDocumentInputProcessor.Capability.ProcessorFingerprint}
+                  AND ({processorFingerprint} IS NOT NULL OR [ProcessorFingerprint] <> {PdfDocumentProcessor.Capability.ProcessorFingerprint})
+                  AND ({processorFingerprint} IS NOT NULL OR [ProcessorFingerprint] <> {VisioDocumentInputProcessor.Capability.ProcessorFingerprint})
                   AND NOT EXISTS (
                       SELECT 1
                       FROM [SourceProcessorForceRequests] AS [force] WITH (UPDLOCK, HOLDLOCK)

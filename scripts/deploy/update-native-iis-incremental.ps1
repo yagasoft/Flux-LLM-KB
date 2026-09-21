@@ -18,6 +18,8 @@ $CanonicalDeployRoot = "$CanonicalLiveRoot\App"
 $CanonicalRecoveryRoot = "$CanonicalLiveRoot\Recovery"
 $IncrementalRecoveryRoot = "$CanonicalRecoveryRoot\IncrementalUpdates"
 $ValidationHoldPath = "$CanonicalLiveRoot\Runtime\deployment-validation-hold.json"
+$InteractiveHostRoot = "C:\inetpub\FluxKnowledge\outlook-host"
+$InteractiveHostTaskName = "FluxKnowledge.OutlookHost"
 $SourceDeletionMigrationBaseline = "20260826160702_AddEmptyCatalogueReadiness"
 $SourceDeletionMigrationTarget = "20260918121829_AddSourceDeletionOperations"
 $SourceDeletionMigrationScriptSha256 = "355F7B8499D0CE333E6FA50142B76C9F7B6CA92B3057A5F1A740C794756ABC90"
@@ -113,6 +115,73 @@ function Invoke-CandidatePayloadActivation {
     }
     Test-ApplicationPayload -Path $ApplicationRoot
     Assert-ApplicationPayloadReadAccess -Path $ApplicationRoot
+}
+
+function Test-InteractiveHostPayload {
+    param([Parameter(Mandatory)][string]$Path)
+
+    foreach ($requiredFile in @("FluxKnowledge.OutlookHost.exe", "FluxKnowledge.OutlookHost.runtimeconfig.json", "run-outlook-host.ps1")) {
+        if (-not (Test-Path -LiteralPath (Join-Path $Path $requiredFile) -PathType Leaf)) {
+            throw "The staged interactive-host payload is missing $requiredFile."
+        }
+    }
+}
+
+function Publish-InteractiveHostCandidate {
+    param(
+        [Parameter(Mandatory)][string]$SourceRoot,
+        [Parameter(Mandatory)][string]$CandidateRoot
+    )
+
+    $project = Join-Path $SourceRoot "src\FluxKnowledge.OutlookHost\FluxKnowledge.OutlookHost.csproj"
+    & dotnet publish $project -c Release --no-restore --nologo -o $CandidateRoot
+    if ($LASTEXITCODE -ne 0) {
+        throw "Publishing the interactive-host candidate failed."
+    }
+    Copy-Item -LiteralPath (Join-Path $SourceRoot "scripts\deploy\run-outlook-host.ps1") `
+        -Destination (Join-Path $CandidateRoot "run-outlook-host.ps1") -Force
+    Test-InteractiveHostPayload -Path $CandidateRoot
+}
+
+function Wait-InteractiveHostStopped {
+    param(
+        [Parameter(Mandatory)][string]$TaskName,
+        [Parameter(Mandatory)][int]$TimeoutSeconds
+    )
+
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    do {
+        $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop
+        if ($task.State -ne 'Running' -and
+            @(Get-Process -Name "FluxKnowledge.OutlookHost" -ErrorAction SilentlyContinue).Count -eq 0) {
+            return
+        }
+        Start-Sleep -Milliseconds 250
+    } while ([DateTime]::UtcNow -lt $deadline)
+    throw "The interactive host did not stop within $TimeoutSeconds seconds."
+}
+
+function Copy-InteractiveHostPayload {
+    param(
+        [Parameter(Mandatory)][string]$Source,
+        [Parameter(Mandatory)][string]$Destination
+    )
+
+    New-Item -ItemType Directory -Path $Destination -Force | Out-Null
+    $output = @(& robocopy $Source $Destination /MIR /COPY:DAT /DCOPY:DAT /XJ /R:0 /W:0 /NFL /NDL /NP 2>&1)
+    if ($LASTEXITCODE -gt 7) {
+        throw "Copying the interactive-host payload failed with robocopy exit code $LASTEXITCODE."
+    }
+    Test-InteractiveHostPayload -Path $Destination
+}
+
+function Restore-InteractiveHostPayload {
+    param(
+        [Parameter(Mandatory)][string]$PreviousRoot,
+        [Parameter(Mandatory)][string]$LiveRoot
+    )
+
+    Copy-InteractiveHostPayload -Source $PreviousRoot -Destination $LiveRoot
 }
 
 function Invoke-RequiredLoopbackProbes {
@@ -507,13 +576,16 @@ if ($PlanOnly) {
         site_name = "FluxKnowledge"
         site_url = "http://127.0.0.1:5137"
         application_root = $CanonicalDeployRoot
+        interactive_host_root = $InteractiveHostRoot
+        interactive_host_task = $InteractiveHostTaskName
+        interactive_host_activation = "next ordinary scheduled run; never triggered by deployment"
         recovery_root = $CanonicalRecoveryRoot
         migrations = [bool]$ApplyMigrations
         migration_plan = $migrationPlan
         clean_slate = $false
         preserved = @("Config", "Data", "Runtime", "Recovery", "CodexPlugin")
         payload_acl = "inherit-from-live-root"
-        rollback = "automatic-application-payload-restore"
+        rollback = "automatic-application-and-interactive-host-payload-restore"
         deployment_validation_hold = $true
         candidate_validation = if ($DeferReadinessForScopedRemediation) {
             "held-live-and-index-health probes, exact-ready-503 and unchanged-retained-pipeline-state"
@@ -541,6 +613,10 @@ $SourceRoot = (Resolve-Path -LiteralPath $SourceRoot -ErrorAction Stop).Path
 $webProject = Join-Path $SourceRoot "src\FluxKnowledge.Web\FluxKnowledge.Web.csproj"
 if (-not (Test-Path -LiteralPath $webProject -PathType Leaf)) {
     throw "The FluxKnowledge Web project is missing from SourceRoot."
+}
+$interactiveHostProject = Join-Path $SourceRoot "src\FluxKnowledge.OutlookHost\FluxKnowledge.OutlookHost.csproj"
+if (-not (Test-Path -LiteralPath $interactiveHostProject -PathType Leaf)) {
+    throw "The FluxKnowledge interactive-host project is missing from SourceRoot."
 }
 
 $sourceStatus = (& git -C $SourceRoot status --porcelain 2>&1 | Out-String).Trim()
@@ -570,6 +646,9 @@ $mutex = [Threading.Mutex]::new($false, "Global\FluxKnowledge.IncrementalIisUpda
 $leaseAcquired = $false
 $deploymentValidation = $null
 $releaseId = $null
+$interactiveHostMutationStarted = $false
+$interactiveHostTaskWasEnabled = $false
+$interactiveHostPreviousRoot = $null
 try {
     try {
         $leaseAcquired = $mutex.WaitOne([TimeSpan]::FromMinutes(1))
@@ -601,6 +680,8 @@ try {
     $candidateRoot = Join-Path $releaseRoot "candidate"
     $previousRoot = Join-Path $releaseRoot "previous"
     $failedRoot = Join-Path $releaseRoot "failed"
+    $interactiveHostCandidateRoot = Join-Path $releaseRoot "candidate-interactive-host"
+    $interactiveHostPreviousRoot = Join-Path $releaseRoot "previous-interactive-host"
     $deploymentValidation = @{ HoldCreated = $false; Baseline = $null; MigrationsApplied = $false; RollbackVerified = $true }
 
     & dotnet publish $webProject -c Release --no-restore --nologo -o $candidateRoot
@@ -608,6 +689,21 @@ try {
         throw "Publishing the incremental IIS candidate failed."
     }
     Test-ApplicationPayload -Path $candidateRoot
+    Publish-InteractiveHostCandidate -SourceRoot $SourceRoot -CandidateRoot $interactiveHostCandidateRoot
+    if (-not (Test-Path -LiteralPath $InteractiveHostRoot -PathType Container)) {
+        throw "The installed interactive-host payload root is missing."
+    }
+    Assert-NotReparsePoint -Path $InteractiveHostRoot -Message "The installed interactive-host payload root cannot be a reparse point."
+    Test-InteractiveHostPayload -Path $InteractiveHostRoot
+    $interactiveHostTask = Get-ScheduledTask -TaskName $InteractiveHostTaskName -ErrorAction Stop
+    $interactiveHostTaskWasEnabled = [bool]$interactiveHostTask.Settings.Enabled
+    if ($interactiveHostTaskWasEnabled) {
+        Disable-ScheduledTask -TaskName $InteractiveHostTaskName -ErrorAction Stop | Out-Null
+    }
+    Wait-InteractiveHostStopped -TaskName $InteractiveHostTaskName -TimeoutSeconds $ReadinessTimeoutSeconds
+    Copy-InteractiveHostPayload -Source $InteractiveHostRoot -Destination $interactiveHostPreviousRoot
+    $interactiveHostMutationStarted = $true
+    Copy-InteractiveHostPayload -Source $interactiveHostCandidateRoot -Destination $InteractiveHostRoot
     if ($ApplyMigrations) {
         $migrationPlan.Up = New-SourceDeletionMigrationScript -SourceRoot $SourceRoot -Direction up -OutputPath (Join-Path $releaseRoot "source-deletion-up.sql")
         $migrationPlan.Down = New-SourceDeletionMigrationScript -SourceRoot $SourceRoot -Direction down -OutputPath (Join-Path $releaseRoot "source-deletion-down.sql")
@@ -692,6 +788,9 @@ try {
     else {
         Invoke-RequiredLoopbackProbes -Origin $loopbackOrigin.Origin -TimeoutSeconds $ReadinessTimeoutSeconds
     }
+    if ($interactiveHostTaskWasEnabled) {
+        Enable-ScheduledTask -TaskName $InteractiveHostTaskName -ErrorAction Stop | Out-Null
+    }
 
     [ordered]@{
         ok = $true
@@ -708,6 +807,12 @@ try {
         else {
             "released-after-unchanged-state-validation"
         }
+        interactive_host = [ordered]@{
+            root = $InteractiveHostRoot
+            task = $InteractiveHostTaskName
+            activation = "next ordinary scheduled run; not triggered by deployment"
+            rollback_payload = $interactiveHostPreviousRoot
+        }
         readiness_remediation = if ($DeferReadinessForScopedRemediation) {
             "pending scoped source remediation"
         }
@@ -715,6 +820,22 @@ try {
             $null
         }
     } | ConvertTo-Json -Depth 3
+}
+catch {
+    if ($interactiveHostMutationStarted) {
+        if ($null -eq $interactiveHostPreviousRoot -or
+            -not (Test-Path -LiteralPath $interactiveHostPreviousRoot -PathType Container)) {
+            throw "Deployment failed after the interactive-host payload was mutated, and no rollback payload is available. The scheduled task remains disabled."
+        }
+        Test-InteractiveHostPayload -Path $interactiveHostPreviousRoot
+        Restore-InteractiveHostPayload -PreviousRoot $interactiveHostPreviousRoot -LiveRoot $InteractiveHostRoot
+        Test-InteractiveHostPayload -Path $InteractiveHostRoot
+        throw "Deployment failed after the interactive-host payload was mutated. The prior payload was restored and the scheduled task remains disabled for operator review."
+    }
+    if ($interactiveHostTaskWasEnabled -and -not $interactiveHostMutationStarted) {
+        Enable-ScheduledTask -TaskName $InteractiveHostTaskName -ErrorAction SilentlyContinue | Out-Null
+    }
+    throw
 }
 finally {
     if ($leaseAcquired -and $null -ne $deploymentValidation -and $deploymentValidation.HoldCreated -and

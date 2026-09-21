@@ -5,7 +5,11 @@ using System.Text;
 using FluxKnowledge.Application.Contracts;
 using FluxKnowledge.Application.Operations;
 using FluxKnowledge.Application.Ports;
+using FluxKnowledge.Application.Sources;
+using FluxKnowledge.Domain.Sources;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
+using FluxKnowledge.Infrastructure.SqlServer.Workers;
+using FluxKnowledge.Integrations.Documents;
 using Microsoft.EntityFrameworkCore;
 
 namespace FluxKnowledge.OutlookHost;
@@ -147,7 +151,9 @@ internal sealed class DefaultOutlookHostApplicationFactory : IOutlookHostApplica
             controlPlane,
             adapterFactory,
             diagnostics: diagnostics);
-        return new ComposedOutlookHostApplication(catchUp, browse, dispatcher, spoolRootPreflight);
+        var outlook = new ComposedOutlookHostApplication(catchUp, browse, dispatcher, spoolRootPreflight);
+        var visio = new PendingVisioDocumentRunner(contextFactory, liveRoot.RetainedRoot);
+        return new DesktopHostApplication(visio, outlook);
     }
 
     private sealed class OutlookDbContextFactory(DbContextOptions<FluxKnowledgeDbContext> options)
@@ -160,6 +166,58 @@ internal sealed class DefaultOutlookHostApplicationFactory : IOutlookHostApplica
             cancellationToken.ThrowIfCancellationRequested();
             return Task.FromResult(CreateDbContext());
         }
+    }
+}
+
+internal interface IPendingVisioDocumentRunner
+{
+    ValueTask<bool> RunOneAsync(CancellationToken cancellationToken);
+}
+
+internal sealed class DesktopHostApplication(
+    IPendingVisioDocumentRunner visio,
+    IOutlookHostApplication outlook) : IOutlookHostApplication
+{
+    public async ValueTask<OutlookHostRunResult> RunOnceAsync(CancellationToken cancellationToken)
+    {
+        var processedVisio = await visio.RunOneAsync(cancellationToken).ConfigureAwait(false);
+        var outlookResult = await outlook.RunOnceAsync(cancellationToken).ConfigureAwait(false);
+        return processedVisio && outlookResult.Reason == OutlookHostExitReason.NoDurableWork
+            ? new OutlookHostRunResult(OutlookHostExitReason.Completed)
+            : outlookResult;
+    }
+
+    public ValueTask DisposeAsync() => outlook.DisposeAsync();
+}
+
+internal sealed class PendingVisioDocumentRunner(
+    IDbContextFactory<FluxKnowledgeDbContext> contextFactory,
+    string retainedRoot) : IPendingVisioDocumentRunner
+{
+    public async ValueTask<bool> RunOneAsync(CancellationToken cancellationToken)
+    {
+        var request = await VisioDocumentPipelineRunner.ReadNextRequestAsync(contextFactory, cancellationToken).ConfigureAwait(false);
+        if (request is null)
+        {
+            return false;
+        }
+
+        var extractor = new VisioDocumentExtractor();
+        if (extractor.GetUnavailableReason() is not null)
+        {
+            return false;
+        }
+
+        using var executionLease = VisioExecutionLease.Acquire(extractor);
+        using var reader = new SqlRetainedSourceReader(contextFactory, retainedRoot);
+        return await VisioDocumentPipelineRunner.ExecuteAsync(
+            request,
+            contextFactory,
+            reader,
+            executionLease,
+            TextWriter.Null,
+            cancellationToken,
+            retainedRoot).ConfigureAwait(false) == 0;
     }
 }
 

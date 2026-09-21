@@ -81,8 +81,19 @@ public sealed class SourceRootProjectionReader(
             .Select(revision => new SourceRevisionRow(
                 revision.Id,
                 revision.CanonicalPath,
-                revision.Classification))
+                revision.Classification,
+                revision.Extension,
+                revision.OriginKind))
             .ToArrayAsync(cancellationToken)
+            .ConfigureAwait(false);
+        var publications = await (
+                from publication in context.DocumentPublications.AsNoTracking()
+                join owner in context.SourceRevisions.AsNoTracking() on publication.OwnerSourceRevisionId equals owner.Id
+                where owner.SourceRootId == rootId && owner.SuppressedAtUtc == null
+                select new DocumentPublicationRow(
+                    publication.OwnerSourceRevisionId,
+                    publication.PipelineRecordId))
+            .ToDictionaryAsync(publication => publication.OwnerSourceRevisionId, cancellationToken)
             .ConfigureAwait(false);
         var activities = await (
                 from activity in context.SourceActivities.AsNoTracking()
@@ -104,6 +115,7 @@ public sealed class SourceRootProjectionReader(
                     revision.SuppressedAtUtc,
                     revision.Classification,
                     revision.Extension,
+                    revision.OriginKind,
                     revision.ContentSha256,
                     revision.ByteLength,
                     artifact == null ? null : artifact.ContentSha256,
@@ -130,6 +142,7 @@ public sealed class SourceRootProjectionReader(
                     attempt.OutcomeCode))
                 .ToListAsync(cancellationToken).ConfigureAwait(false);
         var terminalBlockedReasons = terminalBlockedBranches
+            .Where(branch => !publications.ContainsKey(branch.SourceRevisionId))
             .Select(branch => new SourceActivityReasonProjection(
                 "Blocked",
                 terminalAttempts
@@ -141,6 +154,7 @@ public sealed class SourceRootProjectionReader(
                     .FirstOrDefault(outcome => !string.IsNullOrWhiteSpace(outcome)) ?? "No reason recorded.",
                 1));
         var reasons = activities
+            .Where(activity => activity.OriginKind != 2 && !publications.ContainsKey(activity.SourceRevisionId))
             .Where(activity => activity.State == (int)SourceActivityState.DeferredUnsupported ||
                 activity.State == (int)SourceActivityState.DeferredPolicy ||
                 activity.State == (int)SourceActivityState.FailedTerminal)
@@ -159,6 +173,7 @@ public sealed class SourceRootProjectionReader(
             .Select(group => new SourceActivityReasonProjection(group.Key.State, group.Key.Reason, group.Count()))
             .ToArray();
         var requiredCapabilities = activities
+            .Where(activity => activity.OriginKind != 2 && !publications.ContainsKey(activity.SourceRevisionId))
             .Where(activity => activity.State == (int)SourceActivityState.DeferredUnsupported &&
                 !string.IsNullOrWhiteSpace(activity.RequiredCapability))
             .Select(activity => activity.RequiredCapability!)
@@ -174,6 +189,7 @@ public sealed class SourceRootProjectionReader(
                 .ToArrayAsync(cancellationToken)
                 .ConfigureAwait(false);
         var replayActivities = activities
+            .Where(activity => activity.OriginKind != 2 && !publications.ContainsKey(activity.SourceRevisionId))
             .Where(activity => activity.State == (int)SourceActivityState.DeferredUnsupported &&
                 activity.ExecutionClass == (int)ExecutionClass.DeferredCapability &&
                 activity.ActivityKind == (int)SourceActivityKind.TextExtraction && activity.RequiredCapability is not null &&
@@ -206,7 +222,7 @@ public sealed class SourceRootProjectionReader(
                 value.Capabilities[0].ProcessorVersion,
                 value.Capabilities[0].ProcessorFingerprint))
             .ToArray();
-        var files = ProjectFiles(root.CanonicalPath, revisions, activities, terminalBlockedBranches, terminalAttempts);
+        var files = ProjectFiles(root.CanonicalPath, revisions, activities, terminalBlockedBranches, terminalAttempts, publications);
 
         return new SourceRootDetailProjection(
             root.Id,
@@ -313,15 +329,18 @@ public sealed class SourceRootProjectionReader(
         var rows = await (
             from activity in context.SourceActivities.AsNoTracking()
             join revision in context.SourceRevisions.AsNoTracking() on activity.SourceRevisionId equals revision.Id
-            where rootIds.Contains(revision.SourceRootId) && revision.SuppressedAtUtc == null
+            where rootIds.Contains(revision.SourceRootId) && revision.SuppressedAtUtc == null && revision.OriginKind != 2
             join branch in context.SourceProcessorBranches.AsNoTracking() on activity.Id equals branch.SourceActivityId into branches
             from branch in branches.DefaultIfEmpty()
+            join publicationValue in context.DocumentPublications.AsNoTracking() on revision.Id equals publicationValue.OwnerSourceRevisionId into publicationValues
+            from publication in publicationValues.DefaultIfEmpty()
             select new SourceStateRow(
                 revision.SourceRootId,
                 activity.SourceRevisionId,
                 activity.State,
                 activity.ResultingPipelineRecordId,
-                branch == null ? null : branch.State))
+                branch == null ? null : branch.State,
+                publication == null ? null : publication.PipelineRecordId))
             .ToListAsync(cancellationToken).ConfigureAwait(false);
         return rows.GroupBy(row => row.SourceRootId).ToDictionary(
             group => group.Key,
@@ -340,6 +359,7 @@ public sealed class SourceRootProjectionReader(
 
     private static SourceRevisionProjectionState ClassifyRevision(IReadOnlyCollection<SourceStateRow> rows)
     {
+        if (rows.Any(row => row.PublishedPipelineRecordId is not null)) return SourceRevisionProjectionState.Indexed;
         if (rows.Any(row => row.State == (int)SourceActivityState.FailedTerminal)) return SourceRevisionProjectionState.Error;
         if (rows.Any(row => row.ProcessorBranchState == (int)RetainedProcessorBranchState.Blocked ||
                             row.State == (int)SourceActivityState.DeferredPolicy)) return SourceRevisionProjectionState.Blocked;
@@ -368,9 +388,21 @@ public sealed class SourceRootProjectionReader(
         IReadOnlyList<SourceRevisionRow> revisions,
         IReadOnlyList<SourceActivityRow> activities,
         IReadOnlyList<TerminalProcessorBranchRow> terminalBlockedBranches,
-        IReadOnlyList<SourceProcessorAttemptRow> terminalAttempts) =>
-        revisions.Select(revision =>
+        IReadOnlyList<SourceProcessorAttemptRow> terminalAttempts,
+        IReadOnlyDictionary<Guid, DocumentPublicationRow> publications) =>
+        revisions.Where(revision => revision.OriginKind != 2).Select(revision =>
         {
+            if (publications.TryGetValue(revision.Id, out var publication))
+            {
+                var publishedRelativePath = RelativePath(rootCanonicalPath, revision.CanonicalPath);
+                return new SourceFileProjection(
+                    Path.GetFileName(publishedRelativePath),
+                    publishedRelativePath,
+                    PublishedDocumentClassification(revision.Extension, revision.Classification),
+                    "Indexed",
+                    null,
+                    publication.PipelineRecordId);
+            }
             var revisionActivities = activities.Where(activity => activity.SourceRevisionId == revision.Id).ToArray();
             var revisionBranches = terminalBlockedBranches.Where(branch => branch.SourceRevisionId == revision.Id).ToArray();
             var state = ClassifyRevision(revisionActivities, revisionBranches.Length > 0);
@@ -391,6 +423,13 @@ public sealed class SourceRootProjectionReader(
         .OrderBy(file => file.RelativePath, StringComparer.OrdinalIgnoreCase)
         .ToArray();
 
+    private static string PublishedDocumentClassification(string extension, string fallback) => extension.ToLowerInvariant() switch
+    {
+        ".vsdx" => "VsdxDocumentContainer",
+        ".pdf" => "PdfDocumentContainer",
+        _ => fallback
+    };
+
     private static SourceRevisionProjectionState ClassifyRevision(
         IReadOnlyCollection<SourceActivityRow> activities,
         bool hasBlockedProcessorBranch) =>
@@ -399,7 +438,8 @@ public sealed class SourceRootProjectionReader(
             activity.SourceRevisionId,
             activity.State,
             activity.ResultingPipelineRecordId,
-            hasBlockedProcessorBranch ? (int)RetainedProcessorBranchState.Blocked : null)).ToArray());
+            hasBlockedProcessorBranch ? (int)RetainedProcessorBranchState.Blocked : null,
+            null)).ToArray());
 
     private static string DisplayStatus(SourceRevisionProjectionState state) => state switch
     {
@@ -488,13 +528,16 @@ public sealed class SourceRootProjectionReader(
         DateTimeOffset? SuppressedAtUtc,
         string Classification,
         string Extension,
+        int OriginKind,
         string ContentSha256,
         long ByteLength,
         string? ArtifactContentSha256,
         long? ArtifactByteLength,
         string? ArtifactStoreRelativePath);
 
-    private sealed record SourceRevisionRow(Guid Id, string CanonicalPath, string Classification);
+    private sealed record SourceRevisionRow(Guid Id, string CanonicalPath, string Classification, string Extension, int OriginKind);
+
+    private sealed record DocumentPublicationRow(Guid OwnerSourceRevisionId, Guid PipelineRecordId);
 
     private sealed record SourceCapabilityRow(
         Guid Id,
@@ -518,7 +561,8 @@ public sealed class SourceRootProjectionReader(
         Guid SourceRevisionId,
         int State,
         Guid? ResultingPipelineRecordId,
-        int? ProcessorBranchState);
+        int? ProcessorBranchState,
+        Guid? PublishedPipelineRecordId);
 
     private enum SourceRevisionProjectionState
     {

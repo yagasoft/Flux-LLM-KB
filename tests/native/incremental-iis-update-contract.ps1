@@ -38,11 +38,14 @@ if ($plan.mode -ne "plan-only" -or
     $plan.site_name -ne "FluxKnowledge" -or
     $plan.site_url -ne "http://127.0.0.1:5137" -or
     $plan.application_root -ne "I:\FluxKnowledge\App" -or
+    $plan.interactive_host_root -ne "C:\inetpub\FluxKnowledge\outlook-host" -or
+    $plan.interactive_host_task -ne "FluxKnowledge.OutlookHost" -or
+    $plan.interactive_host_activation -ne "next ordinary scheduled run; never triggered by deployment" -or
     $plan.recovery_root -ne "I:\FluxKnowledge\Recovery" -or
     $plan.migrations -ne $false -or
     $plan.clean_slate -ne $false -or
     $plan.payload_acl -ne "inherit-from-live-root" -or
-    $plan.rollback -ne "automatic-application-payload-restore" -or
+    $plan.rollback -ne "automatic-application-and-interactive-host-payload-restore" -or
     $plan.deployment_validation_hold -ne $true -or
     $plan.candidate_validation -ne "held-loopback-probes-and-unchanged-retained-pipeline-state") {
     throw "The incremental IIS plan is not restricted to the existing application payload and loopback site."
@@ -70,6 +73,21 @@ foreach ($step in $requiredDeploymentValidationSteps) {
     if ($deploymentScriptText -notmatch [regex]::Escape($step)) {
         throw "The incremental IIS updater is missing deployment-validation step $step."
     }
+}
+foreach ($interactiveHostStep in @(
+    'Publish-InteractiveHostCandidate',
+    'Disable-ScheduledTask',
+    'Enable-ScheduledTask',
+    'Settings.Enabled',
+    'Wait-InteractiveHostStopped -TaskName',
+    'The scheduled task remains disabled',
+    'Restore-InteractiveHostPayload')) {
+    if ($deploymentScriptText -notmatch [regex]::Escape($interactiveHostStep)) {
+        throw "The incremental updater is missing interactive-host lifecycle step $interactiveHostStep."
+    }
+}
+if ($deploymentScriptText -match [regex]::Escape('Start-ScheduledTask')) {
+    throw 'The incremental updater manually triggers the interactive host instead of waiting for its ordinary schedule.'
 }
 $requiredSqlClientCompatibilitySteps = @(
     'ConvertTo-DeploymentValidationConnectionString',

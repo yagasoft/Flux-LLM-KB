@@ -62,13 +62,17 @@ separately in [its operational evidence](operations/2026-09-20-interactive-visio
 
 ## Interactive Visio document processing
 
-`documents run-visio` is a trusted local, on-demand desktop command bound to one
-retained VSDX revision, expected hash and Visio processor fingerprint. It prepares
-one document input and claims a distinct operation in the existing Extract stage.
-IIS does not register its worker; generic job claims exclude it. Visio interprets
-the document through its object model, with ordered pages, shapes/groups, expanded
-text, shape data and connections retained as document/page/shape provenance.
-Package members are never independent corpus documents.
+Normal source reconciliation now prepares one retained VSDX input through the
+current Visio capability. The existing logged-in interactive host selects at most
+one completed preparation on each ordinary scheduled run, registers its distinct
+Extract operation and invokes Visio. Deployment updates this existing companion
+payload but never starts the task manually. IIS does not register or execute the
+Visio worker, and generic job claims exclude it. `documents run-visio` remains an
+exact local diagnostic command, not the source-activation mechanism. Visio
+interprets the document through its object model, with ordered pages,
+shapes/groups, expanded text, shape data and connections retained as
+document/page/shape provenance. Package members are never independent corpus
+documents.
 
 The adapter requires the logged-in Windows session and installed Visio. It refuses
 an existing Visio session, opens retained bytes read-only with macros/events

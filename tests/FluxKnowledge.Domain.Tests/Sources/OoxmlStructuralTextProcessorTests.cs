@@ -1021,25 +1021,27 @@ public sealed class OoxmlStructuralTextProcessorTests
     }
 
     [Fact]
-    public async Task Automatic_activation_never_promotes_or_claims_vsdx_or_pdf_document_processors()
+    public async Task Automatic_activation_offers_current_Visio_and_Pdf_document_processors()
     {
         var branches = new NoAutomaticDocumentBranches();
         var activation = new RetainedProcessorActivationService(
             new SourceCapabilityService(new RecordingCapabilityStore(), new LocalSourceCapabilityHandlerRegistry(
             [
                 new OoxmlStructuralTextCapabilityHandler(),
-                new VsdxStructuralTextCapabilityHandler(),
+                new VisioDocumentInputProcessor(),
                 new PdfDocumentCapabilityHandler()
             ])),
             branches, new LegacyReader(SourceRevisionId.New(), [], new string('a', 64)), new ZipArchiveRetainedProcessor(null!),
             new RetainedProcessorOptions { OoxmlDocumentStructuralExtractEnabled = true }, TimeProvider.System,
             ooxmlProcessor: new OoxmlStructuralTextProcessor(null!),
-            vsdxProcessor: new VsdxStructuralTextProcessor(null!),
+            visioProcessor: new VisioDocumentInputProcessor(),
             pdfProcessor: new PdfDocumentProcessor(null!));
 
         await activation.RunOnceAsync(CancellationToken.None);
 
-        Assert.Equal([OoxmlStructuralTextProcessor.Capability], branches.ReadCapabilities);
+        Assert.Equal(
+            [OoxmlStructuralTextProcessor.Capability, VisioDocumentInputProcessor.Capability, PdfDocumentProcessor.Capability],
+            branches.ReadCapabilities);
     }
 
     [Fact]
@@ -2072,11 +2074,6 @@ public sealed class OoxmlStructuralTextProcessorTests
             CancellationToken cancellationToken)
         {
             ReadCapabilities.Add(capability);
-            if (capability != OoxmlStructuralTextProcessor.Capability)
-            {
-                throw new Xunit.Sdk.XunitException("VSDX and PDF can run only through the exact document reprocess command.");
-            }
-
             return ValueTask.FromResult<IReadOnlyList<RetainedProcessorPromotionCandidate>>([]);
         }
 

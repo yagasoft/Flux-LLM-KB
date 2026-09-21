@@ -1,4 +1,5 @@
 using FluxKnowledge.Application.Contracts;
+using FluxKnowledge.Application.Documents;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Sources;
 using FluxKnowledge.Domain.Pipeline;
@@ -16,6 +17,122 @@ public sealed class SourceRootProjectionReaderIntegrationTests(NativeSqlServerFi
     : IClassFixture<NativeSqlServerFixture>
 {
     private readonly NativeSqlServerFixture _fixture = fixture;
+
+    [NativeSqlServerFact]
+    public async Task Published_Visio_owner_projects_only_the_current_document_result()
+    {
+        var now = DateTimeOffset.Parse("2026-09-21T00:00:00+00:00");
+        var rootId = Guid.NewGuid();
+        var ownerId = Guid.NewGuid();
+        var inputId = Guid.NewGuid();
+        var branchActivityId = Guid.NewGuid();
+        var branchId = Guid.NewGuid();
+        var identityId = Guid.NewGuid();
+        var recordId = Guid.NewGuid();
+        var hash = new string('a', 64);
+        var factory = new TestDbContextFactory(_fixture.ConnectionString);
+        await using (var setup = factory.CreateDbContext())
+        {
+            setup.SourceRootConfigurations.Add(new SourceRootConfigurationEntity
+            {
+                Id = rootId, CanonicalPath = $"E:\\source-projection-visio-tests\\{rootId:N}",
+                DisplayName = "Published Visio projection", State = (int)SourceRootState.Enabled,
+                Recursive = true, IncludePatternsJson = "[]", ExcludePatternsJson = "[]",
+                AllowedClassificationsJson = "[]", MaximumFileBytes = 16L * 1024 * 1024,
+                ReconciliationCadenceSeconds = 900, ConfigurationRevision = 1,
+                CreatedAtUtc = now, UpdatedAtUtc = now
+            });
+            setup.SourceRevisions.AddRange(
+                new SourceRevisionEntity
+                {
+                    Id = ownerId, SourceRootId = rootId, StableSourceIdentity = $"visio-owner:{ownerId:N}",
+                    Revision = 1, ContentSha256 = hash,
+                    CanonicalPath = $"E:\\source-projection-visio-tests\\{rootId:N}\\architecture.vsdx",
+                    Classification = "DeferredCapability", Extension = ".vsdx", ByteLength = 4,
+                    DiscoveredAtUtc = now
+                },
+                new SourceRevisionEntity
+                {
+                    Id = inputId, SourceRootId = rootId, StableSourceIdentity = $"visio-input:{inputId:N}",
+                    Revision = 1, ContentSha256 = hash, CanonicalPath = string.Empty,
+                    ParentSourceRevisionId = ownerId, Classification = DocumentProcessingInput.VisioClassification,
+                    Extension = ".vsdx", OriginKind = 2, ByteLength = 4, DiscoveredAtUtc = now
+                });
+            setup.SourceActivities.AddRange(
+                new SourceActivityEntity
+                {
+                    Id = Guid.NewGuid(), SourceRevisionId = ownerId,
+                    ActivityKind = (int)SourceActivityKind.DocumentParsing,
+                    ExecutionClass = (int)ExecutionClass.DeferredCapability,
+                    ProcessorVersion = "phase-6-vsdx-structural-v1", InputFingerprint = hash,
+                    State = (int)SourceActivityState.DeferredUnsupported,
+                    Reason = "vsdx-structural-extraction-pending", CreatedAtUtc = now, UpdatedAtUtc = now
+                },
+                new SourceActivityEntity
+                {
+                    Id = branchActivityId, SourceRevisionId = ownerId,
+                    ActivityKind = (int)SourceActivityKind.TextExtraction,
+                    ExecutionClass = (int)ExecutionClass.InProcess,
+                    ProcessorVersion = DocumentProcessingInput.Visio.ParentProcessorVersion,
+                    InputFingerprint = hash, State = (int)SourceActivityState.Completed,
+                    CreatedAtUtc = now, UpdatedAtUtc = now
+                });
+            setup.SourceProcessorBranches.Add(new SourceProcessorBranchEntity
+            {
+                Id = branchId, SourceActivityId = branchActivityId, SourceRevisionId = ownerId,
+                InputSha256 = hash, ProcessorVersion = DocumentProcessingInput.Visio.ParentProcessorVersion,
+                ProcessorFingerprint = DocumentProcessingInput.Visio.ParentProcessorFingerprint,
+                State = (int)RetainedProcessorBranchState.Completed, CompletedMemberCount = 1,
+                CreatedAtUtc = now, UpdatedAtUtc = now
+            });
+            setup.SourceIdentities.Add(new SourceIdentityEntity
+            {
+                Id = identityId, SourceKind = "retained local source",
+                StableKey = $"visio-input:{inputId:N}", CreatedAtUtc = now
+            });
+            setup.PipelineRecords.Add(new PipelineRecordEntity
+            {
+                Id = recordId, SourceIdentityId = identityId, SourceRevisionId = inputId,
+                Revision = 1, ContentHash = hash, RootLineageRecordId = recordId,
+                CurrentStage = (int)PipelineStage.Publish, CompletionCriteriaMet = true,
+                RegisteredAtUtc = now
+            });
+            setup.DocumentPublications.Add(new DocumentPublicationEntity
+            {
+                OwnerSourceRevisionId = ownerId, DocumentInputSourceRevisionId = inputId,
+                SourceProcessorBranchId = branchId, PipelineRecordId = recordId,
+                PipelineRecordRevision = 1,
+                ProcessorFingerprint = DocumentProcessingInput.Visio.ParentProcessorFingerprint,
+                PublishedAtUtc = now
+            });
+            setup.SourceScanRequests.Add(new SourceScanRequestEntity
+            {
+                Id = Guid.NewGuid(), SourceRootId = rootId, RequestKind = 0, RequestedBy = "test",
+                RequestedAtUtc = now, IsReleased = true, ReleasedAtUtc = now,
+                State = (int)SourceScanRequestState.Completed, DiscoveredFileCount = 1
+            });
+            await setup.SaveChangesAsync();
+        }
+
+        var reader = new SourceRootProjectionReader(factory, new NoPathPolicy(), new NoEnumeration(),
+            new LocalSourceCapabilityHandlerRegistry([]));
+        var list = Assert.Single(await reader.ReadRootsAsync(CancellationToken.None), value => value.Id == rootId);
+        var detail = await reader.ReadRootAsync(rootId, CancellationToken.None);
+
+        Assert.NotNull(detail);
+        Assert.Equal(1, list.IndexedCount);
+        Assert.Equal(0, list.DeferredCount);
+        Assert.Equal(1, detail.IndexedCount);
+        Assert.Equal(0, detail.DeferredCount);
+        var file = Assert.Single(detail.Files);
+        Assert.Equal("architecture.vsdx", file.FileName);
+        Assert.Equal("VsdxDocumentContainer", file.Classification);
+        Assert.Equal("Indexed", file.Status);
+        Assert.Null(file.Reason);
+        Assert.Equal(recordId, file.CorpusPipelineRecordId);
+        Assert.DoesNotContain(detail.DeferredOrBlockedReasons,
+            value => value.Reason == "vsdx-structural-extraction-pending");
+    }
 
     [NativeSqlServerFact]
     public async Task Source_root_projections_derive_visible_counts_from_unsuppressed_activity_state_and_terminal_evidence()

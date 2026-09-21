@@ -490,11 +490,20 @@ public sealed class RetainedTextPipelineIntegrationTests(NativeSqlServerFixture 
 
         var vsdxCandidate = Assert.Single(await store.ReadPromotionCandidatesAsync(
             16, VsdxStructuralTextProcessor.Capability, CancellationToken.None));
+        var currentVisioCandidate = Assert.Single(await store.ReadPromotionCandidatesAsync(
+            16, VisioDocumentInputProcessor.Capability, CancellationToken.None));
         var pdfCandidate = Assert.Single(await store.ReadPromotionCandidatesAsync(
             16, PdfDocumentProcessor.Capability, CancellationToken.None));
 
         Assert.Equal(vsdxActivityId, vsdxCandidate.LegacyActivityId);
+        Assert.Equal(vsdxActivityId, currentVisioCandidate.LegacyActivityId);
         Assert.Equal(pdfActivityId, pdfCandidate.LegacyActivityId);
+        Assert.True(await store.PromoteAsync(currentVisioCandidate, VisioDocumentInputProcessor.Capability, CancellationToken.None));
+        Assert.Single(await store.ClaimAsync(
+            "automatic-visio-preparation", 1, VisioDocumentInputProcessor.Capability.ProcessorFingerprint, CancellationToken.None));
+        Assert.True(await store.PromoteAsync(pdfCandidate, PdfDocumentProcessor.Capability, CancellationToken.None));
+        Assert.Single(await store.ClaimAsync(
+            "automatic-pdf-preparation", 1, PdfDocumentProcessor.Capability.ProcessorFingerprint, CancellationToken.None));
 
         SourceActivityEntity DeferredActivity(Guid id, Guid revisionId, string hash) => new()
         {
