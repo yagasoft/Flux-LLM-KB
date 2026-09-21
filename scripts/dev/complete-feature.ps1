@@ -9,7 +9,6 @@ param(
     [switch]$ConfirmConfigureVss,
     [switch]$ConfirmDestroySql,
     [switch]$ConfirmRegisterCodex,
-    [switch]$ConfirmRemoveLegacyPlugin,
     [int]$StepTimeoutSeconds = 600,
     [int]$TestStepTimeoutSeconds = 1800
 )
@@ -341,11 +340,10 @@ function Assert-NativeGoLiveAcknowledgements {
         [bool]$ConfirmCleanSlate,
         [bool]$ConfirmConfigureVss,
         [bool]$ConfirmDestroySql,
-        [bool]$ConfirmRegisterCodex,
-        [bool]$ConfirmRemoveLegacyPlugin)
+        [bool]$ConfirmRegisterCodex)
     $confirmedCount = @($confirmations | Where-Object { $_ }).Count
     if ($GoLive -and $confirmedCount -ne $confirmations.Count) {
-        throw "-GoLive requires -ConfirmCleanSlate, -ConfirmConfigureVss, -ConfirmDestroySql, -ConfirmRegisterCodex and -ConfirmRemoveLegacyPlugin."
+        throw "-GoLive requires -ConfirmCleanSlate, -ConfirmConfigureVss, -ConfirmDestroySql and -ConfirmRegisterCodex."
     }
     if (-not $GoLive -and $confirmedCount -ne 0) {
         throw "Native go-live acknowledgement switches require -GoLive."
@@ -397,7 +395,7 @@ function Record-NativeGoLiveFailure {
         if (-not [string]::IsNullOrWhiteSpace($Matches['detail'])) {
             $Record.diagnostic_detail = $Matches['detail']
         }
-    } elseif ($Exception.Message -cmatch "\A(?:Native go-live failed with safe reason code '(go-live-(?:acknowledgement-required|cancelled-before-admission|lease-unavailable|closeout-capability-(?:unrecognised|expired|binding-mismatch|consumed))|clean-slate-(?:incomplete|admission-failed)|legacy-plugin-removal-(?:failed|not-proved)|native-plugin-install-(?:failed|not-proved)|vss-(?:exact-action-not-proved|add-diff-area-failed|change-diff-area-failed)|native-go-live-bootstrap-(?:(?:reset|install|probe)-(?:connection|sni-load|script-parse|sql-batch-[1-9][0-9]*)-failed|(?:reset|install|probe)-failed))'\.|(native-go-live-bridge-(?:composition|invocation|discovery|call|result)-failed))\z") {
+    } elseif ($Exception.Message -cmatch "\A(?:Native go-live failed with safe reason code '(go-live-(?:acknowledgement-required|cancelled-before-admission|lease-unavailable|closeout-capability-(?:unrecognised|expired|binding-mismatch|consumed))|clean-slate-(?:incomplete|admission-failed)|native-plugin-install-(?:failed|not-proved)|vss-(?:exact-action-not-proved|add-diff-area-failed|change-diff-area-failed)|native-go-live-bootstrap-(?:(?:reset|install|probe)-(?:connection|sni-load|script-parse|sql-batch-[1-9][0-9]*)-failed|(?:reset|install|probe)-failed))'\.|(native-go-live-bridge-(?:composition|invocation|discovery|call|result)-failed))\z") {
         $Record.reason_code = if ([string]::IsNullOrWhiteSpace($Matches[1])) { $Matches[2] } else { $Matches[1] }
     }
 }
@@ -1066,7 +1064,6 @@ function Invoke-NativeGoLiveComposition {
         [bool]$Acknowledgements.ConfirmConfigureVss,
         [bool]$Acknowledgements.ConfirmDestroySql,
         [bool]$Acknowledgements.ConfirmRegisterCodex,
-        [bool]$Acknowledgements.ConfirmRemoveLegacyPlugin,
         $MergedMainRoot, [string]$manifest.Sha256, $manifest)
 
     return [pscustomobject]@{
@@ -1101,7 +1098,7 @@ function Invoke-NativeGoLive {
         [Parameter(Mandatory)][string]$ModulePath,
         [Parameter(Mandatory)][string]$BootstrapScript)
 
-    foreach ($name in @("ConfirmCleanSlate", "ConfirmConfigureVss", "ConfirmDestroySql", "ConfirmRegisterCodex", "ConfirmRemoveLegacyPlugin")) {
+    foreach ($name in @("ConfirmCleanSlate", "ConfirmConfigureVss", "ConfirmDestroySql", "ConfirmRegisterCodex")) {
         if (-not $Acknowledgements.ContainsKey($name) -or -not [bool]$Acknowledgements[$name]) {
             throw "Every native go-live acknowledgement is required."
         }
@@ -1190,6 +1187,7 @@ try {
     Invoke-FeatureStep -Name "dotnet-restore-locked" -Cwd $FeatureWorktree -Command 'dotnet restore FluxKnowledge.slnx --locked-mode'
     Invoke-FeatureStep -Name "dotnet-build-release" -Cwd $FeatureWorktree -Command 'dotnet build FluxKnowledge.slnx -c Release --no-restore -warnaserror'
     Invoke-FeatureStep -Name "dotnet-test-native" -Cwd $FeatureWorktree -Command 'dotnet test FluxKnowledge.slnx -c Release --no-build --logger "console;verbosity=minimal"' -TimeoutSeconds $TestStepTimeoutSeconds
+    Invoke-FeatureStep -Name "native-repository-contract" -Cwd $FeatureWorktree -Command 'pwsh -NoProfile -File .\tests\native\repository-contract.ps1 -SourceRoot .'
     Invoke-FeatureStep -Name "native-closeout-contract" -Cwd $FeatureWorktree -Command 'pwsh -NoProfile -File .\tests\native\complete-feature-dryrun.ps1 -SourceRoot .'
     Invoke-FeatureStep -Name "native-go-live-bootstrap-nondryrun-contract" -Cwd $FeatureWorktree -Command 'pwsh -NoProfile -File .\tests\native\complete-feature-bootstrap-nondryrun.ps1 -SourceRoot .'
     Invoke-FeatureStep -Name "native-go-live-contract" -Cwd $FeatureWorktree -Command 'pwsh -NoProfile -File .\tests\native\native-go-live-contract.ps1 -SourceRoot .'
@@ -1220,7 +1218,6 @@ try {
                 ConfirmConfigureVss = [bool]$ConfirmConfigureVss
                 ConfirmDestroySql = [bool]$ConfirmDestroySql
                 ConfirmRegisterCodex = [bool]$ConfirmRegisterCodex
-                ConfirmRemoveLegacyPlugin = [bool]$ConfirmRemoveLegacyPlugin
             }
             $goLiveRecord = New-DirectNativeGoLiveStep -Name "native-go-live" -Command "Invoke-NativeGoLive"
             try {

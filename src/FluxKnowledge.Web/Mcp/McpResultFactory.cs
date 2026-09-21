@@ -10,8 +10,6 @@ internal static class McpResultFactory
 {
     private static readonly JsonSerializerOptions SerializerOptions = new(JsonSerializerDefaults.Web);
 
-    public static CallToolResult Json(object value) => Text(JsonSerializer.Serialize(value, SerializerOptions));
-
     public static CallToolResult NativeJson(NativeV1Envelope envelope)
     {
         var bounded = NativeBytes(envelope);
@@ -33,11 +31,6 @@ internal static class McpResultFactory
             Content = [new TextContentBlock { Text = value }],
             IsError = false
         };
-
-    public static CallToolResult Failure(string toolName, Exception exception) =>
-        Json(McpTransientFailureClassifier.IsTransient(exception)
-            ? McpErrorEnvelope.TemporaryUnavailable(toolName)
-            : McpErrorEnvelope.ToolError(toolName));
 
     public static NativeV1Envelope NativeSuccess(object result) => new(true, result, null, null, false);
 

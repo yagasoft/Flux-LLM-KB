@@ -21,6 +21,9 @@ jobs:
         run: dotnet build FluxKnowledge.slnx -c Release --no-restore -warnaserror
       - name: Test native contracts
         run: dotnet test FluxKnowledge.slnx -c Release --no-build --filter "Category!=Browser" --logger "console;verbosity=minimal"
+      - name: Verify repository and documentation
+        shell: pwsh
+        run: ./tests/native/repository-contract.ps1
       - name: Verify native closeout plan
         shell: pwsh
         run: ./tests/native/complete-feature-dryrun.ps1

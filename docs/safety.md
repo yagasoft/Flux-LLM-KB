@@ -1,79 +1,67 @@
-# Safety And Data Boundary
+# Safety and data boundaries
 
-Flux-LLM-KB is intended to remember useful work without unauthorised or external disclosure of private data. Trusted local application surfaces may show useful retained-derived content and diagnostics under the [private-PC local visibility policy](superpowers/specs/2026-08-16-private-pc-local-visibility-policy-design.md).
+FluxKnowledge retains useful local knowledge while preventing unauthorised
+disclosure, unsafe parser access and accidental external acquisition.
 
-## Public Repository Boundary
+## Repository boundary
 
-Allowed in Git:
+Git may contain source, native SQL migrations, synthetic tests, documentation
+and non-secret example configuration. It must not contain live databases,
+private documents or embeddings, raw transcripts, mail/spool contents,
+credentials, tokens, cookies, connection strings containing credentials, model
+payloads or generated private exports. Reference backups belong outside the
+workspace and must not become runtime dependencies.
 
-- source code
-- tests using synthetic fixtures
-- migrations
-- documentation
-- example configuration
-- generated documentation that contains no private memory data
+## Trusted local presentation
 
-Forbidden in Git:
+The private UI, direct-loopback REST, user-invoked CLI/MCP, diagnostics, audit
+and search may show useful retained-derived paths, code, hashes, symbols and
+parser evidence. They still withhold passwords, keys, tokens, session material,
+credential-bearing URIs and secret headers. Public/shared/exported output needs
+its own sanitisation. Local presentation permission is not external disclosure
+permission.
 
-- live memory databases
-- raw transcripts
-- private workspace files
-- credentials, tokens, API keys, cookies, or session material
-- embeddings created from private content
-- generated private wiki exports
-- private user or customer data
-- mail spool contents, exported `.eml`/`.msg` files, attachments, heartbeat files,
-  OAuth tokens, app passwords, or generated private mail configs
-- local dashboard runtime PID/log files and Outlook host heartbeat/error payloads
+## Retained processing and lifecycle
 
-## Runtime Boundary
+Processors consume only bounded, checksum-verified retained artifacts bound to
+the durable revision. They do not reopen originals. Archive path and size
+checks, parser limits, completion ownership and publication fences remain
+mandatory. C# analysis does not build projects, restore dependencies, execute
+code or load project-supplied generators/analyzers.
 
-Runtime data is local by default. The first implementation stores it in a local
-PostgreSQL database and excludes all runtime paths from Git.
+Pause, suppression, deletion and supersession are enforced against durable
+state. Deletion removes only application-owned data after draining work and
+preserving shared survivors. Source files and `J:\Models` remain outside that
+cleanup boundary. Unknown process termination or unsettled GPU ownership does
+not grant permission to retry or publish.
 
-The local UI, direct-loopback REST, user-invoked CLI/MCP, diagnostics, audit and
-search may expose useful raw retained-derived paths, hashes, code, symbols,
-signatures, relationships and parser diagnostics. This permission never includes
-passwords, tokens, OAuth/client secrets, private keys, connection strings,
-cookies, session material or credential-bearing headers. Public/shared/exported
-output remains sanitised.
+## Model and runtime boundary
 
-Mail ingestion writes raw messages and attachments to local private spool paths
-before indexing. Keep those paths under ignored private directories and review
-exports before sharing.
+All reusable model payloads and download staging belong under `J:\Models`.
+Check the central inventory and relevant existing provider caches before every
+proposed acquisition. A missing, corrupt or unavailable artifact causes a
+refusal; it never triggers an automatic download or another-drive fallback.
+Acquisition requires exact identities, immutable revisions, expected transfer
+bytes, destination and explicit approval. Approved transfers must deduplicate,
+verify and publish atomically with receipts.
 
-The Outlook COM bridge runs outside Docker under the logged-in Windows user. It
-must write only to ignored private spool/runtime paths and report status through
-the local Flux API or database; no raw mail or credentials belong in Git.
+Normal loading uses verified local paths and offline provider settings. Tests
+use synthetic fixtures. Startup, retries, publication and rollback cannot
+download models or modify the cache to repair a loader failure.
 
-## Retained processor boundary
+## Windows and integration boundaries
 
-Retained processors, including the C# syntax processor, may read only the
-checksum-verified retained artifact bound to the durable revision. They do not
-reopen source originals. A retained-derived symbol, signature, relationship or
-parser diagnostic is scanned before persistence and local presentation; a
-detected secret is withheld with a fixed reason, while an unscannable fact blocks
-the whole completion without a partial fact set. Local detail pages may reveal
-the remaining useful raw facts, but public/export DTOs must not acquire those
-members.
+HTTP/MCP and CLI use the fixed direct-loopback origin and reject forwarding,
+proxies and redirects. Mutations use closed actions, command-bound confirmations,
+idempotency keys, row versions and durable receipts. Responses and cursors are
+bounded and scoped to retained projections.
 
-The C# parser is local and syntax-only. It does not invoke Office, Outlook,
-cloud/network parsers, model runtimes or code execution. Generated/disposable
-SQL catalogues and cached-browser synthetic tests are permitted for validation;
-they must be loopback-bound, disposable, and unable to download a browser or
-model. Production migrations, deployment, Outlook activation, source-original
-rereads and live validation remain explicit approval gates.
+Outlook and Visio run through the logged-in desktop companion under explicit
+configuration. Visio refuses an existing user session and requires proven
+process cleanup; it is not a general unattended Office automation service.
+Normal application startup cannot change Codex registrations.
 
-## Capture Rules
-
-- Runtime redaction is controlled by `privacy.redactions.enabled`
-  (`FLUX_KB_REDACTIONS_ENABLED`). This personal deployment defaults it off so
-  local memory, OCR/ASR/vision text, paths, and diagnostic details remain exact.
-  Turn it on before any public, shared, or exported deployment that requires
-  masking before persistence.
-- Record provenance for every promoted claim.
-- Preserve superseded facts instead of overwriting them silently.
-- Audit every write, delete, export, and bulk operation.
-- Prefer compact task briefs over large memory injection.
-- Never default to permanently deleting mailbox messages after capture; prefer
-  move-to-processed or remove-label policies.
+Deployment, restart, migration, clean-slate installation, VSS configuration and
+plugin lifecycle actions require approval for the concrete operation. Review
+the verification evidence and recovery conditions before invoking them.
+[Setup](setup.md) distinguishes incremental updates from destructive installation.

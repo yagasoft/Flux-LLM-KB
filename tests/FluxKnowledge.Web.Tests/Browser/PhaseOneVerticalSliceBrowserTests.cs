@@ -184,7 +184,7 @@ public sealed class PhaseOneVerticalSliceBrowserTests
             builder.Services.AddScoped<CircuitHandler, StatusEventCircuitHandler>();
             builder.Services.AddFluxKnowledgeMcp();
             builder.Services.AddSingleton<ILocalPrivateContentDisclosure, LocalPrivateContentDisclosure>();
-            builder.Services.AddMcpServer().WithHttpTransport(options => options.Stateless = true).WithTools<KnowledgeMcpTools>();
+            builder.Services.AddMcpServer().WithHttpTransport(options => options.Stateless = true).WithTools<NativeV1McpTools>();
             configureServices?.Invoke(builder.Services);
 
             var application = builder.Build();

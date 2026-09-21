@@ -7,8 +7,7 @@ param(
     [switch]$ConfirmCleanSlate,
     [switch]$ConfirmConfigureVss,
     [switch]$ConfirmDestroySql,
-    [switch]$ConfirmRegisterCodex,
-    [switch]$ConfirmRemoveLegacyPlugin
+    [switch]$ConfirmRegisterCodex
 )
 
 $ErrorActionPreference = 'Stop'
@@ -21,10 +20,9 @@ $acknowledgements = @(
     $ConfirmCleanSlate,
     $ConfirmConfigureVss,
     $ConfirmDestroySql,
-    $ConfirmRegisterCodex,
-    $ConfirmRemoveLegacyPlugin)
+    $ConfirmRegisterCodex)
 if ($GoLive -and -not ($acknowledgements -notcontains $false)) {
-    throw '-GoLive requires -ConfirmCleanSlate, -ConfirmConfigureVss, -ConfirmDestroySql, -ConfirmRegisterCodex and -ConfirmRemoveLegacyPlugin.'
+    throw '-GoLive requires -ConfirmCleanSlate, -ConfirmConfigureVss, -ConfirmDestroySql and -ConfirmRegisterCodex.'
 }
 if (-not $GoLive -and ($acknowledgements -contains $true)) {
     throw 'Clean-slate acknowledgement switches require -GoLive.'
@@ -38,7 +36,6 @@ if ($ConfirmCleanSlate) { $closeoutArguments.ConfirmCleanSlate = $true }
 if ($ConfirmConfigureVss) { $closeoutArguments.ConfirmConfigureVss = $true }
 if ($ConfirmDestroySql) { $closeoutArguments.ConfirmDestroySql = $true }
 if ($ConfirmRegisterCodex) { $closeoutArguments.ConfirmRegisterCodex = $true }
-if ($ConfirmRemoveLegacyPlugin) { $closeoutArguments.ConfirmRemoveLegacyPlugin = $true }
 
 & $closeout @closeoutArguments
 exit $LASTEXITCODE

@@ -13,7 +13,7 @@ public sealed class ReadonlyMcpRetryExecutorTests
         var executor = new ReadonlyMcpRetryExecutor(TimeSpan.Zero, TimeSpan.Zero);
 
         var result = await executor.ExecuteAsync(
-            "kb.search",
+            "knowledge.search",
             _ =>
             {
                 attempts++;
@@ -33,7 +33,7 @@ public sealed class ReadonlyMcpRetryExecutorTests
         var executor = new ReadonlyMcpRetryExecutor(TimeSpan.Zero, TimeSpan.Zero);
 
         var result = await executor.ExecuteAsync<string>(
-            "kb.search",
+            "knowledge.search",
             _ =>
             {
                 attempts++;

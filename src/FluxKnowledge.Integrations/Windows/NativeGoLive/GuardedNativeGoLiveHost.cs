@@ -742,8 +742,6 @@ internal interface INativeGoLiveMarketplacePort
     ValueTask<NativeGoLiveMarketplaceObservation> RegisterAndObserveAsync(
         NativeGoLiveCodexIdentity identity, CancellationToken cancellationToken);
 
-    ValueTask RemoveExactLegacyPluginAsync(CancellationToken cancellationToken) =>
-        ValueTask.FromException(new NativeGoLiveContractException("legacy-plugin-removal-not-supported"));
 }
 internal interface INativeGoLiveTaskActivationPort
 {
@@ -1101,11 +1099,6 @@ internal sealed class GuardedNativeGoLiveHost : INativeGoLiveHost
         ValidateMarketplace(result, codex, allowMissing: false);
     }
 
-    public ValueTask RemoveLegacyPluginAsync(CancellationToken cancellationToken)
-    {
-        EnsureBootstrapCleared();
-        return _ports.Marketplace.RemoveExactLegacyPluginAsync(cancellationToken);
-    }
 
     private void EnsurePlan(NativeGoLivePlan plan)
     {

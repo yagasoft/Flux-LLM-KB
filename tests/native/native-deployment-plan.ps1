@@ -161,7 +161,7 @@ if ($ordinary.ExitCode -eq 0 -or
 
 $directGoLive = Invoke-ExpectedNativeRejection `
     -Script $deploymentScript `
-    -Arguments @('-GoLive', '-ConfirmCleanSlate', '-ConfirmConfigureVss', '-ConfirmDestroySql', '-ConfirmRegisterCodex', '-ConfirmRemoveLegacyPlugin')
+    -Arguments @('-GoLive', '-ConfirmCleanSlate', '-ConfirmConfigureVss', '-ConfirmDestroySql', '-ConfirmRegisterCodex')
 if ($directGoLive.ExitCode -eq 0 -or $directGoLive.Output -notmatch 'claimed in-process authority') {
     throw 'Direct native go-live execution is not fenced behind the in-process authority.'
 }

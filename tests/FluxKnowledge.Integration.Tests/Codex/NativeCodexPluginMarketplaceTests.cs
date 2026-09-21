@@ -377,7 +377,7 @@ $adapterOutput = & $AdapterPath $EventName
             var manifest = NativeGoLivePayloadHasher.Compute(payloadRoot);
             var capability = new NativeGoLiveCloseoutCapabilityIssuer().Issue(plan, payloadRoot, manifest.Sha256);
             Assert.True(capability.TryBeginExecution());
-            var runner = new NativePluginStateRunner(plan.Codex, installed, enabled, legacyPresentAfterRemoval: false);
+            var runner = new NativePluginStateRunner(plan.Codex, installed, enabled);
             var port = new NativeGoLiveWindowsMarketplacePort(capability, plan.Codex, runner);
             _ = await port.ObserveAsync(plan.Codex, CancellationToken.None);
 
@@ -415,7 +415,7 @@ $adapterOutput = & $AdapterPath $EventName
                 marketplaces = duplicate ? new object[] { valid, valid } : new object[] { valid, 17 }
             });
             var runner = new NativePluginStateRunner(
-                plan.Codex, installed: true, enabled: true, legacyPresentAfterRemoval: false,
+                plan.Codex, installed: true, enabled: true,
                 marketplaceListJson: marketplaceListJson);
             var port = new NativeGoLiveWindowsMarketplacePort(capability, plan.Codex, runner);
             _ = await port.ObserveAsync(plan.Codex, CancellationToken.None);
@@ -459,7 +459,7 @@ $adapterOutput = & $AdapterPath $EventName
                 installed = duplicate ? new object[] { valid, valid } : new object[] { valid, 17 }
             });
             var runner = new NativePluginStateRunner(
-                plan.Codex, installed: true, enabled: true, legacyPresentAfterRemoval: false,
+                plan.Codex, installed: true, enabled: true,
                 pluginListJson: pluginListJson);
             var port = new NativeGoLiveWindowsMarketplacePort(capability, plan.Codex, runner);
             _ = await port.ObserveAsync(plan.Codex, CancellationToken.None);
@@ -476,124 +476,9 @@ $adapterOutput = & $AdapterPath $EventName
         }
     }
 
-    [Fact]
-    public async Task Legacy_plugin_removal_requires_the_exact_plugin_to_be_absent_after_remove()
-    {
-        var root = Path.Combine(Path.GetTempPath(), "FluxKnowledgeNativeMarketplaceTests", Guid.NewGuid().ToString("N"));
-        try
-        {
-            var payloadRoot = Path.Combine(root, "payload");
-            Directory.CreateDirectory(payloadRoot);
-            await File.WriteAllTextAsync(Path.Combine(payloadRoot, "payload.dll"), "one-shot-payload");
-            var plan = NativeGoLivePlan.CreateForIsolatedTests(
-                LiveRootLayout.CreateForIsolatedTests(Path.Combine(root, "live")), new string('a', 40));
-            var manifest = NativeGoLivePayloadHasher.Compute(payloadRoot);
-            var capability = new NativeGoLiveCloseoutCapabilityIssuer().Issue(plan, payloadRoot, manifest.Sha256);
-            Assert.True(capability.TryBeginExecution());
-            var runner = new NativePluginStateRunner(
-                plan.Codex, installed: true, enabled: true,
-                legacyPresentAfterRemoval: true, legacyPresentInitially: true);
-            var port = new NativeGoLiveWindowsMarketplacePort(capability, plan.Codex, runner);
 
-            var exception = await Assert.ThrowsAsync<NativeGoLiveContractException>(
-                () => port.RemoveExactLegacyPluginAsync(CancellationToken.None).AsTask());
 
-            Assert.Equal("legacy-plugin-removal-not-proved", exception.ReasonCode);
-            Assert.Equal(["plugin-list", "legacy-remove", "plugin-list"], runner.Commands);
-        }
-        finally
-        {
-            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
-        }
-    }
 
-    [Fact]
-    public async Task Legacy_plugin_removal_accepts_a_well_formed_already_absent_plugin_list_without_mutation()
-    {
-        var root = Path.Combine(Path.GetTempPath(), "FluxKnowledgeNativeMarketplaceTests", Guid.NewGuid().ToString("N"));
-        try
-        {
-            var payloadRoot = Path.Combine(root, "payload");
-            Directory.CreateDirectory(payloadRoot);
-            await File.WriteAllTextAsync(Path.Combine(payloadRoot, "payload.dll"), "one-shot-payload");
-            var plan = NativeGoLivePlan.CreateForIsolatedTests(
-                LiveRootLayout.CreateForIsolatedTests(Path.Combine(root, "live")), new string('a', 40));
-            var manifest = NativeGoLivePayloadHasher.Compute(payloadRoot);
-            var capability = new NativeGoLiveCloseoutCapabilityIssuer().Issue(plan, payloadRoot, manifest.Sha256);
-            Assert.True(capability.TryBeginExecution());
-            var runner = new NativePluginStateRunner(plan.Codex, installed: true, enabled: true,
-                legacyPresentAfterRemoval: false);
-            var port = new NativeGoLiveWindowsMarketplacePort(capability, plan.Codex, runner);
-
-            await port.RemoveExactLegacyPluginAsync(CancellationToken.None);
-
-            Assert.Equal(["plugin-list"], runner.Commands);
-        }
-        finally
-        {
-            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
-        }
-    }
-
-    [Fact]
-    public async Task Legacy_plugin_removal_removes_the_present_exact_plugin_then_rechecks_absence()
-    {
-        var root = Path.Combine(Path.GetTempPath(), "FluxKnowledgeNativeMarketplaceTests", Guid.NewGuid().ToString("N"));
-        try
-        {
-            var payloadRoot = Path.Combine(root, "payload");
-            Directory.CreateDirectory(payloadRoot);
-            await File.WriteAllTextAsync(Path.Combine(payloadRoot, "payload.dll"), "one-shot-payload");
-            var plan = NativeGoLivePlan.CreateForIsolatedTests(
-                LiveRootLayout.CreateForIsolatedTests(Path.Combine(root, "live")), new string('a', 40));
-            var manifest = NativeGoLivePayloadHasher.Compute(payloadRoot);
-            var capability = new NativeGoLiveCloseoutCapabilityIssuer().Issue(plan, payloadRoot, manifest.Sha256);
-            Assert.True(capability.TryBeginExecution());
-            var runner = new NativePluginStateRunner(
-                plan.Codex, installed: true, enabled: true,
-                legacyPresentAfterRemoval: false, legacyPresentInitially: true);
-            var port = new NativeGoLiveWindowsMarketplacePort(capability, plan.Codex, runner);
-
-            await port.RemoveExactLegacyPluginAsync(CancellationToken.None);
-
-            Assert.Equal(["plugin-list", "legacy-remove", "plugin-list"], runner.Commands);
-        }
-        finally
-        {
-            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
-        }
-    }
-
-    [Fact]
-    public async Task Native_registration_rejects_residual_legacy_plugin()
-    {
-        var root = Path.Combine(Path.GetTempPath(), "FluxKnowledgeNativeMarketplaceTests", Guid.NewGuid().ToString("N"));
-        try
-        {
-            var payloadRoot = Path.Combine(root, "payload");
-            Directory.CreateDirectory(payloadRoot);
-            await File.WriteAllTextAsync(Path.Combine(payloadRoot, "payload.dll"), "one-shot-payload");
-            var plan = NativeGoLivePlan.CreateForIsolatedTests(
-                LiveRootLayout.CreateForIsolatedTests(Path.Combine(root, "live")), new string('a', 40));
-            var manifest = NativeGoLivePayloadHasher.Compute(payloadRoot);
-            var capability = new NativeGoLiveCloseoutCapabilityIssuer().Issue(plan, payloadRoot, manifest.Sha256);
-            Assert.True(capability.TryBeginExecution());
-            var runner = new NativePluginStateRunner(
-                plan.Codex, installed: true, enabled: true,
-                legacyPresentAfterRemoval: false, legacyPresentInitially: true);
-            var port = new NativeGoLiveWindowsMarketplacePort(capability, plan.Codex, runner);
-            _ = await port.ObserveAsync(plan.Codex, CancellationToken.None);
-
-            var exception = await Assert.ThrowsAsync<NativeGoLiveContractException>(
-                () => port.RegisterAndObserveAsync(plan.Codex, CancellationToken.None).AsTask());
-
-            Assert.Equal("native-plugin-install-not-proved", exception.ReasonCode);
-        }
-        finally
-        {
-            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
-        }
-    }
 
     [Fact]
     public async Task Native_registration_allows_well_formed_unrelated_plugins()
@@ -619,11 +504,12 @@ $adapterOutput = & $AdapterPath $EventName
             });
             var runner = new NativePluginStateRunner(
                 plan.Codex, installed: true, enabled: true,
-                legacyPresentAfterRemoval: false, pluginListJson: pluginListJson);
+                pluginListJson: pluginListJson);
             var port = new NativeGoLiveWindowsMarketplacePort(capability, plan.Codex, runner);
             _ = await port.ObserveAsync(plan.Codex, CancellationToken.None);
 
             await port.RegisterAndObserveAsync(plan.Codex, CancellationToken.None);
+            Assert.Equal(["marketplace-list", "marketplace-list", "plugin-add", "plugin-list"], runner.Commands);
         }
         finally
         {
@@ -631,42 +517,6 @@ $adapterOutput = & $AdapterPath $EventName
         }
     }
 
-    [Theory]
-    [InlineData("{\"available\":[]}")]
-    [InlineData("{\"installed\":{}}")]
-    [InlineData("{\"installed\":[{}]}")]
-    [InlineData("{\"installed\":[{\"pluginId\":17}]}")]
-    [InlineData("{\"installed\":[{\"pluginId\":\"\"}]}")]
-    [InlineData("[]")]
-    [InlineData("{")]
-    public async Task Legacy_plugin_removal_rejects_a_plugin_list_without_an_exact_installed_array(string pluginListJson)
-    {
-        var root = Path.Combine(Path.GetTempPath(), "FluxKnowledgeNativeMarketplaceTests", Guid.NewGuid().ToString("N"));
-        try
-        {
-            var payloadRoot = Path.Combine(root, "payload");
-            Directory.CreateDirectory(payloadRoot);
-            await File.WriteAllTextAsync(Path.Combine(payloadRoot, "payload.dll"), "one-shot-payload");
-            var plan = NativeGoLivePlan.CreateForIsolatedTests(
-                LiveRootLayout.CreateForIsolatedTests(Path.Combine(root, "live")), new string('a', 40));
-            var manifest = NativeGoLivePayloadHasher.Compute(payloadRoot);
-            var capability = new NativeGoLiveCloseoutCapabilityIssuer().Issue(plan, payloadRoot, manifest.Sha256);
-            Assert.True(capability.TryBeginExecution());
-            var runner = new NativePluginStateRunner(plan.Codex, installed: true, enabled: true,
-                legacyPresentAfterRemoval: false, pluginListJson: pluginListJson);
-            var port = new NativeGoLiveWindowsMarketplacePort(capability, plan.Codex, runner);
-
-            var exception = await Assert.ThrowsAsync<NativeGoLiveContractException>(
-                () => port.RemoveExactLegacyPluginAsync(CancellationToken.None).AsTask());
-
-            Assert.Equal("legacy-plugin-removal-not-proved", exception.ReasonCode);
-            Assert.Equal(["plugin-list"], runner.Commands);
-        }
-        finally
-        {
-            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
-        }
-    }
 
     private sealed class StaleMarketplaceRunner : INativeCodexMarketplaceCommandRunner
     {
@@ -698,8 +548,6 @@ $adapterOutput = & $AdapterPath $EventName
         NativeGoLiveCodexIdentity identity,
         bool installed,
         bool enabled,
-        bool legacyPresentAfterRemoval,
-        bool legacyPresentInitially = false,
         string? pluginListJson = null,
         string? marketplaceListJson = null) : INativeCodexMarketplaceCommandRunner
     {
@@ -729,12 +577,6 @@ $adapterOutput = & $AdapterPath $EventName
             return ValueTask.FromResult(new NativeCodexMarketplaceCommandResult(0, string.Empty, string.Empty));
         }
 
-        public ValueTask<NativeCodexMarketplaceCommandResult> RemoveLegacyFluxLlmKbPluginAsync(
-            CancellationToken cancellationToken)
-        {
-            Commands.Add("legacy-remove");
-            return ValueTask.FromResult(new NativeCodexMarketplaceCommandResult(0, string.Empty, string.Empty));
-        }
 
         public ValueTask<NativeCodexMarketplaceCommandResult> ListPluginsJsonAsync(
             CancellationToken cancellationToken)
@@ -753,18 +595,6 @@ $adapterOutput = & $AdapterPath $EventName
                     pluginId = identity.PluginName + "@" + identity.MarketplaceName,
                     installed,
                     enabled
-                });
-            }
-            var legacyPresent = Commands.Contains("legacy-remove")
-                ? legacyPresentAfterRemoval
-                : legacyPresentInitially;
-            if (legacyPresent)
-            {
-                plugins.Add(new
-                {
-                    pluginId = "flux-llm-kb@flux-llm-kb-local",
-                    installed = true,
-                    enabled = true
                 });
             }
             return ValueTask.FromResult(new NativeCodexMarketplaceCommandResult(

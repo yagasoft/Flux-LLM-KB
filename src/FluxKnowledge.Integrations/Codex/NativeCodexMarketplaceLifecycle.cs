@@ -47,7 +47,7 @@ internal sealed record NativeCodexMarketplaceCommandResult(
     string StandardOutput,
     string UnrelatedConfigurationStructuralHash);
 
-/// <summary>Typed seam for the only two Codex process actions permitted during native go-live.</summary>
+/// <summary>Typed seam for the fixed Codex process actions permitted during native go-live.</summary>
 internal interface INativeCodexMarketplaceCommandRunner
 {
     ValueTask<NativeCodexMarketplaceCommandResult> AddFluxKnowledgeMarketplaceAsync(
@@ -69,11 +69,6 @@ internal interface INativeCodexMarketplaceCommandRunner
         CancellationToken cancellationToken) =>
         ValueTask.FromException<NativeCodexMarketplaceCommandResult>(
             new NativeGoLiveContractException("native-plugin-install-not-supported"));
-
-    ValueTask<NativeCodexMarketplaceCommandResult> RemoveLegacyFluxLlmKbPluginAsync(
-        CancellationToken cancellationToken) =>
-        ValueTask.FromException<NativeCodexMarketplaceCommandResult>(
-            new NativeGoLiveContractException("legacy-plugin-removal-not-supported"));
 }
 
 internal sealed record NativeCodexMarketplaceRegistration(bool Changed, bool IsHealthy, string? Reason)

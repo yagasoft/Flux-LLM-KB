@@ -136,7 +136,7 @@ artifacts, chunks, stable vector fields and source settings match their baseline
 The original file hash is unchanged, its predecessor remains blocked and it has
 no new publication. The first exact canary command refused before Visio activation
 with `document-reprocess-not-eligible`, creating no successor or publication. Its
-legacy structural branch was blocked with a finished same-generation
+predecessor structural branch was blocked with a finished same-generation
 `office-document-container-invalid` attempt, while the older activity row remained
 Pending. A focused regression failed on that exact combination, then passed after
 eligibility accepted only this attempt-proven terminal shape. The predecessor was

@@ -6,11 +6,11 @@
 apply this section before ANY model-related command. This is a cost-safety
 requirement, not a preference.** It applies to every agent, task, context restart,
 branch, worktree, test, benchmark, setup/deployment script, native adapter and
-legacy tool used for this application.
+supporting tool used for this application.
 
 - **Check the cache before EVERY model download, without exception.** Inspect
   `J:\Models` and its persistent inventory first. Also inspect relevant existing
-  legacy/provider caches and configured cache paths before concluding that an
+  provider caches and configured cache paths before concluding that an
   artifact is missing. A new context, checkout, package version or empty default
   provider cache is never evidence that the model must be downloaded again.
 - All reusable real-model weights, shards, tokenizers, vocabularies, upstream model/processor configs,
@@ -43,7 +43,7 @@ legacy tool used for this application.
   downloads of additional model variants. If bytes, identity or prior cache
   state are uncertain, stop and investigate; never assume a full re-download is
   acceptable.
-- Reuse verified existing artifacts. When legacy cache content is useful,
+- Reuse verified existing artifacts. When existing provider cache content is useful,
   inventory it and propose a non-destructive adoption into `J:\Models` before
   copying or moving it. Preserve originals and their consumers unless separately
   authorised. Never purge, overwrite, relocate or "repair" cached models merely
@@ -66,10 +66,10 @@ legacy tool used for this application.
 ## Repository Guidance
 
 - Keep public repo content free of private memories, raw transcripts, credentials, embeddings from private material, and generated private wiki exports.
-- Prefer PostgreSQL + pgvector as the primary persistence backend.
+- Use SQL Server as canonical persistence, SQL Full-Text for lexical retrieval and embedded USearch for the rebuildable ANN projection.
 - Use MCP, CLI, and REST as first-class integration surfaces.
 - Use tests for behavior changes and run focused verification before reporting completion.
-- For a routine deployment, use `scripts/deploy/update-native-iis-incremental.ps1`: review its `-PlanOnly` output, then use `-Apply` only with current user authority. Do not use the full clean-slate/native GoLive path, or actions that clean the installation, configure VSS, destroy/bootstrap SQL, register Codex, or remove a legacy plugin, unless the user explicitly names and authorises that full path in the current conversation. If an advanced deployment need is not covered by the incremental updater, explain the gap and request direction before using another deployment action.
+- For a routine deployment, use `scripts/deploy/update-native-iis-incremental.ps1`: review its `-PlanOnly` output, then use `-Apply` only with current user authority. Do not use the full clean-slate/native GoLive path, or actions that clean the installation, configure VSS, destroy/bootstrap SQL, register Codex, unless the user explicitly names and authorises that full path in the current conversation. If an advanced deployment need is not covered by the incremental updater, explain the gap and request direction before using another deployment action.
 - Treat `docs/roadmap.md` and `docs/architecture.md` as durable project intent.
 - After each roadmap-significant session or turn, update `docs/roadmap.md`
   `Progress %` and `Remaining Work` entries for affected roadmap items before

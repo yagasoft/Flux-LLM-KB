@@ -1,4 +1,4 @@
-# Python
+# Offline inference adapter and probe bytecode
 __pycache__/
 *.py[cod]
 .pytest_cache/
@@ -9,16 +9,11 @@ venv/
 dist/
 build/
 *.egg-info/
-node_modules/
-dashboard/node_modules/
-dashboard/.vite/
-dashboard/coverage/
 docs/user-guide/rendered-pages/
 
 # Local config and secrets
 .env
 .env.*
-!.env.example
 *.local
 *.secret
 

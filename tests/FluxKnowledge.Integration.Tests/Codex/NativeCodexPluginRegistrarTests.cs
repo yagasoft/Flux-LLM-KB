@@ -320,7 +320,7 @@ public sealed class NativeCodexPluginRegistrarTests
     }
 
     [Fact]
-    public async Task Codex_process_runner_uses_exact_target_add_and_legacy_remove_arguments()
+    public async Task Codex_process_runner_adds_only_the_native_plugin()
     {
         await using var fixture = new NativeMarketplaceFixture();
         var commands = new List<string>();
@@ -333,12 +333,10 @@ public sealed class NativeCodexPluginRegistrarTests
             });
 
         await runner.AddFluxKnowledgePluginAsync(CancellationToken.None);
-        await runner.RemoveLegacyFluxLlmKbPluginAsync(CancellationToken.None);
 
         Assert.Equal(
             [
-                "plugin add fluxknowledge@fluxknowledge",
-                "plugin remove flux-llm-kb@flux-llm-kb-local"
+                "plugin add fluxknowledge@fluxknowledge"
             ],
             commands);
     }

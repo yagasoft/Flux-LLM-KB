@@ -1,73 +1,62 @@
-# Flux-LLM-KB
+# FluxKnowledge
 
-Flux-LLM-KB is a local-first knowledge kernel for agent workflows. It is designed
-to help coding agents recall prior work without injecting large, noisy memory
-files into every conversation.
+FluxKnowledge is a private, single-user knowledge application for Windows. It
+retains local documents and useful knowledge, indexes their content and exposes
+bounded search and operations through a Blazor interface, MCP, REST and a CLI.
 
-The project targets PostgreSQL as the durable metadata and lifecycle store, with
-Vespa/Snowflake/Qwen as the active searchable-evidence stack and
-interfaces for:
+The application runs on .NET 10 and ASP.NET Core under IIS. SQL Server holds
+canonical data and durable work; SQL Full-Text and embedded USearch provide
+search projections. The application endpoint is `http://127.0.0.1:5137`.
 
-- MCP tools for Codex and other MCP-capable agents
-- A command-line interface for local automation
-- A REST API for non-MCP integrations
-- A React/Vite operations dashboard served by FastAPI
-- Codex hooks and a personal plugin for global, cross-workspace use
+## Capabilities
 
-## Current Kernel
+- Local folder registration, watcher-assisted reconciliation, revision tracking,
+  pause/resume and complete removal of application-owned source data.
+- Retained UTF-8, ZIP/TAR, Office Open XML, PDF and C# processing. A document's
+  extracted content keeps the identity of its original file.
+- English document OCR through a provisioned offline PaddleOCR-VL adapter and
+  interactive Visio processing through the logged-in Windows companion host.
+- SQL-authoritative scheduling, leases, idempotent operations, publication
+  fences and rebuildable search indexes.
+- Nine native MCP tools with corresponding REST and CLI operations for knowledge,
+  retained code, corpus management and operational evidence.
+- A local operator interface for sources, corpus, pipeline records, events,
+  search, Outlook capture and retained C# facts.
 
-- PostgreSQL schema for episodes, sources, entities, claims, relations, audit
-  events, capture jobs, workspace scopes, search-index state, and retention
-  policies.
-- Vespa BM25+dense retrieval with Snowflake embeddings, Qwen reranking,
-  PostgreSQL hydration, and bounded PostgreSQL lexical/title/path degraded
-  fallback.
-- CLI commands for init, migration, status, search, remember, audit, forget,
-  Codex backfill queueing, wiki export, runtime settings, mail ingestion, lint,
-  and doctor checks.
-- MCP and REST entrypoints over the same service layer.
-- Codex personal plugin scaffold with hook scripts.
-- Unified React dashboard for health, corpus monitoring, runtime settings, mail
-  capture, worker state, and Outlook COM host status.
-- IMAP mail capture with Gmail OAuth support and a separate Windows Outlook COM
-  host process for selected-folder catch-up.
+Supported formats and important limits are listed in
+[file-type coverage](docs/file-type-coverage.md). Learned semantic retrieval is
+[planned work](docs/roadmap.md); the current embedding baseline is deterministic.
 
-## Quick Start
+## Build and verify
+
+Use Windows, the SDK selected by [global.json](global.json), PowerShell 7 and
+the documented [development prerequisites](docs/setup.md).
 
 ```powershell
-python -m pip install -e .[dev]
-.\scripts\check-docker.ps1
-.\scripts\start-postgres.ps1
-flux-kb migrate
-flux-kb doctor
-flux-kb remember "Project decision" "Use PostgreSQL for metadata and Vespa for active retrieval."
-flux-kb search "Vespa retrieval decision"
-.\scripts\start-dashboard-dev.ps1
+dotnet tool restore
+dotnet restore FluxKnowledge.slnx --locked-mode
+dotnet build FluxKnowledge.slnx -c Release --no-restore -warnaserror
+dotnet test FluxKnowledge.slnx -c Release --no-build --filter "Category!=Browser"
+pwsh -NoProfile -File tests/native/repository-contract.ps1
 ```
 
-In temporary worktrees, prefer `.\scripts\dev\flux-kb.ps1 lint` and other
-wrapper calls over `python -m pip install -e .`; the wrapper runs the checkout
-through `PYTHONPATH` without changing the shared Python environment.
+SQL integration tests use generated disposable databases through the guarded
+test fixture. These commands do not deploy the application. Model-backed
+operation uses verified files under `J:\Models`; ordinary tests use synthetic
+fixtures and must not download models.
 
-Docker Compose is the default runtime profile. If Docker is missing, the setup
-scripts fail clearly instead of silently switching storage engines.
+For an existing installation, review the incremental update plan described in
+[setup](docs/setup.md). Applying an update requires explicit operational approval.
 
-The normal Flux API/dashboard/worker runtime is Docker-hosted. Classic Outlook
-COM catch-up is intentionally split into `flux-kb outlook-host run` on Windows
-because COM must run in the logged-in user session.
+## Documentation
 
-See [docs/setup.md](docs/setup.md) and [docs/integrations.md](docs/integrations.md).
+- [Architecture](docs/architecture.md)
+- [Setup and verification](docs/setup.md)
+- [MCP, REST and CLI integrations](docs/integrations.md)
+- [Operator guide](docs/user-guide/dashboard-user-manual.md)
+- [File-type coverage](docs/file-type-coverage.md)
+- [Safety and data boundaries](docs/safety.md)
+- [Roadmap and remaining work](docs/roadmap.md)
 
-## Safety Model
-
-This public repository stores only code, documentation, migrations, test
-fixtures, and example configuration. It must never store live memories, raw
-transcripts, private workspace data, secrets, embeddings from private content,
-or generated private wiki exports.
-
-See [docs/safety.md](docs/safety.md) for the data boundary.
-
-## Roadmap
-
-See [docs/roadmap.md](docs/roadmap.md) for roadmap intent, implementation
-status, and queued work.
+Git contains source, migrations, synthetic tests and public documentation.
+Private content, credentials, model payloads and runtime data belong outside it.

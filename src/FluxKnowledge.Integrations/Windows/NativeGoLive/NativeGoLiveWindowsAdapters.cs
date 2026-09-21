@@ -951,14 +951,14 @@ internal static class NativeGoLiveRuntimeConfiguration
         }
     }
 
-    private static bool ProviderEnabled(JsonElement runtime, string provider, string legacyProperty)
+    private static bool ProviderEnabled(JsonElement runtime, string provider, string flatProperty)
     {
         var hasNestedProvider = runtime.TryGetProperty(provider, out var nestedProvider);
-        var hasLegacyProvider = runtime.TryGetProperty(legacyProperty, out var legacyProvider);
-        if (!hasNestedProvider && !hasLegacyProvider)
+        var hasFlatProvider = runtime.TryGetProperty(flatProperty, out var flatProvider);
+        if (!hasNestedProvider && !hasFlatProvider)
             throw new NativeGoLiveContractException("runtime-configuration-invalid");
         return hasNestedProvider && RequiredBoolean(nestedProvider, "Enabled") ||
-               hasLegacyProvider && RequiredBooleanValue(legacyProvider);
+               hasFlatProvider && RequiredBooleanValue(flatProvider);
     }
 
     private static void ValidateUnprovisionedProvider(bool enabled, string provider)

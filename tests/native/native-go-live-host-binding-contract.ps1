@@ -113,25 +113,19 @@ try {
         ConfirmConfigureVss = $true
         ConfirmDestroySql = $false
         ConfirmRegisterCodex = $true
-        ConfirmRemoveLegacyPlugin = $false
+
     }
     $null = Invoke-NativeGoLiveComposition -MergedMainRoot $temporaryRoot -CommittedSha ('a' * 40) `
         -Acknowledgements $distinctAcknowledgements -BootstrapScript (Join-Path $temporaryRoot 'fixture.sql')
-    $withoutLegacyRemovalAcknowledgement = @($script:ConstructedNativeGoLiveRequestArguments)
-
-    $distinctAcknowledgements.ConfirmRemoveLegacyPlugin = $true
-    $null = Invoke-NativeGoLiveComposition -MergedMainRoot $temporaryRoot -CommittedSha ('a' * 40) `
-        -Acknowledgements $distinctAcknowledgements -BootstrapScript (Join-Path $temporaryRoot 'fixture.sql')
-    $withLegacyRemovalAcknowledgement = @($script:ConstructedNativeGoLiveRequestArguments)
-
-    Assert-True ($withoutLegacyRemovalAcknowledgement.Count -eq 10 -and
-        -not [bool]$withoutLegacyRemovalAcknowledgement[2] -and
-        [bool]$withoutLegacyRemovalAcknowledgement[3] -and
-        -not [bool]$withoutLegacyRemovalAcknowledgement[4] -and
-        [bool]$withoutLegacyRemovalAcknowledgement[5] -and
-        -not [bool]$withoutLegacyRemovalAcknowledgement[6] -and
-        [bool]$withLegacyRemovalAcknowledgement[6]) `
-        'The reflected fifth acknowledgement does not derive specifically from ConfirmRemoveLegacyPlugin.'
+    $requestArguments = @($script:ConstructedNativeGoLiveRequestArguments)
+    Assert-True ($requestArguments.Count -eq 9 -and
+        -not [bool]$requestArguments[2] -and
+        [bool]$requestArguments[3] -and
+        -not [bool]$requestArguments[4] -and
+        [bool]$requestArguments[5] -and
+        [string]$requestArguments[6] -ceq $temporaryRoot -and
+        $null -ne $requestArguments[8]) `
+        'The reflected native acknowledgements or payload arguments are misbound.'
 
     Assert-Throws -Action {
         Invoke-NativeGoLive -MergedMainRoot $temporaryRoot -CommittedSha ('a' * 40) `
@@ -140,7 +134,7 @@ try {
                 ConfirmConfigureVss = $true
                 ConfirmDestroySql = $true
                 ConfirmRegisterCodex = $true
-                ConfirmRemoveLegacyPlugin = $true
+
             } -ModulePath $modulePath -BootstrapScript (Join-Path $temporaryRoot 'fixture.sql')
     } -Pattern 'native-go-live-bridge-discovery-failed' -Message `
         'The native host did not cross every PowerShell hand-off before ExecuteAsync.'

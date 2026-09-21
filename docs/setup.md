@@ -1,54 +1,42 @@
-# Native FluxKnowledge setup
+# Setup and verification
 
-## Supported local prerequisites
+## Development prerequisites
 
-FluxKnowledge is a private, single-user native Windows application. Its
-supported integration endpoint is the direct loopback application at
-`http://127.0.0.1:5137`; no Docker, Python service, remote endpoint or legacy
-runtime is required or supported for this contract.
-
-For development verification, install the .NET SDK version pinned by the
-repository and restore the local tool manifest:
+Use Windows, PowerShell 7, Git and the .NET SDK selected by
+[global.json](../global.json). Native tests use a local SQL Server or the
+supported `(localdb)\MSSQLLocalDB` instance through
+`scripts/dev/ensure-disposable-sql.ps1`. SQL Full-Text is required for the
+corresponding retrieval checks. The test fixture accepts only a validated
+server-level loopback connection and creates uniquely named disposable databases.
+Never provide the application's production database connection to tests.
 
 ```powershell
 dotnet tool restore
 dotnet restore FluxKnowledge.slnx --locked-mode
 dotnet build FluxKnowledge.slnx -c Release --no-restore -warnaserror
+dotnet test FluxKnowledge.slnx -c Release --no-build --filter "Category!=Browser"
+pwsh -NoProfile -File tests/native/repository-contract.ps1
+pwsh -NoProfile -File tests/native/complete-feature-dryrun.ps1
+pwsh -NoProfile -File tests/native/native-deployment-plan.ps1
 ```
 
-The native application is not started by these commands. Starting, deploying,
-migrating, restarting or probing a live application needs separate operational
-authority.
+Browser checks use `scripts/dev/test-browser.ps1` and the guarded disposable
+browser helper. Use an existing browser installation where available. The
+normal suite reports browser tests as skipped unless that route is enabled.
+No ordinary test is allowed to acquire a real model.
 
-## Native v1 clients
+Production startup loads canonical configuration with no-follow path checks;
+an unrestricted development `dotnet run` is not an installation procedure.
+Tests provide their own isolated host composition and synthetic fixtures.
 
-The CLI reads a JSON request from standard input and prints the canonical JSON
-envelope. It is a loopback-only client and refuses redirects or proxies.
+## Production prerequisites and layout
 
-```powershell
-'{"view":"overview"}' | FluxKnowledge.Cli operations status
-'{"query":"example","limit":10}' | FluxKnowledge.Cli knowledge search
-'{"action":"create_note","title":"Example","body":"Safe retained note"}' |
-  FluxKnowledge.Cli knowledge write --preview
-```
+The native installation requires IIS with the matching ASP.NET Core hosting
+support, a supported local SQL Server with Full-Text, and the required Windows
+filesystem and permissions. Desktop Outlook/Visio processing additionally
+requires the installed desktop application and a logged-in user session.
 
-For a mutation commit, resend precisely the previewed command with both values
-returned or supplied by the caller:
-
-```powershell
-'{"action":"create_note","title":"Example","body":"Safe retained note"}' |
-  FluxKnowledge.Cli knowledge write --commit `
-    --confirmation-id <confirmation-id> `
-    --idempotency-key <unique-idempotency-key>
-```
-
-The corresponding REST routes are under `/api/v1` and the native MCP endpoint
-is `/mcp`. See [native v1 integrations](integrations.md) for all nine tools,
-request routes and the confirmation protocol.
-
-## Storage and recovery preparation
-
-The production hierarchy is fixed beneath `I:\FluxKnowledge`:
+The fixed application hierarchy is:
 
 ```text
 I:\FluxKnowledge\
@@ -65,46 +53,67 @@ I:\FluxKnowledge\
   Recovery\
 ```
 
-The application rejects paths outside this hierarchy and reparse-point or
-ambiguous resolution before production storage I/O. VSS recovery preparation is
-plan-only: the intended OS-managed, unencrypted shadow-storage cap is 10% of
-`I:` and there is no file-copy backup or automatic restore.
+The sole model store is `J:\Models`. Model manifests and inventory must identify
+immutable revisions, exact dependencies, hashes and byte lengths. Offline
+loading refuses missing or invalid content. A missing artifact requires a
+separate exact acquisition proposal and approval after all relevant caches are
+checked; setup, restore and startup never grant download permission.
 
-`FluxKnowledge.Cli fresh-start` emits the guarded layout and VSS plan with
-`executionAvailable: false`. It does not erase files, detach a database,
-configure VSS, install a plugin or start a host. Fresh-start is reserved for a
-separately authorised go-live workflow.
+## Existing installation updates
 
-## One-shot go-live boundary
-
-The sole go-live entry point is `scripts/dev/complete-feature.ps1 -GoLive` with
-the four explicit clean-slate, VSS, SQL-destruction and Codex-registration
-acknowledgements. It admits only an absent `I:\FluxKnowledge` root and target
-catalogue, or wipes both in that same confirmed invocation before continuing.
-It does not inspect ownership state or use deployment journals, markers,
-adoption, recovery, resume, repair or replay. A failure or interruption ends
-the invocation; a later attempt requires a new explicit confirmation and clean
-wipe. This documentation does not authorise that invocation.
-
-## Codex plugin status
-
-Application-owned plugin material belongs in
-`I:\FluxKnowledge\CodexPlugin` and points only to the local `/mcp` endpoint.
-Use the following command only to inspect its status:
+Review the incremental updater's plan before applying any change:
 
 ```powershell
+pwsh -NoProfile -File scripts/deploy/update-native-iis-incremental.ps1 `
+  -SourceRoot . -PlanOnly
+```
+
+Use `-Apply` only with current approval for the concrete target and change.
+The updater validates the candidate under a hold, checks fixed-loopback health
+and retained state, and keeps an application payload rollback path. Schema
+changes require its separate reviewed migration opt-in and compatible rollback
+conditions. Updating code in Git does not authorise deployment, restart or
+migration. Model caches and source originals are outside the update payload.
+
+## Clean-slate installation
+
+The separate one-shot entry point is `scripts/dev/complete-feature.ps1 -GoLive`.
+It requires all four acknowledgements: `-ConfirmCleanSlate`,
+`-ConfirmConfigureVss`, `-ConfirmDestroySql` and `-ConfirmRegisterCodex`.
+It proceeds only from an absent application root and target catalogue or after
+wiping them in that same authorised invocation. It binds execution to a merged
+payload, validates VSS prerequisites, provisions SQL, starts approved native
+tasks, registers the native plugin and validates the result.
+
+This is destructive installation, not a routine updater. It has no journalled
+resume or automatic restore. A failure ends the invocation and a further attempt
+needs new operational approval. The intended OS-managed shadow-storage cap is
+10% of `I:`; a recovery plan is not evidence that recovery has been exercised.
+The commands in this document do not authorise a GoLive invocation.
+
+## Native clients
+
+Clients use `http://127.0.0.1:5137`, `/api/v1` and `/mcp`. The CLI accepts JSON
+on standard input and returns the canonical envelope:
+
+```powershell
+'{"view":"overview"}' | FluxKnowledge.Cli operations status
+'{"query":"example","limit":10}' | FluxKnowledge.Cli knowledge search
+'{"action":"note_create","title":"Example","body":"Safe retained note"}' |
+  FluxKnowledge.Cli knowledge write --preview
 FluxKnowledge.Cli codex plugin status
 ```
 
-The `codex plugin repair` command is intentionally unavailable to normal CLI
-execution: it needs the typed authority of the separately approved go-live
-workflow. Normal application startup never changes Codex registrations.
+Commit a mutation only with the exact previewed command, its confirmation and
+a caller-provided idempotency key. See [integrations](integrations.md).
+The native marketplace belongs under `I:\FluxKnowledge\CodexPlugin`. Normal
+startup and CLI diagnostics do not install, repair or alter plugin registrations.
+Hook trust remains a user action in Codex.
 
-## Verification boundary
+## Feature closeout
 
-The verified non-live release gate is locked restore, a zero-warning Release
-build, focused contract tests, the full Release suite and EF's
-no-pending-model check. Browser validation is necessary only for a changed
-interactive UI route. Neither that gate nor this document authorises live
-deployment, migration, VSS configuration, a plugin lifecycle change or a
-fresh-start operation.
+Use a dedicated `codex/` worktree and run `scripts/dev/complete-feature.ps1` for
+feature closeout. Its default path verifies, commits, integrates and pushes the
+change without deploying. It emits step evidence including `failed_step` and
+`log_path`; resolve failures before rerunning. `-KeepWorktree` preserves the
+checkout. `-GoLive` is a separate operational action with the gates above.

@@ -1103,30 +1103,11 @@ internal sealed class NativeGoLiveWindowsMarketplacePort : INativeGoLiveMarketpl
         if (installed.ExitCode != 0)
             throw new NativeGoLiveContractException("native-plugin-install-failed");
         var plugins = await _runner.ListPluginsJsonAsync(cancellationToken).ConfigureAwait(false);
-        if (plugins.ExitCode != 0 || !HasInstalledEnabledPluginWithoutLegacy(plugins.StandardOutput, identity))
+        if (plugins.ExitCode != 0 || !HasInstalledEnabledNativePlugin(plugins.StandardOutput, identity))
             throw new NativeGoLiveContractException("native-plugin-install-not-proved");
         return Observation(state, identity);
     }
 
-    public async ValueTask RemoveExactLegacyPluginAsync(CancellationToken cancellationToken)
-    {
-        if (!_capability.IsConsumedForExecution)
-            throw new NativeGoLiveContractException("marketplace-authority-not-consumed");
-
-        var before = await _runner.ListPluginsJsonAsync(cancellationToken).ConfigureAwait(false);
-        if (before.ExitCode != 0 ||
-            !TryReadInstalledPluginState(before.StandardOutput, out var legacyPresent))
-            throw new NativeGoLiveContractException("legacy-plugin-removal-not-proved");
-        if (!legacyPresent) return;
-
-        var removed = await _runner.RemoveLegacyFluxLlmKbPluginAsync(cancellationToken).ConfigureAwait(false);
-        if (removed.ExitCode != 0)
-            throw new NativeGoLiveContractException("legacy-plugin-removal-failed");
-        var plugins = await _runner.ListPluginsJsonAsync(cancellationToken).ConfigureAwait(false);
-        if (plugins.ExitCode != 0 ||
-            !TryReadInstalledPluginState(plugins.StandardOutput, out legacyPresent) || legacyPresent)
-            throw new NativeGoLiveContractException("legacy-plugin-removal-not-proved");
-    }
 
     private static NativeGoLiveMarketplaceObservation Observation(
         CodexMarketplaceLifecycleState state,
@@ -1181,7 +1162,7 @@ internal sealed class NativeGoLiveWindowsMarketplacePort : INativeGoLiveMarketpl
         !string.IsNullOrWhiteSpace(StringProperty(entry, "name")) &&
         !string.IsNullOrWhiteSpace(StringProperty(entry, "root"));
 
-    private static bool HasInstalledEnabledPluginWithoutLegacy(string json, NativeGoLiveCodexIdentity identity)
+    private static bool HasInstalledEnabledNativePlugin(string json, NativeGoLiveCodexIdentity identity)
     {
         try
         {
@@ -1196,11 +1177,7 @@ internal sealed class NativeGoLiveWindowsMarketplacePort : INativeGoLiveMarketpl
                     identity.PluginName + "@" + identity.MarketplaceName, StringComparison.Ordinal)).ToArray();
             return entries.All(IsWellFormedInstalledPluginEntry) &&
                    expected.Length == 1 &&
-                   HasInstalledAndEnabledState(expected[0]) &&
-                   !entries.Any(plugin => string.Equals(
-                       StringProperty(plugin, "pluginId"),
-                       "flux-llm-kb@flux-llm-kb-local",
-                       StringComparison.Ordinal));
+                   HasInstalledAndEnabledState(expected[0]);
         }
         catch (JsonException)
         {
@@ -1208,29 +1185,6 @@ internal sealed class NativeGoLiveWindowsMarketplacePort : INativeGoLiveMarketpl
         }
     }
 
-    private static bool TryReadInstalledPluginState(string json, out bool legacyPresent)
-    {
-        legacyPresent = false;
-        try
-        {
-            using var document = JsonDocument.Parse(json);
-            if (document.RootElement.ValueKind != JsonValueKind.Object ||
-                !document.RootElement.TryGetProperty("installed", out var installed) ||
-                installed.ValueKind != JsonValueKind.Array)
-                return false;
-            var entries = installed.EnumerateArray().ToArray();
-            if (!entries.All(IsWellFormedInstalledPluginEntry)) return false;
-            legacyPresent = entries.Any(plugin => string.Equals(
-                StringProperty(plugin, "pluginId"),
-                "flux-llm-kb@flux-llm-kb-local",
-                StringComparison.Ordinal));
-            return true;
-        }
-        catch (JsonException)
-        {
-            return false;
-        }
-    }
 
     private static bool IsWellFormedInstalledPluginEntry(JsonElement plugin) =>
         plugin.ValueKind == JsonValueKind.Object &&
@@ -1307,10 +1261,6 @@ internal sealed class NativeGoLiveCodexProcessRunner : INativeCodexMarketplaceCo
     public ValueTask<NativeCodexMarketplaceCommandResult> ListPluginsJsonAsync(
         CancellationToken cancellationToken) =>
         RunAsync(["plugin", "list", "--json"], true, cancellationToken);
-
-    public ValueTask<NativeCodexMarketplaceCommandResult> RemoveLegacyFluxLlmKbPluginAsync(
-        CancellationToken cancellationToken) =>
-        RunAsync(["plugin", "remove", "flux-llm-kb@flux-llm-kb-local"], false, cancellationToken);
 
     private async ValueTask<NativeCodexMarketplaceCommandResult> RunAsync(
         IReadOnlyList<string> arguments,

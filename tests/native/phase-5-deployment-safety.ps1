@@ -15,10 +15,8 @@ $goLiveModule = Join-Path $SourceRoot "scripts\deploy\native-go-live.psm1"
 $loopbackSafetyScript = Join-Path $SourceRoot "scripts\deploy\loopback-deployment-safety.ps1"
 $workerValidatorScript = Join-Path $SourceRoot "scripts\deploy\validate-native-worker-supervision.ps1"
 $outlookValidatorScript = Join-Path $SourceRoot "scripts\deploy\validate-native-outlook-ingress.ps1"
-$deploymentDesign = Join-Path $SourceRoot "docs\superpowers\specs\2026-08-03-native-closeout-and-loopback-deployment.md"
-$deploymentPlanDocument = Join-Path $SourceRoot "docs\superpowers\plans\2026-08-03-native-closeout-and-loopback-deployment.md"
 
-foreach ($requiredScript in @($planScript, $validatorScript, $deploymentScript, $goLiveModule, $loopbackSafetyScript, $workerValidatorScript, $outlookValidatorScript, $deploymentDesign, $deploymentPlanDocument)) {
+foreach ($requiredScript in @($planScript, $validatorScript, $deploymentScript, $goLiveModule, $loopbackSafetyScript, $workerValidatorScript, $outlookValidatorScript)) {
     if (-not (Test-Path -LiteralPath $requiredScript -PathType Leaf)) {
         throw "A required Phase 5 deployment-safety script is missing: $requiredScript"
     }
@@ -640,18 +638,6 @@ finally {
         $probe.Handler.Dispose()
     }
     $redirectListener.Stop()
-}
-
-$deploymentDesignText = Get-Content -LiteralPath $deploymentDesign -Raw
-$deploymentPlanText = Get-Content -LiteralPath $deploymentPlanDocument -Raw
-foreach ($documentText in @($deploymentDesignText, $deploymentPlanText)) {
-    if ($documentText -match "Active CI and closeout runs contain no Python, pytest") {
-        throw "The native deployment documentation still forbids its deliberate focused Gmail pytest exception."
-    }
-    if ($documentText -notmatch "focused legacy Gmail pytest regression" -or
-        $documentText -notmatch "no other Python or pytest") {
-        throw "The native deployment documentation does not bound the focused Gmail pytest exception."
-    }
 }
 
 $deploymentText = Get-Content -LiteralPath $deploymentScript -Raw

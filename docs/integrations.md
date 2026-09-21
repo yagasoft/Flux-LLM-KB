@@ -1,8 +1,7 @@
 # Native v1 integrations
 
 FluxKnowledge exposes one private, direct-loopback native v1 contract for
-Codex and local scripts. It does not support a legacy service, compatibility
-adapter or remote integration path.
+Codex and local scripts. All supported clients share the native application facade.
 
 ## Boundary
 
@@ -65,13 +64,17 @@ registration, leaving unrelated Codex configuration unchanged.
 go-live authority; ordinary CLI composition denies it. Normal application
 startup does not register, repair or otherwise alter Codex plugin state.
 
-## Unsupported and deferred operations
+## Operational actions and planned extensions
 
-No external listener, remote MCP endpoint, credential bridge, legacy runtime,
-or compatibility contract is supported. Deployment, database migration,
-plugin lifecycle mutation, VSS configuration and fresh-start execution require
-the separately authorised, one-shot `scripts/dev/complete-feature.ps1 -GoLive`
-workflow. It can continue only from an absent root and target catalogue or a
-same-invocation confirmed wipe; deployment recovery, journals, markers,
-adoption, resume, repair and replay are not supported. These actions are not
-application-startup or development-verification operations.
+External listeners and remote MCP are outside this private local contract.
+Deployment, migration, VSS configuration and plugin lifecycle changes are
+operational actions governed by [setup](setup.md), rather than normal application
+startup or development verification.
+
+The native plugin is verified by its exact identity and installed/enabled state.
+Unrelated plugin registrations are not removed. The application has no plugin
+retirement or migration task.
+
+Scoped `corpus.search` and `corpus.read` are [planned extensions](design/corpus-retrieval.md),
+not currently available tools. Current search uses a deterministic embedding
+baseline; learned semantic retrieval remains a separate delivery.

@@ -117,7 +117,7 @@ public sealed class WebHostCompositionTests : IDisposable
     }
 
     [Fact]
-    public void Go_live_options_reject_a_legacy_provider_activation_beside_a_disabled_nested_provider()
+    public void Go_live_options_reject_a_flat_provider_activation_beside_a_disabled_nested_provider()
     {
         var configuration = new ConfigurationBuilder()
             .AddConfiguration(CreateProductionConfiguration())
@@ -444,11 +444,9 @@ public sealed class WebHostCompositionTests : IDisposable
             descriptor.ServiceType.FullName?.Contains("CodexMarketplace", StringComparison.Ordinal) == true ||
             descriptor.ServiceType.FullName?.Contains("CodexPlugin", StringComparison.Ordinal) == true ||
             descriptor.ServiceType.FullName?.Contains("GoLiveAuthority", StringComparison.Ordinal) == true ||
-            descriptor.ServiceType.FullName?.Contains("FreshStart", StringComparison.Ordinal) == true ||
             descriptor.ImplementationType?.FullName?.Contains("CodexMarketplace", StringComparison.Ordinal) == true ||
             descriptor.ImplementationType?.FullName?.Contains("CodexPlugin", StringComparison.Ordinal) == true ||
-            descriptor.ImplementationType?.FullName?.Contains("GoLiveAuthority", StringComparison.Ordinal) == true ||
-            descriptor.ImplementationType?.FullName?.Contains("FreshStart", StringComparison.Ordinal) == true);
+            descriptor.ImplementationType?.FullName?.Contains("GoLiveAuthority", StringComparison.Ordinal) == true);
     }
 
     [Theory]
@@ -613,7 +611,7 @@ public sealed class WebHostCompositionTests : IDisposable
 
         Assert.DoesNotContain(endpointTypes, type => type.Name.Contains("Outlook", StringComparison.OrdinalIgnoreCase));
         Assert.DoesNotContain(
-            typeof(KnowledgeMcpTools).GetMethods(System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.DeclaredOnly),
+            typeof(NativeV1McpTools).GetMethods(System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.DeclaredOnly),
             method => method.Name.Contains("Outlook", StringComparison.OrdinalIgnoreCase));
     }
 
@@ -626,7 +624,7 @@ public sealed class WebHostCompositionTests : IDisposable
 
         Assert.DoesNotContain(endpointTypes, type => type.Name.Contains("OoxmlForce", StringComparison.OrdinalIgnoreCase));
         Assert.DoesNotContain(
-            typeof(KnowledgeMcpTools).GetMethods(System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.DeclaredOnly),
+            typeof(NativeV1McpTools).GetMethods(System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.DeclaredOnly),
             method => method.Name.Contains("Force", StringComparison.OrdinalIgnoreCase));
 
         using var factory = new ConfiguredWebApplicationFactory(_ingressRoot);
@@ -644,7 +642,7 @@ public sealed class WebHostCompositionTests : IDisposable
     [Fact]
     public void Operator_actions_add_no_MCP_mutation_tool()
     {
-        var publicMethods = typeof(KnowledgeMcpTools).GetMethods(
+        var publicMethods = typeof(NativeV1McpTools).GetMethods(
             System.Reflection.BindingFlags.Instance |
             System.Reflection.BindingFlags.Public |
             System.Reflection.BindingFlags.DeclaredOnly);

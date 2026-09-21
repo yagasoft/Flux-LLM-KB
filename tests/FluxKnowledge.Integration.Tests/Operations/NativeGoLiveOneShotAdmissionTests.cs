@@ -8,9 +8,39 @@ namespace FluxKnowledge.Integration.Tests.Operations;
 public sealed class NativeGoLiveOneShotAdmissionTests
 {
     [Fact]
-    public void Native_go_live_request_requires_an_explicit_legacy_removal_acknowledgement()
+    public void Native_go_live_request_has_exactly_the_four_native_operation_acknowledgements()
     {
-        Assert.NotNull(typeof(NativeGoLiveRequest).GetProperty("ConfirmRemoveLegacyPlugin"));
+        Assert.Equal(
+            ["ConfirmCleanSlate", "ConfirmConfigureVss", "ConfirmDestroySql", "ConfirmRegisterCodex"],
+            typeof(NativeGoLiveRequest).GetProperties()
+                .Select(property => property.Name)
+                .Where(name => name.StartsWith("Confirm", StringComparison.Ordinal))
+                .Order(StringComparer.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("clean-slate")]
+    [InlineData("vss")]
+    [InlineData("sql")]
+    [InlineData("codex")]
+    public async Task Each_native_acknowledgement_is_required_before_any_mutation(string omitted)
+    {
+        var request = omitted switch
+        {
+            "clean-slate" => ConfirmedRequest() with { ConfirmCleanSlate = false },
+            "vss" => ConfirmedRequest() with { ConfirmConfigureVss = false },
+            "sql" => ConfirmedRequest() with { ConfirmDestroySql = false },
+            "codex" => ConfirmedRequest() with { ConfirmRegisterCodex = false },
+            _ => throw new ArgumentOutOfRangeException(nameof(omitted))
+        };
+        var host = new OneShotAdmissionHost(NativeGoLiveDeploymentState.Absent);
+
+        var result = await new NativeGoLiveExecutor().ExecuteAsync(request, host);
+
+        Assert.False(result.Succeeded);
+        Assert.Equal("go-live-acknowledgement-required", result.ReasonCode);
+        Assert.Empty(host.Calls);
+        Assert.Empty(host.Mutations);
     }
 
     [Fact]
@@ -62,18 +92,6 @@ public sealed class NativeGoLiveOneShotAdmissionTests
         Assert.True(Directory.Exists(fixture.Layout.LogsRoot));
     }
 
-    [Fact]
-    public async Task Missing_legacy_removal_acknowledgement_rejects_before_mutation()
-    {
-        var host = new OneShotAdmissionHost(NativeGoLiveDeploymentState.Absent);
-
-        var result = await new NativeGoLiveExecutor().ExecuteAsync(
-            ConfirmedRequest() with { ConfirmRemoveLegacyPlugin = false }, host);
-
-        Assert.False(result.Succeeded);
-        Assert.Equal("go-live-acknowledgement-required", result.ReasonCode);
-        Assert.Empty(host.Mutations);
-    }
 
     [Fact]
     public void Production_configuration_admits_provisioned_worker_and_Outlook_operations_only()
@@ -135,7 +153,7 @@ public sealed class NativeGoLiveOneShotAdmissionTests
     }
 
     [Fact]
-    public void Production_configuration_does_not_admit_a_legacy_provider_activation_beside_a_disabled_nested_provider()
+    public void Production_configuration_does_not_admit_a_flat_provider_activation_beside_a_disabled_nested_provider()
     {
         var plan = NativeGoLivePlan.CreateForIsolatedTests(
             LiveRootLayout.CreateForIsolatedTests(Path.Combine(Path.GetTempPath(), "FluxKnowledgeRuntime", Guid.NewGuid().ToString("N"))),
@@ -245,7 +263,7 @@ public sealed class NativeGoLiveOneShotAdmissionTests
         Assert.Equal(1, host.AdmissionCalls);
         Assert.Equal(0, host.WipeCalls);
         Assert.Contains("one-shot-preflight", host.Calls);
-        Assert.DoesNotContain("legacy-preflight", host.Calls);
+        Assert.DoesNotContain("superseded-preflight", host.Calls);
         Assert.DoesNotContain("read-journal", host.Calls);
         Assert.DoesNotContain("compare-and-swap-journal", host.Calls);
         Assert.DoesNotContain("write-root-marker", host.Mutations);
@@ -294,7 +312,7 @@ public sealed class NativeGoLiveOneShotAdmissionTests
     }
 
     [Fact]
-    public async Task Successful_go_live_removes_legacy_before_native_registration_and_validation()
+    public async Task Successful_go_live_registers_native_plugin_after_activation_and_before_validation()
     {
         var host = new OneShotAdmissionHost(NativeGoLiveDeploymentState.Absent);
 
@@ -309,27 +327,15 @@ public sealed class NativeGoLiveOneShotAdmissionTests
                 "provision-empty-catalogue",
                 "publish-and-start",
                 "activate-native-tasks",
-                "remove-legacy-plugin",
                 "register-marketplace",
                 "validate"
             ],
             host.Mutations);
     }
 
-    [Fact]
-    public async Task Legacy_removal_failure_prevents_native_registration()
-    {
-        var host = new OneShotAdmissionHost(NativeGoLiveDeploymentState.Absent, failLegacyRemoval: true);
-
-        var result = await new NativeGoLiveExecutor().ExecuteAsync(ConfirmedRequest(), host);
-
-        Assert.False(result.Succeeded);
-        Assert.Equal("legacy-plugin-removal-failed", result.ReasonCode);
-        Assert.DoesNotContain("register-marketplace", host.Mutations);
-    }
 
     [Fact]
-    public async Task Native_registration_failure_never_restores_legacy_plugin()
+    public async Task Native_registration_failure_prevents_validation()
     {
         var host = new OneShotAdmissionHost(NativeGoLiveDeploymentState.Absent, failNativeInstall: true);
 
@@ -338,12 +344,10 @@ public sealed class NativeGoLiveOneShotAdmissionTests
         Assert.False(result.Succeeded);
         Assert.Equal("native-install-failed", result.ReasonCode);
         Assert.DoesNotContain("validate", host.Mutations);
-        Assert.Contains("remove-legacy-plugin", host.Mutations);
-        Assert.DoesNotContain("restore-legacy-plugin", host.Mutations);
     }
 
     [Fact]
-    public async Task Failed_task_activation_prevents_native_registration_and_legacy_removal()
+    public async Task Failed_task_activation_prevents_native_registration()
     {
         var host = new OneShotAdmissionHost(NativeGoLiveDeploymentState.Absent, failTaskActivation: true);
 
@@ -352,10 +356,9 @@ public sealed class NativeGoLiveOneShotAdmissionTests
         Assert.False(result.Succeeded);
         Assert.Equal("native-task-activation-failed", result.ReasonCode);
         Assert.DoesNotContain("register-marketplace", host.Mutations);
-        Assert.DoesNotContain("remove-legacy-plugin", host.Mutations);
     }
 
-    private static NativeGoLiveRequest ConfirmedRequest() => new(Plan, false, true, true, true, true, true);
+    private static NativeGoLiveRequest ConfirmedRequest() => new(Plan, false, true, true, true, true);
 
     public enum NativeGoLiveDeploymentState
     {
@@ -371,8 +374,7 @@ public sealed class NativeGoLiveOneShotAdmissionTests
         NativeGoLiveDeploymentState state,
         bool failNativeProof = false,
         bool failNativeInstall = false,
-        bool failTaskActivation = false,
-        bool failLegacyRemoval = false) : INativeGoLiveHost
+        bool failTaskActivation = false) : INativeGoLiveHost
     {
         public List<string> Calls { get; } = [];
         public List<string> Mutations { get; } = [];
@@ -408,8 +410,8 @@ public sealed class NativeGoLiveOneShotAdmissionTests
 
         public ValueTask PreflightAsync(NativeGoLivePlan plan, CancellationToken cancellationToken)
         {
-            Calls.Add("legacy-preflight");
-            return ValueTask.FromException(new InvalidOperationException("legacy-preflight-must-not-run"));
+            Calls.Add("superseded-preflight");
+            return ValueTask.FromException(new InvalidOperationException("superseded-preflight-must-not-run"));
         }
 
         public ValueTask VerifyOneShotPreflightAsync(NativeGoLivePlan plan, CancellationToken cancellationToken)
@@ -444,10 +446,6 @@ public sealed class NativeGoLiveOneShotAdmissionTests
             failNativeInstall
                 ? ValueTask.FromException(new NativeGoLiveContractException("native-install-failed"))
                 : Mutate("register-marketplace");
-        public ValueTask RemoveLegacyPluginAsync(CancellationToken cancellationToken) =>
-            failLegacyRemoval
-                ? ValueTask.FromException(new NativeGoLiveContractException("legacy-plugin-removal-failed"))
-                : Mutate("remove-legacy-plugin");
 
         private ValueTask Mutate(string operation)
         {

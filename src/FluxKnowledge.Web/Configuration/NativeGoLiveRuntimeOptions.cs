@@ -101,10 +101,10 @@ public static class NativeGoLiveRuntimeOptions
         return result;
     }
 
-    private static bool ReadProviderEnabled(IConfiguration configuration, string provider, string legacyKey)
+    private static bool ReadProviderEnabled(IConfiguration configuration, string provider, string flatKey)
     {
         var nestedKey = $"Runtime:{provider}:Enabled";
-        return ReadBoolean(configuration, nestedKey) || ReadBoolean(configuration, $"Runtime:{legacyKey}");
+        return ReadBoolean(configuration, nestedKey) || ReadBoolean(configuration, $"Runtime:{flatKey}");
     }
 
     private static void ValidateUnprovisionedProvider(bool enabled, string provider)

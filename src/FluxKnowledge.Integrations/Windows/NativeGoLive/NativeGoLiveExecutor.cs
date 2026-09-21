@@ -116,7 +116,6 @@ public sealed class NativeGoLiveExecutor
                 }
                 await host.PublishAndStartAsync(request.Plan, cancellationToken).ConfigureAwait(false);
                 await host.ActivateNativeTasksAsync(request.Plan, cancellationToken).ConfigureAwait(false);
-                await host.RemoveLegacyPluginAsync(cancellationToken).ConfigureAwait(false);
                 await host.RegisterMarketplaceAsync(request.Plan.Codex, cancellationToken).ConfigureAwait(false);
                 await host.ValidateAsync(request.Plan, cancellationToken).ConfigureAwait(false);
                 return NativeGoLiveResult.Completed();
@@ -140,8 +139,7 @@ public sealed class NativeGoLiveExecutor
         request.ConfirmCleanSlate &&
         request.ConfirmConfigureVss &&
         request.ConfirmDestroySql &&
-        request.ConfirmRegisterCodex &&
-        request.ConfirmRemoveLegacyPlugin;
+        request.ConfirmRegisterCodex;
 
     private static bool TryGetSafeBootstrapFailureReason(Exception exception, out string reasonCode)
     {

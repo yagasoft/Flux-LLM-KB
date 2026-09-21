@@ -13,10 +13,6 @@ internal static class CliProgram
                 Console.Out,
                 Console.Error),
             "validate-sql" => await ValidateSqlCommand.ExecuteAsync(Console.Out, Console.Error),
-            "fresh-start" => await FreshStartCommand.ExecuteAsync(
-                args,
-                Console.Out,
-                Console.Error),
             "knowledge" or "code" or "corpus" or "operations" => await NativeV1Command.ExecuteFromEnvironmentAsync(
                 args,
                 Console.In,
@@ -42,7 +38,7 @@ internal static class CliProgram
 
     private static int WriteUsage()
     {
-        Console.Error.WriteLine("Usage: FluxKnowledge.Cli <knowledge|code|corpus|operations|codex|csharp-code|fresh-start|validate-sql|models|documents>");
+        Console.Error.WriteLine("Usage: FluxKnowledge.Cli <knowledge|code|corpus|operations|codex|csharp-code|validate-sql|models|documents>");
         return 2;
     }
 }

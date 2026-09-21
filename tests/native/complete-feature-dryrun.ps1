@@ -70,7 +70,7 @@ Assert-True ($text -match 'Invoke-NativeGoLive') 'GoLive must be in-process, not
 Assert-True ($text.IndexOf('Invoke-NativeGoLive') -lt $text.IndexOf('push-main')) 'GoLive must precede push.'
 Assert-False ($text -match 'BackupRoot') 'No backup-root contract may remain.'
 Assert-False ($text -match 'post-deploy-validation-record-commit') 'Live evidence must not create a second commit.'
-foreach ($switch in @('ConfirmCleanSlate', 'ConfirmConfigureVss', 'ConfirmDestroySql', 'ConfirmRegisterCodex', 'ConfirmRemoveLegacyPlugin')) {
+foreach ($switch in @('ConfirmCleanSlate', 'ConfirmConfigureVss', 'ConfirmDestroySql', 'ConfirmRegisterCodex')) {
     Assert-True ($text -match ("\[switch\]\`$$switch\b")) "Closeout must require $switch."
 }
 Assert-True (([regex]::Matches($text, 'git push origin main')).Count -eq 1) 'Closeout must have one final main push.'
@@ -87,7 +87,7 @@ Assert-True ($text -match 'Clear-NativeGoLiveBootstrapEnvironment' -and
     $text -match 'finally\s*\{\s*Clear-NativeGoLiveBootstrapEnvironment') `
     'The direct host bridge must clear bootstrap data after the guarded host consumes it.'
 Assert-False ($text -match 'validate-native-worker-supervision|validate-native-outlook-ingress|post-deploy') 'Obsolete worker/Outlook deployment validation remains.'
-Assert-False ($text -match '(?m)^\s*Invoke-FeatureStep\b.*(?:python|docker|rabbitmq|vespa)') 'The native closeout invokes a legacy runtime command.'
+Assert-False ($text -match '(?m)^\s*Invoke-FeatureStep\b.*(?:python|docker|rabbitmq|vespa)') 'The native closeout invokes a non-native service command.'
 
 $tokens = $null
 $parseErrors = $null
@@ -118,8 +118,7 @@ try {
     $incomplete = Invoke-CloseoutChild -Script $closeoutScript -FeatureRoot $featureRoot -MainRoot $mainRoot `
         -Arguments @('-DryRun', '-GoLive', '-ConfirmCleanSlate')
     Assert-True ($incomplete.ExitCode -ne 0 -and
-        $incomplete.Output -match '-GoLive requires -ConfirmCleanSlate, -ConfirmConfigureVss, -ConfirmDestroySql, -ConfirmRegisterCodex' -and
-        $incomplete.Output -match '-ConfirmRemoveLegacyPlugin') `
+        $incomplete.Output -match '-GoLive requires -ConfirmCleanSlate, -ConfirmConfigureVss, -ConfirmDestroySql and -ConfirmRegisterCodex') `
         'Every acknowledgement is required.'
 
     $orphanedConfirmation = Invoke-CloseoutChild -Script $closeoutScript -FeatureRoot $featureRoot -MainRoot $mainRoot `
@@ -131,7 +130,7 @@ try {
     $missingBootstrap = Invoke-CloseoutChild -Script $closeoutScript -FeatureRoot $featureRoot -MainRoot $mainRoot `
         -Arguments @(
             '-GoLive', '-ConfirmCleanSlate', '-ConfirmConfigureVss',
-            '-ConfirmDestroySql', '-ConfirmRegisterCodex', '-ConfirmRemoveLegacyPlugin') `
+            '-ConfirmDestroySql', '-ConfirmRegisterCodex') `
         -Environment @{ FLUXKNOWLEDGE_NATIVE_GO_LIVE_SQL_BOOTSTRAP = $null }
     $missingBootstrapSummary = $missingBootstrap.Output | ConvertFrom-Json
     Assert-True ($missingBootstrap.ExitCode -ne 0 -and
@@ -151,6 +150,7 @@ try {
         'dotnet-restore-locked',
         'dotnet-build-release',
         'dotnet-test-native',
+        'native-repository-contract',
         'native-closeout-contract',
         'native-go-live-bootstrap-nondryrun-contract',
         'native-go-live-contract',
@@ -180,11 +180,11 @@ try {
     $developerGoLive = Invoke-CloseoutChild -Script $developerEntrypoint -FeatureRoot $featureRoot -MainRoot $mainRoot `
         -Arguments @(
             '-DryRun', '-GoLive', '-ConfirmCleanSlate', '-ConfirmConfigureVss',
-            '-ConfirmDestroySql', '-ConfirmRegisterCodex', '-ConfirmRemoveLegacyPlugin')
+            '-ConfirmDestroySql', '-ConfirmRegisterCodex')
     $developerGoLiveSummary = $developerGoLive.Output | ConvertFrom-Json
     Assert-True ($developerGoLive.ExitCode -eq 0 -and $developerGoLiveSummary.ok -and
         @($developerGoLiveSummary.steps | ForEach-Object { $_.name }) -contains 'native-go-live') `
-        'The developer GoLive wrapper did not forward ConfirmRemoveLegacyPlugin to the guarded closeout.'
+        'The developer GoLive wrapper did not forward the four native acknowledgements to the guarded closeout.'
 
     Set-Content -LiteralPath (Join-Path $mainRoot 'dirty-main.txt') -Value 'ordinary closeout must reject dirty main'
     try {
@@ -200,7 +200,7 @@ try {
     $goLive = Invoke-CloseoutChild -Script $closeoutScript -FeatureRoot $featureRoot -MainRoot $mainRoot `
         -Arguments @(
             '-DryRun', '-GoLive', '-ConfirmCleanSlate', '-ConfirmConfigureVss',
-            '-ConfirmDestroySql', '-ConfirmRegisterCodex', '-ConfirmRemoveLegacyPlugin') `
+            '-ConfirmDestroySql', '-ConfirmRegisterCodex') `
         -Environment @{ FLUXKNOWLEDGE_NATIVE_GO_LIVE_SQL_BOOTSTRAP = 'must-not-be-read-in-dry-run' }
     Assert-True ($goLive.ExitCode -eq 0) "The acknowledged go-live dry-run failed: $($goLive.Output)"
     $goLiveSummary = $goLive.Output | ConvertFrom-Json

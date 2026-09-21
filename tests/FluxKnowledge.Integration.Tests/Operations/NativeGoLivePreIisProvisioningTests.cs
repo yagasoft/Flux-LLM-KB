@@ -413,7 +413,7 @@ public sealed class NativeGoLivePreIisProvisioningTests
             var issuer = new NativeGoLiveCloseoutCapabilityIssuer();
             _capability = issuer.Issue(Plan, payloadRoot, manifest.Sha256);
             _request = new NativeGoLiveRequest(
-                Plan, false, true, true, true, true, true, payloadRoot, manifest.Sha256, manifest);
+                Plan, false, true, true, true, true, payloadRoot, manifest.Sha256, manifest);
             var recordedEvents = Events;
             var ports = new NativeGoLiveHostPorts(
                 null!,
