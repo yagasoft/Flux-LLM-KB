@@ -48,6 +48,7 @@ public sealed class SqlSourceActivityStore(
         var runnable = capability.ExecutionClass == ExecutionClass.InProcess && capability.IsRunnable;
         await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         var existing = await context.SourceCapabilities.SingleOrDefaultAsync(value => value.Id == capability.Id, cancellationToken).ConfigureAwait(false);
+        RegisteredSourceCapability registered;
         if (existing is not null)
         {
             if (!string.Equals(existing.ProcessorKind, capability.ProcessorKind, StringComparison.Ordinal) ||
@@ -70,25 +71,40 @@ public sealed class SqlSourceActivityStore(
                 await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
             }
 
-            return ToCapability(existing);
+            registered = ToCapability(existing);
+        }
+        else
+        {
+            var now = timeProvider.GetUtcNow();
+            context.SourceCapabilities.Add(new SourceCapabilityEntity
+            {
+                Id = capability.Id,
+                ProcessorKind = capability.ProcessorKind,
+                ProcessorVersion = capability.ProcessorVersion,
+                ExecutionClass = (int)capability.ExecutionClass,
+                AcceptedClassificationsJson = ToAcceptedClassificationsJson(capability.AcceptedClassification),
+                OutputContract = capability.OutputContract,
+                ProcessorFingerprint = capability.ProcessorFingerprint,
+                IsRunnable = runnable,
+                RegisteredBy = "local-process",
+                RegisteredAtUtc = now
+            });
+            await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+            registered = capability with { IsRunnable = runnable };
         }
 
-        var now = timeProvider.GetUtcNow();
-        context.SourceCapabilities.Add(new SourceCapabilityEntity
+        if (capability.Id == VisioDocumentInputProcessor.Capability.Id)
         {
-            Id = capability.Id,
-            ProcessorKind = capability.ProcessorKind,
-            ProcessorVersion = capability.ProcessorVersion,
-            ExecutionClass = (int)capability.ExecutionClass,
-            AcceptedClassificationsJson = ToAcceptedClassificationsJson(capability.AcceptedClassification),
-            OutputContract = capability.OutputContract,
-            ProcessorFingerprint = capability.ProcessorFingerprint,
-            IsRunnable = runnable,
-            RegisteredBy = "local-process",
-            RegisteredAtUtc = now
-        });
-        await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
-        return capability with { IsRunnable = runnable };
+            await context.SourceCapabilities.Where(value =>
+                    value.Id != capability.Id &&
+                    value.IsRunnable &&
+                    (value.ProcessorKind == "document-vsdx-structural-extract" ||
+                     value.ProcessorKind == "document-vsdx-visio-extract"))
+                .ExecuteUpdateAsync(setters => setters.SetProperty(value => value.IsRunnable, false), cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        return registered;
     }
 
     public async ValueTask<RegisteredSourceCapability?> FindAsync(Guid capabilityId, CancellationToken cancellationToken)

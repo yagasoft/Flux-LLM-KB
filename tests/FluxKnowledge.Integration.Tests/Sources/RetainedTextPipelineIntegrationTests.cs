@@ -17,6 +17,114 @@ public sealed class RetainedTextPipelineIntegrationTests(NativeSqlServerFixture 
     private readonly NativeSqlServerFixture _fixture = fixture;
 
     [NativeSqlServerFact]
+    public async Task Rejected_current_Visio_registration_does_not_retire_older_VSDX_capabilities()
+    {
+        var structuralId = Guid.NewGuid();
+        var now = DateTimeOffset.UtcNow;
+        var factory = new ContextFactory(_fixture.ConnectionString);
+        await using (var setup = factory.CreateDbContext())
+        {
+            await setup.SourceCapabilities.Where(value => value.Id == VisioDocumentInputProcessor.Capability.Id).ExecuteDeleteAsync();
+            setup.SourceCapabilities.AddRange(
+                new SourceCapabilityEntity
+                {
+                    Id = VisioDocumentInputProcessor.Capability.Id,
+                    ProcessorKind = "conflicting-processor", ProcessorVersion = "conflicting-version",
+                    ProcessorFingerprint = "conflicting-fingerprint", ExecutionClass = (int)ExecutionClass.InProcess,
+                    AcceptedClassificationsJson = "[\"VsdxDocumentContainer\"]", OutputContract = "retained:conflicting",
+                    IsRunnable = true, RegisteredBy = "test", RegisteredAtUtc = now
+                },
+                new SourceCapabilityEntity
+                {
+                    Id = structuralId, ProcessorKind = "document-vsdx-structural-extract", ProcessorVersion = $"legacy-{structuralId:N}",
+                    ProcessorFingerprint = $"legacy-structural-{structuralId:N}", ExecutionClass = (int)ExecutionClass.InProcess,
+                    AcceptedClassificationsJson = "[\"VsdxDocumentContainer\"]", OutputContract = "retained:legacy",
+                    IsRunnable = true, RegisteredBy = "test", RegisteredAtUtc = now
+                });
+            await setup.SaveChangesAsync();
+        }
+
+        var service = new SourceCapabilityService(
+            new SqlSourceActivityStore(factory, TimeProvider.System),
+            new LocalSourceCapabilityHandlerRegistry([new VisioDocumentInputProcessor()]));
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            service.RegisterAsync(VisioDocumentInputProcessor.Capability, default).AsTask());
+
+        await using var verification = factory.CreateDbContext();
+        Assert.True(await verification.SourceCapabilities
+            .Where(value => value.Id == structuralId)
+            .Select(value => value.IsRunnable)
+            .SingleAsync());
+    }
+
+    [NativeSqlServerFact]
+    public async Task Concurrent_current_Visio_registration_retires_only_older_VSDX_capabilities_and_remains_idempotent()
+    {
+        var structuralId = Guid.NewGuid();
+        var previousVisioId = Guid.NewGuid();
+        var unrelatedId = Guid.NewGuid();
+        var now = DateTimeOffset.UtcNow;
+        await using (var setup = new ContextFactory(_fixture.ConnectionString).CreateDbContext())
+        {
+            await setup.SourceCapabilities.Where(value => value.Id == VisioDocumentInputProcessor.Capability.Id).ExecuteDeleteAsync();
+            setup.SourceCapabilities.AddRange(
+                new SourceCapabilityEntity
+                {
+                    Id = VisioDocumentInputProcessor.Capability.Id,
+                    ProcessorKind = VisioDocumentInputProcessor.Capability.ProcessorKind,
+                    ProcessorVersion = VisioDocumentInputProcessor.Capability.ProcessorVersion,
+                    ProcessorFingerprint = VisioDocumentInputProcessor.Capability.ProcessorFingerprint,
+                    ExecutionClass = (int)VisioDocumentInputProcessor.Capability.ExecutionClass,
+                    AcceptedClassificationsJson = "[\"VsdxDocumentContainer\"]",
+                    OutputContract = VisioDocumentInputProcessor.Capability.OutputContract,
+                    IsRunnable = true, RegisteredBy = "test", RegisteredAtUtc = now
+                },
+                new SourceCapabilityEntity
+                {
+                    Id = structuralId, ProcessorKind = "document-vsdx-structural-extract", ProcessorVersion = $"legacy-{structuralId:N}",
+                    ProcessorFingerprint = $"legacy-structural-{structuralId:N}", ExecutionClass = (int)ExecutionClass.InProcess,
+                    AcceptedClassificationsJson = "[\"VsdxDocumentContainer\"]", OutputContract = "retained:legacy",
+                    IsRunnable = true, RegisteredBy = "test", RegisteredAtUtc = now
+                },
+                new SourceCapabilityEntity
+                {
+                    Id = previousVisioId, ProcessorKind = "document-vsdx-visio-extract", ProcessorVersion = $"previous-{previousVisioId:N}",
+                    ProcessorFingerprint = $"previous-visio-{previousVisioId:N}", ExecutionClass = (int)ExecutionClass.InProcess,
+                    AcceptedClassificationsJson = "[\"VsdxDocumentContainer\"]", OutputContract = "retained:previous",
+                    IsRunnable = true, RegisteredBy = "test", RegisteredAtUtc = now
+                },
+                new SourceCapabilityEntity
+                {
+                    Id = unrelatedId, ProcessorKind = "document-pdf-extract", ProcessorVersion = $"current-{unrelatedId:N}",
+                    ProcessorFingerprint = $"current-pdf-{unrelatedId:N}", ExecutionClass = (int)ExecutionClass.InProcess,
+                    AcceptedClassificationsJson = "[\"PdfDocumentContainer\"]", OutputContract = "retained:pdf",
+                    IsRunnable = true, RegisteredBy = "test", RegisteredAtUtc = now
+                });
+            await setup.SaveChangesAsync();
+        }
+
+        var factory = new ContextFactory(_fixture.ConnectionString);
+        await Task.WhenAll(Enumerable.Range(0, 8).Select(_ =>
+        {
+            var service = new SourceCapabilityService(
+                new SqlSourceActivityStore(factory, TimeProvider.System),
+                new LocalSourceCapabilityHandlerRegistry([new VisioDocumentInputProcessor()]));
+            return service.RegisterAsync(VisioDocumentInputProcessor.Capability, default).AsTask();
+        }));
+
+        await using var verification = factory.CreateDbContext();
+        var rows = await verification.SourceCapabilities.Where(value =>
+            value.Id == structuralId || value.Id == previousVisioId || value.Id == unrelatedId ||
+            value.Id == VisioDocumentInputProcessor.Capability.Id)
+            .ToArrayAsync();
+        Assert.Equal(4, rows.Length);
+        Assert.True(rows.Single(value => value.Id == VisioDocumentInputProcessor.Capability.Id).IsRunnable);
+        Assert.False(rows.Single(value => value.Id == structuralId).IsRunnable);
+        Assert.False(rows.Single(value => value.Id == previousVisioId).IsRunnable);
+        Assert.True(rows.Single(value => value.Id == unrelatedId).IsRunnable);
+    }
+
+    [NativeSqlServerFact]
     public async Task Retained_reader_extracts_after_the_original_path_is_renamed_without_rereading_it()
     {
         var bytes = "retained text"u8.ToArray();
