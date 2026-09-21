@@ -13,6 +13,19 @@ The complete durable pipeline, compatibility, integration, GPU, retrieval,
 installation and phased-delivery design is in
 [the native Windows replacement design](superpowers/specs/2026-07-26-native-windows-replacement-design.md).
 
+## Planned corpus retrieval extension
+
+The [2026-09-20 corpus retrieval design](superpowers/specs/2026-09-20-corpus-retrieval-design.md)
+defines two future increments: scoped search and cited passage reading across
+all published text, then evaluated local semantic embeddings with a recoverable
+model/index transition. Ordinary text and OCR-derived text use the same
+retrieval contract. Existing `knowledge.search` already combines retained
+corpus snippets and memories; the proposed `corpus.search` and `corpus.read`
+operations add explicit scope, provenance and bounded follow-up context without
+changing that contract. This is design intent only, pending reconciliation with
+the completed OCR branch. It does not activate a model, change persistence or
+authorise an operational action.
+
 ## Offline native model gate
 
 Before any native model-backed adapter may load a payload, the native model

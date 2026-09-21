@@ -37,6 +37,19 @@ estimates toward `shipped`; they are not live runtime health measurements.
 
 The Phase 5/private-PC final-review correction recognises standard PEM private-key envelopes and credential-bearing URIs in both native and Python secret boundaries and checks the completed production service collection during C# parser preflight. A later review rejected an accidental global reduction of the shared retained-processor batch to eight. The approved shared `RetainedProcessorOptions` default, configuration ceiling and ZIP/TAR/OOXML/generic activation budget are restored to 16; OOXML force plus ordinary claims share that combined budget. Hosted C# promotion/claim and the direct durable C# store instead use a separate fixed ceiling of eight. Fresh correction evidence passed Domain 502/502, focused generated-database/native Integration 136/136, focused Web 40/40 and cached-Chromium browser 4/4, all with zero skips; Release built with zero warnings/errors and EF reported no pending model changes. The final independent whole-slice review approved the completed private-PC visibility and retained C# plan. The previously recorded unfiltered Python `stderr.fileno()` harness failure remains non-green.
 
+### Planned corpus retrieval follow-up (2026-09-20)
+
+The [corpus-wide design](superpowers/specs/2026-09-20-corpus-retrieval-design.md)
+and its two implementation plans prepare work after the current OCR/Visio
+delivery. Both ordinary indexed text and OCR-derived text are in scope. Design
+completion does not raise shipped-capability percentages or revise the other
+task's in-progress OCR status.
+
+| Piece | Priority | Status | Progress % | Current evidence / remaining work |
+| --- | --- | --- | ---: | --- |
+| Scoped corpus search and cited passage reading | P1 | planned | 0% | Design and implementation sequence recorded; current mixed knowledge search is preserved. Remaining Work: reconcile with merged OCR publication/provenance contracts, implement scoped chunk retrieval and bounded evidence reads, verify ordinary/native/OCR text across MCP/REST/CLI and complete authorised closeout. |
+| Evaluated semantic corpus retrieval | P1 | planned | 0% | Model/index binding, candidate replacement, rollback and evaluation invariants designed; no model is selected or activated by this plan. Remaining Work: deliver scoped retrieval first, resolve a cache-first exact model/runtime decision, independently review the concrete schema/transaction amendment, implement and test the current-corpus index transition, demonstrate retrieval benefit and obtain separate operational authority. |
+
 ### Status classes for the usefulness-first checkpoint
 
 - **Implemented now:** Phases 0–2 and the complete Phase 3A local-source slice,
