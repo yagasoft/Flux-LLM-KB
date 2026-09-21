@@ -87,10 +87,18 @@ public sealed class NativeCorpusActionMatrixTests(NativeSqlServerFixture fixture
         try
         {
             var policy = new SourceRootPathPolicy(new LocalIngressOptions([allowed]));
-            var service = CreateService(policy);
+            var outboxWake = new RecordingOutboxWakeSignal();
+            var sourceWake = new RecordingSourceWakeSignal();
+            var service = new NativeCorpusCommandService(
+                new NativeOperationService(new SqlNativeOperationStore(SqlTestData.CreateFactory(_fixture), new FixedTimeProvider(Now)), []),
+                new SqlNativeCorpusActionStore(SqlTestData.CreateFactory(_fixture), policy, new LocalPrivateContentDisclosure()),
+                outboxWake,
+                sourceWake);
             var mutation = Mutation("root_create", new { path = source, displayName = "Disposable root" });
             var preview = await service.PreviewAsync(mutation, "test", CancellationToken.None);
             var first = await service.CommitAsync(mutation, preview.ConfirmationId, "root-create-disposable", "test", CancellationToken.None);
+            Assert.Equal(1, outboxWake.NotificationCount);
+            Assert.Equal(1, sourceWake.NotificationCount);
             Directory.Delete(source, recursive: true);
             var replay = await service.CommitAsync(mutation, preview.ConfirmationId, "root-create-disposable", "test", CancellationToken.None);
 

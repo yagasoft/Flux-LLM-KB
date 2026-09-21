@@ -69,7 +69,7 @@ public sealed class NativeCorpusCommandService
         var receipt = await _operations.CommitAsync(
             new NativeActionCommitRequest(action, Payload(command), confirmationId, idempotencyKey, surface),
             cancellationToken).ConfigureAwait(false);
-        if (action is "root_resume" or "root_delete")
+        if (action is "root_create" or "root_resume" or "root_delete")
         {
             // A durable replay can follow a process stop immediately after the
             // original commit; duplicate bounded wake signals are safe.
