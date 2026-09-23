@@ -157,7 +157,12 @@ proxies and redirects; public responses are bounded and secret-filtered.
 remain planned. That design adds scoped lexical passage retrieval first, then
 evaluated local embeddings with explicit model/index binding and recoverable
 generation transitions. It does not describe shipped endpoints or authorise
-model acquisition.
+model acquisition. The design was aligned with main `52742d9` on 2026-09-23:
+it consumes selected internal document/metadata publications, current
+PDF/image/Visio provenance and bounded reads of large Office results. It does
+not require another OCR merge or add same-page region OCR, typed table-cell
+extraction or an OCR retry facility. The planned embedding transition must
+distinguish published search eligibility from broader stored vector membership.
 
 ## Operations and verification
 

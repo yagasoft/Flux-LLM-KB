@@ -32,14 +32,18 @@ behaviour and limitations.
 
 | Item | Priority | Status | Progress % | Remaining Work |
 | --- | --- | --- | ---: | --- |
-| Scoped corpus search and cited passage reading | P1 | planned | 0% | Implement scoped chunk retrieval and bounded evidence reads against current document publication/provenance contracts; verify native and OCR text across MCP, REST and CLI. |
-| Evaluated semantic corpus retrieval | P1 | planned | 0% | Deliver scoped retrieval first; select an exact cache-verified local model/runtime, review schema and transaction invariants, test model/index transition and rollback, demonstrate retrieval benefit and obtain operational authority. |
+| Scoped corpus search and cited passage reading | P1 | planned | 0% | Design/plans aligned with main `52742d9` on 2026-09-23; no OCR merge dependency remains. Implement selected kind 2/3 chunk retrieval and bounded evidence reads, including large Office text and existing PDF/image/Visio locations; verify ordinary and OCR text across MCP, REST and CLI. Page/location response projection belongs to this item; extraction fidelity/region-OCR/retry gaps stay separate. |
+| Evaluated semantic corpus retrieval | P1 | planned | 0% | Design aligned with current selected-publication and broader vector-store contracts. Deliver scoped retrieval first; select an exact cache-verified embedding model/runtime distinct from OCR, review current/prospective publication transaction invariants, test bounded model/index transition and current-corpus rollback, and demonstrate retrieval benefit separately from extraction gaps before operational activation. |
 
 The [retrieval design](design/corpus-retrieval.md) and its
 [scoped retrieval plan](design/scoped-corpus-retrieval-plan.md) and
 [semantic retrieval plan](design/semantic-corpus-retrieval-plan.md) are future
 intent. They do not activate providers, acquire models or imply that proposed
 `corpus.search` and `corpus.read` operations already exist.
+
+The 2026-09-23 alignment is documentation review, not implemented retrieval or
+fresh runtime acceptance; both progress entries remain at 0%. It uses the
+consolidated `docs/design/` files and the current native repository/link check.
 
 ## Update rules
 
