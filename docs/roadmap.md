@@ -15,8 +15,8 @@ test does not by itself establish deployment or live acceptance.
 | Durable scheduler and native worker supervision | P0 | complete | 100% | Preserve priority/FIFO admission, capacity ownership, receipt-first recovery and termination evidence as adapters expand. |
 | Native Outlook ingress | P1 | in progress | 90% | Complete the remaining separately authorised desktop operational acceptance; retain logged-in COM and spool ownership boundaries. |
 | Retained archive, Office and C# processing boundaries | P1 | complete | 100% | Keep unsupported formats explicit. Additional extraction providers need their own scoped implementation and verification. |
-| Offline model gate and English document OCR | P1 | in progress | 98% | Address repeated-text fidelity, mixed native/scanned regions on one page, page fields in search responses and supported retry of a terminal failed OCR revision. Arabic OCR and language routing are outside the current delivery. |
-| Native MCP, REST, CLI and Codex integration | P0 | in progress | 97% | Maintain parity across the nine tools, bounded retained projections, cursor/confirmation/idempotency contracts and plugin authority. User hook trust and operational registration remain explicit actions. |
+| Offline model gate and English document OCR | P1 | in progress | 98% | Address repeated-text fidelity, mixed native/scanned regions on one page and supported retry of a terminal failed OCR revision. Canonical page locations are projected by scoped corpus retrieval once that increment is deployed. Arabic OCR and language routing are outside the current delivery. |
+| Native MCP, REST, CLI and Codex integration | P0 | in progress | 97% | Maintain parity across the eleven tools, bounded retained projections, cursor/confirmation/idempotency contracts and plugin authority. The two new corpus tools still require production activation and live checks; user hook trust and operational registration remain explicit actions. |
 | Source pause/resume and complete deletion | P0 | in progress | 85% | The implementation includes admission/publication fences, drain, shared-blob preservation and survivor index rebuilds. Retain the delivery estimate until the remaining source-lifecycle deployment and disposable-source live acceptance are recorded. |
 | Native repository and maintained documentation | P0 | complete | 100% | Keep repository/link checks in CI and feature closeout. The native Release build has zero warnings; 2,300 tests pass, with 17 opt-in browser cases skipped in the default suite and the affected browser case separately passing. Independent review found no remaining blocking issues. This is repository verification, not a deployment claim. |
 
@@ -32,18 +32,15 @@ behaviour and limitations.
 
 | Item | Priority | Status | Progress % | Remaining Work |
 | --- | --- | --- | ---: | --- |
-| Scoped corpus search and cited passage reading | P1 | planned | 0% | Design/plans aligned with main `52742d9` on 2026-09-23; no OCR merge dependency remains. Implement selected kind 2/3 chunk retrieval and bounded evidence reads, including large Office text and existing PDF/image/Visio locations; verify ordinary and OCR text across MCP, REST and CLI. Page/location response projection belongs to this item; extraction fidelity/region-OCR/retry gaps stay separate. |
-| Evaluated semantic corpus retrieval | P1 | planned | 0% | Design aligned with current selected-publication and broader vector-store contracts. Deliver scoped retrieval first; select an exact cache-verified embedding model/runtime distinct from OCR, review current/prospective publication transaction invariants, test bounded model/index transition and current-corpus rollback, and demonstrate retrieval benefit separately from extraction gaps before operational activation. |
+| Scoped corpus search and cited passage reading | P1 | in progress | 90% | Implementation, full solution checks and independent lexical/migration review pass. Apply the reviewed one-time chunk Full-Text migration through the incremental updater, check population and validate ordinary text and OCR across MCP, REST and CLI. Extraction fidelity/region-OCR/retry gaps stay separate. |
+| Evaluated semantic corpus retrieval | P1 | planned | 0% | Three production-oriented candidates are documented in the model shortlist; no model is selected or acquired. Freeze representative extraction/retrieval evaluation, obtain separate exact acquisition approval, measure relevance/latency/memory/OCR contention, then review generation invariants, bounded transition and current-corpus rollback before activation. |
 
-The [retrieval design](design/corpus-retrieval.md) and its
+The [retrieval design](design/corpus-retrieval.md),
 [scoped retrieval plan](design/scoped-corpus-retrieval-plan.md) and
-[semantic retrieval plan](design/semantic-corpus-retrieval-plan.md) are future
-intent. They do not activate providers, acquire models or imply that proposed
-`corpus.search` and `corpus.read` operations already exist.
-
-The 2026-09-23 alignment is documentation review, not implemented retrieval or
-fresh runtime acceptance; both progress entries remain at 0%. It uses the
-consolidated `docs/design/` files and the current native repository/link check.
+[semantic retrieval plan](design/semantic-corpus-retrieval-plan.md) retain the
+contract and operational gates. The scoped operations exist in this feature
+branch, but have no production activation or live acceptance yet. Semantic
+retrieval remains design intent and no embedding model has been acquired.
 
 ## Update rules
 

@@ -2,7 +2,31 @@
 
 Date: 2026-09-20
 Last aligned: 2026-09-23, main `52742d998e07dc21415444629c710c9bbf55b8cd`.
-Status: documentation aligned with current main; implementation has not started.
+Status: lexical implementation and independent review complete; production migration and live acceptance remain open.
+
+## Implementation evidence, 24 September 2026
+
+The implementation was reconciled with main `8d34a0b`. Scoped search and cited
+read now share selected-publication, deletion and disclosure fences through
+REST, MCP and CLI. Canonical PDF/OCR/image/Visio locations are projected where
+available; Office text without locations remains span-only. Complete-line
+disclosure checks fail closed when a bounded scan cannot establish the line.
+
+Release build passed with zero warnings/errors; 2,335 tests passed, with 17
+opt-in browser tests skipped. The EF model has no pending changes. Independent
+review approved the completed lexical change and the one-time incremental
+Full-Text migration path. Focused native checks cover partial index creation,
+history failures, no migration replay during payload rollback, rollback SQL
+failure, pre-SQL failure and prior-application probe failure. Pinned up/down
+scripts and complete/partial recovery also passed against a disposable SQL
+database. Production population and live checks are still pending.
+
+The task's deployment authorisation includes the one-time migration switch.
+Model acquisition remains separately gated. `all-MiniLM-L6-v2` is an unselected
+baseline and has no acquisition approval. See the current
+[model shortlist](semantic-model-candidates.md). The original implementation
+checklists below are retained as the specification; this evidence section is
+the current delivery status.
 
 **Goal:** Search published ordinary and OCR-derived text by source/workspace and follow verified citations to retained context through MCP, REST and CLI.
 

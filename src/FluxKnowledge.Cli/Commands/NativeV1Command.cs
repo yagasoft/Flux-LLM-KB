@@ -7,7 +7,7 @@ using FluxKnowledge.Application.IntegrationV1;
 
 namespace FluxKnowledge.Cli.Commands;
 
-/// <summary>Thin, loopback-only CLI bindings for the nine native v1 operations.</summary>
+/// <summary>Thin, loopback-only CLI bindings for the native v1 operations.</summary>
 public static class NativeV1Command
 {
     public static readonly Uri LoopbackBaseAddress = new("http://127.0.0.1:5137/");
@@ -135,6 +135,8 @@ public static class NativeV1Command
             ("code", "query") => new(HttpMethod.Post, "api/v1/code/query", false, false, null),
             ("code", "feedback") => new(HttpMethod.Post, "api/v1/code/actions", true, false, null),
             ("corpus", "query") => new(HttpMethod.Post, "api/v1/corpus/query", false, false, null),
+            ("corpus", "search") => new(HttpMethod.Post, "api/v1/corpus/search", false, false, null),
+            ("corpus", "read") => new(HttpMethod.Post, "api/v1/corpus/read", false, false, null),
             ("corpus", "write") => new(HttpMethod.Post, "api/v1/corpus/actions", true, false, null),
             ("operations", "status") => new(HttpMethod.Get, "api/v1/operations/status", false, true, null),
             ("operations", "audit") => new(HttpMethod.Post, "api/v1/operations/audit/query", false, false, null),

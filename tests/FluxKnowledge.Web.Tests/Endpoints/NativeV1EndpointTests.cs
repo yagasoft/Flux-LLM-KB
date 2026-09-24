@@ -21,6 +21,39 @@ namespace FluxKnowledge.Web.Tests.Endpoints;
 public sealed class NativeV1EndpointTests
 {
     [Fact]
+    public async Task Corpus_search_route_preserves_the_requested_root_scope()
+    {
+        await using var host = await StartAsync();
+        var rootId = Guid.NewGuid();
+
+        using var response = await host.Client.PostAsJsonAsync(
+            "/api/v1/corpus/search",
+            new { query = "  invoice reference  ", limit = 5, scope = "root", root_id = rootId });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.True((await ReadAsync(response)).GetProperty("ok").GetBoolean());
+        Assert.Equal(["corpus"], host.Facade.Queries);
+        Assert.NotNull(host.Facade.LastQueryRequest);
+        var request = JsonSerializer.SerializeToElement(host.Facade.LastQueryRequest);
+        Assert.Equal("invoice reference", request.GetProperty("Query").GetString());
+        Assert.Equal("root", request.GetProperty("Scope").GetString());
+        Assert.Equal(rootId, request.GetProperty("RootId").GetGuid());
+    }
+
+    [Fact]
+    public async Task Corpus_read_route_preserves_the_reference_and_context_budget()
+    {
+        await using var host = await StartAsync();
+        using var response = await host.Client.PostAsJsonAsync(
+            "/api/v1/corpus/read", new { evidence_ref = "opaque-reference", context_characters = 32 });
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.True((await ReadAsync(response)).GetProperty("ok").GetBoolean());
+        var request = JsonSerializer.SerializeToElement(host.Facade.LastQueryRequest);
+        Assert.Equal("opaque-reference", request.GetProperty("EvidenceRef").GetString());
+        Assert.Equal(32, request.GetProperty("ContextCharacters").GetInt32());
+    }
+
+    [Fact]
     public async Task Native_routes_map_queries_and_preview_to_the_same_envelope_and_facade_shapes()
     {
         await using var host = await StartAsync();
@@ -352,6 +385,7 @@ public sealed class NativeV1EndpointTests
     private sealed class RecordingFacade(object? queryResult = null) : INativeV1Facade
     {
         public List<string> Queries { get; } = [];
+        public object? LastQueryRequest { get; private set; }
         public int QueryCalls => Queries.Count;
         public int PreviewCalls { get; private set; }
         public int CommitCalls { get; private set; }
@@ -362,6 +396,7 @@ public sealed class NativeV1EndpointTests
         {
             if (request is NativeCodeQuery { Cursor: not null }) throw new NativeOperationException("cursor-invalid");
             Queries.Add(family);
+            LastQueryRequest = request;
             return ValueTask.FromResult(queryResult ?? (object)new { family, safe = true });
         }
 

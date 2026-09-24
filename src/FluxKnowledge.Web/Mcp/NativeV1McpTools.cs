@@ -42,6 +42,16 @@ public sealed class NativeV1McpTools
     public Task<CallToolResult> CorpusQuery(string view, string? root_id, string? branch_id, string? job_id, int limit, string? cursor, CancellationToken cancellationToken = default) =>
         QueryAsync("corpus.query", new { view, root_id, branch_id, job_id, limit, cursor }, cancellationToken);
 
+    [McpServerTool(Name = "corpus.search")]
+    [Description("Search published retained text in all, root, or workspace scope with exact citations.")]
+    public Task<CallToolResult> CorpusSearch(string query, int limit = 10, string scope = "all", string? root_id = null, string? cwd = null, CancellationToken cancellationToken = default) =>
+        QueryAsync("corpus.search", new { query, limit, scope, root_id, cwd }, cancellationToken);
+
+    [McpServerTool(Name = "corpus.read")]
+    [Description("Read bounded retained context for a current corpus evidence reference.")]
+    public Task<CallToolResult> CorpusRead(string evidence_ref, int context_characters = 1024, CancellationToken cancellationToken = default) =>
+        QueryAsync("corpus.read", new { evidence_ref, context_characters }, cancellationToken);
+
     [McpServerTool(Name = "operations.status")]
     [Description("Read a closed native operations status view.")]
     public Task<CallToolResult> OperationsStatus(string view, string? root_id, string? job_id, int limit, CancellationToken cancellationToken = default) =>
@@ -81,7 +91,8 @@ public sealed class NativeV1McpTools
                 cancellationToken).ConfigureAwait(false);
             return McpResultFactory.NativeJson(execution.Succeeded
                 ? McpResultFactory.NativeSuccess(execution.Value!)
-                : McpResultFactory.NativeFailure(execution.Failure!));
+                : McpResultFactory.NativeFailure(execution.Failure!),
+                IsBoundedCorpusQuery(toolName) ? 256 * 1024 : NativeV1ContractLimits.MaximumResponseBytes);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -128,9 +139,11 @@ public sealed class NativeV1McpTools
         "knowledge.search" or "knowledge.write" => "knowledge",
         "knowledge.graph" => "graph",
         "code.query" or "code.write" => "code",
-        "corpus.query" or "corpus.write" => "corpus",
+        "corpus.query" or "corpus.search" or "corpus.read" or "corpus.write" => "corpus",
         "operations.status" => "operations.status",
         "operations.audit" => "operations.audit",
         _ => throw new NativeOperationException("tool-not-allowed")
     };
+
+    private static bool IsBoundedCorpusQuery(string toolName) => toolName is "corpus.search" or "corpus.read";
 }

@@ -7,6 +7,7 @@ param(
     [ValidateRange(10, 300)]
     [int]$ReadinessTimeoutSeconds = 120,
     [switch]$ApplyMigrations,
+    [switch]$ApplyCorpusChunkFullTextMigration,
     [switch]$DeferReadinessForScopedRemediation,
     [switch]$PlanOnly,
     [switch]$Apply
@@ -369,6 +370,63 @@ function New-SourceDeletionMigrationScript {
     return [pscustomobject]@{ From = $from; To = $to; Path = $OutputPath; Sha256 = $hash }
 }
 
+function Get-CorpusFullTextDatabaseState {
+    $history = @(Get-AppliedMigrationIds)
+    $connection = [System.Data.SqlClient.SqlConnection]::new((Get-DeploymentSqlConnectionString))
+    try {
+        $connection.Open()
+        $command = $connection.CreateCommand()
+        try {
+            $command.CommandText = @"
+SELECT CONVERT(int, SERVERPROPERTY('IsFullTextInstalled')),
+ CASE WHEN EXISTS (SELECT 1 FROM sys.fulltext_catalogs WHERE name=N'FluxKnowledge') THEN 1 ELSE 0 END,
+ CASE WHEN EXISTS (
+   SELECT 1 FROM sys.indexes i JOIN sys.index_columns ic ON ic.object_id=i.object_id AND ic.index_id=i.index_id
+   JOIN sys.columns c ON c.object_id=ic.object_id AND c.column_id=ic.column_id
+   WHERE i.object_id=OBJECT_ID(N'dbo.TextChunks') AND i.name=N'PK_TextChunks' AND i.is_unique=1
+     AND i.is_disabled=0 AND c.name=N'Id' AND c.system_type_id=127 AND c.is_nullable=0
+     AND ic.key_ordinal=1 AND (SELECT COUNT(*) FROM sys.index_columns k WHERE k.object_id=i.object_id AND k.index_id=i.index_id)=1
+ ) THEN 1 ELSE 0 END,
+ CASE WHEN EXISTS (SELECT 1 FROM sys.fulltext_indexes WHERE object_id=OBJECT_ID(N'dbo.TextChunks')) THEN 1 ELSE 0 END,
+ CASE WHEN EXISTS (
+   SELECT 1 FROM sys.fulltext_indexes f
+   JOIN sys.fulltext_catalogs fc ON fc.fulltext_catalog_id=f.fulltext_catalog_id
+   JOIN sys.indexes i ON i.object_id=f.object_id AND i.index_id=f.unique_index_id
+   JOIN sys.fulltext_index_columns c ON c.object_id=f.object_id
+   WHERE f.object_id=OBJECT_ID(N'dbo.TextChunks') AND fc.name=N'FluxKnowledge' AND i.name=N'PK_TextChunks'
+     AND f.is_enabled=1 AND f.change_tracking_state_desc=N'AUTO'
+     AND c.column_id=COLUMNPROPERTY(f.object_id,N'Content','ColumnId') AND c.language_id=1033
+     AND (SELECT COUNT(*) FROM sys.fulltext_index_columns x WHERE x.object_id=f.object_id)=1
+ ) THEN 1 ELSE 0 END;
+"@
+            $reader = $command.ExecuteReader()
+            try {
+                if (!$reader.Read()) { throw 'Full-Text preflight returned no state.' }
+                return [pscustomobject]@{
+                    History=$history; FullTextInstalled=($reader.GetInt32(0) -eq 1)
+                    CataloguePresent=($reader.GetInt32(1) -eq 1); KeyPresent=($reader.GetInt32(2) -eq 1)
+                    IndexPresent=($reader.GetInt32(3) -eq 1); IndexValid=($reader.GetInt32(4) -eq 1)
+                }
+            } finally { $reader.Dispose() }
+        } finally { $command.Dispose() }
+    } finally { $connection.Dispose() }
+}
+
+function New-CorpusFullTextMigrationScript {
+    param([string]$SourceRoot, [ValidateSet('up','down')][string]$Direction, [string]$OutputPath)
+    $contract = Get-CorpusFullTextMigrationContract
+    $from = if ($Direction -ceq 'up') { $contract.Baseline } else { $contract.Target }
+    $to = if ($Direction -ceq 'up') { $contract.Target } else { $contract.Baseline }
+    $project = Join-Path $SourceRoot 'src/FluxKnowledge.Infrastructure.SqlServer/FluxKnowledge.Infrastructure.SqlServer.csproj'
+    $startup = Join-Path $SourceRoot 'src/FluxKnowledge.Web/FluxKnowledge.Web.csproj'
+    & dotnet ef migrations script $from $to --configuration Release --project $project --startup-project $startup --no-build --output $OutputPath | Out-Host
+    if ($LASTEXITCODE -ne 0 -or !(Test-Path -LiteralPath $OutputPath -PathType Leaf)) { throw 'Generating Corpus Full-Text migration SQL failed.' }
+    $hash = (Get-FileHash -LiteralPath $OutputPath -Algorithm SHA256).Hash
+    $expected = if ($Direction -ceq 'up') { $contract.UpSha256 } else { $contract.DownSha256 }
+    if ($hash -cne $expected) { throw 'Generated Corpus Full-Text SQL does not match the reviewed SHA-256.' }
+    return [pscustomobject]@{ From=$from; To=$to; Path=$OutputPath; Sha256=$hash }
+}
+
 function Invoke-GeneratedSqlScript {
     param([Parameter(Mandatory)][string]$Path)
 
@@ -540,9 +598,14 @@ if ($PlanOnly -and $Apply) {
 if ($DeferReadinessForScopedRemediation -and $ApplyMigrations) {
     throw "-DeferReadinessForScopedRemediation cannot be combined with -ApplyMigrations."
 }
+if ($ApplyCorpusChunkFullTextMigration -and ($ApplyMigrations -or $DeferReadinessForScopedRemediation)) {
+    throw '-ApplyCorpusChunkFullTextMigration cannot be combined with another migration or readiness deferral.'
+}
+$applyAnyMigration = $ApplyMigrations -or $ApplyCorpusChunkFullTextMigration
 
 . (Join-Path $PSScriptRoot "loopback-deployment-safety.ps1")
 Import-Module (Join-Path $PSScriptRoot "incremental-iis-payload-swap.psm1") -Force -ErrorAction Stop
+Import-Module (Join-Path $PSScriptRoot 'incremental-corpus-fulltext-migration.psm1') -Force -ErrorAction Stop
 $loopbackOrigin = Get-FixedLoopbackOrigin -SiteUrl $SiteUrl
 if ($loopbackOrigin.Origin -cne "http://127.0.0.1:5137") {
     throw "Incremental IIS deployment requires the fixed http://127.0.0.1:5137 origin."
@@ -571,6 +634,18 @@ if ($PlanOnly) {
             rollback = "before validation-hold release only; only when no lifecycle or retired-generation state exists"
         }
     }
+    if ($ApplyCorpusChunkFullTextMigration) {
+        $contract = Get-CorpusFullTextMigrationContract
+        $databaseState = Get-CorpusFullTextDatabaseState
+        Assert-CorpusFullTextMigrationBaseline $databaseState
+        $migrationPlan = [ordered]@{
+            baseline=$contract.Baseline; target=$contract.Target; current_history=@($databaseState.History)
+            generated_up_sha256=$contract.UpSha256; generated_down_sha256=$contract.DownSha256
+            required_permission='DATABASE ALTER'; prerequisites='Full-Text installed, FluxKnowledge catalogue, unique bigint PK_TextChunks, no existing chunk Full-Text index'
+            rollback='before hold release: exact original history, absent chunk Full-Text index, prior payload and probes verified; otherwise hold retained'
+            population='asynchronous; verify full population after deployment before claiming Full-Text readiness'
+        }
+    }
     [ordered]@{
         mode = "plan-only"
         site_name = "FluxKnowledge"
@@ -580,7 +655,7 @@ if ($PlanOnly) {
         interactive_host_task = $InteractiveHostTaskName
         interactive_host_activation = "next ordinary scheduled run; never triggered by deployment"
         recovery_root = $CanonicalRecoveryRoot
-        migrations = [bool]$ApplyMigrations
+        migrations = [bool]$applyAnyMigration
         migration_plan = $migrationPlan
         clean_slate = $false
         preserved = @("Config", "Data", "Runtime", "Recovery", "CodexPlugin")
@@ -627,6 +702,7 @@ if (-not [string]::IsNullOrWhiteSpace($sourceStatus)) {
     throw "SourceRoot has uncommitted changes; incremental IIS deployment requires an immutable committed payload."
 }
 $migrationPlan = $null
+$corpusMigrationState = $null
 if ($ApplyMigrations) {
     $migrationPath = Join-Path $SourceRoot ("src\FluxKnowledge.Infrastructure.SqlServer\Persistence\Migrations\{0}.cs" -f $SourceDeletionMigrationTarget)
     if (-not (Test-Path -LiteralPath $migrationPath -PathType Leaf)) {
@@ -635,6 +711,12 @@ if ($ApplyMigrations) {
     $history = Get-AppliedMigrationIds
     Assert-SourceDeletionMigrationBaseline -AppliedMigrationIds $history
     $migrationPlan = [ordered]@{ Applied = $false; RollbackVerified = $true; Up = $null; Down = $null }
+}
+if ($ApplyCorpusChunkFullTextMigration) {
+    $databaseState = Get-CorpusFullTextDatabaseState
+    Assert-CorpusFullTextMigrationBaseline $databaseState
+    $corpusMigrationState = New-CorpusFullTextMigrationState -OriginalHistory $databaseState.History
+    $migrationPlan = @{ Up=$null; Down=$null }
 }
 $commit = (& git -C $SourceRoot rev-parse HEAD 2>&1 | Out-String).Trim()
 if ($LASTEXITCODE -ne 0 -or $commit -notmatch "^[0-9a-f]{40}$") {
@@ -649,6 +731,8 @@ $releaseId = $null
 $interactiveHostMutationStarted = $false
 $interactiveHostTaskWasEnabled = $false
 $interactiveHostPreviousRoot = $null
+$interactiveHostRollbackVerified = $true
+$holdReleased = $false
 try {
     try {
         $leaseAcquired = $mutex.WaitOne([TimeSpan]::FromMinutes(1))
@@ -703,17 +787,22 @@ try {
     Wait-InteractiveHostStopped -TaskName $InteractiveHostTaskName -TimeoutSeconds $ReadinessTimeoutSeconds
     Copy-InteractiveHostPayload -Source $InteractiveHostRoot -Destination $interactiveHostPreviousRoot
     $interactiveHostMutationStarted = $true
+    $interactiveHostRollbackVerified = $false
     Copy-InteractiveHostPayload -Source $interactiveHostCandidateRoot -Destination $InteractiveHostRoot
     if ($ApplyMigrations) {
         $migrationPlan.Up = New-SourceDeletionMigrationScript -SourceRoot $SourceRoot -Direction up -OutputPath (Join-Path $releaseRoot "source-deletion-up.sql")
         $migrationPlan.Down = New-SourceDeletionMigrationScript -SourceRoot $SourceRoot -Direction down -OutputPath (Join-Path $releaseRoot "source-deletion-down.sql")
+    }
+    if ($ApplyCorpusChunkFullTextMigration) {
+        $migrationPlan.Up = New-CorpusFullTextMigrationScript -SourceRoot $SourceRoot -Direction up -OutputPath (Join-Path $releaseRoot 'corpus-fulltext-up.sql')
+        $migrationPlan.Down = New-CorpusFullTextMigrationScript -SourceRoot $SourceRoot -Direction down -OutputPath (Join-Path $releaseRoot 'corpus-fulltext-down.sql')
     }
 
     $manifest = [ordered]@{
         commit = $commit
         staged_at_utc = [DateTime]::UtcNow.ToString("O")
         application_root = $CanonicalDeployRoot
-        migrations = [bool]$ApplyMigrations
+        migrations = [bool]$applyAnyMigration
         clean_slate = $false
     } | ConvertTo-Json
     [IO.File]::WriteAllText((Join-Path $releaseRoot "manifest.json"), $manifest, [Text.UTF8Encoding]::new($false))
@@ -746,6 +835,11 @@ try {
                 }
                 $deploymentValidation.MigrationsApplied = $true
             }
+            if ($ApplyCorpusChunkFullTextMigration) {
+                Invoke-CorpusFullTextMigrationAttempt -State $corpusMigrationState `
+                    -ReadState { Get-CorpusFullTextDatabaseState } `
+                    -RunUp { Invoke-GeneratedSqlScript -Path $migrationPlan.Up.Path }
+            }
         } `
         -StartApplication {
             Start-WebAppPool -Name $SiteName
@@ -763,7 +857,13 @@ try {
                 -Current (Get-RetainedPipelineStateBaseline)
         } `
         -ValidateRollbackApplication {
-            if ($DeferReadinessForScopedRemediation) {
+            if ($ApplyCorpusChunkFullTextMigration) {
+                Confirm-CorpusFullTextMigrationRollback -State $corpusMigrationState -ValidatePriorApplication {
+                    Invoke-RequiredLoopbackProbes -Origin $loopbackOrigin.Origin -TimeoutSeconds $ReadinessTimeoutSeconds
+                    Assert-RetainedPipelineStateUnchanged -Baseline $deploymentValidation.Baseline -Current (Get-RetainedPipelineStateBaseline)
+                }
+            }
+            elseif ($DeferReadinessForScopedRemediation) {
                 Invoke-ScopedReadinessRemediationProbes -Origin $loopbackOrigin.Origin -TimeoutSeconds $ReadinessTimeoutSeconds
             }
             else {
@@ -771,6 +871,11 @@ try {
             }
         } `
         -PrepareRollbackApplication {
+            if ($ApplyCorpusChunkFullTextMigration) {
+                Undo-CorpusFullTextMigrationAttempt -State $corpusMigrationState `
+                    -ReadState { Get-CorpusFullTextDatabaseState } `
+                    -RunDown { Invoke-GeneratedSqlScript -Path $migrationPlan.Down.Path }
+            }
             if ($ApplyMigrations -and $deploymentValidation.MigrationsApplied) {
                 Assert-SourceDeletionMigrationRollbackSafe
                 Invoke-GeneratedSqlScript -Path $migrationPlan.Down.Path
@@ -782,6 +887,8 @@ try {
 
     Remove-DeploymentValidationHold -Path $ValidationHoldPath -ReleaseId $releaseId
     $deploymentValidation.HoldCreated = $false
+    # Commit boundary: workers may now write. No automatic schema or mixed-payload rollback after this point.
+    $holdReleased = $true
     if ($DeferReadinessForScopedRemediation) {
         Invoke-ScopedReadinessRemediationProbes -Origin $loopbackOrigin.Origin -TimeoutSeconds $ReadinessTimeoutSeconds
     }
@@ -798,8 +905,8 @@ try {
         commit = $commit
         release_root = $releaseRoot
         rollback_payload = $swap.PreviousPayload
-        migrations = [bool]$ApplyMigrations
-        migration = if ($ApplyMigrations) { [ordered]@{ target = $SourceDeletionMigrationTarget; script_sha256 = $migrationPlan.Up.Sha256 } } else { $null }
+        migrations = [bool]$applyAnyMigration
+        migration = if ($applyAnyMigration) { [ordered]@{ target = $migrationPlan.Up.To; script_sha256 = $migrationPlan.Up.Sha256 } } else { $null }
         clean_slate = $false
         deployment_validation_hold = if ($DeferReadinessForScopedRemediation) {
             "released-after-unchanged-state-validation; readiness remediation pending"
@@ -822,6 +929,9 @@ try {
     } | ConvertTo-Json -Depth 3
 }
 catch {
+    if ($holdReleased) {
+        throw "Deployment activated and the validation hold was released, but a post-activation check failed. Current application and schema are retained; do not replay the one-time migration. Inspect recovery release $releaseRoot. Failure: $($_.Exception.Message)"
+    }
     if ($interactiveHostMutationStarted) {
         if ($null -eq $interactiveHostPreviousRoot -or
             -not (Test-Path -LiteralPath $interactiveHostPreviousRoot -PathType Container)) {
@@ -830,6 +940,7 @@ catch {
         Test-InteractiveHostPayload -Path $interactiveHostPreviousRoot
         Restore-InteractiveHostPayload -PreviousRoot $interactiveHostPreviousRoot -LiveRoot $InteractiveHostRoot
         Test-InteractiveHostPayload -Path $InteractiveHostRoot
+        $interactiveHostRollbackVerified = $true
         throw "Deployment failed after the interactive-host payload was mutated. The prior payload was restored and the scheduled task remains disabled for operator review."
     }
     if ($interactiveHostTaskWasEnabled -and -not $interactiveHostMutationStarted) {
@@ -839,7 +950,8 @@ catch {
 }
 finally {
     if ($leaseAcquired -and $null -ne $deploymentValidation -and $deploymentValidation.HoldCreated -and
-        (-not $ApplyMigrations -or $deploymentValidation.RollbackVerified)) {
+        (-not $ApplyMigrations -or $deploymentValidation.RollbackVerified) -and
+        (-not $ApplyCorpusChunkFullTextMigration -or ($corpusMigrationState.RollbackVerified -and $interactiveHostRollbackVerified))) {
         Remove-DeploymentValidationHold -Path $ValidationHoldPath -ReleaseId $releaseId
     }
     if ($leaseAcquired) {

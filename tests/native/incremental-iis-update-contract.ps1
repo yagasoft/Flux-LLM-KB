@@ -187,6 +187,12 @@ if ($scopedRemediationWithMigrations.ExitCode -eq 0 -or $scopedRemediationWithMi
 }
 
 $ordinary = Invoke-ExpectedRejection -Arguments @('-SourceRoot', $SourceRoot)
+foreach ($conflict in @('-ApplyMigrations', '-DeferReadinessForScopedRemediation')) {
+    $rejected = Invoke-ExpectedRejection -Arguments @('-SourceRoot', $SourceRoot, '-PlanOnly', '-ApplyCorpusChunkFullTextMigration', $conflict)
+    if ($rejected.ExitCode -eq 0 -or $rejected.Output -notmatch 'cannot be combined') {
+        throw 'The one-time Corpus Full-Text switch permits an incompatible deployment path.'
+    }
+}
 if ($ordinary.ExitCode -eq 0 -or $ordinary.Output -notmatch 'requires -Apply') {
     throw "The incremental IIS updater can execute without an explicit -Apply acknowledgement."
 }

@@ -17,6 +17,8 @@ public static class NativeV1Endpoints
         endpoints.MapPost("/api/v1/knowledge/graph/query", (HttpRequest request, INativeV1Facade facade, NativeV1RequestMapper mapper, CancellationToken token) => QueryAsync("knowledge.graph", request, facade, mapper, token));
         endpoints.MapPost("/api/v1/code/query", (HttpRequest request, INativeV1Facade facade, NativeV1RequestMapper mapper, CancellationToken token) => QueryAsync("code.query", request, facade, mapper, token));
         endpoints.MapPost("/api/v1/corpus/query", (HttpRequest request, INativeV1Facade facade, NativeV1RequestMapper mapper, CancellationToken token) => QueryAsync("corpus.query", request, facade, mapper, token));
+        endpoints.MapPost("/api/v1/corpus/search", (HttpRequest request, INativeV1Facade facade, NativeV1RequestMapper mapper, CancellationToken token) => QueryAsync("corpus.search", request, facade, mapper, token));
+        endpoints.MapPost("/api/v1/corpus/read", (HttpRequest request, INativeV1Facade facade, NativeV1RequestMapper mapper, CancellationToken token) => QueryAsync("corpus.read", request, facade, mapper, token));
         endpoints.MapGet("/api/v1/operations/status", (HttpRequest request, INativeV1Facade facade, NativeV1RequestMapper mapper, CancellationToken token) => QueryStatusAsync(request, facade, mapper, token));
         endpoints.MapPost("/api/v1/operations/audit/query", (HttpRequest request, INativeV1Facade facade, NativeV1RequestMapper mapper, CancellationToken token) => QueryAsync("operations.audit", request, facade, mapper, token));
         endpoints.MapPost("/api/v1/knowledge/actions/preview", (HttpContext context, INativeV1Facade facade, NativeV1RequestMapper mapper, CancellationToken token) => ActionAsync("knowledge.write", "preview", context, facade, mapper, token));
@@ -34,7 +36,7 @@ public static class NativeV1Endpoints
         {
             var arguments = await ReadBodyAsync(request, cancellationToken).ConfigureAwait(false);
             var result = await facade.ExecuteQueryAsync(Family(toolName), mapper.MapQuery(toolName, arguments), cancellationToken).ConfigureAwait(false);
-            return NativeResult(McpResultFactory.NativeSuccess(result));
+            return NativeResult(McpResultFactory.NativeSuccess(result), maximumBytes: toolName is "corpus.search" or "corpus.read" ? 256 * 1024 : NativeV1ContractLimits.MaximumResponseBytes);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
         catch (Exception exception) { return Failure(exception); }
@@ -100,9 +102,9 @@ public static class NativeV1Endpoints
     private static IResult Failure(string reasonCode, int statusCode) =>
         NativeResult(McpResultFactory.NativeFailure(reasonCode), statusCode);
 
-    private static IResult NativeResult(NativeV1Envelope envelope, int? explicitStatusCode = null)
+    private static IResult NativeResult(NativeV1Envelope envelope, int? explicitStatusCode = null, int maximumBytes = NativeV1ContractLimits.MaximumResponseBytes)
     {
-        var bounded = McpResultFactory.NativeBytes(envelope);
+        var bounded = McpResultFactory.NativeBytes(envelope, maximumBytes);
         var statusCode = explicitStatusCode ?? (bounded.Envelope.Ok
             ? StatusCodes.Status200OK
             : Status(bounded.Envelope));
@@ -128,7 +130,7 @@ public static class NativeV1Endpoints
         "knowledge.search" or "knowledge.write" => "knowledge",
         "knowledge.graph" => "graph",
         "code.query" or "code.write" => "code",
-        "corpus.query" or "corpus.write" => "corpus",
+        "corpus.query" or "corpus.search" or "corpus.read" or "corpus.write" => "corpus",
         "operations.status" => "operations.status",
         "operations.audit" => "operations.audit",
         _ => throw new NativeOperationException("tool-not-allowed")

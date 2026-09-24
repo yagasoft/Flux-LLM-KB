@@ -149,7 +149,7 @@ public sealed class NativeGoLiveLoopbackDenialTests
             "/mcp" when request.JsonBody!.Contains("\"id\":1", StringComparison.Ordinal) =>
                 "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2025-11-25\",\"serverInfo\":{\"name\":\"FluxKnowledge\",\"version\":\"1\"},\"capabilities\":{}}}",
             "/mcp" =>
-                "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"tools\":[{\"name\":\"knowledge.search\"},{\"name\":\"knowledge.write\"},{\"name\":\"knowledge.graph\"},{\"name\":\"code.query\"},{\"name\":\"code.write\"},{\"name\":\"corpus.query\"},{\"name\":\"corpus.write\"},{\"name\":\"operations.status\"},{\"name\":\"operations.audit\"}]}}",
+                "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"tools\":[{\"name\":\"knowledge.search\"},{\"name\":\"knowledge.write\"},{\"name\":\"knowledge.graph\"},{\"name\":\"code.query\"},{\"name\":\"code.write\"},{\"name\":\"corpus.query\"},{\"name\":\"corpus.search\"},{\"name\":\"corpus.read\"},{\"name\":\"corpus.write\"},{\"name\":\"operations.status\"},{\"name\":\"operations.audit\"}]}}",
             var path when path.StartsWith("/native/v1/codex/hooks/", StringComparison.Ordinal) =>
                 "{\"continue\":true}",
             _ => "{}"

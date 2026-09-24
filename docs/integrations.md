@@ -26,6 +26,8 @@ Codex and local scripts. All supported clients share the native application faca
 | `code.query` | `POST /api/v1/code/query` | `FluxKnowledge.Cli code query` |
 | `code.write` | `POST /api/v1/code/actions/preview` or `/commit` | `FluxKnowledge.Cli code feedback --preview|--commit` |
 | `corpus.query` | `POST /api/v1/corpus/query` | `FluxKnowledge.Cli corpus query` |
+| `corpus.search` | `POST /api/v1/corpus/search` | `FluxKnowledge.Cli corpus search` |
+| `corpus.read` | `POST /api/v1/corpus/read` | `FluxKnowledge.Cli corpus read` |
 | `corpus.write` | `POST /api/v1/corpus/actions/preview` or `/commit` | `FluxKnowledge.Cli corpus write --preview|--commit` |
 | `operations.status` | `GET /api/v1/operations/status` | `FluxKnowledge.Cli operations status` |
 | `operations.audit` | `POST /api/v1/operations/audit/query` | `FluxKnowledge.Cli operations audit` |
@@ -33,6 +35,15 @@ Codex and local scripts. All supported clients share the native application faca
 `operations.status` accepts the bounded views `overview`, `sources`, `jobs`,
 `workers`, `processors`, and `recovery`. Code, corpus and audit queries use
 bounded pages and opaque query-bound cursors.
+
+`corpus.search` searches published retained text across `all`, one registered
+`root_id`, or a canonical Windows `cwd` workspace. It returns bounded canonical
+passages, source and owner identity, typed locations where retained provenance
+supports them, and an opaque `evidence_ref`. `corpus.read` accepts that reference
+and returns up to 4,096 UTF-16 units of surrounding retained context while
+rechecking current publication and deletion state. Both operations have a
+256 KiB response limit. Their `retrieval_mode` is `lexical`; learned semantic
+ranking remains a separate evaluated increment.
 
 ## Mutations
 
@@ -75,6 +86,6 @@ The native plugin is verified by its exact identity and installed/enabled state.
 Unrelated plugin registrations are not removed. The application has no plugin
 retirement or migration task.
 
-Scoped `corpus.search` and `corpus.read` are [planned extensions](design/corpus-retrieval.md),
-not currently available tools. Current search uses a deterministic embedding
-baseline; learned semantic retrieval remains a separate delivery.
+The [retrieval design](design/corpus-retrieval.md) records the scoped lexical
+contract. Current hybrid search still uses a deterministic embedding baseline;
+learned semantic corpus retrieval remains a separate delivery.

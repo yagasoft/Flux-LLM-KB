@@ -14,6 +14,8 @@ public sealed class NativeV1CommandTests
     [InlineData("knowledge graph", "POST", "/api/v1/knowledge/graph/query", "{\"node\":\"n\",\"max_depth\":1,\"max_results\":3}")]
     [InlineData("code query", "POST", "/api/v1/code/query", "{\"view\":\"status\",\"limit\":3}")]
     [InlineData("corpus query", "POST", "/api/v1/corpus/query", "{\"view\":\"roots\",\"limit\":3}")]
+    [InlineData("corpus search", "POST", "/api/v1/corpus/search", "{\"query\":\"needle\",\"scope\":\"all\"}")]
+    [InlineData("corpus read", "POST", "/api/v1/corpus/read", "{\"evidence_ref\":\"opaque\"}")]
     [InlineData("operations status", "GET", "/api/v1/operations/status?view=overview&limit=3", "{\"view\":\"overview\",\"limit\":3}")]
     [InlineData("operations audit", "POST", "/api/v1/operations/audit/query", "{\"view\":\"events\",\"limit\":3}")]
     public async Task Query_commands_forward_the_stable_json_body_to_the_matching_loopback_v1_route(
@@ -55,6 +57,8 @@ public sealed class NativeV1CommandTests
     [InlineData("code query", "{\"view\":\"status\",\"limit\":3}")]
     [InlineData("code feedback --preview", "{\"payload\":{\"rating\":\"useful\"}}")]
     [InlineData("corpus query", "{\"view\":\"roots\",\"limit\":3}")]
+    [InlineData("corpus search", "{\"query\":\"needle\",\"scope\":\"all\"}")]
+    [InlineData("corpus read", "{\"evidence_ref\":\"opaque\"}")]
     [InlineData("corpus write --preview", "{\"action\":\"root_create\",\"payload\":{\"name\":\"root\"}}")]
     [InlineData("operations status", "{\"view\":\"overview\",\"limit\":3}")]
     [InlineData("operations audit", "{\"view\":\"events\",\"limit\":3}")]

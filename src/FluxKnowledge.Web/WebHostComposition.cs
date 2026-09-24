@@ -20,6 +20,7 @@ using FluxKnowledge.Infrastructure.Inference.Models;
 using FluxKnowledge.Infrastructure.SqlServer;
 using FluxKnowledge.Infrastructure.SqlServer.Configuration;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
+using FluxKnowledge.Infrastructure.SqlServer.Search;
 using FluxKnowledge.Infrastructure.SqlServer.Visibility;
 using FluxKnowledge.Infrastructure.SqlServer.Workers;
 using FluxKnowledge.Infrastructure.Usearch;
@@ -270,11 +271,14 @@ public static class WebHostComposition
                 liveRoot,
                 productionStorageSafety!,
                 dataProtectionStore));
+            services.AddSingleton<ICorpusEvidenceCodec>(_ => PrivatePcDataProtectionProviderFactory.CreateCorpusEvidenceCodec(
+                liveRoot, productionStorageSafety!, dataProtectionStore));
         }
         else
         {
             services.AddSingleton(_ => PrivatePcDataProtectionProviderFactory.CreateCursorCodec(liveRoot));
             services.AddSingleton<INativeV1CursorCodec>(_ => PrivatePcDataProtectionProviderFactory.CreateNativeV1CursorCodec(liveRoot));
+            services.AddSingleton<ICorpusEvidenceCodec>(_ => PrivatePcDataProtectionProviderFactory.CreateCorpusEvidenceCodec(liveRoot));
         }
         services.AddSingleton<ISourceRootPathPolicy>(provider =>
         {
@@ -327,6 +331,7 @@ public static class WebHostComposition
             nativeRuntimeOptions?.LocalOcrEnabled == true));
         services.AddSingleton<IEmbeddingProvider, DeterministicTokenHashEmbeddingProvider>();
         services.AddScoped<ISearchService, HybridSearchService>();
+        services.AddScoped<ICorpusRetrievalService, CorpusRetrievalService>();
         services.AddScoped<SqlNativeOperationStore>();
         services.AddScoped<INativeOperationStore>(provider => provider.GetRequiredService<SqlNativeOperationStore>());
         services.AddScoped<SqlKnowledgeStore>();

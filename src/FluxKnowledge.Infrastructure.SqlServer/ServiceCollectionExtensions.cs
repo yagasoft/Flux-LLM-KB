@@ -39,6 +39,7 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<IDerivedIndexRecoveryStore, SqlDerivedIndexRecoveryStore>();
         services.AddScoped<ILexicalSearch, SqlFullTextSearch>();
         services.AddScoped<ISearchHydrator, SqlSearchHydrator>();
+        services.AddScoped<ICorpusRetrievalReader, SqlCorpusRetrievalReader>();
 
         return services;
     }

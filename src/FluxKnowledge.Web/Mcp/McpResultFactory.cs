@@ -10,16 +10,16 @@ internal static class McpResultFactory
 {
     private static readonly JsonSerializerOptions SerializerOptions = new(JsonSerializerDefaults.Web);
 
-    public static CallToolResult NativeJson(NativeV1Envelope envelope)
+    public static CallToolResult NativeJson(NativeV1Envelope envelope, int maximumBytes = NativeV1ContractLimits.MaximumResponseBytes)
     {
-        var bounded = NativeBytes(envelope);
+        var bounded = NativeBytes(envelope, maximumBytes);
         return Text(Encoding.UTF8.GetString(bounded.Utf8));
     }
 
-    public static (NativeV1Envelope Envelope, byte[] Utf8) NativeBytes(NativeV1Envelope envelope)
+    public static (NativeV1Envelope Envelope, byte[] Utf8) NativeBytes(NativeV1Envelope envelope, int maximumBytes = NativeV1ContractLimits.MaximumResponseBytes)
     {
         var utf8 = JsonSerializer.SerializeToUtf8Bytes(envelope, SerializerOptions);
-        if (utf8.Length <= NativeV1ContractLimits.MaximumResponseBytes) return (envelope, utf8);
+        if (utf8.Length <= maximumBytes) return (envelope, utf8);
 
         var failure = NativeFailure("response-too-large");
         return (failure, JsonSerializer.SerializeToUtf8Bytes(failure, SerializerOptions));

@@ -1,7 +1,9 @@
 using FluxKnowledge.Application.IntegrationV1.Code;
 using FluxKnowledge.Application.IntegrationV1.Corpus;
 using FluxKnowledge.Application.IntegrationV1.Operations;
+using FluxKnowledge.Application.Contracts;
 using FluxKnowledge.Application.Knowledge;
+using FluxKnowledge.Application.Search;
 
 namespace FluxKnowledge.Application.IntegrationV1;
 
@@ -24,7 +26,8 @@ public sealed class NativeV1Facade(
     NativeOperationsStatusService status,
     NativeAuditQueryService audit,
     IKnowledgeQueryService knowledgeQueries,
-    IKnowledgeCommandService knowledgeCommands) : INativeV1Facade
+    IKnowledgeCommandService knowledgeCommands,
+    ICorpusRetrievalService? corpusRetrieval = null) : INativeV1Facade
 {
     public async ValueTask<object> ExecuteQueryAsync(string family, object request, CancellationToken cancellationToken) =>
         CanonicalFamily(family) switch
@@ -32,6 +35,12 @@ public sealed class NativeV1Facade(
             "knowledge" when request is NativeKnowledgeQuery knowledge => await SearchAsync(knowledge, cancellationToken).ConfigureAwait(false),
             "graph" when request is NativeGraphQuery graph => await GraphAsync(graph, cancellationToken).ConfigureAwait(false),
             "corpus" when request is NativeCorpusQuery corpus => await corpusQueries.ExecuteAsync(corpus, cancellationToken).ConfigureAwait(false),
+            "corpus" when request is CorpusSearchRequest search => await
+                (corpusRetrieval ?? throw new NativeOperationException("temporary-unavailable"))
+                .SearchAsync(search, cancellationToken).ConfigureAwait(false),
+            "corpus" when request is CorpusReadRequest read => await
+                (corpusRetrieval ?? throw new NativeOperationException("temporary-unavailable"))
+                .ReadAsync(read, cancellationToken).ConfigureAwait(false),
             "code" when request is NativeCodeQuery code => await codeQueries.ExecuteAsync(code, cancellationToken).ConfigureAwait(false),
             "operations.status" when request is NativeOperationsStatus operationStatus => await status.ExecuteAsync(operationStatus, cancellationToken).ConfigureAwait(false),
             "operations.audit" when request is NativeAuditQuery auditQuery => await audit.ExecuteAsync(auditQuery, cancellationToken).ConfigureAwait(false),

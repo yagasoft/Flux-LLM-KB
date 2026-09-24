@@ -25,7 +25,7 @@ public sealed class McpEndpointRegistrationTests : IClassFixture<McpEndpointRegi
     public McpEndpointRegistrationTests(McpApplicationFactory factory) => _factory = factory;
 
     [Fact]
-    public async Task Mcp_endpoint_advertises_only_the_nine_native_v1_tools()
+    public async Task Mcp_endpoint_advertises_the_native_v1_tools_including_corpus_retrieval()
     {
         var initialise = await SendMcpRequestAsync(_factory, new
         {
@@ -49,7 +49,7 @@ public sealed class McpEndpointRegistrationTests : IClassFixture<McpEndpointRegi
             .ToArray();
 
         Assert.Equal(
-            ["code.query", "code.write", "corpus.query", "corpus.write", "knowledge.graph", "knowledge.search", "knowledge.write", "operations.audit", "operations.status"],
+            ["code.query", "code.write", "corpus.query", "corpus.read", "corpus.search", "corpus.write", "knowledge.graph", "knowledge.search", "knowledge.write", "operations.audit", "operations.status"],
             names);
     }
 

@@ -65,6 +65,8 @@ public static class NativeGoLiveLoopbackContract
         "code.query",
         "code.write",
         "corpus.query",
+        "corpus.search",
+        "corpus.read",
         "corpus.write",
         "operations.status",
         "operations.audit"

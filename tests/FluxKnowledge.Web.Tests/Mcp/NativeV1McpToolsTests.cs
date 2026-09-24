@@ -18,7 +18,7 @@ namespace FluxKnowledge.Web.Tests.Mcp;
 public sealed class NativeV1McpToolsTests
 {
     [Fact]
-    public void Native_MCP_class_advertises_exactly_the_nine_v1_tools()
+    public void Native_MCP_class_advertises_the_v1_tools_including_corpus_retrieval()
     {
         var names = typeof(NativeV1McpTools).GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.DeclaredOnly)
             .Select(method => method.GetCustomAttribute<McpServerToolAttribute>()?.Name)
@@ -27,7 +27,7 @@ public sealed class NativeV1McpToolsTests
             .ToArray();
 
         Assert.Equal(
-            ["code.query", "code.write", "corpus.query", "corpus.write", "knowledge.graph", "knowledge.search", "knowledge.write", "operations.audit", "operations.status"],
+            ["code.query", "code.write", "corpus.query", "corpus.read", "corpus.search", "corpus.write", "knowledge.graph", "knowledge.search", "knowledge.write", "operations.audit", "operations.status"],
             names);
     }
 
@@ -41,17 +41,19 @@ public sealed class NativeV1McpToolsTests
         var graph = await tools.KnowledgeGraph("node", 2, 3, CancellationToken.None);
         var code = await tools.CodeQuery("symbols", null, null, 3, null, CancellationToken.None);
         var corpus = await tools.CorpusQuery("roots", null, null, null, 3, null, CancellationToken.None);
+        var corpusSearch = await tools.CorpusSearch("needle", 3, "all", cancellationToken: CancellationToken.None);
+        var corpusRead = await tools.CorpusRead("opaque-reference", cancellationToken: CancellationToken.None);
         var status = await tools.OperationsStatus("overview", null, null, 3, CancellationToken.None);
         var audit = await tools.OperationsAudit("events", null, null, 3, null, CancellationToken.None);
         var preview = await tools.KnowledgeWrite("preview", "note_create", null, "Title", "Body", null, null, null, null, null, null, null, cancellationToken: CancellationToken.None);
         var codeWrite = await tools.CodeWrite("preview", JsonSerializer.SerializeToElement(new { rating = "useful" }), cancellationToken: CancellationToken.None);
         var corpusWrite = await tools.CorpusWrite("preview", "root_create", JsonSerializer.SerializeToElement(new { name = "Root" }), cancellationToken: CancellationToken.None);
 
-        foreach (var result in new[] { query, graph, code, corpus, status, audit, preview, codeWrite, corpusWrite })
+        foreach (var result in new[] { query, graph, code, corpus, corpusSearch, corpusRead, status, audit, preview, codeWrite, corpusWrite })
         {
             Assert.True(Read(result).GetProperty("ok").GetBoolean());
         }
-        Assert.Equal(6, facade.QueryCalls);
+        Assert.Equal(8, facade.QueryCalls);
         Assert.Equal(3, facade.PreviewCalls);
         Assert.Equal(0, facade.CommitCalls);
     }

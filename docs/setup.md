@@ -75,6 +75,18 @@ changes require its separate reviewed migration opt-in and compatible rollback
 conditions. Updating code in Git does not authorise deployment, restart or
 migration. Model caches and source originals are outside the update payload.
 
+The one-time `-ApplyCorpusChunkFullTextMigration` switch applies only
+`20260924125920_AddCorpusChunkFullTextIndex` from the exact OCR-metadata baseline
+`20260920122758_AddDocumentOcrRequestsAndArtifactMetadata`. Include that switch
+in both `-PlanOnly` and the authorised `-Apply` command. It is incompatible with
+the older `-ApplyMigrations` switch and readiness deferral. The generated up and
+down SQL are hash-pinned. Before hold release, a failed update restores the
+original migration history, removes only the new chunk index and validates the
+prior application; failed recovery retains the hold. After hold release, a
+failed check retains the activated schema and payload for operator inspection.
+Do not replay this one-time switch after activation. Full-Text population is
+asynchronous and must be checked separately before claiming retrieval readiness.
+
 ## Clean-slate installation
 
 The separate one-shot entry point is `scripts/dev/complete-feature.ps1 -GoLive`.

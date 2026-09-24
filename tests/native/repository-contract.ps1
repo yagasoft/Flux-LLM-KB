@@ -32,7 +32,12 @@ $obsoleteTerms = '(?i)\blegacy\b|flux[-_]llm[-_]kb|flux-kb|\b(Docker|Vespa|Rabbi
 foreach ($path in $documents) {
     $file = Join-Path $SourceRoot $path
     $content = Get-Content -LiteralPath $file -Raw
-    if ($content -match $obsoleteTerms) {
+    # The current, explicitly requested model evaluation names Qwen embedding
+    # candidates; this is not a reference to the removed application stack.
+    $documentObsoleteTerms = if ($path -eq 'docs/design/semantic-model-candidates.md') {
+        $obsoleteTerms.Replace('|Qwen', '')
+    } else { $obsoleteTerms }
+    if ($content -match $documentObsoleteTerms) {
         throw "Documentation contains a superseded architecture reference: $path"
     }
     if ($content -match '(?i)(?<![A-Za-z0-9])(?:I|J):(?![\\/])\w|\(localdb\)MSSQLLocalDB') {

@@ -1,10 +1,12 @@
 using System.Text.Json;
+using FluxKnowledge.Application.Contracts;
 using FluxKnowledge.Application.IntegrationV1;
 using FluxKnowledge.Application.IntegrationV1.Code;
 using FluxKnowledge.Application.IntegrationV1.Corpus;
 using FluxKnowledge.Application.IntegrationV1.Operations;
 using FluxKnowledge.Application.Knowledge;
 using FluxKnowledge.Application.Ports;
+using FluxKnowledge.Application.Search;
 using FluxKnowledge.Application.Visibility;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
 using Microsoft.AspNetCore.DataProtection;
@@ -14,6 +16,19 @@ namespace FluxKnowledge.Domain.Tests.IntegrationV1;
 
 public sealed class NativeV1FacadeTests
 {
+    [Fact]
+    public async Task ExecuteQueryAsync_routes_scoped_corpus_search_to_retrieval()
+    {
+        var retrieval = new RecordingCorpusRetrievalService();
+        var request = new CorpusSearchRequest("invoice", 3, "all", null, null);
+        var facade = CreateFacade(new RecordingProjectionReader(), corpusRetrieval: retrieval);
+
+        var result = await facade.ExecuteQueryAsync("corpus", request, CancellationToken.None);
+
+        Assert.Same(retrieval.Result, result);
+        Assert.Same(request, retrieval.LastRequest);
+    }
+
     [Fact]
     public async Task ExecuteQueryAsync_rejects_an_unknown_view_before_the_projection_reader_is_called()
     {
@@ -226,7 +241,8 @@ public sealed class NativeV1FacadeTests
 
     private static NativeV1Facade CreateFacade(
         RecordingProjectionReader reader,
-        RecordingKnowledgeQueryService? knowledgeQueries = null) => new(
+        RecordingKnowledgeQueryService? knowledgeQueries = null,
+        ICorpusRetrievalService? corpusRetrieval = null) => new(
         new NativeCorpusQueryService(reader, CursorCodec()),
         new NativeCorpusCommandService(new RecordingOperationStore(), reader),
         new NativeCodeQueryService(reader, CursorCodec()),
@@ -234,7 +250,20 @@ public sealed class NativeV1FacadeTests
         new NativeOperationsStatusService(reader),
         new NativeAuditQueryService(reader, CursorCodec()),
         knowledgeQueries ?? new RecordingKnowledgeQueryService(),
-        new RecordingKnowledgeCommandService());
+        new RecordingKnowledgeCommandService(), corpusRetrieval);
+
+    private sealed class RecordingCorpusRetrievalService : ICorpusRetrievalService
+    {
+        public CorpusSearchRequest? LastRequest { get; private set; }
+        public CorpusSearchResponse Result { get; } = new([], new CorpusResolvedScope("all", [], null), "lexical", "not-enabled", null, []);
+        public ValueTask<CorpusSearchResponse> SearchAsync(CorpusSearchRequest request, CancellationToken token)
+        {
+            LastRequest = request;
+            return ValueTask.FromResult(Result);
+        }
+        public ValueTask<CorpusPassageResponse> ReadAsync(CorpusReadRequest request, CancellationToken token) =>
+            throw new NotSupportedException();
+    }
 
     private static INativeV1CursorCodec CursorCodec() =>
         new NativeV1ProjectionCursorCodec(new EphemeralDataProtectionProvider());

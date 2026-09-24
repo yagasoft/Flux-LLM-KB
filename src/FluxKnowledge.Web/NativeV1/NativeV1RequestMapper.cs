@@ -5,6 +5,7 @@ using FluxKnowledge.Application.IntegrationV1.Code;
 using FluxKnowledge.Application.IntegrationV1.Corpus;
 using FluxKnowledge.Application.IntegrationV1.Operations;
 using FluxKnowledge.Application.Knowledge;
+using FluxKnowledge.Application.Contracts;
 using Microsoft.AspNetCore.Http;
 
 namespace FluxKnowledge.Web.NativeV1;
@@ -23,6 +24,8 @@ public sealed class NativeV1RequestMapper
             "knowledge.graph" => new NativeGraphQuery(NativeV1ContractLimits.CanonicalizeGraphNode(QueryString(input, "node")), RequiredInt(input, "max_depth", 1, 8), RequiredInt(input, "max_results", 1, 100)),
             "code.query" => new NativeCodeQuery(RequiredString(input, "view"), NativeV1ContractLimits.CanonicalizeOptionalCodeQuery(QueryString(input, "query", required: false)), OptionalGuid(input, "branch_id"), Limit(input), OptionalCursor(input)),
             "corpus.query" => new NativeCorpusQuery(RequiredString(input, "view"), OptionalGuid(input, "root_id"), OptionalGuid(input, "branch_id"), OptionalGuid(input, "job_id"), Limit(input), OptionalCursor(input)),
+            "corpus.search" => CorpusSearch(input),
+            "corpus.read" => CorpusRead(input),
             "operations.status" => new NativeOperationsStatus(RequiredString(input, "view"), OptionalGuid(input, "root_id"), OptionalGuid(input, "job_id"), Limit(input)),
             "operations.audit" => new NativeAuditQuery(RequiredString(input, "view"), OptionalGuid(input, "root_id"), OptionalGuid(input, "job_id"), Limit(input), OptionalCursor(input)),
             _ => throw new NativeOperationException("tool-not-allowed")
@@ -117,6 +120,47 @@ public sealed class NativeV1RequestMapper
     }
 
     private static int Limit(JsonElement input) => RequiredInt(input, "limit", 1, 100);
+
+    private static CorpusSearchRequest CorpusSearch(JsonElement input)
+    {
+        foreach (var property in input.EnumerateObject())
+        {
+            if (property.Name is not ("query" or "limit" or "scope" or "root_id" or "cwd"))
+                throw new NativeOperationException("invalid-request");
+        }
+
+        var query = NativeV1ContractLimits.CanonicalizeKnowledgeQuery(QueryString(input, "query"));
+        var limit = input.TryGetProperty("limit", out _) ? RequiredInt(input, "limit", 1, 20) : 10;
+        var scope = RequiredString(input, "scope");
+        var rootId = OptionalGuid(input, "root_id");
+        var cwd = OptionalString(input, "cwd");
+        if (scope is not ("all" or "root" or "workspace") ||
+            scope == "all" && (rootId.HasValue || cwd is not null) ||
+            scope == "root" && (!rootId.HasValue || cwd is not null) ||
+            scope == "workspace" && (rootId.HasValue || string.IsNullOrWhiteSpace(cwd)))
+            throw new NativeOperationException("invalid-request");
+
+        return new CorpusSearchRequest(query, limit, scope, rootId, cwd);
+    }
+
+    private static CorpusReadRequest CorpusRead(JsonElement input)
+    {
+        foreach (var property in input.EnumerateObject())
+        {
+            if (property.Name is not ("evidence_ref" or "context_characters"))
+                throw new NativeOperationException("invalid-request");
+        }
+
+        var evidenceRef = RequiredString(input, "evidence_ref");
+        if (evidenceRef.Length > 2048) throw new NativeOperationException("evidence-invalid");
+        var contextCharacters = 1024;
+        if (input.TryGetProperty("context_characters", out var context))
+        {
+            if (!context.TryGetInt32(out contextCharacters) || contextCharacters is < 0 or > 4096)
+                throw new NativeOperationException("invalid-request");
+        }
+        return new CorpusReadRequest(evidenceRef, contextCharacters);
+    }
 
     private static int RequiredInt(JsonElement input, string property, int minimum, int maximum)
     {

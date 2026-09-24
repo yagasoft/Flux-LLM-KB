@@ -117,7 +117,8 @@ The source-bound OCR result continues through normalisation, indexing and
 publication with retained page/block provenance. Native-text pages preserve
 their text. A page containing both native text and scanned regions is not
 currently region-OCRed. Repeated-text fidelity remains imperfect; Arabic OCR is
-not supported. Public search responses do not yet expose retained page fields.
+not supported. The scoped corpus operations project retained page, image and
+Visio locations; the older mixed `knowledge.search` response has no page fields.
 Reprocessing a terminal failed revision does not provide a same-revision retry.
 See the [practical assessment](operations/2026-09-20-english-ocr-practical-assessment.md)
 and [scoped delivery evidence](operations/2026-09-20-english-ocr-live-delivery.md).
@@ -148,16 +149,16 @@ SQL Full-Text and USearch serve the native retrieval path; the registered
 embedding provider is a deterministic token-hash baseline. It is not a learned
 semantic model. SQL publication eligibility controls which revision can appear.
 
-The nine native tools, their REST routes, envelopes, cursors and CLI verbs are
+The eleven native tools, their REST routes, envelopes, cursors and CLI verbs are
 specified in [integrations](integrations.md). Mutations require a preview-bound
 confirmation and an idempotency key. Direct-loopback checks refuse forwarding,
 proxies and redirects; public responses are bounded and secret-filtered.
 
 [Scoped corpus search and cited passage reading](design/corpus-retrieval.md)
-remain planned. That design adds scoped lexical passage retrieval first, then
-evaluated local embeddings with explicit model/index binding and recoverable
-generation transitions. It does not describe shipped endpoints or authorise
-model acquisition. The design was aligned with main `52742d9` on 2026-09-23:
+provide published-text lexical search and bounded cited reads through the three
+native surfaces. The follow-on design evaluates local embeddings with explicit
+model/index binding and recoverable generation transitions; it does not
+authorise model acquisition. The design was aligned with main `52742d9` on 2026-09-23:
 it consumes selected internal document/metadata publications, current
 PDF/image/Visio provenance and bounded reads of large Office results. It does
 not require another OCR merge or add same-page region OCR, typed table-cell

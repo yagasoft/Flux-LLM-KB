@@ -2,7 +2,7 @@
 
 Date: 2026-09-20
 Last aligned: 2026-09-23, main `52742d998e07dc21415444629c710c9bbf55b8cd`.
-Status: design and planning only; implementation and production activation are not authorised by this document.
+Status: approved design; scoped lexical implementation is in progress. Production activation requires the reviewed incremental migration and deployment gates.
 
 ## Outcome and scope
 
@@ -15,7 +15,7 @@ Deliver two independently useful increments:
 
 The first observable result is a public synthetic plain-text document and a retained OCR document queried through MCP, REST and CLI: each returns the relevant passage within the requested scope, original identity, revision and supported location, and each citation can retrieve bounded context. An unrelated source containing the same terms must remain excluded.
 
-Keep native SQL Server, SQL Full-Text and embedded USearch. This follows the current native architecture; this work does not initiate a database migration. Preserve the existing pipeline and processor ownership. No new extractors, OCR tuning, model acquisitions, ASR, reranker, answer generator, autonomous memory writes, source rescans, source-original reads, dashboard redesign or manual regeneration belongs to this delivery. Existing specialised code/symbol queries remain unchanged. Already published code text can participate under the same corpus policy, without replacing symbol search or indexing additional code facts.
+Keep native SQL Server, SQL Full-Text and embedded USearch. This follows the current native architecture; the lexical increment adds only a Full-Text index on retained chunks. Preserve the existing pipeline and processor ownership. No new extractors, OCR tuning, model acquisitions, ASR, reranker, answer generator, autonomous memory writes, source rescans, source-original reads, dashboard redesign or manual regeneration belongs to this delivery. Existing specialised code/symbol queries remain unchanged. Already published code text can participate under the same corpus policy, without replacing symbol search or indexing additional code facts.
 
 ## Evidence and dependency boundary
 

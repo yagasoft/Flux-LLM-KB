@@ -2,6 +2,7 @@ using System.Runtime.Versioning;
 using System.Security;
 using System.Security.Cryptography;
 using FluxKnowledge.Application.Operations;
+using FluxKnowledge.Infrastructure.SqlServer.Search;
 using Microsoft.AspNetCore.DataProtection;
 
 namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
@@ -56,6 +57,43 @@ public static class PrivatePcDataProtectionProviderFactory
         catch (Exception exception) when (IsKeyRingUnavailable(exception))
         {
             return new NativeV1ProjectionCursorCodec(new UnavailableDataProtectionProvider());
+        }
+    }
+
+    public static CorpusEvidenceCodec CreateCorpusEvidenceCodec(LiveRootLayout layout)
+    {
+        ArgumentNullException.ThrowIfNull(layout);
+        if (layout.IsProduction)
+            return CreateCorpusEvidenceCodec(layout,
+                new LiveRootStorageSafety(layout, FileSystemLiveRootPathInspector.Instance),
+                FileSystemPrivatePcDataProtectionStore.Instance, createIfMissing: false);
+        try
+        {
+            return new CorpusEvidenceCodec(
+                FileSystemPrivatePcDataProtectionStore.Instance.CreateProvider(KeyRingRoot(layout), createIfMissing: true));
+        }
+        catch (Exception exception) when (IsKeyRingUnavailable(exception))
+        {
+            return new CorpusEvidenceCodec(new UnavailableDataProtectionProvider());
+        }
+    }
+
+    internal static CorpusEvidenceCodec CreateCorpusEvidenceCodec(
+        LiveRootLayout layout, LiveRootStorageSafety storageSafety,
+        IPrivatePcDataProtectionStore store, bool createIfMissing = true)
+    {
+        ArgumentNullException.ThrowIfNull(layout);
+        ArgumentNullException.ThrowIfNull(storageSafety);
+        ArgumentNullException.ThrowIfNull(store);
+        var keyRingRoot = KeyRingRoot(layout);
+        storageSafety.ValidateBeforeIo(keyRingRoot);
+        try
+        {
+            return new CorpusEvidenceCodec(store.CreateProvider(keyRingRoot, createIfMissing));
+        }
+        catch (Exception exception) when (IsKeyRingUnavailable(exception))
+        {
+            return new CorpusEvidenceCodec(new UnavailableDataProtectionProvider());
         }
     }
 

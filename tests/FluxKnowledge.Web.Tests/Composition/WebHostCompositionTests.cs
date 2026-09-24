@@ -8,6 +8,7 @@ using FluxKnowledge.Application.Pipeline;
 using FluxKnowledge.Application.Sources;
 using FluxKnowledge.Application.Indexing;
 using FluxKnowledge.Application.Ports;
+using FluxKnowledge.Application.Search;
 using FluxKnowledge.Application.Workers;
 using FluxKnowledge.Application.Operations;
 using FluxKnowledge.Domain.Jobs;
@@ -402,6 +403,8 @@ public sealed class WebHostCompositionTests : IDisposable
 
         Assert.Throws<InvalidOperationException>(() =>
             provider.GetRequiredService<LocalRetainedCsharpCodeSearchCursorCodec>());
+        Assert.Throws<InvalidOperationException>(() =>
+            provider.GetRequiredService<ICorpusEvidenceCodec>());
         Assert.Equal(0, indexIo.CreateDirectoryCalls);
         Assert.Equal(0, keyRingIo.CreateProviderCalls);
     }
@@ -418,6 +421,8 @@ public sealed class WebHostCompositionTests : IDisposable
             new ServiceProviderOptions { ValidateScopes = true, ValidateOnBuild = true });
 
         Assert.False(provider.GetRequiredService<OutlookCaptureRecoveryOptions>().Enabled);
+        using var retrievalScope = provider.CreateScope();
+        Assert.IsType<CorpusRetrievalService>(retrievalScope.ServiceProvider.GetRequiredService<ICorpusRetrievalService>());
         Assert.Empty(provider.GetServices<IHostedService>().OfType<OutlookCaptureRecoveryService>());
         Assert.DoesNotContain(
             typeof(WebHostComposition).Assembly.GetReferencedAssemblies(),
