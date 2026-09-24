@@ -155,10 +155,12 @@ confirmation and an idempotency key. Direct-loopback checks refuse forwarding,
 proxies and redirects; public responses are bounded and secret-filtered.
 
 [Scoped corpus search and cited passage reading](design/corpus-retrieval.md)
-provide published-text lexical search and bounded cited reads through the three
-native surfaces. The follow-on design evaluates local embeddings with explicit
-model/index binding and recoverable generation transitions; it does not
-authorise model acquisition. The design was aligned with main `52742d9` on 2026-09-23:
+provide deployed published-text lexical search and bounded cited reads through
+MCP, REST and CLI. The one-time SQL chunk Full-Text index is active. The follow-on
+design evaluates local embeddings with explicit model/index binding and
+recoverable generation transitions; BGE-M3 ONNX is being evaluated offline
+under separate acquisition approval, with no learned provider active. The
+design was aligned with main `52742d9` on 2026-09-23:
 it consumes selected internal document/metadata publications, current
 PDF/image/Visio provenance and bounded reads of large Office results. It does
 not require another OCR merge or add same-page region OCR, typed table-cell

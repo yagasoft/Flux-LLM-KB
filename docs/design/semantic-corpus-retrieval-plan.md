@@ -2,7 +2,14 @@
 
 Date: 2026-09-20
 Last aligned: 2026-09-23, main `52742d998e07dc21415444629c710c9bbf55b8cd`.
-Status: design-stage plan with explicit model and migration gates; no implementation or activation performed.
+Status: design-stage plan with explicit model and migration gates; lexical corpus
+retrieval is deployed, but no learned embedding provider is selected or active.
+The active model evaluation is BGE-M3 ONNX at revision
+`5617a9f61b028005a4858fdac845db406aefb181`, using the existing .NET ONNX
+Runtime and DirectML setup offline. The alternative Python inference route is
+paused; its earlier shortlist entry is not an acquisition or implementation
+instruction. Production selection still depends on the frozen local relevance,
+execution, latency, memory, OCR contention and source-coverage gates.
 
 **Goal:** Improve paraphrase retrieval across ordinary and OCR-derived text using one verified local embedding model, without losing exact retrieval, citation correctness or service continuity.
 
@@ -43,7 +50,7 @@ Status: design-stage plan with explicit model and migration gates; no implementa
 **Inspect:** `src/FluxKnowledge.Application/Ports/IEmbeddingProvider.cs`, `src/FluxKnowledge.Infrastructure.Inference/DeterministicTokenHashEmbeddingProvider.cs`, `src/FluxKnowledge.Application/Models/ILocalModelStore.cs`, `src/FluxKnowledge.Web/Configuration/NativeGoLiveRuntimeOptions.cs`, `WebHostComposition.cs`, current OCR scheduler/runtime composition and the central inventory. Existing OCR activation/manifest checks do not enable embeddings; preserve that provisioned route while designing the distinct embedding binding. Inspect metadata without loading providers or initiating acquisition.
 
 - [ ] Recheck repository model rules, central availability/containment and inventory, plus relevant configured provider caches. Record exact reusable artifacts and unverified/missing dependencies privately. Do not copy/adopt or hash/load payloads outside the applicable verification procedure.
-- [ ] Select at most two plausible already provisioned complete embedding routes for a bounded comparison; prefer one supported route compatible with the approved runtime. If no route is locally complete, present exact missing artifacts/revisions/bytes/destination or runtime change and stop that dependent work. Continue model-free contract/migration design where safe.
+- [ ] Evaluate the separately approved pinned BGE-M3 ONNX route first with the existing .NET DirectML runtime. If a required tokenizer or inference runtime component is still missing, inventory it and request separate exact acquisition authority before transfer. Do not broaden to the paused alternative unless measured BGE shortcomings justify a Python worker and its operational cost.
 - [ ] For the selected route, record immutable weights/tokenizer identity, versioned query/document prefixes, pooling, normalisation, dimensions, metric, token limit, execution provider and runtime. Check current primary documentation if selecting a new library/model; do not infer support from an old cache filename.
 - [ ] Define long-chunk handling before inference: preserve all canonical text through bounded model-token windows and a documented normalised pooling rule, fingerprinted with the profile. No silent provider truncation. If multiple subchunk vectors are actually needed, amend the schema/retrieval design before implementation rather than quietly changing vector identity.
 - [ ] Measure ordinary text and OCR samples against the frozen question set and its pre-recorded extraction-coverage subset, without rewriting expectations. Report upstream omissions/repetition separately from retrieval misses and disclose both denominators. Include long Office content and image/Visio correctness fixtures. Record semantic relevance, peak CPU/GPU memory, warm/cold latency and OCR contention. Follow separate authority for real-model execution/runtime activation; this alignment task authorises none.

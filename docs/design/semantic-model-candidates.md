@@ -1,5 +1,13 @@
 # Local embedding candidates for semantic retrieval
 
+Current evaluation (24 September 2026): BGE-M3's ONNX export at the pinned
+revision below is the sole active semantic candidate. Its nine-file acquisition
+was separately approved and is staged only under `J:\Models`; this does not
+select or activate a production model. Qwen evaluation and the proposed Python
+inference runtime are paused. Revisit Qwen only if a measured material BGE
+shortcoming justifies that extra runtime. The original PyTorch and Qwen rows
+below document the earlier research shortlist, not current acquisition scope.
+
 Metadata and official documentation checked 24 September 2026. This is a shortlist for local evaluation, not a production model selection or permission to acquire model files. No model payload, tokenizer, config or runtime package was downloaded for this research. All byte counts assume an empty cache; subtract only artifacts verified in `J:\Models` or other existing provider caches before requesting acquisition. `J:\Models` is the sole canonical model store.
 
 The implementation owner's current inventory found no BGE-M3 or Qwen3-Embedding matches in `J:\Models` manifests and model inventory, and no matching files in the checked Hugging Face and other provider caches. That is a scoped finding, not proof that every configured path or artifact hash has been checked. Recheck all relevant paths by exact artifact identity immediately before any proposed acquisition.
