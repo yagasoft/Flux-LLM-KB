@@ -33,15 +33,15 @@ behaviour and limitations.
 | Item | Priority | Status | Progress % | Remaining Work |
 | --- | --- | --- | ---: | --- |
 | Scoped corpus search and cited passage reading | P1 | complete | 100% | Maintain the deployed one-time chunk Full-Text index and MCP/REST/CLI parity. Live checks cover OCR image, native PDF, DOCX, XLSX and Visio search/read; extraction fidelity, same-page region OCR and failed-revision retry remain separate work. |
-| Evaluated semantic corpus retrieval | P1 | in progress | 0% | The fixed lexical pilot and extraction-miss labels are recorded, but plain-text and scanned/mixed-PDF coverage remain insufficient for selection. BGE-M3 ONNX acquisition and offline DirectML evaluation are underway under separate approval; the alternative Python route is paused. Select and activate no learned model until relevance, latency, memory, concurrent OCR and generation/rollback gates pass. |
+| Evaluated semantic corpus retrieval | P1 | in progress | 0% | The approved BGE-M3 ONNX export runs offline with DirectML, but the fixed pilot failed its predeclared paraphrase and citation-preservation gates; no semantic service is selected or active, so delivered capability remains 0%. Add held-out plain-text and scanned/mixed-PDF coverage, correct hybrid citation preservation, prove exact .NET tokenisation and scope-aware search, then verify end-to-end latency, OCR admission and generation/rollback before selection or activation. The alternative Python route remains paused. |
 
 The [retrieval design](design/corpus-retrieval.md),
 [scoped retrieval plan](design/scoped-corpus-retrieval-plan.md) and
 [semantic retrieval plan](design/semantic-corpus-retrieval-plan.md) retain the
 contract and operational gates. The scoped operations and one-time SQL Full-Text
 index are deployed and live-validated. Semantic retrieval remains unselected;
-the approved BGE-M3 ONNX acquisition and local evaluation do not activate an
-embedding provider.
+the [BGE-M3 ONNX evaluation](operations/2026-09-24-bge-m3-onnx-evaluation.md)
+records a failed relevance pilot and does not activate an embedding provider.
 
 ## Update rules
 

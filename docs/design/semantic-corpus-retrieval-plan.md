@@ -1,7 +1,7 @@
 # Semantic corpus retrieval implementation plan
 
 Date: 2026-09-20
-Last aligned: 2026-09-23, main `52742d998e07dc21415444629c710c9bbf55b8cd`.
+Last aligned: 2026-09-24, main `0b2606ecb8a2db1b4d7a6eee251a6d933bcc3d91`.
 Status: design-stage plan with explicit model and migration gates; lexical corpus
 retrieval is deployed, but no learned embedding provider is selected or active.
 The active model evaluation is BGE-M3 ONNX at revision
@@ -9,7 +9,11 @@ The active model evaluation is BGE-M3 ONNX at revision
 Runtime and DirectML setup offline. The alternative Python inference route is
 paused; its earlier shortlist entry is not an acquisition or implementation
 instruction. Production selection still depends on the frozen local relevance,
-execution, latency, memory, OCR contention and source-coverage gates.
+execution, latency, memory, OCR contention and source-coverage gates. The
+[2026-09-24 ONNX pilot](../operations/2026-09-24-bge-m3-onnx-evaluation.md)
+verified offline DirectML execution but failed the frozen relevance gate;
+ordinary plain-text and scanned/mixed-PDF coverage remain absent. Keep this
+plan's implementation batches gated until a new held-out evaluation passes.
 
 **Goal:** Improve paraphrase retrieval across ordinary and OCR-derived text using one verified local embedding model, without losing exact retrieval, citation correctness or service continuity.
 
