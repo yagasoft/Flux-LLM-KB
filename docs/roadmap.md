@@ -33,6 +33,7 @@ behaviour and limitations.
 | Item | Priority | Status | Progress % | Remaining Work |
 | --- | --- | --- | ---: | --- |
 | Scoped corpus search and cited passage reading | P1 | complete | 100% | Maintain the deployed one-time chunk Full-Text index and MCP/REST/CLI parity. Live checks cover OCR image, native PDF, DOCX, XLSX and Visio search/read; extraction fidelity, same-page region OCR and failed-revision retry remain separate work. |
+| Scoped lexical passage ranking investigation | P1 | complete (no ranking change) | 100% | Source-first development and held-out cohorts were frozen; five held-out labels were independently source-audited and corrected before any held-out ranking run. Two bounded excerpt rules improved aggregate development Recall@5 but regressed DOCX, so no candidate reached implementation or deployment. A new lexical attempt needs sound query-concept grouping, fresh development evidence and a separately authored blinded held-out cohort for production acceptance. |
 | Evaluated semantic corpus retrieval | P1 | in progress | 0% | The approved BGE-M3 ONNX export runs offline with DirectML, but the fixed pilot failed its predeclared paraphrase and citation-preservation gates; no semantic service is selected or active, so delivered capability remains 0%. Add held-out plain-text and scanned/mixed-PDF coverage, correct hybrid citation preservation, prove exact .NET tokenisation and scope-aware search, then verify end-to-end latency, OCR admission and generation/rollback before selection or activation. The alternative Python route remains paused. |
 
 The [retrieval design](design/corpus-retrieval.md),
@@ -42,6 +43,11 @@ contract and operational gates. The scoped operations and one-time SQL Full-Text
 index are deployed and live-validated. Semantic retrieval remains unselected;
 the [BGE-M3 ONNX evaluation](operations/2026-09-24-bge-m3-onnx-evaluation.md)
 records a failed relevance pilot and does not activate an embedding provider.
+
+The separate [lexical passage ranking investigation](operations/2026-09-24-scoped-lexical-ranking-investigation.md)
+used the old pilot for diagnosis and fresh development data for two bounded
+prototypes. Neither passed the no-regression gate; no held-out ranking run
+occurred and the deployed ranking remains unchanged.
 
 ## Update rules
 
