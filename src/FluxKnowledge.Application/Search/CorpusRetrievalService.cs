@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Globalization;
+using System.Text.Json;
 using FluxKnowledge.Application.Contracts;
 using FluxKnowledge.Application.IntegrationV1;
 using FluxKnowledge.Application.Ports;
@@ -84,11 +85,12 @@ public sealed class CorpusRetrievalService(
             var current = await reader.ReadAsync(binding, 0, token).ConfigureAwait(false);
             if (current is null) continue;
             if (current.DisclosureText is null ||
-                disclosure.Evaluate(current.DisclosureText, LocalDisclosureKind.RetainedDetail).Withheld)
+                disclosure.Evaluate(current.DisclosureText, LocalDisclosureKind.RetainedDetail).Withheld ||
+                !NativeV1EnvelopeProtector.CanDiscloseResult(JsonSerializer.SerializeToElement(current.DisclosureText)))
                 continue;
             var citation = CorpusCitationMapper.Map(current.DocumentMetadataJson,
                 binding.CitedStart, binding.CitedLength, candidate.SourceIdentity);
-            hits.Add(new CorpusSearchHit(
+            var hit = new CorpusSearchHit(
                 evidenceCodec.Encode(binding), source.Value!, candidate.RootId,
                 candidate.OwnerSourceRevisionId, candidate.PipelineRecordId,
                 candidate.PipelineRecordRevision, title.Value!, candidate.ChunkId,
@@ -96,7 +98,9 @@ public sealed class CorpusRetrievalService(
                 citation.Locations, candidate.OriginKind == 3 ? "metadata" : citation.ExtractionMethod,
                 [match >= 0 ? "exact:ordinal" : "lexical:full-text",
                  ..(match >= 0 && query.Length > localLength ? new[] { "passage-bounded" } : []),
-                 ..citation.Warnings]));
+                 ..citation.Warnings]);
+            if (!NativeV1EnvelopeProtector.CanDiscloseResult(JsonSerializer.SerializeToElement(hit))) continue;
+            hits.Add(hit);
             passagesPerDocument[documentKey] = passagesPerDocument.GetValueOrDefault(documentKey) + 1;
         }
 
@@ -104,9 +108,12 @@ public sealed class CorpusRetrievalService(
         if (!readiness.PopulationComplete) warnings.Add("full-text-populating");
         if (candidates.Count >= 200) warnings.Add("candidate-budget-reached");
         if (lexicalTerms.Count >= 512) warnings.Add("lexical-term-budget-reached");
-        return new CorpusSearchResponse(hits,
+        var response = new CorpusSearchResponse(hits,
             new CorpusResolvedScope(scope.Kind, scope.RootIds, scope.CanonicalCwd),
             "lexical", "not-enabled", null, warnings);
+        if (!NativeV1EnvelopeProtector.CanDiscloseResult(JsonSerializer.SerializeToElement(response)))
+            throw new NativeOperationException("content-withheld");
+        return response;
     }
 
     private static string Hash(string text) => Convert.ToHexStringLower(
@@ -164,12 +171,13 @@ public sealed class CorpusRetrievalService(
         var title = disclosure.Evaluate(Path.GetFileName(candidate.SourceIdentity), LocalDisclosureKind.CorpusMetadata);
         var text = disclosure.Evaluate(context.Text, LocalDisclosureKind.RetainedDetail);
         var surroundingWithheld = context.DisclosureText is null ||
-            disclosure.Evaluate(context.DisclosureText, LocalDisclosureKind.RetainedDetail).Withheld;
+            disclosure.Evaluate(context.DisclosureText, LocalDisclosureKind.RetainedDetail).Withheld ||
+            !NativeV1EnvelopeProtector.CanDiscloseResult(JsonSerializer.SerializeToElement(context.DisclosureText));
         if (source.Withheld || title.Withheld || text.Withheld || surroundingWithheld)
             throw new NativeOperationException("content-withheld");
         var citation = CorpusCitationMapper.Map(context.DocumentMetadataJson,
             context.StartOffset, context.Text.Length, candidate.SourceIdentity);
-        return new CorpusPassageResponse(
+        var response = new CorpusPassageResponse(
             request.EvidenceRef, source.Value!, candidate.RootId,
             candidate.OwnerSourceRevisionId, candidate.PipelineRecordId,
             candidate.PipelineRecordRevision, title.Value!, candidate.ChunkId,
@@ -178,5 +186,8 @@ public sealed class CorpusRetrievalService(
             context.ContextBounded, citation.Locations,
             candidate.OriginKind == 3 ? "metadata" : citation.ExtractionMethod,
             citation.Warnings);
+        if (!NativeV1EnvelopeProtector.CanDiscloseResult(JsonSerializer.SerializeToElement(response)))
+            throw new NativeOperationException("content-withheld");
+        return response;
     }
 }

@@ -51,6 +51,10 @@ public static partial class NativeV1EnvelopeProtector
     private static bool NullableBoundedString(JsonElement value, int maximum) => value.ValueKind == JsonValueKind.Null ||
         value.ValueKind == JsonValueKind.String && value.GetString() is { } text && text.Length <= maximum;
 
+    // Apply the transport boundary before assembling a corpus page so one
+    // withheld passage cannot cause the CLI to reject every safe hit.
+    internal static bool CanDiscloseResult(JsonElement value) => !ContainsProtectedContent(value);
+
     private static bool ContainsProtectedContent(JsonElement value) => value.ValueKind switch
     {
         JsonValueKind.Object => value.EnumerateObject().Any(property => IsProtectedName(property.Name) || ContainsProtectedContent(property.Value)),

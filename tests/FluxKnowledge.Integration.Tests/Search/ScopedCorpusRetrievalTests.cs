@@ -235,6 +235,53 @@ public sealed class ScopedCorpusRetrievalTests(NativeSqlServerFixture fixture) :
     }
 
     [NativeSqlServerFact]
+    public async Task Corpus_results_obey_the_same_credential_text_boundary_as_the_CLI_envelope()
+    {
+        var factory = SqlTestData.CreateFactory(fixture);
+        var rootId = Guid.NewGuid();
+        await using (var context = await factory.CreateDbContextAsync())
+        {
+            AddPublishedText(context, rootId, @"C:\transport-parity", "safe.txt", ["parity marker safe content"]);
+            AddPublishedText(context, rootId, @"C:\transport-parity", "withheld.txt", ["parity marker discusses a bearer token"]);
+            await context.SaveChangesAsync();
+        }
+        var reader = new SqlCorpusRetrievalReader(factory);
+        var codec = new TestEvidenceCodec();
+        var service = new CorpusRetrievalService(reader, codec, new LocalPrivateContentDisclosure());
+        var response = await service.SearchAsync(new CorpusSearchRequest("parity marker", 10, "root", rootId, null), CancellationToken.None);
+        Assert.Equal("safe.txt", Assert.Single(response.Results).Title);
+        var envelope = JsonSerializer.Serialize(new { ok = true, result = response, reasonCode = (string?)null, message = (string?)null, retryable = false });
+        Assert.True(FluxKnowledge.Application.IntegrationV1.NativeV1EnvelopeProtector.TryRead(envelope, out _));
+
+        var scope = new ResolvedCorpusScope("root", [rootId], null);
+        var candidate = Assert.Single(await reader.SearchAsync("parity marker", scope, 10, CancellationToken.None),
+            value => value.SourceIdentity.EndsWith("withheld.txt", StringComparison.Ordinal));
+        var binding = new CorpusEvidenceBinding(1, candidate.RootId, candidate.OwnerSourceRevisionId,
+            Hash(candidate.SourceIdentity), candidate.PipelineRecordId, candidate.PipelineRecordRevision,
+            candidate.ArtifactId, candidate.ArtifactHash, candidate.ChunkId, candidate.ChunkHash, 0, 6);
+        var error = await Assert.ThrowsAsync<FluxKnowledge.Application.IntegrationV1.NativeOperationException>(
+            async () => await service.ReadAsync(new CorpusReadRequest(codec.Encode(binding), 0), CancellationToken.None));
+        Assert.Equal("content-withheld", error.ReasonCode);
+    }
+
+    [NativeSqlServerFact]
+    public async Task Workspace_metadata_obeys_the_transport_boundary_even_without_hits()
+    {
+        var factory = SqlTestData.CreateFactory(fixture);
+        await using (var context = await factory.CreateDbContextAsync())
+        {
+            AddPublishedText(context, Guid.NewGuid(), @"C:\docs\bearer token", "safe.txt", ["unrelated text"]);
+            await context.SaveChangesAsync();
+        }
+        var service = new CorpusRetrievalService(new SqlCorpusRetrievalReader(factory),
+            new TestEvidenceCodec(), new LocalPrivateContentDisclosure());
+        var error = await Assert.ThrowsAsync<FluxKnowledge.Application.IntegrationV1.NativeOperationException>(
+            async () => await service.SearchAsync(new CorpusSearchRequest("missing-unique-phrase", 5, "workspace", null,
+                @"C:\docs\bearer token"), CancellationToken.None));
+        Assert.Equal("content-withheld", error.ReasonCode);
+    }
+
+    [NativeSqlServerFact]
     public async Task Search_never_reveals_a_secret_when_the_passage_starts_after_its_assignment_marker()
     {
         var factory = SqlTestData.CreateFactory(fixture);
