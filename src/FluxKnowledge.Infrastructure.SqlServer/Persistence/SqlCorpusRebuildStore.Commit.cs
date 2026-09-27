@@ -19,7 +19,7 @@ public sealed partial class SqlCorpusRebuildStore
             plan.Inputs.Select(input => input.EmbeddingJobId).Distinct().Count() != plan.Inputs.Count ||
             plan.Inputs.Select(input => input.DispatchMessageId).Distinct().Count() != plan.Inputs.Count)
             throw new CorpusRebuildRefusalException("corpus-rebuild-plan-invalid");
-        return await WithMaintenanceTransactionAsync(sharedSlotKey, async (context, token) =>
+        var receipt = await WithMaintenanceTransactionAsync(sharedSlotKey, async (context, token) =>
         {
             var connection = context.Database.GetDbConnection();
             if (!string.Equals(connection.Database, plan.DatabaseName, StringComparison.Ordinal) ||
@@ -35,8 +35,18 @@ public sealed partial class SqlCorpusRebuildStore
             }
             if (await context.CorpusQueryLeases.AnyAsync(token).ConfigureAwait(false))
                 throw new CorpusRebuildRefusalException("corpus-rebuild-query-drain-required");
+            CorpusRebuildPlan? superseded = null;
+            CorpusRebuildSupersession? supersession = null;
+            if (plan.Supersession is { } replacement)
+            {
+                superseded = await ReadReplacementParentAsync(context, plan.OperationId, replacement.OperationId,
+                    replacement.TargetEpoch, replacement.ManifestHash, token).ConfigureAwait(false);
+                supersession = await CaptureSupersessionAsync(context, superseded, replacement.RuntimeKey,
+                    replacement.SettingsFingerprint, token).ConfigureAwait(false);
+            }
             var captured = await CapturePlanAsync(context, plan.OperationId, plan.TargetEpoch, plan.Profile,
-                plan.PassagePolicyFingerprint, token, plan.Inputs.ToDictionary(input => input.PipelineRecordId)).ConfigureAwait(false);
+                plan.PassagePolicyFingerprint, token, plan.Inputs.ToDictionary(input => input.PipelineRecordId),
+                superseded, supersession).ConfigureAwait(false);
             if (captured.ManifestHash != plan.ManifestHash)
                 throw new CorpusRebuildRefusalException("corpus-rebuild-manifest-changed");
             var jobIds = plan.Inputs.Select(input => input.EmbeddingJobId).ToArray();
@@ -48,7 +58,7 @@ public sealed partial class SqlCorpusRebuildStore
             context.CorpusRebuildOperations.Add(new CorpusRebuildOperationEntity
             {
                 Id = plan.OperationId, TargetEpoch = plan.TargetEpoch, ManifestHash = plan.ManifestHash,
-                ManifestJson = JsonSerializer.Serialize(plan), CreatedAtUtc = now
+                ManifestJson = JsonSerializer.Serialize(plan), CreatedAtUtc = now, SupersedesOperationId = superseded?.OperationId
             });
             context.CorpusRebuildWorkItems.AddRange(plan.Inputs.Select(input => new CorpusRebuildWorkItemEntity
             {
@@ -57,6 +67,8 @@ public sealed partial class SqlCorpusRebuildStore
                 DispatchMessageId = input.DispatchMessageId
             }));
             await context.SaveChangesAsync(token).ConfigureAwait(false);
+            if (supersession is not null)
+                await CommitSupersessionAsync(context, plan.OperationId, supersession, now, token).ConfigureAwait(false);
             var state = await context.IndexState.SingleAsync(value => value.Id == 1, token).ConfigureAwait(false);
             state.ActiveIndexGenerationId = null;
             state.EmptyCatalogueValidatedAtUtc = null;
@@ -65,7 +77,8 @@ public sealed partial class SqlCorpusRebuildStore
             state.CorpusRebuildOperationId = plan.OperationId;
             state.UpdatedAtUtc = now;
             await context.SaveChangesAsync(token).ConfigureAwait(false);
-            await context.EmbeddingGpuRequests.ExecuteDeleteAsync(token).ConfigureAwait(false);
+            await context.EmbeddingGpuRequests.Where(request => !context.CorpusRebuildSupersededJobs.Any(receipt => receipt.JobId == request.ParentJobId))
+                .ExecuteDeleteAsync(token).ConfigureAwait(false);
             await context.IndexGenerationVectors.ExecuteDeleteAsync(token).ConfigureAwait(false);
             await context.Vectors.ExecuteDeleteAsync(token).ConfigureAwait(false);
             await context.IndexGenerations.ExecuteDeleteAsync(token).ConfigureAwait(false);
@@ -75,5 +88,7 @@ public sealed partial class SqlCorpusRebuildStore
             if (afterProjectionReset is not null) await afterProjectionReset(token).ConfigureAwait(false);
             return new CorpusRebuildReceipt(plan.OperationId, plan.TargetEpoch, plan.ManifestHash, false);
         }, ct).ConfigureAwait(false);
+        if (afterCommit is not null) await afterCommit(ct).ConfigureAwait(false);
+        return receipt;
     }
 }

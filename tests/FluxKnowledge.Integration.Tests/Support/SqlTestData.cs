@@ -79,6 +79,8 @@ internal static class SqlTestData
         state.CorpusRebuildOperationId = null;
         await context.SaveChangesAsync();
         await context.CorpusRebuildWorkItems.ExecuteDeleteAsync();
+        await context.CorpusRebuildSupersededJobs.ExecuteDeleteAsync();
+        await context.CorpusRebuildOperations.ExecuteUpdateAsync(setters => setters.SetProperty(value => value.SupersedesOperationId, (Guid?)null));
         await context.CorpusRebuildOperations.ExecuteDeleteAsync();
         await context.IndexGenerationVectors.ExecuteDeleteAsync();
         await context.Vectors.ExecuteDeleteAsync();

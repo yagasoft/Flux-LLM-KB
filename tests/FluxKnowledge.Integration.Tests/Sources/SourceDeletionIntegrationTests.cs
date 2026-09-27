@@ -78,6 +78,13 @@ public sealed class SourceDeletionIntegrationTests(NativeSqlServerFixture fixtur
             Assert.Equal("cleanup-files", operation.Phase);
             Assert.Equal("source-delete-search-queries-active", operation.ReasonCode);
             Assert.Equal(0, (await verification.SourceDeletionCleanupItems.SingleAsync()).State);
+            // A client disconnect is not a server acknowledgement of lock release.
+            await using var releasePin = new SqlCommand("""
+                DECLARE @result int;
+                EXEC @result = sp_releaseapplock @Resource = 'FluxKnowledge.DerivedIndexRecovery', @LockOwner = 'Session';
+                SELECT @result;
+                """, querySession);
+            Assert.True(Convert.ToInt32(await releasePin.ExecuteScalarAsync()) >= 0);
         }
         Assert.True(await coordinator.RunOneAsync(CancellationToken.None));
         Assert.Equal(1, files.DeleteCalls);
@@ -228,10 +235,18 @@ public sealed class SourceDeletionIntegrationTests(NativeSqlServerFixture fixtur
             Assert.True(await stillPinned.SourceRootConfigurations.AnyAsync(value => value.Id == deleting.RootId));
             Assert.False((await stillPinned.PipelineRecords.SingleAsync(value => value.Id == deleting.RecordId)).IsDeleted);
             Assert.Equal(0, (await stillPinned.SourceDeletionOperations.SingleAsync(value => value.Id == operationId)).State);
+            // Prove the test's release premise before requiring immediate progress.
+            await using var releasePin = new SqlCommand("""
+                DECLARE @result int;
+                EXEC @result = sp_releaseapplock @Resource = 'FluxKnowledge.DerivedIndexRecovery', @LockOwner = 'Session';
+                SELECT @result;
+                """, querySession);
+            Assert.True(Convert.ToInt32(await releasePin.ExecuteScalarAsync()) >= 0);
         }
-        Assert.True(await coordinator.RunOneAsync(CancellationToken.None));
-
+        var completed = await coordinator.RunOneAsync(CancellationToken.None);
         await using var verification = CreateContext();
+        var observedOperation = await verification.SourceDeletionOperations.SingleAsync(row => row.Id == operationId);
+        Assert.True(completed, $"Deletion returned false: state={observedOperation.State}; phase={observedOperation.Phase}; reason={observedOperation.ReasonCode}");
         Assert.DoesNotContain(await verification.SourceRootConfigurations.ToListAsync(), row => row.Id == deleting.RootId);
         Assert.DoesNotContain(await verification.SourceRevisions.ToListAsync(), row => row.SourceRootId == deleting.RootId);
         Assert.DoesNotContain(await verification.PipelineRecords.ToListAsync(), row => row.SourceRevisionId == deleting.RevisionId);

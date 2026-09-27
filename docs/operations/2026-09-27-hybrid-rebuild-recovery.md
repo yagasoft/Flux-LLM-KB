@@ -1,4 +1,4 @@
-# Interrupted hybrid rebuild and proposed forward recovery
+# Interrupted hybrid rebuild and controlled forward recovery
 
 ## Observed state
 
@@ -32,14 +32,28 @@ remain applicable. Canonical source text is not trimmed or rewritten.
 The changed passage-output policy requires a fresh derived projection. The local
 correction does not change models, ranking, scheduler ownership or residency.
 
-## Proposed replacement capability
+## Approved replacement capability
 
-This is a proposed recovery extension, not an implemented or executed reset.
+The user approved the controlled replacement of this interrupted 35-input rebuild.
+The recovery extension is implemented locally; execution and final verification
+remain pending. Production still retains the original held operation and epoch.
 Independent review concluded that controlled replacement is clearer than repairing
 individual chunk identities, failed requests, manifests and checkpoint counts.
+The final focused lifecycle run passed 63 tests, including replacement, source
+deletion and native-operation recovery. The preceding combined recovery run passed
+70 tests and the additional transaction-fence run passed 19. Independent review
+approved the complete recovery change and the final archived-task ownership check.
+The first closeout's feature suite passed 2,646 tests, but its merged-main suite
+reported one source-deletion failure after a pinned query session was closed. The
+failure did not reproduce in isolation. Both affected lock tests now require a
+successful SQL lock-release acknowledgement before asserting immediate deletion;
+their blocked-deletion, control-root and terminal-receipt assertions remain intact.
+Independent review approved this fixture correction and 41 focused tests passed.
+This corrects an underdefined release premise; it does not prove the cause of the
+unreproduced failure. The complete closeout must pass before deployment.
 
-Extend the existing incremental updater and rebuild operator for one explicit
-replacement of an interrupted rebuild:
+The incremental updater and rebuild operator implement one explicit replacement
+of the interrupted release with schema 54:
 
 1. Identify the old release, operation, epoch, manifest, activated payload,
    configuration, schema and database exactly. Refuse a foreign hold, ambiguous
@@ -68,9 +82,22 @@ Before execution, retain focused integration evidence for changed input, wrong
 operation/hold, active or uncertain capacity, acknowledged queued work,
 publication/query races, failure rollback, replay and preserved histories. The
 complete change requires independent review, required feature closeout, and a
-fresh `-PlanOnly` operational packet. User authorisation is required for the
-replacement action because it changes the committed operation/epoch and discards
-the partially rebuilt disposable projection.
+fresh `-PlanOnly` operational packet. The current user approval authorises this
+replacement action, including its new operation/epoch and disposal of the partially
+rebuilt projection. It does not authorise model acquisition or dead-letter processing.
+
+Use `-ApplyHybridPassageRebuild -ReplaceHybridRebuildRelease <exact old release>`
+with the incremental updater. The read-only plan binds the predecessor journal,
+manifest, payload/configuration/schema hashes and SQL receipt. The successor
+journal retains that immutable binding and the predecessor's original scheduled
+intake preference. SQL supersession and unstarted-task cancellation commit together
+under the existing fences. Historical jobs retain their actual state and attempt
+counts; a separate supersession receipt permanently removes their execution
+authority. Embed request and native receipt history survives projection deletion.
+The successor hold takes ownership only after an authoritative SQL receipt matches
+the new manifest. A failed post-activation attempt restores deny-all admission for
+that successor; resume uses its exact new release name. Downgrade refuses while
+rebuild or supersession receipts exist.
 
 After the replacement transaction, recovery stays forward at the new compatible
 release and operation. Before that transaction, a failed attempt retains the

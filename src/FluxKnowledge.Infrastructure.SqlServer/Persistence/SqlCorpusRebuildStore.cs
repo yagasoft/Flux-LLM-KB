@@ -13,7 +13,8 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
 
 /// <summary>Captures a reviewed projection reset; reading a plan never changes corpus data.</summary>
 public sealed partial class SqlCorpusRebuildStore(IDbContextFactory<FluxKnowledgeDbContext> factory,
-    TimeProvider? timeProvider = null, Func<CancellationToken, ValueTask>? afterProjectionReset = null)
+    TimeProvider? timeProvider = null, Func<CancellationToken, ValueTask>? afterProjectionReset = null,
+    Func<CancellationToken, ValueTask>? afterCommit = null)
 {
     public async ValueTask<CorpusRebuildPlan> ReadPlanAsync(Guid operationId, EmbeddingProfile profile,
         string passagePolicyFingerprint, CancellationToken cancellationToken)
@@ -36,19 +37,33 @@ public sealed partial class SqlCorpusRebuildStore(IDbContextFactory<FluxKnowledg
 
     private static async Task<CorpusRebuildPlan> CapturePlanAsync(FluxKnowledgeDbContext context, Guid operationId,
         Guid targetEpoch, EmbeddingProfile profile, string policy, CancellationToken ct,
-        IReadOnlyDictionary<Guid, CorpusRebuildInput>? reservedInputs = null)
+        IReadOnlyDictionary<Guid, CorpusRebuildInput>? reservedInputs = null,
+        CorpusRebuildPlan? superseded = null, CorpusRebuildSupersession? supersession = null)
     {
-        if (await context.IndexState.AnyAsync(state => state.CorpusRebuildOperationId != null, ct).ConfigureAwait(false))
+        var replacementJobIds = supersession?.JobIds.ToArray() ?? [];
+        var unstartedRequestIds = supersession?.UnstartedRequestIds.ToArray() ?? [];
+        if (superseded is null && await context.IndexState.AnyAsync(state => state.CorpusRebuildOperationId != null, ct).ConfigureAwait(false))
             throw new CorpusRebuildRefusalException("corpus-rebuild-in-progress");
         if (await context.Jobs.AnyAsync(job => !job.PipelineRecord.IsDeleted && job.Stage >= (int)PipelineStage.CanonicalIndex &&
-                job.PublicState != (int)PublicJobState.Completed, ct).ConfigureAwait(false))
+                job.PublicState != (int)PublicJobState.Completed &&
+                !context.CorpusRebuildSupersededJobs.Any(receipt => receipt.JobId == job.Id) &&
+                !replacementJobIds.Contains(job.Id), ct).ConfigureAwait(false))
             throw new CorpusRebuildRefusalException("corpus-rebuild-projection-work-unsettled");
         if (await context.SourceRootConfigurations.AnyAsync(root => root.State == (int)SourceRootState.Deleting, ct).ConfigureAwait(false))
             throw new CorpusRebuildRefusalException("corpus-rebuild-source-deletion-in-progress");
-        if (await context.EmbeddingGpuRequests.AnyAsync(request => request.State != 2 || !request.NativeCleanupConfirmed, ct).ConfigureAwait(false))
+        if (await context.EmbeddingGpuRequests.AnyAsync(request => (request.State != 2 || !request.NativeCleanupConfirmed) &&
+                !unstartedRequestIds.Contains(request.MiniTaskId), ct).ConfigureAwait(false))
             throw new CorpusRebuildRefusalException("corpus-rebuild-embedding-request-unsettled");
 
-        var rows = await context.Database.SqlQuery<RebuildInputRow>(SqlPublishedPassageSelection.Bind($"""
+        RebuildInputRow[] rows;
+        if (superseded is not null)
+        {
+            var retained = new List<RebuildInputRow>(superseded.Inputs.Count);
+            foreach (var input in superseded.Inputs)
+                retained.Add(await ReadUnchangedInputAsync(context, input, ct).ConfigureAwait(false));
+            rows = retained.OrderBy(row => row.PipelineRecordId).ToArray();
+        }
+        else rows = await context.Database.SqlQuery<RebuildInputRow>(SqlPublishedPassageSelection.Bind($"""
             SELECT [record].[Id] AS [PipelineRecordId], [record].[Revision] AS [SourceRevision],
                 [artifact].[Id] AS [CanonicalArtifactId], [artifact].[ContentHash], [artifact].[SearchText], [artifact].[DocumentMetadataJson],
                 [record].[SourceRevisionId] AS [RetainedInputId], [retained].[ContentSha256] AS [RetainedHash],
@@ -95,7 +110,7 @@ public sealed partial class SqlCorpusRebuildStore(IDbContextFactory<FluxKnowledg
             await context.EmbeddingGpuRequests.OrderBy(request => request.MiniTaskId).Select(request => request.MiniTaskId).ToArrayAsync(ct).ConfigureAwait(false),
             await context.TextChunks.LongCountAsync(ct).ConfigureAwait(false),
             await context.Vectors.LongCountAsync(ct).ConfigureAwait(false),
-            await context.IndexGenerationVectors.LongCountAsync(ct).ConfigureAwait(false), "");
+            await context.IndexGenerationVectors.LongCountAsync(ct).ConfigureAwait(false), "", supersession);
         return plan with { ManifestHash = Hash(JsonSerializer.Serialize(plan)) };
     }
 

@@ -37,8 +37,9 @@ internal static class SqlCorpusRebuildEligibility
         """;
 
     internal static string Admission(string jobId) => $"""
-        (NOT EXISTS (SELECT 1 FROM [IndexState] WHERE [Id] = 1 AND [CorpusRebuildOperationId] IS NOT NULL)
-         OR {ActiveJob(jobId)})
+        (NOT EXISTS (SELECT 1 FROM [CorpusRebuildSupersededJobs] WHERE [JobId] = {jobId})
+         AND (NOT EXISTS (SELECT 1 FROM [IndexState] WHERE [Id] = 1 AND [CorpusRebuildOperationId] IS NOT NULL)
+         OR {ActiveJob(jobId)}))
         """;
 
     internal static string DeploymentAdmission(string jobId) => $"""

@@ -136,6 +136,8 @@ public sealed partial class SqlCorpusRebuildStore
     internal static async Task<bool> ValidateMaintenanceJobAsync(FluxKnowledgeDbContext context, Guid jobId,
         CancellationToken ct, EmbeddingProfile? profile = null)
     {
+        if (await context.CorpusRebuildSupersededJobs.AnyAsync(value => value.JobId == jobId, ct).ConfigureAwait(false))
+            throw new CorpusRebuildRefusalException("corpus-rebuild-job-superseded");
         var operationId = await context.IndexState.Where(value => value.Id == 1)
             .Select(value => value.CorpusRebuildOperationId).SingleAsync(ct).ConfigureAwait(false);
         if (operationId is null) return false;

@@ -24,7 +24,8 @@ public sealed class SqlEmbeddingGpuRequestStore(IDbContextFactory<FluxKnowledgeD
     public EmbeddingProfile Profile => runtime.Profile;
 
     internal static IQueryable<GpuMiniTaskEntity> OwnedLocalTasks(FluxKnowledgeDbContext context, EmbeddingGpuRuntime runtime)
-        => context.GpuMiniTasks.Where(task => task.ModelRuntimeKey == runtime.RuntimeKey && task.SettingsFingerprint == runtime.SettingsFingerprint &&
+        => context.GpuMiniTasks.Where(task => ArchivedTaskIds(context).Contains(task.Id) ||
+            task.ModelRuntimeKey == runtime.RuntimeKey && task.SettingsFingerprint == runtime.SettingsFingerprint &&
             task.PriorityLane == (int)GpuPriorityLane.DocumentIndexing && context.EmbeddingGpuRequests.Any(request =>
                 request.MiniTaskId == task.Id && request.ParentJobId == task.ParentJobId && request.SourceRevision == task.SourceRevision &&
                 request.ModelFingerprint == runtime.Profile.ModelFingerprint && request.Dimensions == runtime.Profile.Dimensions &&
@@ -37,7 +38,32 @@ public sealed class SqlEmbeddingGpuRequestStore(IDbContextFactory<FluxKnowledgeD
     internal static Task<bool> HasContradictoryRequestsAsync(FluxKnowledgeDbContext context, IReadOnlyCollection<Guid> recordIds,
         IReadOnlyCollection<Guid> ownedTaskIds, CancellationToken ct)
         => context.EmbeddingGpuRequests.AnyAsync(request => recordIds.Contains(request.PipelineRecordId) &&
-            context.GpuMiniTasks.Any(task => task.Id == request.MiniTaskId) && !ownedTaskIds.Contains(request.MiniTaskId), ct);
+            context.GpuMiniTasks.Any(task => task.Id == request.MiniTaskId) && !ownedTaskIds.Contains(request.MiniTaskId) &&
+            !ArchivedTaskIds(context).Contains(request.MiniTaskId), ct);
+
+    // Source deletion also inventories task ownership after the rebuild has discarded
+    // generation rows. Only exact supersession and terminal-cleanup provenance may
+    // replace that live-generation proof; foreign or uncertain work still refuses.
+    private static IQueryable<Guid> ArchivedTaskIds(FluxKnowledgeDbContext context) => context.Database.SqlQuery<Guid>($"""
+        SELECT task.Id AS [Value]
+        FROM GpuMiniTasks task
+        INNER JOIN EmbeddingGpuRequests request ON request.MiniTaskId=task.Id AND request.ParentJobId=task.ParentJobId
+            AND request.SourceRevision=task.SourceRevision
+        INNER JOIN Jobs job ON job.Id=request.ParentJobId AND job.PipelineRecordId=request.PipelineRecordId
+            AND job.SourceRevision=request.SourceRevision AND job.Stage={(int)PipelineStage.Embed} AND job.Operation={PipelineOperations.Embed}
+        INNER JOIN CorpusRebuildSupersededJobs receipt ON receipt.JobId=job.Id
+        INNER JOIN CorpusRebuildWorkItems item ON item.OperationId=receipt.OperationId AND item.EmbeddingJobId=job.Id
+            AND item.PipelineRecordId=request.PipelineRecordId AND item.SourceRevision=request.SourceRevision
+        INNER JOIN CorpusRebuildOperations previous ON previous.Id=receipt.OperationId AND previous.TargetEpoch=request.CorpusEpoch
+        INNER JOIN CorpusRebuildOperations successor ON successor.Id=receipt.ReplacementOperationId AND successor.SupersedesOperationId=previous.Id
+        WHERE request.State=2 AND request.NativeCleanupConfirmed=1 AND request.CleanupConfirmedAtUtc IS NOT NULL
+          AND task.State IN ({(int)GpuMiniTaskExecutionState.Completed},{(int)GpuMiniTaskExecutionState.OutcomeUncertain},{(int)GpuMiniTaskExecutionState.Cancelled})
+          AND task.PriorityLane={(int)GpuPriorityLane.DocumentIndexing}
+          AND task.ModelRuntimeKey COLLATE Latin1_General_100_BIN2 = JSON_VALUE(successor.ManifestJson,'$.Supersession.RuntimeKey') COLLATE Latin1_General_100_BIN2
+          AND task.SettingsFingerprint COLLATE Latin1_General_100_BIN2 = JSON_VALUE(successor.ManifestJson,'$.Supersession.SettingsFingerprint') COLLATE Latin1_General_100_BIN2
+          AND request.ModelFingerprint COLLATE Latin1_General_100_BIN2 = JSON_VALUE(previous.ManifestJson,'$.Profile.ModelFingerprint') COLLATE Latin1_General_100_BIN2
+          AND request.Dimensions=TRY_CONVERT(int,JSON_VALUE(previous.ManifestJson,'$.Profile.Dimensions'))
+        """);
 
     public async ValueTask QueueAsync(StageWorkItem work, EmbeddingWorkBatch batch, CancellationToken cancellationToken)
     {
@@ -240,6 +266,7 @@ public sealed class SqlEmbeddingGpuRequestStore(IDbContextFactory<FluxKnowledgeD
         {
             var request = await ReadBoundRequestAsync(context, handle, cancellationToken).ConfigureAwait(false);
             if (request is null || request.MiniTaskId != miniTaskId || !request.NativeCleanupConfirmed) return false;
+            if (await context.CorpusRebuildSupersededJobs.AnyAsync(value => value.JobId == request.ParentJobId, cancellationToken).ConfigureAwait(false)) return false;
             if (request.State == 2) return true;
             var terminal = await (from task in context.GpuMiniTasks
                 join batch in context.GpuBatches on task.BatchId equals batch.Id

@@ -1,5 +1,6 @@
 using System.Text.Json;
 using FluxKnowledge.Application.Documents;
+using FluxKnowledge.Application.Gpu;
 using FluxKnowledge.Application.Indexing;
 using FluxKnowledge.Application.Operations;
 using FluxKnowledge.Application.Ports;
@@ -61,8 +62,12 @@ public static class CorpusRebuildCommand
             switch (args[0])
             {
                 case "plan":
-                    result = await store.ReadPlanAsync(operationId, new(BgeOfflineModels.EmbeddingFingerprint, 1024),
-                        builder.PolicyFingerprint, ct).ConfigureAwait(false);
+                    var profile = new EmbeddingProfile(BgeOfflineModels.EmbeddingFingerprint, 1024);
+                    result = args.Length == 9
+                        ? await store.ReadReplacementPlanAsync(operationId, Guid.Parse(args[4]), Guid.Parse(args[6]), args[8], profile,
+                            builder.PolicyFingerprint, ct, new EmbeddingGpuRuntime(BgeOfflineModels.GpuRuntimeKey,
+                                BgeOfflineModels.GpuSettingsFingerprint, profile, 0)).ConfigureAwait(false)
+                        : await store.ReadPlanAsync(operationId, profile, builder.PolicyFingerprint, ct).ConfigureAwait(false);
                     break;
                 case "commit":
                     using (var stream = new FileStream(args[2], FileMode.Open, FileAccess.Read, FileShare.Read))
@@ -102,12 +107,17 @@ public static class CorpusRebuildCommand
                         {
                             OperationId = operationId, Committed = operation is not null, Completed = operation?.CompletedAtUtc is not null,
                             operation?.ManifestHash, operation?.TargetEpoch,
+                            operation?.SupersedesOperationId,
+                            SupersededByOperationId = await context.CorpusRebuildOperations.Where(value => value.SupersedesOperationId == operationId)
+                                .Select(value => (Guid?)value.Id).SingleOrDefaultAsync(ct).ConfigureAwait(false),
+                            ActiveOperationId = await context.IndexState.Select(value => value.CorpusRebuildOperationId).SingleAsync(ct).ConfigureAwait(false),
                             PendingItems = await items.CountAsync(value => value.State == 0, ct).ConfigureAwait(false),
                             RunningItems = await items.CountAsync(value => value.State == 1, ct).ConfigureAwait(false),
                             CompletedItems = await items.CountAsync(value => value.State == 2, ct).ConfigureAwait(false),
                             FailedEmbeddingJobs = await context.Jobs.CountAsync(value => jobIds.Contains(value.Id) && value.PublicState == (int)FluxKnowledge.Domain.Jobs.PublicJobState.Failed, ct).ConfigureAwait(false),
                             FailedPublishJobs = await context.Jobs.CountAsync(value => value.Stage == (int)FluxKnowledge.Domain.Pipeline.PipelineStage.Publish &&
-                                value.PublicState == (int)FluxKnowledge.Domain.Jobs.PublicJobState.Failed && items.Any(item =>
+                                value.PublicState == (int)FluxKnowledge.Domain.Jobs.PublicJobState.Failed &&
+                                !context.CorpusRebuildSupersededJobs.Any(receipt => receipt.JobId == value.Id) && items.Any(item =>
                                     item.State == 1 && item.PipelineRecordId == value.PipelineRecordId && item.SourceRevision == value.SourceRevision), ct).ConfigureAwait(false)
                         };
                     }
@@ -128,14 +138,19 @@ public static class CorpusRebuildCommand
         }
     }
 
-    private static bool IsValid(string[] args) => args is ["verify-models"] || args.Length == 3 &&
+    private static bool IsValid(string[] args) => args is ["verify-models"] ||
+        args is ["plan", "--operation", var replacement, "--replace", var old, "--epoch", var epoch, "--manifest-hash", var hash] &&
+        Guid.TryParseExact(replacement, "D", out var replacementId) && replacementId != Guid.Empty &&
+        Guid.TryParseExact(old, "D", out var oldId) && oldId != Guid.Empty && replacementId != oldId &&
+        Guid.TryParseExact(epoch, "D", out var epochId) && epochId != Guid.Empty && hash.Length == 64 && hash.All(char.IsAsciiHexDigitLower) ||
+        args.Length == 3 &&
         (args[0] == "commit" ? args[1] == "--manifest" && !string.IsNullOrWhiteSpace(args[2]) :
          args[0] is "plan" or "prepare" or "status" or "finish" && args[1] == "--operation" &&
          Guid.TryParseExact(args[2], "D", out var id) && id != Guid.Empty);
 
     private static async Task<int> UsageAsync(TextWriter error)
     {
-        await error.WriteLineAsync("Usage: FluxKnowledge.Cli corpus-rebuild <plan|prepare|status|finish> --operation <guid> | commit --manifest <path> | verify-models").ConfigureAwait(false);
+        await error.WriteLineAsync("Usage: FluxKnowledge.Cli corpus-rebuild <plan|prepare|status|finish> --operation <guid> | plan --operation <guid> --replace <old-guid> --epoch <old-epoch> --manifest-hash <old-hash> | commit --manifest <path> | verify-models").ConfigureAwait(false);
         return 2;
     }
 

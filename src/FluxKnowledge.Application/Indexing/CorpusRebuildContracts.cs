@@ -1,4 +1,5 @@
 using FluxKnowledge.Application.Ports;
+using System.Text.Json.Serialization;
 
 namespace FluxKnowledge.Application.Indexing;
 
@@ -15,7 +16,12 @@ public sealed record CorpusRebuildPlan(Guid OperationId, string DatabaseServer, 
     IReadOnlyList<CorpusRebuildInput> Inputs, IReadOnlyList<CorpusRebuildArtifact> ProjectionArtifacts,
     IReadOnlyList<CorpusRebuildGeneration> Generations, IReadOnlyList<Guid> SettledEmbeddingRequestIds,
     long ChunkCount, long VectorCount, long MembershipCount,
-    string ManifestHash);
+    string ManifestHash,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] CorpusRebuildSupersession? Supersession = null);
+
+public sealed record CorpusRebuildSupersession(Guid OperationId, Guid TargetEpoch, string ManifestHash,
+    string HistoryHash, IReadOnlyList<Guid> JobIds, IReadOnlyList<Guid> UnstartedRequestIds,
+    string? RuntimeKey, string? SettingsFingerprint);
 
 public sealed class CorpusRebuildRefusalException(string code) : InvalidOperationException(code);
 

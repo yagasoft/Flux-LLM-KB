@@ -24,15 +24,15 @@ function Invoke-HybridPassageRebuildFlow {
 function Get-HybridPassageMigrationContract {
     [pscustomobject]@{
         Baseline = '20260924125920_AddCorpusChunkFullTextIndex'
-        Target = '20260927121634_AddCorpusRebuildWorklist'
-        UpSha256 = '33EBCF7F22B4E0E7D82F9750D1A1F4C0BDBCED62DF735B4DD06F74B612C3817B'
+        Target = '20260927202655_AddCorpusRebuildSupersession'
+        UpSha256 = '0C0AFC914FFCE360E2B2DED05B64FBF0E3C57C4139DF633C83B35BB049AD04B9'
         Suffix = @(
             '20260926180256_AddCoherentPassageProjection', '20260926182806_AddInteractiveGpuRequestOwnership',
             '20260926183316_AddGpuOcrTurnBound', '20260927062852_BindInteractiveGpuOwnerProcess',
             '20260927075141_AddCorpusPublicationVersions', '20260927080745_AddCorpusQueryLeases',
             '20260927085306_AddEmbeddingCheckpoints', '20260927093601_AddEmbeddingGpuRequests',
             '20260927115029_BindOutboxMessagesToJobs', '20260927115909_BindCompletedDeliveryArtifacts',
-            '20260927121634_AddCorpusRebuildWorklist')
+            '20260927121634_AddCorpusRebuildWorklist', '20260927202655_AddCorpusRebuildSupersession')
     }
 }
 
@@ -166,6 +166,128 @@ function Get-HybridPayloadFingerprint {
     return [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes(($observations -join "`n"))))
 }
 
+function Get-HybridReplacementSqlReceipt {
+    param([string]$ConnectionString, [Guid]$OperationId)
+    $connection = [Data.SqlClient.SqlConnection]::new($ConnectionString)
+    try {
+        $connection.Open(); $command = $connection.CreateCommand()
+        try {
+            $command.CommandText = @'
+SELECT op.ManifestHash, op.TargetEpoch, op.CompletedAtUtc,
+    JSON_VALUE(op.ManifestJson, '$.Supersession.OperationId') AS SupersedesOperationId,
+    state.CorpusRebuildOperationId AS ActiveOperationId, state.CorpusEpoch
+FROM CorpusRebuildOperations op CROSS JOIN IndexState state
+WHERE op.Id = @operation AND state.Id = 1;
+'@
+            [void]$command.Parameters.Add('@operation', [Data.SqlDbType]::UniqueIdentifier)
+            $command.Parameters['@operation'].Value = $OperationId
+            $reader = $command.ExecuteReader()
+            try {
+                if (-not $reader.Read()) { return @{ Committed=$false } }
+                $receipt = @{ Committed=$true; OperationId=$OperationId.ToString('D') }
+                for ($index=0; $index -lt $reader.FieldCount; $index++) {
+                    $receipt[$reader.GetName($index)] = if ($reader.IsDBNull($index)) { $null } else { $reader.GetValue($index) }
+                }
+                if ($reader.Read()) { throw 'hybrid-replacement-sql-receipt-ambiguous' }
+                return $receipt
+            } finally { $reader.Dispose() }
+        } finally { $command.Dispose() }
+    } finally { $connection.Dispose() }
+}
+
+function Get-HybridReplacementBinding {
+    param([string]$RecoveryRoot, [string]$ReleaseId, [string]$ConnectionString)
+    if ($ReleaseId -notmatch '^\d{8}T\d{6}Z-[0-9a-f]{12}-hybrid$') { throw 'hybrid-replacement-release-invalid' }
+    $root = Join-Path $RecoveryRoot $ReleaseId
+    foreach ($path in @($RecoveryRoot, $root, (Join-Path $root 'hybrid-state.json'), (Join-Path $root 'corpus-rebuild-manifest.json'),
+        (Join-Path $root 'candidate-config.json'), (Join-Path $root 'hybrid-idempotent-up.sql'))) {
+        if (((Get-Item -LiteralPath $path -ErrorAction Stop).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'hybrid-replacement-packet-unsafe' }
+    }
+    $state = Get-Content -LiteralPath (Join-Path $root 'hybrid-state.json') -Raw | ConvertFrom-Json -AsHashtable
+    $manifest = Get-Content -LiteralPath (Join-Path $root 'corpus-rebuild-manifest.json') -Raw | ConvertFrom-Json -AsHashtable
+    foreach ($field in @('Version','ReleaseId','Commit','OperationId','DatabaseServer','DatabaseName','OriginalHistory','SchemaAttempted',
+        'ResetCommitted','HoldReleased','HoldReleaseAttempted','ResetManifestHash','CandidateHash','OperatorHash','ActivatedConfigHash','PreservedInputFingerprint','InteractiveHostWasEnabled')) {
+        if (-not $state.ContainsKey($field)) { throw 'hybrid-replacement-state-incomplete' }
+    }
+    foreach ($field in @('SchemaAttempted','ResetCommitted','HoldReleased','HoldReleaseAttempted','InteractiveHostWasEnabled')) {
+        if ($state[$field] -isnot [bool]) { throw 'hybrid-replacement-state-ambiguous' }
+    }
+    $database = [Data.SqlClient.SqlConnectionStringBuilder]::new($ConnectionString)
+    $operation = [Guid]::Empty; $epoch = [Guid]::Empty
+    if ($state.Version -ne 1 -or $state.ReleaseId -cne $ReleaseId -or -not $state.SchemaAttempted -or -not $state.ResetCommitted -or
+        $state.HoldReleased -or $state.HoldReleaseAttempted -or $state.Commit -cnotmatch ('^' + [Regex]::Escape(($ReleaseId -split '-')[1]) + '[0-9a-f]{28}$') -or
+        $state.DatabaseServer -cne $database.DataSource -or $state.DatabaseName -cne $database.InitialCatalog -or
+        -not [Guid]::TryParseExact($state.OperationId, 'D', [ref]$operation) -or $operation -eq [Guid]::Empty -or
+        -not [Guid]::TryParseExact($manifest.TargetEpoch, 'D', [ref]$epoch) -or $epoch -eq [Guid]::Empty -or
+        $manifest.OperationId -cne $state.OperationId -or $manifest.ManifestHash -cne $state.ResetManifestHash -or
+        $manifest.DatabaseServer -cne $state.DatabaseServer -or $manifest.DatabaseName -cne $state.DatabaseName) { throw 'hybrid-replacement-identity-mismatch' }
+    foreach ($payload in @(@{ Path=(Join-Path $root 'candidate'); Hash=$state.CandidateHash }, @{ Path=(Join-Path $root 'operator'); Hash=$state.OperatorHash })) {
+        if ((Get-HybridPayloadFingerprint -Path $payload.Path) -cne $payload.Hash) { throw 'hybrid-replacement-payload-changed' }
+    }
+    if ((Get-FileHash -LiteralPath (Join-Path $root 'candidate-config.json')).Hash -cne $state.ActivatedConfigHash -or
+        (Get-FileHash -LiteralPath (Join-Path $root 'hybrid-idempotent-up.sql')).Hash -cne '33EBCF7F22B4E0E7D82F9750D1A1F4C0BDBCED62DF735B4DD06F74B612C3817B') { throw 'hybrid-replacement-configuration-or-schema-changed' }
+    $receipt = Get-HybridReplacementSqlReceipt -ConnectionString $ConnectionString -OperationId $operation
+    if (-not $receipt.Committed -or $receipt.CompletedAtUtc -or [string]$receipt.ActiveOperationId -cne $state.OperationId -or
+        [string]$receipt.TargetEpoch -cne [string]$manifest.TargetEpoch -or [string]$receipt.CorpusEpoch -cne [string]$manifest.TargetEpoch -or
+        $receipt.ManifestHash -cne $state.ResetManifestHash) { throw 'hybrid-replacement-sql-binding-mismatch' }
+    return @{
+        ReleaseId=$ReleaseId; OperationId=$state.OperationId; TargetEpoch=$manifest.TargetEpoch; ManifestHash=$state.ResetManifestHash
+        DatabaseServer=$state.DatabaseServer; DatabaseName=$state.DatabaseName; OriginalHistory=$state.OriginalHistory
+        CandidateHash=$state.CandidateHash; ActivatedConfigHash=$state.ActivatedConfigHash; PreservedInputFingerprint=$state.PreservedInputFingerprint
+        JournalHash=(Get-FileHash -LiteralPath (Join-Path $root 'hybrid-state.json')).Hash
+        ManifestFileHash=(Get-FileHash -LiteralPath (Join-Path $root 'corpus-rebuild-manifest.json')).Hash
+        OperatorHash=$state.OperatorHash
+        InteractiveHostWasEnabled=$state.InteractiveHostWasEnabled
+    }
+}
+
+function Assert-HybridReplacementPacket {
+    param([string]$RecoveryRoot, [System.Collections.IDictionary]$Binding)
+    if ($Binding.ReleaseId -notmatch '^\d{8}T\d{6}Z-[0-9a-f]{12}-hybrid$') { throw 'hybrid-replacement-release-invalid' }
+    $root = Join-Path $RecoveryRoot $Binding.ReleaseId
+    foreach ($path in @($RecoveryRoot,$root)) {
+        if (((Get-Item -LiteralPath $path).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'hybrid-replacement-packet-unsafe' }
+    }
+    foreach ($file in @(@{ Name='hybrid-state.json'; Hash=$Binding.JournalHash }, @{ Name='corpus-rebuild-manifest.json'; Hash=$Binding.ManifestFileHash })) {
+        $path = Join-Path $root $file.Name
+        if (((Get-Item -LiteralPath $path).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+            (Get-FileHash -LiteralPath $path).Hash -cne $file.Hash) { throw 'hybrid-replacement-predecessor-packet-changed' }
+    }
+    if ((Get-HybridPayloadFingerprint (Join-Path $root 'candidate')) -cne $Binding.CandidateHash -or
+        (Get-HybridPayloadFingerprint (Join-Path $root 'operator')) -cne $Binding.OperatorHash -or
+        (Get-FileHash -LiteralPath (Join-Path $root 'candidate-config.json')).Hash -cne $Binding.ActivatedConfigHash -or
+        (Get-FileHash -LiteralPath (Join-Path $root 'hybrid-idempotent-up.sql')).Hash -cne '33EBCF7F22B4E0E7D82F9750D1A1F4C0BDBCED62DF735B4DD06F74B612C3817B') {
+        throw 'hybrid-replacement-predecessor-packet-changed'
+    }
+}
+
+function Assert-HybridReplacementReceipt {
+    param($Receipt, [System.Collections.IDictionary]$Manifest, [System.Collections.IDictionary]$Binding)
+    if (-not $Receipt.Committed -or [string]$Receipt.OperationId -cne [string]$Manifest.OperationId -or
+        $Receipt.ManifestHash -cne $Manifest.ManifestHash -or [string]$Receipt.TargetEpoch -cne [string]$Manifest.TargetEpoch -or
+        [string]$Receipt.CorpusEpoch -cne [string]$Manifest.TargetEpoch -or
+        [string]$Receipt.SupersedesOperationId -cne [string]$Binding.OperationId -or
+        [string]$Manifest.Supersession.OperationId -cne [string]$Binding.OperationId -or
+        $Manifest.Supersession.ManifestHash -cne $Binding.ManifestHash -or [string]$Manifest.Supersession.TargetEpoch -cne [string]$Binding.TargetEpoch -or
+        ($Receipt.ActiveOperationId -and [string]$Receipt.ActiveOperationId -cne [string]$Manifest.OperationId)) { throw 'hybrid-replacement-reset-receipt-mismatch' }
+}
+
+function Move-HybridReplacementHold {
+    param([string]$Path, [System.Collections.IDictionary]$Binding, [string]$ReleaseId, [Guid]$OperationId)
+    # The updater's machine mutex excludes competing release owners. This never creates a missing hold.
+    $value = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json -AsHashtable
+    if (($value -is [string] -and $value -ceq $ReleaseId) -or
+        ($value -is [System.Collections.IDictionary] -and $value.Count -eq 3 -and $value.version -eq 1 -and
+         $value.releaseId -ceq $ReleaseId -and $value.corpusRebuildOperationId -ceq $OperationId.ToString('D'))) {
+        Assert-HybridDeploymentHoldOwner -Path $Path -ReleaseId $ReleaseId -OperationId $OperationId
+        return
+    }
+    Assert-HybridDeploymentHoldOwner -Path $Path -ReleaseId $Binding.ReleaseId -OperationId $Binding.OperationId
+    Write-HybridRebuildJson -Path $Path -Value $ReleaseId
+}
+
 Export-ModuleMember -Function Invoke-HybridPassageRebuildFlow, Get-HybridPassageMigrationContract,
     Assert-HybridMigrationHistory, Invoke-WithHybridGpuDrain, Invoke-HybridRebuildOperator, Write-HybridRebuildJson,
-    Set-HybridDeploymentHold, Assert-HybridDeploymentHoldOwner, Get-HybridPayloadFingerprint
+    Set-HybridDeploymentHold, Assert-HybridDeploymentHoldOwner, Get-HybridPayloadFingerprint,
+    Get-HybridReplacementBinding, Get-HybridReplacementSqlReceipt, Assert-HybridReplacementPacket,
+    Assert-HybridReplacementReceipt, Move-HybridReplacementHold

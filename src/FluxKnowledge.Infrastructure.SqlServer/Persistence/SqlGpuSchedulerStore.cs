@@ -1121,6 +1121,9 @@ public sealed partial class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecu
             .BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken)
             .ConfigureAwait(false);
 
+        if (await context.CorpusRebuildSupersededJobs.AnyAsync(value => value.JobId == request.ParentJob.JobId.Value, cancellationToken))
+            throw new InvalidOperationException("corpus-rebuild-job-superseded");
+
         if (_beforeIdempotencyRead is not null)
         {
             await _beforeIdempotencyRead(cancellationToken).ConfigureAwait(false);
@@ -1270,6 +1273,7 @@ public sealed partial class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecu
             (task.ParentJobId == null
                 ? !task.InteractiveCancellationRequested && task.QueueDeadlineUtc > now
                 : task.ParentJob!.PublicState == (int)PublicJobState.GpuQueued &&
+                  !context.CorpusRebuildSupersededJobs.Any(receipt => receipt.JobId == task.ParentJobId) &&
                   !task.ParentJob.PipelineRecord.IsDeleted &&
                   (task.ParentJob.PipelineRecord.SourceRevisionId == null ||
                    task.ParentJob.PipelineRecord.SourceRevision!.SourceRoot.State == enabledRootState ||

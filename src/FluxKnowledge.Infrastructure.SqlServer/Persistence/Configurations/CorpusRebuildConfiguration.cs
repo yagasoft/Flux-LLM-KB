@@ -13,11 +13,27 @@ public sealed class CorpusRebuildOperationConfiguration : IEntityTypeConfigurati
         builder.HasKey(value => value.Id);
         builder.Property(value => value.Id).ValueGeneratedNever();
         builder.HasIndex(value => value.TargetEpoch).IsUnique();
+        builder.HasIndex(value => value.SupersedesOperationId).IsUnique();
+        builder.HasOne<CorpusRebuildOperationEntity>().WithMany().HasForeignKey(value => value.SupersedesOperationId).OnDelete(DeleteBehavior.Restrict);
         SchemaConfiguration.ConfigureHash(builder.Property(value => value.ManifestHash));
         builder.Property(value => value.ManifestJson).IsRequired();
         builder.Property(value => value.CreatedAtUtc).HasColumnType("datetimeoffset(7)");
         builder.Property(value => value.CompletedAtUtc).HasColumnType("datetimeoffset(7)");
         SchemaConfiguration.ConfigureRowVersion(builder.Property(value => value.RowVersion));
+    }
+}
+
+public sealed class CorpusRebuildSupersededJobConfiguration : IEntityTypeConfiguration<CorpusRebuildSupersededJobEntity>
+{
+    public void Configure(EntityTypeBuilder<CorpusRebuildSupersededJobEntity> builder)
+    {
+        builder.ToTable("CorpusRebuildSupersededJobs");
+        builder.HasKey(value => value.JobId);
+        builder.Property(value => value.JobId).ValueGeneratedNever();
+        builder.HasOne<CorpusRebuildOperationEntity>().WithMany().HasForeignKey(value => value.OperationId).OnDelete(DeleteBehavior.Restrict);
+        builder.HasOne<CorpusRebuildOperationEntity>().WithMany().HasForeignKey(value => value.ReplacementOperationId).OnDelete(DeleteBehavior.Restrict);
+        builder.Property(value => value.SupersededAtUtc).HasColumnType("datetimeoffset(7)");
+        // Like worklist identities, this receipt survives ordinary source/job deletion.
     }
 }
 

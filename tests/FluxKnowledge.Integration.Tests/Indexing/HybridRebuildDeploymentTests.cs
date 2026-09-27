@@ -14,6 +14,8 @@ namespace FluxKnowledge.Integration.Tests.Indexing;
 public sealed class HybridRebuildDeploymentTests(NativeSqlServerFixture fixture) : IClassFixture<NativeSqlServerFixture>
 {
     [NativeSqlServerFact]
+    public Task Actual_updater_replacement_reconciles_sql_receipts_and_retains_deny_all_hold_on_failure() => RunScriptAsync("replacement");
+    [NativeSqlServerFact]
     public async Task Actual_updater_drain_holds_admission_and_fails_closed_after_session_loss_or_uncertain_capacity()
     {
         await SqlTestData.ClearPhase3SourceDataAsync(fixture);
@@ -30,7 +32,7 @@ public sealed class HybridRebuildDeploymentTests(NativeSqlServerFixture fixture)
         await using var context = SqlTestData.CreateFactory(fixture).CreateDbContext();
         var migrator = context.GetService<IMigrator>();
         const string baseline = "20260924125920_AddCorpusChunkFullTextIndex";
-        const string target = "20260927121634_AddCorpusRebuildWorklist";
+        const string target = "20260927202655_AddCorpusRebuildSupersession";
         var path = Path.Combine(Path.GetTempPath(), $"hybrid-reviewed-schema-{Guid.NewGuid():N}.sql");
         try
         {
@@ -47,7 +49,8 @@ public sealed class HybridRebuildDeploymentTests(NativeSqlServerFixture fixture)
         while (root is not null && !File.Exists(Path.Combine(root.FullName, "scripts", "deploy", "update-native-iis-incremental.ps1"))) root=root.Parent;
         Assert.NotNull(root);
         var start = new ProcessStartInfo("pwsh") { UseShellExecute=false, CreateNoWindow=true, RedirectStandardOutput=true, RedirectStandardError=true };
-        foreach (var value in new[] { "-NoProfile", "-File", Path.Combine(root.FullName,"tests","native","hybrid-rebuild-sql-integration.ps1"), "-SourceRoot", root.FullName, "-Mode", mode }) start.ArgumentList.Add(value);
+        var script = mode == "replacement" ? "hybrid-rebuild-replacement-contract.ps1" : "hybrid-rebuild-sql-integration.ps1";
+        foreach (var value in new[] { "-NoProfile", "-File", Path.Combine(root.FullName,"tests","native",script), "-SourceRoot", root.FullName, "-Mode", mode }) start.ArgumentList.Add(value);
         if (migrationScript is not null) { start.ArgumentList.Add("-MigrationScript"); start.ArgumentList.Add(migrationScript); }
         start.Environment["FLUXKNOWLEDGE_HYBRID_DISPOSABLE_SQL"] = fixture.ConnectionString;
         using var process = Process.Start(start)!;

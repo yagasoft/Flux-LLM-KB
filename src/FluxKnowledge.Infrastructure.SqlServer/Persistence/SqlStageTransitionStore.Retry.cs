@@ -28,6 +28,8 @@ public sealed partial class SqlStageTransitionStore
         {
             await using var context = await _contextFactory.CreateDbContextAsync(cancellationToken);
             await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
+            await SqlPublishedPassageSelection.AcquireFenceAsync(context, cancellationToken);
+            await SqlCorpusRebuildStore.ValidateMaintenanceJobAsync(context, request.CurrentJob.JobId.Value, cancellationToken);
             // Match the ordinary transition's dispatch-before-job order. A retry never completes delivery.
             var dispatch = await context.OutboxMessages.FromSqlInterpolated($"""
                 SELECT * FROM [OutboxMessages] WITH (UPDLOCK, HOLDLOCK)

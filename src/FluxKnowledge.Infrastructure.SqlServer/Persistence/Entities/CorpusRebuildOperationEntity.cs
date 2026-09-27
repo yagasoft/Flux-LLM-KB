@@ -8,7 +8,17 @@ public sealed class CorpusRebuildOperationEntity
     public string ManifestJson { get; set; } = "";
     public DateTimeOffset CreatedAtUtc { get; set; }
     public DateTimeOffset? CompletedAtUtc { get; set; }
+    public Guid? SupersedesOperationId { get; set; }
     public byte[] RowVersion { get; set; } = [];
+}
+
+/// <summary>Historical jobs retain their real state; this receipt permanently revokes execution authority.</summary>
+public sealed class CorpusRebuildSupersededJobEntity
+{
+    public Guid JobId { get; set; }
+    public Guid OperationId { get; set; }
+    public Guid ReplacementOperationId { get; set; }
+    public DateTimeOffset SupersededAtUtc { get; set; }
 }
 
 public sealed class CorpusRebuildWorkItemEntity

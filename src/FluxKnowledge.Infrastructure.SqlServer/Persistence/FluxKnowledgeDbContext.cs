@@ -20,6 +20,7 @@ public sealed class FluxKnowledgeDbContext(DbContextOptions<FluxKnowledgeDbConte
     public DbSet<IndexStateEntity> IndexState => Set<IndexStateEntity>();
     public DbSet<CorpusRebuildOperationEntity> CorpusRebuildOperations => Set<CorpusRebuildOperationEntity>();
     public DbSet<CorpusRebuildWorkItemEntity> CorpusRebuildWorkItems => Set<CorpusRebuildWorkItemEntity>();
+    public DbSet<CorpusRebuildSupersededJobEntity> CorpusRebuildSupersededJobs => Set<CorpusRebuildSupersededJobEntity>();
     public DbSet<CorpusQueryLeaseEntity> CorpusQueryLeases => Set<CorpusQueryLeaseEntity>();
     public DbSet<AuditEventEntity> AuditEvents => Set<AuditEventEntity>();
     public DbSet<GpuMiniTaskEntity> GpuMiniTasks => Set<GpuMiniTaskEntity>();

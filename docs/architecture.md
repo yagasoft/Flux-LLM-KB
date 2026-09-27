@@ -340,6 +340,17 @@ service changes. Disposable SQL checks exercise actual idempotent migration/repl
 session loss and exited-owner recovery. Canonical GPU measurements, English quality,
 deployment and live validation remain pending.
 
+An interrupted schema-54 worklist can be replaced explicitly through that updater.
+The successor binds the immutable predecessor packet and the same canonical inputs,
+then atomically commits a new epoch/worklist and permanent old-job supersession.
+Historical states, attempts, failures and native receipts remain; proven unstarted
+GPU tasks are cancelled under the existing admission fence. Claim, retry,
+checkpoint and publication paths reject superseded jobs after the successor finishes.
+SQL resolves an ambiguous commit response before hold ownership changes. Recovery
+inherits the predecessor's original scheduled intake preference and stays forward
+with the successor's compatible schema/payload. No model residency change is part
+of this recovery.
+
 The shared query engine retrieves at most 100 lexical and 100 dense passage IDs,
 fuses by identity, reranks at most 50 and revalidates complete bodies/citations.
 Root/workspace dense retrieval scores the entire eligible captured scope up to
