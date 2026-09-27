@@ -16,7 +16,7 @@ using Microsoft.EntityFrameworkCore;
 
 namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
 
-public sealed class SqlStageTransitionStore : IStageTransitionStore
+public sealed partial class SqlStageTransitionStore : IStageTransitionStore
 {
     private readonly IDbContextFactory<FluxKnowledgeDbContext> _contextFactory;
     private readonly IStageTransitionFailureInjector? _failureInjector;
@@ -71,12 +71,15 @@ public sealed class SqlStageTransitionStore : IStageTransitionStore
     {
         await using var transaction = await context.Database
             .BeginTransactionAsync(
-                request.IndexingOutput?.ActivateGeneration is null && request.Artifact.Stage != PipelineStage.Publish &&
+                request.IndexingOutput?.ActivateGeneration is null && request.IndexingOutput?.UsePersistedEmbeddingDraft != true && request.Artifact.Stage != PipelineStage.Publish &&
                 request.CurrentJob.Operation != PipelineOperations.ExtractVisio
                     ? IsolationLevel.ReadCommitted
                     : IsolationLevel.Serializable,
                 cancellationToken)
             .ConfigureAwait(false);
+
+        if (request.Artifact.Stage >= PipelineStage.Embed || request.IndexingOutput?.ActivateGeneration is not null || request.IndexingOutput?.UsePersistedEmbeddingDraft == true)
+            await SqlPublishedPassageSelection.AcquireFenceAsync(context, cancellationToken).ConfigureAwait(false);
 
         var validated = await ValidateClaimAsync(context, request, cancellationToken)
             .ConfigureAwait(false);
@@ -89,6 +92,37 @@ public sealed class SqlStageTransitionStore : IStageTransitionStore
                 .ConfigureAwait(false);
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
             return existing;
+        }
+
+        await SqlCorpusRebuildStore.ValidateMaintenanceJobAsync(context, request.CurrentJob.JobId.Value, cancellationToken).ConfigureAwait(false);
+
+        if (request.IndexingOutput?.UsePersistedEmbeddingDraft == true)
+        {
+            if (request.Artifact.Stage != PipelineStage.Embed || request.IndexingOutput.IndexGenerationId is not { } draftId ||
+                request.IndexingOutput.Vectors is not null || request.IndexingOutput.Chunks is not null ||
+                request.Artifact.ContentType != EmbedDraftDefaults.ArtifactContentType || request.Artifact.SearchText != draftId.ToString("D"))
+                throw new InvalidOperationException("embedding-checkpoint-seal-invalid");
+            var work = new Application.Workers.StageWorkItem(request.DispatchMessage, request.CurrentJob);
+            await SqlEmbeddingCheckpointStore.ValidateClaimAsync(context, work, _timeProvider.GetUtcNow(), cancellationToken).ConfigureAwait(false);
+            var draft = await context.IndexGenerations.SingleAsync(value => value.Id == draftId, cancellationToken).ConfigureAwait(false);
+            var epoch = (await SqlPublishedPassageSelection.ReadStampAsync(context, cancellationToken).ConfigureAwait(false)).CorpusEpoch;
+            SqlEmbeddingCheckpointStore.ValidateDraft(draft, work, new(request.IndexingOutput.ModelFingerprint!, draft.Dimensions), epoch);
+            if (await SqlEmbeddingCheckpointStore.ReadCompletedChecksumAsync(context, draft, work, cancellationToken).ConfigureAwait(false) != request.Artifact.ContentHash)
+                throw new InvalidOperationException("embedding-checkpoint-seal-checksum-invalid");
+        }
+
+        IndexStateEntity? publicationState = null;
+        IReadOnlyList<long>? previousPublishedIds = null;
+        if (request.Artifact.Stage == PipelineStage.Publish || request.IndexingOutput?.ActivateGeneration is not null)
+        {
+            publicationState = await context.IndexState.SingleAsync(state => state.Id == 1, cancellationToken).ConfigureAwait(false);
+            var stamp = new CorpusPublicationStamp(publicationState.CorpusEpoch, publicationState.CorpusVersion);
+            if (request.IndexingOutput?.ActivateGeneration is { } activating &&
+                (request.IndexingOutput.ExpectedCorpusStamp is null || activating.CorpusStamp is null))
+                throw new PublicationSnapshotConflictException("New generation activation requires expected and publication corpus stamps.");
+            if (request.IndexingOutput?.ExpectedCorpusStamp is { } expectedStamp && expectedStamp != stamp)
+                throw new PublicationSnapshotConflictException("The corpus epoch or version changed; rebuild the publication candidate.");
+            previousPublishedIds = await SqlPublishedPassageSelection.ReadVectorIdsAsync(context, cancellationToken).ConfigureAwait(false);
         }
 
         if (request.CurrentJob.Operation == PipelineOperations.ExtractVisio)
@@ -238,6 +272,7 @@ public sealed class SqlStageTransitionStore : IStageTransitionStore
                 new OutboxMessageEntity
                 {
                     Id = nextDispatchGuid,
+                    JobId = nextJobGuid,
                     PipelineRecordId = request.CurrentJob.PipelineRecordId.Value,
                     SourceRevision = request.CurrentJob.SourceRevision,
                     Stage = (int)nextStage,
@@ -263,20 +298,32 @@ public sealed class SqlStageTransitionStore : IStageTransitionStore
             validated.PipelineRecord.CompletionCriteriaMet = true;
         }
 
+        if (publicationState is not null)
+        {
+            await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+            var publishedIds = await SqlPublishedPassageSelection.ReadVectorIdsAsync(context, cancellationToken).ConfigureAwait(false);
+            if (!previousPublishedIds!.SequenceEqual(publishedIds))
+            {
+                publicationState.CorpusVersion = checked(publicationState.CorpusVersion + 1);
+                publicationState.UpdatedAtUtc = _timeProvider.GetUtcNow();
+            }
+        }
+
         if (request.IndexingOutput?.ActivateGeneration is { } activeGeneration)
         {
+            await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
             var expectedMembership = request.IndexingOutput.ActivateMembership
                 ?? throw new ArgumentException("An active generation requires an immutable vector membership snapshot.", nameof(request));
-            var currentMembership = await ReadEligibleVectorsAsync(context, cancellationToken)
+            var currentMembership = await SqlPublishedPassageSelection.ReadVectorsAsync(context, cancellationToken)
                 .ConfigureAwait(false);
-            if (!SameSnapshot(expectedMembership, currentMembership) ||
+            if (activeGeneration.CorpusStamp is { } generationStamp && generationStamp !=
+                    new CorpusPublicationStamp(publicationState!.CorpusEpoch, publicationState.CorpusVersion) ||
+                !SameSnapshot(expectedMembership, currentMembership) ||
                 !string.Equals(activeGeneration.MetadataChecksum,
                     ComputeSnapshotChecksum(activeGeneration.ModelFingerprint, activeGeneration.Dimensions, expectedMembership),
                     StringComparison.Ordinal))
             {
-                // Superseded candidates complete their durable Publish work without moving
-                // the pointer backwards; a later current-corpus Publish owns activation.
-                goto SkipActivation;
+                throw new PublicationSnapshotConflictException("The publication snapshot changed; rebuild the candidate before committing.");
             }
 
             await EnsureGenerationExistsAsync(context, activeGeneration, cancellationToken)
@@ -308,9 +355,11 @@ public sealed class SqlStageTransitionStore : IStageTransitionStore
             state.ActiveIndexGenerationId = activeGeneration.Id;
             state.EmptyCatalogueValidatedAtUtc = null;
             state.UpdatedAtUtc = _timeProvider.GetUtcNow();
-        SkipActivation: ;
         }
 
+        if (request.Artifact.Stage == PipelineStage.Publish && request.NextStage is null)
+            await SqlCorpusRebuildStore.CompletePublishedItemAsync(context, request.CurrentJob.JobId.Value,
+                request.IndexingOutput?.ActivateGeneration, _timeProvider.GetUtcNow(), cancellationToken).ConfigureAwait(false);
         await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
         await MarkDispatchCompleteAsync(context, request, cancellationToken)
             .ConfigureAwait(false);
@@ -356,6 +405,7 @@ public sealed class SqlStageTransitionStore : IStageTransitionStore
         var dispatch = await context.OutboxMessages.SingleOrDefaultAsync(
                 message =>
                     message.Id == request.DispatchMessage.DispatchMessageId.Value &&
+                    message.JobId == request.CurrentJob.JobId.Value &&
                     message.PipelineRecordId == request.CurrentJob.PipelineRecordId.Value &&
                     message.SourceRevision == request.CurrentJob.SourceRevision &&
                     message.IdempotencyKey == request.DispatchMessage.IdempotencyKey,
@@ -481,6 +531,7 @@ public sealed class SqlStageTransitionStore : IStageTransitionStore
         var dispatch = await context.OutboxMessages.SingleOrDefaultAsync(
                 message =>
                     message.Id == request.DispatchMessage.DispatchMessageId.Value &&
+                    message.JobId == request.CurrentJob.JobId.Value &&
                     message.PipelineRecordId == request.CurrentJob.PipelineRecordId.Value &&
                     message.SourceRevision == request.CurrentJob.SourceRevision &&
                     message.IdempotencyKey == request.DispatchMessage.IdempotencyKey,
@@ -560,18 +611,17 @@ public sealed class SqlStageTransitionStore : IStageTransitionStore
                 "The durable delivery completed without the expected stage artefact.");
         }
 
+        var completedArtifactId = await context.OutboxMessages.AsNoTracking()
+            .Where(message => message.Id == request.DispatchMessage.DispatchMessageId.Value &&
+                message.JobId == request.CurrentJob.JobId.Value)
+            .Select(message => message.CompletedArtifactId).SingleAsync(cancellationToken).ConfigureAwait(false);
+        if (completedArtifactId != artifact.Id)
+            throw new InvalidOperationException("completed-delivery-artifact-replaced");
+
         JobId? nextJobId = null;
         DispatchMessageId? nextDispatchMessageId = null;
         if (request.NextStage is { } nextStage)
         {
-            var nextJob = await context.Jobs.AsNoTracking().SingleAsync(
-                    job =>
-                        job.PipelineRecordId == request.CurrentJob.PipelineRecordId.Value &&
-                        job.SourceRevision == request.CurrentJob.SourceRevision &&
-                        job.Stage == (int)nextStage &&
-                        job.Operation == request.NextOperation,
-                    cancellationToken)
-                .ConfigureAwait(false);
             var nextDispatch = await context.OutboxMessages.AsNoTracking().SingleAsync(
                     message =>
                         message.PipelineRecordId == request.CurrentJob.PipelineRecordId.Value &&
@@ -580,6 +630,13 @@ public sealed class SqlStageTransitionStore : IStageTransitionStore
                         message.Operation == request.NextOperation &&
                         message.DispatchGeneration ==
                         request.DispatchMessage.DispatchGeneration + 1,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            var nextJob = await context.Jobs.AsNoTracking().SingleAsync(
+                    job => job.Id == nextDispatch.JobId &&
+                        job.PipelineRecordId == request.CurrentJob.PipelineRecordId.Value &&
+                        job.SourceRevision == request.CurrentJob.SourceRevision &&
+                        job.Stage == (int)nextStage && job.Operation == request.NextOperation,
                     cancellationToken)
                 .ConfigureAwait(false);
             nextJobId = new JobId(nextJob.Id);
@@ -593,12 +650,14 @@ public sealed class SqlStageTransitionStore : IStageTransitionStore
             ExistingTransition: true);
     }
 
-    private static async ValueTask PublishDocumentIfApplicableAsync(
+    internal static async ValueTask PublishDocumentIfApplicableAsync(
         FluxKnowledgeDbContext context,
         PipelineRecordEntity record,
         DateTimeOffset now,
         CancellationToken cancellationToken)
     {
+        if (await SqlCorpusRebuildStore.PreserveCapturedPublicationAsync(context, record, cancellationToken).ConfigureAwait(false))
+            return;
         if (record.SourceRevisionId is not { } inputRevisionId)
         {
             return;
@@ -802,19 +861,22 @@ public sealed class SqlStageTransitionStore : IStageTransitionStore
         await MarkDispatchCompleteAsync(
                 context,
                 request.DispatchMessage,
-                cancellationToken)
+                cancellationToken,
+                request.Artifact.Id)
             .ConfigureAwait(false);
 
     private async Task MarkDispatchCompleteAsync(
         FluxKnowledgeDbContext context,
         Application.Workers.ClaimedDispatchMessage claim,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Guid? completedArtifactId = null)
     {
         var dispatchedAt = _timeProvider.GetUtcNow();
         var acknowledged = await context.Database.ExecuteSqlInterpolatedAsync(
                 $"""
                  UPDATE [OutboxMessages]
                  SET [DispatchedAtUtc] = {dispatchedAt},
+                     [CompletedArtifactId] = {completedArtifactId},
                      [LeaseOwner] = NULL,
                      [LeaseExpiresAtUtc] = NULL
                  WHERE [Id] = {claim.DispatchMessageId.Value}
@@ -872,12 +934,15 @@ public sealed class SqlStageTransitionStore : IStageTransitionStore
                     StartOffset = chunk.StartOffset,
                     Length = chunk.Length,
                     Content = chunk.Content,
-                    ContentHash = chunk.ContentHash
+                    ContentHash = chunk.ContentHash,
+                    PassagePolicyFingerprint = chunk.PassagePolicyFingerprint,
+                    ContextHeader = chunk.ContextHeader,
+                    SearchInputHash = chunk.SearchInputHash
                 });
             }
         }
 
-        if (output.IndexGenerationId is { } generationId)
+        if (!output.UsePersistedEmbeddingDraft && output.IndexGenerationId is { } generationId)
         {
             context.IndexGenerations.Add(new IndexGenerationEntity
             {
@@ -908,33 +973,12 @@ public sealed class SqlStageTransitionStore : IStageTransitionStore
         }
     }
 
-    private static Task<List<CanonicalVector>> ReadEligibleVectorsAsync(
-        FluxKnowledgeDbContext context,
-        CancellationToken cancellationToken) =>
-        (
-            from vector in context.Vectors
-            join chunk in context.TextChunks on vector.TextChunkId equals chunk.Id
-            join artifact in context.Artifacts on chunk.ArtifactId equals artifact.Id
-            join record in context.PipelineRecords on artifact.PipelineRecordId equals record.Id
-            where !vector.IsDeleted && !record.IsDeleted &&
-                  (record.SourceRevisionId.HasValue
-                      ? context.SourceRevisions.Any(sourceRevision =>
-                          sourceRevision.Id == record.SourceRevisionId.Value && sourceRevision.SuppressedAtUtc == null)
-                      : record.Revision == context.PipelineRecords
-                          .Where(candidate => candidate.SourceIdentityId == record.SourceIdentityId)
-                          .Max(candidate => candidate.Revision))
-            orderby vector.VectorId
-            select new CanonicalVector(vector.VectorId, vector.TextChunkId,
-                vector.ModelFingerprint, vector.Dimensions, vector.Values,
-                vector.TextChunkContentHash, vector.PayloadChecksum,
-                vector.SourceRevision))
-        .ToListAsync(cancellationToken);
-
     private static bool SameSnapshot(
         IReadOnlyList<CanonicalVector> expected,
         IReadOnlyList<CanonicalVector> actual) =>
         expected.Count == actual.Count && expected.Zip(actual, static (left, right) =>
-            left.VectorId == right.VectorId &&
+            left.VectorId == right.VectorId && left.TextChunkId == right.TextChunkId &&
+            left.SourceRevision == right.SourceRevision && left.Values.AsSpan().SequenceEqual(right.Values) &&
             left.Dimensions == right.Dimensions &&
             string.Equals(left.ModelFingerprint, right.ModelFingerprint, StringComparison.Ordinal) &&
             string.Equals(left.TextChunkContentHash, right.TextChunkContentHash, StringComparison.Ordinal) &&
@@ -949,9 +993,10 @@ public sealed class SqlStageTransitionStore : IStageTransitionStore
         await context.Database.ExecuteSqlInterpolatedAsync(
                 $"""
                  INSERT INTO [IndexGenerations]
-                     ([Id], [ModelFingerprint], [Dimensions], [IndexPath], [MetadataChecksum], [VectorCount], [CreatedAtUtc], [ValidatedAtUtc])
+                     ([Id], [ModelFingerprint], [Dimensions], [IndexPath], [MetadataChecksum], [VectorCount], [CreatedAtUtc], [ValidatedAtUtc], [CorpusEpoch], [CorpusVersion])
                  SELECT {generation.Id}, {generation.ModelFingerprint}, {generation.Dimensions}, {generation.IndexPath},
-                        {generation.MetadataChecksum}, {generation.VectorCount}, {_timeProvider.GetUtcNow()}, {_timeProvider.GetUtcNow()}
+                        {generation.MetadataChecksum}, {generation.VectorCount}, {_timeProvider.GetUtcNow()}, {_timeProvider.GetUtcNow()},
+                        {generation.CorpusStamp?.CorpusEpoch}, {generation.CorpusStamp?.CorpusVersion}
                  WHERE NOT EXISTS
                  (
                      SELECT 1
@@ -994,7 +1039,8 @@ public sealed class SqlStageTransitionStore : IStageTransitionStore
         actual.Dimensions == expected.Dimensions &&
         string.Equals(actual.IndexPath, expected.IndexPath, StringComparison.Ordinal) &&
         string.Equals(actual.MetadataChecksum, expected.MetadataChecksum, StringComparison.Ordinal) &&
-        actual.VectorCount == expected.VectorCount;
+        actual.VectorCount == expected.VectorCount &&
+        actual.CorpusEpoch == expected.CorpusStamp?.CorpusEpoch && actual.CorpusVersion == expected.CorpusStamp?.CorpusVersion;
 
     private static string ComputeSnapshotChecksum(
         string fingerprint,

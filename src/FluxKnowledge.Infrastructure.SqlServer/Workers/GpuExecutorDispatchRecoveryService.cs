@@ -29,12 +29,26 @@ public sealed class GpuExecutorDispatchRecoveryService(
         {
             while (!stoppingToken.IsCancellationRequested)
             {
+                await RecoverAdapterContinuationsAsync(stoppingToken).ConfigureAwait(false);
                 await DeliverPendingDispatchesAsync(stoppingToken).ConfigureAwait(false);
                 await WaitForPromptOrFallbackAsync(stoppingToken).ConfigureAwait(false);
             }
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
         {
+        }
+    }
+
+    private async ValueTask RecoverAdapterContinuationsAsync(CancellationToken stoppingToken)
+    {
+        foreach (var adapter in _adapters.Values.OfType<IGpuExecutorRecoveryAdapter>())
+        {
+            try { await adapter.RecoverAsync(stoppingToken).ConfigureAwait(false); }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { throw; }
+            catch (Exception exception)
+            {
+                _logger.LogWarning(exception, "GPU executor continuation recovery failed; durable ownership remains retained.");
+            }
         }
     }
 

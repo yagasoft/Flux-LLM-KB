@@ -10,5 +10,9 @@ public sealed class TextChunkEntity
     public int Length { get; set; }
     public string Content { get; set; } = string.Empty;
     public string ContentHash { get; set; } = string.Empty;
+    public string PassagePolicyFingerprint { get; set; } = string.Empty;
+    public string ContextHeader { get; set; } = string.Empty;
+    public string SearchInputHash { get; set; } = string.Empty;
+    public string SearchText { get; private set; } = string.Empty;
     public ArtifactEntity Artifact { get; set; } = null!;
 }

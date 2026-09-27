@@ -356,6 +356,9 @@ public sealed class SourceReconciliationIntegrationTests(NativeSqlServerFixture 
 
         var store = CreateStore();
         var unchanged = File("a.txt", new string('a', 64));
+        long initialCorpusVersion;
+        await using (var initialState = CreateContext())
+            initialCorpusVersion = (await initialState.IndexState.SingleAsync()).CorpusVersion;
         var changedFile = File("a.txt", new string('b', 64));
         var unchangedReceipt = new SourceArtifactReceipt(SourceArtifactId.New(), unchanged.ContentSha256, "sha256\\aa\\unchanged.bin", unchanged.ByteLength, false);
         var changedReceipt = new SourceArtifactReceipt(SourceArtifactId.New(), changedFile.ContentSha256, "sha256\\bb\\changed.bin", changedFile.ByteLength, false);
@@ -371,6 +374,14 @@ public sealed class SourceReconciliationIntegrationTests(NativeSqlServerFixture 
         await using var verification = CreateContext();
         Assert.Equal(2, await verification.SourceRevisions.CountAsync());
         Assert.All(await verification.SourceRevisions.ToListAsync(), value => Assert.NotNull(value.SuppressedAtUtc));
+        var suppressedStamp = await verification.IndexState.AsNoTracking().SingleAsync();
+        Assert.Equal(initialCorpusVersion + 1, suppressedStamp.CorpusVersion);
+        await store.SuppressUnseenAsync(root.Id, new HashSet<SourceRevisionId>(), CancellationToken.None);
+        Assert.Equal(suppressedStamp.CorpusVersion, (await verification.IndexState.AsNoTracking().SingleAsync()).CorpusVersion);
+        await store.ConvergeRevisionAndArtifactAsync(root, unchanged, unchangedReceipt, CancellationToken.None);
+        var restoredStamp = await verification.IndexState.AsNoTracking().SingleAsync();
+        Assert.Equal(suppressedStamp.CorpusEpoch, restoredStamp.CorpusEpoch);
+        Assert.Equal(suppressedStamp.CorpusVersion + 1, restoredStamp.CorpusVersion);
     }
 
     [NativeSqlServerFact]

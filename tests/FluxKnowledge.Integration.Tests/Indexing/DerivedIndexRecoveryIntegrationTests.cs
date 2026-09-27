@@ -22,6 +22,26 @@ public sealed class DerivedIndexRecoveryIntegrationTests(NativeSqlServerFixture 
     private readonly NativeSqlServerFixture _fixture = fixture;
 
     [Fact]
+    public async Task Unavailable_projection_is_reported_as_updating_without_resolving_native_or_filesystem_services()
+    {
+        var services = new ServiceCollection();
+        var store = new RecordingRecoveryStore(new DerivedIndexRecoverySqlSnapshot(null, null, [],
+            ImmutableHashSet<Guid>.Empty, ImmutableHashSet<string>.Empty, IsProjectionUnavailable: true));
+        services.AddSingleton<IDerivedIndexRecoveryStore>(store);
+        using var provider = services.BuildServiceProvider();
+        var coordinator = new DerivedIndexRecoveryCoordinator(provider.GetRequiredService<IServiceScopeFactory>(),
+            UsearchIndexConfiguration.FromConfiguredRoot(Path.GetTempPath()), TimeProvider.System);
+        await coordinator.RunOnceAsync(CancellationToken.None);
+        Assert.Equal(DerivedIndexRecoveryState.IndexUpdating, coordinator.Snapshot.State);
+        Assert.True(coordinator.Snapshot.IsProjectionUnavailable);
+        Assert.False(coordinator.Snapshot.IsValidatedEmptyCatalogue);
+        Assert.Null(coordinator.Snapshot.FailureCategory);
+        Assert.Equal(0, store.PathUpdateAttempts);
+        await coordinator.RunOnceAsync(CancellationToken.None);
+        Assert.Equal(2, store.ReadCount);
+    }
+
+    [Fact]
     public async Task Validated_empty_catalogue_is_healthy_without_resolving_filesystem_or_usearch_services()
     {
         var services = new ServiceCollection();

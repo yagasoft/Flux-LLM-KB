@@ -1,6 +1,7 @@
 using System.Data;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Workers;
+using FluxKnowledge.Application.Sources;
 using FluxKnowledge.Domain.Common;
 using FluxKnowledge.Domain.Jobs;
 using FluxKnowledge.Domain.Pipeline;
@@ -10,7 +11,8 @@ using Microsoft.EntityFrameworkCore;
 namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
 
 public sealed class SqlJobClaimStore(
-    IDbContextFactory<FluxKnowledgeDbContext> contextFactory) : IJobClaimStore
+    IDbContextFactory<FluxKnowledgeDbContext> contextFactory,
+    IDeploymentValidationHold? deploymentValidationHold = null) : IJobClaimStore
 {
     public async ValueTask<Job?> ClaimWorkerAsync(
         string leaseOwner,
@@ -93,6 +95,8 @@ public sealed class SqlJobClaimStore(
         ClaimedDispatchMessage? dispatchMessage,
         CancellationToken cancellationToken)
     {
+        var admission = deploymentValidationHold?.ReadAdmissionState() ?? new(false, null);
+        if (admission is { IsHeld: true, PermittedCorpusRebuildOperationId: null }) return null;
         ArgumentException.ThrowIfNullOrWhiteSpace(leaseOwner);
         if (leaseExpiresAtUtc <= nowUtc)
         {
@@ -108,10 +112,11 @@ public sealed class SqlJobClaimStore(
                 AND [SourceRevision] = @sourceRevision
                 AND [Stage] = @stage
                 AND [Operation] = @operation
-                AND (@operation <> @visioOperation OR EXISTS
+                AND EXISTS
                 (
                     SELECT 1 FROM [OutboxMessages] AS [dispatch] WITH (UPDLOCK, HOLDLOCK)
                     WHERE [dispatch].[Id] = @dispatchId
+                      AND [dispatch].[JobId] = [Jobs].[Id]
                       AND [dispatch].[PipelineRecordId] = [Jobs].[PipelineRecordId]
                       AND [dispatch].[SourceRevision] = [Jobs].[SourceRevision]
                       AND [dispatch].[Stage] = [Jobs].[Stage]
@@ -122,7 +127,7 @@ public sealed class SqlJobClaimStore(
                       AND [dispatch].[DispatchGeneration] = @dispatchGeneration
                       AND [dispatch].[IdempotencyKey] = @dispatchKey
                       AND [dispatch].[LeaseExpiresAtUtc] > @nowUtc
-                ))
+                )
               """;
         var sql =
             $$"""
@@ -142,6 +147,8 @@ public sealed class SqlJobClaimStore(
                      [RowVersion]
                  FROM [Jobs] WITH (UPDLOCK, READPAST, READCOMMITTEDLOCK)
                  WHERE [DueAtUtc] <= @nowUtc
+                   AND {{SqlCorpusRebuildEligibility.Admission("[Jobs].[Id]")}}
+                   AND {{SqlCorpusRebuildEligibility.DeploymentAdmission("[Jobs].[Id]")}}
                    AND
                    (
                        ([PublicState] = @queuedState AND
@@ -167,7 +174,7 @@ public sealed class SqlJobClaimStore(
                            INNER JOIN [SourceRootConfigurations] AS [root]
                                ON [root].[Id] = [revision].[SourceRootId]
                            WHERE [record].[Id] = [Jobs].[PipelineRecordId]
-                             AND [root].[State] = @sourceRootEnabled
+                             AND ([root].[State] = @sourceRootEnabled OR {{SqlCorpusRebuildEligibility.ActiveJob("[Jobs].[Id]")}})
                        )
                    )
                     {{dispatchPredicate}}
@@ -238,6 +245,9 @@ public sealed class SqlJobClaimStore(
         var connection = (SqlConnection)context.Database.GetDbConnection();
         await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = new SqlCommand(sql, connection);
+        AddParameter(command, "@deploymentHeld", SqlDbType.Bit, admission.IsHeld);
+        AddParameter(command, "@permittedRebuildOperationId", SqlDbType.UniqueIdentifier,
+            (object?)admission.PermittedCorpusRebuildOperationId ?? DBNull.Value);
         AddParameter(command, "@nowUtc", SqlDbType.DateTimeOffset, nowUtc);
         AddParameter(command, "@leaseExpiresAtUtc", SqlDbType.DateTimeOffset, leaseExpiresAtUtc);
         AddParameter(command, "@leaseOwner", SqlDbType.NVarChar, leaseOwner, 256);

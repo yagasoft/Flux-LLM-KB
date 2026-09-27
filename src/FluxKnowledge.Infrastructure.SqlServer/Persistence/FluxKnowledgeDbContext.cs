@@ -18,6 +18,9 @@ public sealed class FluxKnowledgeDbContext(DbContextOptions<FluxKnowledgeDbConte
     public DbSet<IndexGenerationEntity> IndexGenerations => Set<IndexGenerationEntity>();
     public DbSet<IndexGenerationVectorEntity> IndexGenerationVectors => Set<IndexGenerationVectorEntity>();
     public DbSet<IndexStateEntity> IndexState => Set<IndexStateEntity>();
+    public DbSet<CorpusRebuildOperationEntity> CorpusRebuildOperations => Set<CorpusRebuildOperationEntity>();
+    public DbSet<CorpusRebuildWorkItemEntity> CorpusRebuildWorkItems => Set<CorpusRebuildWorkItemEntity>();
+    public DbSet<CorpusQueryLeaseEntity> CorpusQueryLeases => Set<CorpusQueryLeaseEntity>();
     public DbSet<AuditEventEntity> AuditEvents => Set<AuditEventEntity>();
     public DbSet<GpuMiniTaskEntity> GpuMiniTasks => Set<GpuMiniTaskEntity>();
     public DbSet<GpuBatchEntity> GpuBatches => Set<GpuBatchEntity>();
@@ -28,6 +31,7 @@ public sealed class FluxKnowledgeDbContext(DbContextOptions<FluxKnowledgeDbConte
     public DbSet<GpuExecutorResultReceiptEntity> GpuExecutorResultReceipts => Set<GpuExecutorResultReceiptEntity>();
     public DbSet<GpuExecutorEvidenceEntity> GpuExecutorEvidence => Set<GpuExecutorEvidenceEntity>();
     public DbSet<DocumentOcrRequestEntity> DocumentOcrRequests => Set<DocumentOcrRequestEntity>();
+    public DbSet<EmbeddingGpuRequestEntity> EmbeddingGpuRequests => Set<EmbeddingGpuRequestEntity>();
     public DbSet<NativeWorkerInstanceEntity> NativeWorkerInstances => Set<NativeWorkerInstanceEntity>();
     public DbSet<NativeWorkerLifecycleEvidenceEntity> NativeWorkerLifecycleEvidence => Set<NativeWorkerLifecycleEvidenceEntity>();
     public DbSet<SourceRootConfigurationEntity> SourceRootConfigurations => Set<SourceRootConfigurationEntity>();

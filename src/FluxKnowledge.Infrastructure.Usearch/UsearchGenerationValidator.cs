@@ -9,7 +9,7 @@ namespace FluxKnowledge.Infrastructure.Usearch;
 
 public sealed class IndexGenerationValidationException(string message) : Exception(message);
 
-public class UsearchGenerationValidator
+public class UsearchGenerationValidator : IIndexGenerationVerifier
 {
     private readonly LiveRootStorageSafety? _storageSafety;
 
@@ -27,9 +27,11 @@ public class UsearchGenerationValidator
         return Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(data)));
     }
 
-    public static Guid DeterministicGenerationId(string checksum)
+    public static Guid DeterministicGenerationId(string checksum, CorpusPublicationStamp? corpusStamp = null)
     {
-        var bytes = Convert.FromHexString(checksum)[..16];
+        var bytes = corpusStamp is null ? Convert.FromHexString(checksum)[..16] :
+            SHA256.HashData(Encoding.UTF8.GetBytes(FormattableString.Invariant(
+                $"corpus-generation/v1|{corpusStamp.CorpusEpoch:N}|{corpusStamp.CorpusVersion}|{checksum}")))[..16];
         return new Guid(bytes);
     }
 
@@ -67,7 +69,8 @@ public class UsearchGenerationValidator
         if (metadata.GenerationId != expected.Id || metadata.ModelFingerprint != expected.ModelFingerprint ||
             metadata.Metric != "cos" || metadata.Dimensions != expected.Dimensions ||
             metadata.VectorCount != expected.VectorCount ||
-            !string.Equals(metadata.Checksum, expected.MetadataChecksum, StringComparison.Ordinal))
+            !string.Equals(metadata.Checksum, expected.MetadataChecksum, StringComparison.Ordinal) ||
+            metadata.CorpusStamp != expected.CorpusStamp)
         {
             throw new IndexGenerationValidationException("Generation metadata does not match the SQL candidate.");
         }
@@ -154,5 +157,6 @@ public class UsearchGenerationValidator
         string Metric,
         int Dimensions,
         long VectorCount,
-        string Checksum);
+        string Checksum,
+        CorpusPublicationStamp? CorpusStamp = null);
 }

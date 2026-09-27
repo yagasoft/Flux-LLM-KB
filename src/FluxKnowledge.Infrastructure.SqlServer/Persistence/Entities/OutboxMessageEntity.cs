@@ -3,6 +3,8 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
 public sealed class OutboxMessageEntity
 {
     public Guid Id { get; set; }
+    public Guid? JobId { get; set; }
+    public Guid? CompletedArtifactId { get; set; }
     public Guid PipelineRecordId { get; set; }
     public long SourceRevision { get; set; }
     public int Stage { get; set; }

@@ -3,8 +3,11 @@ using FluxKnowledge.Application.Workers;
 using FluxKnowledge.Domain.Jobs;
 using FluxKnowledge.Domain.Pipeline;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
+using FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
 using FluxKnowledge.Integration.Tests.Support;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Xunit;
 
 namespace FluxKnowledge.Integration.Tests.Persistence;
@@ -66,6 +69,16 @@ public sealed class StageTransitionAtomicityTests(NativeSqlServerFixture fixture
         var store = new SqlStageTransitionStore(factory);
 
         var first = await store.TransitionAsync(request, CancellationToken.None);
+        await using (var extra = factory.CreateDbContext())
+        {
+            extra.Jobs.Add(new JobEntity
+            {
+                Id = Guid.NewGuid(), PipelineRecordId = request.CurrentJob.PipelineRecordId.Value,
+                SourceRevision = request.CurrentJob.SourceRevision, Stage = (int)request.NextStage!,
+                Operation = request.NextOperation!, PublicState = (int)PublicJobState.Completed, DueAtUtc = now
+            });
+            await extra.SaveChangesAsync();
+        }
         var second = await store.TransitionAsync(request, CancellationToken.None);
 
         Assert.False(first.ExistingTransition);
@@ -79,13 +92,66 @@ public sealed class StageTransitionAtomicityTests(NativeSqlServerFixture fixture
                 .Where(artifact => artifact.PipelineRecordId == seeded.PipelineRecordId.Value)
                 .ToListAsync());
         Assert.Equal(
-            2,
+            3,
             await context.Jobs.CountAsync(
                 job => job.PipelineRecordId == seeded.PipelineRecordId.Value));
         Assert.Equal(
             2,
             await context.OutboxMessages.CountAsync(
                 message => message.PipelineRecordId == seeded.PipelineRecordId.Value));
+    }
+
+    [NativeSqlServerFact]
+    public async Task Completed_delivery_cannot_resolve_a_replacement_stage_artifact()
+    {
+        await SqlTestData.ClearPipelineAsync(_fixture);
+        var now = DateTimeOffset.UtcNow;
+        await SqlTestData.SeedWorkItemAsync(_fixture, now, PublicJobState.WorkerQueued, null);
+        var factory = new RetryingDbContextFactory(_fixture.ConnectionString);
+        var request = await ClaimExtractAsync(factory, now);
+        var store = new SqlStageTransitionStore(factory);
+        await store.TransitionAsync(request, CancellationToken.None);
+        var replacementId = Guid.NewGuid();
+        await using (var context = factory.CreateDbContext())
+        {
+            await context.Artifacts.ExecuteDeleteAsync();
+            context.Artifacts.Add(new ArtifactEntity
+            {
+                Id = replacementId, PipelineRecordId = request.CurrentJob.PipelineRecordId.Value,
+                SourceRevision = request.CurrentJob.SourceRevision, Stage = (int)request.Artifact.Stage,
+                ContentHash = request.Artifact.ContentHash, ContentType = request.Artifact.ContentType,
+                SearchText = request.Artifact.SearchText, CreatedAtUtc = now
+            });
+            await context.SaveChangesAsync();
+        }
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            await store.TransitionAsync(request, CancellationToken.None));
+        Assert.Equal("completed-delivery-artifact-replaced", error.Message);
+        await using var verification = factory.CreateDbContext();
+        Assert.Equal(replacementId, (await verification.Artifacts.SingleAsync()).Id);
+        Assert.Equal(2, await verification.Jobs.CountAsync());
+    }
+
+    [NativeSqlServerFact]
+    public async Task Completed_output_migration_backfills_exact_existing_artifact_and_replay_remains_valid()
+    {
+        await SqlTestData.ClearPipelineAsync(_fixture);
+        var now = DateTimeOffset.UtcNow;
+        await SqlTestData.SeedWorkItemAsync(_fixture, now, PublicJobState.WorkerQueued, null);
+        var factory = new RetryingDbContextFactory(_fixture.ConnectionString);
+        var request = await ClaimExtractAsync(factory, now);
+        var store = new SqlStageTransitionStore(factory);
+        var result = await store.TransitionAsync(request, CancellationToken.None);
+        await using (var context = factory.CreateDbContext())
+        {
+            await context.GetService<IMigrator>().MigrateAsync("20260927115029_BindOutboxMessagesToJobs");
+            await context.Database.MigrateAsync();
+            Assert.Equal(result.ArtifactId, (await context.OutboxMessages.SingleAsync(message =>
+                message.Id == request.DispatchMessage.DispatchMessageId.Value)).CompletedArtifactId);
+        }
+        var replay = await store.TransitionAsync(request, CancellationToken.None);
+        Assert.True(replay.ExistingTransition);
+        Assert.Equal(result.ArtifactId, replay.ArtifactId);
     }
 
     [NativeSqlServerFact]

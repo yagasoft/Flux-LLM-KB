@@ -21,7 +21,11 @@ public sealed record EligiblePassageCandidate(
     string Content,
     string SourceIdentity,
     int FullTextRank = 0,
-    int OriginKind = 0);
+    int OriginKind = 0,
+    Guid CorpusEpoch = default,
+    string ContextHeader = "",
+    string PassagePolicyFingerprint = "",
+    string SearchInputHash = "");
 
 public sealed record EligibleContext(
     EligiblePassageCandidate Candidate,

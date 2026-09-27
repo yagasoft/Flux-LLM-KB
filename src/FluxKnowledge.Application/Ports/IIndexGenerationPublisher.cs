@@ -21,4 +21,5 @@ public sealed class NoEligibleVectorsException : InvalidOperationException
 
 public sealed record IndexGenerationCandidateSnapshot(
     IndexGenerationDescriptor Generation,
-    IReadOnlyList<CanonicalVector> Vectors);
+    IReadOnlyList<CanonicalVector> Vectors,
+    CorpusPublicationStamp? ExpectedCorpusStamp = null);

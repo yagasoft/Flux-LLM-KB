@@ -149,6 +149,161 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Migrations
                     b.ToTable("AuditEvents", (string)null);
                 });
 
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.CorpusQueryLeaseEntity", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("CorpusEpoch")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<long>("CorpusVersion")
+                        .HasColumnType("bigint");
+
+                    b.Property<DateTimeOffset>("CreatedAtUtc")
+                        .HasColumnType("datetimeoffset");
+
+                    b.Property<int>("Dimensions")
+                        .HasColumnType("int");
+
+                    b.Property<Guid>("GenerationId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("ModelFingerprint")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)")
+                        .UseCollation("Latin1_General_100_BIN2");
+
+                    b.Property<Guid>("OwnerInstanceId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("OwnerMachineFingerprint")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("nchar(64)")
+                        .IsFixedLength()
+                        .UseCollation("Latin1_General_100_BIN2");
+
+                    b.Property<int>("OwnerProcessId")
+                        .HasColumnType("int");
+
+                    b.Property<DateTimeOffset>("OwnerStartedAtUtc")
+                        .HasColumnType("datetimeoffset");
+
+                    b.Property<int>("SqlSessionId")
+                        .HasColumnType("int");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("GenerationId");
+
+                    b.ToTable("CorpusQueryLeases", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_CorpusQueryLeases_MachineFingerprint", "LEN([OwnerMachineFingerprint]) = 64 AND [OwnerMachineFingerprint] COLLATE Latin1_General_100_BIN2 NOT LIKE '%[^0-9a-f]%'");
+
+                            t.HasCheckConstraint("CK_CorpusQueryLeases_ModelFingerprint", "DATALENGTH([ModelFingerprint]) > 0 AND UNICODE(RIGHT([ModelFingerprint], 1)) NOT IN (9, 10, 11, 12, 13, 32, 133, 160, 5760, 8192, 8193, 8194, 8195, 8196, 8197, 8198, 8199, 8200, 8201, 8202, 8232, 8233, 8239, 8287, 12288)");
+
+                            t.HasCheckConstraint("CK_CorpusQueryLeases_Ownership", "[OwnerInstanceId] <> '00000000-0000-0000-0000-000000000000' AND [OwnerProcessId] > 0 AND [SqlSessionId] > 0");
+
+                            t.HasCheckConstraint("CK_CorpusQueryLeases_Stamp", "[CorpusEpoch] <> '00000000-0000-0000-0000-000000000000' AND [CorpusVersion] >= 0 AND [Dimensions] > 0");
+                        });
+                });
+
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.CorpusRebuildOperationEntity", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTimeOffset?>("CompletedAtUtc")
+                        .HasColumnType("datetimeoffset(7)");
+
+                    b.Property<DateTimeOffset>("CreatedAtUtc")
+                        .HasColumnType("datetimeoffset(7)");
+
+                    b.Property<string>("ManifestHash")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .IsUnicode(false)
+                        .HasColumnType("char(64)")
+                        .IsFixedLength();
+
+                    b.Property<string>("ManifestJson")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<byte[]>("RowVersion")
+                        .IsConcurrencyToken()
+                        .IsRequired()
+                        .ValueGeneratedOnAddOrUpdate()
+                        .HasColumnType("rowversion");
+
+                    b.Property<Guid>("TargetEpoch")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TargetEpoch")
+                        .IsUnique();
+
+                    b.ToTable("CorpusRebuildOperations", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_CorpusRebuildOperations_ManifestJson", "ISJSON([ManifestJson]) = 1");
+                        });
+                });
+
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.CorpusRebuildWorkItemEntity", b =>
+                {
+                    b.Property<Guid>("OperationId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("PipelineRecordId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("CanonicalArtifactId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTimeOffset?>("CompletedAtUtc")
+                        .HasColumnType("datetimeoffset(7)");
+
+                    b.Property<Guid>("DispatchMessageId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("EmbeddingJobId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTimeOffset?>("PreparedAtUtc")
+                        .HasColumnType("datetimeoffset(7)");
+
+                    b.Property<byte[]>("RowVersion")
+                        .IsConcurrencyToken()
+                        .IsRequired()
+                        .ValueGeneratedOnAddOrUpdate()
+                        .HasColumnType("rowversion");
+
+                    b.Property<long>("SourceRevision")
+                        .HasColumnType("bigint");
+
+                    b.Property<int>("State")
+                        .HasColumnType("int");
+
+                    b.HasKey("OperationId", "PipelineRecordId");
+
+                    b.HasIndex("DispatchMessageId")
+                        .IsUnique();
+
+                    b.HasIndex("EmbeddingJobId")
+                        .IsUnique();
+
+                    b.HasIndex("OperationId", "State");
+
+                    b.ToTable("CorpusRebuildWorkItems", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_CorpusRebuildWorkItems_State", "[State] IN (0, 1, 2)");
+                        });
+                });
+
             modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.DeferredCapabilityEntity", b =>
                 {
                     b.Property<Guid>("Id")
@@ -329,6 +484,120 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Migrations
                         .IsUnique();
 
                     b.ToTable("DocumentPublications", (string)null);
+                });
+
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.EmbeddingGpuRequestEntity", b =>
+                {
+                    b.Property<Guid>("MiniTaskId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid?>("ClaimOperationId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTimeOffset?>("CleanupConfirmedAtUtc")
+                        .HasColumnType("datetimeoffset(7)");
+
+                    b.Property<Guid>("CorpusEpoch")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTimeOffset>("CreatedAtUtc")
+                        .HasColumnType("datetimeoffset(7)");
+
+                    b.Property<int>("Dimensions")
+                        .HasColumnType("int");
+
+                    b.Property<Guid?>("DispatchId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid?>("ExecutorInstanceId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("GenerationId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("InputDigest")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("nvarchar(64)")
+                        .UseCollation("Latin1_General_100_BIN2");
+
+                    b.Property<string>("InputsJson")
+                        .IsRequired()
+                        .HasMaxLength(2048)
+                        .HasColumnType("nvarchar(2048)");
+
+                    b.Property<string>("ModelFingerprint")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)")
+                        .UseCollation("Latin1_General_100_BIN2");
+
+                    b.Property<bool>("NativeCleanupConfirmed")
+                        .HasColumnType("bit");
+
+                    b.Property<string>("OwnerMachineFingerprint")
+                        .HasMaxLength(64)
+                        .HasColumnType("nvarchar(64)")
+                        .UseCollation("Latin1_General_100_BIN2");
+
+                    b.Property<int?>("OwnerProcessId")
+                        .HasColumnType("int");
+
+                    b.Property<DateTimeOffset?>("OwnerStartedAtUtc")
+                        .HasColumnType("datetimeoffset(7)");
+
+                    b.Property<Guid>("ParentJobId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("PipelineRecordId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<byte[]>("ResultDigest")
+                        .HasColumnType("varbinary(max)");
+
+                    b.Property<byte[]>("RowVersion")
+                        .IsConcurrencyToken()
+                        .IsRequired()
+                        .ValueGeneratedOnAddOrUpdate()
+                        .HasColumnType("rowversion");
+
+                    b.Property<long>("SourceRevision")
+                        .HasColumnType("bigint");
+
+                    b.Property<int>("State")
+                        .HasColumnType("int");
+
+                    b.Property<DateTimeOffset>("UpdatedAtUtc")
+                        .HasColumnType("datetimeoffset(7)");
+
+                    b.HasKey("MiniTaskId");
+
+                    b.HasIndex("ParentJobId", "State");
+
+                    b.HasIndex("ParentJobId", "GenerationId", "InputDigest")
+                        .IsUnique()
+                        .HasFilter("[State] < 2");
+
+                    b.HasIndex("PipelineRecordId", "SourceRevision", "State");
+
+                    b.ToTable("EmbeddingGpuRequests", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_EmbeddingGpuRequests_Cleanup", "([NativeCleanupConfirmed] = 0 AND [CleanupConfirmedAtUtc] IS NULL) OR ([NativeCleanupConfirmed] = 1 AND [CleanupConfirmedAtUtc] IS NOT NULL)");
+
+                            t.HasCheckConstraint("CK_EmbeddingGpuRequests_Completion", "[State] = 0 OR ([State] = 1 AND [ResultDigest] IS NOT NULL AND [ExecutorInstanceId] IS NOT NULL) OR ([State] = 2 AND [NativeCleanupConfirmed] = 1)");
+
+                            t.HasCheckConstraint("CK_EmbeddingGpuRequests_InputDigest", "LEN([InputDigest]) = 64 AND [InputDigest] COLLATE Latin1_General_100_BIN2 NOT LIKE '%[^0-9a-f]%'");
+
+                            t.HasCheckConstraint("CK_EmbeddingGpuRequests_Inputs", "ISJSON([InputsJson]) = 1 AND DATALENGTH([InputsJson]) BETWEEN 2 AND 4096");
+
+                            t.HasCheckConstraint("CK_EmbeddingGpuRequests_Owner", "([ExecutorInstanceId] IS NULL AND [ClaimOperationId] IS NULL AND [OwnerProcessId] IS NULL AND [OwnerStartedAtUtc] IS NULL AND [OwnerMachineFingerprint] IS NULL AND [DispatchId] IS NULL) OR ([ExecutorInstanceId] IS NOT NULL AND [ExecutorInstanceId] <> '00000000-0000-0000-0000-000000000000' AND [ClaimOperationId] IS NOT NULL AND [ClaimOperationId] <> '00000000-0000-0000-0000-000000000000' AND [OwnerProcessId] IS NOT NULL AND [OwnerProcessId] > 0 AND [OwnerStartedAtUtc] IS NOT NULL AND [DispatchId] IS NOT NULL AND [OwnerMachineFingerprint] IS NOT NULL AND LEN([OwnerMachineFingerprint]) = 64 AND [OwnerMachineFingerprint] COLLATE Latin1_General_100_BIN2 NOT LIKE '%[^0-9a-f]%')");
+
+                            t.HasCheckConstraint("CK_EmbeddingGpuRequests_Profile", "[Dimensions] BETWEEN 1 AND 4096 AND DATALENGTH([ModelFingerprint]) > 0");
+
+                            t.HasCheckConstraint("CK_EmbeddingGpuRequests_Result", "[ResultDigest] IS NULL OR DATALENGTH([ResultDigest]) = 32");
+
+                            t.HasCheckConstraint("CK_EmbeddingGpuRequests_State", "[State] BETWEEN 0 AND 2");
+                        });
                 });
 
             modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.GpuBatchEntity", b =>
@@ -691,6 +960,9 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Migrations
                     b.Property<long>("EstimatedBytes")
                         .HasColumnType("bigint");
 
+                    b.Property<DateTimeOffset?>("ExecutionDeadlineUtc")
+                        .HasColumnType("datetimeoffset(7)");
+
                     b.Property<int>("ExecutionState")
                         .HasColumnType("int")
                         .HasColumnName("State");
@@ -706,17 +978,42 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Migrations
                         .HasColumnType("nvarchar(512)")
                         .UseCollation("Latin1_General_100_BIN2");
 
+                    b.Property<bool>("InteractiveCancellationRequested")
+                        .HasColumnType("bit");
+
+                    b.Property<Guid?>("InteractiveExecutorInstanceId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("InteractiveOwnerMachineFingerprint")
+                        .HasMaxLength(64)
+                        .HasColumnType("nvarchar(64)")
+                        .UseCollation("Latin1_General_100_BIN2");
+
+                    b.Property<int?>("InteractiveOwnerProcessId")
+                        .HasColumnType("int");
+
+                    b.Property<DateTimeOffset?>("InteractiveOwnerStartedAtUtc")
+                        .HasColumnType("datetimeoffset(7)");
+
                     b.Property<string>("ModelRuntimeKey")
                         .IsRequired()
                         .HasMaxLength(256)
                         .HasColumnType("nvarchar(256)")
                         .UseCollation("Latin1_General_100_BIN2");
 
-                    b.Property<Guid>("ParentJobId")
+                    b.Property<Guid?>("ParentJobId")
                         .HasColumnType("uniqueidentifier");
 
                     b.Property<int>("PriorityLane")
                         .HasColumnType("int");
+
+                    b.Property<DateTimeOffset?>("QueueDeadlineUtc")
+                        .HasColumnType("datetimeoffset(7)");
+
+                    b.Property<string>("RequiredExecutorKey")
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)")
+                        .UseCollation("Latin1_General_100_BIN2");
 
                     b.Property<int>("ReservationAttemptCount")
                         .HasColumnType("int");
@@ -751,11 +1048,15 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Migrations
 
                     b.ToTable("GpuMiniTasks", null, t =>
                         {
+                            t.HasCheckConstraint("CK_GpuMiniTasks_ExclusiveOwner", "([ParentJobId] IS NOT NULL AND [SourceRevision] > 0 AND [InteractiveExecutorInstanceId] IS NULL AND [RequiredExecutorKey] IS NULL AND [QueueDeadlineUtc] IS NULL AND [ExecutionDeadlineUtc] IS NULL AND [InteractiveCancellationRequested] = 0 AND [InteractiveOwnerProcessId] IS NULL AND [InteractiveOwnerStartedAtUtc] IS NULL AND [InteractiveOwnerMachineFingerprint] IS NULL) OR ([ParentJobId] IS NULL AND [SourceRevision] = 0 AND [InteractiveExecutorInstanceId] IS NOT NULL AND [InteractiveExecutorInstanceId] <> '00000000-0000-0000-0000-000000000000' AND [RequiredExecutorKey] IS NOT NULL AND LEN([RequiredExecutorKey]) > 0 AND [QueueDeadlineUtc] IS NOT NULL AND [ExecutionDeadlineUtc] IS NOT NULL AND [ExecutionDeadlineUtc] > [QueueDeadlineUtc] AND [PriorityLane] = 0 AND [HandoffLeaseOwner] IS NULL AND [InteractiveOwnerProcessId] IS NOT NULL AND [InteractiveOwnerProcessId] > 0 AND [InteractiveOwnerStartedAtUtc] IS NOT NULL AND [InteractiveOwnerStartedAtUtc] > '0001-01-01T00:00:00+00:00' AND DATEPART(TZOFFSET, [InteractiveOwnerStartedAtUtc]) = 0 AND [InteractiveOwnerMachineFingerprint] IS NOT NULL AND DATALENGTH([InteractiveOwnerMachineFingerprint]) = 128 AND [InteractiveOwnerMachineFingerprint] NOT LIKE '%[^0-9a-f]%' COLLATE Latin1_General_100_BIN2)");
+
                             t.HasCheckConstraint("CK_GpuMiniTasks_HandoffLeaseOwner_NoTrailingWhitespace", "[HandoffLeaseOwner] IS NULL OR (DATALENGTH([HandoffLeaseOwner]) > 0 AND UNICODE(RIGHT([HandoffLeaseOwner], 1)) NOT IN (9, 10, 11, 12, 13, 32, 133, 160, 5760, 8192, 8193, 8194, 8195, 8196, 8197, 8198, 8199, 8200, 8201, 8202, 8232, 8233, 8239, 8287, 12288))");
 
                             t.HasCheckConstraint("CK_GpuMiniTasks_IdempotencyKey_NoTrailingWhitespace", "DATALENGTH([IdempotencyKey]) > 0 AND UNICODE(RIGHT([IdempotencyKey], 1)) NOT IN (9, 10, 11, 12, 13, 32, 133, 160, 5760, 8192, 8193, 8194, 8195, 8196, 8197, 8198, 8199, 8200, 8201, 8202, 8232, 8233, 8239, 8287, 12288)");
 
                             t.HasCheckConstraint("CK_GpuMiniTasks_ModelRuntimeKey_NoTrailingWhitespace", "DATALENGTH([ModelRuntimeKey]) > 0 AND UNICODE(RIGHT([ModelRuntimeKey], 1)) NOT IN (9, 10, 11, 12, 13, 32, 133, 160, 5760, 8192, 8193, 8194, 8195, 8196, 8197, 8198, 8199, 8200, 8201, 8202, 8232, 8233, 8239, 8287, 12288)");
+
+                            t.HasCheckConstraint("CK_GpuMiniTasks_RequiredExecutorKey_NoTrailingWhitespace", "[RequiredExecutorKey] IS NULL OR (DATALENGTH([RequiredExecutorKey]) > 0 AND UNICODE(RIGHT([RequiredExecutorKey], 1)) NOT IN (9, 10, 11, 12, 13, 32, 133, 160, 5760, 8192, 8193, 8194, 8195, 8196, 8197, 8198, 8199, 8200, 8201, 8202, 8232, 8233, 8239, 8287, 12288))");
 
                             t.HasCheckConstraint("CK_GpuMiniTasks_SettingsFingerprint_NoTrailingWhitespace", "DATALENGTH([SettingsFingerprint]) > 0 AND UNICODE(RIGHT([SettingsFingerprint], 1)) NOT IN (9, 10, 11, 12, 13, 32, 133, 160, 5760, 8192, 8193, 8194, 8195, 8196, 8197, 8198, 8199, 8200, 8201, 8202, 8232, 8233, 8239, 8287, 12288)");
                         });
@@ -871,6 +1172,9 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Migrations
                         .ValueGeneratedOnAddOrUpdate()
                         .HasColumnType("rowversion");
 
+                    b.Property<int>("SearchBatchesWhileOcrWaiting")
+                        .HasColumnType("int");
+
                     b.Property<DateTimeOffset>("UpdatedAtUtc")
                         .HasColumnType("datetimeoffset(7)");
 
@@ -883,6 +1187,8 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Migrations
                         {
                             t.HasCheckConstraint("CK_GpuSchedulerState_InFlightWake", "([InFlightWakeOperationId] IS NULL AND [InFlightWakeGeneration] IS NULL AND [InFlightWakeReasons] = 0 AND [InFlightNextDeferredAtUtc] IS NULL AND [InFlightEffectiveAdmissionReasons] IS NULL) OR ([InFlightWakeOperationId] IS NOT NULL AND [InFlightWakeGeneration] IS NOT NULL AND [InFlightEffectiveAdmissionReasons] IS NOT NULL)");
 
+                            t.HasCheckConstraint("CK_GpuSchedulerState_SearchTurnBound", "[SearchBatchesWhileOcrWaiting] BETWEEN 0 AND 3");
+
                             t.HasCheckConstraint("CK_GpuSchedulerState_Singleton", "[Id] = 1");
                         });
                 });
@@ -892,11 +1198,20 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Migrations
                     b.Property<Guid>("Id")
                         .HasColumnType("uniqueidentifier");
 
+                    b.Property<Guid?>("CorpusEpoch")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<long?>("CorpusVersion")
+                        .HasColumnType("bigint");
+
                     b.Property<DateTimeOffset>("CreatedAtUtc")
                         .HasColumnType("datetimeoffset(7)");
 
                     b.Property<int>("Dimensions")
                         .HasColumnType("int");
+
+                    b.Property<Guid?>("EmbeddingJobId")
+                        .HasColumnType("uniqueidentifier");
 
                     b.Property<string>("IndexPath")
                         .IsRequired()
@@ -932,7 +1247,14 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Migrations
 
                     b.HasKey("Id");
 
-                    b.ToTable("IndexGenerations", (string)null);
+                    b.HasIndex("EmbeddingJobId")
+                        .IsUnique()
+                        .HasFilter("[EmbeddingJobId] IS NOT NULL");
+
+                    b.ToTable("IndexGenerations", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_IndexGenerations_CorpusStamp", "([CorpusEpoch] IS NULL AND [CorpusVersion] IS NULL) OR ([CorpusEpoch] IS NOT NULL AND [CorpusEpoch] <> '00000000-0000-0000-0000-000000000000' AND [CorpusVersion] IS NOT NULL AND [CorpusVersion] >= 0)");
+                        });
                 });
 
             modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.IndexGenerationVectorEntity", b =>
@@ -958,6 +1280,17 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Migrations
                     b.Property<Guid?>("ActiveIndexGenerationId")
                         .HasColumnType("uniqueidentifier");
 
+                    b.Property<Guid>("CorpusEpoch")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier")
+                        .HasDefaultValueSql("NEWID()");
+
+                    b.Property<Guid?>("CorpusRebuildOperationId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<long>("CorpusVersion")
+                        .HasColumnType("bigint");
+
                     b.Property<DateTimeOffset?>("EmptyCatalogueValidatedAtUtc")
                         .HasColumnType("datetimeoffset(7)");
 
@@ -974,9 +1307,13 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Migrations
 
                     b.HasIndex("ActiveIndexGenerationId");
 
+                    b.HasIndex("CorpusRebuildOperationId");
+
                     b.ToTable("IndexState", null, t =>
                         {
                             t.HasCheckConstraint("CK_IndexState_ActiveGenerationOrEmptyCatalogue", "[ActiveIndexGenerationId] IS NULL OR [EmptyCatalogueValidatedAtUtc] IS NULL");
+
+                            t.HasCheckConstraint("CK_IndexState_CorpusVersion", "[CorpusVersion] >= 0");
 
                             t.HasCheckConstraint("CK_IndexState_Singleton", "[Id] = 1");
                         });
@@ -985,6 +1322,8 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Migrations
                         new
                         {
                             Id = 1,
+                            CorpusEpoch = new Guid("00000000-0000-0000-0000-000000000000"),
+                            CorpusVersion = 0L,
                             RowVersion = new byte[0],
                             UpdatedAtUtc = new DateTimeOffset(new DateTime(1970, 1, 1, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0))
                         });
@@ -1995,6 +2334,9 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Migrations
                     b.Property<Guid>("Id")
                         .HasColumnType("uniqueidentifier");
 
+                    b.Property<Guid?>("CompletedArtifactId")
+                        .HasColumnType("uniqueidentifier");
+
                     b.Property<DateTimeOffset>("CreatedAtUtc")
                         .HasColumnType("datetimeoffset(7)");
 
@@ -2011,6 +2353,9 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Migrations
                         .IsRequired()
                         .HasMaxLength(512)
                         .HasColumnType("nvarchar(512)");
+
+                    b.Property<Guid?>("JobId")
+                        .HasColumnType("uniqueidentifier");
 
                     b.Property<DateTimeOffset?>("LeaseExpiresAtUtc")
                         .HasColumnType("datetimeoffset(7)");
@@ -2048,6 +2393,8 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Migrations
                         .IsUnique();
 
                     b.HasIndex("DispatchedAtUtc", "DueAtUtc");
+
+                    b.HasIndex("JobId", "SourceRevision");
 
                     b.HasIndex("PipelineRecordId", "SourceRevision");
 
@@ -4171,11 +4518,32 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Migrations
                         .HasColumnType("char(64)")
                         .IsFixedLength();
 
+                    b.Property<string>("ContextHeader")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)");
+
                     b.Property<int>("Length")
                         .HasColumnType("int");
 
                     b.Property<int>("Ordinal")
                         .HasColumnType("int");
+
+                    b.Property<string>("PassagePolicyFingerprint")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("nvarchar(64)");
+
+                    b.Property<string>("SearchInputHash")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("nvarchar(64)");
+
+                    b.Property<string>("SearchText")
+                        .IsRequired()
+                        .ValueGeneratedOnAddOrUpdate()
+                        .HasColumnType("nvarchar(max)")
+                        .HasComputedColumnSql("CASE WHEN [ContextHeader] = N'' THEN [Content] ELSE [ContextHeader] + NCHAR(10) + [Content] END", true);
 
                     b.Property<long>("SourceRevision")
                         .HasColumnType("bigint");
@@ -4234,6 +4602,12 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Migrations
                         .ValueGeneratedOnAddOrUpdate()
                         .HasColumnType("rowversion");
 
+                    b.Property<string>("SearchInputHash")
+                        .HasMaxLength(64)
+                        .IsUnicode(false)
+                        .HasColumnType("char(64)")
+                        .IsFixedLength();
+
                     b.Property<long>("SourceRevision")
                         .HasColumnType("bigint");
 
@@ -4263,6 +4637,8 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Migrations
                     b.ToTable("Vectors", null, t =>
                         {
                             t.HasCheckConstraint("CK_Vectors_PayloadChecksum", "LEN([PayloadChecksum]) = 64 AND [PayloadChecksum] COLLATE Latin1_General_100_BIN2 NOT LIKE '%[^0-9a-f]%'");
+
+                            t.HasCheckConstraint("CK_Vectors_SearchInputHash", "[SearchInputHash] IS NULL OR (LEN([SearchInputHash]) = 64 AND [SearchInputHash] COLLATE Latin1_General_100_BIN2 NOT LIKE '%[^0-9a-f]%')");
 
                             t.HasCheckConstraint("CK_Vectors_TextChunkContentHash", "LEN([TextChunkContentHash]) = 64 AND [TextChunkContentHash] COLLATE Latin1_General_100_BIN2 NOT LIKE '%[^0-9a-f]%'");
                         });
@@ -4316,6 +4692,15 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Migrations
                     b.Navigation("SourceRoot");
 
                     b.Navigation("SourceScanRequest");
+                });
+
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.CorpusRebuildWorkItemEntity", b =>
+                {
+                    b.HasOne("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.CorpusRebuildOperationEntity", null)
+                        .WithMany()
+                        .HasForeignKey("OperationId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
                 });
 
             modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.DeferredCapabilityEntity", b =>
@@ -4460,12 +4845,19 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Migrations
                         .WithMany()
                         .HasForeignKey("ParentJobId", "SourceRevision")
                         .HasPrincipalKey("Id", "SourceRevision")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired();
+                        .OnDelete(DeleteBehavior.Restrict);
 
                     b.Navigation("Batch");
 
                     b.Navigation("ParentJob");
+                });
+
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.IndexGenerationEntity", b =>
+                {
+                    b.HasOne("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.JobEntity", null)
+                        .WithMany()
+                        .HasForeignKey("EmbeddingJobId")
+                        .OnDelete(DeleteBehavior.Restrict);
                 });
 
             modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.IndexGenerationVectorEntity", b =>
@@ -4492,6 +4884,11 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Migrations
                     b.HasOne("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.IndexGenerationEntity", "ActiveIndexGeneration")
                         .WithMany()
                         .HasForeignKey("ActiveIndexGenerationId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.CorpusRebuildOperationEntity", null)
+                        .WithMany()
+                        .HasForeignKey("CorpusRebuildOperationId")
                         .OnDelete(DeleteBehavior.Restrict);
 
                     b.Navigation("ActiveIndexGeneration");
@@ -4599,6 +4996,12 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Migrations
 
             modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.OutboxMessageEntity", b =>
                 {
+                    b.HasOne("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.JobEntity", null)
+                        .WithMany()
+                        .HasForeignKey("JobId", "SourceRevision")
+                        .HasPrincipalKey("Id", "SourceRevision")
+                        .OnDelete(DeleteBehavior.Restrict);
+
                     b.HasOne("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.PipelineRecordEntity", "PipelineRecord")
                         .WithMany()
                         .HasForeignKey("PipelineRecordId", "SourceRevision")

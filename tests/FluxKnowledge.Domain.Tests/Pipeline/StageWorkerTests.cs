@@ -298,6 +298,54 @@ public sealed class StageWorkerTests
         Assert.Empty(publisher.Events);
     }
 
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    public async Task Publish_rebuilds_conflicting_snapshots_and_defers_after_three_conflicts(int conflicts)
+    {
+        var draft = new IndexGenerationDescriptor(Guid.NewGuid(), new string('a', 64), 4, "draft", new string('b', 64), 1);
+        var transitions = new RecordingTransitionStore { ConflictsRemaining = conflicts };
+        var publisher = new RecordingGenerationPublisher(draft);
+        var worker = new PublishStageWorker(new StubIndexGenerationStore([], draft),
+            new StubPipelineReader(new string('a', 64), draft.Id.ToString("N")), publisher,
+            CreateTransitionService(transitions), new FixedTimeProvider());
+        var work = CreateWork(PipelineStage.Publish, PipelineOperations.Publish);
+
+        await worker.ExecuteAsync(work, CancellationToken.None);
+
+        Assert.Equal(Math.Min(conflicts + 1, 3), publisher.BuildCalls);
+        if (conflicts < 3)
+        {
+            Assert.Single(transitions.Transitions);
+            Assert.Empty(transitions.Retries);
+        }
+        else
+        {
+            Assert.Empty(transitions.Transitions);
+            var retry = Assert.Single(transitions.Retries);
+            Assert.Equal(work.Job, retry.CurrentJob);
+            Assert.Equal(work.DispatchMessage, retry.DispatchMessage);
+            Assert.Equal(Now.AddSeconds(5), retry.DueAtUtc);
+            Assert.Equal("publication-snapshot-conflict", retry.Reason);
+        }
+        Assert.Empty(transitions.Failures);
+    }
+
+    private sealed class RecordingGenerationPublisher(IndexGenerationDescriptor draft) : IIndexGenerationPublisher
+    {
+        public int BuildCalls { get; private set; }
+        public ValueTask<IndexGenerationCandidateSnapshot> BuildAndPlaceAsync(Guid id, CancellationToken cancellationToken)
+        {
+            Assert.Equal(draft.Id, id);
+            BuildCalls++;
+            return ValueTask.FromResult(new IndexGenerationCandidateSnapshot(draft with { Id = Guid.NewGuid() }, []));
+        }
+        public ValueTask<IndexGenerationDescriptor> RebuildFromSqlAsync(Guid id, CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+    }
+
     private static StageWorkItem CreateWork(PipelineStage stage, string operation)
     {
         var recordId = PipelineRecordId.New();
@@ -438,7 +486,7 @@ public sealed class StageWorkerTests
     }
 
     private sealed class StubIndexGenerationStore(
-        IReadOnlyList<CanonicalTextChunk> chunks) : IIndexGenerationStore
+        IReadOnlyList<CanonicalTextChunk> chunks, IndexGenerationDescriptor? generation = null) : IIndexGenerationStore
     {
         public ValueTask<IReadOnlyList<CanonicalTextChunk>> ReadChunksAsync(
             PipelineRecordId pipelineRecordId,
@@ -458,7 +506,7 @@ public sealed class StageWorkerTests
         public ValueTask<IndexGenerationDescriptor?> GetGenerationAsync(
             Guid indexGenerationId,
             CancellationToken cancellationToken) =>
-            throw new NotSupportedException();
+            ValueTask.FromResult(generation);
 
         public ValueTask<Guid?> GetActiveGenerationIdAsync(
             CancellationToken cancellationToken) =>
@@ -474,11 +522,18 @@ public sealed class StageWorkerTests
     {
         public List<StageTransitionRequest> Transitions { get; } = [];
         public List<StageFailureRequest> Failures { get; } = [];
+        public List<StageRetryRequest> Retries { get; } = [];
+        public int ConflictsRemaining { get; set; }
 
         public ValueTask<StageTransitionResult> TransitionAsync(
             StageTransitionRequest request,
             CancellationToken cancellationToken)
         {
+            if (ConflictsRemaining > 0)
+            {
+                ConflictsRemaining--;
+                throw new PublicationSnapshotConflictException("The corpus changed.");
+            }
             Transitions.Add(request);
             return ValueTask.FromResult(
                 new StageTransitionResult(
@@ -493,6 +548,12 @@ public sealed class StageWorkerTests
             CancellationToken cancellationToken)
         {
             Failures.Add(request);
+            return ValueTask.CompletedTask;
+        }
+
+        public ValueTask RetryAsync(StageRetryRequest request, CancellationToken cancellationToken)
+        {
+            Retries.Add(request);
             return ValueTask.CompletedTask;
         }
     }

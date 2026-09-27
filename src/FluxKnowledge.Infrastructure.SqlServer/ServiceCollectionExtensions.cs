@@ -3,6 +3,8 @@ using FluxKnowledge.Infrastructure.SqlServer.Persistence;
 using FluxKnowledge.Infrastructure.SqlServer.Provisioning;
 using FluxKnowledge.Infrastructure.SqlServer.Search;
 using FluxKnowledge.Application.Ports;
+using FluxKnowledge.Application.Gpu;
+using FluxKnowledge.Integrations.Windows;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -36,7 +38,9 @@ public static class ServiceCollectionExtensions
 
         services.AddDbContextFactory<FluxKnowledgeDbContext>(ConfigureDatabase);
         services.TryAddSingleton<TimeProvider>(TimeProvider.System);
+        if (OperatingSystem.IsWindows()) services.TryAddSingleton<IGpuInteractiveOwnerProbe, WindowsInteractiveGpuOwnerProbe>();
         services.AddSingleton<IDerivedIndexRecoveryStore, SqlDerivedIndexRecoveryStore>();
+        services.AddScoped<ICorpusGenerationLeaseStore, SqlCorpusGenerationLeaseStore>();
         services.AddScoped<ILexicalSearch, SqlFullTextSearch>();
         services.AddScoped<ISearchHydrator, SqlSearchHydrator>();
         services.AddScoped<ICorpusRetrievalReader, SqlCorpusRetrievalReader>();

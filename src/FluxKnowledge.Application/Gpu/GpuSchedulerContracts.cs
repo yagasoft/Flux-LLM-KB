@@ -22,7 +22,8 @@ public sealed record GpuBatchCandidate(
     string ModelRuntimeKey,
     string SettingsFingerprint,
     int ItemCount,
-    long EstimatedBytes);
+    long EstimatedBytes,
+    string? RequiredExecutorKey = null);
 
 public enum GpuAdmissionDisposition
 {

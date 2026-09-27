@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Search;
+using FluxKnowledge.Domain.Pipeline;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
 using FluxKnowledge.Infrastructure.SqlServer.Search;
@@ -151,7 +152,7 @@ public sealed class Task5RegressionTests(NativeSqlServerFixture fixture) : IClas
     {
         var artifactId = Guid.NewGuid();
         var contentHash = Convert.ToHexStringLower(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(searchText)));
-        context.PipelineRecords.Add(new PipelineRecordEntity { Id = recordId, SourceIdentityId = sourceId, SourceRevisionId = retainedSourceRevisionId, Revision = revision, ContentHash = contentHash, RootLineageRecordId = recordId, CurrentStage = 3, RegisteredAtUtc = DateTimeOffset.UtcNow, IsDeleted = deleted });
+        context.PipelineRecords.Add(new PipelineRecordEntity { Id = recordId, SourceIdentityId = sourceId, SourceRevisionId = retainedSourceRevisionId, Revision = revision, ContentHash = contentHash, RootLineageRecordId = recordId, CurrentStage = (int)PipelineStage.Publish, CompletionCriteriaMet = true, RegisteredAtUtc = DateTimeOffset.UtcNow, IsDeleted = deleted });
         context.Artifacts.Add(new ArtifactEntity { Id = artifactId, PipelineRecordId = recordId, SourceRevision = revision, Stage = 3, ContentHash = contentHash, ContentType = "text/plain", SearchText = searchText, CreatedAtUtc = DateTimeOffset.UtcNow });
         var chunk = new TextChunkEntity { ArtifactId = artifactId, SourceRevision = revision, Ordinal = 0, StartOffset = 0, Length = searchText.Length, Content = searchText, ContentHash = contentHash };
         context.TextChunks.Add(chunk);

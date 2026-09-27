@@ -175,10 +175,16 @@ public sealed class SchemaMappingTests
     public void Gpu_mini_task_mapping_preserves_future_lane_fields()
     {
         using var context = CreateContext();
-        var entityType = FindTable(context.Model, "GpuMiniTasks");
+        var entityType = FindTable(context.GetService<IDesignTimeModel>().Model, "GpuMiniTasks");
 
         AssertProperty<Guid>(entityType, "Id");
-        AssertProperty<Guid>(entityType, "ParentJobId");
+        AssertProperty<Guid?>(entityType, "ParentJobId");
+        AssertProperty<Guid?>(entityType, "InteractiveExecutorInstanceId");
+        AssertProperty<string>(entityType, "RequiredExecutorKey");
+        AssertProperty<DateTimeOffset?>(entityType, "QueueDeadlineUtc");
+        AssertProperty<DateTimeOffset?>(entityType, "ExecutionDeadlineUtc");
+        AssertProperty<bool>(entityType, "InteractiveCancellationRequested");
+        Assert.Contains(entityType.GetCheckConstraints(), c => c.Name == "CK_GpuMiniTasks_ExclusiveOwner");
         AssertProperty<long>(entityType, "SourceRevision");
         AssertProperty<int>(entityType, "PriorityLane");
         AssertProperty<string>(entityType, "ModelRuntimeKey");
@@ -1224,8 +1230,9 @@ public sealed class NativeSchemaMigrationTests(NativeSqlServerFixture fixture)
                OR [name] LIKE N'CK_Jobs_%_NoTrailingWhitespace';
             """,
             connection);
-        // The executor boundary adds three dispatch, two receipt and four evidence fences.
-        Assert.Equal(25, Convert.ToInt32(await constraintCommand.ExecuteScalarAsync()));
+        // The executor boundary adds three dispatch, two receipt and four evidence
+        // fences; interactive ownership adds the required-executor-key fence.
+        Assert.Equal(26, Convert.ToInt32(await constraintCommand.ExecuteScalarAsync()));
 
         await using var insert = new SqlCommand(
             """
@@ -1279,18 +1286,15 @@ public sealed class NativeSchemaMigrationTests(NativeSqlServerFixture fixture)
                      {"text/plain"}, {"migration test"}, {now});
                 """);
 
-            var chunk = new TextChunkEntity
-            {
-                ArtifactId = artifactId,
-                SourceRevision = 1,
-                Ordinal = 0,
-                StartOffset = 0,
-                Length = 14,
-                Content = "migration test",
-                ContentHash = new string('c', 64)
-            };
-            context.TextChunks.Add(chunk);
-            await context.SaveChangesAsync();
+            // Seed the historical chunk shape too: coherent-passage columns did
+            // not exist at this migration's baseline.
+            await context.Database.ExecuteSqlInterpolatedAsync(
+                $"""
+                INSERT INTO [TextChunks]
+                    ([ArtifactId], [SourceRevision], [Ordinal], [StartOffset], [Length], [Content], [ContentHash])
+                VALUES ({artifactId}, {1L}, {0}, {0}, {14}, {"migration test"}, {new string('c', 64)});
+                """);
+            var chunkId = await context.TextChunks.Select(chunk => chunk.Id).SingleAsync();
 
             await context.Database.ExecuteSqlInterpolatedAsync(
                 $"""
@@ -1299,7 +1303,7 @@ public sealed class NativeSchemaMigrationTests(NativeSqlServerFixture fixture)
                       [ContentHash], [SourceRevision], [IsDeleted],
                       [IndexGenerationId], [CreatedAtUtc])
                  VALUES
-                     ({chunk.Id}, {"migration-test:1"}, {1}, {new byte[] { 0, 0, 128, 63 }},
+                     ({chunkId}, {"migration-test:1"}, {1}, {new byte[] { 0, 0, 128, 63 }},
                       {new string('d', 64)}, {1L}, {false}, {generationId}, {now});
                  """);
             vectorId = await context.Vectors

@@ -7,6 +7,8 @@ public sealed record DispatchMessage
 {
     public DispatchMessageId Id { get; private init; }
 
+    public JobId JobId { get; private init; }
+
     public PipelineRecordId PipelineRecordId { get; private init; }
 
     public long SourceRevision { get; private init; }
@@ -24,6 +26,7 @@ public sealed record DispatchMessage
     public DateTimeOffset CreatedAtUtc { get; private init; }
 
     public static DispatchMessage Create(
+        JobId jobId,
         PipelineRecordId pipelineRecordId,
         long sourceRevision,
         PipelineStage stage,
@@ -34,19 +37,20 @@ public sealed record DispatchMessage
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(operation);
         ArgumentException.ThrowIfNullOrWhiteSpace(idempotencyKey);
-        if (sourceRevision <= 0 || dispatchGeneration < 0)
+        if (jobId.Value == Guid.Empty || sourceRevision <= 0 || dispatchGeneration < 0)
         {
             throw new DomainInvariantException("Source revision and dispatch generation must be non-negative valid values.");
         }
 
         var now = DateTimeOffset.UtcNow;
         return new DispatchMessage(
-            DispatchMessageId.New(), pipelineRecordId, sourceRevision, stage, operation,
+            DispatchMessageId.New(), jobId, pipelineRecordId, sourceRevision, stage, operation,
             dispatchGeneration, idempotencyKey, dueAtUtc ?? now, now);
     }
 
     private DispatchMessage(
         DispatchMessageId id,
+        JobId jobId,
         PipelineRecordId pipelineRecordId,
         long sourceRevision,
         PipelineStage stage,
@@ -57,6 +61,7 @@ public sealed record DispatchMessage
         DateTimeOffset createdAtUtc)
     {
         Id = id;
+        JobId = jobId;
         PipelineRecordId = pipelineRecordId;
         SourceRevision = sourceRevision;
         Stage = stage;

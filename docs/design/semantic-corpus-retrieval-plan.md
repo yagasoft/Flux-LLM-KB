@@ -1,5 +1,13 @@
 # Semantic corpus retrieval implementation plan
 
+**Superseded for future implementation, 25 September 2026:** use the
+[hybrid passage design](hybrid-passage-retrieval.md) and its
+[implementation plan](hybrid-passage-retrieval-plan.md). The user selected English,
+declared indexed text disposable and requested quality models with shared GPU
+scheduling. The new plan uses a clean rebuild, coherent passages and reranking;
+the online model-transition work below is historical planning, not an execution
+requirement. Prior experiments and their failed gates remain valid records.
+
 Date: 2026-09-20
 Last aligned: 2026-09-24, main `0b2606ecb8a2db1b4d7a6eee251a6d933bcc3d91`.
 Status: design-stage plan with explicit model and migration gates; lexical corpus

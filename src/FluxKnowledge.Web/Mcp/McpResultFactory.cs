@@ -3,6 +3,7 @@ using System.Text.Json;
 using FluxKnowledge.Application.Mcp;
 using ModelContextProtocol.Protocol;
 using FluxKnowledge.Application.IntegrationV1;
+using FluxKnowledge.Application.Ports;
 
 namespace FluxKnowledge.Web.Mcp;
 
@@ -36,6 +37,7 @@ internal static class McpResultFactory
 
     public static NativeV1Envelope NativeFailure(Exception exception) => exception switch
     {
+        PassageRetrievalRefusalException search => new(false, null, "search-" + search.Status, "Search could not be completed.", search.Retryable),
         NativeOperationException native => new(false, null, native.ReasonCode, "The request could not be completed.", false),
         _ when McpTransientFailureClassifier.IsTransient(exception) => new(false, null, "temporary-unavailable", "The request could not be completed.", true),
         _ => new(false, null, "operation-failed", "The request could not be completed.", false)

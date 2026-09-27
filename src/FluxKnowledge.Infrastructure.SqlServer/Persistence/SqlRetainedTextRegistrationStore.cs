@@ -455,6 +455,7 @@ public sealed class SqlRetainedTextRegistrationStore(
         context.OutboxMessages.Add(new OutboxMessageEntity
         {
             Id = dispatchId,
+            JobId = jobId,
             PipelineRecordId = recordId,
             SourceRevision = revision,
             Stage = (int)PipelineStage.Extract,

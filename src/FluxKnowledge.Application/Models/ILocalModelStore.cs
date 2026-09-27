@@ -67,6 +67,16 @@ public sealed class VerifiedLocalModelLease : IDisposable
     public IReadOnlyList<VerifiedModelFile> Files =>
         _files.Select(static item => new VerifiedModelFile(item.Key, item.Value.ByteLength)).ToArray();
 
+    /// <summary>Only for local native loaders. Keep this lease alive until the loader/session
+    /// is disposed; a returned path has no protection after lease disposal.</summary>
+    public string GetVerifiedLocalPath(string filename)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ArgumentException.ThrowIfNullOrWhiteSpace(filename);
+        if (!_files.TryGetValue(filename, out var file)) throw new KeyNotFoundException(filename);
+        return file.ProtectedLocalPath ?? throw new ModelVerificationFilesException(ModelStoreReasons.PathUnsafe);
+    }
+
     public ValueTask<int> ReadAsync(
         string filename,
         long offset,

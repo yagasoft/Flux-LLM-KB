@@ -139,7 +139,8 @@ public sealed class UsearchGenerationBuilder : IIndexGenerationPublisher
         Guid indexGenerationId,
         CancellationToken cancellationToken)
     {
-        var vectors = await store.ReadEligibleVectorsAsync(cancellationToken);
+        var publication = await store.ReadPublicationSnapshotAsync(indexGenerationId, cancellationToken);
+        var vectors = publication.Vectors;
         if (vectors.Count == 0)
         {
             throw new NoEligibleVectorsException();
@@ -158,15 +159,15 @@ public sealed class UsearchGenerationBuilder : IIndexGenerationPublisher
         }
 
         var membershipChecksum = UsearchGenerationValidator.ComputeChecksum(fingerprint, dimensions, vectors);
-        var candidateId = UsearchGenerationValidator.DeterministicGenerationId(membershipChecksum);
+        var candidateId = UsearchGenerationValidator.DeterministicGenerationId(membershipChecksum, publication.PublicationStamp);
         var finalDirectory = Path.Combine(options.RootPath, "generations", candidateId.ToString("N"));
         var candidate = new IndexGenerationDescriptor(candidateId, fingerprint, dimensions,
-            finalDirectory, membershipChecksum, vectors.Count);
+            finalDirectory, membershipChecksum, vectors.Count, publication.PublicationStamp);
         EnsureStorageSafe(finalDirectory);
         if (Directory.Exists(finalDirectory))
         {
             validator.Validate(finalDirectory, candidate, vectors);
-            return new IndexGenerationCandidateSnapshot(candidate, vectors);
+            return new IndexGenerationCandidateSnapshot(candidate, vectors, publication.ExpectedCorpusStamp);
         }
 
         var staging = Path.Combine(options.RootPath, "staging", candidateId.ToString("N"), Guid.NewGuid().ToString("N"));
@@ -185,13 +186,13 @@ public sealed class UsearchGenerationBuilder : IIndexGenerationPublisher
                     _storageSafety,
                     _directoryCreator);
                 candidate = candidate with { IndexPath = finalPath };
-                return new IndexGenerationCandidateSnapshot(candidate, vectors);
+                return new IndexGenerationCandidateSnapshot(candidate, vectors, publication.ExpectedCorpusStamp);
             }
             catch (IOException) when (Directory.Exists(finalDirectory))
             {
                 validator.Validate(finalDirectory, candidate, vectors);
                 if (Directory.Exists(staging)) Directory.Delete(staging, recursive: true);
-                return new IndexGenerationCandidateSnapshot(candidate, vectors);
+                return new IndexGenerationCandidateSnapshot(candidate, vectors, publication.ExpectedCorpusStamp);
             }
         }
         catch
@@ -224,7 +225,7 @@ public sealed class UsearchGenerationBuilder : IIndexGenerationPublisher
         File.WriteAllText(Path.Combine(staging, UsearchGenerationValidator.MetadataFileName),
             JsonSerializer.Serialize(new UsearchGenerationValidator.Metadata(
                 candidate.Id, candidate.ModelFingerprint, "cos", candidate.Dimensions,
-                candidate.VectorCount, candidate.MetadataChecksum)));
+                candidate.VectorCount, candidate.MetadataChecksum, candidate.CorpusStamp)));
     }
 
     private void EnsureStorageSafe(string path) => _storageSafety?.ValidateBeforeIo(path);

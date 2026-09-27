@@ -26,16 +26,31 @@ public sealed class PublishStageWorker(
             return;
         }
 
-        var candidate = await publisher.BuildAndPlaceAsync(generation.Id, cancellationToken);
-        var placed = candidate.Generation;
-        await transitions.TransitionAsync(new StageTransitionRequest(
-            workItem.DispatchMessage, workItem.Job,
-            new StageArtifact(Guid.NewGuid(), PipelineStage.Publish,
-                Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(placed.MetadataChecksum))),
-                "application/vnd.fluxknowledge.usearch-generation", placed.Id.ToString("N"), timeProvider.GetUtcNow()),
-            null, null, nameof(PublishStageWorker), new IndexingStageOutput(
-                ActivateGeneration: placed,
-                ActivateMembership: candidate.Vectors)), cancellationToken);
+        for (var attempt = 0; attempt < 3; attempt++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var candidate = await publisher.BuildAndPlaceAsync(generation.Id, cancellationToken);
+            var placed = candidate.Generation;
+            try
+            {
+                await transitions.TransitionAsync(new StageTransitionRequest(
+                    workItem.DispatchMessage, workItem.Job,
+                    new StageArtifact(Guid.NewGuid(), PipelineStage.Publish,
+                        Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(placed.MetadataChecksum))),
+                        "application/vnd.fluxknowledge.usearch-generation", placed.Id.ToString("N"), timeProvider.GetUtcNow()),
+                    null, null, nameof(PublishStageWorker), new IndexingStageOutput(
+                        ActivateGeneration: placed,
+                        ActivateMembership: candidate.Vectors,
+                        ExpectedCorpusStamp: candidate.ExpectedCorpusStamp)), cancellationToken);
+                return;
+            }
+            catch (PublicationSnapshotConflictException)
+            {
+                // Valid vectors and immutable placements are reusable; only membership changed.
+            }
+        }
+        await transitions.RetryAsync(new StageRetryRequest(workItem.DispatchMessage, workItem.Job,
+            timeProvider.GetUtcNow().AddSeconds(5), "publication-snapshot-conflict", nameof(PublishStageWorker)), cancellationToken);
     }
 
     private async ValueTask<IndexGenerationDescriptor?> FindGenerationAsync(

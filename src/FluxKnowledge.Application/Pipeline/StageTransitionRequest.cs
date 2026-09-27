@@ -20,7 +20,9 @@ public sealed record IndexingStageOutput(
     string? ModelFingerprint = null,
     IReadOnlyList<CanonicalVector>? Vectors = null,
     IndexGenerationDescriptor? ActivateGeneration = null,
-    IReadOnlyList<CanonicalVector>? ActivateMembership = null);
+    IReadOnlyList<CanonicalVector>? ActivateMembership = null,
+    CorpusPublicationStamp? ExpectedCorpusStamp = null,
+    bool UsePersistedEmbeddingDraft = false);
 
 public sealed record StageTransitionRequest(
     ClaimedDispatchMessage DispatchMessage,
@@ -42,4 +44,11 @@ public sealed record StageFailureRequest(
     ClaimedJob CurrentJob,
     string Reason,
     string? ErrorDetails,
+    string Actor);
+
+public sealed record StageRetryRequest(
+    ClaimedDispatchMessage DispatchMessage,
+    ClaimedJob CurrentJob,
+    DateTimeOffset DueAtUtc,
+    string Reason,
     string Actor);

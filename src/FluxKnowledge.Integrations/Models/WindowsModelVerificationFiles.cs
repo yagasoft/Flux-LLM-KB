@@ -24,15 +24,29 @@ public sealed class WindowsModelVerificationFiles : IModelVerificationFiles
     private readonly HandleRelativeNativeFileSystem _fileSystem;
     private readonly NativeModelDirectoryChain _root;
     private readonly WindowsModelVerificationTestOptions? _testOptions;
+    private readonly string[]? _bundleComponents;
     private bool _disposed;
 
-    private WindowsModelVerificationFiles(string root, WindowsModelVerificationTestOptions? testOptions = null)
+    private WindowsModelVerificationFiles(string root, WindowsModelVerificationTestOptions? testOptions = null, IReadOnlyList<string>? bundleComponents = null)
     {
         _testOptions = testOptions;
         _fileSystem = new HandleRelativeNativeFileSystem();
         try
         {
             _root = _fileSystem.OpenModelDirectoryChain(root);
+            if (bundleComponents is not null)
+            {
+                _bundleComponents = bundleComponents.ToArray();
+                try
+                {
+                    using var checkedBundle = _fileSystem.OpenModelDirectoryChain(_root.Leaf, _bundleComponents);
+                }
+                catch
+                {
+                    _root.Dispose();
+                    throw;
+                }
+            }
             _testOptions?.Observe?.Invoke(WindowsModelVerificationOperation.OpenRoot);
         }
         catch (NativeModelPathException exception)
@@ -46,6 +60,14 @@ public sealed class WindowsModelVerificationFiles : IModelVerificationFiles
     }
 
     public static WindowsModelVerificationFiles OpenProduction() => new(ProductionRoot);
+
+    // Explicitly selected, flat, immutable bundle under the same canonical store. This
+    // lets ONNX open verified external data beside its graph without copying weights.
+    public static WindowsModelVerificationFiles OpenProductionBundle(IReadOnlyList<string> literalDirectoryComponents) =>
+        new(ProductionRoot, bundleComponents: literalDirectoryComponents ?? throw new ArgumentNullException(nameof(literalDirectoryComponents)));
+
+    internal static WindowsModelVerificationFiles OpenBundleForTest(string root, IReadOnlyList<string> components) =>
+        new(root, bundleComponents: components);
 
     public static async Task<byte[]> ReadLocalManifestAsync(
         string localPath,
@@ -134,7 +156,7 @@ public sealed class WindowsModelVerificationFiles : IModelVerificationFiles
         {
             var directories = _fileSystem.OpenModelDirectoryChain(
                 _root.Leaf,
-                ["artifacts", "sha256", specification.Sha256]);
+                _bundleComponents ?? ["artifacts", "sha256", specification.Sha256]);
             try
             {
                 var held = _fileSystem.TryOpenModelReadFile(directories.Leaf, specification.Filename, directories);
@@ -231,6 +253,7 @@ public sealed class WindowsModelVerificationFiles : IModelVerificationFiles
     private sealed class WindowsModelVerificationFile(NativeModelHeldReadFile file) : IModelVerificationFile
     {
         public long ByteLength => file.ByteLength;
+        public string ProtectedLocalPath => file.ProtectedLocalPath;
 
         public ValueTask<int> ReadAsync(long offset, Memory<byte> buffer, CancellationToken cancellationToken) =>
             file.ReadAsync(offset, buffer, cancellationToken);

@@ -115,6 +115,19 @@ public sealed class DerivedIndexRecoveryCoordinator : IDerivedIndexRecoveryStatu
 
             var sql = await recoveryStore.ReadActiveAsync(cancellationToken);
             activeId = sql.ActiveGenerationId;
+            if (sql.IsProjectionUnavailable)
+            {
+                if (sql.IsValidatedEmptyCatalogue) throw new SqlMembershipValidationException();
+                var updating = new DerivedIndexRecoverySnapshot(DerivedIndexRecoveryState.IndexUpdating, activeId,
+                    beforeAttempt.LastCompletedAtUtc, null, null, 0, IsProjectionUnavailable: true);
+                if (ReferenceEquals(Interlocked.CompareExchange(ref _snapshot, updating, beforeAttempt), beforeAttempt))
+                {
+                    _attempts = 0;
+                    Volatile.Write(ref _episodeDetectionRecorded, 0);
+                    await PublishAsync(cancellationToken);
+                }
+                return;
+            }
             if (sql.IsValidatedEmptyCatalogue)
             {
                 ValidateValidatedEmptyCatalogue(sql);

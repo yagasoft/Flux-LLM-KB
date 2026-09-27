@@ -23,4 +23,10 @@ public sealed record SearchResponse(
     IReadOnlyList<SearchHit> Results,
     int CandidateCount,
     string ActiveIndexGeneration,
-    string ScopeNote);
+    string ScopeNote)
+{
+    // The knowledge list cannot carry response metadata; its adapter must refuse
+    // degraded source retrieval rather than silently return an incomplete union.
+    [System.Text.Json.Serialization.JsonIgnore]
+    public string? DegradedStatus { get; init; }
+}

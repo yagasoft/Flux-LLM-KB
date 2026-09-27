@@ -151,6 +151,7 @@ public sealed class SqlPipelineStore(
             new OutboxMessageEntity
             {
                 Id = dispatchId,
+                JobId = jobId,
                 PipelineRecordId = recordId,
                 SourceRevision = revision,
                 Stage = (int)PipelineStage.Extract,
@@ -262,7 +263,7 @@ public sealed class SqlPipelineStore(
                   artifact.Stage == (int)PipelineStage.CanonicalIndex
             orderby chunk.Ordinal
             select new CanonicalTextChunk(chunk.Id, chunk.Ordinal, chunk.StartOffset, chunk.Length,
-                chunk.Content, chunk.ContentHash))
+                chunk.Content, chunk.ContentHash, chunk.PassagePolicyFingerprint, chunk.ContextHeader))
             .ToListAsync(cancellationToken);
     }
 
@@ -287,24 +288,60 @@ public sealed class SqlPipelineStore(
         CancellationToken cancellationToken)
     {
         await using var context = await contextFactory.CreateDbContextAsync(cancellationToken);
-        return await (
-            from vector in context.Vectors.AsNoTracking()
-            join chunk in context.TextChunks.AsNoTracking() on vector.TextChunkId equals chunk.Id
-            join artifact in context.Artifacts.AsNoTracking() on chunk.ArtifactId equals artifact.Id
-            join record in context.PipelineRecords.AsNoTracking() on artifact.PipelineRecordId equals record.Id
-            where !vector.IsDeleted && !record.IsDeleted &&
-                  (record.SourceRevisionId.HasValue
-                      ? context.SourceRevisions.Any(sourceRevision =>
-                          sourceRevision.Id == record.SourceRevisionId.Value && sourceRevision.SuppressedAtUtc == null)
-                      : record.Revision == context.PipelineRecords
-                          .Where(candidate => candidate.SourceIdentityId == record.SourceIdentityId)
-                          .Max(candidate => candidate.Revision))
-            orderby vector.VectorId
-            select new CanonicalVector(vector.VectorId, vector.TextChunkId,
-                vector.ModelFingerprint, vector.Dimensions, vector.Values,
-                vector.TextChunkContentHash, vector.PayloadChecksum,
-                vector.SourceRevision))
-            .ToListAsync(cancellationToken);
+        return await SqlPublishedPassageSelection.ReadVectorsAsync(context, cancellationToken);
+    }
+
+    public async ValueTask<IReadOnlyList<CanonicalVector>> ReadPublicationVectorsAsync(
+        Guid draftGenerationId, CancellationToken cancellationToken) =>
+        (await ReadPublicationSnapshotAsync(draftGenerationId, cancellationToken)).Vectors;
+
+    public async ValueTask<IndexPublicationSnapshot> ReadPublicationSnapshotAsync(
+        Guid draftGenerationId, CancellationToken cancellationToken)
+    {
+        await using var executionContext = await contextFactory.CreateDbContextAsync(cancellationToken);
+        return await executionContext.Database.CreateExecutionStrategy().ExecuteAsync(async () =>
+        {
+            await using var context = await contextFactory.CreateDbContextAsync(cancellationToken);
+            return await ReadPublicationVectorsWithinTransactionAsync(context, draftGenerationId, cancellationToken);
+        });
+    }
+
+    private async Task<IndexPublicationSnapshot> ReadPublicationVectorsWithinTransactionAsync(
+        FluxKnowledgeDbContext context, Guid draftGenerationId, CancellationToken cancellationToken)
+    {
+        await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
+        await SqlPublishedPassageSelection.AcquireFenceAsync(context, cancellationToken);
+        var expectedStamp = await SqlPublishedPassageSelection.ReadStampAsync(context, cancellationToken);
+        var previousMembership = await SqlPublishedPassageSelection.ReadVectorIdsAsync(context, cancellationToken);
+        var origins = await (from vector in context.Vectors
+            join chunk in context.TextChunks on vector.TextChunkId equals chunk.Id
+            join artifact in context.Artifacts on chunk.ArtifactId equals artifact.Id
+            where vector.IndexGenerationId == draftGenerationId
+            select artifact.PipelineRecordId).Distinct().ToArrayAsync(cancellationToken);
+        // A general corpus rebuild has no source draft. A draft must belong to one source.
+        if (origins.Length > 1) throw new InvalidOperationException("A publication draft spans multiple pipeline records.");
+        if (origins.Length == 1)
+        {
+            var record = await context.PipelineRecords.SingleAsync(record => record.Id == origins[0], cancellationToken);
+            if (!record.CompletionCriteriaMet)
+            {
+                if (record.IsDeleted || record.CurrentStage != (int)PipelineStage.Publish)
+                    throw new InvalidOperationException("The publication draft is no longer publishable.");
+                await SqlStageTransitionStore.PublishDocumentIfApplicableAsync(context, record, timeProvider.GetUtcNow(), cancellationToken);
+                record.CompletionCriteriaMet = true;
+                await context.SaveChangesAsync(cancellationToken);
+            }
+        }
+        var vectors = await SqlPublishedPassageSelection.ReadVectorsAsync(context, cancellationToken);
+        var publishedStamp = expectedStamp with
+        {
+            CorpusVersion = checked(expectedStamp.CorpusVersion +
+                (previousMembership.SequenceEqual(vectors.Select(vector => vector.VectorId)) ? 0 : 1))
+        };
+        // Preview invokes the commit selection, including branch precedence and retirement,
+        // but rolls back every mutation before returning detached immutable vector data.
+        await transaction.RollbackAsync(cancellationToken);
+        return new IndexPublicationSnapshot(vectors, expectedStamp, publishedStamp);
     }
 
     public async ValueTask<IndexGenerationDescriptor?> GetGenerationAsync(
@@ -316,7 +353,9 @@ public sealed class SqlPipelineStore(
             .Where(generation => generation.Id == indexGenerationId && generation.RetiredAtUtc == null)
             .Select(generation => new IndexGenerationDescriptor(generation.Id,
                 generation.ModelFingerprint, generation.Dimensions, generation.IndexPath,
-                generation.MetadataChecksum, generation.VectorCount))
+                generation.MetadataChecksum, generation.VectorCount,
+                generation.CorpusEpoch.HasValue && generation.CorpusVersion.HasValue
+                    ? new CorpusPublicationStamp(generation.CorpusEpoch.Value, generation.CorpusVersion.Value) : null))
             .SingleOrDefaultAsync(cancellationToken);
     }
 
@@ -338,8 +377,13 @@ public sealed class SqlPipelineStore(
             candidate => candidate.Id == generation.Id, cancellationToken);
         if (entity is null)
         {
-            entity = new IndexGenerationEntity { Id = generation.Id, CreatedAtUtc = timeProvider.GetUtcNow() };
+            entity = new IndexGenerationEntity { Id = generation.Id, CreatedAtUtc = timeProvider.GetUtcNow(),
+                CorpusEpoch = generation.CorpusStamp?.CorpusEpoch, CorpusVersion = generation.CorpusStamp?.CorpusVersion };
             context.IndexGenerations.Add(entity);
+        }
+        else if (entity.CorpusEpoch != generation.CorpusStamp?.CorpusEpoch || entity.CorpusVersion != generation.CorpusStamp?.CorpusVersion)
+        {
+            throw new IndexGenerationStaleException("Generation metadata updates cannot change the immutable corpus stamp.");
         }
         entity.ModelFingerprint = generation.ModelFingerprint;
         entity.Dimensions = generation.Dimensions;

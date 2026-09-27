@@ -13,6 +13,7 @@ public sealed class VectorEntity
     public byte[] Values { get; set; } = [];
     public string TextChunkContentHash { get; set; } = string.Empty;
     public string PayloadChecksum { get; set; } = string.Empty;
+    public string? SearchInputHash { get; set; }
     public long SourceRevision { get; set; }
     public bool IsDeleted { get; set; }
     public Guid IndexGenerationId { get; set; }

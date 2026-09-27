@@ -1,6 +1,7 @@
 using FluxKnowledge.Application.Contracts;
 using FluxKnowledge.Application.Gpu;
 using FluxKnowledge.Application.Ports;
+using FluxKnowledge.Application.Sources;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -27,7 +28,8 @@ public static class GpuSchedulerServiceCollectionExtensions
         services.TryAddSingleton<IStatusEventPublisher, NullStatusEventPublisher>();
         services.TryAddScoped<SqlGpuSchedulerStore>(provider => new SqlGpuSchedulerStore(
             provider.GetRequiredService<IDbContextFactory<FluxKnowledgeDbContext>>(),
-            timeProvider: provider.GetRequiredService<TimeProvider>()));
+            timeProvider: provider.GetRequiredService<TimeProvider>(),
+            deploymentValidationHold: provider.GetService<IDeploymentValidationHold>()));
         services.TryAddScoped<IGpuSchedulerStore>(provider => provider.GetRequiredService<SqlGpuSchedulerStore>());
         services.TryAddScoped<IGpuExecutorDispatchStore>(provider => provider.GetRequiredService<SqlGpuSchedulerStore>());
         services.TryAddScoped<SqlNativeWorkerInstanceStore>(provider => new SqlNativeWorkerInstanceStore(

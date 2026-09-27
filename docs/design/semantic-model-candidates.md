@@ -1,16 +1,25 @@
-# Local embedding candidates for semantic retrieval
+# Local models for semantic retrieval and reranking
 
-Current evaluation (24 September 2026): BGE-M3's ONNX export at the pinned
-revision below is the sole active semantic candidate. Its nine-file acquisition
-was separately approved and is staged only under `J:\Models`; this does not
-select or activate a production model. Qwen evaluation and the proposed Python
-inference runtime are paused. Revisit Qwen only if a measured material BGE
-shortcoming justifies that extra runtime. The original PyTorch and Qwen rows
-below document the earlier research shortlist, not current acquisition scope.
+Current proposal (25 September 2026): use the already acquired BGE-M3 ONNX
+embedding model with BAAI/bge-reranker-v2-m3 in the
+[hybrid passage design](hybrid-passage-retrieval.md). Include GPU scheduling
+from the outset; CPU placement is optional after same-model validation. Neither
+model is activated for production by this proposal. Subsequent approved work
+acquired and exported the reranker; native CPU adapter parity is now verified as
+recorded below. Qwen evaluation and the alternative
+production Python route remain paused; a demonstrated limitation can justify a
+specific alternative without changing the passage/candidate/citation contracts.
+The earlier shortlist below is historical research, not current acquisition scope.
 
 Metadata and official documentation checked 24 September 2026. This is a shortlist for local evaluation, not a production model selection or permission to acquire model files. No model payload, tokenizer, config or runtime package was downloaded for this research. All byte counts assume an empty cache; subtract only artifacts verified in `J:\Models` or other existing provider caches before requesting acquisition. `J:\Models` is the sole canonical model store.
 
-The implementation owner's current inventory found no BGE-M3 or Qwen3-Embedding matches in `J:\Models` manifests and model inventory, and no matching files in the checked Hugging Face and other provider caches. That is a scoped finding, not proof that every configured path or artifact hash has been checked. Recheck all relevant paths by exact artifact identity immediately before any proposed acquisition.
+The original pre-acquisition inventory found no matching embedding artifacts in
+its checked caches. That finding is superseded for BGE-M3: a nine-file ONNX bundle
+now exists under `J:\Models\bundles\bge-m3-onnx\5617a9f61b028005a4858fdac845db406aefb181`,
+with a 25 September integrity receipt. The native tokenizer runtime also has a
+25 September receipt under `J:\Models\runtimes\bge-onnx-net-tokenizer-1.4.0-win-x64`.
+This planning task read metadata; it did not repeat hashing or prove tokenizer
+parity. Never treat a stale inventory statement as permission to download again.
 
 ## Shortlist
 
@@ -77,9 +86,70 @@ The byte counts and identities above were read from Hugging Face's metadata-only
 
 ## Runtime and selection implications
 
-* BGE's PyTorch weights and Qwen's safetensors cannot load directly in the installed .NET ONNX Runtime 1.24.4 DirectML stack. BGE's published ONNX export is the closest format match, but its contributor provenance, graph, DirectML operator coverage, tokeniser integration, dense output/pooling semantics and speed remain unverified. A decision to use ONNX requires an alternative exact manifest and local probe.
+* Original PyTorch/safetensors files cannot load directly in the installed .NET ONNX Runtime 1.24.4 DirectML stack. The separately acquired BGE-M3 ONNX export passed the [offline execution pilot](../operations/2026-09-24-bge-m3-onnx-evaluation.md), including close CPU/GPU output agreement. The subsequent [native CPU adapter checks](bge-native-cpu-adapters.md) establish .NET tokenizer and numeric parity for both selected models. GPU ownership integration and integrated relevance remain unaccepted. The original tokenizer acquisition receipt alone was availability evidence.
 * The currently inventoried OCR Python runtime has ONNX Runtime 1.30 CPU, tokenizers 0.23.2 and PaddleOCR/Paddle GPU, but no PyTorch, Transformers or Sentence Transformers. Use a separate dedicated offline runtime for PyTorch/safetensors evaluation; do not modify the OCR runtime. Qwen's official repositories provide safetensors, not ONNX. The 4B bfloat16 weights occupy 8.04 billion bytes before activations and runtime overhead; the shared 12 GiB GPU has a 4 GiB OCR admission **estimate**, not measured free VRAM. GPU coexistence cannot be assumed at useful sequence lengths or concurrency. CPU operation with roughly 80 GiB RAM may be possible but latency is unmeasured.
 * BGE is MIT licensed, requiring preservation of its copyright and permission notice on redistribution ([MIT terms](https://opensource.org/license/mit)). Qwen cards mark Apache-2.0; redistribution requires licence and notice preservation, prominent changes and carries the stated patent terms ([Apache-2.0 terms](https://www.apache.org/licenses/LICENSE-2.0)). Each repository card is the licence declaration for the weights; dependency licences remain separate.
 * Alibaba's [gte-multilingual-base](https://huggingface.co/Alibaba-NLP/gte-multilingual-base) was screened as a smaller 768-dimensional alternative, but its official loading example requires `trust_remote_code=True` and its config refers to code in a different repository. That adds an additional pinned-code and offline integrity surface for this deployment. Qwen3 8B's official files exceed 15 GB and the shared 12 GiB GPU. These were therefore not added to the three-candidate evaluation shortlist.
 
 Choose a production model only after local relevance evaluation against real corpus queries, runtime performance and OCR contention tests, complete cache inventory, and a separately approved exact acquisition for any missing artifacts. Public benchmark scores are not local selection evidence.
+
+## First reranker configuration
+
+Propose [BAAI/bge-reranker-v2-m3](https://huggingface.co/BAAI/bge-reranker-v2-m3),
+a trained XLM-R based cross-encoder of approximately 0.6B parameters, with
+Apache-2.0 licensing. It accepts a query/passage pair and emits a relevance
+logit; it does not supply stored dense embeddings. The model owner includes
+English among its recommended uses. Local superiority over alternatives is
+unmeasured; this is a deliberate first quality configuration, not a leaderboard
+claim. A smaller MiniLM reranker was considered for CPU convenience and is not
+the default recommendation.
+
+Metadata-only API inspection on 25 September returned immutable revision
+`953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e`. Its
+[pinned repository](https://huggingface.co/BAAI/bge-reranker-v2-m3/tree/953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e)
+contains these source artifacts and no ONNX export:
+
+| File | Bytes | Metadata identity |
+| --- | ---: | --- |
+| `model.safetensors` | 2,271,071,852 | SHA-256 `d9e3e081faff1eefb84019509b2f5558fd74c1a05a2c7db22f74174fcedb5286` |
+| `config.json` | 795 | Git blob `9f62673cb00ec41dcec8947b9ed16f6f2eb23ba2` |
+| `sentencepiece.bpe.model` | 5,069,051 | SHA-256 `cfc8146abe2a0488e9e2a0c56de7952f7c11ab059eca145a0a727afce0db2865` |
+| `special_tokens_map.json` | 964 | Git blob `b1879d702821e753ffe4245048eee415d54a9385` |
+| `tokenizer.json` | 17,098,273 | SHA-256 `69564b696052886ed0ac63fa393e928384e0f8caada38c1f4864a9bfbf379c15` |
+| `tokenizer_config.json` | 1,173 | Git blob `328a00a9a560aadcf2a3064f917517359eb3cc26` |
+
+The source set totals 2,293,242,108 bytes before verified cache reuse. The
+sentencepiece file and special-token metadata match earlier BGE source
+identities; inspect exact local files rather than acquiring duplicates. Do not
+substitute BGE's embedding tokenizer JSON: the reranker file has a different
+hash. Git blob IDs are not raw-file SHA-256 values.
+
+This is not a complete acquisition request: exact cache checks, licence files,
+conversion runtime dependencies and transfer bytes still need resolution before
+approval. Retain all weights/configs, conversion inputs/tools/receipts and ONNX
+outputs under `J:\Models`; no ordinary restore/import/load may acquire them.
+Use pinned conversion tooling in an isolated offline environment, validate
+query/passage tokenisation and logits against the pinned reference, then prove
+.NET CPU/DirectML output parity and the actual maximum supported pair length.
+The published example uses 512 tokens; it must not become silent truncation of
+Flux queries or evidence. Reject oversized complete pairs with an explicit
+reason, or validate a larger supported input profile before use.
+
+Measure the real 50-passage shortlist, each model's load/run/unload times and
+peak/released GPU memory, and complete search including per-request loads.
+The baseline unloads between embedding/reranking phases and after each request.
+Combined or across-request residency is not assumed; any retention proposal
+needs measured full-search benefit, memory headroom and OCR-wait evidence.
+The embedding pilot's CPU p95 of about 109 ms
+versus DirectML 18 ms is not a reranker or full-search latency measurement.
+Models stay behind stable embedding/reranking ports, so provider placement or
+a later scorer update does not require redesigning SQL, USearch or citations.
+
+On 27 September the [separately approved source acquisition](bge-reranker-acquisition-request.md)
+completed with exactly 2,288,188,149 bytes transferred and three dependencies
+reused. The [offline conversion record](bge-reranker-offline-conversion.md)
+documents verified cache adoption with no additional downloads, the float32
+ONNX export and CPU/reference logit agreement. The [native CPU adapter record](bge-native-cpu-adapters.md)
+now establishes tokenizer and .NET CPU output parity, the 512-token boundary and
+library/session cleanup. Scheduler-owned GPU execution, scoped relevance and
+full-search latency are still unaccepted; the application has not enabled this provider.

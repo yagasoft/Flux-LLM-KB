@@ -39,6 +39,7 @@ internal static class SqlTestData
                 .Options);
         await context.AuditEvents.ExecuteDeleteAsync();
         await context.DocumentPublications.ExecuteDeleteAsync();
+        await context.CorpusQueryLeases.ExecuteDeleteAsync();
         await context.OperatorActionOperationLedger.ExecuteDeleteAsync();
         await context.SourceProcessorActionIgnoreHeads.ExecuteDeleteAsync();
         await context.OperatorActionActionLedger.ExecuteDeleteAsync();
@@ -55,6 +56,7 @@ internal static class SqlTestData
         await context.GpuExecutorResultReceipts.ExecuteDeleteAsync();
         await context.GpuExecutorDispatches.ExecuteDeleteAsync();
         await context.DocumentOcrRequests.ExecuteDeleteAsync();
+        await context.EmbeddingGpuRequests.ExecuteDeleteAsync();
         await context.GpuMiniTasks.ExecuteDeleteAsync();
         await context.GpuCapacitySlots
             .Where(slot => slot.ActiveBatchId != null)
@@ -63,6 +65,7 @@ internal static class SqlTestData
         await context.GpuCapacitySlots.ExecuteDeleteAsync();
         var scheduler = await context.GpuSchedulerStates.SingleAsync(candidate => candidate.Id == 1);
         scheduler.WakeGeneration = 0;
+        scheduler.SearchBatchesWhileOcrWaiting = 0;
         scheduler.PendingWakeReasons = 0;
         scheduler.NextDeferredAtUtc = null;
         scheduler.InFlightWakeOperationId = null;
@@ -73,7 +76,10 @@ internal static class SqlTestData
         scheduler.UpdatedAtUtc = DateTimeOffset.UnixEpoch;
         var state = await context.IndexState.SingleAsync(candidate => candidate.Id == 1);
         state.ActiveIndexGenerationId = null;
+        state.CorpusRebuildOperationId = null;
         await context.SaveChangesAsync();
+        await context.CorpusRebuildWorkItems.ExecuteDeleteAsync();
+        await context.CorpusRebuildOperations.ExecuteDeleteAsync();
         await context.IndexGenerationVectors.ExecuteDeleteAsync();
         await context.Vectors.ExecuteDeleteAsync();
         await context.IndexGenerations.ExecuteDeleteAsync();
@@ -176,6 +182,7 @@ internal static class SqlTestData
             new OutboxMessageEntity
             {
                 Id = dispatchId,
+                JobId = jobId,
                 PipelineRecordId = recordId,
                 SourceRevision = 1,
                 Stage = (int)stage,

@@ -5,6 +5,7 @@ using System.Security.Cryptography;
 using System.Text;
 using FluxKnowledge.Application.Gpu;
 using FluxKnowledge.Application.Ports;
+using FluxKnowledge.Application.Sources;
 using FluxKnowledge.Domain.Gpu;
 using FluxKnowledge.Domain.Jobs;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
@@ -13,7 +14,7 @@ using Microsoft.EntityFrameworkCore.Storage;
 
 namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
 
-public sealed class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecutorDispatchStore
+public sealed partial class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecutorDispatchStore, IGpuInteractiveRequestStore
 {
     private readonly IDbContextFactory<FluxKnowledgeDbContext> _contextFactory;
     private readonly Func<CancellationToken, ValueTask>? _afterMiniTaskPersisted;
@@ -24,6 +25,8 @@ public sealed class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecutorDispa
     private readonly Func<CancellationToken, ValueTask>? _afterLifecycleCommitted;
     private readonly Func<CancellationToken, ValueTask>? _afterWakeConsumptionCommitted;
     private readonly TimeProvider _timeProvider;
+    private readonly Lazy<GpuInteractiveOwnerIdentity> _interactiveOwner;
+    private readonly IDeploymentValidationHold? _deploymentValidationHold;
 
     public SqlGpuSchedulerStore(
         IDbContextFactory<FluxKnowledgeDbContext> contextFactory,
@@ -34,7 +37,9 @@ public sealed class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecutorDispa
         Func<CancellationToken, ValueTask>? beforeAdmissionLockAttempt = null,
         Func<CancellationToken, ValueTask>? afterAdmissionCommitted = null,
         Func<CancellationToken, ValueTask>? afterLifecycleCommitted = null,
-        Func<CancellationToken, ValueTask>? afterWakeConsumptionCommitted = null)
+        Func<CancellationToken, ValueTask>? afterWakeConsumptionCommitted = null,
+        GpuInteractiveOwnerIdentity? interactiveOwner = null,
+        IDeploymentValidationHold? deploymentValidationHold = null)
     {
         _contextFactory = contextFactory;
         _afterMiniTaskPersisted = afterMiniTaskPersisted;
@@ -45,6 +50,9 @@ public sealed class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecutorDispa
         _afterAdmissionCommitted = afterAdmissionCommitted;
         _afterLifecycleCommitted = afterLifecycleCommitted;
         _afterWakeConsumptionCommitted = afterWakeConsumptionCommitted;
+        _deploymentValidationHold = deploymentValidationHold;
+        interactiveOwner?.Validate();
+        _interactiveOwner = new(() => interactiveOwner ?? new FluxKnowledge.Integrations.Windows.WindowsInteractiveGpuOwnerProbe().Current);
     }
 
     public async ValueTask<GpuMiniTaskHandoffResult> GpuTaskHandoffAsync(
@@ -111,9 +119,18 @@ public sealed class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecutorDispa
                 async () =>
                 {
                     await using var context = await _contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
-                    return await RunAdmissionRoundWithinTransactionAsync(
-                            context, wakeReason, options, decideAdmission, operationId, batchId, dispatchId, cancellationToken)
-                        .ConfigureAwait(false);
+                    try
+                    {
+                        return await RunAdmissionRoundWithinTransactionAsync(
+                                context, wakeReason, options, decideAdmission, operationId, batchId, dispatchId, cancellationToken)
+                            .ConfigureAwait(false);
+                    }
+                    catch (InteractiveQueueExpiredException expired)
+                    {
+                        // The admission transaction has rolled back any provisional reservation.
+                        return await CommitExpiredInteractiveAsync(expired, operationId, batchId, wakeReason, options, cancellationToken)
+                            .ConfigureAwait(false);
+                    }
                 })
             .ConfigureAwait(false);
     }
@@ -179,7 +196,7 @@ public sealed class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecutorDispa
             head.ModelRuntimeKey,
             head.SettingsFingerprint,
             selected.Count,
-            selected.Sum(task => task.EstimatedBytes));
+            selected.Sum(task => task.EstimatedBytes), head.RequiredExecutorKey);
         var gateDecision = await decideAdmission(candidate, cancellationToken).ConfigureAwait(false);
         if (gateDecision is null)
         {
@@ -187,6 +204,11 @@ public sealed class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecutorDispa
         }
 
         var decision = gateDecision.Validate(options);
+        RequireUnexpiredInteractive(selected);
+        now = _timeProvider.GetUtcNow();
+        if (decision.Disposition == GpuAdmissionDisposition.Admit && head.RequiredExecutorKey is not null &&
+            !string.Equals(decision.ExecutorKey, head.RequiredExecutorKey, StringComparison.Ordinal))
+            throw new InvalidOperationException("interactive-executor-instance-mismatch");
 
         return decision.Disposition switch
         {
@@ -1043,7 +1065,7 @@ public sealed class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecutorDispa
             .FirstOrDefaultAsync(cancellationToken)
             .ConfigureAwait(false);
         var laneCounts = await tasks
-            .Where(task => task.ExecutionState != completedState)
+            .Where(task => task.ExecutionState != completedState && task.ExecutionState != (int)GpuMiniTaskExecutionState.Cancelled)
             .GroupBy(task => task.PriorityLane)
             .ToDictionaryAsync(group => (GpuPriorityLane)group.Key, group => group.Count(), cancellationToken)
             .ConfigureAwait(false);
@@ -1231,17 +1253,48 @@ public sealed class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecutorDispa
         DateTimeOffset now,
         CancellationToken cancellationToken)
     {
+        await CancelExpiredInteractiveAsync(context, now, cancellationToken).ConfigureAwait(false);
+        var deploymentAdmission = _deploymentValidationHold?.ReadAdmissionState() ?? new(false, null);
+        var rebuildOperation = await context.IndexState.Where(state => state.Id == 1)
+            .Select(state => state.CorpusRebuildOperationId).SingleAsync(cancellationToken).ConfigureAwait(false);
+        if ((rebuildOperation is not null && deploymentAdmission.PermittedCorpusRebuildOperationId != rebuildOperation) ||
+            (deploymentAdmission.IsHeld && rebuildOperation is null)) return [];
         var readyState = (int)GpuMiniTaskExecutionState.Ready;
         var includeFutureDeferrals = wakeReason.HasFlag(GpuSchedulerWakeReason.CapacityReleased);
         var enabledRootState = (int)FluxKnowledge.Domain.Sources.SourceRootState.Enabled;
-        var eligibility = context.GpuMiniTasks.Where(task => task.ExecutionState == readyState &&
-            (includeFutureDeferrals || task.DeferredUntilUtc == null || task.DeferredUntilUtc <= now) &&
-            (task.ParentJob.PipelineRecord.SourceRevisionId == null ||
-             task.ParentJob.PipelineRecord.SourceRevision!.SourceRoot.State == enabledRootState));
+        // Both the predicate and alias are application-owned SQL constants, with no caller input.
+        var rebuildJobSql = "SELECT * FROM [Jobs] WHERE " + SqlCorpusRebuildEligibility.ActiveJob("[Jobs].[Id]");
+        var rebuildingJobs = context.Jobs.FromSqlRaw(rebuildJobSql)
+            .Select(job => job.Id);
+        var ready = context.GpuMiniTasks.Where(task => task.ExecutionState == readyState &&
+            (task.ParentJobId == null
+                ? !task.InteractiveCancellationRequested && task.QueueDeadlineUtc > now
+                : task.ParentJob!.PublicState == (int)PublicJobState.GpuQueued &&
+                  !task.ParentJob.PipelineRecord.IsDeleted &&
+                  (task.ParentJob.PipelineRecord.SourceRevisionId == null ||
+                   task.ParentJob.PipelineRecord.SourceRevision!.SourceRoot.State == enabledRootState ||
+                   rebuildingJobs.Contains(task.ParentJobId.Value))));
+        if (rebuildOperation is not null)
+            ready = ready.Where(task => task.ParentJobId != null && rebuildingJobs.Contains(task.ParentJobId.Value));
+        var eligibility = ready.Where(task => includeFutureDeferrals || task.DeferredUntilUtc == null || task.DeferredUntilUtc <= now);
 
         GpuMiniTaskEntity? head = null;
+        GpuMiniTaskEntity? oldestOcr = null;
+        if (options.WorkloadPolicy is not null)
+        {
+            oldestOcr = await WithWorkload(ready.Where(t => t.ParentJobId != null), options.WorkloadPolicy, GpuWorkloadKind.Ocr)
+                .OrderBy(t => t.CreatedSequence).ThenBy(t => t.Id).FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+            var state = await context.GpuSchedulerStates.SingleAsync(s => s.Id == 1, cancellationToken).ConfigureAwait(false);
+            if (oldestOcr is null) state.SearchBatchesWhileOcrWaiting = 0;
+            else if (state.SearchBatchesWhileOcrWaiting >= GpuSchedulerOptions.MaxSearchBatchesBeforeOcr)
+            {
+                if (!includeFutureDeferrals && oldestOcr.DeferredUntilUtc > now) return [];
+                head = oldestOcr;
+            }
+        }
         foreach (var lane in Enum.GetValues<GpuPriorityLane>())
         {
+            if (head is not null) break;
             head = await eligibility
                 .Where(task => task.PriorityLane == (int)lane)
                 .OrderBy(task => task.CreatedSequence)
@@ -1258,28 +1311,39 @@ public sealed class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecutorDispa
         {
             return [];
         }
+        if (oldestOcr is not null && options.WorkloadPolicy!.Classify(head.ModelRuntimeKey, head.SettingsFingerprint) == GpuWorkloadKind.Ocr)
+        {
+            if (!includeFutureDeferrals && oldestOcr.DeferredUntilUtc > now) return [];
+            head = oldestOcr;
+        }
 
         if (head.EstimatedBytes > options.MaxBatchEstimatedBytes)
         {
             throw new InvalidOperationException("The strict-priority GPU head exceeds the configured batch byte limit.");
         }
 
+        // Each embedding request already contains up to four passages. Aggregate no
+        // other mini-task into its native session or durable completion boundary.
+        var maximumSelected = await context.EmbeddingGpuRequests.AnyAsync(request => request.MiniTaskId == head.Id, cancellationToken)
+            .ConfigureAwait(false) ? 1 : options.MaxBatchItems;
         var orderedPrefix = await eligibility
             .Where(task => task.PriorityLane == head.PriorityLane)
+            .Where(task => oldestOcr == null || head.Id != oldestOcr.Id || task.Id == head.Id)
             .Include(task => task.ParentJob)
             .OrderBy(task => task.CreatedSequence)
             .ThenBy(task => task.Id)
-            .Take(options.MaxBatchItems)
+            .Take(maximumSelected)
             .ToListAsync(cancellationToken)
             .ConfigureAwait(false);
         var selected = new List<GpuMiniTaskEntity>();
         long estimatedBytes = 0;
         foreach (var task in orderedPrefix)
         {
+            if (task.InteractiveExecutorInstanceId.HasValue && selected.Count > 0) break;
             if (task.PriorityLane != head.PriorityLane ||
                 !string.Equals(task.ModelRuntimeKey, head.ModelRuntimeKey, StringComparison.Ordinal) ||
                 !string.Equals(task.SettingsFingerprint, head.SettingsFingerprint, StringComparison.Ordinal) ||
-                selected.Count == options.MaxBatchItems ||
+                selected.Count == maximumSelected ||
                 task.EstimatedBytes > options.MaxBatchEstimatedBytes - estimatedBytes)
             {
                 break;
@@ -1287,6 +1351,9 @@ public sealed class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecutorDispa
 
             selected.Add(task);
             estimatedBytes += task.EstimatedBytes;
+            if (task.InteractiveExecutorInstanceId.HasValue) break;
+            if (options.WorkloadPolicy?.Classify(task.ModelRuntimeKey, task.SettingsFingerprint) == GpuWorkloadKind.Ocr) break;
+            if (options.WorkloadPolicy?.Classify(task.ModelRuntimeKey, task.SettingsFingerprint) == GpuWorkloadKind.Retrieval && selected.Count >= 4) break;
         }
 
         return selected;
@@ -1415,6 +1482,7 @@ public sealed class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecutorDispa
         {
             throw new InvalidOperationException("Selected GPU mini-tasks do not share an admission generation.");
         }
+        RequireUnexpiredInteractive(selected);
 
         var batch = new GpuBatchEntity
         {
@@ -1469,7 +1537,7 @@ public sealed class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecutorDispa
 
         foreach (var task in selected)
         {
-            if (task.ParentJob.PublicState != (int)PublicJobState.GpuQueued)
+            if (task.ParentJob is not null && task.ParentJob.PublicState != (int)PublicJobState.GpuQueued)
             {
                 throw new InvalidOperationException("A selected GPU mini-task parent Job is not GPU queued.");
             }
@@ -1494,7 +1562,7 @@ public sealed class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecutorDispa
             }
         }
 
-        foreach (var parent in selected.Select(task => task.ParentJob).DistinctBy(job => job.Id))
+        foreach (var parent in selected.Where(task => task.ParentJob is not null).Select(task => task.ParentJob!).DistinctBy(job => job.Id))
         {
             var transitioned = await context.Database.ExecuteSqlInterpolatedAsync(
                     $"""
@@ -1513,9 +1581,12 @@ public sealed class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecutorDispa
         }
 
         await RecomputeNextDeferredAsync(context, now, cancellationToken).ConfigureAwait(false);
+        await RecordWorkloadTurnAsync(context, selected[0], options, cancellationToken).ConfigureAwait(false);
+        RequireUnexpiredInteractive(selected);
         var result = new GpuSchedulerAdmissionRoundResult(true, GpuAdmissionDisposition.Admit, null);
         RecordAdmissionReceipt(context, operationId, batchId, wakeReason, options, result);
         await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        RequireUnexpiredInteractive(selected);
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
         if (_afterAdmissionCommitted is not null)
         {
@@ -1620,8 +1691,9 @@ public sealed class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecutorDispa
 
     private static string CreateAdmissionRequestFingerprint(
         GpuSchedulerWakeReason wakeReason,
-        GpuSchedulerOptions options) =>
-        CreateRequestFingerprint(
+        GpuSchedulerOptions options)
+    {
+        var original = CreateRequestFingerprint(
             "admission",
             ((int)wakeReason).ToString(CultureInfo.InvariantCulture),
             options.MaxBatchItems.ToString(CultureInfo.InvariantCulture),
@@ -1629,6 +1701,9 @@ public sealed class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecutorDispa
             options.CapacityDeferralCap.Ticks.ToString(CultureInfo.InvariantCulture),
             options.FallbackInterval.Ticks.ToString(CultureInfo.InvariantCulture),
             options.UnresponsiveDiagnosticAge.Ticks.ToString(CultureInfo.InvariantCulture));
+        return options.WorkloadPolicy is null ? original : CreateRequestFingerprint(original,
+            "ocr-turn-v1", options.WorkloadPolicy.Fingerprint, GpuSchedulerOptions.MaxSearchBatchesBeforeOcr.ToString(CultureInfo.InvariantCulture));
+    }
 
     private static string CreateExecutorAcknowledgementFingerprint(GpuExecutorAcknowledgement acknowledgement) =>
         CreateExecutorHandleFingerprint("executor-acknowledgement", acknowledgement.Handle);

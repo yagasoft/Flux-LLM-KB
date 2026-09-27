@@ -10,8 +10,10 @@ corrected five held-out labels before any held-out run. Since the implementation
 owner drafted and could see those questions, a future production acceptance
 claim still needs a separately authored blinded cohort. See the
 [investigation record](../operations/2026-09-24-scoped-lexical-ranking-investigation.md).
-The implementation and deployment steps below remain a conditional plan for a
-future candidate, not a record of work performed.
+The implementation and deployment steps below are historical conditional work,
+not a record of work performed. Future passage/ranking delivery follows the
+[hybrid passage design](hybrid-passage-retrieval.md); do not reopen this closed
+heuristic experiment as a prerequisite to the standard pipeline.
 
 ## Objective and boundaries
 

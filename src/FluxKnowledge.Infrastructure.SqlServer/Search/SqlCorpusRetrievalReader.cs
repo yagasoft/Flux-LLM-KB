@@ -10,19 +10,21 @@ using Microsoft.EntityFrameworkCore;
 namespace FluxKnowledge.Infrastructure.SqlServer.Search;
 
 /// <summary>Reads bounded canonical chunks from completed, currently eligible publications.</summary>
-public sealed class SqlCorpusRetrievalReader(IDbContextFactory<FluxKnowledgeDbContext> contextFactory)
-    : ICorpusRetrievalReader
+public sealed partial class SqlCorpusRetrievalReader(IDbContextFactory<FluxKnowledgeDbContext> contextFactory)
+    : ICorpusRetrievalReader, IHybridPassageCandidateReader
 {
     private const int CandidateBudget = 200;
 
     public async ValueTask<CorpusLexicalReadiness> GetLexicalReadinessAsync(CancellationToken cancellationToken)
     {
         await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        await EnsureServingAsync(context, cancellationToken).ConfigureAwait(false);
         var state = await context.Database.SqlQuery<FullTextStateRow>(
             $"""
              SELECT CAST(CASE WHEN EXISTS (
-                 SELECT 1 FROM sys.fulltext_indexes
-                 WHERE [object_id] = OBJECT_ID(N'[dbo].[TextChunks]'))
+                 SELECT 1 FROM sys.fulltext_index_columns
+                 WHERE [object_id] = OBJECT_ID(N'[dbo].[TextChunks]')
+                     AND [column_id] = COLUMNPROPERTY(OBJECT_ID(N'[dbo].[TextChunks]'), N'SearchText', 'ColumnId'))
                  THEN 1 ELSE 0 END AS int) AS [IndexPresent],
                  CAST(CASE WHEN FULLTEXTCATALOGPROPERTY(N'FluxKnowledge', N'PopulateStatus') = 0
                      AND TRY_CONVERT(int, OBJECTPROPERTYEX(OBJECT_ID(N'[dbo].[TextChunks]'), N'TableFulltextPopulateStatus')) = 0
@@ -91,6 +93,18 @@ public sealed class SqlCorpusRetrievalReader(IDbContextFactory<FluxKnowledgeDbCo
         ArgumentException.ThrowIfNullOrWhiteSpace(query);
         ArgumentNullException.ThrowIfNull(scope);
         if (limit is < 1 or > 20) throw new ArgumentOutOfRangeException(nameof(limit));
+        return await SearchCoreAsync(query, scope, CandidateBudget, cancellationToken).ConfigureAwait(false);
+    }
+
+    public ValueTask<IReadOnlyList<EligiblePassageCandidate>> ReadLexicalCandidatesAsync(
+        string query, ResolvedCorpusScope scope, CancellationToken cancellationToken) =>
+        SearchCoreAsync(query, scope, 100, cancellationToken);
+
+    private async ValueTask<IReadOnlyList<EligiblePassageCandidate>> SearchCoreAsync(
+        string query, ResolvedCorpusScope scope, int budget, CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(query);
+        ArgumentNullException.ThrowIfNull(scope);
         if (scope.Kind is not ("all" or "root" or "workspace")) throw new ArgumentException("Unknown scope.", nameof(scope));
 
         var rootIdsJson = JsonSerializer.Serialize(scope.RootIds);
@@ -98,12 +112,16 @@ public sealed class SqlCorpusRetrievalReader(IDbContextFactory<FluxKnowledgeDbCo
         var cwd = scope.CanonicalCwd ?? string.Empty;
         var cwdPrefix = cwd.EndsWith('\\') ? cwd : cwd + '\\';
         await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
-        var rows = await context.Database.SqlQuery<CandidateRow>(
+        await EnsureServingAsync(context, cancellationToken).ConfigureAwait(false);
+        var rows = await context.Database.SqlQuery<CandidateRow>(SqlPublishedPassageSelection.Bind(
                 $"""
-                 SELECT TOP ({CandidateBudget})
+                 SELECT TOP ({budget})
                      [chunk].[Id] AS [ChunkId], [chunk].[Ordinal] AS [Ordinal], [chunk].[Content] AS [Content],
                      COALESCE([fulltext].[RANK], 0) AS [FullTextRank],
-                     [chunk].[ContentHash] AS [ChunkHash],
+                     [chunk].[ContentHash] AS [ChunkHash], [state].[CorpusEpoch] AS [CorpusEpoch],
+                     [chunk].[ContextHeader] AS [ContextHeader],
+                     [chunk].[PassagePolicyFingerprint] AS [PassagePolicyFingerprint],
+                     [chunk].[SearchInputHash] AS [SearchInputHash],
                      [chunk].[StartOffset] AS [StartOffset], [chunk].[Length] AS [Length],
                      [artifact].[Id] AS [ArtifactId], [artifact].[ContentHash] AS [ArtifactHash],
                      CAST(NULL AS nvarchar(max)) AS [DocumentMetadataJson],
@@ -116,6 +134,7 @@ public sealed class SqlCorpusRetrievalReader(IDbContextFactory<FluxKnowledgeDbCo
                           WHEN [retained].[Id] IS NOT NULL THEN [retained].[CanonicalPath]
                           ELSE [source].[StableKey] COLLATE Latin1_General_100_BIN2 END AS [SourceIdentity]
                  FROM [TextChunks] AS [chunk]
+                 INNER JOIN [IndexState] AS [state] ON [state].[Id] = 1
                  INNER JOIN [Artifacts] AS [artifact]
                    ON [chunk].[ArtifactId] = [artifact].[Id]
                   AND [chunk].[SourceRevision] = [artifact].[SourceRevision]
@@ -124,32 +143,12 @@ public sealed class SqlCorpusRetrievalReader(IDbContextFactory<FluxKnowledgeDbCo
                   AND [artifact].[SourceRevision] = [record].[Revision]
                  INNER JOIN [SourceIdentities] AS [source]
                    ON [record].[SourceIdentityId] = [source].[Id]
-                 LEFT JOIN FREETEXTTABLE([TextChunks], [Content], {query}) AS [fulltext]
+                 LEFT JOIN FREETEXTTABLE([TextChunks], [SearchText], {query}) AS [fulltext]
                    ON [fulltext].[KEY] = [chunk].[Id]
-                 LEFT JOIN [SourceRevisions] AS [retained]
-                   ON [record].[SourceRevisionId] = [retained].[Id]
-                 LEFT JOIN [DocumentPublications] AS [publication]
-                   ON [publication].[PipelineRecordId] = [record].[Id]
-                  AND [publication].[PipelineRecordRevision] = [record].[Revision]
-                  AND [publication].[DocumentInputSourceRevisionId] = [retained].[Id]
-                 LEFT JOIN [SourceRevisions] AS [owner]
-                   ON [publication].[OwnerSourceRevisionId] = [owner].[Id]
-                 LEFT JOIN [SourceRootConfigurations] AS [root]
-                   ON COALESCE([owner].[SourceRootId], [retained].[SourceRootId]) = [root].[Id]
+                 /*publication-bindings*/
                  WHERE [record].[IsDeleted] = 0
-                   AND [record].[CompletionCriteriaMet] = 1
-                   AND [record].[CurrentStage] = {(int)PipelineStage.Publish}
-                   AND [artifact].[Stage] = {(int)PipelineStage.CanonicalIndex}
+                   AND /*publication-eligibility*/
                    AND [chunk].[Length] > 0 AND [chunk].[Length] <= 2048
-                   AND [retained].[SuppressedAtUtc] IS NULL
-                   AND [owner].[SuppressedAtUtc] IS NULL
-                   AND ([record].[SourceRevisionId] IS NULL OR
-                        ([retained].[Id] IS NOT NULL AND [root].[State] <> {(int)SourceRootState.Deleting}))
-                   AND ([retained].[Id] IS NULL OR [retained].[OriginKind] NOT IN (2, 3) OR
-                        [publication].[OwnerSourceRevisionId] IS NOT NULL)
-                   AND ([record].[SourceRevisionId] IS NOT NULL OR [record].[Revision] = (
-                        SELECT MAX([current].[Revision]) FROM [PipelineRecords] AS [current]
-                        WHERE [current].[SourceIdentityId] = [record].[SourceIdentityId]))
                    AND ({scopeKind} = N'all' OR COALESCE([owner].[SourceRootId], [retained].[SourceRootId]) IN (
                         SELECT [scopeRoot].[Id] FROM OPENJSON({rootIdsJson})
                         WITH ([Id] uniqueidentifier '$') AS [scopeRoot]))
@@ -163,7 +162,7 @@ public sealed class SqlCorpusRetrievalReader(IDbContextFactory<FluxKnowledgeDbCo
                  ORDER BY CASE WHEN CHARINDEX({query}, [chunk].[Content] COLLATE Latin1_General_100_BIN2) > 0
                                THEN 0 ELSE 1 END,
                           [fulltext].[RANK] DESC, [chunk].[Id]
-                 """)
+                 """))
             .ToListAsync(cancellationToken)
             .ConfigureAwait(false);
 
@@ -171,7 +170,8 @@ public sealed class SqlCorpusRetrievalReader(IDbContextFactory<FluxKnowledgeDbCo
             row.RootId, row.OwnerSourceRevisionId, row.PipelineRecordId,
             row.PipelineRecordRevision, row.ArtifactId, row.ArtifactHash,
             row.ChunkId, row.ChunkHash, row.StartOffset, row.Length,
-            row.Content, row.SourceIdentity, row.FullTextRank, row.OriginKind)).ToArray();
+            row.Content, row.SourceIdentity, row.FullTextRank, row.OriginKind,
+            row.CorpusEpoch, row.ContextHeader, row.PassagePolicyFingerprint, row.SearchInputHash)).ToArray();
     }
 
     public async ValueTask<EligibleContext?> ReadAsync(
@@ -180,12 +180,16 @@ public sealed class SqlCorpusRetrievalReader(IDbContextFactory<FluxKnowledgeDbCo
         ArgumentNullException.ThrowIfNull(binding);
         if (contextCharacters is < 0 or > 4096) throw new ArgumentOutOfRangeException(nameof(contextCharacters));
         await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
-        var rows = await context.Database.SqlQuery<CandidateRow>(
+        await EnsureServingAsync(context, cancellationToken).ConfigureAwait(false);
+        var rows = await context.Database.SqlQuery<CandidateRow>(SqlPublishedPassageSelection.Bind(
                 $"""
                  SELECT TOP (1)
                      [chunk].[Id] AS [ChunkId], [chunk].[Ordinal] AS [Ordinal], [chunk].[Content] AS [Content],
                      0 AS [FullTextRank],
-                     [chunk].[ContentHash] AS [ChunkHash],
+                     [chunk].[ContentHash] AS [ChunkHash], [state].[CorpusEpoch] AS [CorpusEpoch],
+                     [chunk].[ContextHeader] AS [ContextHeader],
+                     [chunk].[PassagePolicyFingerprint] AS [PassagePolicyFingerprint],
+                     [chunk].[SearchInputHash] AS [SearchInputHash],
                      [chunk].[StartOffset] AS [StartOffset], [chunk].[Length] AS [Length],
                      [artifact].[Id] AS [ArtifactId], [artifact].[ContentHash] AS [ArtifactHash],
                      [artifact].[DocumentMetadataJson] AS [DocumentMetadataJson],
@@ -198,6 +202,7 @@ public sealed class SqlCorpusRetrievalReader(IDbContextFactory<FluxKnowledgeDbCo
                           WHEN [retained].[Id] IS NOT NULL THEN [retained].[CanonicalPath]
                           ELSE [source].[StableKey] COLLATE Latin1_General_100_BIN2 END AS [SourceIdentity]
                  FROM [TextChunks] AS [chunk]
+                 INNER JOIN [IndexState] AS [state] ON [state].[Id] = 1
                  INNER JOIN [Artifacts] AS [artifact]
                    ON [chunk].[ArtifactId] = [artifact].[Id]
                   AND [chunk].[SourceRevision] = [artifact].[SourceRevision]
@@ -206,32 +211,13 @@ public sealed class SqlCorpusRetrievalReader(IDbContextFactory<FluxKnowledgeDbCo
                   AND [artifact].[SourceRevision] = [record].[Revision]
                  INNER JOIN [SourceIdentities] AS [source]
                    ON [record].[SourceIdentityId] = [source].[Id]
-                 LEFT JOIN [SourceRevisions] AS [retained]
-                   ON [record].[SourceRevisionId] = [retained].[Id]
-                 LEFT JOIN [DocumentPublications] AS [publication]
-                   ON [publication].[PipelineRecordId] = [record].[Id]
-                  AND [publication].[PipelineRecordRevision] = [record].[Revision]
-                  AND [publication].[DocumentInputSourceRevisionId] = [retained].[Id]
-                 LEFT JOIN [SourceRevisions] AS [owner]
-                   ON [publication].[OwnerSourceRevisionId] = [owner].[Id]
-                 LEFT JOIN [SourceRootConfigurations] AS [root]
-                   ON COALESCE([owner].[SourceRootId], [retained].[SourceRootId]) = [root].[Id]
+                 /*publication-bindings*/
                  WHERE [chunk].[Id] = {binding.ChunkId}
+                   AND [state].[CorpusEpoch] = {binding.CorpusEpoch}
                    AND [record].[IsDeleted] = 0
-                   AND [record].[CompletionCriteriaMet] = 1
-                   AND [record].[CurrentStage] = {(int)PipelineStage.Publish}
-                   AND [artifact].[Stage] = {(int)PipelineStage.CanonicalIndex}
+                   AND /*publication-eligibility*/
                    AND [chunk].[Length] > 0 AND [chunk].[Length] <= 2048
-                   AND [retained].[SuppressedAtUtc] IS NULL
-                   AND [owner].[SuppressedAtUtc] IS NULL
-                   AND ([record].[SourceRevisionId] IS NULL OR
-                        ([retained].[Id] IS NOT NULL AND [root].[State] <> {(int)SourceRootState.Deleting}))
-                   AND ([retained].[Id] IS NULL OR [retained].[OriginKind] NOT IN (2, 3) OR
-                        [publication].[OwnerSourceRevisionId] IS NOT NULL)
-                   AND ([record].[SourceRevisionId] IS NOT NULL OR [record].[Revision] = (
-                        SELECT MAX([current].[Revision]) FROM [PipelineRecords] AS [current]
-                        WHERE [current].[SourceIdentityId] = [record].[SourceIdentityId]))
-                 """)
+                 """))
             .ToListAsync(cancellationToken).ConfigureAwait(false);
         var row = rows.SingleOrDefault();
         if (row is null || row.RootId != binding.RootId ||
@@ -245,30 +231,27 @@ public sealed class SqlCorpusRetrievalReader(IDbContextFactory<FluxKnowledgeDbCo
             (long)binding.CitedStart + binding.CitedLength > (long)row.StartOffset + row.Length)
             return null;
 
-        // The canonical chunker emits contiguous, non-overlapping UTF-16 chunks. Bound
-        // adjacent hydration by ordinal as well as the requested context size.
-        var nearby = await context.TextChunks.AsNoTracking()
-            .Where(chunk => chunk.ArtifactId == row.ArtifactId &&
-                            chunk.SourceRevision == row.PipelineRecordRevision &&
-                            chunk.Ordinal >= Math.Max(0, row.Ordinal - 16) &&
-                            chunk.Ordinal <= row.Ordinal + 16)
-            .OrderBy(chunk => chunk.Ordinal)
-            .Select(chunk => new { chunk.Ordinal, chunk.StartOffset, chunk.Length, chunk.Content, chunk.ContentHash })
-            .ToListAsync(cancellationToken).ConfigureAwait(false);
-        var citedIndex = nearby.FindIndex(chunk => chunk.StartOffset == row.StartOffset);
-        if (citedIndex < 0) return null;
-        var first = citedIndex;
-        var last = citedIndex;
-        while (first > 0 && nearby[first - 1].StartOffset >= 0 &&
-               nearby[first - 1].Length == nearby[first - 1].Content.Length &&
-               nearby[first - 1].StartOffset + nearby[first - 1].Length == nearby[first].StartOffset &&
-               Hash(nearby[first - 1].Content) == nearby[first - 1].ContentHash) first--;
-        while (last + 1 < nearby.Count && nearby[last + 1].StartOffset >= 0 &&
-               nearby[last + 1].Length == nearby[last + 1].Content.Length &&
-               nearby[last].StartOffset + nearby[last].Length == nearby[last + 1].StartOffset &&
-               Hash(nearby[last + 1].Content) == nearby[last + 1].ContentHash) last++;
-        var joined = string.Concat(nearby.Skip(first).Take(last - first + 1).Select(chunk => chunk.Content));
-        var joinedStart = nearby[first].StartOffset;
+        // Slice canonical text directly: passage overlap and ordinals do not describe
+        // how neighbouring bodies concatenate. Never hydrate an entire artifact.
+        const int scanLimit = 16 * 1024;
+        var windowStart = Math.Max(0, binding.CitedStart - contextCharacters / 2 - scanLimit / 4);
+        var canonical = await context.Database.SqlQuery<CanonicalWindowRow>(
+                $"""
+                 SELECT CAST(DATALENGTH([SearchText]) / 2 AS int) AS [CanonicalLength],
+                        SUBSTRING([SearchText] COLLATE Latin1_General_100_BIN2,
+                                  {windowStart + 1}, {scanLimit}) AS [Text]
+                 FROM [Artifacts]
+                 WHERE [Id] = {row.ArtifactId} AND [SourceRevision] = {row.PipelineRecordRevision}
+                   AND [ContentHash] = {row.ArtifactHash}
+                 """)
+            .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+        if (canonical?.Text is null || row.Length != row.Content.Length || Hash(row.Content) != row.ChunkHash ||
+            row.StartOffset < windowStart ||
+            (long)row.StartOffset + row.Length > (long)windowStart + canonical.Text.Length ||
+            !canonical.Text.AsSpan(row.StartOffset - windowStart, row.Length).SequenceEqual(row.Content.AsSpan()))
+            return null;
+        var joined = canonical.Text;
+        var joinedStart = windowStart;
         var citationEnd = binding.CitedStart + binding.CitedLength;
         var desiredBefore = Math.Min(contextCharacters / 2, binding.CitedStart - joinedStart);
         var desiredAfter = Math.Min(contextCharacters - desiredBefore,
@@ -281,12 +264,13 @@ public sealed class SqlCorpusRetrievalReader(IDbContextFactory<FluxKnowledgeDbCo
         var candidate = new EligiblePassageCandidate(row.RootId, row.OwnerSourceRevisionId,
             row.PipelineRecordId, row.PipelineRecordRevision, row.ArtifactId, row.ArtifactHash,
             row.ChunkId, row.ChunkHash, row.StartOffset, row.Length, row.Content,
-            row.SourceIdentity, 0, row.OriginKind);
+            row.SourceIdentity, 0, row.OriginKind, row.CorpusEpoch, row.ContextHeader,
+            row.PassagePolicyFingerprint, row.SearchInputHash);
         var disclosureText = BuildDisclosureWindow(joined, joinedStart, start, end,
-            nearby[first].Ordinal == 0,
-            last == nearby.Count - 1 && nearby[last].Ordinal < row.Ordinal + 16);
+            joinedStart == 0,
+            joinedStart + joined.Length == canonical.CanonicalLength);
         return new EligibleContext(candidate, start, joined.Substring(start - joinedStart, end - start),
-            desiredBefore + desiredAfter < contextCharacters, row.DocumentMetadataJson, disclosureText);
+            end - start - binding.CitedLength < contextCharacters, row.DocumentMetadataJson, disclosureText);
     }
 
     private static string? BuildDisclosureWindow(
@@ -311,8 +295,18 @@ public sealed class SqlCorpusRetrievalReader(IDbContextFactory<FluxKnowledgeDbCo
         return joined.Substring(first, last - first);
     }
 
+    private sealed class CanonicalWindowRow
+    {
+        public int CanonicalLength { get; init; }
+        public string? Text { get; init; }
+    }
+
     private sealed class CandidateRow
     {
+        public Guid CorpusEpoch { get; init; }
+        public string ContextHeader { get; init; } = string.Empty;
+        public string PassagePolicyFingerprint { get; init; } = string.Empty;
+        public string SearchInputHash { get; init; } = string.Empty;
         public Guid? RootId { get; init; }
         public int OriginKind { get; init; }
         public Guid? OwnerSourceRevisionId { get; init; }

@@ -1,6 +1,10 @@
 using FluxKnowledge.Application.Sources;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Documents;
+using FluxKnowledge.Application.Gpu;
+using FluxKnowledge.Application.Indexing;
+using FluxKnowledge.Application.Workers;
+using FluxKnowledge.Infrastructure.Inference.Search;
 using FluxKnowledge.Application.Contracts;
 using FluxKnowledge.Application.IntegrationV1;
 using FluxKnowledge.Application.IntegrationV1.Corpus;
@@ -13,6 +17,7 @@ using FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
 using FluxKnowledge.Infrastructure.SqlServer.Workers;
 using FluxKnowledge.Integration.Tests.Support;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Data.SqlClient;
 using Xunit;
 
 namespace FluxKnowledge.Integration.Tests.Sources;
@@ -22,6 +27,61 @@ public sealed class SourceDeletionIntegrationTests(NativeSqlServerFixture fixtur
     : IClassFixture<NativeSqlServerFixture>, IAsyncLifetime
 {
     private readonly NativeSqlServerFixture _fixture = fixture;
+
+    [NativeSqlServerFact]
+    public async Task Generation_file_cleanup_waits_for_cross_instance_queries_then_resumes()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var deleting = await SeedRootAsync("query-file-cleanup", SourceRootState.Deleting, now);
+        var operationId = Guid.NewGuid();
+        await using (var setup = CreateContext())
+        {
+            setup.SourceDeletionOperations.Add(new SourceDeletionOperationEntity
+            {
+                Id = operationId, SourceRootId = deleting.RootId, State = 0, Phase = "accepted", CreatedAtUtc = now, UpdatedAtUtc = now
+            });
+            setup.SourceDeletionCleanupItems.Add(new SourceDeletionCleanupItemEntity
+            {
+                Id = Guid.NewGuid(), SourceDeletionOperationId = operationId, StorageKind = 2,
+                RelativePath = "generations\\query-pinned", State = 0, CreatedAtUtc = now, UpdatedAtUtc = now
+            });
+            await setup.SaveChangesAsync();
+        }
+        var factory = SqlTestData.CreateFactory(_fixture);
+        var deletionStore = new SqlSourceDeletionStore(factory, TimeProvider.System);
+        // Reach cleanup through the real graph purge; a synthetic cleanup phase with
+        // undeleted source rows would correctly fail the final root FK constraints.
+        var deletingWork = await deletionStore.ClaimNextAsync(CancellationToken.None);
+        Assert.NotNull(deletingWork);
+        Assert.True((await deletionStore.PurgeAsync(deletingWork, null, CancellationToken.None)).RequiresIndexBuild);
+        var rebuildingWork = await deletionStore.ClaimNextAsync(CancellationToken.None);
+        Assert.NotNull(rebuildingWork);
+        Assert.Equal("cleanup-files", (await deletionStore.PurgeAsync(rebuildingWork, null, CancellationToken.None)).Phase);
+        var files = new RecordingFileStore();
+        var coordinator = new SourceDeletionCoordinator(deletionStore, fileStore: files,
+            queryCleanupGate: new SqlDerivedIndexRecoveryStore(factory, TimeProvider.System));
+        await using (var querySession = new SqlConnection(new SqlConnectionStringBuilder(_fixture.ConnectionString) { Pooling = false }.ConnectionString))
+        {
+            await querySession.OpenAsync();
+            await using var pin = new SqlCommand("""
+                DECLARE @result int;
+                EXEC @result = sp_getapplock @Resource = 'FluxKnowledge.DerivedIndexRecovery',
+                    @LockMode = 'Shared', @LockOwner = 'Session', @LockTimeout = 0;
+                SELECT @result;
+                """, querySession);
+            Assert.True(Convert.ToInt32(await pin.ExecuteScalarAsync()) >= 0);
+            Assert.False(await coordinator.RunOneAsync(CancellationToken.None));
+            Assert.Equal(0, files.DeleteCalls);
+            await using var verification = CreateContext();
+            var operation = await verification.SourceDeletionOperations.SingleAsync(value => value.Id == operationId);
+            Assert.Equal(0, operation.State);
+            Assert.Equal("cleanup-files", operation.Phase);
+            Assert.Equal("source-delete-search-queries-active", operation.ReasonCode);
+            Assert.Equal(0, (await verification.SourceDeletionCleanupItems.SingleAsync()).State);
+        }
+        Assert.True(await coordinator.RunOneAsync(CancellationToken.None));
+        Assert.Equal(1, files.DeleteCalls);
+    }
 
     public async Task InitializeAsync()
     {
@@ -153,6 +213,22 @@ public sealed class SourceDeletionIntegrationTests(NativeSqlServerFixture fixtur
         var coordinator = new SourceDeletionCoordinator(new SqlSourceDeletionStore(
             SqlTestData.CreateFactory(_fixture), TimeProvider.System));
 
+        await using (var querySession = new SqlConnection(new SqlConnectionStringBuilder(_fixture.ConnectionString) { Pooling = false }.ConnectionString))
+        {
+            await querySession.OpenAsync();
+            await using var queryPin = new SqlCommand("""
+                DECLARE @result int;
+                EXEC @result = sp_getapplock @Resource = 'FluxKnowledge.DerivedIndexRecovery',
+                    @LockMode = 'Shared', @LockOwner = 'Session', @LockTimeout = 0;
+                SELECT @result;
+                """, querySession);
+            Assert.True(Convert.ToInt32(await queryPin.ExecuteScalarAsync()) >= 0);
+            Assert.False(await coordinator.RunOneAsync(CancellationToken.None));
+            await using var stillPinned = CreateContext();
+            Assert.True(await stillPinned.SourceRootConfigurations.AnyAsync(value => value.Id == deleting.RootId));
+            Assert.False((await stillPinned.PipelineRecords.SingleAsync(value => value.Id == deleting.RecordId)).IsDeleted);
+            Assert.Equal(0, (await stillPinned.SourceDeletionOperations.SingleAsync(value => value.Id == operationId)).State);
+        }
         Assert.True(await coordinator.RunOneAsync(CancellationToken.None));
 
         await using var verification = CreateContext();
@@ -308,7 +384,8 @@ public sealed class SourceDeletionIntegrationTests(NativeSqlServerFixture fixtur
 
         var coordinator = new SourceDeletionCoordinator(
             new SqlSourceDeletionStore(SqlTestData.CreateFactory(_fixture), TimeProvider.System),
-            fileStore: new SuccessfulFileStore());
+            fileStore: new SuccessfulFileStore(),
+            queryCleanupGate: new SqlDerivedIndexRecoveryStore(SqlTestData.CreateFactory(_fixture), TimeProvider.System));
 
         Assert.True(await coordinator.RunOneAsync(CancellationToken.None));
 
@@ -484,10 +561,15 @@ public sealed class SourceDeletionIntegrationTests(NativeSqlServerFixture fixtur
             new SqlNativeCorpusActionStore(factory, new NoRootCreationPolicy(), new LocalPrivateContentDisclosure()));
         var mutation = new NativeCorpusMutation("root_delete", JsonSerializer.SerializeToElement(new { rootId = deleting.RootId }));
         var preview = await service.PreviewAsync(mutation, "test", CancellationToken.None);
+        long initialCorpusVersion;
+        await using (var initialState = CreateContext())
+            initialCorpusVersion = (await initialState.IndexState.SingleAsync()).CorpusVersion;
         if (binding == "matching")
         {
             var receipt = await service.CommitAsync(mutation, preview.ConfirmationId, $"delete-ocr:{deleting.RootId:N}", "test", CancellationToken.None);
             Assert.Equal("completed", receipt.Outcome);
+            await using (var afterDelete = CreateContext())
+                Assert.Equal(initialCorpusVersion + 1, (await afterDelete.IndexState.SingleAsync()).CorpusVersion);
             Assert.True(await new SourceDeletionCoordinator(new SqlSourceDeletionStore(factory, TimeProvider.System)).RunOneAsync(CancellationToken.None));
         }
         else
@@ -502,6 +584,76 @@ public sealed class SourceDeletionIntegrationTests(NativeSqlServerFixture fixtur
         Assert.True(await verification.SourceRootConfigurations.AnyAsync(value => value.Id == control.RootId));
         Assert.True(await verification.DocumentOcrRequests.AnyAsync(value => value.PipelineRecordId == control.RecordId));
         Assert.True(await verification.GpuMiniTasks.AnyAsync(value => value.ParentJobId == control.JobId));
+    }
+
+    [NativeSqlServerTheory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Reversed_embedding_request_refuses_deletion_and_preserves_the_other_roots_execution(bool publicPath)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var deleting = await SeedRootAsync("embedding-reverse-delete", publicPath ? SourceRootState.Enabled : SourceRootState.Deleting, now);
+        var control = await SeedRootAsync("embedding-reverse-control", SourceRootState.Enabled, now);
+        var runtime = new EmbeddingGpuRuntime(BgeOfflineModels.GpuRuntimeKey, BgeOfflineModels.GpuSettingsFingerprint,
+            new(BgeOfflineModels.EmbeddingFingerprint, 1024), 1024);
+        var miniTaskId = Guid.NewGuid();
+        var generationId = Guid.NewGuid();
+        await using (var setup = CreateContext())
+        {
+            var job = await setup.Jobs.SingleAsync(value => value.Id == control.JobId);
+            job.Stage = (int)FluxKnowledge.Domain.Pipeline.PipelineStage.Embed;
+            job.Operation = PipelineOperations.Embed;
+            setup.IndexGenerations.Add(new IndexGenerationEntity
+            {
+                Id = generationId, EmbeddingJobId = job.Id, CorpusEpoch = (await setup.IndexState.SingleAsync()).CorpusEpoch,
+                CorpusVersion = (await setup.IndexState.SingleAsync()).CorpusVersion,
+                ModelFingerprint = runtime.Profile.ModelFingerprint, Dimensions = 1024, IndexPath = "", MetadataChecksum = EmbedDraftDefaults.MetadataChecksum,
+                VectorCount = 0, CreatedAtUtc = now
+            });
+            setup.GpuMiniTasks.Add(new GpuMiniTaskEntity
+            {
+                Id = miniTaskId, ParentJobId = job.Id, SourceRevision = 1, PriorityLane = (int)GpuPriorityLane.DocumentIndexing,
+                ModelRuntimeKey = runtime.RuntimeKey, SettingsFingerprint = runtime.SettingsFingerprint, EstimatedBytes = 1024,
+                IdempotencyKey = $"embedding-reverse:{miniTaskId:N}", ExecutionState = (int)GpuMiniTaskExecutionState.Completed, CreatedAtUtc = now
+            });
+            setup.EmbeddingGpuRequests.Add(new EmbeddingGpuRequestEntity
+            {
+                MiniTaskId = miniTaskId, ParentJobId = job.Id, PipelineRecordId = deleting.RecordId, SourceRevision = 1,
+                GenerationId = generationId, CorpusEpoch = (await setup.IndexState.SingleAsync()).CorpusEpoch,
+                ModelFingerprint = runtime.Profile.ModelFingerprint, Dimensions = 1024, InputsJson = "[]",
+                InputDigest = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData("[]"u8.ToArray())),
+                State = 2, NativeCleanupConfirmed = true, CleanupConfirmedAtUtc = now, CreatedAtUtc = now, UpdatedAtUtc = now
+            });
+            if (!publicPath) setup.SourceDeletionOperations.Add(new SourceDeletionOperationEntity
+            {
+                Id = Guid.NewGuid(), SourceRootId = deleting.RootId, State = 0, Phase = "accepted", CreatedAtUtc = now, UpdatedAtUtc = now
+            });
+            await setup.SaveChangesAsync();
+        }
+        var factory = SqlTestData.CreateFactory(_fixture);
+        if (publicPath)
+        {
+            var service = new NativeCorpusCommandService(new SqlNativeOperationStore(factory, TimeProvider.System, embeddingRuntime: runtime),
+                new SqlNativeCorpusActionStore(factory, new NoRootCreationPolicy(), new LocalPrivateContentDisclosure()));
+            var mutation = new NativeCorpusMutation("root_delete", JsonSerializer.SerializeToElement(new { rootId = deleting.RootId }));
+            var preview = await service.PreviewAsync(mutation, "test", CancellationToken.None);
+            var refusal = await Assert.ThrowsAsync<NativeOperationException>(() => service.CommitAsync(mutation, preview.ConfirmationId,
+                $"embedding-reverse-delete:{deleting.RootId:N}", "test", CancellationToken.None).AsTask());
+            Assert.Equal("source-delete-external-execution-owned", refusal.ReasonCode);
+        }
+        else
+        {
+            Assert.False(await new SourceDeletionCoordinator(new SqlSourceDeletionStore(factory, TimeProvider.System, embeddingRuntime: runtime)).RunOneAsync(CancellationToken.None));
+            await using var failure = CreateContext();
+            Assert.Equal("source-delete-external-execution-owned", (await failure.SourceDeletionOperations.SingleAsync()).ReasonCode);
+        }
+        await using var check = CreateContext();
+        Assert.True(await check.GpuMiniTasks.AnyAsync(value => value.Id == miniTaskId && value.ParentJobId == control.JobId));
+        Assert.True(await check.EmbeddingGpuRequests.AnyAsync(value => value.MiniTaskId == miniTaskId));
+        Assert.True(await check.IndexGenerations.AnyAsync(value => value.Id == generationId && value.EmbeddingJobId == control.JobId));
+        Assert.True(await check.SourceRootConfigurations.AnyAsync(value => value.Id == control.RootId));
+        Assert.True(await check.PipelineRecords.AnyAsync(value => value.Id == control.RecordId));
+        Assert.True(await check.PipelineRecords.AnyAsync(value => value.Id == deleting.RecordId));
     }
 
     private sealed class NoRootCreationPolicy : ISourceRootPathPolicy
@@ -884,6 +1036,9 @@ public sealed class SourceDeletionIntegrationTests(NativeSqlServerFixture fixtur
             await setup.SaveChangesAsync();
         }
 
+        await using var stampContext = CreateContext();
+        var corpusState = await stampContext.IndexState.SingleAsync();
+        var corpusStamp = new CorpusPublicationStamp(corpusState.CorpusEpoch, corpusState.CorpusVersion);
         var candidate = new IndexGenerationCandidateSnapshot(
             new IndexGenerationDescriptor(
                 survivorGenerationId,
@@ -891,12 +1046,13 @@ public sealed class SourceDeletionIntegrationTests(NativeSqlServerFixture fixtur
                 1,
                 "survivor",
                 ComputeMetadataChecksum("source-deletion-test:1", 1, [Canonical(survivorVector)]),
-                1),
-            [Canonical(survivorVector)]);
+                1, corpusStamp),
+            [Canonical(survivorVector)], corpusStamp);
         var coordinator = new SourceDeletionCoordinator(
             new SqlSourceDeletionStore(SqlTestData.CreateFactory(_fixture), TimeProvider.System),
             new FixedGenerationPublisher(candidate),
-            new SuccessfulFileStore());
+            new SuccessfulFileStore(),
+            queryCleanupGate: new SqlDerivedIndexRecoveryStore(SqlTestData.CreateFactory(_fixture), TimeProvider.System));
 
         Assert.True(await coordinator.RunOneAsync(CancellationToken.None));
 
@@ -985,6 +1141,9 @@ public sealed class SourceDeletionIntegrationTests(NativeSqlServerFixture fixtur
             await setup.SaveChangesAsync();
         }
 
+        await using var stampContext = CreateContext();
+        var corpusState = await stampContext.IndexState.SingleAsync();
+        var corpusStamp = new CorpusPublicationStamp(corpusState.CorpusEpoch, corpusState.CorpusVersion);
         var candidate = new IndexGenerationCandidateSnapshot(
             new IndexGenerationDescriptor(
                 survivorGenerationId,
@@ -992,12 +1151,13 @@ public sealed class SourceDeletionIntegrationTests(NativeSqlServerFixture fixtur
                 1,
                 "draft-survivor-generation",
                 ComputeMetadataChecksum("source-deletion-test:1", 1, [Canonical(survivorVector)]),
-                1),
-            [Canonical(survivorVector)]);
+                1, corpusStamp),
+            [Canonical(survivorVector)], corpusStamp);
         var coordinator = new SourceDeletionCoordinator(
             new SqlSourceDeletionStore(SqlTestData.CreateFactory(_fixture), TimeProvider.System),
             new FixedGenerationPublisher(candidate),
-            new SuccessfulFileStore());
+            new SuccessfulFileStore(),
+            queryCleanupGate: new SqlDerivedIndexRecoveryStore(SqlTestData.CreateFactory(_fixture), TimeProvider.System));
 
         Assert.True(await coordinator.RunOneAsync(CancellationToken.None));
 
@@ -1008,7 +1168,7 @@ public sealed class SourceDeletionIntegrationTests(NativeSqlServerFixture fixtur
     }
 
     [NativeSqlServerFact]
-    public async Task Older_deletion_rebuild_keeps_a_later_pending_deletion_vector_as_its_temporary_survivor()
+    public async Task Older_deletion_clears_search_without_purging_a_later_pending_deletions_owned_vector()
     {
         var now = DateTimeOffset.Parse("2026-09-18T12:00:00+00:00");
         var older = await SeedRootAsync("older-deletion", SourceRootState.Deleting, now);
@@ -1066,25 +1226,24 @@ public sealed class SourceDeletionIntegrationTests(NativeSqlServerFixture fixtur
 
         var membership = await new SqlPipelineStore(SqlTestData.CreateFactory(_fixture), TimeProvider.System)
             .ReadEligibleVectorsAsync(CancellationToken.None);
-        Assert.Equal([laterVector.VectorId], membership.Select(vector => vector.VectorId).ToArray());
-        var candidate = new IndexGenerationCandidateSnapshot(
-            new IndexGenerationDescriptor(
-                Guid.NewGuid(),
-                "source-deletion-test:1",
-                1,
-                "later-deletion-survivor",
-                ComputeMetadataChecksum("source-deletion-test:1", 1, membership),
-                membership.Count),
-            membership);
+        Assert.Empty(membership);
 
         var rebuilding = Assert.IsType<SourceDeletionWorkItem>(await store.ClaimNextAsync(CancellationToken.None));
-        var completedPurge = await store.PurgeAsync(rebuilding, candidate, CancellationToken.None);
+        var completedPurge = await store.PurgeAsync(rebuilding, survivorGeneration: null, CancellationToken.None);
 
         Assert.Equal("cleanup-files", completedPurge.Phase);
         await using var verification = CreateContext();
+        var projection = await verification.IndexState.SingleAsync();
+        Assert.Null(projection.ActiveIndexGenerationId);
+        Assert.Null(projection.EmptyCatalogueValidatedAtUtc);
+        Assert.NotNull(await verification.IndexGenerations.SingleOrDefaultAsync(generation => generation.Id == retiredGenerationId));
         Assert.NotNull(await verification.SourceRootConfigurations.SingleOrDefaultAsync(root => root.Id == later.RootId));
         Assert.False(await verification.Vectors.Where(vector => vector.VectorId == laterVector.VectorId)
             .Select(vector => vector.IsDeleted).SingleAsync());
+        var recovery = await new SqlDerivedIndexRecoveryStore(SqlTestData.CreateFactory(_fixture), TimeProvider.System)
+            .ReadActiveAsync(CancellationToken.None);
+        Assert.True(recovery.IsProjectionUnavailable);
+        Assert.False(recovery.IsValidatedEmptyCatalogue);
     }
 
     private async Task<SeededRoot> SeedRootAsync(string name, SourceRootState state, DateTimeOffset now)
@@ -1157,6 +1316,7 @@ public sealed class SourceDeletionIntegrationTests(NativeSqlServerFixture fixtur
         context.OutboxMessages.Add(new OutboxMessageEntity
         {
             Id = outboxId,
+            JobId = jobId,
             PipelineRecordId = recordId,
             SourceRevision = 1,
             Stage = 0,
@@ -1227,6 +1387,9 @@ public sealed class SourceDeletionIntegrationTests(NativeSqlServerFixture fixtur
     {
         var values = new byte[] { 0, 0, 0, 0 };
         await using var context = CreateContext();
+        var published = await context.PipelineRecords.SingleAsync(record => record.Id == root.RecordId);
+        published.CurrentStage = (int)FluxKnowledge.Domain.Pipeline.PipelineStage.Publish;
+        published.CompletionCriteriaMet = true;
         var artifact = new ArtifactEntity
         {
             Id = Guid.NewGuid(),

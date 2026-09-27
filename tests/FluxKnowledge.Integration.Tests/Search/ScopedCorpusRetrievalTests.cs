@@ -11,12 +11,121 @@ using FluxKnowledge.Infrastructure.SqlServer.Persistence;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
 using FluxKnowledge.Infrastructure.SqlServer.Search;
 using FluxKnowledge.Integration.Tests.Support;
+using Microsoft.EntityFrameworkCore;
 using Xunit;
 
 namespace FluxKnowledge.Integration.Tests.Search;
 
 public sealed class ScopedCorpusRetrievalTests(NativeSqlServerFixture fixture) : IClassFixture<NativeSqlServerFixture>
 {
+    [NativeSqlServerFact]
+    public async Task Context_header_discovers_the_body_but_never_becomes_cited_evidence_or_exact_match()
+    {
+        var factory = SqlTestData.CreateFactory(fixture);
+        var rootId = Guid.NewGuid();
+        const string body = "The deadline is Thursday.";
+        long chunkId;
+        await using (var context = await factory.CreateDbContextAsync())
+        {
+            AddPublishedText(context, rootId, @"C:\headers", "answer.txt", [body]);
+            var chunk = context.TextChunks.Local.Single();
+            chunk.ContextHeader = "Payment procedure";
+            chunk.PassagePolicyFingerprint = Hash("synthetic-header-policy");
+            chunk.SearchInputHash = Hash(chunk.ContextHeader + "\n" + body);
+            await context.SaveChangesAsync();
+            chunkId = chunk.Id;
+        }
+        var service = new CorpusRetrievalService(new SqlCorpusRetrievalReader(factory),
+            new TestEvidenceCodec(), new LocalPrivateContentDisclosure(), new CorpusRetrievalOptions(true));
+        CorpusSearchResponse? response = null;
+        for (var attempt = 0; attempt < 50; attempt++)
+        {
+            response = await service.SearchAsync(new CorpusSearchRequest("payments", 5, "root", rootId, null), CancellationToken.None);
+            if (response.Results.Count > 0) break;
+            await Task.Delay(200);
+        }
+        var hit = Assert.Single(response!.Results);
+        Assert.Equal(body, hit.Passage);
+        Assert.Contains("lexical:context-header", hit.Explanation);
+        Assert.DoesNotContain("exact:ordinal", hit.Explanation);
+        Assert.Equal(body, (await service.ReadAsync(new CorpusReadRequest(hit.EvidenceRef, 0), CancellationToken.None)).Text);
+
+        await using (var context = await factory.CreateDbContextAsync())
+        {
+            (await context.TextChunks.FindAsync(chunkId))!.SearchInputHash = Hash("different-input");
+            await context.SaveChangesAsync();
+        }
+        Assert.Empty((await service.SearchAsync(new CorpusSearchRequest("Thursday", 5, "root", rootId, null), CancellationToken.None)).Results);
+        await using (var context = await factory.CreateDbContextAsync())
+        {
+            var chunk = (await context.TextChunks.FindAsync(chunkId))!;
+            chunk.ContextHeader = "secret-content-sentinel";
+            chunk.SearchInputHash = Hash(chunk.ContextHeader + "\n" + body);
+            await context.SaveChangesAsync();
+        }
+        Assert.Empty((await service.SearchAsync(new CorpusSearchRequest("Thursday", 5, "root", rootId, null), CancellationToken.None)).Results);
+    }
+
+    [NativeSqlServerFact]
+    public async Task Coherent_passage_returns_its_full_body_and_reads_overlap_from_canonical_text()
+    {
+        var factory = SqlTestData.CreateFactory(fixture);
+        var rootId = Guid.NewGuid();
+        const string text = "Context before the answer. INV-42 confirms payment. Context after the answer.";
+        await using (var context = await factory.CreateDbContextAsync())
+        {
+            AddPublishedText(context, rootId, @"C:\coherent", "answer.txt", [text]);
+            var original = context.TextChunks.Local.Single();
+            original.PassagePolicyFingerprint = Hash("synthetic-coherent-policy");
+            original.SearchInputHash = Hash(original.Content);
+            context.TextChunks.Add(new TextChunkEntity
+            {
+                ArtifactId = original.ArtifactId, SourceRevision = 1, Ordinal = 1,
+                StartOffset = 26, Length = text.Length - 26,
+                Content = text[26..], ContentHash = Hash(text[26..]),
+                PassagePolicyFingerprint = original.PassagePolicyFingerprint, SearchInputHash = Hash(text[26..])
+            });
+            await context.SaveChangesAsync();
+        }
+
+        var service = new CorpusRetrievalService(new SqlCorpusRetrievalReader(factory),
+            new TestEvidenceCodec(), new LocalPrivateContentDisclosure(), new CorpusRetrievalOptions(true));
+        var hit = (await service.SearchAsync(new CorpusSearchRequest("INV-42", 5, "root", rootId, null),
+            CancellationToken.None)).Results.First();
+
+        Assert.Equal(text, hit.Passage);
+        Assert.Equal(0, hit.StartOffset);
+        var read = await service.ReadAsync(new CorpusReadRequest(hit.EvidenceRef, 100), CancellationToken.None);
+        Assert.Equal(text, read.Text);
+        Assert.True(read.ContextBounded);
+        Assert.Equal(hit.Passage, (await service.ReadAsync(new CorpusReadRequest(hit.EvidenceRef, 0),
+            CancellationToken.None)).Text);
+    }
+
+    [NativeSqlServerFact]
+    public async Task Advancing_corpus_epoch_invalidates_previously_issued_evidence()
+    {
+        var factory = SqlTestData.CreateFactory(fixture);
+        var rootId = Guid.NewGuid();
+        await using (var context = await factory.CreateDbContextAsync())
+        {
+            AddPublishedText(context, rootId, @"C:\epoch", "answer.txt", ["INV-43 confirms a value."]);
+            await context.SaveChangesAsync();
+        }
+        var service = new CorpusRetrievalService(new SqlCorpusRetrievalReader(factory),
+            new TestEvidenceCodec(), new LocalPrivateContentDisclosure());
+        var hit = Assert.Single((await service.SearchAsync(new CorpusSearchRequest("INV-43", 5, "root", rootId, null),
+            CancellationToken.None)).Results);
+        await using (var context = await factory.CreateDbContextAsync())
+        {
+            (await context.IndexState.SingleAsync()).CorpusEpoch = Guid.NewGuid();
+            await context.SaveChangesAsync();
+        }
+        var error = await Assert.ThrowsAsync<FluxKnowledge.Application.IntegrationV1.NativeOperationException>(
+            async () => await service.ReadAsync(new CorpusReadRequest(hit.EvidenceRef, 0), CancellationToken.None));
+        Assert.Equal("evidence-stale", error.ReasonCode);
+    }
+
     [NativeSqlServerFact]
     public async Task Root_scope_finds_a_late_plain_text_chunk_without_leaking_another_root()
     {
@@ -256,9 +365,9 @@ public sealed class ScopedCorpusRetrievalTests(NativeSqlServerFixture fixture) :
         var scope = new ResolvedCorpusScope("root", [rootId], null);
         var candidate = Assert.Single(await reader.SearchAsync("parity marker", scope, 10, CancellationToken.None),
             value => value.SourceIdentity.EndsWith("withheld.txt", StringComparison.Ordinal));
-        var binding = new CorpusEvidenceBinding(1, candidate.RootId, candidate.OwnerSourceRevisionId,
+        var binding = new CorpusEvidenceBinding(2, candidate.RootId, candidate.OwnerSourceRevisionId,
             Hash(candidate.SourceIdentity), candidate.PipelineRecordId, candidate.PipelineRecordRevision,
-            candidate.ArtifactId, candidate.ArtifactHash, candidate.ChunkId, candidate.ChunkHash, 0, 6);
+            candidate.ArtifactId, candidate.ArtifactHash, candidate.ChunkId, candidate.ChunkHash, 0, 6, candidate.CorpusEpoch);
         var error = await Assert.ThrowsAsync<FluxKnowledge.Application.IntegrationV1.NativeOperationException>(
             async () => await service.ReadAsync(new CorpusReadRequest(codec.Encode(binding), 0), CancellationToken.None));
         Assert.Equal("content-withheld", error.ReasonCode);
@@ -316,10 +425,10 @@ public sealed class ScopedCorpusRetrievalTests(NativeSqlServerFixture fixture) :
         var scope = await reader.ResolveScopeAsync("root", rootId, null, CancellationToken.None);
         Assert.NotNull(scope);
         var candidate = Assert.Single(await reader.SearchAsync("abc123", scope, 5, CancellationToken.None));
-        var binding = new CorpusEvidenceBinding(1, candidate.RootId, candidate.OwnerSourceRevisionId,
+        var binding = new CorpusEvidenceBinding(2, candidate.RootId, candidate.OwnerSourceRevisionId,
             Hash(candidate.SourceIdentity), candidate.PipelineRecordId,
             candidate.PipelineRecordRevision, candidate.ArtifactId, candidate.ArtifactHash,
-            candidate.ChunkId, candidate.ChunkHash, candidate.StartOffset, 6);
+            candidate.ChunkId, candidate.ChunkHash, candidate.StartOffset, 6, candidate.CorpusEpoch);
         var codec = new TestEvidenceCodec();
         var service = new CorpusRetrievalService(reader, codec, new LocalPrivateContentDisclosure());
         Assert.Empty((await service.SearchAsync(new CorpusSearchRequest("abc123", 5, "root", rootId, null),

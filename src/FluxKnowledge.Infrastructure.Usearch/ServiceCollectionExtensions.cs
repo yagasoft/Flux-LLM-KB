@@ -94,6 +94,7 @@ public static class ServiceCollectionExtensions
         services.AddScoped<IIndexGenerationPublisher>(provider => provider.GetRequiredService<UsearchGenerationBuilder>());
         services.AddSingleton<UsearchAnnIndex>();
         services.AddSingleton<IAnnIndex>(provider => provider.GetRequiredService<UsearchAnnIndex>());
+        services.AddScoped<ICorpusAnnLeaseFactory, UsearchCorpusAnnLeaseFactory>();
         services.AddScoped<ISemanticSearch, UsearchNearestNeighbourQuery>();
         return services;
     }

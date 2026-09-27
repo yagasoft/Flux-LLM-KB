@@ -236,6 +236,48 @@ public sealed class GpuExecutorDispatchRecoveryServiceTests
         Assert.False(signal.TryConsume());
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Existing_dispatch_loop_recovers_durable_continuations_on_startup_and_prompt_without_blocking_other_delivery(bool recoveryThrows)
+    {
+        var handle = CreateHandle("executor-a");
+        var store = new PendingDispatchStore(handle);
+        var adapter = new RecoveringAdapter(handle.ExecutorKey, recoveryThrows);
+        await using var provider = CreateProvider(store, TimeProvider.System, adapter);
+        var service = provider.GetRequiredService<GpuExecutorDispatchRecoveryService>();
+        await service.StartAsync(CancellationToken.None);
+        try
+        {
+            Assert.Equal("recover", await adapter.Events.Reader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(2)));
+            Assert.Equal("deliver", await adapter.Events.Reader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(2)));
+            provider.GetRequiredService<ChannelGpuExecutorDispatchSignal>().Notify();
+            Assert.Equal("recover", await adapter.Events.Reader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(2)));
+            Assert.Equal("deliver", await adapter.Events.Reader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(2)));
+            Assert.Equal(0, store.MutationCount);
+        }
+        finally { await service.StopAsync(CancellationToken.None); }
+    }
+
+    private sealed class RecoveringAdapter(string executorKey, bool recoveryThrows) : IGpuExecutorAdapter, IGpuExecutorRecoveryAdapter
+    {
+        public string ExecutorKey => executorKey;
+        public Channel<string> Events { get; } = Channel.CreateUnbounded<string>();
+        public ValueTask RecoverAsync(CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+            Events.Writer.TryWrite("recover");
+            return recoveryThrows ? ValueTask.FromException(new IOException("test-recovery")) : ValueTask.CompletedTask;
+        }
+        public ValueTask DeliverAsync(GpuExecutorBatchHandle handle, CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+            Assert.Equal(ExecutorKey, handle.ExecutorKey);
+            Events.Writer.TryWrite("deliver");
+            return ValueTask.CompletedTask;
+        }
+    }
+
     private static ServiceProvider CreateProvider(
         PendingDispatchStore store,
         TimeProvider timeProvider,

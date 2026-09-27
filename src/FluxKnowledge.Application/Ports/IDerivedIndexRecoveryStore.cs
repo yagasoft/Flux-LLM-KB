@@ -9,7 +9,8 @@ public sealed record DerivedIndexRecoverySqlSnapshot(
     ImmutableArray<CanonicalVector> Membership,
     ImmutableHashSet<Guid> ReferencedGenerationIds,
     ImmutableHashSet<string> ReferencedIndexPaths,
-    bool IsValidatedEmptyCatalogue = false);
+    bool IsValidatedEmptyCatalogue = false,
+    bool IsProjectionUnavailable = false);
 
 public interface IDerivedIndexRecoveryLease : IAsyncDisposable;
 

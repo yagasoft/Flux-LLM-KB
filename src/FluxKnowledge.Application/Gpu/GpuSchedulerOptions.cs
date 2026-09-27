@@ -14,13 +14,15 @@ public sealed record GpuSchedulerOptions
         long maxBatchEstimatedBytes,
         TimeSpan capacityDeferralCap,
         TimeSpan fallbackInterval,
-        TimeSpan unresponsiveDiagnosticAge)
+        TimeSpan unresponsiveDiagnosticAge,
+        GpuWorkloadPolicy? workloadPolicy = null)
     {
         MaxBatchItems = maxBatchItems;
         MaxBatchEstimatedBytes = maxBatchEstimatedBytes;
         CapacityDeferralCap = capacityDeferralCap;
         FallbackInterval = fallbackInterval;
         UnresponsiveDiagnosticAge = unresponsiveDiagnosticAge;
+        WorkloadPolicy = workloadPolicy;
         Validate();
     }
 
@@ -33,6 +35,8 @@ public sealed record GpuSchedulerOptions
     public TimeSpan FallbackInterval { get; }
 
     public TimeSpan UnresponsiveDiagnosticAge { get; }
+    public GpuWorkloadPolicy? WorkloadPolicy { get; }
+    public const int MaxSearchBatchesBeforeOcr = 3;
 
     public void Validate()
     {

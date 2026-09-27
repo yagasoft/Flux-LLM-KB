@@ -354,7 +354,9 @@ public static class WebHostComposition
         services.AddScoped<SqlSourceDeletionStore>(provider => new SqlSourceDeletionStore(
             provider.GetRequiredService<IDbContextFactory<FluxKnowledgeDbContext>>(),
             provider.GetRequiredService<TimeProvider>(),
-            provider.GetService<PaddleOcrVlmExecutionRegistry>()));
+            provider.GetService<PaddleOcrVlmExecutionRegistry>(),
+            provider.GetService<IGpuInteractiveOwnerProbe>(),
+            provider.GetService<EmbeddingGpuRuntime>(), provider.GetService<EmbeddingGpuExecutor>()));
         services.AddScoped<ISourceDeletionStore>(provider => provider.GetRequiredService<SqlSourceDeletionStore>());
         services.AddScoped<SourceDeletionCoordinator>();
         services.AddScoped<SqlSourceActivityStore>();
@@ -419,6 +421,15 @@ public static class WebHostComposition
             AddFixedLocalOcrServices(services);
         }
         services.AddFluxKnowledgeGpuScheduler();
+        var hybridSetting = configuration["Search:HybridPassagesEnabled"];
+        if (hybridSetting is not null && !bool.TryParse(hybridSetting, out _))
+            throw new InvalidOperationException("hybrid-search-setting-invalid");
+        if (bool.TryParse(hybridSetting, out var hybridEnabled) && hybridEnabled)
+        {
+            // Reuse the provisioned physical slot, OCR adapter and recovery graph.
+            if (!localOcrEnabled) throw new InvalidOperationException("hybrid-search-requires-shared-ocr-runtime");
+            BgeSearchRuntimeComposition.Add(services);
+        }
         if (localOcrEnabled)
         {
             services.AddSingleton<IHostedService, PaddleOcrVlmCompletionRecoveryService>();

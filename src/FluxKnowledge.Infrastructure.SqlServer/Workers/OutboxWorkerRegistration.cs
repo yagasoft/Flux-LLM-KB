@@ -79,6 +79,7 @@ public static class OutboxWorkerServiceCollectionExtensions
             provider => provider.GetRequiredService<SqlPipelineStore>());
         services.TryAddScoped<IIndexGenerationStore>(
             provider => provider.GetRequiredService<SqlPipelineStore>());
+        services.TryAddScoped<IEmbeddingCheckpointStore, SqlEmbeddingCheckpointStore>();
         services.TryAddScoped<SqlRetainedTextRegistrationStore>();
         services.TryAddScoped<IRetainedTextRegistrationStore>(
             provider => provider.GetRequiredService<SqlRetainedTextRegistrationStore>());

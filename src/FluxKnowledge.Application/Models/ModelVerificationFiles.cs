@@ -15,6 +15,10 @@ public interface IModelVerificationFile : IDisposable
 {
     long ByteLength { get; }
 
+    // Optional native loading capability. The implementation must prevent held-file
+    // writes/replacement and ancestor rename/replacement until disposal.
+    string? ProtectedLocalPath => null;
+
     ValueTask<int> ReadAsync(long offset, Memory<byte> buffer, CancellationToken cancellationToken);
 }
 

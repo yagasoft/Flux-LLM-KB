@@ -1,6 +1,7 @@
 using System.Data;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Documents;
+using FluxKnowledge.Application.Sources;
 using FluxKnowledge.Application.Workers;
 using FluxKnowledge.Domain.Common;
 using FluxKnowledge.Domain.Jobs;
@@ -12,7 +13,8 @@ using Microsoft.EntityFrameworkCore;
 namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
 
 public sealed class SqlOutboxStore(
-    IDbContextFactory<FluxKnowledgeDbContext> contextFactory) : IOutboxStore
+    IDbContextFactory<FluxKnowledgeDbContext> contextFactory,
+    IDeploymentValidationHold? deploymentValidationHold = null) : IOutboxStore
 {
     public async ValueTask EnqueueAsync(
         DispatchMessage message,
@@ -22,10 +24,15 @@ public sealed class SqlOutboxStore(
         await using var context = await contextFactory
             .CreateDbContextAsync(cancellationToken)
             .ConfigureAwait(false);
+        if (!await context.Jobs.AnyAsync(job => job.Id == message.JobId.Value &&
+                job.PipelineRecordId == message.PipelineRecordId.Value && job.SourceRevision == message.SourceRevision &&
+                job.Stage == (int)message.Stage && job.Operation == message.Operation, cancellationToken).ConfigureAwait(false))
+            throw new InvalidOperationException("outbox-job-binding-invalid");
         context.OutboxMessages.Add(
             new OutboxMessageEntity
             {
                 Id = message.Id.Value,
+                JobId = message.JobId.Value,
                 PipelineRecordId = message.PipelineRecordId.Value,
                 SourceRevision = message.SourceRevision,
                 Stage = (int)message.Stage,
@@ -58,6 +65,8 @@ public sealed class SqlOutboxStore(
         IReadOnlyCollection<string> registeredOperations, DocumentReprocessRequest? exactRequest, Guid? branchId,
         CancellationToken cancellationToken)
     {
+        var admission = deploymentValidationHold?.ReadAdmissionState() ?? new(false, null);
+        if (admission is { IsHeld: true, PermittedCorpusRebuildOperationId: null }) return null;
         ArgumentException.ThrowIfNullOrWhiteSpace(leaseOwner);
         ArgumentNullException.ThrowIfNull(registeredOperations);
         if (leaseDuration <= TimeSpan.Zero)
@@ -115,6 +124,8 @@ public sealed class SqlOutboxStore(
                    AND ([LeaseExpiresAtUtc] IS NULL OR [LeaseExpiresAtUtc] <= @nowUtc)
                    AND [Operation] IN ({operationParameters})
                    {exactPredicate}
+                   AND {SqlCorpusRebuildEligibility.Admission("[OutboxMessages].[JobId]")}
+                   AND {SqlCorpusRebuildEligibility.DeploymentAdmission("[OutboxMessages].[JobId]")}
                    AND
                    (
                        NOT EXISTS
@@ -133,7 +144,7 @@ public sealed class SqlOutboxStore(
                            INNER JOIN [SourceRootConfigurations] AS [root]
                                ON [root].[Id] = [revision].[SourceRootId]
                            WHERE [record].[Id] = [OutboxMessages].[PipelineRecordId]
-                             AND [root].[State] = @sourceRootEnabled
+                             AND ([root].[State] = @sourceRootEnabled OR {SqlCorpusRebuildEligibility.ActiveJob("[OutboxMessages].[JobId]")})
                        )
                    )
                  ORDER BY [DueAtUtc], [CreatedAtUtc], [Id]
@@ -162,6 +173,9 @@ public sealed class SqlOutboxStore(
         var connection = (SqlConnection)context.Database.GetDbConnection();
         await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = new SqlCommand(sql, connection);
+        AddParameter(command, "@deploymentHeld", SqlDbType.Bit, admission.IsHeld);
+        AddParameter(command, "@permittedRebuildOperationId", SqlDbType.UniqueIdentifier,
+            (object?)admission.PermittedCorpusRebuildOperationId ?? DBNull.Value);
         AddParameter(command, "@nowUtc", SqlDbType.DateTimeOffset, nowUtc);
         AddParameter(
             command,

@@ -2,6 +2,7 @@ using System.Data;
 using System.Security.Cryptography;
 using System.Text;
 using FluxKnowledge.Application.Indexing;
+using FluxKnowledge.Application.Gpu;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Domain.Jobs;
 using FluxKnowledge.Domain.Pipeline;
@@ -20,7 +21,8 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
 public sealed class SqlSourceDeletionStore(
     IDbContextFactory<FluxKnowledgeDbContext> contextFactory,
     TimeProvider timeProvider,
-    PaddleOcrVlmExecutionRegistry? localOcrExecutions = null) : ISourceDeletionStore
+    PaddleOcrVlmExecutionRegistry? localOcrExecutions = null, IGpuInteractiveOwnerProbe? queryOwnerProbe = null,
+    EmbeddingGpuRuntime? embeddingRuntime = null, EmbeddingGpuExecutor? localEmbeddingExecutions = null) : ISourceDeletionStore
 {
     private static readonly TimeSpan LeaseDuration = TimeSpan.FromMinutes(15);
 
@@ -76,6 +78,20 @@ public sealed class SqlSourceDeletionStore(
         {
             await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
             await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken).ConfigureAwait(false);
+            if (!await SqlCorpusGenerationLeaseStore.TryAcquireCleanupTransactionAsync(context, queryOwnerProbe, cancellationToken).ConfigureAwait(false))
+            {
+                var waiting = await context.SourceDeletionOperations.SingleAsync(value => value.Id == workItem.OperationId, cancellationToken).ConfigureAwait(false);
+                if (!OwnsActiveLease(waiting, workItem, timeProvider.GetUtcNow()))
+                    throw new InvalidOperationException("The source deletion cleanup lease is no longer owned.");
+                waiting.State = 0;
+                ReleaseLease(waiting);
+                waiting.ReasonCode = "source-delete-search-queries-active";
+                waiting.UpdatedAtUtc = timeProvider.GetUtcNow();
+                await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+                await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+                return new SourceDeletionRunResult(false, waiting.Phase);
+            }
+            await SqlPublishedPassageSelection.AcquireFenceAsync(context, cancellationToken).ConfigureAwait(false);
             var operation = await context.SourceDeletionOperations
                 .FromSqlInterpolated($"""
                     SELECT * FROM [SourceDeletionOperations] WITH (UPDLOCK, HOLDLOCK)
@@ -172,11 +188,16 @@ public sealed class SqlSourceDeletionStore(
                     .ToArrayAsync(cancellationToken)
                     .ConfigureAwait(false);
             var localOcrTaskSet = localOcrTaskIds.ToHashSet();
-            if (sourceGpuTaskIds.Any(taskId => !localOcrTaskSet.Contains(taskId)))
+            var localEmbeddingTaskIds = embeddingRuntime is null ? [] : await SqlEmbeddingGpuRequestStore.OwnedLocalTasks(context, embeddingRuntime)
+                .Where(task => context.Jobs.Any(job => job.Id == task.ParentJobId && recordIds.Contains(job.PipelineRecordId)))
+                .Select(task => task.Id).ToArrayAsync(cancellationToken).ConfigureAwait(false);
+            var localEmbeddingTaskSet = localEmbeddingTaskIds.ToHashSet();
+            if (sourceGpuTaskIds.Any(taskId => !localOcrTaskSet.Contains(taskId) && !localEmbeddingTaskSet.Contains(taskId)) ||
+                await SqlEmbeddingGpuRequestStore.HasContradictoryRequestsAsync(context, recordIds, localEmbeddingTaskIds, cancellationToken).ConfigureAwait(false))
             {
                 return await RefuseAsync(context, transaction, operation, "source-delete-external-execution-owned", cancellationToken).ConfigureAwait(false);
             }
-            var activeLocalOcrTaskIds = sourceGpuTaskIds.Length == 0
+            var activeLocalTaskIds = sourceGpuTaskIds.Length == 0
                 ? []
                 : await context.GpuMiniTasks.Where(value =>
                         sourceGpuTaskIds.Contains(value.Id) &&
@@ -184,14 +205,17 @@ public sealed class SqlSourceDeletionStore(
                     .Select(value => value.Id)
                     .ToArrayAsync(cancellationToken)
                     .ConfigureAwait(false);
-            if (activeLocalOcrTaskIds.Length > 0)
+            var unconfirmedEmbeddingCleanup = await context.EmbeddingGpuRequests.AnyAsync(value => recordIds.Contains(value.PipelineRecordId) &&
+                value.ExecutorInstanceId != null && !value.NativeCleanupConfirmed, cancellationToken).ConfigureAwait(false);
+            if (activeLocalTaskIds.Length > 0 || unconfirmedEmbeddingCleanup)
             {
-                var cancellationRequested = localOcrExecutions is not null &&
-                    activeLocalOcrTaskIds.Any(localOcrExecutions.RequestCancellation);
-                if (!cancellationRequested)
+                var activeOcrTasks = activeLocalTaskIds.Where(localOcrTaskSet.Contains).ToArray();
+                if (activeOcrTasks.Length > 0 && !(localOcrExecutions is not null && activeOcrTasks.Any(localOcrExecutions.RequestCancellation)))
                 {
                     return await RefuseAsync(context, transaction, operation, "source-delete-external-execution-owned", cancellationToken).ConfigureAwait(false);
                 }
+                if (localEmbeddingExecutions is not null)
+                    foreach (var taskId in activeLocalTaskIds.Where(localEmbeddingTaskSet.Contains)) localEmbeddingExecutions.RequestCancellation(taskId);
 
                 operation.State = 0;
                 ReleaseLease(operation);
@@ -220,6 +244,12 @@ public sealed class SqlSourceDeletionStore(
             var targetVectorIds = await ReadTargetVectorIdsAsync(context, recordIds, cancellationToken).ConfigureAwait(false);
             if (!string.Equals(operation.Phase, "rebuild-index", StringComparison.Ordinal))
             {
+                // Withdraw owned unplaced checkpoints in the same durable phase as
+                // their source rows. Recovery between deletion phases must not treat
+                // a deliberately withdrawn partial draft as inconsistent provenance.
+                await context.IndexGenerations.Where(generation => generation.EmbeddingJobId.HasValue && generation.IndexPath == string.Empty &&
+                    context.Jobs.Any(job => job.Id == generation.EmbeddingJobId.Value && recordIds.Contains(job.PipelineRecordId)))
+                    .ExecuteUpdateAsync(update => update.SetProperty(generation => generation.RetiredAtUtc, timeProvider.GetUtcNow()), cancellationToken).ConfigureAwait(false);
                 if (recordIds.Length > 0)
                 {
                     await context.PipelineRecords.Where(record => recordIds.Contains(record.Id))
@@ -243,16 +273,21 @@ public sealed class SqlSourceDeletionStore(
                 return new SourceDeletionRunResult(false, operation.Phase, ContinueImmediately: true, RequiresIndexBuild: true);
             }
 
-            var currentMembership = await ReadEligibleVectorsAsync(context, cancellationToken).ConfigureAwait(false);
+            var currentMembership = await SqlPublishedPassageSelection.ReadVectorsAsync(context, cancellationToken).ConfigureAwait(false);
             if (survivorGeneration is null && currentMembership.Count != 0)
             {
                 return await RefuseAsync(context, transaction, operation, "source-delete-index-publisher-unavailable", cancellationToken).ConfigureAwait(false);
             }
-            if (survivorGeneration is not null && !HasValidDescriptor(survivorGeneration))
+            if (survivorGeneration is not null && (!HasValidDescriptor(survivorGeneration) ||
+                survivorGeneration.ExpectedCorpusStamp is null || survivorGeneration.Generation.CorpusStamp is null))
             {
                 return await RefuseAsync(context, transaction, operation, "source-delete-index-candidate-invalid", cancellationToken).ConfigureAwait(false);
             }
-            if (survivorGeneration is not null && !SameSnapshot(survivorGeneration.Vectors, currentMembership))
+            var corpusStamp = await SqlPublishedPassageSelection.ReadStampAsync(context, cancellationToken).ConfigureAwait(false);
+            if (survivorGeneration is not null &&
+                (!SameSnapshot(survivorGeneration.Vectors, currentMembership) ||
+                 survivorGeneration.ExpectedCorpusStamp is { } expectedStamp && expectedStamp != corpusStamp ||
+                 survivorGeneration.Generation.CorpusStamp is { } generationStamp && generationStamp != corpusStamp))
             {
                 operation.State = 0;
                 ReleaseLease(operation);
@@ -275,10 +310,13 @@ public sealed class SqlSourceDeletionStore(
             {
                 await ActivateSurvivorGenerationAsync(context, survivorGeneration, cancellationToken).ConfigureAwait(false);
             }
+            // Persist captured retirement in this transaction before releasing checkpoint
+            // job foreign keys; database reads must see the same ownership proof.
+            await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
             await DeleteOwnedGraphAsync(context, root.Id, revisionIds, recordIds, cancellationToken).ConfigureAwait(false);
             if (survivorGeneration is null)
             {
-                await MarkEmptyCatalogueAsync(context, cancellationToken).ConfigureAwait(false);
+                await ClearProjectionAndValidateEmptyCatalogueAsync(context, cancellationToken).ConfigureAwait(false);
             }
             operation.State = 0;
             ReleaseLease(operation);
@@ -421,23 +459,6 @@ public sealed class SqlSourceDeletionStore(
             .ToArrayAsync(cancellationToken).ConfigureAwait(false);
     }
 
-    private static Task<List<CanonicalVector>> ReadEligibleVectorsAsync(
-        FluxKnowledgeDbContext context,
-        CancellationToken cancellationToken) =>
-        (
-            from vector in context.Vectors
-            join chunk in context.TextChunks on vector.TextChunkId equals chunk.Id
-            join artifact in context.Artifacts on chunk.ArtifactId equals artifact.Id
-            join record in context.PipelineRecords on artifact.PipelineRecordId equals record.Id
-            where !vector.IsDeleted && !record.IsDeleted &&
-                  (record.SourceRevisionId.HasValue
-                      ? context.SourceRevisions.Any(revision => revision.Id == record.SourceRevisionId.Value && revision.SuppressedAtUtc == null)
-                      : record.Revision == context.PipelineRecords.Where(candidate => candidate.SourceIdentityId == record.SourceIdentityId).Max(candidate => candidate.Revision))
-            orderby vector.VectorId
-            select new CanonicalVector(vector.VectorId, vector.TextChunkId, vector.ModelFingerprint, vector.Dimensions,
-                vector.Values, vector.TextChunkContentHash, vector.PayloadChecksum, vector.SourceRevision))
-        .ToListAsync(cancellationToken);
-
     private async Task CaptureCleanupTargetsAsync(
         FluxKnowledgeDbContext context,
         SourceDeletionOperationEntity operation,
@@ -494,8 +515,14 @@ public sealed class SqlSourceDeletionStore(
                 .Where(static generationId => generationId != Guid.Empty)
                 .Distinct()
                 .ToArray();
+        var checkpointIds = await (from generation in context.IndexGenerations
+            join job in context.Jobs on generation.EmbeddingJobId equals job.Id
+            where recordIds.Contains(job.PipelineRecordId)
+            select generation.Id).ToArrayAsync(cancellationToken).ConfigureAwait(false);
+        ownedGenerationIds = ownedGenerationIds.Union(checkpointIds).ToArray();
         var generations = retireAllGenerations
-            ? await context.IndexGenerations.ToArrayAsync(cancellationToken).ConfigureAwait(false)
+            ? await context.IndexGenerations.Where(generation => generation.IndexPath != string.Empty ||
+                ownedGenerationIds.Contains(generation.Id)).ToArrayAsync(cancellationToken).ConfigureAwait(false)
             : targetVectorIds.Count == 0 && ownedGenerationIds.Length == 0
                 ? []
                 : await (
@@ -539,6 +566,8 @@ public sealed class SqlSourceDeletionStore(
                 IndexPath = candidate.Generation.IndexPath,
                 MetadataChecksum = candidate.Generation.MetadataChecksum,
                 VectorCount = candidate.Generation.VectorCount,
+                CorpusEpoch = candidate.Generation.CorpusStamp?.CorpusEpoch,
+                CorpusVersion = candidate.Generation.CorpusStamp?.CorpusVersion,
                 CreatedAtUtc = timeProvider.GetUtcNow(),
                 ValidatedAtUtc = timeProvider.GetUtcNow()
             };
@@ -569,25 +598,36 @@ public sealed class SqlSourceDeletionStore(
         state.UpdatedAtUtc = timeProvider.GetUtcNow();
     }
 
-    private async Task MarkEmptyCatalogueAsync(FluxKnowledgeDbContext context, CancellationToken cancellationToken)
+    private async Task ClearProjectionAndValidateEmptyCatalogueAsync(FluxKnowledgeDbContext context, CancellationToken cancellationToken)
     {
-        if (await context.Vectors.AnyAsync(cancellationToken).ConfigureAwait(false))
-        {
-            throw new InvalidOperationException("The source deletion cannot mark an empty catalogue while vectors remain.");
-        }
+        // The eligibility and draft proof below must include retirements tracked in this transaction.
+        await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        if ((await SqlPublishedPassageSelection.ReadVectorsAsync(context, cancellationToken).ConfigureAwait(false)).Count != 0)
+            throw new InvalidOperationException("The source deletion cannot clear a searchable survivor projection.");
+        var hasCanonicalVectors = await context.Vectors.AnyAsync(cancellationToken).ConfigureAwait(false);
+        var hasOtherUnplacedDrafts = await context.IndexGenerations.AnyAsync(generation =>
+            generation.IndexPath == string.Empty && generation.RetiredAtUtc == null, cancellationToken).ConfigureAwait(false);
 
         var state = await context.IndexState.SingleAsync(value => value.Id == 1, cancellationToken).ConfigureAwait(false);
         state.ActiveIndexGenerationId = null;
-        state.EmptyCatalogueValidatedAtUtc = timeProvider.GetUtcNow();
+        // No search survivors is different from a proven empty canonical catalogue.
+        // Other deletion owners or pending sources keep their SQL rows and remain unavailable
+        // to semantic search until their own publication/purge finishes.
+        state.EmptyCatalogueValidatedAtUtc = hasCanonicalVectors || hasOtherUnplacedDrafts ? null : timeProvider.GetUtcNow();
         state.UpdatedAtUtc = timeProvider.GetUtcNow();
         await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
-        await context.IndexGenerationVectors.ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
-        await context.IndexGenerations.ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
+        if (!hasCanonicalVectors && !hasOtherUnplacedDrafts)
+        {
+            await context.IndexGenerationVectors.ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
+            await context.IndexGenerations.ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
+        }
     }
 
     private static bool SameSnapshot(IReadOnlyList<CanonicalVector> expected, IReadOnlyList<CanonicalVector> actual) =>
         expected.Count == actual.Count && expected.Zip(actual, static (left, right) =>
-            left.VectorId == right.VectorId && left.Dimensions == right.Dimensions &&
+            left.VectorId == right.VectorId && left.TextChunkId == right.TextChunkId &&
+            left.SourceRevision == right.SourceRevision && left.Values.AsSpan().SequenceEqual(right.Values) &&
+            string.Equals(left.TextChunkContentHash, right.TextChunkContentHash, StringComparison.Ordinal) && left.Dimensions == right.Dimensions &&
             string.Equals(left.ModelFingerprint, right.ModelFingerprint, StringComparison.Ordinal) &&
             string.Equals(left.PayloadChecksum, right.PayloadChecksum, StringComparison.Ordinal)).All(static equal => equal);
 
@@ -626,7 +666,8 @@ public sealed class SqlSourceDeletionStore(
         actual.Dimensions == expected.Dimensions &&
         string.Equals(actual.IndexPath, expected.IndexPath, StringComparison.Ordinal) &&
         string.Equals(actual.MetadataChecksum, expected.MetadataChecksum, StringComparison.Ordinal) &&
-        actual.VectorCount == expected.VectorCount;
+        actual.VectorCount == expected.VectorCount && actual.CorpusEpoch == expected.CorpusStamp?.CorpusEpoch &&
+        actual.CorpusVersion == expected.CorpusStamp?.CorpusVersion;
 
     private static async Task<bool> HasActiveWorkAsync(
         FluxKnowledgeDbContext context,
@@ -695,7 +736,7 @@ public sealed class SqlSourceDeletionStore(
             : await context.TextChunks.Where(value => artifactIds.Contains(value.ArtifactId))
                 .Select(value => value.Id).ToArrayAsync(cancellationToken).ConfigureAwait(false);
 
-        await DeleteOwnedLocalOcrExecutionGraphAsync(context, recordIds, cancellationToken).ConfigureAwait(false);
+        await DeleteOwnedLocalModelExecutionGraphAsync(context, recordIds, cancellationToken).ConfigureAwait(false);
 
         await context.AuditEvents.Where(value => value.SourceRootId == rootId ||
                 (value.SourceScanRequestId.HasValue && scanRequestIds.Contains(value.SourceScanRequestId.Value)) ||
@@ -786,6 +827,11 @@ public sealed class SqlSourceDeletionStore(
             var identityIds = await context.PipelineRecords.Where(value => recordIds.Contains(value.Id)).Select(value => value.SourceIdentityId).ToArrayAsync(cancellationToken).ConfigureAwait(false);
             await context.Artifacts.Where(value => recordIds.Contains(value.PipelineRecordId)).ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
             await context.OutboxMessages.Where(value => recordIds.Contains(value.PipelineRecordId)).ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
+            var ownedJobIds = await context.Jobs.Where(value => recordIds.Contains(value.PipelineRecordId)).Select(value => value.Id).ToArrayAsync(cancellationToken).ConfigureAwait(false);
+            if (await context.IndexGenerations.AnyAsync(value => value.EmbeddingJobId.HasValue && ownedJobIds.Contains(value.EmbeddingJobId.Value) && value.RetiredAtUtc == null, cancellationToken).ConfigureAwait(false))
+                throw new InvalidOperationException("source-delete-checkpoint-not-retired");
+            await context.IndexGenerations.Where(value => value.EmbeddingJobId.HasValue && ownedJobIds.Contains(value.EmbeddingJobId.Value))
+                .ExecuteUpdateAsync(update => update.SetProperty(value => value.EmbeddingJobId, (Guid?)null), cancellationToken).ConfigureAwait(false);
             await context.Jobs.Where(value => recordIds.Contains(value.PipelineRecordId)).ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
             await context.PipelineRecords.Where(value => recordIds.Contains(value.Id)).ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
             await context.SourceIdentities.Where(value => identityIds.Contains(value.Id) && !context.PipelineRecords.Any(record => record.SourceIdentityId == value.Id)).ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
@@ -801,7 +847,7 @@ public sealed class SqlSourceDeletionStore(
         }
     }
 
-    private static async Task DeleteOwnedLocalOcrExecutionGraphAsync(
+    private static async Task DeleteOwnedLocalModelExecutionGraphAsync(
         FluxKnowledgeDbContext context,
         IReadOnlyCollection<Guid> recordIds,
         CancellationToken cancellationToken)
@@ -814,8 +860,12 @@ public sealed class SqlSourceDeletionStore(
         var miniTaskIds = await context.DocumentOcrRequests
             .Where(request => recordIds.Contains(request.PipelineRecordId))
             .Select(request => request.MiniTaskId)
+            .Union(context.EmbeddingGpuRequests.Where(request => recordIds.Contains(request.PipelineRecordId)).Select(request => request.MiniTaskId))
             .ToArrayAsync(cancellationToken)
             .ConfigureAwait(false);
+        if (await context.EmbeddingGpuRequests.AnyAsync(request => recordIds.Contains(request.PipelineRecordId) &&
+            request.ExecutorInstanceId != null && !request.NativeCleanupConfirmed, cancellationToken).ConfigureAwait(false))
+            throw new InvalidOperationException("source-delete-embedding-native-cleanup-unconfirmed");
         var batchIds = miniTaskIds.Length == 0
             ? []
             : await context.GpuMiniTasks.Where(task => miniTaskIds.Contains(task.Id) && task.BatchId.HasValue)
@@ -851,6 +901,8 @@ public sealed class SqlSourceDeletionStore(
 
         if (miniTaskIds.Length > 0)
         {
+            await context.EmbeddingGpuRequests.Where(value => miniTaskIds.Contains(value.MiniTaskId))
+                .ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
             await context.DocumentOcrRequests.Where(value => miniTaskIds.Contains(value.MiniTaskId))
                 .ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
             await context.GpuMiniTasks.Where(value => miniTaskIds.Contains(value.Id))
@@ -859,6 +911,8 @@ public sealed class SqlSourceDeletionStore(
         // A malformed or pre-scheduler request can lack its mini task. It is still owned by
         // the fenced record and must not survive after the parent record is removed.
         await context.DocumentOcrRequests.Where(value => recordIds.Contains(value.PipelineRecordId))
+            .ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
+        await context.EmbeddingGpuRequests.Where(value => recordIds.Contains(value.PipelineRecordId))
             .ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
 
         if (batchIds.Length > 0)

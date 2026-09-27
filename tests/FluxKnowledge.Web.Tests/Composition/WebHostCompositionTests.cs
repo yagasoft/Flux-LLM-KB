@@ -45,6 +45,44 @@ namespace FluxKnowledge.Web.Tests.Composition;
 
 public sealed class WebHostCompositionTests : IDisposable
 {
+    [Fact]
+    public void Hybrid_runtime_composes_shared_slot_exact_profiles_and_both_executors_without_loading_models()
+    {
+        var configuration = new ConfigurationBuilder().AddConfiguration(CreateProductionConfiguration())
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Runtime:Model:Enabled"] = "true", ["Runtime:Gpu:Enabled"] = "true", ["Runtime:Ocr:Enabled"] = "true",
+                ["Search:HybridPassagesEnabled"] = "true"
+            }).Build();
+        using var host = new HostBuilder().Build();
+        var services = new ServiceCollection();
+        services.AddSingleton(host.Services.GetRequiredService<IHostApplicationLifetime>());
+        WebHostComposition.AddProductionFluxKnowledgeServicesForTests(services, configuration);
+        using var provider = services.BuildServiceProvider(new ServiceProviderOptions { ValidateScopes = true, ValidateOnBuild = true });
+        using var scope = provider.CreateScope();
+        Assert.IsType<SharedGpuAdmissionGate>(provider.GetRequiredService<IGpuAdmissionGate>());
+        Assert.Equal(2, provider.GetRequiredService<GpuSchedulerOptions>().WorkloadPolicy!.Profiles.Count);
+        Assert.Contains(provider.GetServices<IGpuExecutorAdapter>(), value => value is GpuInteractiveExecutor && value is IGpuExecutorRecoveryAdapter);
+        Assert.Contains(provider.GetServices<IGpuExecutorAdapter>(), value => value is EmbeddingGpuExecutor);
+        Assert.Contains(provider.GetServices<IGpuExecutorAdapter>(), value => value is PaddleOcrVlmExecutorAdapter);
+        Assert.IsType<SqlEmbeddingGpuRequestStore>(scope.ServiceProvider.GetRequiredService<IEmbeddingGpuHandoff>());
+        Assert.IsType<HybridPassageRetrievalEngine>(scope.ServiceProvider.GetRequiredService<IHybridPassageRetrieval>());
+        Assert.IsType<PassageSearchService>(scope.ServiceProvider.GetRequiredService<ISearchService>());
+        Assert.True(provider.GetRequiredService<CorpusRetrievalOptions>().CoherentPassagesEnabled);
+        Assert.NotNull(provider.GetRequiredService<PassageBuilder>());
+        WebHostComposition.ValidateNativeGoLiveComposition(services, configuration);
+    }
+
+    [Fact]
+    public void Hybrid_runtime_refuses_activation_without_the_existing_complete_shared_ocr_runtime()
+    {
+        var configuration = new ConfigurationBuilder().AddConfiguration(CreateProductionConfiguration())
+            .AddInMemoryCollection(new Dictionary<string, string?> { ["Search:HybridPassagesEnabled"] = "true" }).Build();
+        var exception = Assert.Throws<InvalidOperationException>(() =>
+            WebHostComposition.AddProductionFluxKnowledgeServicesForTests(new ServiceCollection(), configuration));
+        Assert.Equal("hybrid-search-requires-shared-ocr-runtime", exception.Message);
+    }
+
     private readonly string _ingressRoot =
         Path.Combine(Path.GetTempPath(), $"FluxKnowledgeWebHost_{Guid.NewGuid():N}");
 

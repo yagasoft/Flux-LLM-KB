@@ -6,7 +6,8 @@ public enum DerivedIndexRecoveryState
     Healthy,
     Recovering,
     RetryScheduled,
-    OperatorActionRequired
+    OperatorActionRequired,
+    IndexUpdating
 }
 
 public enum DerivedIndexRecoveryFailureCategory
@@ -29,7 +30,8 @@ public sealed record DerivedIndexRecoverySnapshot(
     DateTimeOffset? NextRetryAtUtc,
     DerivedIndexRecoveryFailureCategory? FailureCategory,
     int CleanedCandidateCount,
-    bool IsValidatedEmptyCatalogue = false);
+    bool IsValidatedEmptyCatalogue = false,
+    bool IsProjectionUnavailable = false);
 
 public sealed record DerivedIndexRecoveryFault(
     DerivedIndexRecoveryFailureCategory Category,

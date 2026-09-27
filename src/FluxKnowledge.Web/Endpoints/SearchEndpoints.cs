@@ -61,5 +61,15 @@ public static class SearchEndpoints
                     ["code"] = exception.IsUnsupportedScope ? "unsupported_scope" : "invalid_search_request"
                 });
         }
+        catch (PassageRetrievalRefusalException exception)
+        {
+            return Results.Problem(title: "Search could not be completed",
+                statusCode: exception.Retryable ? StatusCodes.Status503ServiceUnavailable : StatusCodes.Status409Conflict,
+                extensions: new Dictionary<string, object?>
+                {
+                    ["code"] = "search-" + exception.Status,
+                    ["retryable"] = exception.Retryable
+                });
+        }
     }
 }

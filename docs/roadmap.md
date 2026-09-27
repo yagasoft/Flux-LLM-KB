@@ -33,16 +33,27 @@ behaviour and limitations.
 | Item | Priority | Status | Progress % | Remaining Work |
 | --- | --- | --- | ---: | --- |
 | Scoped corpus search and cited passage reading | P1 | complete | 100% | Maintain the deployed one-time chunk Full-Text index and MCP/REST/CLI parity. Live checks cover OCR image, native PDF, DOCX, XLSX and Visio search/read; extraction fidelity, same-page region OCR and failed-revision retry remain separate work. |
-| Scoped lexical passage ranking investigation | P1 | complete (no ranking change) | 100% | Source-first development and held-out cohorts were frozen; five held-out labels were independently source-audited and corrected before any held-out ranking run. Two bounded excerpt rules improved aggregate development Recall@5 but regressed DOCX, so no candidate reached implementation or deployment. A new lexical attempt needs sound query-concept grouping, fresh development evidence and a separately authored blinded held-out cohort for production acceptance. |
-| Evaluated semantic corpus retrieval | P1 | in progress | 0% | The approved BGE-M3 ONNX export runs offline with DirectML, but the fixed pilot failed its predeclared paraphrase and citation-preservation gates; no semantic service is selected or active, so delivered capability remains 0%. Add held-out plain-text and scanned/mixed-PDF coverage, correct hybrid citation preservation, prove exact .NET tokenisation and scope-aware search, then verify end-to-end latency, OCR admission and generation/rollback before selection or activation. The alternative Python route remains paused. |
+| Scoped lexical passage ranking investigation | P1 | complete (no ranking change) | 100% | Historical investigation closed after aggregate gains regressed DOCX. Future passage/ranking work follows the hybrid passage plan, without reopening these excerpt heuristics. The frozen source audit and experiment records remain evidence of their original scope. |
+| Hybrid passage and semantic corpus retrieval | P1 | shared engine, scheduler/model composition, controlled rebuild CLI and incremental deployment/recovery implemented and reviewed locally; unreleased | 20% | Complete full-branch verification/review and feature closeout, then the reviewed incremental deployment and live acceptance. The operator/updater now joins exact worklist admission, active-page drain, worker exit, reviewed idempotent schema, reset/preparation, native generation/Full-Text validation and hold release. Independent review approved the bounded operational code; 97 combined integration checks passed, including actual SQL migration/replay and exited-owner recovery without inference. Foreign holds, absent permits and journal/schema disagreement fail closed. Canonical shared-GPU memory, full-search latency, sustained-search OCR waiting, transport parity and held-out English quality remain unmeasured. Production remains unchanged. Baseline unloads after each request/batch; retaining models requires measured loading, memory and full-search benefit. Indexed text is disposable. |
 
-The [retrieval design](design/corpus-retrieval.md),
-[scoped retrieval plan](design/scoped-corpus-retrieval-plan.md) and
-[semantic retrieval plan](design/semantic-corpus-retrieval-plan.md) retain the
-contract and operational gates. The scoped operations and one-time SQL Full-Text
-index are deployed and live-validated. Semantic retrieval remains unselected;
+The [original retrieval design](design/corpus-retrieval.md) and
+[scoped retrieval plan](design/scoped-corpus-retrieval-plan.md) retain the
+deployed contract history. Future delivery follows the
+[hybrid passage design](design/hybrid-passage-retrieval.md) and
+[implementation plan](design/hybrid-passage-retrieval-plan.md), superseding the
+earlier [semantic transition plan](design/semantic-corpus-retrieval-plan.md).
+The scoped operations and one-time SQL Full-Text index are deployed and
+live-validated. Production semantic retrieval remains unselected;
 the [BGE-M3 ONNX evaluation](operations/2026-09-24-bge-m3-onnx-evaluation.md)
 records a failed relevance pilot and does not activate an embedding provider.
+
+The hybrid item's 20% counts one completed, independently reviewed delivery gate
+out of the plan's five equally counted milestone gates. It is not an effort,
+elapsed-time or accuracy estimate. The partial scheduler-core work does not yet
+count as completed milestone 2 without hardware acceptance. The locally implemented
+query/runtime slices likewise do not count as whole-release acceptance. The implementation plan records the local
+focused checks; real-model quality, full-search latency and deployment remain
+unverified.
 
 The separate [lexical passage ranking investigation](operations/2026-09-24-scoped-lexical-ranking-investigation.md)
 used the old pilot for diagnosis and fresh development data for two bounded

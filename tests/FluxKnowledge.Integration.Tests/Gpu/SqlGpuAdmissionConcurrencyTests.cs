@@ -502,6 +502,7 @@ public sealed class SqlGpuAdmissionConcurrencyTests(NativeSqlServerFixture fixtu
     private static async Task<Guid> ReadParentIdAsync(IDbContextFactory<FluxKnowledgeDbContext> factory, Guid miniTaskId)
     {
         await using var context = await factory.CreateDbContextAsync();
-        return await context.GpuMiniTasks.Where(task => task.Id == miniTaskId).Select(task => task.ParentJobId).SingleAsync();
+        return await context.GpuMiniTasks.Where(task => task.Id == miniTaskId).Select(task => task.ParentJobId).SingleAsync()
+            ?? throw new InvalidOperationException("Expected a source-owned GPU task.");
     }
 }

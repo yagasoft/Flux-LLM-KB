@@ -353,7 +353,7 @@ public sealed class SqlGpuExecutorDispatchRecoveryServiceTests(NativeSqlServerFi
     private sealed record SlotSnapshot(string SlotKey, int State, Guid? ActiveBatchId, string? OwnerKey,
         DateTimeOffset? LastHeartbeatAtUtc, DateTimeOffset UpdatedAtUtc, string? RowVersion);
 
-    private sealed record TaskSnapshot(Guid Id, Guid ParentJobId, long SourceRevision, int PriorityLane, string RuntimeKey,
+    private sealed record TaskSnapshot(Guid Id, Guid? ParentJobId, long SourceRevision, int PriorityLane, string RuntimeKey,
         string SettingsFingerprint, long EstimatedBytes, long AdmissionGeneration, string IdempotencyKey, string? HandoffLeaseOwner,
         int State, long CreatedSequence, DateTimeOffset? DeferredUntilUtc, Guid? BatchId, int ReservationAttemptCount,
         DateTimeOffset CreatedAtUtc, string? RowVersion);

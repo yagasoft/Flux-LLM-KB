@@ -15,10 +15,15 @@ public interface ICorpusRetrievalService
     ValueTask<CorpusPassageResponse> ReadAsync(CorpusReadRequest request, CancellationToken token);
 }
 
+/// <summary>Local release gate; enable coherent passages only with the corresponding clean rebuild.</summary>
+public sealed record CorpusRetrievalOptions(bool CoherentPassagesEnabled = false);
+
 public sealed class CorpusRetrievalService(
     ICorpusRetrievalReader reader,
     ICorpusEvidenceCodec evidenceCodec,
-    ILocalPrivateContentDisclosure disclosure) : ICorpusRetrievalService
+    ILocalPrivateContentDisclosure disclosure,
+    CorpusRetrievalOptions? options = null,
+    IHybridPassageRetrieval? hybrid = null) : ICorpusRetrievalService
 {
     private static readonly CompareInfo EnglishCompare = CultureInfo.GetCultureInfo("en-US").CompareInfo;
     private const CompareOptions FullTextCompareOptions = CompareOptions.IgnoreCase | CompareOptions.IgnoreNonSpace;
@@ -38,6 +43,7 @@ public sealed class CorpusRetrievalService(
             request.Scope == "workspace" && (request.RootId.HasValue || string.IsNullOrWhiteSpace(request.Cwd)))
             throw new NativeOperationException("invalid-request");
 
+        if (hybrid is not null) return await hybrid.SearchAsync(request with { Query = query }, token).ConfigureAwait(false);
         var scope = await reader.ResolveScopeAsync(request.Scope, request.RootId, request.Cwd, token)
             .ConfigureAwait(false) ?? throw new NativeOperationException("scope-unavailable");
         var readiness = await reader.GetLexicalReadinessAsync(token).ConfigureAwait(false);
@@ -60,14 +66,26 @@ public sealed class CorpusRetrievalService(
                 !string.Equals(Hash(candidate.Content), candidate.ChunkHash, StringComparison.Ordinal))
                 continue;
 
+            var coherent = options?.CoherentPassagesEnabled == true;
+            var searchInput = candidate.ContextHeader.Length == 0
+                ? candidate.Content : candidate.ContextHeader + "\n" + candidate.Content;
+            if (coherent && (candidate.PassagePolicyFingerprint.Length != 64 ||
+                !string.Equals(Hash(searchInput), candidate.SearchInputHash, StringComparison.Ordinal))) continue;
+            if (disclosure.Evaluate(candidate.ContextHeader, LocalDisclosureKind.CorpusMetadata).Withheld) continue;
+            if (coherent && (disclosure.Evaluate(searchInput, LocalDisclosureKind.RetainedDetail).Withheld ||
+                !NativeV1EnvelopeProtector.CanDiscloseResult(JsonSerializer.SerializeToElement(searchInput)))) continue;
             var match = candidate.Content.IndexOf(query, StringComparison.Ordinal);
             var lexicalAnchor = match >= 0 ? match : FindLexicalAnchor(candidate.Content, lexicalTerms);
-            if (lexicalAnchor < 0 || match < 0 && candidate.FullTextRank <= 0) continue;
-            var localStart = match >= 0
+            var headerMatch = coherent && candidate.FullTextRank > 0 &&
+                FindLexicalAnchor(candidate.ContextHeader, lexicalTerms) >= 0;
+            if (lexicalAnchor < 0 && !headerMatch || match < 0 && candidate.FullTextRank <= 0) continue;
+            if (options?.CoherentPassagesEnabled == true && candidate.Length > 1024) continue;
+            var localStart = options?.CoherentPassagesEnabled == true ? 0 : match >= 0
                 ? match
                 : Math.Min(lexicalAnchor, Math.Max(0, candidate.Length - 1024));
             if (localStart > 0 && char.IsLowSurrogate(candidate.Content[localStart])) localStart--;
-            var localLength = Math.Min(1024, candidate.Length - localStart);
+            var localLength = options?.CoherentPassagesEnabled == true
+                ? candidate.Length : Math.Min(1024, candidate.Length - localStart);
             if (localStart + localLength < candidate.Length &&
                 char.IsHighSurrogate(candidate.Content[localStart + localLength - 1])) localLength--;
             var passage = candidate.Content.Substring(localStart, localLength);
@@ -77,11 +95,11 @@ public sealed class CorpusRetrievalService(
             if (source.Withheld || title.Withheld || text.Withheld) continue;
 
             var binding = new CorpusEvidenceBinding(
-                1, candidate.RootId, candidate.OwnerSourceRevisionId,
+                2, candidate.RootId, candidate.OwnerSourceRevisionId,
                 Hash(candidate.SourceIdentity), candidate.PipelineRecordId,
                 candidate.PipelineRecordRevision, candidate.ArtifactId,
                 candidate.ArtifactHash, candidate.ChunkId, candidate.ChunkHash,
-                candidate.StartOffset + localStart, localLength);
+                candidate.StartOffset + localStart, localLength, candidate.CorpusEpoch);
             var current = await reader.ReadAsync(binding, 0, token).ConfigureAwait(false);
             if (current is null) continue;
             if (current.DisclosureText is null ||
@@ -96,7 +114,7 @@ public sealed class CorpusRetrievalService(
                 candidate.PipelineRecordRevision, title.Value!, candidate.ChunkId,
                 candidate.ChunkHash, binding.CitedStart, localLength, text.Value!,
                 citation.Locations, candidate.OriginKind == 3 ? "metadata" : citation.ExtractionMethod,
-                [match >= 0 ? "exact:ordinal" : "lexical:full-text",
+                [match >= 0 ? "exact:ordinal" : headerMatch && lexicalAnchor < 0 ? "lexical:context-header" : "lexical:full-text",
                  ..(match >= 0 && query.Length > localLength ? new[] { "passage-bounded" } : []),
                  ..citation.Warnings]);
             if (!NativeV1EnvelopeProtector.CanDiscloseResult(JsonSerializer.SerializeToElement(hit))) continue;
@@ -119,7 +137,7 @@ public sealed class CorpusRetrievalService(
     private static string Hash(string text) => Convert.ToHexStringLower(
         SHA256.HashData(Encoding.UTF8.GetBytes(text)));
 
-    private static int FindLexicalAnchor(string content, IReadOnlyList<string> terms)
+    internal static int FindLexicalAnchor(string content, IReadOnlyList<string> terms)
     {
         var best = -1;
         foreach (var term in terms)

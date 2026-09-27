@@ -1,5 +1,12 @@
 # Scoped corpus retrieval and semantic search
 
+**Current direction, 25 September 2026:** scoped lexical retrieval described here
+has since been deployed. Its future semantic/chunking transition is superseded
+by the [hybrid passage design](hybrid-passage-retrieval.md) and
+[implementation plan](hybrid-passage-retrieval-plan.md). Retain this document for
+the original scope and deployed scope/citation safeguards; old status and future
+exclusions below describe that earlier increment, not the new reranking work.
+
 Date: 2026-09-20
 Last aligned: 2026-09-23, main `52742d998e07dc21415444629c710c9bbf55b8cd`.
 Status: approved design; scoped lexical implementation is in progress. Production activation requires the reviewed incremental migration and deployment gates.

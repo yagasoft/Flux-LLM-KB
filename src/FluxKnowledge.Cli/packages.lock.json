@@ -399,6 +399,13 @@
           "Microsoft.EntityFrameworkCore.SqlServer": "[10.0.10, )"
         }
       },
+      "fluxknowledge.infrastructure.usearch": {
+        "type": "Project",
+        "dependencies": {
+          "Cloud.Unum.USearch": "[2.19.3, )",
+          "FluxKnowledge.Application": "[1.0.0, )"
+        }
+      },
       "fluxknowledge.integrations": {
         "type": "Project",
         "dependencies": {
@@ -412,6 +419,12 @@
       },
       "fluxknowledge.nativeworker.protocol": {
         "type": "Project"
+      },
+      "Cloud.Unum.USearch": {
+        "type": "CentralTransitive",
+        "requested": "[2.19.3, )",
+        "resolved": "2.19.3",
+        "contentHash": "xbIOMMcR3HVMWgwy4t9/vmXIyZ672cSxk2JEhLkJjJntnEmeIMCrVOtr3fEC/BtOB2fNGeyGM0Mumgrm9SdHyQ=="
       },
       "MetadataExtractor": {
         "type": "CentralTransitive",

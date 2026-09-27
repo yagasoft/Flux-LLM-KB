@@ -14,7 +14,7 @@ public sealed class SqlGpuAdmissionTests(NativeSqlServerFixture fixture) : IClas
 {
     private readonly NativeSqlServerFixture _fixture = fixture;
     private static readonly GpuSchedulerOptions Options = new(3, 100, TimeSpan.FromMinutes(5), TimeSpan.FromMinutes(1), TimeSpan.FromMinutes(10));
-    private static readonly DateTimeOffset Now = DateTimeOffset.Parse("2026-07-29T10:00:00+00:00");
+    internal static readonly DateTimeOffset Now = DateTimeOffset.Parse("2026-07-29T10:00:00+00:00");
 
     [NativeSqlServerFact]
     public async Task Production_retrying_execution_strategy_allows_admission()

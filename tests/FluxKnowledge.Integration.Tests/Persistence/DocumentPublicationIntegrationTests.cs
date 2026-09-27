@@ -3,6 +3,9 @@ using FluxKnowledge.Application.Documents;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Sources;
 using FluxKnowledge.Application.Workers;
+using FluxKnowledge.Application.Indexing;
+using FluxKnowledge.Infrastructure.Usearch;
+using FluxKnowledge.Integration.Tests.Indexing;
 using FluxKnowledge.Domain.Common;
 using FluxKnowledge.Domain.Jobs;
 using FluxKnowledge.Domain.Pipeline;
@@ -22,6 +25,79 @@ public sealed class DocumentPublicationIntegrationTests(NativeSqlServerFixture f
 
     public Task InitializeAsync() => SqlTestData.ClearPhase3SourceDataAsync(_fixture);
     public Task DisposeAsync() => Task.CompletedTask;
+
+    [NativeSqlServerTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Rebuild_preserves_the_exact_published_document_branch_and_timestamp_under_pause(bool pdf)
+    {
+        await using var environment = await SqlToUsearchRebuildTests.PipelineEnvironment.CreateAsync(_fixture, "Unrooted control.");
+        var now = DateTimeOffset.UtcNow;
+        var rootId = Guid.NewGuid();
+        var ownerId = Guid.NewGuid();
+        var contract = pdf ? DocumentProcessingInput.Pdf : DocumentProcessingInput.Visio;
+        DocumentCandidate candidate;
+        await using (var context = Context())
+        {
+            context.SourceRootConfigurations.Add(new SourceRootConfigurationEntity
+            {
+                Id = rootId, CanonicalPath = $"C:\\document-rebuild\\{rootId:N}", DisplayName = "Document rebuild", State = 0,
+                IncludePatternsJson = "[]", ExcludePatternsJson = "[]", AllowedClassificationsJson = "[]",
+                MaximumFileBytes = 1024 * 1024, ReconciliationCadenceSeconds = 900, ConfigurationRevision = 1,
+                CreatedAtUtc = now, UpdatedAtUtc = now
+            });
+            context.SourceRevisions.Add(new SourceRevisionEntity
+            {
+                Id = ownerId, SourceRootId = rootId, StableSourceIdentity = "rebuild-owner", Revision = 1,
+                ContentSha256 = new string('a', 64), CanonicalPath = $"C:\\document-rebuild\\original{contract.Extension}",
+                Classification = contract.Classification, Extension = contract.Extension, ByteLength = 4, DiscoveredAtUtc = now
+            });
+            candidate = SeedCandidate(context, rootId, ownerId, now, "rebuild-document", 0, contract);
+            await context.SaveChangesAsync();
+        }
+        await PublishAsync(new SqlStageTransitionStore(environment.Factory), candidate, now);
+        await using var setup = Context();
+        var publication = await setup.DocumentPublications.AsNoTracking().SingleAsync();
+        const string text = "Published document INV-42 requires two signatures.";
+        setup.Artifacts.Add(new ArtifactEntity
+        {
+            Id = Guid.NewGuid(), PipelineRecordId = candidate.RecordId, SourceRevision = 1, Stage = (int)PipelineStage.CanonicalIndex,
+            ContentHash = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(text))),
+            ContentType = "text/plain; charset=utf-8; canonical-chunks=v1", SearchText = text, CreatedAtUtc = now
+        });
+        await setup.Artifacts.Where(value => value.PipelineRecordId == candidate.RecordId && value.Stage == (int)PipelineStage.Publish)
+            .ExecuteUpdateAsync(setters => setters.SetProperty(value => value.ContentType, "application/vnd.fluxknowledge.usearch-generation"));
+        var root = await setup.SourceRootConfigurations.SingleAsync();
+        root.State = (int)SourceRootState.Paused;
+        setup.GpuCapacitySlots.Add(new GpuCapacitySlotEntity { SlotKey = "slot-a", UpdatedAtUtc = now });
+        await setup.SaveChangesAsync();
+        var active = await setup.IndexGenerations.FirstAsync(value => value.IndexPath != "");
+        var builder = new PassageBuilder(new RebuildTokenizer());
+        var rebuild = new SqlCorpusRebuildStore(environment.Factory);
+        var plan = await rebuild.ReadPlanAsync(Guid.NewGuid(), new(active.ModelFingerprint, active.Dimensions), builder.PolicyFingerprint, CancellationToken.None);
+        await rebuild.CommitAsync(plan, "slot-a", CancellationToken.None);
+        environment.PermitRebuild(plan.OperationId);
+        foreach (var input in plan.Inputs) await rebuild.PrepareAsync(plan.OperationId, input.PipelineRecordId, builder, CancellationToken.None);
+        await environment.PumpAsync();
+        await using var verification = Context();
+        var after = await verification.DocumentPublications.AsNoTracking().SingleAsync();
+        Assert.Equal((publication.OwnerSourceRevisionId, publication.DocumentInputSourceRevisionId, publication.SourceProcessorBranchId,
+                publication.PipelineRecordId, publication.PipelineRecordRevision, publication.ProcessorFingerprint, publication.PublishedAtUtc),
+            (after.OwnerSourceRevisionId, after.DocumentInputSourceRevisionId, after.SourceProcessorBranchId,
+                after.PipelineRecordId, after.PipelineRecordRevision, after.ProcessorFingerprint, after.PublishedAtUtc));
+        Assert.Equal(publication.RowVersion, after.RowVersion);
+        Assert.Equal((int)SourceRootState.Paused, (await verification.SourceRootConfigurations.SingleAsync()).State);
+        Assert.True((await verification.PipelineRecords.SingleAsync(value => value.Id == candidate.RecordId)).CompletionCriteriaMet);
+        Assert.Equal(2, (await verification.CorpusRebuildWorkItems.SingleAsync(value => value.PipelineRecordId == candidate.RecordId)).State);
+        Assert.Contains(await environment.Store.ReadEligibleVectorsAsync(CancellationToken.None), vector =>
+            verification.TextChunks.Any(chunk => chunk.Id == vector.TextChunkId && chunk.Artifact.PipelineRecordId == candidate.RecordId));
+    }
+
+    private sealed class RebuildTokenizer : IPassageTokenizer
+    {
+        public string Fingerprint => "document-rebuild-synthetic-tokenizer-v1";
+        public int CountTokens(string text) => text.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries).Length;
+    }
 
     [NativeSqlServerFact]
     public async Task Later_created_vsdx_branch_remains_published_when_an_older_branch_finishes_late()
@@ -419,7 +495,7 @@ public sealed class DocumentPublicationIntegrationTests(NativeSqlServerFixture f
         });
         context.OutboxMessages.Add(new OutboxMessageEntity
         {
-            Id = dispatchId, PipelineRecordId = recordId, SourceRevision = 1, Stage = (int)PipelineStage.Publish,
+            Id = dispatchId, JobId = jobId, PipelineRecordId = recordId, SourceRevision = 1, Stage = (int)PipelineStage.Publish,
             Operation = PipelineOperations.Publish, DispatchGeneration = 0, IdempotencyKey = $"document-publication:{name}",
             DueAtUtc = now, CreatedAtUtc = now, LeaseOwner = $"dispatch-{name}", LeaseExpiresAtUtc = leaseExpiresAtUtc,
             LeaseGeneration = 1

@@ -12,7 +12,8 @@ public sealed record CorpusEvidenceBinding(
     long ChunkId,
     string ChunkHash,
     int CitedStart,
-    int CitedLength);
+    int CitedLength,
+    Guid CorpusEpoch = default);
 
 public interface ICorpusEvidenceCodec
 {

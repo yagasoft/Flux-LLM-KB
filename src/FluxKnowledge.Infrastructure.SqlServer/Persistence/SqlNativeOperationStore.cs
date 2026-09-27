@@ -6,6 +6,7 @@ using FluxKnowledge.Application.Contracts;
 using FluxKnowledge.Application.Knowledge;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Documents;
+using FluxKnowledge.Application.Gpu;
 using FluxKnowledge.Domain.Gpu;
 using FluxKnowledge.Domain.Knowledge;
 using FluxKnowledge.Domain.Sources;
@@ -24,7 +25,7 @@ public sealed class SqlNativeOperationStore(
     TimeProvider timeProvider,
     Action? afterCommitFailureInjector = null,
     Action? beforeCommitInjector = null,
-    Action? afterSaveBeforeCommitInjector = null) : INativeOperationStore
+    Action? afterSaveBeforeCommitInjector = null, EmbeddingGpuRuntime? embeddingRuntime = null) : INativeOperationStore
 {
     private static readonly TimeSpan ConfirmationLifetime = TimeSpan.FromMinutes(5);
     private readonly IDbContextFactory<FluxKnowledgeDbContext> _contextFactory = contextFactory ?? throw new ArgumentNullException(nameof(contextFactory));
@@ -107,6 +108,8 @@ public sealed class SqlNativeOperationStore(
         CancellationToken cancellationToken)
     {
         await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
+        if (prepared.Operation is NativeCorpusMutationCommitOperation)
+            await SqlPublishedPassageSelection.AcquireFenceAsync(context, cancellationToken).ConfigureAwait(false);
         await AcquireApplicationLockAsync(
             context,
             $"idempotency:{NativeOperationCanonicalization.CreateConfirmationHash($"{prepared.ActorSurface.Length}:{prepared.ActorSurface}{prepared.IdempotencyKey.Length}:{prepared.IdempotencyKey}")}",
@@ -496,7 +499,7 @@ public sealed class SqlNativeOperationStore(
         throw new NativeOperationException("invalid-knowledge-mutation");
     }
 
-    private static async Task ApplyCorpusMutationAsync(FluxKnowledgeDbContext context, IReadOnlyList<NativeTargetVersion> targets, NativeCorpusMutationCommitOperation operation, string actor, DateTimeOffset now, CancellationToken cancellationToken)
+    private async Task ApplyCorpusMutationAsync(FluxKnowledgeDbContext context, IReadOnlyList<NativeTargetVersion> targets, NativeCorpusMutationCommitOperation operation, string actor, DateTimeOffset now, CancellationToken cancellationToken)
     {
         using var document = JsonDocument.Parse(operation.CanonicalPayload);
         var payload = document.RootElement;
@@ -587,16 +590,23 @@ public sealed class SqlNativeOperationStore(
                 .Where(value => value.SourceRootId == rootIdValue)
                 .Select(value => value.Id)
                 .ToArrayAsync(cancellationToken);
-            var deletingRecordCount = await context.PipelineRecords
-                .CountAsync(value => value.SourceRevisionId.HasValue && deletingRevisionIds.Contains(value.SourceRevisionId.Value), cancellationToken);
+            var deletingRecordIds = await context.PipelineRecords
+                .Where(value => value.SourceRevisionId.HasValue && deletingRevisionIds.Contains(value.SourceRevisionId.Value))
+                .Select(value => value.Id).ToArrayAsync(cancellationToken);
+            var deletingRecordCount = deletingRecordIds.Length;
             var deletingJobIds = await context.Jobs
                 .Where(value => value.PipelineRecord.SourceRevisionId.HasValue && deletingRevisionIds.Contains(value.PipelineRecord.SourceRevisionId.Value))
                 .Select(value => value.Id)
                 .ToArrayAsync(cancellationToken);
-            // The deletion coordinator can drain the exact local OCR graph. Unknown
+            var ownedEmbeddingTaskIds = embeddingRuntime is null ? [] : await SqlEmbeddingGpuRequestStore.OwnedLocalTasks(context, embeddingRuntime)
+                .Where(task => task.ParentJobId.HasValue && deletingJobIds.Contains(task.ParentJobId.Value)).Select(task => task.Id).ToArrayAsync(cancellationToken);
+            if (await SqlEmbeddingGpuRequestStore.HasContradictoryRequestsAsync(context, deletingRecordIds, ownedEmbeddingTaskIds, cancellationToken))
+                throw new NativeOperationException("source-delete-external-execution-owned");
+            // The deletion coordinator can drain the exact local model graph. Unknown
             // or cross-source GPU ownership must still be refused before fencing.
             if (deletingJobIds.Length > 0 && await context.GpuMiniTasks.AnyAsync(task =>
-                    deletingJobIds.Contains(task.ParentJobId) &&
+                    task.ParentJobId.HasValue && deletingJobIds.Contains(task.ParentJobId.Value) &&
+                    !ownedEmbeddingTaskIds.Contains(task.Id) &&
                     !context.DocumentOcrRequests.Any(request =>
                         request.MiniTaskId == task.Id && request.ParentJobId == task.ParentJobId &&
                         request.SourceRevision == task.SourceRevision &&
@@ -617,6 +627,7 @@ public sealed class SqlNativeOperationStore(
             }
             if (root!.State != (int)SourceRootState.Deleting)
             {
+                await SqlPublishedPassageSelection.AdvanceVersionAsync(context, now, cancellationToken).ConfigureAwait(false);
                 root.State = (int)SourceRootState.Deleting;
                 root.ConfigurationRevision++;
                 root.UpdatedAtUtc = now;

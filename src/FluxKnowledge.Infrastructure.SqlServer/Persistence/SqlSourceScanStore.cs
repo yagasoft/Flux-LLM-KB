@@ -72,7 +72,8 @@ public sealed class SqlSourceScanStore(
         await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken).ConfigureAwait(false);
 
-        // All source reconciliation transactions take these locks in this order: root, stable identity,
+        await SqlPublishedPassageSelection.AcquireFenceAsync(context, cancellationToken).ConfigureAwait(false);
+        // All source reconciliation transactions take these locks in this order: publication fence, root, stable identity,
         // canonical path/content hash, then artifact-by-revision. This prevents inverse lock deadlocks.
         await context.Database.ExecuteSqlInterpolatedAsync(
             $"SELECT [Id] FROM [SourceRootConfigurations] WITH (UPDLOCK, HOLDLOCK) WHERE [Id] = {sourceRoot.Id.Value};",
@@ -112,6 +113,7 @@ public sealed class SqlSourceScanStore(
         }
         else if (revision.SuppressedAtUtc is not null)
         {
+            await SqlPublishedPassageSelection.AdvanceVersionAsync(context, timeProvider.GetUtcNow(), cancellationToken).ConfigureAwait(false);
             revision.SuppressedAtUtc = null;
             revision.RetentionEvidenceJson = null;
             eventType = "source.updated";
@@ -269,7 +271,8 @@ public sealed class SqlSourceScanStore(
         await using var transaction = await context.Database
             .BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken)
             .ConfigureAwait(false);
-        // This follows the reconciliation root-first lock order so a suppression pass cannot
+        await SqlPublishedPassageSelection.AcquireFenceAsync(context, cancellationToken).ConfigureAwait(false);
+        // This follows the reconciliation publication-fence/root lock order so a suppression pass cannot
         // observe a partially converged rename or historic-path restoration.
         await context.Database.ExecuteSqlInterpolatedAsync(
             $"SELECT [Id] FROM [SourceRootConfigurations] WITH (UPDLOCK, HOLDLOCK) WHERE [Id] = {sourceRootId.Value};",
@@ -278,6 +281,7 @@ public sealed class SqlSourceScanStore(
             .FromSqlInterpolated($"SELECT * FROM [SourceRevisions] WITH (UPDLOCK, HOLDLOCK) WHERE [SourceRootId] = {sourceRootId.Value} AND [SuppressedAtUtc] IS NULL AND [OriginKind] = 0")
             .ToListAsync(cancellationToken).ConfigureAwait(false);
         var now = timeProvider.GetUtcNow();
+        var suppressionChanged = false;
         foreach (var revision in active)
         {
             if (convergedRevisionIds.Contains(new SourceRevisionId(revision.Id)))
@@ -286,6 +290,7 @@ public sealed class SqlSourceScanStore(
             }
 
             revision.SuppressedAtUtc = now;
+            suppressionChanged = true;
             revision.RetainUntilUtc = now.AddDays(30);
             revision.RetentionEvidenceJson = "{\"reason\":\"unseen-during-authoritative-scan\"}";
             OperatorEventAppender.Add(context, OperatorEventDraft.SourceRemoved(
@@ -295,6 +300,8 @@ public sealed class SqlSourceScanStore(
                 new { revision = revision.Revision, reason = "unseen-during-authoritative-scan" }));
         }
 
+        if (suppressionChanged)
+            await SqlPublishedPassageSelection.AdvanceVersionAsync(context, now, cancellationToken).ConfigureAwait(false);
         await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
     }

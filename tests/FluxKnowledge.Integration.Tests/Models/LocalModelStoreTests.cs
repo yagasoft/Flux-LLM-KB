@@ -12,6 +12,64 @@ namespace FluxKnowledge.Integration.Tests.Models;
 public sealed class LocalModelStoreTests
 {
     [Fact]
+    public async Task Bundle_native_paths_remain_protected_until_the_verified_lease_is_disposed()
+    {
+        await using var fixture = await LocalModelFixture.CreateAsync();
+        var manifest = await fixture.SeedCompleteBundleAsync();
+        var bundle = Path.Combine(fixture.ModelRoot, "bundles", "synthetic");
+        Directory.CreateDirectory(bundle);
+        foreach (var artifact in manifest.Files)
+            File.Copy(fixture.ArtifactPath(artifact), Path.Combine(bundle, artifact.Filename));
+        var store = new LocalModelStore(() => WindowsModelVerificationFiles.OpenBundleForTest(fixture.ModelRoot, ["bundles", "synthetic"]));
+
+        var resolved = await store.ResolveAsync(manifest, CancellationToken.None);
+        Assert.True(resolved.Succeeded, resolved.ReasonCode);
+        using var lease = Assert.IsType<VerifiedLocalModelLease>(resolved.Lease);
+        var path = lease.GetVerifiedLocalPath("weights.bin");
+        Assert.Equal(Path.Combine(bundle, "weights.bin"), path);
+        Assert.Equal("flux-model", await File.ReadAllTextAsync(path));
+        Assert.Throws<IOException>(() => File.Open(path, FileMode.Open, FileAccess.Write, FileShare.Read));
+        Assert.Throws<IOException>(() => File.Delete(path));
+        Assert.Throws<IOException>(() => Directory.Move(bundle, bundle + "-moved"));
+        Assert.Throws<KeyNotFoundException>(() => lease.GetVerifiedLocalPath("../weights.bin"));
+        lease.Dispose();
+        Assert.Throws<ObjectDisposedException>(() => lease.GetVerifiedLocalPath("weights.bin"));
+        Directory.Move(bundle, bundle + "-moved");
+    }
+
+    [Fact]
+    public async Task Bundle_native_paths_refuse_missing_companion_and_reparse_directory()
+    {
+        await using var fixture = await LocalModelFixture.CreateAsync();
+        var manifest = await fixture.SeedCompleteBundleAsync();
+        var bundle = Path.Combine(fixture.ModelRoot, "bundles", "synthetic");
+        Directory.CreateDirectory(bundle);
+        File.Copy(fixture.ArtifactPath(manifest.Files[0]), Path.Combine(bundle, manifest.Files[0].Filename));
+        var store = new LocalModelStore(() => WindowsModelVerificationFiles.OpenBundleForTest(fixture.ModelRoot, ["bundles", "synthetic"]));
+        var missing = await store.ResolveAsync(manifest, CancellationToken.None);
+        Assert.False(missing.Succeeded);
+        Assert.Null(missing.Lease);
+        Assert.Equal(ModelStoreReasons.ArtifactMissing, missing.ReasonCode);
+        Directory.Move(bundle, bundle + "-original");
+        Directory.CreateSymbolicLink(bundle, bundle + "-original");
+        var redirected = await store.ResolveAsync(manifest, CancellationToken.None);
+        Assert.False(redirected.Succeeded);
+        Assert.Null(redirected.Lease);
+        Assert.Equal(ModelStoreReasons.PathUnsafe, redirected.ReasonCode);
+    }
+
+    [Theory]
+    [InlineData("..")]
+    [InlineData("J:\\Models")]
+    [InlineData("bundles/synthetic")]
+    public async Task Bundle_directory_is_a_literal_relative_chain(string component)
+    {
+        await using var fixture = await LocalModelFixture.CreateAsync();
+        Assert.Throws<ModelVerificationFilesException>(() =>
+            WindowsModelVerificationFiles.OpenBundleForTest(fixture.ModelRoot, [component]));
+    }
+
+    [Fact]
     public async Task Read_only_manifest_and_artifact_directories_allow_verification_and_separate_receipts()
     {
         if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("This permission test requires Windows.");

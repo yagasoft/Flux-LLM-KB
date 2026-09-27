@@ -3,6 +3,9 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
 public sealed class IndexGenerationEntity
 {
     public Guid Id { get; set; }
+    public Guid? CorpusEpoch { get; set; }
+    public long? CorpusVersion { get; set; }
+    public Guid? EmbeddingJobId { get; set; }
     public string ModelFingerprint { get; set; } = string.Empty;
     public int Dimensions { get; set; }
     public string IndexPath { get; set; } = string.Empty;

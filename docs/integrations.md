@@ -32,6 +32,14 @@ Codex and local scripts. All supported clients share the native application faca
 | `operations.status` | `GET /api/v1/operations/status` | `FluxKnowledge.Cli operations status` |
 | `operations.audit` | `POST /api/v1/operations/audit/query` | `FluxKnowledge.Cli operations audit` |
 
+The unreleased trusted-local `corpus-rebuild` CLI is an operator interface used by
+the incremental IIS updater. It accepts `plan --operation <guid>`,
+`commit --manifest <path>`, `prepare --operation <guid>`,
+`status --operation <guid>` and `finish --operation <guid>`. Its
+`verify-models` command checks pinned local files without inference or downloads.
+The rebuild requires the updater's owned hold and scheduler drain; these commands
+do not grant production authority or replace normal public search/write contracts.
+
 `operations.status` accepts the bounded views `overview`, `sources`, `jobs`,
 `workers`, `processors`, and `recovery`. Code, corpus and audit queries use
 bounded pages and opaque query-bound cursors.
@@ -44,6 +52,20 @@ and returns up to 4,096 UTF-16 units of surrounding retained context while
 rechecking current publication and deletion state. Both operations have a
 256 KiB response limit. Their `retrieval_mode` is `lexical`; learned semantic
 ranking remains a separate evaluated increment.
+
+The unreleased `Search:HybridPassagesEnabled` runtime shares coherent passage
+retrieval across corpus, existing search and knowledge-source search. Successful
+wire shapes and public limits remain unchanged. Corpus responses identify hybrid
+or lexical mode, semantic status and warnings. Existing search keeps complete fallback
+passages with warnings on each hit, but a degraded empty response becomes an explicit
+refusal. Knowledge's list contract cannot carry degradation metadata, so degraded
+source retrieval refuses instead of silently returning an incomplete union.
+Native REST/MCP/remote CLI share named `search-busy`, `search-timeout`,
+`search-unavailable`, `search-index-updating` and `search-rebuilding` failures;
+these transient failures are retryable (REST HTTP 503). Input-length and scoped
+capacity refusals are non-retryable. `/api/search` exposes equivalent problem
+codes. Its numeric score is reciprocal result position, not a relevance probability.
+Activation and real-model acceptance remain pending.
 
 ## Mutations
 

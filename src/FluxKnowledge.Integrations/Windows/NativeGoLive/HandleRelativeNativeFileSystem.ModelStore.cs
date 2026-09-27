@@ -51,14 +51,17 @@ internal sealed class NativeModelHeldReadFile : IDisposable
     private readonly IDisposable _owner;
     private bool _disposed;
 
-    internal NativeModelHeldReadFile(SafeFileHandle handle, long byteLength, IDisposable owner)
+    internal NativeModelHeldReadFile(SafeFileHandle handle, long byteLength, IDisposable owner, string path)
     {
         _handle = handle;
         ByteLength = byteLength;
         _owner = owner;
+        _path = path;
     }
 
     internal long ByteLength { get; }
+    private readonly string _path;
+    internal string ProtectedLocalPath => _disposed ? throw new ObjectDisposedException(nameof(NativeModelHeldReadFile)) : _path;
 
     internal ValueTask<int> ReadAsync(long offset, Memory<byte> buffer, CancellationToken cancellationToken)
     {
@@ -217,7 +220,7 @@ internal sealed partial class HandleRelativeNativeFileSystem
         try
         {
             EnsureModelFile(handle!);
-            return new NativeModelHeldReadFile(handle!, RandomAccess.GetLength(handle!), owner);
+            return new NativeModelHeldReadFile(handle!, RandomAccess.GetLength(handle!), owner, Path.Combine(parent.CanonicalPath, literalChild));
         }
         catch
         {

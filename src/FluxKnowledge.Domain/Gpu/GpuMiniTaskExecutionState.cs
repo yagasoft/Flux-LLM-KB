@@ -5,5 +5,6 @@ public enum GpuMiniTaskExecutionState
     Ready,
     Active,
     Completed,
-    OutcomeUncertain
+    OutcomeUncertain,
+    Cancelled
 }

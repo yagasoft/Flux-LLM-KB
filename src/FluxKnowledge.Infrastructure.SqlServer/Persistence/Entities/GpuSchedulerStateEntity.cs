@@ -3,6 +3,7 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
 public sealed class GpuSchedulerStateEntity
 {
     public int Id { get; set; }
+    public int SearchBatchesWhileOcrWaiting { get; set; }
     public long WakeGeneration { get; set; }
     public int PendingWakeReasons { get; set; }
     public DateTimeOffset? NextDeferredAtUtc { get; set; }

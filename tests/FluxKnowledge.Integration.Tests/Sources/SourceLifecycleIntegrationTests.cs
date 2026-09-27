@@ -255,6 +255,7 @@ public sealed class SourceLifecycleIntegrationTests(NativeSqlServerFixture fixtu
         context.OutboxMessages.Add(new OutboxMessageEntity
         {
             Id = outboxId,
+            JobId = jobId,
             PipelineRecordId = recordId,
             SourceRevision = 1,
             Stage = (int)PipelineStage.Extract,

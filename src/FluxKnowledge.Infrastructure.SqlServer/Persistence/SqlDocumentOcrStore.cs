@@ -430,6 +430,7 @@ public sealed class SqlDocumentOcrStore(
             }
 
             var outbox = await context.OutboxMessages.SingleOrDefaultAsync(value =>
+                    value.JobId == parent.Id &&
                     value.PipelineRecordId == parent.PipelineRecordId &&
                     value.SourceRevision == parent.SourceRevision &&
                     value.Stage == parent.Stage &&

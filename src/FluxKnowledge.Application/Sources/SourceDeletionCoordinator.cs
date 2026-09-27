@@ -7,7 +7,8 @@ public sealed class SourceDeletionCoordinator(
     ISourceDeletionStore store,
     IIndexGenerationPublisher? generationPublisher = null,
     ISourceDeletionFileStore? fileStore = null,
-    ISourceArtifactPublicationGate? artifactPublicationGate = null)
+    ISourceArtifactPublicationGate? artifactPublicationGate = null,
+    IDerivedIndexRecoveryStore? queryCleanupGate = null)
 {
     public async ValueTask<bool> RunOneAsync(CancellationToken cancellationToken)
     {
@@ -62,6 +63,18 @@ public sealed class SourceDeletionCoordinator(
                     }
 
                     var target = pending[0];
+                    if (target.StorageKind == 2 && queryCleanupGate is null)
+                    {
+                        await store.FailAsync(workItem, "source-delete-query-cleanup-gate-unavailable", cancellationToken).ConfigureAwait(false);
+                        return false;
+                    }
+                    await using var queryCleanupLease = target.StorageKind == 2
+                        ? await queryCleanupGate!.TryAcquireExclusiveLeaseAsync(TimeSpan.Zero, cancellationToken).ConfigureAwait(false) : null;
+                    if (target.StorageKind == 2 && queryCleanupLease is null)
+                    {
+                        await store.PurgeAsync(workItem, survivorGeneration: null, cancellationToken).ConfigureAwait(false);
+                        return false;
+                    }
                     if (target.StorageKind == 1 && target.ContentSha256 is not null && artifactPublicationGate is null)
                     {
                         await store.FailAsync(workItem, "source-delete-artifact-publication-gate-unavailable", cancellationToken).ConfigureAwait(false);

@@ -8,6 +8,9 @@ param(
     [int]$ReadinessTimeoutSeconds = 120,
     [switch]$ApplyMigrations,
     [switch]$ApplyCorpusChunkFullTextMigration,
+    [switch]$ApplyHybridPassageRebuild,
+    [string]$ResumeHybridRebuildRelease = '',
+    [ValidateRange(30, 3600)][int]$RebuildTimeoutSeconds = 1800,
     [switch]$DeferReadinessForScopedRemediation,
     [switch]$PlanOnly,
     [switch]$Apply
@@ -551,6 +554,295 @@ function Assert-NotReparsePoint {
     }
 }
 
+function Stop-HybridIisAfterGpuDrain {
+    Invoke-WithHybridGpuDrain -ConnectionString (Get-DeploymentSqlConnectionString) -TimeoutSeconds $RebuildTimeoutSeconds -StopApplication {
+        param($sessionId)
+        $appcmd = Join-Path $env:SystemRoot 'System32/inetsrv/appcmd.exe'
+        $workerXml = (& $appcmd list wp "/apppool.name:$SiteName" /xml | Out-String)
+        if ($LASTEXITCODE -ne 0) { throw 'hybrid-iis-worker-inventory-unavailable' }
+        $identities = [Collections.Generic.List[object]]::new()
+        $processes = @(Get-CimInstance Win32_Process -ErrorAction Stop)
+        $workerIds = @(([xml]$workerXml).SelectNodes('/appcmd/WP') | ForEach-Object { [int]$_.'WP.NAME' })
+        $pending = [Collections.Generic.Queue[int]]::new()
+        foreach ($id in $workerIds) { $pending.Enqueue($id) }
+        while ($pending.Count -gt 0) {
+            $id = $pending.Dequeue()
+            $process = @($processes | Where-Object ProcessId -eq $id)
+            if ($process.Count -ne 1) { throw 'hybrid-iis-process-identity-ambiguous' }
+            $identities.Add(@{ ProcessId=$id; Created=$process[0].CreationDate })
+            foreach ($child in @($processes | Where-Object ParentProcessId -eq $id)) { $pending.Enqueue([int]$child.ProcessId) }
+        }
+        if ((Get-WebAppPoolState -Name $SiteName).Value -ne 'Stopped') { Stop-WebAppPool -Name $SiteName }
+        Wait-IisAppPoolState -Name $SiteName -ExpectedState 'Stopped' -TimeoutSeconds $ReadinessTimeoutSeconds
+        $timer = [Diagnostics.Stopwatch]::StartNew()
+        while ($true) {
+            $remaining = @()
+            foreach ($identity in $identities) {
+                $current = @(Get-CimInstance Win32_Process -Filter "ProcessId = $($identity.ProcessId)" -ErrorAction Stop)
+                $remaining += @($current | Where-Object CreationDate -eq $identity.Created)
+            }
+            $currentWorkers = (& $appcmd list wp "/apppool.name:$SiteName" /xml | Out-String)
+            if ($LASTEXITCODE -ne 0) { throw 'hybrid-iis-worker-exit-proof-unavailable' }
+            if ($remaining.Count -eq 0 -and ([xml]$currentWorkers).SelectNodes('/appcmd/WP').Count -eq 0) { break }
+            if ($timer.Elapsed.TotalSeconds -ge $ReadinessTimeoutSeconds) { throw 'hybrid-iis-worker-exit-not-proven' }
+            Start-Sleep -Milliseconds 250
+        }
+    }
+}
+
+function Get-HybridPreservedInputFingerprint {
+    $connection = [System.Data.SqlClient.SqlConnection]::new((Get-DeploymentSqlConnectionString))
+    try {
+        $connection.Open()
+        $command = $connection.CreateCommand()
+        try {
+            $command.CommandText = @'
+SELECT CONVERT(varchar(64), HASHBYTES('SHA2_256', CONVERT(varbinary(max), CONCAT(
+    (SELECT * FROM SourceRootConfigurations ORDER BY Id FOR JSON PATH, INCLUDE_NULL_VALUES),
+    (SELECT * FROM SourceIdentities ORDER BY Id FOR JSON PATH, INCLUDE_NULL_VALUES),
+    (SELECT * FROM SourceRevisions ORDER BY Id FOR JSON PATH, INCLUDE_NULL_VALUES),
+    (SELECT * FROM SourceActivities ORDER BY Id FOR JSON PATH, INCLUDE_NULL_VALUES),
+    (SELECT * FROM SourceProcessorBranches ORDER BY Id FOR JSON PATH, INCLUDE_NULL_VALUES),
+    (SELECT * FROM SourceProcessorBranchMembers ORDER BY BranchId, ChildSourceRevisionId FOR JSON PATH, INCLUDE_NULL_VALUES),
+    (SELECT * FROM DocumentPublications ORDER BY OwnerSourceRevisionId FOR JSON PATH, INCLUDE_NULL_VALUES),
+    (SELECT Id, SourceIdentityId, SourceRevisionId, Revision, ContentHash, RootLineageRecordId,
+            ParentRevisionRecordId, IsDeleted, RegisteredAtUtc FROM PipelineRecords ORDER BY Id FOR JSON PATH, INCLUDE_NULL_VALUES),
+    (SELECT * FROM Artifacts WHERE Stage <= 3 ORDER BY Id FOR JSON PATH, INCLUDE_NULL_VALUES)
+))), 2);
+'@
+            return [string]$command.ExecuteScalar()
+        }
+        finally { $command.Dispose() }
+    }
+    finally { $connection.Dispose() }
+}
+
+function Activate-HybridCompatiblePayload {
+    param([string]$CandidateRoot, [string]$PreviousRoot, [string]$ReleaseRoot, [string]$ConfigurationCandidate,
+        [string]$ConfigurationPath, [System.Collections.IDictionary]$State)
+    $alreadyCompatible = (Test-Path -LiteralPath $CanonicalDeployRoot -PathType Container) -and
+        (Get-HybridPayloadFingerprint -Path $CanonicalDeployRoot) -ceq $State.CandidateHash
+    if (-not $alreadyCompatible) {
+        if (Test-Path -LiteralPath $CanonicalDeployRoot) {
+            $destination = if (-not (Test-Path -LiteralPath $PreviousRoot)) { $PreviousRoot } else {
+                Join-Path $ReleaseRoot ('interrupted-activation-' + [Guid]::NewGuid().ToString('N'))
+            }
+            Assert-CanonicalPath -RequestedPath $CanonicalDeployRoot -ExpectedPath 'I:\FluxKnowledge\App' -Message 'hybrid-activation-path-unsafe'
+            Move-Item -LiteralPath $CanonicalDeployRoot -Destination $destination
+        }
+        Invoke-CandidatePayloadActivation -CandidateRoot $CandidateRoot -ApplicationRoot $CanonicalDeployRoot
+    }
+    if ((Get-HybridPayloadFingerprint -Path $CanonicalDeployRoot) -cne $State.CandidateHash) { throw 'hybrid-activated-payload-hash-mismatch' }
+    Write-HybridRebuildJson -Path $ConfigurationPath -Value (Get-Content -LiteralPath $ConfigurationCandidate -Raw | ConvertFrom-Json -AsHashtable)
+    if ((Get-FileHash -LiteralPath $ConfigurationPath -Algorithm SHA256).Hash -cne $State.ActivatedConfigHash) { throw 'hybrid-configuration-activation-mismatch' }
+}
+
+function Invoke-HybridPassageIisUpdate {
+    param([string]$SourceRoot, [string]$Commit, [string]$ResumeRelease)
+    $contract = Get-HybridPassageMigrationContract
+    $configurationPath = Join-Path $CanonicalLiveRoot 'Config/appsettings.Production.json'
+    Assert-NotReparsePoint -Path $CanonicalLiveRoot -Message 'hybrid-live-root-unsafe'
+    Assert-NotReparsePoint -Path $configurationPath -Message 'hybrid-configuration-unsafe'
+    if (-not (Test-Path -LiteralPath $IncrementalRecoveryRoot)) { New-Item -ItemType Directory -Path $IncrementalRecoveryRoot | Out-Null }
+    Assert-NotReparsePoint -Path $IncrementalRecoveryRoot -Message 'hybrid-recovery-root-unsafe'
+    $releaseId = if ($ResumeRelease) { $ResumeRelease } else { '{0}-{1}-hybrid' -f [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ'), $Commit.Substring(0,12) }
+    $releaseRoot = Join-Path $IncrementalRecoveryRoot $releaseId
+    $statePath = Join-Path $releaseRoot 'hybrid-state.json'
+    $candidateRoot = Join-Path $releaseRoot 'candidate'
+    $operatorRoot = Join-Path $releaseRoot 'operator'
+    $previousRoot = Join-Path $releaseRoot 'previous'
+    $configurationCandidate = Join-Path $releaseRoot 'candidate-config.json'
+    $upPath = Join-Path $releaseRoot 'hybrid-idempotent-up.sql'
+    $manifestPath = Join-Path $releaseRoot 'corpus-rebuild-manifest.json'
+    $connectionString = Get-DeploymentSqlConnectionString
+    $database = [System.Data.SqlClient.SqlConnectionStringBuilder]::new($connectionString)
+    if ($ResumeRelease) {
+        Assert-NotReparsePoint -Path $releaseRoot -Message 'hybrid-release-root-unsafe'
+        foreach ($file in @($statePath,$configurationCandidate,$upPath)) {
+            Assert-NotReparsePoint -Path $file -Message 'hybrid-resume-file-unsafe'
+        }
+        $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json -AsHashtable
+        foreach ($required in @('Version','ReleaseId','Commit','OperationId','DatabaseServer','DatabaseName','OriginalHistory',
+            'SchemaAttempted','ResetCommitted','HoldReleased','HoldReleaseAttempted','CandidateHash','OperatorHash',
+            'OriginalConfigHash','ActivatedConfigHash','PreservedInputFingerprint','InteractiveHostWasEnabled')) {
+            if (-not $state.ContainsKey($required)) { throw 'hybrid-resume-state-incomplete' }
+        }
+        foreach ($flag in @('SchemaAttempted','ResetCommitted','HoldReleased','HoldReleaseAttempted','InteractiveHostWasEnabled')) {
+            if ($state[$flag] -isnot [bool]) { throw 'hybrid-resume-state-ambiguous' }
+        }
+        $operationId = [Guid]::Empty
+        if ($state.Version -ne 1 -or $state.ReleaseId -cne $releaseId -or $state.Commit -cne $Commit -or
+            $state.DatabaseServer -cne $database.DataSource -or $state.DatabaseName -cne $database.InitialCatalog -or
+            -not [Guid]::TryParseExact($state.OperationId, 'D', [ref]$operationId) -or $operationId -eq [Guid]::Empty) { throw 'hybrid-resume-identity-mismatch' }
+        foreach ($payload in @(@{ Path=$candidateRoot; Hash=$state.CandidateHash }, @{ Path=$operatorRoot; Hash=$state.OperatorHash })) {
+            if ((Get-HybridPayloadFingerprint -Path $payload.Path) -cne $payload.Hash) { throw 'hybrid-resume-payload-changed' }
+        }
+        if ((Get-FileHash -LiteralPath $configurationCandidate -Algorithm SHA256).Hash -cne $state.ActivatedConfigHash) { throw 'hybrid-resume-configuration-candidate-changed' }
+        if ((Get-FileHash -LiteralPath $upPath -Algorithm SHA256).Hash -cne $contract.UpSha256) { throw 'hybrid-resume-schema-script-changed' }
+    }
+    else {
+        $history = @(Get-AppliedMigrationIds)
+        Assert-HybridMigrationHistory -OriginalHistory $history -CurrentHistory $history
+        if (Test-Path -LiteralPath $releaseRoot) { throw 'hybrid-release-already-exists' }
+        New-Item -ItemType Directory -Path $releaseRoot | Out-Null
+        $configuration = Get-Content -LiteralPath $configurationPath -Raw | ConvertFrom-Json -AsHashtable
+        foreach ($provider in @(@{ Name='Model'; Flat='ModelRuntimeEnabled' }, @{ Name='Gpu'; Flat='GpuEnabled' }, @{ Name='Ocr'; Flat='OcrEnabled' })) {
+            $runtime = $configuration.Runtime
+            $flat = $false; $nested = $false
+            if ($runtime.ContainsKey($provider.Flat)) { if (-not [bool]::TryParse([string]$runtime[$provider.Flat], [ref]$flat)) { throw 'hybrid-shared-ocr-runtime-invalid' } }
+            if ($runtime.ContainsKey($provider.Name) -and $runtime[$provider.Name].ContainsKey('Enabled')) {
+                if (-not [bool]::TryParse([string]$runtime[$provider.Name].Enabled, [ref]$nested)) { throw 'hybrid-shared-ocr-runtime-invalid' }
+            }
+            if (-not ($flat -or $nested)) { throw 'hybrid-shared-ocr-runtime-required' }
+        }
+        Copy-Item -LiteralPath $configurationPath -Destination (Join-Path $releaseRoot 'original-config.json')
+        if (-not $configuration.ContainsKey('Search')) { $configuration.Search = @{} }
+        $configuration.Search.HybridPassagesEnabled = $true
+        Write-HybridRebuildJson -Path $configurationCandidate -Value $configuration
+        & dotnet publish (Join-Path $SourceRoot 'src/FluxKnowledge.Web/FluxKnowledge.Web.csproj') -c Release --no-restore --nologo -o $candidateRoot | Out-Host
+        if ($LASTEXITCODE -ne 0) { throw 'hybrid-web-publish-failed' }
+        & dotnet publish (Join-Path $SourceRoot 'src/FluxKnowledge.Cli/FluxKnowledge.Cli.csproj') -c Release --no-restore --nologo -o $operatorRoot | Out-Host
+        if ($LASTEXITCODE -ne 0) { throw 'hybrid-operator-publish-failed' }
+        Test-ApplicationPayload -Path $candidateRoot
+        & dotnet ef migrations script $contract.Baseline $contract.Target --idempotent --configuration Release `
+            --project (Join-Path $SourceRoot 'src/FluxKnowledge.Infrastructure.SqlServer') `
+            --startup-project (Join-Path $SourceRoot 'src/FluxKnowledge.Infrastructure.SqlServer') --no-build --output $upPath | Out-Host
+        if ($LASTEXITCODE -ne 0 -or (Get-FileHash -LiteralPath $upPath -Algorithm SHA256).Hash -cne $contract.UpSha256) { throw 'hybrid-schema-script-hash-mismatch' }
+        $state = @{
+            Version=1; ReleaseId=$releaseId; Commit=$Commit; OperationId=[Guid]::NewGuid().ToString('D')
+            DatabaseServer=$database.DataSource; DatabaseName=$database.InitialCatalog; OriginalHistory=$history
+            SchemaAttempted=$false; ResetCommitted=$false; HoldReleased=$false; HoldReleaseAttempted=$false
+            CandidateHash=(Get-HybridPayloadFingerprint -Path $candidateRoot); OperatorHash=(Get-HybridPayloadFingerprint -Path $operatorRoot)
+            OriginalConfigHash=(Get-FileHash -LiteralPath $configurationPath -Algorithm SHA256).Hash
+            ActivatedConfigHash=(Get-FileHash -LiteralPath $configurationCandidate -Algorithm SHA256).Hash
+            PreservedInputFingerprint=$null; InteractiveHostWasEnabled=[bool](Get-ScheduledTask -TaskName $InteractiveHostTaskName).Settings.Enabled
+        }
+        Write-HybridRebuildJson -Path $statePath -Value $state
+    }
+    $configurationHash = (Get-FileHash -LiteralPath $configurationPath -Algorithm SHA256).Hash
+    if ($configurationHash -cne $state.OriginalConfigHash -and $configurationHash -cne $state.ActivatedConfigHash) { throw 'hybrid-live-configuration-changed' }
+    $currentHistory = @(Get-AppliedMigrationIds)
+    Assert-HybridMigrationHistory -OriginalHistory $state.OriginalHistory -CurrentHistory $currentHistory
+    if ($ResumeRelease -and -not $state.SchemaAttempted -and $currentHistory.Count -ne @($state.OriginalHistory).Count) {
+        throw 'hybrid-resume-schema-boundary-ambiguous'
+    }
+    # This check opens verified file leases only. It performs no native inference or acquisition.
+    $models = Invoke-HybridRebuildOperator -OperatorRoot $operatorRoot -ConnectionString $connectionString -Arguments @('verify-models')
+    if (-not $models.Verified -or -not $models.Offline) { throw 'hybrid-offline-model-verification-failed' }
+    if ($state.HoldReleased -or ($state.HoldReleaseAttempted -and -not (Test-Path -LiteralPath $ValidationHoldPath))) {
+        if (Test-Path -LiteralPath $ValidationHoldPath) { throw 'hybrid-release-outcome-ambiguous' }
+        $receipt = Invoke-HybridRebuildOperator -OperatorRoot $operatorRoot -ConnectionString $connectionString -Arguments @('status','--operation',$state.OperationId)
+        if (-not $receipt.Committed -or -not $receipt.Completed -or $currentHistory[-1] -cne $contract.Target -or
+            ($state.ContainsKey('ResetManifestHash') -and $state.ResetManifestHash -cne $receipt.ManifestHash) -or
+            $configurationHash -cne $state.ActivatedConfigHash -or
+            (Get-HybridPayloadFingerprint -Path $CanonicalDeployRoot) -cne $state.CandidateHash) { throw 'hybrid-release-outcome-ambiguous' }
+        Invoke-RequiredLoopbackProbes -Origin $loopbackOrigin.Origin -TimeoutSeconds $ReadinessTimeoutSeconds
+        $state.HoldReleased = $true
+        Write-HybridRebuildJson -Path $statePath -Value $state
+    }
+    elseif (-not $state.HoldReleased) {
+        $attempt = @{ OwnsHold=$false; StoppedApplication=$false; DisabledInteractiveHost=$false }
+        try {
+            if (-not (Test-Path -LiteralPath $ValidationHoldPath)) { [void](New-DeploymentValidationHold -Path $ValidationHoldPath -ReleaseId $releaseId) }
+            Invoke-HybridPassageRebuildFlow -State $state -SaveState { Write-HybridRebuildJson -Path $statePath -Value $state } -Quiesce {
+                Set-HybridDeploymentHold -Path $ValidationHoldPath -ReleaseId $releaseId -OperationId $state.OperationId -Permit $false
+                $attempt.OwnsHold = $true
+                Disable-ScheduledTask -TaskName $InteractiveHostTaskName | Out-Null
+                $attempt.DisabledInteractiveHost = $true
+                Wait-InteractiveHostStopped -TaskName $InteractiveHostTaskName -TimeoutSeconds $ReadinessTimeoutSeconds
+                if ($ResumeRelease -and $state.SchemaAttempted -and (Get-WebAppPoolState -Name $SiteName).Value -eq 'Stopped' -and
+                    @(Get-AppliedMigrationIds)[-1] -ceq $contract.Target) {
+                    $receipt = Invoke-HybridRebuildOperator -OperatorRoot $operatorRoot -ConnectionString $connectionString -Arguments @('status','--operation',$state.OperationId)
+                    if ($receipt.Committed) {
+                        if ($state.ContainsKey('ResetManifestHash') -and $state.ResetManifestHash -cne $receipt.ManifestHash) { throw 'hybrid-reset-receipt-mismatch' }
+                        # Only the verified compatible payload starts here. Its existing recovery loop
+                        # may prove dead owners and settle reservations; deny-all admission stays in place.
+                        Activate-HybridCompatiblePayload -CandidateRoot $candidateRoot -PreviousRoot $previousRoot -ReleaseRoot $releaseRoot `
+                            -ConfigurationCandidate $configurationCandidate -ConfigurationPath $configurationPath -State $state
+                        Start-WebAppPool -Name $SiteName
+                        Wait-IisAppPoolState -Name $SiteName -ExpectedState 'Started' -TimeoutSeconds $ReadinessTimeoutSeconds
+                        $live = Invoke-FixedLoopbackProbe -Uri "$($loopbackOrigin.Origin)/health/live" -TimeoutSeconds $ReadinessTimeoutSeconds
+                        $live.Dispose()
+                    }
+                }
+                Stop-HybridIisAfterGpuDrain
+                $attempt.StoppedApplication = $true
+                if ($null -eq $state.PreservedInputFingerprint) { $state.PreservedInputFingerprint = Get-HybridPreservedInputFingerprint }
+                elseif ((Get-HybridPreservedInputFingerprint) -cne $state.PreservedInputFingerprint) { throw 'hybrid-preserved-inputs-changed' }
+            } -ApplySchema {
+                Assert-HybridMigrationHistory -OriginalHistory $state.OriginalHistory -CurrentHistory @(Get-AppliedMigrationIds)
+                Invoke-GeneratedSqlScript -Path $upPath
+                $current = @(Get-AppliedMigrationIds)
+                Assert-HybridMigrationHistory -OriginalHistory $state.OriginalHistory -CurrentHistory $current
+                if ($current[-1] -cne $contract.Target) { throw 'hybrid-schema-target-not-recorded' }
+            } -ResetAndPrepare {
+                $receipt = Invoke-HybridRebuildOperator -OperatorRoot $operatorRoot -ConnectionString $connectionString -Arguments @('status','--operation',$state.OperationId)
+                if (-not $receipt.Committed) {
+                    if (-not (Test-Path -LiteralPath $manifestPath)) {
+                        $plan = Invoke-HybridRebuildOperator -OperatorRoot $operatorRoot -ConnectionString $connectionString -Arguments @('plan','--operation',$state.OperationId)
+                        Write-HybridRebuildJson -Path $manifestPath -Value $plan
+                    }
+                    Assert-NotReparsePoint -Path $manifestPath -Message 'hybrid-manifest-file-unsafe'
+                    $receipt = Invoke-HybridRebuildOperator -OperatorRoot $operatorRoot -ConnectionString $connectionString -Arguments @('commit','--manifest',$manifestPath)
+                    $state.ResetManifestHash = $receipt.ManifestHash
+                }
+                elseif ($state.ContainsKey('ResetManifestHash') -and $state.ResetManifestHash -cne $receipt.ManifestHash) { throw 'hybrid-reset-receipt-mismatch' }
+                else { $state.ResetManifestHash = $receipt.ManifestHash }
+                $state.ResetCommitted = $true
+                Write-HybridRebuildJson -Path $statePath -Value $state
+                [void](Invoke-HybridRebuildOperator -OperatorRoot $operatorRoot -ConnectionString $connectionString -Arguments @('prepare','--operation',$state.OperationId))
+            } -ActivateAndStart {
+                Activate-HybridCompatiblePayload -CandidateRoot $candidateRoot -PreviousRoot $previousRoot -ReleaseRoot $releaseRoot `
+                    -ConfigurationCandidate $configurationCandidate -ConfigurationPath $configurationPath -State $state
+                Set-HybridDeploymentHold -Path $ValidationHoldPath -ReleaseId $releaseId -OperationId $state.OperationId -Permit $true
+                Start-WebAppPool -Name $SiteName
+                Wait-IisAppPoolState -Name $SiteName -ExpectedState 'Started' -TimeoutSeconds $ReadinessTimeoutSeconds
+                $live = Invoke-FixedLoopbackProbe -Uri "$($loopbackOrigin.Origin)/health/live" -TimeoutSeconds $ReadinessTimeoutSeconds
+                $live.Dispose()
+            } -RunAndFinish {
+                $timer = [Diagnostics.Stopwatch]::StartNew()
+                while ($true) {
+                    $status = Invoke-HybridRebuildOperator -OperatorRoot $operatorRoot -ConnectionString $connectionString -Arguments @('status','--operation',$state.OperationId)
+                    if ($status.Completed) { break }
+                    if ($status.FailedEmbeddingJobs -gt 0 -or $status.FailedPublishJobs -gt 0) { throw 'hybrid-rebuild-job-failed-hold-retained' }
+                    if ($status.PendingItems -eq 0 -and $status.RunningItems -eq 0) {
+                        try { [void](Invoke-HybridRebuildOperator -OperatorRoot $operatorRoot -ConnectionString $connectionString -Arguments @('finish','--operation',$state.OperationId)); break }
+                        catch { if ($_.Exception.Message -cne 'corpus-rebuild-full-text-not-ready') { throw } }
+                    }
+                    if ($timer.Elapsed.TotalSeconds -ge $RebuildTimeoutSeconds) { throw 'hybrid-rebuild-wait-timeout-hold-retained' }
+                    Start-Sleep -Milliseconds 1000
+                }
+            } -Validate {
+                if ((Get-HybridPreservedInputFingerprint) -cne $state.PreservedInputFingerprint) { throw 'hybrid-preserved-inputs-changed' }
+                Invoke-RequiredLoopbackProbes -Origin $loopbackOrigin.Origin -TimeoutSeconds $ReadinessTimeoutSeconds
+            } -ReleaseHold {
+                $state.HoldReleaseAttempted = $true
+                Write-HybridRebuildJson -Path $statePath -Value $state
+                Assert-HybridDeploymentHoldOwner -Path $ValidationHoldPath -ReleaseId $releaseId -OperationId $state.OperationId
+                Remove-Item -LiteralPath $ValidationHoldPath -Force
+            }
+        }
+        catch {
+            if ($state.SchemaAttempted) {
+                if ($attempt.OwnsHold -and (Test-Path -LiteralPath $ValidationHoldPath)) { Set-HybridDeploymentHold -Path $ValidationHoldPath -ReleaseId $releaseId -OperationId $state.OperationId -Permit $false }
+                throw "Hybrid deployment requires forward recovery. Current payload/schema/configuration and the hold are retained; never restore old binaries or downgrade automatically. Resume release $releaseId. Failure: $($_.Exception.Message)"
+            }
+            # No schema command, reset, configuration or payload change has occurred.
+            if ($attempt.OwnsHold) {
+                if ($attempt.StoppedApplication) { Start-WebAppPool -Name $SiteName }
+                Remove-DeploymentValidationHold -Path $ValidationHoldPath -ReleaseId $releaseId
+                if ($attempt.DisabledInteractiveHost -and $state.InteractiveHostWasEnabled) { Enable-ScheduledTask -TaskName $InteractiveHostTaskName | Out-Null }
+            }
+            throw
+        }
+    }
+    Invoke-RequiredLoopbackProbes -Origin $loopbackOrigin.Origin -TimeoutSeconds $ReadinessTimeoutSeconds
+    if ($state.InteractiveHostWasEnabled) { Enable-ScheduledTask -TaskName $InteractiveHostTaskName | Out-Null }
+    [ordered]@{ ok=$true; mode='hybrid-rebuild-applied'; commit=$Commit; release_root=$releaseRoot; operation_id=$state.OperationId;
+        reset_manifest_hash=$state.ResetManifestHash; schema_target=$contract.Target; deployment_validation_hold='released-after-rebuild-and-preserved-input-validation';
+        runtime='offline-BGE-shared-scheduler-load-run-unload'; rollback='forward-only; original payload/configuration retained for inspection' } | ConvertTo-Json
+}
+
 function Assert-IncrementalIisPreflight {
     $site = Get-Website -Name $SiteName -ErrorAction Stop
     Assert-CanonicalPath `
@@ -563,26 +855,26 @@ function Assert-IncrementalIisPreflight {
     if ($site.State -ne "Started") {
         throw "The fixed FluxKnowledge IIS site must be started before an incremental update."
     }
-    if ((Get-WebAppPoolState -Name $SiteName).Value -ne "Started") {
+    if ((Get-WebAppPoolState -Name $SiteName).Value -ne "Started" -and [string]::IsNullOrWhiteSpace($ResumeHybridRebuildRelease)) {
         throw "The fixed FluxKnowledge IIS application pool must be started before an incremental update."
     }
     $binding = @(Get-WebBinding -Name $SiteName -Protocol "http" | Where-Object { $_.bindingInformation -ceq "127.0.0.1:5137:" })
     if ($binding.Count -ne 1) {
         throw "The fixed FluxKnowledge IIS site must have exactly one http/127.0.0.1:5137 binding."
     }
-    if (-not (Test-Path -LiteralPath $CanonicalDeployRoot -PathType Container)) {
+    if (-not (Test-Path -LiteralPath $CanonicalDeployRoot -PathType Container) -and [string]::IsNullOrWhiteSpace($ResumeHybridRebuildRelease)) {
         throw "The canonical application payload root is missing."
     }
     if (-not (Test-Path -LiteralPath $CanonicalRecoveryRoot -PathType Container)) {
         throw "The canonical recovery root is missing."
     }
-    Assert-NotReparsePoint `
-        -Path $CanonicalDeployRoot `
-        -Message "The canonical application payload root cannot be a reparse point."
+    if (Test-Path -LiteralPath $CanonicalDeployRoot) {
+        Assert-NotReparsePoint -Path $CanonicalDeployRoot -Message "The canonical application payload root cannot be a reparse point."
+    }
     Assert-NotReparsePoint `
         -Path $CanonicalRecoveryRoot `
         -Message "The canonical recovery root cannot be a reparse point."
-    Test-ApplicationPayload -Path $CanonicalDeployRoot
+    if ([string]::IsNullOrWhiteSpace($ResumeHybridRebuildRelease)) { Test-ApplicationPayload -Path $CanonicalDeployRoot }
 }
 
 Assert-CanonicalPath `
@@ -601,11 +893,17 @@ if ($DeferReadinessForScopedRemediation -and $ApplyMigrations) {
 if ($ApplyCorpusChunkFullTextMigration -and ($ApplyMigrations -or $DeferReadinessForScopedRemediation)) {
     throw '-ApplyCorpusChunkFullTextMigration cannot be combined with another migration or readiness deferral.'
 }
-$applyAnyMigration = $ApplyMigrations -or $ApplyCorpusChunkFullTextMigration
+if (($ApplyHybridPassageRebuild -or $ResumeHybridRebuildRelease) -and ($ApplyMigrations -or $ApplyCorpusChunkFullTextMigration -or $DeferReadinessForScopedRemediation)) {
+    throw 'Hybrid passage rebuild cannot be combined with another migration or readiness deferral.'
+}
+if ($ResumeHybridRebuildRelease -and -not $ApplyHybridPassageRebuild) { throw 'Hybrid resume requires -ApplyHybridPassageRebuild.' }
+if ($ResumeHybridRebuildRelease -and $ResumeHybridRebuildRelease -notmatch '^\d{8}T\d{6}Z-[0-9a-f]{12}-hybrid$') { throw 'Hybrid resume requires an exact recovery release name.' }
+$applyAnyMigration = $ApplyMigrations -or $ApplyCorpusChunkFullTextMigration -or $ApplyHybridPassageRebuild
 
 . (Join-Path $PSScriptRoot "loopback-deployment-safety.ps1")
 Import-Module (Join-Path $PSScriptRoot "incremental-iis-payload-swap.psm1") -Force -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'incremental-corpus-fulltext-migration.psm1') -Force -ErrorAction Stop
+Import-Module (Join-Path $PSScriptRoot 'incremental-hybrid-passage-rebuild.psm1') -Force -ErrorAction Stop
 $loopbackOrigin = Get-FixedLoopbackOrigin -SiteUrl $SiteUrl
 if ($loopbackOrigin.Origin -cne "http://127.0.0.1:5137") {
     throw "Incremental IIS deployment requires the fixed http://127.0.0.1:5137 origin."
@@ -613,6 +911,26 @@ if ($loopbackOrigin.Origin -cne "http://127.0.0.1:5137") {
 
 if ($PlanOnly) {
     $migrationPlan = $null
+    if ($ApplyHybridPassageRebuild) {
+        $contract = Get-HybridPassageMigrationContract
+        $history = @(Get-AppliedMigrationIds)
+        if ($ResumeHybridRebuildRelease) {
+            $resumePath = Join-Path (Join-Path $IncrementalRecoveryRoot $ResumeHybridRebuildRelease) 'hybrid-state.json'
+            $resume = Get-Content -LiteralPath $resumePath -Raw | ConvertFrom-Json -AsHashtable
+            Assert-HybridMigrationHistory -OriginalHistory $resume.OriginalHistory -CurrentHistory $history
+        }
+        else { Assert-HybridMigrationHistory -OriginalHistory $history -CurrentHistory $history }
+        $migrationPlan = [ordered]@{
+            baseline=$contract.Baseline; target=$contract.Target; current_history=$history; generated_up_sha256=$contract.UpSha256
+            rebuild='replace disposable chunks, vectors and ANN generations; preserve canonical inputs and published document winners'
+            gpu_drain='hold canonical admission; allow active OCR page/native cleanup to finish; prove IIS worker exit before reset'
+            admission='only the exact captured rebuild worklist runs while the deployment hold remains'
+            recovery='persist forward-only held recovery boundary before first schema command; resume same release, database and operation'
+            activation='Search:HybridPassagesEnabled=true; pinned offline BGE-M3 and BGE-reranker-v2-m3; load/run/unload'
+            completion='verify SQL/native membership and Full-Text population, preserved input/publication fingerprints and loopback readiness before hold release'
+            resume_release=$ResumeHybridRebuildRelease
+        }
+    }
     if ($ApplyMigrations) {
         if ([string]::IsNullOrWhiteSpace($SourceRoot)) {
             $SourceRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
@@ -660,9 +978,9 @@ if ($PlanOnly) {
         clean_slate = $false
         preserved = @("Config", "Data", "Runtime", "Recovery", "CodexPlugin")
         payload_acl = "inherit-from-live-root"
-        rollback = "automatic-application-and-interactive-host-payload-restore"
+        rollback = if ($ApplyHybridPassageRebuild) { 'before-schema: original payload; after-schema: held forward recovery with retained original payload/configuration' } else { "automatic-application-and-interactive-host-payload-restore" }
         deployment_validation_hold = $true
-        candidate_validation = if ($DeferReadinessForScopedRemediation) {
+        candidate_validation = if ($ApplyHybridPassageRebuild) { 'held-exact-rebuild-finalisation-preserved-inputs-and-loopback-probes' } elseif ($DeferReadinessForScopedRemediation) {
             "held-live-and-index-health probes, exact-ready-503 and unchanged-retained-pipeline-state"
         }
         else {
@@ -745,6 +1063,10 @@ try {
     }
 
     Assert-IncrementalIisPreflight
+    if ($ApplyHybridPassageRebuild) {
+        Invoke-HybridPassageIisUpdate -SourceRoot $SourceRoot -Commit $commit -ResumeRelease $ResumeHybridRebuildRelease
+        return
+    }
     if (-not (Test-Path -LiteralPath $IncrementalRecoveryRoot -PathType Container)) {
         New-Item -ItemType Directory -Path $IncrementalRecoveryRoot -Force | Out-Null
     }

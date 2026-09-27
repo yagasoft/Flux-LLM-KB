@@ -33,7 +33,17 @@ public sealed class CorpusEvidenceCodecTests
         Assert.Equal("evidence-invalid", Assert.Throws<NativeOperationException>(() => codec.Decode(new string('x', 2049))).ReasonCode);
     }
 
+    [Fact]
+    public void New_references_require_a_non_empty_epoch_and_reject_version_one()
+    {
+        var codec = new CorpusEvidenceCodec(new EphemeralDataProtectionProvider());
+        Assert.Equal("evidence-invalid", Assert.Throws<NativeOperationException>(
+            () => codec.Encode(Binding() with { CorpusEpoch = Guid.Empty })).ReasonCode);
+        Assert.Equal("evidence-invalid", Assert.Throws<NativeOperationException>(
+            () => codec.Encode(Binding() with { Version = 1 })).ReasonCode);
+    }
+
     private static CorpusEvidenceBinding Binding() => new(
-        1, Guid.NewGuid(), Guid.NewGuid(), new string('a', 64), Guid.NewGuid(), 1,
-        Guid.NewGuid(), new string('b', 64), 41, new string('c', 64), 25, 32);
+        2, Guid.NewGuid(), Guid.NewGuid(), new string('a', 64), Guid.NewGuid(), 1,
+        Guid.NewGuid(), new string('b', 64), 41, new string('c', 64), 25, 32, Guid.NewGuid());
 }

@@ -9,7 +9,7 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Search;
 public sealed class CorpusEvidenceCodec : ICorpusEvidenceCodec
 {
     private const int MaximumReferenceLength = 2048;
-    private const string Purpose = "FluxKnowledge.CorpusEvidence/v1";
+    private const string Purpose = "FluxKnowledge.CorpusEvidence/v2";
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private readonly IDataProtectionProvider _provider;
 
@@ -60,7 +60,7 @@ public sealed class CorpusEvidenceCodec : ICorpusEvidenceCodec
 
     private static void Validate(CorpusEvidenceBinding? binding)
     {
-        if (binding is null || binding.Version != 1 ||
+        if (binding is null || binding.Version != 2 || binding.CorpusEpoch == Guid.Empty ||
             binding.PipelineRecordId == Guid.Empty || binding.PipelineRecordRevision < 1 ||
             binding.ArtifactId == Guid.Empty || binding.ChunkId < 1 ||
             binding.CitedStart < 0 || binding.CitedLength is < 1 or > 1024 ||

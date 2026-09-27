@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using FluxKnowledge.Application.Contracts;
+using FluxKnowledge.Application.Gpu;
 using FluxKnowledge.Application.Indexing;
 using FluxKnowledge.Application.Pipeline;
 using FluxKnowledge.Application.Ports;
@@ -19,6 +20,7 @@ using FluxKnowledge.Infrastructure.Usearch.Search;
 using FluxKnowledge.Integrations.Files;
 using FluxKnowledge.Integration.Tests.Support;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Xunit;
@@ -29,6 +31,449 @@ namespace FluxKnowledge.Integration.Tests.Indexing;
 public sealed class SqlToUsearchRebuildTests(NativeSqlServerFixture fixture) : IClassFixture<NativeSqlServerFixture>
 {
     private readonly NativeSqlServerFixture _fixture = fixture;
+
+    [NativeSqlServerFact]
+    public async Task Stale_stamped_projection_waits_for_publication_then_recovers_without_repairing_old_files()
+    {
+        await using var environment = await PipelineEnvironment.CreateAsync(_fixture, "Projection version baseline.");
+        var active = await environment.ActiveGenerationAsync();
+        var metadataBefore = File.ReadAllText(Path.Combine(active.IndexPath, UsearchGenerationValidator.MetadataFileName));
+        await using (var context = await environment.Factory.CreateDbContextAsync())
+        {
+            var state = await context.IndexState.SingleAsync();
+            state.CorpusVersion++;
+            await context.SaveChangesAsync();
+        }
+        var sql = await new SqlDerivedIndexRecoveryStore(environment.Factory, TimeProvider.System).ReadActiveAsync(CancellationToken.None);
+        Assert.True(sql.IsProjectionUnavailable);
+        using var provider = CreateRecoveryProvider(environment.Factory, environment.IndexRoot);
+        var coordinator = provider.GetRequiredService<DerivedIndexRecoveryCoordinator>();
+        await coordinator.RunOnceAsync(CancellationToken.None);
+        Assert.Equal(DerivedIndexRecoveryState.IndexUpdating, coordinator.Snapshot.State);
+        Assert.Equal(metadataBefore, File.ReadAllText(Path.Combine(active.IndexPath, UsearchGenerationValidator.MetadataFileName)));
+        var candidate = await environment.Builder.BuildAndPlaceAsync(Guid.NewGuid(), CancellationToken.None);
+        await new SqlStageTransitionStore(environment.Factory).TransitionAsync(await ClaimPublishAsync(environment, candidate), CancellationToken.None);
+        await coordinator.RunOnceAsync(CancellationToken.None);
+        Assert.Equal(DerivedIndexRecoveryState.Healthy, coordinator.Snapshot.State);
+        Assert.False(coordinator.Snapshot.IsProjectionUnavailable);
+        Assert.Equal(candidate.Generation.Id, coordinator.Snapshot.ActiveGenerationId);
+    }
+
+    [NativeSqlServerFact]
+    public async Task Leased_ann_uses_captured_membership_and_refuses_after_publication_changes()
+    {
+        await using var environment = await PipelineEnvironment.CreateAsync(_fixture, "Leased native ANN baseline.");
+        var active = await environment.ActiveGenerationAsync();
+        var sqlLease = await new SqlCorpusGenerationLeaseStore(environment.Factory, TimeProvider.System).TryAcquireAsync(Guid.NewGuid(),
+            new GpuInteractiveOwnerIdentity(Environment.ProcessId, DateTimeOffset.UtcNow, new string('a', 64)),
+            active.ModelFingerprint, active.Dimensions, CancellationToken.None);
+        Assert.NotNull(sqlLease);
+        var native = await new UsearchCorpusAnnLeaseFactory(environment.Store, new UsearchGenerationValidator())
+            .OpenAsync(sqlLease, CancellationToken.None);
+        var vector = (await environment.Store.ReadVectorsAsync(active.Id, CancellationToken.None))[0];
+        var query = new float[active.Dimensions];
+        Buffer.BlockCopy(vector.Values, 0, query, 0, vector.Values.Length);
+        var matches = await native.SearchAsync(query, 1, CancellationToken.None);
+        Assert.Equal(vector.VectorId, Assert.Single(matches).VectorId);
+        Assert.True(await native.IsCurrentAsync(CancellationToken.None));
+        await environment.AddAndPumpAtPathAsync("Leased native ANN successor.", "initial.txt");
+        await Assert.ThrowsAsync<PublicationSnapshotConflictException>(async () => await native.SearchAsync(query, 1, CancellationToken.None));
+        await native.DisposeAsync();
+        Assert.False(await sqlLease.IsCurrentAsync(CancellationToken.None));
+        await Assert.ThrowsAsync<ObjectDisposedException>(async () => await native.SearchAsync(query, 1, CancellationToken.None));
+    }
+
+    [NativeSqlServerFact]
+    public async Task Failed_native_open_releases_the_captured_sql_lease()
+    {
+        await using var environment = await PipelineEnvironment.CreateAsync(_fixture, "Leased ANN corruption baseline.");
+        var active = await environment.ActiveGenerationAsync();
+        var sqlLease = await new SqlCorpusGenerationLeaseStore(environment.Factory, TimeProvider.System).TryAcquireAsync(Guid.NewGuid(),
+            new GpuInteractiveOwnerIdentity(Environment.ProcessId, DateTimeOffset.UtcNow, new string('a', 64)),
+            active.ModelFingerprint, active.Dimensions, CancellationToken.None);
+        Assert.NotNull(sqlLease);
+        File.WriteAllText(Path.Combine(active.IndexPath, UsearchGenerationValidator.MetadataFileName), "{}");
+        await Assert.ThrowsAsync<IndexGenerationValidationException>(async () =>
+            await new UsearchCorpusAnnLeaseFactory(environment.Store, new UsearchGenerationValidator()).OpenAsync(sqlLease, CancellationToken.None));
+        Assert.False(await sqlLease.IsCurrentAsync(CancellationToken.None));
+        await using var exclusive = await new SqlDerivedIndexRecoveryStore(environment.Factory, TimeProvider.System)
+            .TryAcquireExclusiveLeaseAsync(TimeSpan.Zero, CancellationToken.None);
+        Assert.NotNull(exclusive);
+    }
+
+    [NativeSqlServerFact]
+    public async Task Lost_query_session_refuses_results_and_blocks_cleanup_until_native_disposal()
+    {
+        await using var environment = await PipelineEnvironment.CreateAsync(_fixture, "Query session loss.");
+        var active = await environment.ActiveGenerationAsync();
+        var leases = new SqlCorpusGenerationLeaseStore(environment.Factory, TimeProvider.System);
+        var lease = await leases.TryAcquireAsync(Guid.NewGuid(),
+            new GpuInteractiveOwnerIdentity(Environment.ProcessId, DateTimeOffset.UtcNow, new string('a', 64)),
+            active.ModelFingerprint, active.Dimensions, CancellationToken.None);
+        Assert.NotNull(lease);
+        var native = await new UsearchCorpusAnnLeaseFactory(environment.Store, new UsearchGenerationValidator()).OpenAsync(lease, CancellationToken.None);
+        await using (var context = await environment.Factory.CreateDbContextAsync())
+        {
+            var registration = await context.CorpusQueryLeases.SingleAsync(value => value.Id == lease.LeaseId);
+            // Fixture guarantees a generated disposable catalogue on the loopback server.
+            // Kill only the exact query-owned session, never the server or another process.
+            await context.Database.ExecuteSqlRawAsync(FormattableString.Invariant($"KILL {registration.SqlSessionId}"));
+        }
+        Assert.False(await lease.IsCurrentAsync(CancellationToken.None));
+        var recovery = new SqlDerivedIndexRecoveryStore(environment.Factory, TimeProvider.System);
+        Assert.Null(await recovery.TryAcquireExclusiveLeaseAsync(TimeSpan.Zero, CancellationToken.None));
+        await using (var context = await environment.Factory.CreateDbContextAsync())
+            Assert.True(await context.CorpusQueryLeases.AnyAsync(value => value.Id == lease.LeaseId));
+        var deletionStore = new SqlSourceDeletionStore(environment.Factory, TimeProvider.System);
+        await using (var context = await environment.Factory.CreateDbContextAsync())
+        {
+            context.SourceDeletionOperations.Add(new SourceDeletionOperationEntity
+            {
+                Id = Guid.NewGuid(), SourceRootId = Guid.NewGuid(), State = 0, Phase = "accepted",
+                CreatedAtUtc = DateTimeOffset.UtcNow, UpdatedAtUtc = DateTimeOffset.UtcNow
+            });
+            await context.SaveChangesAsync();
+        }
+        var work = await deletionStore.ClaimNextAsync(CancellationToken.None);
+        Assert.NotNull(work);
+        Assert.False((await deletionStore.PurgeAsync(work, null, CancellationToken.None)).Completed);
+        await using (var context = await environment.Factory.CreateDbContextAsync())
+            Assert.Equal("source-delete-search-queries-active", (await context.SourceDeletionOperations.SingleAsync()).ReasonCode);
+        await native.DisposeAsync();
+        await using (var exclusive = await recovery.TryAcquireExclusiveLeaseAsync(TimeSpan.Zero, CancellationToken.None))
+        {
+            Assert.NotNull(exclusive);
+            await using var context = await environment.Factory.CreateDbContextAsync();
+            Assert.Empty(await context.CorpusQueryLeases.ToListAsync());
+            Assert.True(await context.IndexGenerations.AnyAsync(value => value.Id == active.Id));
+        }
+        await lease.DisposeAsync();
+        var resumed = await deletionStore.ClaimNextAsync(CancellationToken.None);
+        Assert.NotNull(resumed);
+        Assert.True((await deletionStore.PurgeAsync(resumed, null, CancellationToken.None)).Completed);
+    }
+
+    [NativeSqlServerTheory]
+    [InlineData(GpuInteractiveOwnerObservation.Unknown)]
+    [InlineData(GpuInteractiveOwnerObservation.Alive)]
+    [InlineData(GpuInteractiveOwnerObservation.Exited)]
+    public async Task Only_proven_exited_query_incarnations_can_be_recovered(GpuInteractiveOwnerObservation observation)
+    {
+        await using var environment = await PipelineEnvironment.CreateAsync(_fixture, "Query incarnation recovery.");
+        var active = await environment.ActiveGenerationAsync();
+        var owner = new GpuInteractiveOwnerIdentity(Environment.ProcessId, DateTimeOffset.UtcNow, new string('a', 64));
+        var id = Guid.NewGuid();
+        await using (var context = await environment.Factory.CreateDbContextAsync())
+        {
+            context.CorpusQueryLeases.Add(new CorpusQueryLeaseEntity
+            {
+                Id = id, GenerationId = active.Id, CorpusEpoch = active.CorpusStamp!.CorpusEpoch,
+                CorpusVersion = active.CorpusStamp.CorpusVersion, ModelFingerprint = active.ModelFingerprint, Dimensions = active.Dimensions,
+                OwnerInstanceId = Guid.NewGuid(), OwnerProcessId = owner.ProcessId, OwnerStartedAtUtc = owner.StartedAtUtc,
+                OwnerMachineFingerprint = owner.MachineFingerprint, SqlSessionId = 123, CreatedAtUtc = DateTimeOffset.UtcNow
+            });
+            await context.SaveChangesAsync();
+        }
+        var observer = new QueryOwnerProbe(owner, observation);
+        await using var exclusive = await new SqlDerivedIndexRecoveryStore(environment.Factory, TimeProvider.System, observer)
+            .TryAcquireExclusiveLeaseAsync(TimeSpan.Zero, CancellationToken.None);
+        Assert.Equal(observation == GpuInteractiveOwnerObservation.Exited, exclusive is not null);
+        await using var verification = await environment.Factory.CreateDbContextAsync();
+        Assert.Equal(observation != GpuInteractiveOwnerObservation.Exited, await verification.CorpusQueryLeases.AnyAsync(value => value.Id == id));
+        // This row was a synthetic observer fixture, with no native query owner.
+        await verification.CorpusQueryLeases.Where(value => value.Id == id).ExecuteDeleteAsync();
+    }
+
+    private sealed class QueryOwnerProbe(GpuInteractiveOwnerIdentity current, GpuInteractiveOwnerObservation observation) : IGpuInteractiveOwnerProbe
+    {
+        public GpuInteractiveOwnerIdentity Current => current;
+        public GpuInteractiveOwnerObservation Observe(GpuInteractiveOwnerIdentity owner)
+        {
+            Assert.Equal(current, owner);
+            return observation;
+        }
+    }
+
+    [NativeSqlServerTheory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task New_activation_refuses_a_missing_expected_or_generation_stamp(bool missingExpected)
+    {
+        await using var environment = await PipelineEnvironment.CreateAsync(_fixture, "Missing stamp baseline.");
+        var candidate = await environment.Builder.BuildAndPlaceAsync(Guid.NewGuid(), CancellationToken.None);
+        candidate = missingExpected ? candidate with { ExpectedCorpusStamp = null } :
+            candidate with { Generation = candidate.Generation with { CorpusStamp = null } };
+        var request = await ClaimPublishAsync(environment, candidate);
+        await Assert.ThrowsAsync<PublicationSnapshotConflictException>(async () =>
+            await new SqlStageTransitionStore(environment.Factory).TransitionAsync(request, CancellationToken.None));
+        await using var context = await environment.Factory.CreateDbContextAsync();
+        Assert.False(await context.Artifacts.AnyAsync(value => value.Id == request.Artifact.Id));
+    }
+
+    [NativeSqlServerFact]
+    public async Task Query_lease_blocks_cross_instance_recovery_and_captures_one_generation_until_disposal()
+    {
+        await using var environment = await PipelineEnvironment.CreateAsync(_fixture, "Query lease baseline.");
+        var active = await environment.ActiveGenerationAsync();
+        var owner = new GpuInteractiveOwnerIdentity(Environment.ProcessId, DateTimeOffset.UtcNow, new string('a', 64));
+        var leases = new SqlCorpusGenerationLeaseStore(environment.Factory, TimeProvider.System);
+        var lease = await leases.TryAcquireAsync(Guid.NewGuid(), owner, active.ModelFingerprint, active.Dimensions, CancellationToken.None);
+        Assert.NotNull(lease);
+        Assert.Equal(active, lease.Generation);
+        Assert.True(await lease.IsCurrentAsync(CancellationToken.None));
+        var recovery = new SqlDerivedIndexRecoveryStore(environment.Factory, TimeProvider.System);
+        Assert.Null(await recovery.TryAcquireExclusiveLeaseAsync(TimeSpan.Zero, CancellationToken.None));
+        await environment.AddAndPumpAtPathAsync("Query lease successor.", "initial.txt");
+        Assert.False(await lease.IsCurrentAsync(CancellationToken.None));
+        Assert.Equal(active, lease.Generation);
+        Assert.NotEmpty(await environment.Store.ReadVectorsAsync(active.Id, CancellationToken.None));
+        Assert.Null(await recovery.TryAcquireExclusiveLeaseAsync(TimeSpan.Zero, CancellationToken.None));
+        await lease.DisposeAsync();
+        await lease.DisposeAsync();
+        Assert.False(await lease.IsCurrentAsync(CancellationToken.None));
+        await using var exclusive = await recovery.TryAcquireExclusiveLeaseAsync(TimeSpan.Zero, CancellationToken.None);
+        Assert.NotNull(exclusive);
+        await using var verification = await environment.Factory.CreateDbContextAsync();
+        Assert.Empty(await verification.CorpusQueryLeases.ToListAsync());
+    }
+
+    [NativeSqlServerFact]
+    public async Task Query_lease_refuses_wrong_profile_and_stale_or_unstamped_projection()
+    {
+        await using var environment = await PipelineEnvironment.CreateAsync(_fixture, "Query profile baseline.");
+        var active = await environment.ActiveGenerationAsync();
+        var owner = new GpuInteractiveOwnerIdentity(Environment.ProcessId, DateTimeOffset.UtcNow, new string('a', 64));
+        var leases = new SqlCorpusGenerationLeaseStore(environment.Factory, TimeProvider.System);
+        Assert.Null(await leases.TryAcquireAsync(Guid.NewGuid(), owner, new string('b', 64), active.Dimensions, CancellationToken.None));
+        Assert.Null(await leases.TryAcquireAsync(Guid.NewGuid(), owner, active.ModelFingerprint, active.Dimensions + 1, CancellationToken.None));
+        await using var context = await environment.Factory.CreateDbContextAsync();
+        var state = await context.IndexState.SingleAsync();
+        state.CorpusVersion++;
+        await context.SaveChangesAsync();
+        Assert.Null(await leases.TryAcquireAsync(Guid.NewGuid(), owner, active.ModelFingerprint, active.Dimensions, CancellationToken.None));
+        state.CorpusVersion--;
+        var generation = await context.IndexGenerations.SingleAsync(value => value.Id == active.Id);
+        generation.CorpusEpoch = null;
+        generation.CorpusVersion = null;
+        await context.SaveChangesAsync();
+        Assert.Null(await leases.TryAcquireAsync(Guid.NewGuid(), owner, active.ModelFingerprint, active.Dimensions, CancellationToken.None));
+        Assert.Empty(await context.CorpusQueryLeases.ToListAsync());
+    }
+
+    [NativeSqlServerFact]
+    public async Task Publications_stamp_the_exact_epoch_and_membership_version()
+    {
+        await using var environment = await PipelineEnvironment.CreateAsync(_fixture, "Published first version.");
+        var first = await environment.ActiveGenerationAsync();
+        await using (var context = await environment.Factory.CreateDbContextAsync())
+        {
+            var state = await context.IndexState.SingleAsync();
+            Assert.Equal(new CorpusPublicationStamp(state.CorpusEpoch, state.CorpusVersion), first.CorpusStamp);
+        }
+        await environment.AddAndPumpAtPathAsync("Published replacement version.", "initial.txt");
+        var replacement = await environment.ActiveGenerationAsync();
+        Assert.NotNull(first.CorpusStamp);
+        Assert.NotNull(replacement.CorpusStamp);
+        Assert.Equal(first.CorpusStamp.CorpusEpoch, replacement.CorpusStamp.CorpusEpoch);
+        Assert.Equal(first.CorpusStamp.CorpusVersion + 1, replacement.CorpusStamp.CorpusVersion);
+        await using var verification = await environment.Factory.CreateDbContextAsync();
+        Assert.Equal(replacement.CorpusStamp.CorpusVersion, (await verification.IndexState.SingleAsync()).CorpusVersion);
+        var candidate = await environment.Builder.BuildAndPlaceAsync(Guid.NewGuid(), CancellationToken.None);
+        var request = await ClaimPublishAsync(environment, candidate);
+        await new SqlStageTransitionStore(environment.Factory).TransitionAsync(request, CancellationToken.None);
+        await using var afterNoMembershipChange = await environment.Factory.CreateDbContextAsync();
+        Assert.Equal(replacement.CorpusStamp.CorpusVersion, (await afterNoMembershipChange.IndexState.SingleAsync()).CorpusVersion);
+    }
+
+    [NativeSqlServerFact]
+    public async Task Old_epoch_candidate_refuses_even_when_vector_membership_is_identical()
+    {
+        await using var environment = await PipelineEnvironment.CreateAsync(_fixture, "Published epoch baseline.");
+        var candidate = await environment.Builder.BuildAndPlaceAsync(Guid.NewGuid(), CancellationToken.None);
+        Assert.NotNull(candidate.ExpectedCorpusStamp);
+        var request = await ClaimPublishAsync(environment, candidate);
+        await using (var context = await environment.Factory.CreateDbContextAsync())
+        {
+            var state = await context.IndexState.SingleAsync();
+            state.CorpusEpoch = Guid.NewGuid();
+            await context.SaveChangesAsync();
+        }
+        await Assert.ThrowsAsync<PublicationSnapshotConflictException>(async () =>
+            await new SqlStageTransitionStore(environment.Factory).TransitionAsync(request, CancellationToken.None));
+        await using var verification = await environment.Factory.CreateDbContextAsync();
+        Assert.False(await verification.Artifacts.AnyAsync(artifact => artifact.Id == request.Artifact.Id));
+        Assert.False((await verification.PipelineRecords.SingleAsync(record => record.Id == request.CurrentJob.PipelineRecordId.Value)).CompletionCriteriaMet);
+        var newEpochCandidate = await environment.Builder.BuildAndPlaceAsync(Guid.NewGuid(), CancellationToken.None);
+        Assert.NotEqual(candidate.Generation.Id, newEpochCandidate.Generation.Id);
+    }
+
+    [NativeSqlServerFact]
+    public async Task Publication_conflict_retry_is_durable_idempotent_and_fenced_from_a_later_claim()
+    {
+        await using var environment = await PipelineEnvironment.CreateAsync(_fixture, "Published retry baseline.");
+        var candidate = await environment.Builder.BuildAndPlaceAsync(Guid.NewGuid(), CancellationToken.None);
+        var claim = await ClaimPublishAsync(environment, candidate);
+        IStageTransitionStore store = new SqlStageTransitionStore(environment.Factory);
+        var due = DateTimeOffset.UtcNow.AddSeconds(5);
+        var request = new StageRetryRequest(claim.DispatchMessage, claim.CurrentJob, due,
+            "publication-snapshot-conflict", nameof(SqlToUsearchRebuildTests));
+        await store.RetryAsync(request, CancellationToken.None);
+        await store.RetryAsync(request, CancellationToken.None);
+        await using (var context = await environment.Factory.CreateDbContextAsync())
+        {
+            var job = await context.Jobs.SingleAsync(job => job.Id == claim.CurrentJob.JobId.Value);
+            var dispatch = await context.OutboxMessages.SingleAsync(message => message.Id == claim.DispatchMessage.DispatchMessageId.Value);
+            Assert.Equal((int)PublicJobState.WorkerQueued, job.PublicState);
+            Assert.Null(job.LeaseOwner);
+            Assert.Null(job.LeaseExpiresAtUtc);
+            Assert.Equal(due, job.DueAtUtc);
+            Assert.Equal(request.Reason, job.Reason);
+            Assert.Null(dispatch.LeaseOwner);
+            Assert.Null(dispatch.LeaseExpiresAtUtc);
+            Assert.Null(dispatch.DispatchedAtUtc);
+            Assert.Equal(due, dispatch.DueAtUtc);
+            Assert.False(await context.Artifacts.AnyAsync(artifact => artifact.Id == claim.Artifact.Id));
+        }
+        var outbox = new SqlOutboxStore(environment.Factory);
+        Assert.Null(await outbox.ClaimNextDueAsync("retry-dispatcher", due.AddMilliseconds(-1),
+            TimeSpan.FromMinutes(2), [PipelineOperations.Publish], CancellationToken.None));
+        var nextDispatch = await outbox.ClaimNextDueAsync("retry-dispatcher", due,
+            TimeSpan.FromMinutes(2), [PipelineOperations.Publish], CancellationToken.None);
+        Assert.NotNull(nextDispatch);
+        var nextJob = await new SqlJobClaimStore(environment.Factory).ClaimForDispatchAsync(nextDispatch,
+            "retry-worker", due, TimeSpan.FromMinutes(2), CancellationToken.None);
+        Assert.NotNull(nextJob);
+        Assert.True(nextJob.LeaseGeneration > claim.CurrentJob.LeaseGeneration);
+        await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            await store.RetryAsync(request, CancellationToken.None));
+        await using var verification = await environment.Factory.CreateDbContextAsync();
+        var active = await verification.Jobs.SingleAsync(job => job.Id == nextJob.JobId.Value);
+        Assert.Equal((int)PublicJobState.WorkerProcessing, active.PublicState);
+        Assert.Equal("retry-worker", active.LeaseOwner);
+    }
+
+    [NativeSqlServerTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Publication_preview_includes_the_pending_source_and_rolls_back_all_visibility_changes(bool sqlRetries)
+    {
+        await using var environment = await PipelineEnvironment.CreateAsync(_fixture, "Pending preview source.", publish: false);
+        await using var before = await environment.Factory.CreateDbContextAsync();
+        var vector = await before.Vectors.SingleAsync();
+        Assert.Empty(await environment.Store.ReadEligibleVectorsAsync(CancellationToken.None));
+        var previewStore = sqlRetries
+            ? new SqlPipelineStore(new Microsoft.EntityFrameworkCore.Infrastructure.PooledDbContextFactory<FluxKnowledgeDbContext>(
+                new DbContextOptionsBuilder<FluxKnowledgeDbContext>().UseSqlServer(_fixture.ConnectionString,
+                    sql => sql.EnableRetryOnFailure()).Options))
+            : environment.Store;
+        var beforeState = await before.IndexState.SingleAsync();
+        var preview = await previewStore.ReadPublicationSnapshotAsync(vector.IndexGenerationId, CancellationToken.None);
+        Assert.Equal(vector.VectorId, Assert.Single(preview.Vectors).VectorId);
+        Assert.Equal(new CorpusPublicationStamp(beforeState.CorpusEpoch, beforeState.CorpusVersion), preview.ExpectedCorpusStamp);
+        Assert.Equal(new CorpusPublicationStamp(beforeState.CorpusEpoch, beforeState.CorpusVersion + 1), preview.PublicationStamp);
+        await using var after = await environment.Factory.CreateDbContextAsync();
+        var record = await after.PipelineRecords.SingleAsync();
+        Assert.Equal(beforeState.CorpusVersion, (await after.IndexState.SingleAsync()).CorpusVersion);
+        Assert.False(record.CompletionCriteriaMet);
+        Assert.Null((await after.IndexState.SingleAsync()).ActiveIndexGenerationId);
+        Assert.Empty(await after.DocumentPublications.ToArrayAsync());
+        Assert.Empty(await after.IndexGenerationVectors.ToArrayAsync());
+        Assert.Empty(await after.Artifacts.Where(artifact => artifact.Stage == (int)PipelineStage.Publish).ToArrayAsync());
+        Assert.Equal((int)PublicJobState.WorkerQueued,
+            (await after.Jobs.SingleAsync(job => job.Stage == (int)PipelineStage.Publish)).PublicState);
+    }
+
+    [NativeSqlServerFact]
+    public async Task Unfinished_unrooted_revision_preserves_the_last_published_passages_in_both_channels()
+    {
+        await using var environment = await PipelineEnvironment.CreateAsync(_fixture, "Published INV-42 approval.");
+        var expected = await environment.Store.ReadEligibleVectorsAsync(CancellationToken.None);
+        Assert.NotEmpty(expected);
+        await using (var context = await environment.Factory.CreateDbContextAsync())
+        {
+            var published = await context.PipelineRecords.SingleAsync();
+            context.PipelineRecords.Add(new PipelineRecordEntity
+            {
+                Id = Guid.NewGuid(), SourceIdentityId = published.SourceIdentityId,
+                Revision = published.Revision + 1, ContentHash = new string('a', 64),
+                RootLineageRecordId = published.RootLineageRecordId, ParentRevisionRecordId = published.Id,
+                CurrentStage = (int)PipelineStage.Embed, RegisteredAtUtc = DateTimeOffset.UtcNow
+            });
+            await context.SaveChangesAsync();
+        }
+
+        Assert.Equal(expected.Select(vector => vector.VectorId),
+            (await environment.Store.ReadEligibleVectorsAsync(CancellationToken.None)).Select(vector => vector.VectorId));
+        var reader = new SqlCorpusRetrievalReader(environment.Factory);
+        var scope = await reader.ResolveScopeAsync("all", null, null, CancellationToken.None);
+        Assert.NotNull(scope);
+        Assert.NotEmpty(await reader.SearchAsync("INV-42", scope, 5, CancellationToken.None));
+    }
+
+    [NativeSqlServerFact]
+    public async Task Unpublished_retained_passages_are_absent_from_vector_and_lexical_selection()
+    {
+        await using var environment = await PipelineEnvironment.CreateAsync(_fixture, "Published baseline.");
+        var recordId = await environment.AddRetainedAndPumpAsync("UNPUBLISHED-42 approval.");
+        await using (var context = await environment.Factory.CreateDbContextAsync())
+        {
+            var record = await context.PipelineRecords.SingleAsync(candidate => candidate.Id == recordId);
+            record.CompletionCriteriaMet = false;
+            await context.SaveChangesAsync();
+        }
+        await using var verification = await environment.Factory.CreateDbContextAsync();
+        var forbidden = await (from vector in verification.Vectors
+            join chunk in verification.TextChunks on vector.TextChunkId equals chunk.Id
+            join artifact in verification.Artifacts on chunk.ArtifactId equals artifact.Id
+            where artifact.PipelineRecordId == recordId select vector.VectorId).ToArrayAsync();
+        Assert.DoesNotContain(await environment.Store.ReadEligibleVectorsAsync(CancellationToken.None),
+            vector => forbidden.Contains(vector.VectorId));
+        var reader = new SqlCorpusRetrievalReader(environment.Factory);
+        var scope = await reader.ResolveScopeAsync("all", null, null, CancellationToken.None);
+        Assert.NotNull(scope);
+        Assert.Empty(await reader.SearchAsync("UNPUBLISHED-42", scope, 5, CancellationToken.None));
+    }
+
+    [NativeSqlServerFact]
+    public async Task Vector_selection_requires_the_exact_canonical_content_hash()
+    {
+        await using var environment = await PipelineEnvironment.CreateAsync(_fixture, "Published exact revision.");
+        await using (var context = await environment.Factory.CreateDbContextAsync())
+        {
+            var vector = await context.Vectors.SingleAsync();
+            vector.TextChunkContentHash = new string('b', 64);
+            await context.SaveChangesAsync();
+        }
+        Assert.Empty(await environment.Store.ReadEligibleVectorsAsync(CancellationToken.None));
+    }
+
+    [NativeSqlServerFact]
+    public async Task Coherent_passages_flow_through_ingress_publication_search_and_citation_readback()
+    {
+        var passageBuilder = new PassageBuilder(new SyntheticPassageTokenizer(), new PassagePolicy(12, 16, 160, 8, 80));
+        var text = string.Concat(Enumerable.Repeat("Every payment requires a manager approval. ", 8)) +
+            "INV-42 confirms the final approved payment.";
+        await using var environment = await PipelineEnvironment.CreateAsync(_fixture, text, passageBuilder);
+        await using var context = await environment.Factory.CreateDbContextAsync();
+        var chunks = await context.TextChunks.OrderBy(chunk => chunk.Ordinal).ToArrayAsync();
+        Assert.True(chunks.Length > 1);
+        Assert.All(chunks, chunk =>
+        {
+            Assert.Equal(passageBuilder.PolicyFingerprint, chunk.PassagePolicyFingerprint);
+            Assert.InRange(chunk.Length, 1, 160);
+            Assert.Equal(chunk.Content, chunk.SearchText);
+            Assert.Equal(Convert.ToHexStringLower(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(chunk.SearchText))),
+                chunk.SearchInputHash);
+        });
+        var service = new CorpusRetrievalService(new SqlCorpusRetrievalReader(environment.Factory),
+            new CorpusEvidenceCodec(new Microsoft.AspNetCore.DataProtection.EphemeralDataProtectionProvider()),
+            new FluxKnowledge.Infrastructure.SqlServer.Visibility.LocalPrivateContentDisclosure(), new CorpusRetrievalOptions(true));
+        var hit = Assert.Single((await service.SearchAsync(new CorpusSearchRequest("INV-42", 5, "all", null, null),
+            CancellationToken.None)).Results);
+        Assert.Equal(chunks.Single(chunk => chunk.Content.Contains("INV-42", StringComparison.Ordinal)).Content, hit.Passage);
+        Assert.Equal(hit.Passage, (await service.ReadAsync(new CorpusReadRequest(hit.EvidenceRef, 0),
+            CancellationToken.None)).Text);
+    }
 
     [NativeSqlServerFact]
     public async Task Rebuild_from_sql_keeps_a_retained_source_pipeline_record_searchable()
@@ -123,6 +568,7 @@ public sealed class SqlToUsearchRebuildTests(NativeSqlServerFixture fixture) : I
             await context.SaveChangesAsync();
         }
 
+        var publicationStamp = await environment.Store.ReadPublicationSnapshotAsync(Guid.NewGuid(), CancellationToken.None);
         var candidate = new IndexGenerationCandidateSnapshot(
             new IndexGenerationDescriptor(
                 Guid.NewGuid(),
@@ -133,8 +579,8 @@ public sealed class SqlToUsearchRebuildTests(NativeSqlServerFixture fixture) : I
                     expectedMembership[0].ModelFingerprint,
                     expectedMembership[0].Dimensions,
                     expectedMembership),
-                expectedMembership.Count),
-            expectedMembership);
+                expectedMembership.Count, publicationStamp.PublicationStamp),
+            expectedMembership, publicationStamp.ExpectedCorpusStamp);
         var request = await ClaimPublishAsync(environment, candidate);
 
         _ = await new SqlStageTransitionStore(environment.Factory).TransitionAsync(request, CancellationToken.None);
@@ -669,7 +1115,7 @@ public sealed class SqlToUsearchRebuildTests(NativeSqlServerFixture fixture) : I
     }
 
     [NativeSqlServerFact]
-    public async Task Prebuilt_snapshot_is_superseded_by_a_newer_publish_without_pointer_regression()
+    public async Task Stale_snapshot_refuses_and_rolls_back_publication_without_pointer_regression()
     {
         await using var environment = await PipelineEnvironment.CreateAsync(_fixture, "first source");
         var stale = await environment.Builder.BuildAndPlaceAsync(Guid.NewGuid(), CancellationToken.None);
@@ -678,15 +1124,16 @@ public sealed class SqlToUsearchRebuildTests(NativeSqlServerFixture fixture) : I
         var transition = new SqlStageTransitionStore(environment.Factory);
         var request = await ClaimPublishAsync(environment, stale);
 
-        var result = await transition.TransitionAsync(
-            request,
-            CancellationToken.None);
+        await Assert.ThrowsAsync<PublicationSnapshotConflictException>(async () =>
+            await transition.TransitionAsync(request, CancellationToken.None));
         await using var context = await environment.Factory.CreateDbContextAsync();
         var record = await context.PipelineRecords.SingleAsync(candidate =>
             candidate.Id == request.CurrentJob.PipelineRecordId.Value);
 
-        Assert.False(result.ExistingTransition);
-        Assert.True(record.CompletionCriteriaMet);
+        Assert.False(record.CompletionCriteriaMet);
+        Assert.False(await context.Artifacts.AnyAsync(artifact => artifact.Id == request.Artifact.Id));
+        Assert.Equal((int)PublicJobState.WorkerProcessing,
+            (await context.Jobs.SingleAsync(job => job.Id == request.CurrentJob.JobId.Value)).PublicState);
         Assert.NotEqual(stale.Generation.Id, active.Id);
         Assert.True(File.Exists(Path.Combine(stale.Generation.IndexPath, UsearchGenerationValidator.IndexFileName)));
         Assert.Equal(active.Id, await environment.Store.GetActiveGenerationIdAsync(CancellationToken.None));
@@ -714,6 +1161,16 @@ public sealed class SqlToUsearchRebuildTests(NativeSqlServerFixture fixture) : I
         Assert.Equal(active.Id, await environment.Store.GetActiveGenerationIdAsync(CancellationToken.None));
         Assert.Equal(members.Select(member => member.VectorId).Distinct().Count(), members.Count);
         Assert.True(File.Exists(Path.Combine(candidate.Generation.IndexPath, UsearchGenerationValidator.IndexFileName)));
+        await environment.AddAndPumpAsync("Replay successor publication.");
+        var successorId = await environment.Store.GetActiveGenerationIdAsync(CancellationToken.None);
+        var lateReplay = await transition.TransitionAsync(request with
+        {
+            IndexingOutput = request.IndexingOutput! with { ExpectedCorpusStamp = null,
+                ActivateGeneration = request.IndexingOutput!.ActivateGeneration! with { CorpusStamp = null } }
+        }, CancellationToken.None);
+        Assert.True(lateReplay.ExistingTransition);
+        Assert.Equal(first.ArtifactId, lateReplay.ArtifactId);
+        Assert.Equal(successorId, await environment.Store.GetActiveGenerationIdAsync(CancellationToken.None));
     }
 
     [NativeSqlServerFact]
@@ -725,7 +1182,7 @@ public sealed class SqlToUsearchRebuildTests(NativeSqlServerFixture fixture) : I
         var incompatible = active with { IndexPath = active.IndexPath + "-incompatible" };
         var request = await ClaimPublishAsync(
             environment,
-            new IndexGenerationCandidateSnapshot(incompatible, vectors));
+            new IndexGenerationCandidateSnapshot(incompatible, vectors, active.CorpusStamp));
 
         await Assert.ThrowsAsync<IndexGenerationStaleException>(
             async () => await new SqlStageTransitionStore(environment.Factory)
@@ -866,7 +1323,8 @@ public sealed class SqlToUsearchRebuildTests(NativeSqlServerFixture fixture) : I
             nameof(SqlToUsearchRebuildTests),
             new IndexingStageOutput(
                 ActivateGeneration: candidate.Generation,
-                ActivateMembership: candidate.Vectors));
+                ActivateMembership: candidate.Vectors,
+                ExpectedCorpusStamp: candidate.ExpectedCorpusStamp));
     }
 
     private async Task AssertUnrecognisedNonzeroDraftAsync(
@@ -1257,7 +1715,7 @@ public sealed class SqlToUsearchRebuildTests(NativeSqlServerFixture fixture) : I
         public void Release() => _release.TrySetResult(true);
     }
 
-    private sealed class PipelineEnvironment : IAsyncDisposable
+    public sealed class PipelineEnvironment : IAsyncDisposable
     {
         private readonly ServiceProvider _provider;
         private readonly string _ingressRoot;
@@ -1274,9 +1732,12 @@ public sealed class SqlToUsearchRebuildTests(NativeSqlServerFixture fixture) : I
         public UsearchGenerationBuilder Builder { get; }
         public UsearchAnnIndex Reader { get; }
         public IEmbeddingProvider Embeddings { get; }
+        public IDeploymentValidationHold DeploymentHold => _provider.GetRequiredService<IDeploymentValidationHold>();
+        public void PermitRebuild(Guid operationId) => ((RebuildTestHold)DeploymentHold).OperationId = operationId;
         public FluxKnowledge.Application.Contracts.RegisterUtf8FileResult? LastReceipt { get; private set; }
 
-        public static async Task<PipelineEnvironment> CreateAsync(NativeSqlServerFixture fixture, string text)
+        public static async Task<PipelineEnvironment> CreateAsync(NativeSqlServerFixture fixture, string text,
+            PassageBuilder? passageBuilder = null, bool publish = true, bool embed = true)
         {
             await SqlTestData.ClearPipelineAsync(fixture);
             var ingress = Path.Combine(Path.GetTempPath(), $"FluxKnowledgeIngress_{Guid.NewGuid():N}");
@@ -1285,7 +1746,9 @@ public sealed class SqlToUsearchRebuildTests(NativeSqlServerFixture fixture) : I
             Directory.CreateDirectory(ingress);
             Directory.CreateDirectory(artifact);
             var services = new ServiceCollection();
+            services.AddSingleton<IDeploymentValidationHold>(new RebuildTestHold());
             services.AddSingleton(SqlTestData.CreateFactory(fixture));
+            if (passageBuilder is not null) services.AddSingleton(passageBuilder);
             services.AddSingleton<IUtf8FileSourceReader>(new Utf8FileSourceReader(new LocalIngressOptions([ingress])));
             services.AddScoped<IRetainedSourceReader>(provider => new SqlRetainedSourceReader(
                 provider.GetRequiredService<IDbContextFactory<FluxKnowledgeDbContext>>(), artifact));
@@ -1293,8 +1756,8 @@ public sealed class SqlToUsearchRebuildTests(NativeSqlServerFixture fixture) : I
             services.AddSingleton<IEmbeddingProvider, DeterministicTokenHashEmbeddingProvider>();
             services.AddFluxKnowledgeUsearch(new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?> { ["Usearch:RootPath"] = index }).Build());
             services.AddScoped<IStageWorker, CanonicalIndexStageWorker>();
-            services.AddScoped<IStageWorker, EmbedStageWorker>();
-            services.AddScoped<IStageWorker, PublishStageWorker>();
+            if (embed) services.AddScoped<IStageWorker, EmbedStageWorker>();
+            if (publish) services.AddScoped<IStageWorker, PublishStageWorker>();
             var provider = services.BuildServiceProvider();
             var environment = new PipelineEnvironment(provider, ingress, artifact, index, provider.GetRequiredService<IDbContextFactory<FluxKnowledgeDbContext>>());
             await environment.AddAndPumpAtPathAsync(text, "initial.txt");
@@ -1306,7 +1769,7 @@ public sealed class SqlToUsearchRebuildTests(NativeSqlServerFixture fixture) : I
             await AddAndPumpAtPathAsync(text, $"{Guid.NewGuid():N}.txt");
         }
 
-        public async Task AddAndPumpAtPathAsync(string text, string fileName)
+        public async Task AddAndPumpAtPathAsync(string text, string fileName, bool pump = true)
         {
             ArgumentException.ThrowIfNullOrWhiteSpace(fileName);
             if (!string.Equals(fileName, Path.GetFileName(fileName), StringComparison.Ordinal))
@@ -1318,7 +1781,17 @@ public sealed class SqlToUsearchRebuildTests(NativeSqlServerFixture fixture) : I
             await File.WriteAllTextAsync(path, text);
             using var scope = _provider.CreateScope();
             LastReceipt = await scope.ServiceProvider.GetRequiredService<RegisterUtf8FileHandler>().HandleAsync(new(path, "native-sql-test", null), CancellationToken.None);
-            await _provider.GetRequiredService<OutboxPumpService>().PumpOnceAsync(CancellationToken.None);
+            if (pump) await PumpAsync();
+        }
+
+        public Task PumpAsync() => _provider.GetRequiredService<OutboxPumpService>().PumpOnceAsync(CancellationToken.None).AsTask();
+
+        private sealed class RebuildTestHold : IDeploymentValidationHold
+        {
+            public Guid? OperationId { get; set; }
+            public bool IsHeld => OperationId is not null;
+            public DeploymentHoldAdmission ReadAdmissionState() => new(IsHeld, OperationId);
+            public ValueTask WaitUntilReleasedAsync(CancellationToken cancellationToken) => ValueTask.CompletedTask;
         }
 
         public async Task<Guid> AddRetainedAndPumpAsync(string text)
@@ -1386,5 +1859,11 @@ public sealed class SqlToUsearchRebuildTests(NativeSqlServerFixture fixture) : I
             if (Directory.Exists(IndexRoot)) Directory.Delete(IndexRoot, true);
             return ValueTask.CompletedTask;
         }
+    }
+
+    private sealed class SyntheticPassageTokenizer : IPassageTokenizer
+    {
+        public string Fingerprint => "synthetic-word-v1";
+        public int CountTokens(string text) => text.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries).Length;
     }
 }

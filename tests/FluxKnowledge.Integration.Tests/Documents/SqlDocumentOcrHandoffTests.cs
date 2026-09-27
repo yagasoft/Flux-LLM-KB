@@ -27,6 +27,81 @@ public sealed class SqlDocumentOcrHandoffTests(NativeSqlServerFixture fixture)
     private readonly NativeSqlServerFixture _fixture = fixture;
 
     [NativeSqlServerFact]
+    public async Task Actual_document_OCR_gets_an_owed_turn_after_three_search_batches_and_active_pages_are_not_interrupted()
+    {
+        var (factory, claim, revisionId, hash) = await CreateClaimedPdfAsync();
+        var ocr = await CreateStore(factory).HandoffAsync(new DocumentOcrHandoffRequest(claim, revisionId, hash, [0]), CancellationToken.None);
+        var ocrId = Assert.IsType<Guid>(ocr.MiniTaskId);
+        var now = DateTimeOffset.UtcNow;
+        var policy = new GpuWorkloadPolicy([
+            new(PaddleOcrVlmRuntimeContract.ModelRuntimeKey, PaddleOcrVlmRuntimeContract.SettingsFingerprint, GpuWorkloadKind.Ocr),
+            new("synthetic-retrieval", "synthetic-settings", GpuWorkloadKind.Retrieval)]);
+        var options = new GpuSchedulerOptions(4, PaddleOcrVlmRuntimeContract.EstimatedDocumentBytes,
+            TimeSpan.FromMinutes(1), TimeSpan.FromSeconds(1), TimeSpan.FromMinutes(1), policy);
+        var store = new SqlGpuSchedulerStore(factory, timeProvider: new TurnTestTimeProvider(now));
+        await using (var context = await factory.CreateDbContextAsync())
+        {
+            context.GpuCapacitySlots.Add(new GpuCapacitySlotEntity { SlotKey = "shared-test-gpu", State = 0, UpdatedAtUtc = now });
+            await context.SaveChangesAsync();
+        }
+        GpuInteractiveHandoffRequest Request()
+        {
+            var instance = Guid.NewGuid();
+            return new(Guid.NewGuid(), instance, $"retrieval-gpu:{instance:N}", "synthetic-retrieval",
+                "synthetic-settings", 10, now.AddSeconds(2), now.AddSeconds(10));
+        }
+        async Task<(GpuExecutorBatchHandle Handle, Guid Task)> AdmitAsync(Guid operationId)
+        {
+            await store.RunAdmissionRoundAsync(operationId, GpuSchedulerWakeReason.WorkReady, options,
+                (candidate, _) => ValueTask.FromResult(new GpuAdmissionDecision(GpuAdmissionDisposition.Admit,
+                    "shared-test-gpu", "shared-test-owner", null, candidate.RequiredExecutorKey ?? "shared-test-executor")), CancellationToken.None);
+            await using var read = await factory.CreateDbContextAsync();
+            var batch = await read.GpuBatches.SingleAsync(b => b.State == (int)GpuBatchState.Active);
+            var dispatch = await read.GpuExecutorDispatches.SingleAsync(d => d.BatchId == batch.Id);
+            return (new(batch.Id, batch.CapacitySlotKey, dispatch.ExecutorKey, batch.AdmissionGeneration, batch.Id),
+                await read.GpuMiniTasks.Where(t => t.BatchId == batch.Id).Select(t => t.Id).SingleAsync());
+        }
+        async Task CompleteAsync(GpuExecutorBatchHandle handle, Guid taskId)
+        {
+            Assert.True((await store.AcknowledgeAsync(new(Guid.NewGuid(), handle), CancellationToken.None)).Accepted);
+            Assert.True((await store.RecordReceiptAsync(new(Guid.NewGuid(), handle, taskId,
+                GpuMiniTaskBoundaryDisposition.Completed, null, GpuExecutorEvidenceClass.TaskOutcomeConfirmed), CancellationToken.None)).Accepted);
+            Assert.True((await store.ApplyBatchCallbackAsync(Guid.NewGuid(), new(handle, GpuBatchCallbackKind.Completed,
+                [new(taskId, GpuMiniTaskBoundaryDisposition.Completed)], true), CancellationToken.None)).Accepted);
+        }
+        for (var i = 1; i <= 3; i++)
+        {
+            var request = Request();
+            await store.HandoffInteractiveAsync(request, CancellationToken.None);
+            var operation = Guid.NewGuid();
+            var admitted = await AdmitAsync(operation);
+            Assert.Equal(request.RequestId, admitted.Task);
+            Assert.True((await store.RunAdmissionRoundAsync(operation, GpuSchedulerWakeReason.WorkReady, options,
+                (_, _) => throw new InvalidOperationException("Admission receipt replay called gate"), CancellationToken.None)).IsIdempotentReplay);
+            await using (var state = await factory.CreateDbContextAsync())
+                Assert.Equal(i, (await state.GpuSchedulerStates.SingleAsync()).SearchBatchesWhileOcrWaiting);
+            await CompleteAsync(admitted.Handle, admitted.Task);
+            store = new SqlGpuSchedulerStore(factory, timeProvider: new TurnTestTimeProvider(now));
+        }
+        await store.HandoffInteractiveAsync(Request(), CancellationToken.None);
+        var owed = await AdmitAsync(Guid.NewGuid());
+        Assert.Equal(ocrId, owed.Task);
+        await using (var state = await factory.CreateDbContextAsync())
+        {
+            Assert.Equal((int)GpuPriorityLane.DocumentIndexing, (await state.GpuMiniTasks.SingleAsync(t => t.Id == ocrId)).PriorityLane);
+            Assert.Equal(0, (await state.GpuSchedulerStates.SingleAsync()).SearchBatchesWhileOcrWaiting);
+        }
+        var busy = await store.RunAdmissionRoundAsync(Guid.NewGuid(), GpuSchedulerWakeReason.WorkReady, options,
+            (_, _) => ValueTask.FromResult(new GpuAdmissionDecision(GpuAdmissionDisposition.Busy, null, null, null)), CancellationToken.None);
+        Assert.Equal(GpuAdmissionDisposition.Busy, busy.Disposition);
+        await using (var state = await factory.CreateDbContextAsync())
+            Assert.Equal((int)GpuMiniTaskExecutionState.Active, (await state.GpuMiniTasks.SingleAsync(t => t.Id == ocrId)).ExecutionState);
+        await CompleteAsync(owed.Handle, owed.Task);
+    }
+
+    private sealed class TurnTestTimeProvider(DateTimeOffset now) : TimeProvider { public override DateTimeOffset GetUtcNow() => now; }
+
+    [NativeSqlServerFact]
     public async Task Handoff_persists_one_source_bound_request_and_queues_its_exact_mini_task()
     {
         var (factory, claim, retainedSourceRevisionId, contentHash) = await CreateClaimedPdfAsync();
@@ -567,6 +642,7 @@ public sealed class SqlDocumentOcrHandoffTests(NativeSqlServerFixture fixture)
             arrange.OutboxMessages.Add(new OutboxMessageEntity
             {
                 Id = dispatchId.Value,
+                JobId = jobId.Value,
                 PipelineRecordId = pipelineRecordId.Value,
                 SourceRevision = 1,
                 Stage = (int)PipelineStage.Extract,

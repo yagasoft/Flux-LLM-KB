@@ -373,6 +373,11 @@ public sealed class OutboxMessageConfiguration : IEntityTypeConfiguration<Outbox
         SchemaConfiguration.ConfigureRowVersion(builder.Property(entity => entity.RowVersion));
         builder.HasIndex(entity => entity.IdempotencyKey).IsUnique();
         builder.HasIndex(entity => new { entity.DispatchedAtUtc, entity.DueAtUtc });
+        builder.HasOne<JobEntity>()
+            .WithMany()
+            .HasForeignKey(entity => new { entity.JobId, entity.SourceRevision })
+            .HasPrincipalKey(entity => new { entity.Id, entity.SourceRevision })
+            .OnDelete(DeleteBehavior.Restrict);
         builder.HasOne(entity => entity.PipelineRecord)
             .WithMany()
             .HasForeignKey(entity => new { entity.PipelineRecordId, entity.SourceRevision })
@@ -463,6 +468,11 @@ public sealed class TextChunkConfiguration : IEntityTypeConfiguration<TextChunkE
         builder.Property(entity => entity.Id).UseIdentityColumn();
         SchemaConfiguration.ConfigureHash(builder.Property(entity => entity.ContentHash));
         builder.Property(entity => entity.Content).HasColumnType("nvarchar(max)").IsRequired();
+        builder.Property(entity => entity.PassagePolicyFingerprint).HasMaxLength(64).IsRequired();
+        builder.Property(entity => entity.ContextHeader).HasMaxLength(256).IsRequired();
+        builder.Property(entity => entity.SearchInputHash).HasMaxLength(64).IsRequired();
+        builder.Property(entity => entity.SearchText).HasComputedColumnSql(
+            "CASE WHEN [ContextHeader] = N'' THEN [Content] ELSE [ContextHeader] + NCHAR(10) + [Content] END", stored: true);
         builder.HasAlternateKey(entity => new { entity.Id, entity.SourceRevision });
         builder.HasIndex(entity => new { entity.ArtifactId, entity.Ordinal }).IsUnique();
         builder.HasOne(entity => entity.Artifact)
@@ -477,7 +487,8 @@ public sealed class IndexGenerationConfiguration : IEntityTypeConfiguration<Inde
 {
     public void Configure(EntityTypeBuilder<IndexGenerationEntity> builder)
     {
-        builder.ToTable("IndexGenerations");
+        builder.ToTable("IndexGenerations", table => table.HasCheckConstraint("CK_IndexGenerations_CorpusStamp",
+            "([CorpusEpoch] IS NULL AND [CorpusVersion] IS NULL) OR ([CorpusEpoch] IS NOT NULL AND [CorpusEpoch] <> '00000000-0000-0000-0000-000000000000' AND [CorpusVersion] IS NOT NULL AND [CorpusVersion] >= 0)"));
         builder.HasKey(entity => entity.Id);
         builder.Property(entity => entity.Id).ValueGeneratedNever();
         builder.Property(entity => entity.ModelFingerprint).HasMaxLength(256).IsRequired();
@@ -486,6 +497,8 @@ public sealed class IndexGenerationConfiguration : IEntityTypeConfiguration<Inde
         builder.Property(entity => entity.CreatedAtUtc).HasColumnType("datetimeoffset(7)");
         builder.Property(entity => entity.ValidatedAtUtc).HasColumnType("datetimeoffset(7)");
         builder.Property(entity => entity.RetiredAtUtc).HasColumnType("datetimeoffset(7)");
+        builder.HasIndex(entity => entity.EmbeddingJobId).IsUnique().HasFilter("[EmbeddingJobId] IS NOT NULL");
+        builder.HasOne<JobEntity>().WithMany().HasForeignKey(entity => entity.EmbeddingJobId).OnDelete(DeleteBehavior.Restrict);
         SchemaConfiguration.ConfigureRowVersion(builder.Property(entity => entity.RowVersion));
     }
 }
@@ -504,6 +517,7 @@ public sealed class VectorConfiguration : IEntityTypeConfiguration<VectorEntity>
                 table.HasCheckConstraint(
                     "CK_Vectors_PayloadChecksum",
                     SchemaConfiguration.Sha256CheckFor(nameof(VectorEntity.PayloadChecksum)));
+                table.HasCheckConstraint("CK_Vectors_SearchInputHash", "[SearchInputHash] IS NULL OR (" + SchemaConfiguration.Sha256CheckFor(nameof(VectorEntity.SearchInputHash)) + ")");
             });
         builder.HasKey(entity => entity.VectorId);
         builder.Property(entity => entity.VectorId).UseIdentityColumn();
@@ -511,6 +525,7 @@ public sealed class VectorConfiguration : IEntityTypeConfiguration<VectorEntity>
         builder.Property(entity => entity.Values).HasColumnType("varbinary(max)").IsRequired();
         SchemaConfiguration.ConfigureHash(builder.Property(entity => entity.TextChunkContentHash));
         SchemaConfiguration.ConfigureHash(builder.Property(entity => entity.PayloadChecksum));
+        builder.Property(entity => entity.SearchInputHash).HasMaxLength(64).IsUnicode(false).IsFixedLength();
         builder.Property(entity => entity.CreatedAtUtc).HasColumnType("datetimeoffset(7)");
         SchemaConfiguration.ConfigureRowVersion(builder.Property(entity => entity.RowVersion));
         builder.HasIndex(entity => new
@@ -540,7 +555,8 @@ public sealed class IndexStateConfiguration : IEntityTypeConfiguration<IndexStat
             "IndexState",
             table =>
             {
-                table.HasCheckConstraint("CK_IndexState_Singleton", "[Id] = 1");
+                  table.HasCheckConstraint("CK_IndexState_Singleton", "[Id] = 1");
+                  table.HasCheckConstraint("CK_IndexState_CorpusVersion", "[CorpusVersion] >= 0");
                 table.HasCheckConstraint(
                     "CK_IndexState_ActiveGenerationOrEmptyCatalogue",
                     "[ActiveIndexGenerationId] IS NULL OR [EmptyCatalogueValidatedAtUtc] IS NULL");
@@ -549,11 +565,14 @@ public sealed class IndexStateConfiguration : IEntityTypeConfiguration<IndexStat
         builder.Property(entity => entity.Id).ValueGeneratedNever();
         builder.Property(entity => entity.UpdatedAtUtc).HasColumnType("datetimeoffset(7)");
         builder.Property(entity => entity.EmptyCatalogueValidatedAtUtc).HasColumnType("datetimeoffset(7)");
+        builder.Property(entity => entity.CorpusEpoch).HasDefaultValueSql("NEWID()");
         SchemaConfiguration.ConfigureRowVersion(builder.Property(entity => entity.RowVersion));
         builder.HasOne(entity => entity.ActiveIndexGeneration)
             .WithMany()
             .HasForeignKey(entity => entity.ActiveIndexGenerationId)
             .OnDelete(DeleteBehavior.Restrict);
+        builder.HasOne<CorpusRebuildOperationEntity>().WithMany()
+            .HasForeignKey(value => value.CorpusRebuildOperationId).OnDelete(DeleteBehavior.Restrict);
         builder.HasData(new IndexStateEntity { Id = 1, UpdatedAtUtc = DateTimeOffset.UnixEpoch });
     }
 }
@@ -638,6 +657,23 @@ public sealed class GpuMiniTaskConfiguration : IEntityTypeConfiguration<GpuMiniT
                 table.HasCheckConstraint(
                     "CK_GpuMiniTasks_HandoffLeaseOwner_NoTrailingWhitespace",
                     SchemaConfiguration.NoTrailingWhitespaceCheckFor("HandoffLeaseOwner", nullable: true));
+                table.HasCheckConstraint("CK_GpuMiniTasks_ExclusiveOwner",
+                    "([ParentJobId] IS NOT NULL AND [SourceRevision] > 0 AND [InteractiveExecutorInstanceId] IS NULL " +
+                    "AND [RequiredExecutorKey] IS NULL AND [QueueDeadlineUtc] IS NULL AND [ExecutionDeadlineUtc] IS NULL " +
+                    "AND [InteractiveCancellationRequested] = 0 AND [InteractiveOwnerProcessId] IS NULL " +
+                    "AND [InteractiveOwnerStartedAtUtc] IS NULL AND [InteractiveOwnerMachineFingerprint] IS NULL) OR " +
+                    "([ParentJobId] IS NULL AND [SourceRevision] = 0 AND [InteractiveExecutorInstanceId] IS NOT NULL " +
+                    "AND [InteractiveExecutorInstanceId] <> '00000000-0000-0000-0000-000000000000' " +
+                    "AND [RequiredExecutorKey] IS NOT NULL AND LEN([RequiredExecutorKey]) > 0 " +
+                    "AND [QueueDeadlineUtc] IS NOT NULL AND [ExecutionDeadlineUtc] IS NOT NULL AND [ExecutionDeadlineUtc] > [QueueDeadlineUtc] " +
+                    "AND [PriorityLane] = 0 AND [HandoffLeaseOwner] IS NULL " +
+                    "AND [InteractiveOwnerProcessId] IS NOT NULL AND [InteractiveOwnerProcessId] > 0 " +
+                    "AND [InteractiveOwnerStartedAtUtc] IS NOT NULL AND [InteractiveOwnerStartedAtUtc] > '0001-01-01T00:00:00+00:00' " +
+                    "AND DATEPART(TZOFFSET, [InteractiveOwnerStartedAtUtc]) = 0 " +
+                    "AND [InteractiveOwnerMachineFingerprint] IS NOT NULL AND DATALENGTH([InteractiveOwnerMachineFingerprint]) = 128 " +
+                    "AND [InteractiveOwnerMachineFingerprint] NOT LIKE '%[^0-9a-f]%' COLLATE Latin1_General_100_BIN2)");
+                table.HasCheckConstraint("CK_GpuMiniTasks_RequiredExecutorKey_NoTrailingWhitespace",
+                    SchemaConfiguration.NoTrailingWhitespaceCheckFor("RequiredExecutorKey", nullable: true));
             });
         builder.HasKey(entity => entity.Id);
         builder.Property(entity => entity.Id).ValueGeneratedNever();
@@ -655,6 +691,13 @@ public sealed class GpuMiniTaskConfiguration : IEntityTypeConfiguration<GpuMiniT
             .UseCollation(SchemaConfiguration.SchedulerFenceCollation);
         builder.Property(entity => entity.HandoffLeaseOwner)
             .HasMaxLength(256)
+            .UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(entity => entity.RequiredExecutorKey).HasMaxLength(256)
+            .UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(entity => entity.QueueDeadlineUtc).HasColumnType("datetimeoffset(7)");
+        builder.Property(entity => entity.ExecutionDeadlineUtc).HasColumnType("datetimeoffset(7)");
+        builder.Property(entity => entity.InteractiveOwnerStartedAtUtc).HasColumnType("datetimeoffset(7)");
+        builder.Property(entity => entity.InteractiveOwnerMachineFingerprint).HasMaxLength(64)
             .UseCollation(SchemaConfiguration.SchedulerFenceCollation);
         builder.Property(entity => entity.ExecutionState).HasColumnName("State");
         builder.Property(entity => entity.CreatedSequence)
@@ -773,6 +816,7 @@ public sealed class GpuSchedulerStateConfiguration : IEntityTypeConfiguration<Gp
             table =>
             {
                 table.HasCheckConstraint("CK_GpuSchedulerState_Singleton", "[Id] = 1");
+                table.HasCheckConstraint("CK_GpuSchedulerState_SearchTurnBound", "[SearchBatchesWhileOcrWaiting] BETWEEN 0 AND 3");
                 table.HasCheckConstraint(
                     "CK_GpuSchedulerState_InFlightWake",
                     "([InFlightWakeOperationId] IS NULL AND [InFlightWakeGeneration] IS NULL AND [InFlightWakeReasons] = 0 AND [InFlightNextDeferredAtUtc] IS NULL AND [InFlightEffectiveAdmissionReasons] IS NULL) OR ([InFlightWakeOperationId] IS NOT NULL AND [InFlightWakeGeneration] IS NOT NULL AND [InFlightEffectiveAdmissionReasons] IS NOT NULL)");

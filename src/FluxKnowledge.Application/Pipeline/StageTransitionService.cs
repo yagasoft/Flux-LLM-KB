@@ -13,6 +13,9 @@ public interface IStageTransitionStore
     ValueTask FailAsync(
         StageFailureRequest request,
         CancellationToken cancellationToken);
+
+    ValueTask RetryAsync(StageRetryRequest request, CancellationToken cancellationToken) =>
+        throw new NotSupportedException("This store does not support durable stage retries.");
 }
 
 public interface IStageTransitionFailureInjector
@@ -26,6 +29,14 @@ public sealed class StageTransitionService(
     IOutboxWakeSignal wakeSignal,
     TimeProvider timeProvider)
 {
+    public async ValueTask RetryAsync(StageRetryRequest request, CancellationToken cancellationToken)
+    {
+        await store.RetryAsync(request, cancellationToken).ConfigureAwait(false);
+        await statusPublisher.PublishAsync(new StatusChanged(request.CurrentJob.PipelineRecordId,
+            "pipeline", timeProvider.GetUtcNow()), cancellationToken).ConfigureAwait(false);
+        wakeSignal.Notify();
+    }
+
     public async ValueTask<StageTransitionResult> TransitionAsync(
         StageTransitionRequest request,
         CancellationToken cancellationToken)

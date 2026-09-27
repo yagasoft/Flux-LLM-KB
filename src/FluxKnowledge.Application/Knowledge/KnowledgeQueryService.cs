@@ -20,9 +20,10 @@ public sealed class KnowledgeQueryService(IKnowledgeStore store, ISearchService 
     {
         if (limit is < 1 or > 100) throw new ArgumentOutOfRangeException(nameof(limit));
         var canonicalQuery = NativeV1ContractLimits.CanonicalizeKnowledgeQuery(query);
-        var sourceTask = retainedSearch.SearchAsync(new Application.Contracts.SearchRequest(canonicalQuery, limit, "local_first", null, null, null), cancellationToken).AsTask();
+        var sourceTask = retainedSearch.SearchAsync(new Application.Contracts.SearchRequest(canonicalQuery, Math.Min(limit, 50), "local_first", null, null, null), cancellationToken).AsTask();
         var knowledgeTask = store.SearchAsync(canonicalQuery, limit, cancellationToken).AsTask();
         await Task.WhenAll(sourceTask, knowledgeTask).ConfigureAwait(false);
+        if (sourceTask.Result.DegradedStatus is { } degraded) throw new PassageRetrievalRefusalException(degraded);
 
         var sourceRows = sourceTask.Result.Results.Select(static hit => new KnowledgeSearchResult(
             hit.PipelineRecordId.Value, "source", hit.Title, hit.Snippet, "retained-source", null, hit.SourceIdentity, hit.Revision))

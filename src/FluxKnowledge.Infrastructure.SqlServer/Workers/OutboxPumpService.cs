@@ -114,7 +114,7 @@ public sealed class OutboxPumpService(
         try
         {
             await (deploymentValidationHold ?? DeploymentValidationHold.None)
-                .WaitUntilReleasedAsync(stoppingToken).ConfigureAwait(false);
+                .WaitUntilPipelineAllowedAsync(stoppingToken).ConfigureAwait(false);
             while (!stoppingToken.IsCancellationRequested)
             {
                 try

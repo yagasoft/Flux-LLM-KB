@@ -9,7 +9,8 @@ namespace FluxKnowledge.Application.Indexing;
 public sealed class CanonicalIndexStageWorker(
     IPipelineStageReader pipelineReader,
     StageTransitionService transitions,
-    TimeProvider timeProvider) : IStageWorker
+    TimeProvider timeProvider,
+    PassageBuilder? passageBuilder = null) : IStageWorker
 {
     public string Operation => PipelineOperations.CanonicalIndex;
 
@@ -25,13 +26,15 @@ public sealed class CanonicalIndexStageWorker(
             return;
         }
 
-        var chunks = TextChunker.Chunk(source.InputText);
+        var chunks = passageBuilder is null ? TextChunker.Chunk(source.InputText) :
+            passageBuilder.BuildDocument(source.InputText, source.InputDocumentMetadataJson);
         await transitions.TransitionAsync(new StageTransitionRequest(
             workItem.DispatchMessage,
             workItem.Job,
             new StageArtifact(Guid.NewGuid(), PipelineStage.CanonicalIndex,
                 Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(source.InputText))),
-                "text/plain; charset=utf-8; canonical-chunks=v1", source.InputText, timeProvider.GetUtcNow(),
+                passageBuilder is null ? "text/plain; charset=utf-8; canonical-chunks=v1" :
+                    "text/plain; charset=utf-8; coherent-passages=v1", source.InputText, timeProvider.GetUtcNow(),
                 source.InputDocumentMetadataJson),
             PipelineStage.Embed,
             PipelineOperations.Embed,

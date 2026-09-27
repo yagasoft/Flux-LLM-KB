@@ -65,4 +65,9 @@ public sealed record CorpusSearchResponse(
     string RetrievalMode,
     string SemanticStatus,
     Guid? IndexGeneration,
-    IReadOnlyList<string> Warnings);
+    IReadOnlyList<string> Warnings)
+{
+    // Shared adapters need the candidate count without extending the corpus wire contract.
+    [System.Text.Json.Serialization.JsonIgnore]
+    public int CandidateCount { get; init; }
+}

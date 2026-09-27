@@ -15,7 +15,7 @@ public sealed class GpuSchedulerContractTests
     public void Private_scheduler_enums_have_only_approved_members()
     {
         Assert.Equal(
-            ["Ready", "Active", "Completed", "OutcomeUncertain"],
+            ["Ready", "Active", "Completed", "OutcomeUncertain", "Cancelled"],
             Enum.GetNames<GpuMiniTaskExecutionState>());
         Assert.Equal(
             ["Active", "AtSafeBoundary", "Completed", "Released", "CapacityUncertain"],
