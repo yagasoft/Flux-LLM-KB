@@ -13,6 +13,54 @@ namespace FluxKnowledge.Integration.Tests.Gpu;
 
 public sealed class GpuInteractiveExecutorTests(NativeSqlServerFixture fixture) : IClassFixture<NativeSqlServerFixture>
 {
+    [NativeSqlServerFact]
+    public async Task Two_requests_sharing_one_trace_remain_distinct_through_owned_native_batch_measurements()
+    {
+        using var trace = new HybridSearchTraceListener();
+        await SqlTestData.ClearPipelineAsync(fixture);
+        var factory = SqlTestData.CreateFactory(fixture);
+        var store = new SqlGpuSchedulerStore(factory);
+        await using var context = await factory.CreateDbContextAsync();
+        context.GpuCapacitySlots.Add(new GpuCapacitySlotEntity { SlotKey = "gpu-0", State = 0, UpdatedAtUtc = DateTimeOffset.UtcNow });
+        await context.SaveChangesAsync();
+        var executor = new GpuInteractiveExecutor(store, new Lifecycle(store), store, new ChannelGpuSchedulerWakeSignal(),
+            TimeProvider.System, BgeOfflineModels.GpuRuntimeKey, BgeOfflineModels.GpuSettingsFingerprint, 10);
+        var inference = new BgeScheduledPassageInference(executor, new BgeGpuInferenceSession(new BgeGpuInferenceTests.RecordingModels()));
+        var traceId = System.Diagnostics.ActivityTraceId.CreateRandom().ToString();
+        async Task<string> RequestAsync()
+        {
+            using var activity = new System.Diagnostics.Activity("HTTP search").SetIdFormat(System.Diagnostics.ActivityIdFormat.W3C)
+                .SetParentId("00-" + traceId + "-" + System.Diagnostics.ActivitySpanId.CreateRandom() + "-01").Start();
+            var spanId = activity.SpanId.ToString();
+            await inference.ExecuteAsync(async (embedding, reranker, ct) =>
+            {
+                await embedding.CreateEmbeddingAsync("query", ct);
+                await reranker.RerankAsync("query", [new(8, "passage")], ct);
+                return 42;
+            }, CancellationToken.None);
+            return spanId;
+        }
+        var first = RequestAsync();
+        var second = RequestAsync();
+        for (var attempt = 0; await context.GpuMiniTasks.CountAsync() < 2 && attempt < 50; attempt++) await Task.Delay(10);
+        var options = new GpuSchedulerOptions(4, 1024, TimeSpan.FromMinutes(1), TimeSpan.FromSeconds(1), TimeSpan.FromMinutes(1));
+        for (var index = 0; index < 2; index++)
+        {
+            await store.RunAdmissionRoundAsync(Guid.NewGuid(), GpuSchedulerWakeReason.WorkReady, options,
+                (candidate, _) => ValueTask.FromResult(new GpuAdmissionDecision(GpuAdmissionDisposition.Admit, "gpu-0", "owner", null, candidate.RequiredExecutorKey)), CancellationToken.None);
+            await executor.DeliverAsync(Assert.Single(await store.ReadPendingDispatchesAsync(CancellationToken.None)), CancellationToken.None);
+        }
+        var spans = await Task.WhenAll(first, second);
+        var mappings = trace.Events.Where(entry => entry.Id == 4 && Equals(entry["traceId"], traceId)).ToArray();
+        Assert.Equal(2, mappings.Length);
+        Assert.All(mappings, entry => Assert.Contains("spanId", entry.Names));
+        Assert.Equal(spans.Order(), mappings.Select(entry => (string)entry["spanId"]!).Order());
+        Assert.Equal(2, mappings.Select(entry => entry["batchId"]).Distinct().Count());
+        foreach (var mapping in mappings)
+            Assert.Equal(6, trace.Events.Count(entry => entry.Id == 3 && Equals(entry["batchId"], mapping["batchId"])));
+        Assert.Equal((int)GpuCapacitySlotState.Available, await context.GpuCapacitySlots.AsNoTracking().Select(slot => slot.State).SingleAsync());
+    }
+
     [NativeSqlServerTheory]
     [InlineData(false)]
     [InlineData(true)]

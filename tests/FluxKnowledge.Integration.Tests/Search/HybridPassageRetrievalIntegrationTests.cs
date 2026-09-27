@@ -33,6 +33,8 @@ public sealed class HybridPassageRetrievalIntegrationTests(NativeSqlServerFixtur
     [NativeSqlServerFact]
     public async Task Complete_hybrid_passage_flows_through_real_sql_ann_ranking_and_evidence_readback()
     {
+        using var trace = new HybridSearchTraceListener();
+        using var activity = new System.Diagnostics.Activity("search acceptance").Start();
         const string body = "Employees receive twenty days of annual leave.";
         await using var environment = await SqlToUsearchRebuildTests.PipelineEnvironment.CreateAsync(fixture, body, Builder);
         await BindInputsAsync(environment);
@@ -55,6 +57,22 @@ public sealed class HybridPassageRetrievalIntegrationTests(NativeSqlServerFixtur
         Assert.Equal(hit.Passage, read.Text);
         await using var context = await environment.Factory.CreateDbContextAsync();
         Assert.Empty(await context.CorpusQueryLeases.ToArrayAsync());
+        var selected = Assert.Single(trace.Events, entry => entry.Id == 1 && Equals(entry["traceId"], activity.TraceId.ToString()));
+        Assert.Contains("spanId", selected.Names);
+        Assert.Equal(activity.SpanId.ToString(), selected["spanId"]);
+        Assert.Equal(hit.ChunkId.ToString(System.Globalization.CultureInfo.InvariantCulture), selected["denseIds"]);
+        Assert.Equal(selected["denseIds"], selected["shortlistIds"]);
+        Assert.Equal(string.Empty, selected["lexicalIds"]);
+        var completed = Assert.Single(trace.Events, entry => entry.Id == 2 && Equals(entry["traceId"], activity.TraceId.ToString()));
+        Assert.Equal("ready", completed["semanticStatus"]);
+        Assert.Equal(selected["searchId"], completed["searchId"]);
+        Assert.Equal(selected["spanId"], completed["spanId"]);
+        Assert.Equal(selected["shortlistIds"], completed["resultIds"]);
+        Assert.True((double)completed["elapsedMs"]! >= 0);
+        var serialized = System.Text.Json.JsonSerializer.Serialize(trace.Events);
+        Assert.DoesNotContain(body, serialized);
+        Assert.DoesNotContain("holiday entitlement", serialized);
+        Assert.DoesNotContain(trace.Events, entry => entry.Id == 0);
     }
 
     [NativeSqlServerFact]

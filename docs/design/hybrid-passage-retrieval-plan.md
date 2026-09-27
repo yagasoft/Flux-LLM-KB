@@ -474,6 +474,22 @@ Add these to the existing search, knowledge and endpoint suites.
 
 ## Milestone 5: bounded acceptance and operational readiness
 
+The merged baseline has an opt-in `FluxKnowledge-HybridSearch` EventSource for
+the real acceptance run. EventPipe collection records the actual eligible lexical
+and dense candidate IDs, fused shortlist IDs, returned IDs/status and elapsed
+search time. Captured HTTP trace and request span IDs link each foreground search
+unambiguously to its owned native batch, including requests sharing one trace;
+embedding and reranker load, inference and unload events record elapsed time and
+success/failure. The load duration includes verified file/tokenizer/session
+opening, and unload includes disposal. Background embedding uses the same phase
+measurements. No query, body, source path, vector or model payload is emitted.
+Collection is opt-in and does not change the wire contract, ranking, deadlines,
+admission or release proof. Disabled model tracing retains the original lease
+without an additional disposal wrapper. Native memory is measured independently.
+Focused test-first checks prove actual SQL/ANN candidate-to-result trace identity,
+content omission, ordered phases and preserved cache-miss/failed-disposal release
+behaviour. These observations support acceptance; they are not accuracy results.
+
 Prepare the frozen baseline/cohorts early while the first slice is built. Run
 the complete pipeline once components are joined; the design defines cohort
 independence, stage metrics, acceptance targets and a bounded correction policy.

@@ -1,5 +1,7 @@
 using FluxKnowledge.Application.Gpu;
 using FluxKnowledge.Application.Ports;
+using FluxKnowledge.Application.Search;
+using System.Diagnostics;
 using FluxKnowledge.Application.Pipeline;
 
 namespace FluxKnowledge.Infrastructure.Inference.Search;
@@ -39,11 +41,11 @@ public sealed class BgeGpuInferenceSession(IBgeGpuModelFactory models) : IEmbedd
             foreach (var text in texts) ValidateText(text);
             using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, ownership.CancellationToken);
             IReadOnlyList<EmbeddingResult> results;
-            using (var lease = await models.OpenEmbeddingAsync(ownership).ConfigureAwait(false))
+            using (var lease = await OpenMeasuredAsync(() => models.OpenEmbeddingAsync(ownership), ownership, "embedding").ConfigureAwait(false))
             {
                 ownership.RequireActive(BgeOfflineModels.GpuRuntimeKey, BgeOfflineModels.GpuSettingsFingerprint);
                 ValidateProfile(lease.Model);
-                results = await lease.Model.CreateEmbeddingsAsync(texts, linked.Token).ConfigureAwait(false);
+                results = await MeasureAsync(() => lease.Model.CreateEmbeddingsAsync(texts, linked.Token), ownership, "embedding", "inference").ConfigureAwait(false);
                 if (results.Count != texts.Count) throw new BgeInferenceException("bge-embedding-output-invalid");
                 foreach (var result in results) ValidateEmbedding(result);
             }
@@ -60,6 +62,29 @@ public sealed class BgeGpuInferenceSession(IBgeGpuModelFactory models) : IEmbedd
         exception is PublicationSnapshotConflictException ? "index-updating" :
         exception is BgeInferenceException bge ? bge.ReasonCode :
         exception is OperationCanceledException ? "bge-request-cancelled" : "bge-request-work-failed";
+
+    private static async ValueTask<BgeGpuModelLease<T>> OpenMeasuredAsync<T>(Func<ValueTask<BgeGpuModelLease<T>>> open,
+        GpuOwnedWorkContext owner, string model) where T : class
+    {
+        if (!HybridSearchDiagnostics.Log.IsEnabled()) return await open().ConfigureAwait(false);
+        var lease = await MeasureAsync(open, owner, model, "load").ConfigureAwait(false);
+        return new(lease.Model, () =>
+        {
+            var timer = Stopwatch.StartNew();
+            var success = false;
+            try { lease.Dispose(); success = true; }
+            finally { HybridSearchDiagnostics.Log.ModelPhase(owner.Handle.BatchId.ToString("N"), model, "unload", timer.Elapsed.TotalMilliseconds, success ? "success" : "failed"); }
+        });
+    }
+
+    private static async ValueTask<T> MeasureAsync<T>(Func<ValueTask<T>> work, GpuOwnedWorkContext owner, string model, string phase)
+    {
+        if (!HybridSearchDiagnostics.Log.IsEnabled()) return await work().ConfigureAwait(false);
+        var timer = Stopwatch.StartNew();
+        var success = false;
+        try { var result = await work().ConfigureAwait(false); success = true; return result; }
+        finally { HybridSearchDiagnostics.Log.ModelPhase(owner.Handle.BatchId.ToString("N"), model, phase, timer.Elapsed.TotalMilliseconds, success ? "success" : "failed"); }
+    }
 
     private static void ValidateText(string text)
     {
@@ -107,10 +132,10 @@ public sealed class BgeGpuInferenceSession(IBgeGpuModelFactory models) : IEmbedd
                 if (Interlocked.CompareExchange(ref request._phase, 1, 0) != 0) throw new BgeInferenceException("bge-request-phase-invalid");
                 using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, request._ownership.CancellationToken);
                 EmbeddingResult result;
-                using (var lease = await request._models.OpenEmbeddingAsync(request._ownership).ConfigureAwait(false))
+                using (var lease = await OpenMeasuredAsync(() => request._models.OpenEmbeddingAsync(request._ownership), request._ownership, "embedding").ConfigureAwait(false))
                 {
                     request.RequireActive(); ValidateProfile(lease.Model);
-                    result = await lease.Model.CreateEmbeddingAsync(text, linked.Token).ConfigureAwait(false);
+                    result = await MeasureAsync(() => lease.Model.CreateEmbeddingAsync(text, linked.Token), request._ownership, "embedding", "inference").ConfigureAwait(false);
                     ValidateEmbedding(result);
                 }
                 linked.Token.ThrowIfCancellationRequested();
@@ -132,9 +157,9 @@ public sealed class BgeGpuInferenceSession(IBgeGpuModelFactory models) : IEmbedd
                 RerankResult result;
                 try
                 {
-                    using var lease = await request._models.OpenRerankerAsync(request._ownership).ConfigureAwait(false);
+                    using var lease = await OpenMeasuredAsync(() => request._models.OpenRerankerAsync(request._ownership), request._ownership, "reranker").ConfigureAwait(false);
                     request.RequireActive();
-                    result = await lease.Model.RerankAsync(query, passages, linked.Token).ConfigureAwait(false);
+                    result = await MeasureAsync(() => lease.Model.RerankAsync(query, passages, linked.Token), request._ownership, "reranker", "inference").ConfigureAwait(false);
                     if (result.ModelFingerprint != BgeOfflineModels.RerankerFingerprint || result.Scores.Count != passages.Count ||
                         !result.Scores.Select(score => score.PassageId).SequenceEqual(passages.Select(p => p.PassageId)) ||
                         result.Scores.Any(score => !float.IsFinite(score.Logit)))

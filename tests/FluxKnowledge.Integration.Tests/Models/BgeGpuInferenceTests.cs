@@ -30,6 +30,7 @@ public sealed class BgeGpuInferenceTests
     [Fact]
     public async Task Request_embeds_then_unloads_before_loading_reranker_and_preserves_results()
     {
+        using var trace = new FluxKnowledge.Integration.Tests.Support.HybridSearchTraceListener();
         var factory = new RecordingModels();
         var owner = Owner();
         IEmbeddingProvider? escaped = null;
@@ -47,13 +48,23 @@ public sealed class BgeGpuInferenceTests
         Assert.Equal([8L, 2L], result.Value!.Scores.Select(score => score.PassageId));
         Assert.Equal(["embedding.open", "embedding.run", "embedding.dispose", "ranking.open", "ranking.run", "ranking.dispose"], factory.Events);
         await Assert.ThrowsAsync<ObjectDisposedException>(() => escaped!.CreateEmbeddingAsync("late query", CancellationToken.None).AsTask());
+        var phases = trace.Events.Where(entry => entry.Id == 3 && Equals(entry["batchId"], owner.Handle.BatchId.ToString("N"))).ToArray();
+        Assert.Equal(["embedding:load", "embedding:inference", "embedding:unload", "reranker:load", "reranker:inference", "reranker:unload"],
+            phases.Select(entry => entry["model"] + ":" + entry["phase"]));
+        Assert.All(phases, entry => { Assert.Equal("success", entry["outcome"]); Assert.True((double)entry["elapsedMs"]! >= 0); });
+        var serialized = System.Text.Json.JsonSerializer.Serialize(phases);
+        Assert.DoesNotContain("query", serialized);
+        Assert.DoesNotContain("first", serialized);
+        Assert.DoesNotContain("second", serialized);
     }
 
     [Fact]
     public async Task Cache_miss_before_native_creation_refuses_and_confirms_no_gpu_allocation()
     {
+        using var trace = new FluxKnowledge.Integration.Tests.Support.HybridSearchTraceListener();
         var factory = new RecordingModels { Failure = "cache-miss" };
-        var result = await new BgeGpuInferenceSession(factory).ExecuteSearchAsync<int>(Owner(), async (embedding, _, ct) =>
+        var owner = Owner();
+        var result = await new BgeGpuInferenceSession(factory).ExecuteSearchAsync<int>(owner, async (embedding, _, ct) =>
         {
             await embedding.CreateEmbeddingAsync("query", ct);
             return 42;
@@ -61,6 +72,9 @@ public sealed class BgeGpuInferenceTests
         Assert.Equal(ModelStoreReasons.ArtifactMissing, result.RefusalReason);
         Assert.True(result.NativeCapacityReleased);
         Assert.DoesNotContain("embedding.run", factory.Events);
+        var phase = Assert.Single(trace.Events, entry => entry.Id == 3 && Equals(entry["batchId"], owner.Handle.BatchId.ToString("N")));
+        Assert.Equal("load", phase["phase"]);
+        Assert.Equal("failed", phase["outcome"]);
     }
 
     [Theory]
@@ -69,6 +83,7 @@ public sealed class BgeGpuInferenceTests
     [InlineData("creation", false)]
     public async Task Failure_reports_release_only_when_native_cleanup_is_confirmed(string fault, bool released)
     {
+        using var trace = new FluxKnowledge.Integration.Tests.Support.HybridSearchTraceListener();
         var factory = new RecordingModels { Failure = fault };
         var result = await new BgeGpuInferenceSession(factory).ExecuteSearchAsync<int>(Owner(), async (embedding, _, ct) =>
         {

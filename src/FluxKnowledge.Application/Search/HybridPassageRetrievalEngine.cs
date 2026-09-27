@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using FluxKnowledge.Application.Contracts;
@@ -46,11 +47,16 @@ public sealed class HybridPassageRetrievalEngine(ICorpusRetrievalReader reader, 
         Func<CancellationToken, ValueTask<ResolvedCorpusScope?>> resolveScope, CancellationToken callerToken)
     {
         callerToken.ThrowIfCancellationRequested();
+        var traceId = Activity.Current?.TraceId.ToString() ?? string.Empty;
+        var spanId = Activity.Current?.SpanId.ToString() ?? string.Empty;
+        var searchId = Guid.NewGuid().ToString("N");
+        var timer = Stopwatch.StartNew();
+        CorpusSearchResponse? returned = null;
         var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10), _clock);
         var budget = CancellationTokenSource.CreateLinkedTokenSource(callerToken, deadline.Token);
         ResolvedCorpusScope? resolved = null;
-        var work = SearchCoreAsync(query, limit, resolveScope, scope => resolved = scope, budget.Token).AsTask();
-        try { return await work.WaitAsync(TimeSpan.FromSeconds(10), _clock, callerToken).ConfigureAwait(false); }
+        var work = SearchCoreAsync(query, limit, resolveScope, scope => resolved = scope, traceId, spanId, searchId, budget.Token).AsTask();
+        try { return returned = await work.WaitAsync(TimeSpan.FromSeconds(10), _clock, callerToken).ConfigureAwait(false); }
         catch (Exception exception) when (!callerToken.IsCancellationRequested &&
             (exception is TimeoutException || exception is OperationCanceledException && deadline.IsCancellationRequested))
         {
@@ -58,10 +64,13 @@ public sealed class HybridPassageRetrievalEngine(ICorpusRetrievalReader reader, 
                 "lexical", "timeout", null, ["semantic:timeout", "search-deadline-exceeded"]);
             if (!NativeV1EnvelopeProtector.CanDiscloseResult(JsonSerializer.SerializeToElement(response)))
                 throw new NativeOperationException("content-withheld");
-            return response;
+            return returned = response;
         }
         finally
         {
+            if (HybridSearchDiagnostics.Log.IsEnabled())
+                HybridSearchDiagnostics.Log.Completed(traceId, spanId, searchId, returned?.SemanticStatus ?? "refused",
+                    returned is null ? string.Empty : string.Join(',', returned.Results.Select(hit => hit.ChunkId)), timer.Elapsed.TotalMilliseconds);
             // Stops further useful work, never disposes a callback's native/SQL lease.
             budget.Cancel();
             _ = ObserveAndDisposeAsync(work, budget, deadline);
@@ -77,6 +86,7 @@ public sealed class HybridPassageRetrievalEngine(ICorpusRetrievalReader reader, 
 
     private async ValueTask<CorpusSearchResponse> SearchCoreAsync(string query, int limit,
         Func<CancellationToken, ValueTask<ResolvedCorpusScope?>> resolveScope, Action<ResolvedCorpusScope> scopeResolved,
+        string traceId, string spanId, string searchId,
         CancellationToken cancellationToken)
     {
         var scope = await resolveScope(cancellationToken).ConfigureAwait(false) ?? throw new NativeOperationException("scope-unavailable");
@@ -111,6 +121,11 @@ public sealed class HybridPassageRetrievalEngine(ICorpusRetrievalReader reader, 
                 var lexicalEligible = lexical.Where(value => Safe(value, scope) && LexicalMatch(value, query, terms)).ToArray();
                 var denseEligible = dense.Candidates.Where(value => Safe(value, scope)).ToArray();
                 var shortlist = PassageRanking.Fuse(query, lexicalEligible, denseEligible);
+                if (HybridSearchDiagnostics.Log.IsEnabled())
+                    HybridSearchDiagnostics.Log.Candidates(traceId, spanId, searchId,
+                        string.Join(',', lexicalEligible.Select(value => value.ChunkId)),
+                        string.Join(',', denseEligible.Select(value => value.ChunkId)),
+                        string.Join(',', shortlist.Select(value => value.Passage.ChunkId)));
                 var candidateCount = lexicalEligible.Concat(denseEligible).Select(value => value.ChunkId).Distinct().Count();
                 var warnings = BaseWarnings(readiness, lexical.Count, dense.Candidates.Count);
                 IReadOnlyList<RankedPassage> ranked = shortlist;

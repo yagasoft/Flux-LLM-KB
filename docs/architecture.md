@@ -273,6 +273,13 @@ closing that owner atomically prevents later allocations. A constructor or dispo
 failure retains capacity until independent release evidence exists. Model-free
 tests run this wrapper through actual disposable-SQL dispatch and settlement.
 
+Opt-in `FluxKnowledge-HybridSearch` EventPipe diagnostics report actual candidate,
+shortlist and result IDs, search status/time, HTTP trace/span-to-native-batch identity,
+and model load/inference/unload duration and outcome. They emit no queries,
+passages, paths or vectors and retain the existing ownership and release rules.
+These measurements support the English acceptance gates and any later decision
+about model residency; native memory still requires an independent measurement.
+
 Background embedding can now persist one request containing at most four passage
 IDs and input hashes, then hand it to the existing parent-job GPU lifecycle. The
 ordinary Embed worker uses this profile without running inference under its worker
