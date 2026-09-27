@@ -11,6 +11,10 @@ param(
     [switch]$ApplyHybridPassageRebuild,
     [string]$ResumeHybridRebuildRelease = '',
     [string]$ReplaceHybridRebuildRelease = '',
+    [string]$PatchHybridRebuildRelease = '',
+    [string]$ResumeHybridPatchRelease = '',
+    [string]$ExpectedPatchCandidateHash = '',
+    [string]$ExpectedPatchOperatorHash = '',
     [ValidateRange(30, 3600)][int]$RebuildTimeoutSeconds = 1800,
     [switch]$DeferReadinessForScopedRemediation,
     [switch]$PlanOnly,
@@ -915,6 +919,225 @@ function Invoke-HybridPassageIisUpdate {
         runtime='offline-BGE-shared-scheduler-load-run-unload'; rollback='forward-only; original payload/configuration retained for inspection' } | ConvertTo-Json
 }
 
+function Invoke-HybridPassageIisPatch {
+    param([string]$SourceRoot, [string]$Commit, [string]$PredecessorRelease, [string]$ResumeRelease,
+        [string]$ExpectedCandidateHash='', [string]$ExpectedOperatorHash='')
+    $connectionString=Get-DeploymentSqlConnectionString
+    $configurationPath=Join-Path $CanonicalLiveRoot 'Config/appsettings.Production.json'
+    $releaseId=if ($ResumeRelease) { $ResumeRelease } else { '{0}-{1}-hybridpatch' -f [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ'),$Commit.Substring(0,12) }
+    $releaseRoot=Join-Path $IncrementalRecoveryRoot $releaseId
+    $bindingPath=Join-Path $releaseRoot 'patch-binding.json'
+    $progressPath=Join-Path $releaseRoot 'patch-progress.json'
+    $candidateRoot=Join-Path $releaseRoot 'candidate'
+    $operatorRoot=Join-Path $releaseRoot 'operator'
+    $previousRoot=Join-Path $releaseRoot 'previous'
+    $candidateConfig=Join-Path $releaseRoot 'candidate-config.json'
+    $contract=Get-HybridPassageMigrationContract
+    Assert-NotReparsePoint -Path $CanonicalLiveRoot -Message 'hybrid-patch-live-root-unsafe'
+    Assert-NotReparsePoint -Path $IncrementalRecoveryRoot -Message 'hybrid-patch-recovery-root-unsafe'
+    Assert-NotReparsePoint -Path $configurationPath -Message 'hybrid-patch-configuration-unsafe'
+    if ($ResumeRelease) {
+        if ($ResumeRelease -notmatch '^\d{8}T\d{6}Z-[0-9a-f]{12}-hybridpatch$') { throw 'hybrid-patch-resume-release-invalid' }
+        foreach ($path in @($releaseRoot,$bindingPath,$progressPath,$operatorRoot,$candidateConfig)) {
+            Assert-NotReparsePoint -Path $path -Message 'hybrid-patch-resume-path-unsafe'
+        }
+        foreach ($path in @($candidateRoot,$previousRoot,$CanonicalDeployRoot)) {
+            if (Test-Path -LiteralPath $path) { Assert-NotReparsePoint -Path $path -Message 'hybrid-patch-payload-root-unsafe' }
+        }
+        $binding=Get-Content -LiteralPath $bindingPath -Raw | ConvertFrom-Json -AsHashtable
+        $progress=Get-Content -LiteralPath $progressPath -Raw | ConvertFrom-Json -AsHashtable
+        foreach ($field in @('Version','ReleaseId','Commit','OperationId','TargetEpoch','ManifestHash','Predecessor',
+            'CandidateHash','OperatorHash','ConfigurationHash','PreservedInputFingerprint')) {
+            if (-not $binding.ContainsKey($field)) { throw 'hybrid-patch-binding-incomplete' }
+        }
+        foreach ($field in @('ActivationIntent','HoldReleaseAttempted','HoldReleased')) {
+            if (-not $progress.ContainsKey($field) -or $progress[$field] -isnot [bool]) { throw 'hybrid-patch-progress-ambiguous' }
+        }
+        if ($binding.Version -ne 1 -or $binding.ReleaseId -cne $releaseId -or $binding.Commit -cne $Commit -or
+            $binding.Commit -cnotmatch ('^' + [Regex]::Escape(($releaseId -split '-')[1]) + '[0-9a-f]{28}$')) {
+            throw 'hybrid-patch-resume-identity-mismatch'
+        }
+        $predecessor=$binding.Predecessor
+        Assert-HybridPatchPacket -RecoveryRoot $IncrementalRecoveryRoot -Binding $predecessor -ConnectionString $connectionString
+        if ($binding.OperationId -cne $predecessor.OperationId -or $binding.TargetEpoch -cne $predecessor.TargetEpoch -or
+            $binding.ManifestHash -cne $predecessor.ManifestHash -or
+            $binding.PreservedInputFingerprint -cne $predecessor.PreservedInputFingerprint -or
+            $binding.ConfigurationHash -cne $predecessor.ActivatedConfigHash) { throw 'hybrid-patch-resume-binding-mismatch' }
+        if ((Get-HybridPayloadFingerprint -Path $operatorRoot) -cne $binding.OperatorHash -or
+            (Get-FileHash -LiteralPath $candidateConfig).Hash -cne $binding.ConfigurationHash) { throw 'hybrid-patch-resume-payload-changed' }
+        if (Test-Path -LiteralPath $candidateRoot) {
+            if ((Get-HybridPayloadFingerprint -Path $candidateRoot) -cne $binding.CandidateHash) { throw 'hybrid-patch-candidate-changed' }
+        }
+    }
+    else {
+        if (Test-Path -LiteralPath $releaseRoot) { throw 'hybrid-patch-release-already-exists' }
+        $predecessor=Get-HybridPatchBinding -RecoveryRoot $IncrementalRecoveryRoot -ReleaseId $PredecessorRelease -ConnectionString $connectionString
+        Assert-HybridMigrationHistory -OriginalHistory $predecessor.OriginalHistory -CurrentHistory @(Get-AppliedMigrationIds)
+        if (@(Get-AppliedMigrationIds)[-1] -cne $contract.Target) { throw 'hybrid-patch-schema-mismatch' }
+        Assert-HybridDeploymentHoldOwner -Path $ValidationHoldPath -ReleaseId $predecessor.ReleaseId -OperationId $predecessor.OperationId
+        if ((Get-HybridPayloadFingerprint -Path $CanonicalDeployRoot) -cne $predecessor.CandidateHash -or
+            (Get-FileHash -LiteralPath $configurationPath).Hash -cne $predecessor.ActivatedConfigHash -or
+            (Get-HybridPreservedInputFingerprint) -cne $predecessor.PreservedInputFingerprint) { throw 'hybrid-patch-live-binding-changed' }
+        New-Item -ItemType Directory -Path $releaseRoot | Out-Null
+        Copy-Item -LiteralPath $configurationPath -Destination $candidateConfig
+        & dotnet publish (Join-Path $SourceRoot 'src/FluxKnowledge.Web/FluxKnowledge.Web.csproj') -c Release --no-restore --nologo -o $candidateRoot | Out-Host
+        if ($LASTEXITCODE -ne 0) { throw 'hybrid-patch-web-publish-failed' }
+        & dotnet publish (Join-Path $SourceRoot 'src/FluxKnowledge.Cli/FluxKnowledge.Cli.csproj') -c Release --no-restore --nologo -o $operatorRoot | Out-Host
+        if ($LASTEXITCODE -ne 0) { throw 'hybrid-patch-operator-publish-failed' }
+        Test-ApplicationPayload -Path $candidateRoot
+        Assert-NotReparsePoint -Path $candidateRoot -Message 'hybrid-patch-candidate-root-unsafe'
+        $candidateHash=Get-HybridPayloadFingerprint -Path $candidateRoot
+        $operatorHash=Get-HybridPayloadFingerprint -Path $operatorRoot
+        if ($candidateHash -cne $ExpectedCandidateHash -or $operatorHash -cne $ExpectedOperatorHash) {
+            throw 'hybrid-patch-reviewed-payload-hash-mismatch'
+        }
+        $binding=@{
+            Version=1; ReleaseId=$releaseId; Commit=$Commit; OperationId=$predecessor.OperationId
+            TargetEpoch=$predecessor.TargetEpoch; ManifestHash=$predecessor.ManifestHash; Predecessor=$predecessor
+            CandidateHash=$candidateHash; OperatorHash=$operatorHash
+            ConfigurationHash=(Get-FileHash -LiteralPath $candidateConfig).Hash
+            PreservedInputFingerprint=$predecessor.PreservedInputFingerprint
+        }
+        Write-HybridRebuildJson -Path $bindingPath -Value $binding
+        $progress=@{ ActivationIntent=$false; HoldReleaseAttempted=$false; HoldReleased=$false }
+        Write-HybridRebuildJson -Path $progressPath -Value $progress
+    }
+    $predecessor=$binding.Predecessor
+    Assert-HybridMigrationHistory -OriginalHistory $predecessor.OriginalHistory -CurrentHistory @(Get-AppliedMigrationIds)
+    if (@(Get-AppliedMigrationIds)[-1] -cne $contract.Target -or
+        (Get-FileHash -LiteralPath $configurationPath).Hash -cne $binding.ConfigurationHash) { throw 'hybrid-patch-runtime-binding-changed' }
+    $holdPresent=Test-Path -LiteralPath $ValidationHoldPath
+    if (-not $holdPresent -and -not $progress.HoldReleaseAttempted) { throw 'hybrid-patch-hold-missing' }
+    $oldOwner=@{ ReleaseId=$predecessor.ReleaseId; OperationId=$binding.OperationId }
+    $newOwner=@{ ReleaseId=$releaseId; OperationId=$binding.OperationId }
+    if ($holdPresent) {
+        $value=Get-Content -LiteralPath $ValidationHoldPath -Raw | ConvertFrom-Json -AsHashtable
+        if ($value -is [string] -and $value -ceq $predecessor.ReleaseId) {
+            Set-HybridDeploymentHold -Path $ValidationHoldPath -ReleaseId $oldOwner.ReleaseId -OperationId $oldOwner.OperationId -Permit $false
+        }
+        else { Set-HybridDeploymentHold -Path $ValidationHoldPath -ReleaseId $newOwner.ReleaseId -OperationId $newOwner.OperationId -Permit $false }
+        if ((Get-HybridPreservedInputFingerprint) -cne $binding.PreservedInputFingerprint) { throw 'hybrid-patch-preserved-inputs-changed' }
+    }
+    $models=Invoke-HybridRebuildOperator -OperatorRoot $operatorRoot -ConnectionString $connectionString -Arguments @('verify-models')
+    if (-not $models.Verified -or -not $models.Offline) { throw 'hybrid-patch-offline-model-verification-failed' }
+    $status=Invoke-HybridRebuildOperator -OperatorRoot $operatorRoot -ConnectionString $connectionString -Arguments @('status','--operation',$binding.OperationId)
+    if (-not $status.Committed -or $status.ManifestHash -cne $binding.ManifestHash -or
+        [string]$status.TargetEpoch -cne [string]$binding.TargetEpoch) { throw 'hybrid-patch-operation-receipt-mismatch' }
+    if ($status.FailedEmbeddingJobs -gt 0 -or $status.FailedPublishJobs -gt 0) { throw 'hybrid-patch-existing-job-failure' }
+    if (-not $holdPresent) {
+        if (-not $progress.HoldReleaseAttempted -or -not $status.Completed -or
+            (Get-HybridPayloadFingerprint -Path $CanonicalDeployRoot) -cne $binding.CandidateHash) { throw 'hybrid-patch-hold-missing' }
+        Invoke-RequiredLoopbackProbes -Origin $loopbackOrigin.Origin -TimeoutSeconds $ReadinessTimeoutSeconds
+        $progress.HoldReleased=$true; Write-HybridRebuildJson -Path $progressPath -Value $progress
+    }
+    else {
+        try {
+            Disable-ScheduledTask -TaskName $InteractiveHostTaskName | Out-Null
+            Wait-InteractiveHostStopped -TaskName $InteractiveHostTaskName -TimeoutSeconds $ReadinessTimeoutSeconds
+            if ((Get-WebAppPoolState -Name $SiteName).Value -eq 'Stopped' -and (Test-Path -LiteralPath $CanonicalDeployRoot)) {
+                Assert-NotReparsePoint -Path $CanonicalDeployRoot -Message 'hybrid-patch-recovery-payload-root-unsafe'
+                $compatibleHash='partial-candidate'
+                if (@(Get-ChildItem -LiteralPath $CanonicalDeployRoot -File -Recurse -Force).Count -gt 0) {
+                    $compatibleHash=Get-HybridPayloadFingerprint -Path $CanonicalDeployRoot
+                }
+                if ($compatibleHash -eq $predecessor.CandidateHash -or $compatibleHash -eq $binding.CandidateHash) {
+                    # The committed worker may have died while holding a native batch.
+                    # Start only this verified payload under deny-all so its existing
+                    # owner-recovery loop can release capacity, then drain it normally.
+                    Start-WebAppPool -Name $SiteName
+                    Wait-IisAppPoolState -Name $SiteName -ExpectedState 'Started' -TimeoutSeconds $ReadinessTimeoutSeconds
+                    $recoveryLive=Invoke-FixedLoopbackProbe -Uri "$($loopbackOrigin.Origin)/health/live" -TimeoutSeconds $ReadinessTimeoutSeconds
+                    $recoveryLive.Dispose()
+                }
+            }
+            Stop-HybridIisAfterGpuDrain
+            if ((Get-HybridPreservedInputFingerprint) -cne $binding.PreservedInputFingerprint) { throw 'hybrid-patch-preserved-inputs-changed' }
+            if (-not $progress.ActivationIntent) {
+                $progress.ActivationIntent=$true
+                Write-HybridRebuildJson -Path $progressPath -Value $progress
+            }
+            if (Test-Path -LiteralPath $previousRoot) {
+                Assert-NotReparsePoint -Path $previousRoot -Message 'hybrid-patch-previous-root-unsafe'
+                if ((Get-HybridPayloadFingerprint -Path $previousRoot) -cne $predecessor.CandidateHash) { throw 'hybrid-patch-previous-payload-changed' }
+            }
+            if (Test-Path -LiteralPath $candidateRoot) { Assert-NotReparsePoint -Path $candidateRoot -Message 'hybrid-patch-candidate-root-unsafe' }
+            if (Test-Path -LiteralPath $CanonicalDeployRoot) { Assert-NotReparsePoint -Path $CanonicalDeployRoot -Message 'hybrid-patch-live-root-unsafe' }
+            $liveHash=if (Test-Path -LiteralPath $CanonicalDeployRoot) {
+                if (@(Get-ChildItem -LiteralPath $CanonicalDeployRoot -Recurse -File -Force).Count -eq 0) { 'partial-candidate' }
+                else { Get-HybridPayloadFingerprint -Path $CanonicalDeployRoot }
+            } else { $null }
+            if ($liveHash -cne $binding.CandidateHash) {
+                $partial=$liveHash -and $liveHash -cne $predecessor.CandidateHash
+                if ($partial -and (-not $progress.ActivationIntent -or -not (Test-Path -LiteralPath $previousRoot) -or
+                    -not (Test-Path -LiteralPath $candidateRoot))) {
+                    throw 'hybrid-patch-unrecognised-live-payload'
+                }
+                if ($liveHash -ceq $predecessor.CandidateHash -and (Test-Path -LiteralPath $previousRoot)) { throw 'hybrid-patch-duplicate-old-payload' }
+                if (-not $liveHash -and -not (Test-Path -LiteralPath $previousRoot)) { throw 'hybrid-patch-live-payload-missing' }
+                if (-not (Test-Path -LiteralPath $candidateRoot) -or
+                    (Get-HybridPayloadFingerprint -Path $candidateRoot) -cne $binding.CandidateHash) { throw 'hybrid-patch-candidate-missing-or-changed' }
+                if ($liveHash -ceq $predecessor.CandidateHash) { Move-Item -LiteralPath $CanonicalDeployRoot -Destination $previousRoot }
+                if ($partial) {
+                    Assert-CanonicalPath -RequestedPath $CanonicalDeployRoot -ExpectedPath 'I:\FluxKnowledge\App' -Message 'hybrid-patch-live-path-unsafe'
+                    Assert-NotReparsePoint -Path $CanonicalLiveRoot -Message 'hybrid-patch-live-root-unsafe'
+                    Assert-NotReparsePoint -Path $CanonicalDeployRoot -Message 'hybrid-patch-live-root-unsafe'
+                    foreach ($item in @(Get-ChildItem -LiteralPath $CanonicalDeployRoot -Recurse -Force)) {
+                        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'hybrid-patch-partial-payload-reparse-point' }
+                    }
+                    # Replay must copy every candidate byte, even if an interrupted
+                    # file has the expected size and timestamp.
+                    $copyOutput=@(& robocopy $candidateRoot $CanonicalDeployRoot /MIR /IS /IT /IM /COPY:DAT /DCOPY:DAT /XJ /R:0 /W:0 /NFL /NDL /NP 2>&1)
+                    if ($LASTEXITCODE -gt 7) { throw 'hybrid-patch-partial-copy-failed' }
+                    Test-ApplicationPayload -Path $CanonicalDeployRoot
+                    Assert-ApplicationPayloadReadAccess -Path $CanonicalDeployRoot
+                }
+                else { Invoke-CandidatePayloadActivation -CandidateRoot $candidateRoot -ApplicationRoot $CanonicalDeployRoot }
+            }
+            if ((Get-HybridPayloadFingerprint -Path $CanonicalDeployRoot) -cne $binding.CandidateHash -or
+                (Get-HybridPayloadFingerprint -Path $previousRoot) -cne $predecessor.CandidateHash) { throw 'hybrid-patch-activation-unproven' }
+            Move-HybridReplacementHold -Path $ValidationHoldPath -Binding $predecessor -ReleaseId $releaseId -OperationId $binding.OperationId
+            Set-HybridDeploymentHold -Path $ValidationHoldPath -ReleaseId $newOwner.ReleaseId -OperationId $newOwner.OperationId -Permit $true
+            Start-WebAppPool -Name $SiteName
+            Wait-IisAppPoolState -Name $SiteName -ExpectedState 'Started' -TimeoutSeconds $ReadinessTimeoutSeconds
+            $live=Invoke-FixedLoopbackProbe -Uri "$($loopbackOrigin.Origin)/health/live" -TimeoutSeconds $ReadinessTimeoutSeconds
+            $live.Dispose()
+            $timer=[Diagnostics.Stopwatch]::StartNew()
+            while ($true) {
+                $status=Invoke-HybridRebuildOperator -OperatorRoot $operatorRoot -ConnectionString $connectionString -Arguments @('status','--operation',$binding.OperationId)
+                if ($status.Completed) { break }
+                if ($status.FailedEmbeddingJobs -gt 0 -or $status.FailedPublishJobs -gt 0) { throw 'hybrid-patch-rebuild-job-failed-hold-retained' }
+                if ($status.PendingItems -eq 0 -and $status.RunningItems -eq 0) {
+                    try { [void](Invoke-HybridRebuildOperator -OperatorRoot $operatorRoot -ConnectionString $connectionString -Arguments @('finish','--operation',$binding.OperationId)); break }
+                    catch { if ($_.Exception.Message -cne 'corpus-rebuild-full-text-not-ready') { throw } }
+                }
+                if ($timer.Elapsed.TotalSeconds -ge $RebuildTimeoutSeconds) { throw 'hybrid-patch-wait-timeout-hold-retained' }
+                Start-Sleep -Milliseconds 1000
+            }
+            Assert-HybridPatchPacket -RecoveryRoot $IncrementalRecoveryRoot -Binding $predecessor -ConnectionString $connectionString
+            if ((Get-HybridPreservedInputFingerprint) -cne $binding.PreservedInputFingerprint) { throw 'hybrid-patch-preserved-inputs-changed' }
+            Invoke-RequiredLoopbackProbes -Origin $loopbackOrigin.Origin -TimeoutSeconds $ReadinessTimeoutSeconds
+            $progress.HoldReleaseAttempted=$true; Write-HybridRebuildJson -Path $progressPath -Value $progress
+            Assert-HybridDeploymentHoldOwner -Path $ValidationHoldPath -ReleaseId $newOwner.ReleaseId -OperationId $newOwner.OperationId
+            Remove-Item -LiteralPath $ValidationHoldPath -Force
+            $progress.HoldReleased=$true; Write-HybridRebuildJson -Path $progressPath -Value $progress
+        }
+        catch {
+            if (Test-Path -LiteralPath $ValidationHoldPath) {
+                $value=Get-Content -LiteralPath $ValidationHoldPath -Raw | ConvertFrom-Json -AsHashtable
+                if ($value -is [string] -and $value -ceq $predecessor.ReleaseId) {
+                    Set-HybridDeploymentHold -Path $ValidationHoldPath -ReleaseId $oldOwner.ReleaseId -OperationId $oldOwner.OperationId -Permit $false
+                }
+                else { Set-HybridDeploymentHold -Path $ValidationHoldPath -ReleaseId $newOwner.ReleaseId -OperationId $newOwner.OperationId -Permit $false }
+            }
+            throw "Hybrid forward patch requires exact-release recovery $releaseId; no schema/reset/checkpoint change or old-payload restore. Failure: $($_.Exception.Message)"
+        }
+    }
+    if ($predecessor.InteractiveHostWasEnabled) { Enable-ScheduledTask -TaskName $InteractiveHostTaskName | Out-Null }
+    [ordered]@{ ok=$true; mode='hybrid-forward-patch-applied'; commit=$Commit; release_root=$releaseRoot;
+        operation_id=$binding.OperationId; target_epoch=$binding.TargetEpoch; manifest_hash=$binding.ManifestHash;
+        deployment_validation_hold='released-after-same-operation-rebuild-and-input-validation' } | ConvertTo-Json
+}
+
 function Assert-IncrementalIisPreflight {
     $site = Get-Website -Name $SiteName -ErrorAction Stop
     Assert-CanonicalPath `
@@ -927,14 +1150,16 @@ function Assert-IncrementalIisPreflight {
     if ($site.State -ne "Started") {
         throw "The fixed FluxKnowledge IIS site must be started before an incremental update."
     }
-    if ((Get-WebAppPoolState -Name $SiteName).Value -ne "Started" -and [string]::IsNullOrWhiteSpace($ResumeHybridRebuildRelease)) {
+    if ((Get-WebAppPoolState -Name $SiteName).Value -ne "Started" -and [string]::IsNullOrWhiteSpace($ResumeHybridRebuildRelease) -and
+        [string]::IsNullOrWhiteSpace($ResumeHybridPatchRelease)) {
         throw "The fixed FluxKnowledge IIS application pool must be started before an incremental update."
     }
     $binding = @(Get-WebBinding -Name $SiteName -Protocol "http" | Where-Object { $_.bindingInformation -ceq "127.0.0.1:5137:" })
     if ($binding.Count -ne 1) {
         throw "The fixed FluxKnowledge IIS site must have exactly one http/127.0.0.1:5137 binding."
     }
-    if (-not (Test-Path -LiteralPath $CanonicalDeployRoot -PathType Container) -and [string]::IsNullOrWhiteSpace($ResumeHybridRebuildRelease)) {
+    if (-not (Test-Path -LiteralPath $CanonicalDeployRoot -PathType Container) -and [string]::IsNullOrWhiteSpace($ResumeHybridRebuildRelease) -and
+        [string]::IsNullOrWhiteSpace($ResumeHybridPatchRelease)) {
         throw "The canonical application payload root is missing."
     }
     if (-not (Test-Path -LiteralPath $CanonicalRecoveryRoot -PathType Container)) {
@@ -946,7 +1171,9 @@ function Assert-IncrementalIisPreflight {
     Assert-NotReparsePoint `
         -Path $CanonicalRecoveryRoot `
         -Message "The canonical recovery root cannot be a reparse point."
-    if ([string]::IsNullOrWhiteSpace($ResumeHybridRebuildRelease)) { Test-ApplicationPayload -Path $CanonicalDeployRoot }
+    if ([string]::IsNullOrWhiteSpace($ResumeHybridRebuildRelease) -and [string]::IsNullOrWhiteSpace($ResumeHybridPatchRelease)) {
+        Test-ApplicationPayload -Path $CanonicalDeployRoot
+    }
 }
 
 Assert-CanonicalPath `
@@ -972,7 +1199,17 @@ if ($ResumeHybridRebuildRelease -and -not $ApplyHybridPassageRebuild) { throw 'H
 if ($ReplaceHybridRebuildRelease -and (-not $ApplyHybridPassageRebuild -or $ResumeHybridRebuildRelease)) { throw 'Hybrid replacement requires -ApplyHybridPassageRebuild and cannot combine with resume.' }
 if ($ReplaceHybridRebuildRelease -and $ReplaceHybridRebuildRelease -notmatch '^\d{8}T\d{6}Z-[0-9a-f]{12}-hybrid$') { throw 'Hybrid replacement requires an exact recovery release name.' }
 if ($ResumeHybridRebuildRelease -and $ResumeHybridRebuildRelease -notmatch '^\d{8}T\d{6}Z-[0-9a-f]{12}-hybrid$') { throw 'Hybrid resume requires an exact recovery release name.' }
-$applyAnyMigration = $ApplyMigrations -or $ApplyCorpusChunkFullTextMigration -or $ApplyHybridPassageRebuild
+if (($PatchHybridRebuildRelease -or $ResumeHybridPatchRelease) -and
+    (-not $ApplyHybridPassageRebuild -or $ReplaceHybridRebuildRelease -or $ResumeHybridRebuildRelease -or
+     ($PatchHybridRebuildRelease -and $ResumeHybridPatchRelease))) { throw 'Hybrid patch requires -ApplyHybridPassageRebuild and one exact patch or patch-resume release.' }
+if ($PatchHybridRebuildRelease -and $PatchHybridRebuildRelease -notmatch '^\d{8}T\d{6}Z-[0-9a-f]{12}-hybrid$') { throw 'Hybrid patch predecessor release invalid.' }
+if ($ResumeHybridPatchRelease -and $ResumeHybridPatchRelease -notmatch '^\d{8}T\d{6}Z-[0-9a-f]{12}-hybridpatch$') { throw 'Hybrid patch resume release invalid.' }
+if ($PatchHybridRebuildRelease -and ($ExpectedPatchCandidateHash -cnotmatch '^[0-9A-F]{64}$' -or $ExpectedPatchOperatorHash -cnotmatch '^[0-9A-F]{64}$')) {
+    throw 'Hybrid patch requires exact reviewed candidate and operator SHA-256 fingerprints.'
+}
+if (-not $PatchHybridRebuildRelease -and ($ExpectedPatchCandidateHash -or $ExpectedPatchOperatorHash)) { throw 'Reviewed patch hashes only apply to initial patch.' }
+if (($PatchHybridRebuildRelease -or $ResumeHybridPatchRelease) -and $RebuildTimeoutSeconds -gt 1800) { throw 'Hybrid patch drain timeout maximum is 1800 seconds.' }
+$applyAnyMigration = $ApplyMigrations -or $ApplyCorpusChunkFullTextMigration -or ($ApplyHybridPassageRebuild -and -not ($PatchHybridRebuildRelease -or $ResumeHybridPatchRelease))
 
 . (Join-Path $PSScriptRoot "loopback-deployment-safety.ps1")
 Import-Module (Join-Path $PSScriptRoot "incremental-iis-payload-swap.psm1") -Force -ErrorAction Stop
@@ -988,7 +1225,33 @@ if ($PlanOnly) {
     if ($ApplyHybridPassageRebuild) {
         $contract = Get-HybridPassageMigrationContract
         $history = @(Get-AppliedMigrationIds)
-        if ($ResumeHybridRebuildRelease) {
+        if ($PatchHybridRebuildRelease -or $ResumeHybridPatchRelease) {
+            $patchRelease=if ($PatchHybridRebuildRelease) { $PatchHybridRebuildRelease } else {
+                $patchRoot=Join-Path $IncrementalRecoveryRoot $ResumeHybridPatchRelease
+                Assert-NotReparsePoint -Path $patchRoot -Message 'hybrid-patch-plan-root-unsafe'
+                $patchBindingPath=Join-Path $patchRoot 'patch-binding.json'
+                Assert-NotReparsePoint -Path $patchBindingPath -Message 'hybrid-patch-plan-binding-unsafe'
+                (Get-Content -LiteralPath $patchBindingPath -Raw | ConvertFrom-Json -AsHashtable).Predecessor.ReleaseId
+            }
+            $patch=Get-HybridPatchBinding -RecoveryRoot $IncrementalRecoveryRoot -ReleaseId $patchRelease -ConnectionString (Get-DeploymentSqlConnectionString)
+            Assert-HybridMigrationHistory -OriginalHistory $patch.OriginalHistory -CurrentHistory $history
+            if ($history[-1] -cne $contract.Target) { throw 'hybrid-patch-plan-schema-mismatch' }
+            if ($PatchHybridRebuildRelease) {
+                Assert-HybridDeploymentHoldOwner -Path $ValidationHoldPath -ReleaseId $patch.ReleaseId -OperationId $patch.OperationId
+            }
+            $migrationPlan=[ordered]@{
+                kind='same-operation-forward-patch'; migrations=$false; reset=$false; prepare=$false
+                predecessor=$patch; resume_patch_release=$ResumeHybridPatchRelease; patch_predecessor_release=$PatchHybridRebuildRelease
+                expected_candidate_hash=$ExpectedPatchCandidateHash; expected_operator_hash=$ExpectedPatchOperatorHash
+                source_commit=$(if ($SourceRoot) { (& git -C $SourceRoot rev-parse HEAD 2>&1 | Out-String).Trim() } else { $null })
+                current_history=$history; schema_target=$contract.Target
+                gpu_drain='deny admissions; allow current OCR page; prove capacity release and exact IIS worker exit'
+                activation='new verified native-tokenizer-runtime-lifetime payload; same model files and unchanged configuration'
+                recovery='immutable predecessor and patch binding; forward-only exact patch release replay; same operation, epoch and checkpoints'
+                completion='same-operation finish, preserved inputs, held loopback probes, then hold release'
+            }
+        }
+        elseif ($ResumeHybridRebuildRelease) {
             $resumePath = Join-Path (Join-Path $IncrementalRecoveryRoot $ResumeHybridRebuildRelease) 'hybrid-state.json'
             $resume = Get-Content -LiteralPath $resumePath -Raw | ConvertFrom-Json -AsHashtable
             Assert-HybridMigrationHistory -OriginalHistory $resume.OriginalHistory -CurrentHistory $history
@@ -999,7 +1262,7 @@ if ($PlanOnly) {
             Assert-HybridMigrationHistory -OriginalHistory $replacement.OriginalHistory -CurrentHistory $history
         }
         else { Assert-HybridMigrationHistory -OriginalHistory $history -CurrentHistory $history }
-        $migrationPlan = [ordered]@{
+        if (-not ($PatchHybridRebuildRelease -or $ResumeHybridPatchRelease)) { $migrationPlan = [ordered]@{
             baseline=$contract.Baseline; target=$contract.Target; current_history=$history; generated_up_sha256=$contract.UpSha256
             rebuild='replace disposable chunks, vectors and ANN generations; preserve canonical inputs and published document winners'
             gpu_drain='hold canonical admission; allow active OCR page/native cleanup to finish; prove IIS worker exit before reset'
@@ -1010,7 +1273,7 @@ if ($PlanOnly) {
             resume_release=$ResumeHybridRebuildRelease
             replace_release=$ReplaceHybridRebuildRelease
             replacement=$(if ($ReplaceHybridRebuildRelease) { $replacement } else { $null })
-        }
+        } }
     }
     if ($ApplyMigrations) {
         if ([string]::IsNullOrWhiteSpace($SourceRoot)) {
@@ -1059,9 +1322,9 @@ if ($PlanOnly) {
         clean_slate = $false
         preserved = @("Config", "Data", "Runtime", "Recovery", "CodexPlugin")
         payload_acl = "inherit-from-live-root"
-        rollback = if ($ApplyHybridPassageRebuild) { 'before-schema: original payload; after-schema: held forward recovery with retained original payload/configuration' } else { "automatic-application-and-interactive-host-payload-restore" }
+        rollback = if ($PatchHybridRebuildRelease -or $ResumeHybridPatchRelease) { 'forward-only after activation intent; predecessor payload/packet retained, hold denied on failure' } elseif ($ApplyHybridPassageRebuild) { 'before-schema: original payload; after-schema: held forward recovery with retained original payload/configuration' } else { "automatic-application-and-interactive-host-payload-restore" }
         deployment_validation_hold = $true
-        candidate_validation = if ($ApplyHybridPassageRebuild) { 'held-exact-rebuild-finalisation-preserved-inputs-and-loopback-probes' } elseif ($DeferReadinessForScopedRemediation) {
+        candidate_validation = if ($PatchHybridRebuildRelease -or $ResumeHybridPatchRelease) { 'same-operation-epoch-checkpoint-continuity-preserved-inputs-and-loopback-probes' } elseif ($ApplyHybridPassageRebuild) { 'held-exact-rebuild-finalisation-preserved-inputs-and-loopback-probes' } elseif ($DeferReadinessForScopedRemediation) {
             "held-live-and-index-health probes, exact-ready-503 and unchanged-retained-pipeline-state"
         }
         else {
@@ -1145,6 +1408,11 @@ try {
 
     Assert-IncrementalIisPreflight
     if ($ApplyHybridPassageRebuild) {
+        if ($PatchHybridRebuildRelease -or $ResumeHybridPatchRelease) {
+            Invoke-HybridPassageIisPatch -SourceRoot $SourceRoot -Commit $commit -PredecessorRelease $PatchHybridRebuildRelease -ResumeRelease $ResumeHybridPatchRelease `
+                -ExpectedCandidateHash $ExpectedPatchCandidateHash -ExpectedOperatorHash $ExpectedPatchOperatorHash
+            return
+        }
         Invoke-HybridPassageIisUpdate -SourceRoot $SourceRoot -Commit $commit -ResumeRelease $ResumeHybridRebuildRelease -ReplaceRelease $ReplaceHybridRebuildRelease
         return
     }

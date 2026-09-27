@@ -35,8 +35,8 @@ correction does not change models, ranking, scheduler ownership or residency.
 ## Approved replacement capability
 
 The user approved the controlled replacement of this interrupted 35-input rebuild.
-The recovery extension is implemented locally; execution and final verification
-remain pending. Production still retains the original held operation and epoch.
+The recovery extension was merged and its controlled replacement committed. The
+successor operation and epoch are held while native memory recovery is completed.
 Independent review concluded that controlled replacement is clearer than repairing
 individual chunk identities, failed requests, manifests and checkpoint counts.
 The final focused lifecycle run passed 63 tests, including replacement, source
@@ -81,8 +81,8 @@ of the interrupted release with schema 54:
 Before execution, retain focused integration evidence for changed input, wrong
 operation/hold, active or uncertain capacity, acknowledged queued work,
 publication/query races, failure rollback, replay and preserved histories. The
-complete change requires independent review, required feature closeout, and a
-fresh `-PlanOnly` operational packet. The current user approval authorises this
+complete replacement passed independent review, required feature closeout, and a
+fresh `-PlanOnly` operational packet. The user approval authorised this
 replacement action, including its new operation/epoch and disposal of the partially
 rebuilt projection. It does not authorise model acquisition or dead-letter processing.
 
@@ -136,3 +136,60 @@ All finished build/test workers, trace collectors, memory samplers and recovery
 waiters must exit. Reusable task build servers are disabled to reduce idle
 process accumulation. The held application and SQL Server remain service
 processes, not orphaned measurement workers.
+
+## Successor state and native memory investigation
+
+The controlled replacement committed on 27 September 2026 as release
+`20260927T212805Z-38c90f816f21-hybrid`, operation
+`ce09966e-c2f7-4377-816a-838bbeb8c307`, epoch
+`044b6dab-b58c-4844-8d80-9329432ef29a`. Schema migration 55 is applied.
+The successor retained all 35 canonical inputs and historical failures. SQL proves
+55 old jobs superseded, 84 old embedding requests retained, and 13 never-native-
+owned queued requests cancelled. Its 3,596 new passages contain no ASCII
+whitespace-only entry. A bounded, reviewed same-release resume recycled a drained
+IIS worker without resetting the operation or checkpoints. At the subsequent
+deny-all hold, 28 inputs and 908 vectors had completed; seven inputs remained.
+No active native batch was present and no new job had failed.
+
+The first successor worker grew from 21.3 GB to 42.3 GB private memory while
+embedding batches ran. Managed GC committed memory was about 415 MB, so the bulk
+was outside the managed heap. The recycled worker also grew to approximately
+20.0 GB before a five-minute bounded resume timed out and restored deny-all
+admission. A separate, offline tokenizer-only test reproduced 3.48 GB private
+memory after 20 ordinary tokenizer create/encode/dispose/DLL-unload cycles,
+including after full GC. Keeping one additional verified native DLL handle held
+for that test reduced 20-cycle memory to 1.19 GB; 80 cycles plateaued near
+1.06 GB. This implicates repeated unload of the mimalloc-backed tokenizer DLL;
+it does not prove DirectML never retains memory. No acquisition, weight
+residency, scheduler change or dead-letter action followed from the observation.
+
+The local correction pins only the verified tokenizer native DLL and protected
+runtime file lease for the process lifetime. Each tokenizer and ONNX model session
+continues per-request disposal. The incremental updater's existing resume checks
+the old commit and payload hash; it cannot accept a corrected binary within this
+release. The forward-patch recovery operation preserves
+the current operation, epoch, checkpoints, source fingerprint and deny-all hold
+while draining and replacing only the compatible application payload. No updater
+bypass or second reset of the successor projection is authorised.
+
+The incremental updater now has that forward-patch route. Its initial invocation
+requires the exact held predecessor release and independently reviewed SHA-256
+fingerprints for the new web and operator payloads. Run `-PlanOnly` first, then
+`-ApplyHybridPassageRebuild -PatchHybridRebuildRelease <release>
+-ExpectedPatchCandidateHash <hash> -ExpectedPatchOperatorHash <hash> -Apply`
+only with production approval. It verifies the unchanged schema, SQL operation,
+epoch, manifest, canonical inputs, hold owner, configuration and offline model
+inventory before replacing the web payload. It disables interactive intake,
+drains the GPU and IIS worker without interrupting an active OCR page, records
+activation intent, and retains the old payload for inspection. It neither runs a
+migration nor resets or prepares the projection. It releases the hold only after
+the same operation finishes and the required loopback and input checks pass.
+
+If activation or validation stops, the hold remains deny-all. Resume the exact
+patch release through `-ApplyHybridPassageRebuild -ResumeHybridPatchRelease
+<patch-release> -Apply` after reviewing its `-PlanOnly` output. Recovery checks
+the immutable predecessor and patch binding, recopies any partial payload from
+the verified candidate, and validates the full payload fingerprint before
+starting IIS. It never rolls back the schema, projection or old application
+binary automatically. Neither this route nor an approved dry run authorises a
+new model download or dead-letter processing.

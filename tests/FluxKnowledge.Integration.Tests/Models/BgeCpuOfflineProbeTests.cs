@@ -11,7 +11,7 @@ namespace FluxKnowledge.Integration.Tests.Models;
 public sealed class BgeCpuOfflineProbeTests
 {
     [BgeNativeProbeFact]
-    public async Task Native_tokenizer_library_is_balanced_across_failure_repetition_and_two_live_owners()
+    public async Task Native_tokenizers_are_disposed_while_the_verified_runtime_survives_failure_and_repetition()
     {
         var tokenizerStore = new LocalModelStore(() => WindowsModelVerificationFiles.OpenProductionBundle(
             ["bundles", "bge-m3-onnx", BgeOfflineModels.EmbeddingRevision, "onnx"]));
@@ -22,8 +22,9 @@ public sealed class BgeCpuOfflineProbeTests
             using var process = Process.GetCurrentProcess();
             return process.Modules.Cast<ProcessModule>().Any(m => m.ModuleName.Equals("hf_tokenizers.dll", StringComparison.OrdinalIgnoreCase));
         }
-        Assert.False(Loaded());
-        for (var iteration = 0; iteration < 3; iteration++)
+        using var current = Process.GetCurrentProcess();
+        var before = current.PrivateMemorySize64;
+        for (var iteration = 0; iteration < 40; iteration++)
         {
             using var first = await BgeOfflineModels.CreateTokenizerAsync(tokenizerStore, runtimeStore, false, CancellationToken.None);
             using var second = await BgeOfflineModels.CreateTokenizerAsync(tokenizerStore, runtimeStore, false, CancellationToken.None);
@@ -34,16 +35,21 @@ public sealed class BgeCpuOfflineProbeTests
             Assert.True(Loaded());
             Assert.Equal(expected, second.EncodeUntruncated("Sample request."));
             second.Dispose();
-            Assert.False(Loaded());
+            Assert.Throws<ObjectDisposedException>(() => second.EncodeUntruncated("Disposed request."));
+            Assert.True(Loaded());
         }
+        current.Refresh();
+        // The former unload cycle retained ~168 MB each and exceeded 3 GB in 20
+        // tokenizer-only cycles. Two instances per iteration exercise 80 cycles.
+        Assert.InRange(current.PrivateMemorySize64 - before, long.MinValue, 2L * 1024 * 1024 * 1024);
         await using var fixture = await LocalModelFixture.CreateAsync();
         var spec = await fixture.SeedCompleteBundleAsync();
         using var malformed = (await fixture.Store.ResolveAsync(spec, CancellationToken.None)).Lease!;
         using var runtime = (await runtimeStore.ResolveAsync(BgeOfflineModels.TokenizerRuntime, CancellationToken.None)).Lease!;
         // The already verified synthetic processor JSON cannot construct a tokenizer:
-        // native load occurred, but constructor failure must balance that load too.
+        // native load occurred; failure balances the request reference, not the process pin.
         Assert.ThrowsAny<Exception>(() => NativeBgeTokenizer.OpenForTest(malformed, runtime, "processor.json"));
-        Assert.False(Loaded());
+        Assert.True(Loaded());
     }
 
     [BgeNativeProbeFact]

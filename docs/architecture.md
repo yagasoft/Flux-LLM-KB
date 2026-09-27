@@ -213,6 +213,13 @@ dispatch/slot execution read. It is registered in the held production compositio
 background GPU execution is observed, while full-search quality and latency
 acceptance remain pending.
 
+A held 35-input rebuild reached 28 completed inputs before native process memory
+growth required a pause. Isolated tokenizer-only cycles identified repeated native
+tokenizer DLL unload as the main source of that growth. The local correction pins
+only the verified tokenizer runtime DLL and its protected file lease for the IIS
+process lifetime; each tokenizer and ONNX model session retains per-request
+disposal. The corrected payload has not been deployed into the held rebuild.
+
 Interactive ownership now records an opaque Windows machine fingerprint, PID and
 process start time. Independently reviewed recovery proves the exact local process
 incarnation has exited before reconciling capacity; it never replays private search

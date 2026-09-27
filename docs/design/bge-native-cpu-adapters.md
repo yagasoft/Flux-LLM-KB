@@ -31,11 +31,16 @@ owns its complete lease until session disposal; a path alone is not a lease.
 
 The tokenizer reads the separately pinned JSON for each model and verifies the
 cached Tokenizers.DotNet 1.4.0 managed/native runtime. It uses an isolated assembly
-context and an explicit native DLL path. One owned DLL load is balanced exactly
-once after tokenizer destruction, including construction failure. Tests observe
-module removal after the final live owner is disposed and preserve another live
-tokenizer when the first is disposed. Tokenizer/model payloads remain in the
-central store and are not copied into application releases.
+context and an explicit native DLL path. A held rebuild exposed native memory
+growth when the mimalloc-backed DLL was unloaded after every tokenizer. The local
+correction retains one extra verified DLL handle and protected runtime lease until
+process exit. Each request still balances its own DLL reference and disposes its
+tokenizer and model session; another verified runtime path or identity is refused.
+An isolated tokenizer-only run reached 3.48 GB after 20 ordinary unload cycles,
+compared with 1.06 GB after 80 cycles with an extra DLL handle held. That second
+run was a diagnostic; the corrected payload still awaits production deployment.
+Tokenizer/model payloads remain in the central store and are not copied into
+application releases.
 
 ## Inference contracts
 
@@ -71,7 +76,7 @@ stored under `J:\Models\manifests\bge-reranker-source-20260927`.
 | Embedding components | Maximum absolute reference difference `0.0000004116445779800415` |
 | Reranker logits | Maximum absolute source-reference difference `0.000015676021575927734` |
 | Pair boundary | Exactly 512 tokens accepted; 513 refused without truncation |
-| Native library lifetime | Repeated creation/disposal, two live owners and failed construction passed |
+| Native library lifetime | Request references balanced; verified runtime-only process pin passed focused regression |
 | Native models, contracts and model-store checks | 51 passed; zero failures/skips in the explicitly enabled run |
 
 These are numerical and lifecycle checks. Probe aggregate timings include cache

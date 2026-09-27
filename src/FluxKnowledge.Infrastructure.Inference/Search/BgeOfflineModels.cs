@@ -8,6 +8,7 @@ namespace FluxKnowledge.Infrastructure.Inference.Search;
 /// <summary>Fixed offline profiles. No provider-cache lookup or acquisition path.</summary>
 public static class BgeOfflineModels
 {
+    private static readonly ProcessTokenizerRuntimePin TokenizerRuntimePin = new();
     public const string EmbeddingRevision = "5617a9f61b028005a4858fdac845db406aefb181";
     public const string RerankerRevision = "953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e";
     public const string RerankerExport = "f083b9dbba6d1b56869a6572e5d7f9f5fd17f961d3c521ea2424d80c5f800580";
@@ -62,6 +63,11 @@ public static class BgeOfflineModels
         try
         {
             runtime = await ResolveLeaseAsync(runtimeStore, TokenizerRuntime, cancellationToken).ConfigureAwait(false);
+            // The pin owns an additional verified lease. The current request continues
+            // to own and dispose its own runtime/tokenizer leases, including failure.
+            await TokenizerRuntimePin.EnsureAsync(ModelManifestCodec.Fingerprint(TokenizerRuntime),
+                runtime.GetVerifiedLocalPath("hf_tokenizers.dll"),
+                ct => ResolveLeaseAsync(runtimeStore, TokenizerRuntime, ct), cancellationToken).ConfigureAwait(false);
             return await NativeBgeTokenizer.CreateAsync(tokenizer, runtime, ModelManifestCodec.Fingerprint(spec), cancellationToken).ConfigureAwait(false);
         }
         catch

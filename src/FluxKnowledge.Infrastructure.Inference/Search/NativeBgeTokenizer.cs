@@ -98,8 +98,8 @@ internal sealed class NativeBgeTokenizer : IBgeTokenizer
             try { _tokenizer.Dispose(); }
             finally
             {
-                // The managed binding caches P/Invoke targets. No finalizer may call those
-                // targets after our explicit load reference is balanced.
+                // The managed binding caches P/Invoke targets. Balance this request's
+                // reference; the separate verified process pin protects allocator arenas.
                 GC.SuppressFinalize(_tokenizer);
                 _context.Unload();
                 ReleaseNativeLibrary();
