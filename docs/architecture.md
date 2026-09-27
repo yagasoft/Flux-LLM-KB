@@ -322,6 +322,11 @@ deployment hold, the existing scheduler's admission fence and proof of worker
 exit. While a rebuild is active, outbox, job and GPU admissions require the exact
 operation permit, including when the hold file is absent. Source intake remains
 held. An active OCR page finishes normally before the application stops.
+Worker exit proof uses a validated complete IIS worker inventory and selects the
+exact application pool; unrelated workers do not prevent completion. The updater
+records its owned stop before requesting it, so a failure during exit proof can
+restore the original pool before any schema change. A pool already stopped by
+another operation is not claimed as an owned stop.
 
 The updater records its forward recovery boundary before the first schema command.
 After that boundary, failure retains the hold, schema, payload and configuration;

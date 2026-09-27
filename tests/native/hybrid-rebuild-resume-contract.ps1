@@ -12,7 +12,7 @@ foreach ($name in @('Invoke-HybridPassageIisUpdate','Assert-NotReparsePoint','Ne
     . ([scriptblock]::Create($definition[0].Extent.Text))
 }
 function Get-DeploymentSqlConnectionString { 'Data Source=localhost;Initial Catalog=FluxKnowledge_DisposableResumeContract;Integrated Security=True;TrustServerCertificate=True;ConnectRetryCount=0' }
-function Get-AppliedMigrationIds { if ($evidence.Mode -eq 'foreign') { @($contract.Baseline) } else { @($contract.Baseline)+@($contract.Suffix) } }
+function Get-AppliedMigrationIds { if ($evidence.Mode -in @('foreign','pre-schema-proof-failure','pre-schema-originally-stopped')) { @($contract.Baseline) } else { @($contract.Baseline)+@($contract.Suffix) } }
 function Invoke-HybridRebuildOperator {
     param($OperatorRoot,$ConnectionString,$Arguments)
     switch ($Arguments[0]) {
@@ -37,9 +37,12 @@ function Start-WebAppPool {
 }
 function Wait-IisAppPoolState { param($Name,$ExpectedState,$TimeoutSeconds) if ($evidence.PoolState -cne $ExpectedState) { throw 'Fake pool state mismatch.' } }
 function Stop-HybridIisAfterGpuDrain {
+    param([scriptblock]$OnStopRequested)
     $evidence.Drains++
     if ($evidence.StaleReservation) { throw 'Drain attempted before compatible held recovery.' }
+    if ($evidence.PoolState -eq 'Started' -and $OnStopRequested) { & $OnStopRequested }
     $evidence.Events.Add('drain'); $evidence.PoolState='Stopped'
+    if ($evidence.Mode -in @('pre-schema-proof-failure','pre-schema-originally-stopped')) { throw 'hybrid-iis-worker-exit-proof-unavailable' }
 }
 function Activate-HybridCompatiblePayload { param($CandidateRoot,$PreviousRoot,$ReleaseRoot,$ConfigurationCandidate,$ConfigurationPath,$State) $evidence.Activations++; $evidence.Events.Add('activate') }
 function Invoke-FixedLoopbackProbe { param($Uri,$TimeoutSeconds) [IO.MemoryStream]::new() }
@@ -60,7 +63,7 @@ try {
             --startup-project (Join-Path $SourceRoot 'src/FluxKnowledge.Infrastructure.SqlServer') --no-build --output $MigrationScript | Out-Null
         if ($LASTEXITCODE -ne 0) { throw 'Test migration generation failed.' }
     }
-    foreach ($mode in @('foreign','released-foreign','unjournalled-schema','recovery')) {
+    foreach ($mode in @('foreign','released-foreign','unjournalled-schema','recovery','pre-schema-proof-failure','pre-schema-originally-stopped')) {
         $CanonicalLiveRoot=Join-Path $temporaryRoot $mode
         $CanonicalDeployRoot=Join-Path $CanonicalLiveRoot 'App'
         $IncrementalRecoveryRoot=Join-Path $CanonicalLiveRoot 'Recovery/IncrementalUpdates'
@@ -86,7 +89,7 @@ try {
         }
         Write-HybridRebuildJson -Path (Join-Path $releaseRoot 'hybrid-state.json') -Value $state
         Write-HybridRebuildJson -Path $ValidationHoldPath -Value $(if ($mode -in @('foreign','released-foreign')) { 'another-release' } else { $releaseId })
-        $evidence=@{ Mode=$mode; Starts=0; Activations=0; Schemas=0; Drains=0; Disables=0; Enables=0; PoolState='Stopped'; StaleReservation=($mode -eq 'recovery'); Finished=$false; Events=[Collections.Generic.List[string]]::new() }
+        $evidence=@{ Mode=$mode; Starts=0; Activations=0; Schemas=0; Drains=0; Disables=0; Enables=0; PoolState=$(if ($mode -eq 'pre-schema-proof-failure') { 'Started' } else { 'Stopped' }); StaleReservation=($mode -eq 'recovery'); Finished=$false; Events=[Collections.Generic.List[string]]::new() }
         try {
             Invoke-HybridPassageIisUpdate -SourceRoot $SourceRoot -Commit ('a'*40) -ResumeRelease $releaseId | Out-Null
             if ($mode -ne 'recovery') { throw 'Ambiguous resume was accepted.' }
@@ -96,11 +99,19 @@ try {
                 'foreign' { 'hybrid-hold-not-owned-by-release-and-operation' }
                 'released-foreign' { 'hybrid-release-outcome-ambiguous' }
                 'unjournalled-schema' { 'hybrid-resume-schema-boundary-ambiguous' }
+                'pre-schema-proof-failure' { 'hybrid-iis-worker-exit-proof-unavailable' }
+                'pre-schema-originally-stopped' { 'hybrid-iis-worker-exit-proof-unavailable' }
                 default { '' }
             }
             if (-not $expected -or $_.Exception.Message -cne $expected) { throw }
         }
-        if ($mode -ne 'recovery') {
+        if ($mode -in @('pre-schema-proof-failure','pre-schema-originally-stopped')) {
+            $expectedStarts=if ($mode -eq 'pre-schema-proof-failure') { 1 } else { 0 }
+            $expectedPool=if ($mode -eq 'pre-schema-proof-failure') { 'Started' } else { 'Stopped' }
+            if ($evidence.Starts -ne $expectedStarts -or $evidence.PoolState -cne $expectedPool -or (Test-Path $ValidationHoldPath) -or
+                $evidence.Activations -or $evidence.Schemas -or $evidence.Disables -ne 1 -or $evidence.Enables -ne 1) { throw 'Pre-schema proof failure did not restore original pool/task state without schema/payload mutation.' }
+        }
+        elseif ($mode -ne 'recovery') {
             if ($evidence.Starts -or $evidence.Activations -or $evidence.Schemas -or $evidence.Drains -or $evidence.Disables -or $evidence.Enables -or
                 (Get-Content $ValidationHoldPath -Raw | ConvertFrom-Json) -cne $(if ($mode -eq 'unjournalled-schema') { $releaseId } else { 'another-release' })) { throw 'Ambiguous resume refusal mutated an operation.' }
         }

@@ -177,7 +177,8 @@ public sealed class GpuInteractiveExecutorTests(NativeSqlServerFixture fixture) 
     {
         await SqlTestData.ClearPipelineAsync(fixture);
         var factory = SqlTestData.CreateFactory(fixture);
-        var store = new SqlGpuSchedulerStore(factory);
+        var clock = new ManualClock(DateTimeOffset.UtcNow);
+        var store = new SqlGpuSchedulerStore(factory, timeProvider: clock);
         await using (var setup = await factory.CreateDbContextAsync())
         {
             setup.GpuCapacitySlots.Add(new GpuCapacitySlotEntity { SlotKey = "gpu-0", State = 0, UpdatedAtUtc = DateTimeOffset.UtcNow });
@@ -186,7 +187,7 @@ public sealed class GpuInteractiveExecutorTests(NativeSqlServerFixture fixture) 
         using var caller = new CancellationTokenSource();
         var calls = 0;
         var executor = new GpuInteractiveExecutor(store, new Lifecycle(store), store, new ChannelGpuSchedulerWakeSignal(),
-            TimeProvider.System, "synthetic-retrieval-v1", "synthetic-settings-v1", 10);
+            clock, "synthetic-retrieval-v1", "synthetic-settings-v1", 10);
         var response = executor.ExecuteAsync<int>(_ => { Interlocked.Increment(ref calls); return ValueTask.FromResult(new GpuInteractiveNativeResult<int>(42, true)); }, caller.Token).AsTask();
         await using var context = await factory.CreateDbContextAsync();
         for (var attempt = 0; await context.GpuMiniTasks.CountAsync() == 0 && attempt < 50; attempt++) await Task.Delay(10);
@@ -198,7 +199,13 @@ public sealed class GpuInteractiveExecutorTests(NativeSqlServerFixture fixture) 
         Assert.Empty(await store.ReadPendingDispatchesAsync(CancellationToken.None));
         // No DeliverAsync: the existing dispatcher cannot see an uncertain dispatch.
         if (cancelCaller) { caller.Cancel(); await Assert.ThrowsAnyAsync<OperationCanceledException>(() => response); }
-        else await Assert.ThrowsAsync<TimeoutException>(() => response);
+        else
+        {
+            Assert.False(response.IsCompleted);
+            clock.Advance(TimeSpan.FromSeconds(2));
+            await Assert.ThrowsAsync<TimeoutException>(() => response.WaitAsync(TimeSpan.FromSeconds(5)));
+            Assert.True(response.IsFaulted); // The executor deadline fired, rather than the test watchdog.
+        }
         for (var attempt = 0; await context.GpuCapacitySlots.AsNoTracking().Select(s => s.State).SingleAsync() != (int)GpuCapacitySlotState.Available && attempt < 100; attempt++) await Task.Delay(20);
         Assert.Equal((int)GpuCapacitySlotState.Available, await context.GpuCapacitySlots.AsNoTracking().Select(s => s.State).SingleAsync());
         Assert.Equal(0, calls);
@@ -219,8 +226,12 @@ public sealed class GpuInteractiveExecutorTests(NativeSqlServerFixture fixture) 
     {
         await SqlTestData.ClearPipelineAsync(fixture);
         var factory = SqlTestData.CreateFactory(fixture);
+        // The already-uncertain dispatch requires three SQL reads before refusal;
+        // keep that ownership check independent of queue expiry (tested above).
+        // Other cases retain real time so their durable retry delays still run.
+        TimeProvider clock = failureMode == 5 ? new ManualClock(DateTimeOffset.UtcNow) : TimeProvider.System;
         var uncertaintyResponses = 0;
-        var store = new SqlGpuSchedulerStore(factory, afterLifecycleCommitted: _ =>
+        var store = new SqlGpuSchedulerStore(factory, timeProvider: clock, afterLifecycleCommitted: _ =>
         {
             if (failureMode == 7 && Interlocked.Increment(ref uncertaintyResponses) == 1) throw new ResponseLostException();
             return ValueTask.CompletedTask;
@@ -238,7 +249,7 @@ public sealed class GpuInteractiveExecutorTests(NativeSqlServerFixture fixture) 
         var requests = new TransientRecoveryReads(store, failureMode == 7);
         var scheduler = new TransientReservationRead(store, failureMode == 7);
         var executor = new GpuInteractiveExecutor(requests, new Lifecycle(store, failureMode == 4, failureMode == 6 ? MarkUncertain : null, failureMode == 7), scheduler, new ChannelGpuSchedulerWakeSignal(),
-            TimeProvider.System, "synthetic-retrieval-v1", "synthetic-settings-v1", 10);
+            clock, "synthetic-retrieval-v1", "synthetic-settings-v1", 10);
         var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var cleaned = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var nativeCalls = 0;
@@ -349,6 +360,52 @@ public sealed class GpuInteractiveExecutorTests(NativeSqlServerFixture fixture) 
         public ValueTask<GpuSchedulerWakeConsumption> ConsumeWakeAsync(Guid operation, long generation, CancellationToken ct) => store.ConsumeWakeAsync(operation, generation, ct);
         public ValueTask<bool> AcknowledgeWakeAsync(Guid operation, Guid consumption, CancellationToken ct) => store.AcknowledgeWakeAsync(operation, consumption, ct);
         public ValueTask<GpuSchedulerStatusSnapshot> ReadGpuSchedulerStatusAsync(CancellationToken ct) => store.ReadGpuSchedulerStatusAsync(ct);
+    }
+    private sealed class ManualClock(DateTimeOffset now) : TimeProvider
+    {
+        private readonly object _sync = new();
+        private readonly List<ManualTimer> _timers = [];
+        private DateTimeOffset _now = now;
+        public override DateTimeOffset GetUtcNow() { lock (_sync) return _now; }
+        public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period)
+        {
+            lock (_sync)
+            {
+                var timer = new ManualTimer(this, callback, state);
+                timer.Change(dueTime, period);
+                _timers.Add(timer);
+                return timer;
+            }
+        }
+        public void Advance(TimeSpan elapsed)
+        {
+            List<Action> callbacks = [];
+            lock (_sync)
+            {
+                _now += elapsed;
+                foreach (var timer in _timers)
+                    if (timer.TakeIfDue(_now) is { } callback) callbacks.Add(callback);
+            }
+            foreach (var callback in callbacks) callback();
+        }
+        private sealed class ManualTimer(ManualClock clock, TimerCallback callback, object? state) : ITimer
+        {
+            private DateTimeOffset? _due;
+            public bool Change(TimeSpan dueTime, TimeSpan period)
+            {
+                if (period != Timeout.InfiniteTimeSpan) throw new NotSupportedException("Only one-shot timers are used by these tests.");
+                lock (clock._sync) { _due = dueTime == Timeout.InfiniteTimeSpan ? null : clock._now + dueTime; }
+                return true;
+            }
+            public Action? TakeIfDue(DateTimeOffset current)
+            {
+                if (_due is null || _due > current) return null;
+                _due = null;
+                return () => callback(state);
+            }
+            public void Dispose() { lock (clock._sync) _due = null; }
+            public ValueTask DisposeAsync() { Dispose(); return ValueTask.CompletedTask; }
+        }
     }
     private sealed class ResponseLostException : System.Data.Common.DbException;
 }

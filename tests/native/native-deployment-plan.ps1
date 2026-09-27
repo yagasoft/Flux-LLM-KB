@@ -459,4 +459,9 @@ if ($LASTEXITCODE -ne 0) {
     throw "The reviewed native go-live SQL bootstrap manifest is not reproducible: $bootstrapManifestOutput"
 }
 
+$workerProofOutput = & pwsh -NoProfile -File (Join-Path $SourceRoot 'tests/native/hybrid-iis-worker-recovery-contract.ps1') -SourceRoot $SourceRoot 2>&1 | Out-String
+if ($LASTEXITCODE -ne 0) {
+    throw "The hybrid IIS worker exit/recovery contract failed: $workerProofOutput"
+}
+
 Write-Output "Native deployment plan contract passed."

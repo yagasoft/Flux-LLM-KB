@@ -554,15 +554,35 @@ function Assert-NotReparsePoint {
     }
 }
 
+function Get-HybridIisWorkerIds {
+    param([Parameter(Mandatory)][string]$AppCmdPath, [Parameter(Mandatory)][string]$PoolName)
+    # Appcmd's filtered list returns exit 1 for an empty result. Obtain a successful
+    # complete inventory, validate it, then select the exact application pool.
+    $output = (& $AppCmdPath list wp /xml | Out-String)
+    if ($LASTEXITCODE -ne 0) { throw 'hybrid-iis-worker-inventory-unavailable' }
+    try {
+        $inventory = [xml]$output
+        if ($inventory.DocumentElement.Name -cne 'appcmd') { throw 'Invalid inventory root.' }
+        foreach ($worker in $inventory.DocumentElement.ChildNodes) {
+            if ($worker.NodeType -eq [System.Xml.XmlNodeType]::Whitespace) { continue }
+            $id = 0
+            if ($worker.Name -cne 'WP' -or
+                -not [int]::TryParse($worker.GetAttribute('WP.NAME'), [ref]$id) -or $id -le 0 -or
+                [string]::IsNullOrWhiteSpace($worker.GetAttribute('APPPOOL.NAME'))) { throw 'Invalid worker identity.' }
+            if ([string]::Equals($worker.GetAttribute('APPPOOL.NAME'), $PoolName, [StringComparison]::OrdinalIgnoreCase)) { $id }
+        }
+    }
+    catch { throw 'hybrid-iis-worker-inventory-unavailable' }
+}
+
 function Stop-HybridIisAfterGpuDrain {
+    param([scriptblock]$OnStopRequested)
     Invoke-WithHybridGpuDrain -ConnectionString (Get-DeploymentSqlConnectionString) -TimeoutSeconds $RebuildTimeoutSeconds -StopApplication {
         param($sessionId)
         $appcmd = Join-Path $env:SystemRoot 'System32/inetsrv/appcmd.exe'
-        $workerXml = (& $appcmd list wp "/apppool.name:$SiteName" /xml | Out-String)
-        if ($LASTEXITCODE -ne 0) { throw 'hybrid-iis-worker-inventory-unavailable' }
+        $workerIds = @(Get-HybridIisWorkerIds -AppCmdPath $appcmd -PoolName $SiteName)
         $identities = [Collections.Generic.List[object]]::new()
         $processes = @(Get-CimInstance Win32_Process -ErrorAction Stop)
-        $workerIds = @(([xml]$workerXml).SelectNodes('/appcmd/WP') | ForEach-Object { [int]$_.'WP.NAME' })
         $pending = [Collections.Generic.Queue[int]]::new()
         foreach ($id in $workerIds) { $pending.Enqueue($id) }
         while ($pending.Count -gt 0) {
@@ -572,7 +592,10 @@ function Stop-HybridIisAfterGpuDrain {
             $identities.Add(@{ ProcessId=$id; Created=$process[0].CreationDate })
             foreach ($child in @($processes | Where-Object ParentProcessId -eq $id)) { $pending.Enqueue([int]$child.ProcessId) }
         }
-        if ((Get-WebAppPoolState -Name $SiteName).Value -ne 'Stopped') { Stop-WebAppPool -Name $SiteName }
+        if ((Get-WebAppPoolState -Name $SiteName).Value -ne 'Stopped') {
+            if ($OnStopRequested) { & $OnStopRequested }
+            Stop-WebAppPool -Name $SiteName
+        }
         Wait-IisAppPoolState -Name $SiteName -ExpectedState 'Stopped' -TimeoutSeconds $ReadinessTimeoutSeconds
         $timer = [Diagnostics.Stopwatch]::StartNew()
         while ($true) {
@@ -581,9 +604,8 @@ function Stop-HybridIisAfterGpuDrain {
                 $current = @(Get-CimInstance Win32_Process -Filter "ProcessId = $($identity.ProcessId)" -ErrorAction Stop)
                 $remaining += @($current | Where-Object CreationDate -eq $identity.Created)
             }
-            $currentWorkers = (& $appcmd list wp "/apppool.name:$SiteName" /xml | Out-String)
-            if ($LASTEXITCODE -ne 0) { throw 'hybrid-iis-worker-exit-proof-unavailable' }
-            if ($remaining.Count -eq 0 -and ([xml]$currentWorkers).SelectNodes('/appcmd/WP').Count -eq 0) { break }
+            $currentWorkers = @(Get-HybridIisWorkerIds -AppCmdPath $appcmd -PoolName $SiteName)
+            if ($remaining.Count -eq 0 -and $currentWorkers.Count -eq 0) { break }
             if ($timer.Elapsed.TotalSeconds -ge $ReadinessTimeoutSeconds) { throw 'hybrid-iis-worker-exit-not-proven' }
             Start-Sleep -Milliseconds 250
         }
@@ -765,8 +787,7 @@ function Invoke-HybridPassageIisUpdate {
                         $live.Dispose()
                     }
                 }
-                Stop-HybridIisAfterGpuDrain
-                $attempt.StoppedApplication = $true
+                Stop-HybridIisAfterGpuDrain -OnStopRequested { $attempt.StoppedApplication = $true }
                 if ($null -eq $state.PreservedInputFingerprint) { $state.PreservedInputFingerprint = Get-HybridPreservedInputFingerprint }
                 elseif ((Get-HybridPreservedInputFingerprint) -cne $state.PreservedInputFingerprint) { throw 'hybrid-preserved-inputs-changed' }
             } -ApplySchema {
@@ -829,7 +850,7 @@ function Invoke-HybridPassageIisUpdate {
             }
             # No schema command, reset, configuration or payload change has occurred.
             if ($attempt.OwnsHold) {
-                if ($attempt.StoppedApplication) { Start-WebAppPool -Name $SiteName }
+                if ($attempt.StoppedApplication -and (Get-WebAppPoolState -Name $SiteName).Value -ne 'Started') { Start-WebAppPool -Name $SiteName }
                 Remove-DeploymentValidationHold -Path $ValidationHoldPath -ReleaseId $releaseId
                 if ($attempt.DisabledInteractiveHost -and $state.InteractiveHostWasEnabled) { Enable-ScheduledTask -TaskName $InteractiveHostTaskName | Out-Null }
             }
