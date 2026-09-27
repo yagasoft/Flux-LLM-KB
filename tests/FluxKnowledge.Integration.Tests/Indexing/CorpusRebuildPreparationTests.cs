@@ -243,6 +243,38 @@ public sealed class CorpusRebuildPreparationTests(NativeSqlServerFixture fixture
         Assert.NotNull(state.EmptyCatalogueValidatedAtUtc);
     }
 
+    [NativeSqlServerFact]
+    public async Task Whitespace_only_canonical_input_finishes_without_embedding_work_and_preserves_its_source()
+    {
+        var text = string.Concat(Enumerable.Repeat(" \t\r\n\u00a0\u2003", 200));
+        await using var environment = await SqlToUsearchRebuildTests.PipelineEnvironment.CreateAsync(fixture, text);
+        await using var before = environment.Factory.CreateDbContext();
+        var original = await before.Artifacts.AsNoTracking().SingleAsync(value => value.Stage == (int)PipelineStage.CanonicalIndex);
+        Assert.True(string.IsNullOrWhiteSpace(original.SearchText));
+        var builder = new PassageBuilder(new Tokenizer());
+        var (store, plan) = await ResetAsync(environment, builder);
+        var input = Assert.Single(plan.Inputs);
+
+        var preparation = await store.PrepareAsync(plan.OperationId, input.PipelineRecordId, builder, CancellationToken.None);
+
+        Assert.Equal(0, preparation.PassageCount);
+        Assert.Null(preparation.EmbeddingJobId);
+        Assert.Null(preparation.DispatchMessageId);
+        await using var context = environment.Factory.CreateDbContext();
+        var retained = await context.Artifacts.SingleAsync(value => value.Id == input.CanonicalArtifactId);
+        Assert.Equal(original.SearchText, retained.SearchText);
+        Assert.Equal(original.ContentHash, retained.ContentHash);
+        Assert.Empty(await context.TextChunks.ToArrayAsync());
+        Assert.False(await context.Jobs.AnyAsync(value => value.Id == input.EmbeddingJobId));
+        Assert.False(await context.OutboxMessages.AnyAsync(value => value.Id == input.DispatchMessageId));
+        Assert.Equal(2, (await context.CorpusRebuildWorkItems.SingleAsync()).State);
+        await FinishWhenPopulatedAsync(store, plan.OperationId, new ThrowingVerifier());
+        var state = await context.IndexState.AsNoTracking().SingleAsync();
+        Assert.Null(state.CorpusRebuildOperationId);
+        Assert.Null(state.ActiveIndexGenerationId);
+        Assert.NotNull(state.EmptyCatalogueValidatedAtUtc);
+    }
+
     private static async Task<CorpusRebuildReceipt> FinishWhenPopulatedAsync(SqlCorpusRebuildStore store, Guid operationId,
         IIndexGenerationVerifier? verifier = null)
     {

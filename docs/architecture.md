@@ -189,11 +189,13 @@ synthetic ingress through SQL/USearch publication to REST search and citation
 reading, including separate context headers and evidence v2 corpus epochs.
 The shared scheduler core also supports exclusive interactive ownership,
 bounded admission and the durable OCR turn exception. Both slices passed
-independent review. They are unreleased: production composition has not enabled
-the new passage options, request-owner adapter or workload policy. GPU adapter and
-runtime wiring, coherent generation/reset leases and the unified hybrid
-engine remain required before activation. See the implementation plan for the
-focused verification evidence and remaining milestone gates.
+independent review. The combined engine, native adapter and rebuild flow are now
+merged and activated in a held production rebuild. Background GPU embeddings have
+executed with confirmed cleanup; full semantic search is not ready. Separator-only
+passages caused a terminal embedding failure. The local v2 passage correction and
+proposed replacement recovery are documented in the
+[recovery record](operations/2026-09-27-hybrid-rebuild-recovery.md). Quality, full-search
+latency and live OCR fairness remain acceptance gates.
 
 The pinned reranker source and a float32 ONNX export are now verified in
 `J:\Models`. An isolated CPU conversion runtime reused cached packages with no
@@ -206,10 +208,10 @@ The [native CPU adapter record](design/bge-native-cpu-adapters.md) now establish
 offline .NET tokenizer and numeric parity for both fixed models, including the
 512-token boundary and verified-file/native-library lifetimes. Models are loaded
 from explicit protected bundle paths in the canonical store, without acquisition.
-The branch also has an unreleased shared admission gate using the existing OCR
-physical slot and an exact-owner/dispatch/slot execution read. These do not yet
-constitute GPU execution, full-search accuracy or latency
-acceptance, and are not registered in production.
+The shared admission gate uses the existing OCR physical slot and an exact-owner/
+dispatch/slot execution read. It is registered in the held production composition;
+background GPU execution is observed, while full-search quality and latency
+acceptance remain pending.
 
 Interactive ownership now records an opaque Windows machine fingerprint, PID and
 process start time. Independently reviewed recovery proves the exact local process
@@ -220,18 +222,19 @@ dispatch/receipt/callback primitives, and separates caller cancellation from nat
 cleanup. Before native execution starts, cancellation can reconcile an undelivered
 uncertain admission using its single-owner no-start proof. Confirmed cleanup can
 also reconcile watchdog uncertainty. Failed cleanup retains capacity. This adapter
-passed independent review with 26 focused ownership/executor tests. It remains
-unregistered pending native GPU integration and shared-slot runtime validation.
+passed independent review with 26 focused ownership/executor tests. It is registered
+in the held composition; live foreground search and OCR handover remain pending.
 
 The native GPU factories now require an active executor-owned context bound to
 the pinned BGE runtime/settings profile. The context expires before capacity
 settlement; model sessions retain verified local-file leases and dispose before
 those leases are released. DirectML uses sequential execution with memory patterns
-disabled. Guard checks and the cached CPU reference regression pass; actual GPU
-execution, memory, parity and full-search latency remain unverified.
+disabled. Guard checks and the cached CPU reference regression pass. Background GPU
+execution, loading and sampled process memory are now observed; GPU numeric parity
+and full-search latency remain unverified.
 
 Publication preview, activation, lexical search/read and deletion survivor
-selection now share one SQL publication rule in the unreleased branch. Pending
+selection now share one SQL publication rule in the shared implementation. Pending
 unrooted revisions preserve the last completed publication. Preview applies the
 existing document winner selection inside a rolled-back transaction, including
 SQL retry support. A changed snapshot rolls back publication and pointer updates;
@@ -244,7 +247,7 @@ expected and resulting stamps. Suppression, restoration and the initial deleting
 transition invalidate older candidates. Committed transition replay remains
 idempotent after a later publication.
 
-The unreleased query path captures one stamped profile/generation before embedding.
+The implemented query path captures one stamped profile/generation before embedding.
 A shared SQL session lock and durable process-incarnation record protect its
 membership, vectors and derived files. Native ANN disposal precedes explicit SQL
 lease release. Losing a SQL session refuses results but retains ownership: cleanup
@@ -255,7 +258,7 @@ Recovery now reports a stale stamped projection or a recognised pending draft as
 `IndexUpdating`, without attempting to repair superseded files or declaring the
 canonical catalogue empty. An unknown absent pointer still fails validation.
 
-The unreleased embedding path accepts batches of at most four passages. SQL stores
+The implemented embedding path accepts batches of at most four passages. SQL stores
 an unplaced draft owned by the existing Embed job and saves exact search-input and
 payload hashes. Each delivery performs one batch and requeues through the existing
 fenced retry transition; reclaim reuses completed vectors. Final sealing rechecks
@@ -264,10 +267,10 @@ Embed-to-Publish transition. Checksum validation reads bounded keyset pages, inc
 when SQL retry buffering is enabled. Deletion withdraws its own pending draft in the
 first durable phase, then captures cleanup and releases its job reference in the
 second phase. BGE batch and synthetic disposable-SQL pipeline tests cover this path;
-the opt-in model/scheduler composition is implemented locally. Rebuild maintenance and
-reset/drain remain milestone 3 work before semantic activation.
+the model/scheduler composition and controlled reset/drain are merged. Live rebuild
+recovery and the remaining acceptance gates are not complete.
 
-The unreleased foreground BGE wrapper now loads, runs and unloads embedding before
+The implemented foreground BGE wrapper now loads, runs and unloads embedding before
 opening the reranker. Native allocations register against the acknowledged owner;
 closing that owner atomically prevents later allocations. A constructor or disposal
 failure retains capacity until independent release evidence exists. Model-free

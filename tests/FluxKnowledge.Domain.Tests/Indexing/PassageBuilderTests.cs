@@ -89,7 +89,6 @@ public sealed class PassageBuilderTests
     [Theory]
     [InlineData("😀")]
     [InlineData("e\u0301")]
-    [InlineData("\r\n")]
     [InlineData("👨‍👩‍👧‍👦")]
     [InlineData("🇬🇧")]
     public void Oversized_indivisible_text_progresses_without_splitting_text_elements(string element)
@@ -113,6 +112,22 @@ public sealed class PassageBuilderTests
     }
 
     [Fact]
+    public void Meaningful_spans_preserve_CRLF_text_elements()
+    {
+        var text = string.Concat(Enumerable.Repeat("Evidence\r\n", 100));
+        var builder = new PassageBuilder(new ScalarTokenizer(), new PassagePolicy(32, 48, 65, 0, 0));
+        var passages = builder.Build(text);
+
+        Assert.True(passages.Count > 1);
+        Assert.All(passages, passage =>
+        {
+            Assert.False(passage.StartOffset > 0 && text[passage.StartOffset - 1] == '\r');
+            Assert.False(passage.StartOffset + passage.Length < text.Length && text[passage.StartOffset + passage.Length - 1] == '\r');
+        });
+        AssertSpans(text, passages);
+    }
+
+    [Fact]
     public void Rechecks_preferred_boundaries_when_prefix_token_counts_are_not_monotonic()
     {
         const string text = "One. Two. Three. Four. Five.";
@@ -130,6 +145,42 @@ public sealed class PassageBuilderTests
         Assert.InRange(new WordTokenizer().CountTokens(passage.ContextHeader), 1, 32);
         Assert.Empty(builder.Build(string.Empty));
         Assert.Throws<ArgumentOutOfRangeException>(() => builder.Build("text", [5]));
+    }
+
+    [Theory]
+    [InlineData("\n")]
+    [InlineData("\r\n")]
+    [InlineData(" \t\r\n\u00a0\u2003")]
+    public void Whitespace_only_documents_have_no_search_passages(string whitespace)
+    {
+        var text = string.Concat(Enumerable.Repeat(whitespace, 1100));
+        Assert.Empty(new PassageBuilder(new WordTokenizer()).Build(text, contextHeader: "Document title"));
+    }
+
+    [Fact]
+    public void Blank_segments_do_not_create_embedding_inputs_or_change_evidence_offsets()
+    {
+        const string first = "First evidence.";
+        var blank = new string('\n', 1100) + "\t\u00a0\u2003";
+        const string second = "Second evidence.";
+        var text = blank + first + blank + second + blank;
+        var firstStart = blank.Length;
+        var secondStart = firstStart + first.Length + blank.Length;
+        var boundaries = new[] { firstStart, firstStart + first.Length, secondStart, secondStart + second.Length };
+        var builder = new PassageBuilder(new WordTokenizer());
+
+        var passages = builder.Build(text, boundaries);
+
+        Assert.Equal(new[] { first, second }, passages.Select(passage => passage.Content));
+        Assert.Equal(new[] { firstStart, secondStart }, passages.Select(passage => passage.StartOffset));
+        Assert.Equal(new[] { 0, 1 }, passages.Select(passage => passage.Ordinal));
+        Assert.All(passages, passage =>
+        {
+            Assert.Equal(text.Substring(passage.StartOffset, passage.Length), passage.Content);
+            Assert.Equal(Hash(passage.Content), passage.ContentHash);
+            Assert.False(string.IsNullOrWhiteSpace(passage.SearchText));
+        });
+        Assert.Equal(passages, builder.Build(text, boundaries));
     }
 
     private static void AssertSpans(string text, IReadOnlyList<FluxKnowledge.Application.Ports.CanonicalTextChunk> passages)

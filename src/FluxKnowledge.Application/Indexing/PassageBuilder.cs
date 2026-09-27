@@ -40,7 +40,7 @@ public sealed class PassageBuilder
             throw new ArgumentOutOfRangeException(nameof(policy));
         PolicyFingerprint = Hash(JsonSerializer.Serialize(new
         {
-            version = "coherent-passages-v1", tokenizer = tokenizer.Fingerprint,
+            version = "coherent-passages-v2", tokenizer = tokenizer.Fingerprint,
             policy = _policy, headerTokens = 32, headerCharacters = 256
         }));
     }
@@ -105,10 +105,13 @@ public sealed class PassageBuilder
                 var targetEnd = FitTokens(text, start, ends.Where(end => end <= maximumEnd).ToArray(),
                     _policy.TargetTokens);
                 var validEnds = ends.Where(end => end <= maximumEnd).ToArray();
-                var end = PreferredEnd(text, start, validEnds.Where(end => end > coveredEnd).ToArray(), targetEnd);
+                var end = PreferredEnd(text, start, validEnds.Where(end => end > coveredEnd).ToArray(), targetEnd, segmentEnd);
                 var content = text.Substring(start, end - start);
-                result.Add(new CanonicalTextChunk(0, result.Count, start, content.Length, content,
-                    Hash(content), PolicyFingerprint, header));
+                // Retain canonical offsets while omitting separators with no evidence.
+                // Blank PDF pages and shape separators are not embedding inputs.
+                if (!string.IsNullOrWhiteSpace(content))
+                    result.Add(new CanonicalTextChunk(0, result.Count, start, content.Length, content,
+                        Hash(content), PolicyFingerprint, header));
                 coveredEnd = end;
                 start = end == segmentEnd ? end : OverlapStart(text, start, end, validEnds);
             }
@@ -116,7 +119,7 @@ public sealed class PassageBuilder
         return result;
     }
 
-    private int PreferredEnd(string text, int start, IReadOnlyList<int> ends, int targetEnd)
+    private int PreferredEnd(string text, int start, IReadOnlyList<int> ends, int targetEnd, int segmentEnd)
     {
         foreach (var kind in new[] { 0, 1, 2 })
         {
@@ -126,7 +129,7 @@ public sealed class PassageBuilder
             {
                 var isBoundary = kind switch
                 {
-                    0 => end == text.Length || end >= 2 && text[end - 1] == '\n' &&
+                    0 => end == segmentEnd || end >= 2 && text[end - 1] == '\n' &&
                         (text[end - 2] == '\n' || end >= 3 && text[end - 2] == '\r' && text[end - 3] == '\n'),
                     1 => SentenceEnd(text, start, end),
                     _ => char.IsWhiteSpace(text[end - 1])
