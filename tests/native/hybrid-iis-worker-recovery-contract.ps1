@@ -10,6 +10,48 @@ foreach($name in @('Get-HybridIisWorkerIds','Stop-HybridIisAfterGpuDrain')) {
  if($definition.Count -ne 1) { throw "Required worker proof function missing: $name" }
  . ([scriptblock]::Create($definition[0].Extent.Text))
 }
+$swapCommand=@($ast.FindAll({param($node) $node -is [Management.Automation.Language.CommandAst] -and $node.GetCommandName() -ceq 'Invoke-IncrementalApplicationPayloadSwap'},$true))
+if($swapCommand.Count -ne 1) { throw 'Expected one routine incremental payload swap.' }
+$stopArgument=$null;$rollbackValidationArgument=$null
+for($i=0;$i -lt $swapCommand[0].CommandElements.Count-1;$i++) {
+ if($swapCommand[0].CommandElements[$i] -is [Management.Automation.Language.CommandParameterAst] -and
+    $swapCommand[0].CommandElements[$i].ParameterName -ceq 'StopApplication') {
+  $stopArgument=$swapCommand[0].CommandElements[$i+1].Extent.Text
+ }
+ if($swapCommand[0].CommandElements[$i] -is [Management.Automation.Language.CommandParameterAst] -and
+    $swapCommand[0].CommandElements[$i].ParameterName -ceq 'ValidateRollbackApplication') {
+  $rollbackValidationArgument=$swapCommand[0].CommandElements[$i+1].Extent.Text
+ }
+}
+if(-not $stopArgument -or $stopArgument -notmatch 'Stop-HybridIisAfterGpuDrain' -or
+   $stopArgument -match 'Stop-WebAppPool') { throw 'Routine payload swap bypasses the canonical GPU drain and worker-exit proof.' }
+if(-not $rollbackValidationArgument -or
+   $rollbackValidationArgument.IndexOf('Assert-RetainedPipelineStateUnchanged', [StringComparison]::Ordinal) -lt 0 -or
+   $rollbackValidationArgument.LastIndexOf('PayloadRollbackVerified = $true', [StringComparison]::Ordinal) -lt
+       $rollbackValidationArgument.LastIndexOf('Assert-RetainedPipelineStateUnchanged', [StringComparison]::Ordinal)) {
+ throw 'Payload rollback is marked verified before restoration probes and retained-state comparison.'
+}
+$releaseGuardCalls=@($ast.FindAll({param($node) $node -is [Management.Automation.Language.CommandAst] -and $node.GetCommandName() -ceq 'Test-IncrementalRollbackHoldRelease'},$true))
+if($releaseGuardCalls.Count -ne 1) { throw 'Rollback hold-release guard is not wired into the updater.' }
+$eligibility=@($ast.FindAll({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'Test-IncrementalRollbackHoldRelease'},$true))
+if($eligibility.Count -ne 1) { throw 'Routine rollback hold-release guard is missing.' }
+. ([scriptblock]::Create($eligibility[0].Extent.Text))
+$validation=@{HoldCreated=$true;PayloadRollbackVerified=$false;RollbackVerified=$true}
+$arguments=@{Validation=$validation;ApplyMigrations=$false;ApplyCorpusChunkFullTextMigration=$false;CorpusRollbackVerified=$true;InteractiveHostMutationStarted=$true;InteractiveHostRollbackVerified=$true}
+if(Test-IncrementalRollbackHoldRelease @arguments) { throw 'Unverified payload rollback released the validation hold.' }
+$validation.PayloadRollbackVerified=$true
+$arguments.InteractiveHostRollbackVerified=$false
+if(Test-IncrementalRollbackHoldRelease @arguments) { throw 'Unverified interactive-host rollback released the validation hold.' }
+$arguments.InteractiveHostRollbackVerified=$true
+if(-not (Test-IncrementalRollbackHoldRelease @arguments)) { throw 'Verified schema-neutral rollback retained the validation hold.' }
+$arguments.ApplyMigrations=$true;$validation.RollbackVerified=$false
+if(Test-IncrementalRollbackHoldRelease @arguments) { throw 'Unverified schema rollback released the validation hold.' }
+$validation.RollbackVerified=$true;$arguments.ApplyMigrations=$false
+$arguments.ApplyCorpusChunkFullTextMigration=$true;$arguments.CorpusRollbackVerified=$false
+if(Test-IncrementalRollbackHoldRelease @arguments) { throw 'Unverified Full-Text rollback released the validation hold.' }
+$arguments.CorpusRollbackVerified=$true;$arguments.ApplyCorpusChunkFullTextMigration=$false
+$validation.HoldCreated=$false
+if(Test-IncrementalRollbackHoldRelease @arguments) { throw 'Absent hold was eligible for release.' }
 function SyntheticAppCmd {
  $evidence.Commands.Add(($args -join ' '))
  $global:LASTEXITCODE=$evidence.ExitCode

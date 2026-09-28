@@ -617,6 +617,21 @@ function Stop-HybridIisAfterGpuDrain {
     }
 }
 
+function Test-IncrementalRollbackHoldRelease {
+    param(
+        [Parameter(Mandatory)][hashtable]$Validation,
+        [bool]$ApplyMigrations,
+        [bool]$ApplyCorpusChunkFullTextMigration,
+        [bool]$CorpusRollbackVerified,
+        [bool]$InteractiveHostMutationStarted,
+        [bool]$InteractiveHostRollbackVerified
+    )
+    return [bool]($Validation.HoldCreated -and $Validation.PayloadRollbackVerified -and
+        (-not $ApplyMigrations -or $Validation.RollbackVerified) -and
+        (-not $ApplyCorpusChunkFullTextMigration -or $CorpusRollbackVerified) -and
+        (-not $InteractiveHostMutationStarted -or $InteractiveHostRollbackVerified))
+}
+
 function Get-HybridPreservedInputFingerprint {
     $connection = [System.Data.SqlClient.SqlConnection]::new((Get-DeploymentSqlConnectionString))
     try {
@@ -1323,6 +1338,7 @@ if ($PlanOnly) {
         preserved = @("Config", "Data", "Runtime", "Recovery", "CodexPlugin")
         payload_acl = "inherit-from-live-root"
         rollback = if ($PatchHybridRebuildRelease -or $ResumeHybridPatchRelease) { 'forward-only after activation intent; predecessor payload/packet retained, hold denied on failure' } elseif ($ApplyHybridPassageRebuild) { 'before-schema: original payload; after-schema: held forward recovery with retained original payload/configuration' } else { "automatic-application-and-interactive-host-payload-restore" }
+        gpu_drain = 'deny admissions; allow active OCR page and native cleanup to finish; prove exact IIS worker exit before each payload swap stop'
         deployment_validation_hold = $true
         candidate_validation = if ($PatchHybridRebuildRelease -or $ResumeHybridPatchRelease) { 'same-operation-epoch-checkpoint-continuity-preserved-inputs-and-loopback-probes' } elseif ($ApplyHybridPassageRebuild) { 'held-exact-rebuild-finalisation-preserved-inputs-and-loopback-probes' } elseif ($DeferReadinessForScopedRemediation) {
             "held-live-and-index-health probes, exact-ready-503 and unchanged-retained-pipeline-state"
@@ -1437,7 +1453,7 @@ try {
     $failedRoot = Join-Path $releaseRoot "failed"
     $interactiveHostCandidateRoot = Join-Path $releaseRoot "candidate-interactive-host"
     $interactiveHostPreviousRoot = Join-Path $releaseRoot "previous-interactive-host"
-    $deploymentValidation = @{ HoldCreated = $false; Baseline = $null; MigrationsApplied = $false; RollbackVerified = $true }
+    $deploymentValidation = @{ HoldCreated = $false; Baseline = $null; MigrationsApplied = $false; RollbackVerified = $true; PayloadRollbackVerified = $false }
 
     & dotnet publish $webProject -c Release --no-restore --nologo -o $candidateRoot
     if ($LASTEXITCODE -ne 0) {
@@ -1487,8 +1503,7 @@ try {
             Invoke-CandidatePayloadActivation -CandidateRoot $candidateRoot -ApplicationRoot $CanonicalDeployRoot
         } `
         -StopApplication {
-            Stop-WebAppPool -Name $SiteName
-            Wait-IisAppPoolState -Name $SiteName -ExpectedState "Stopped" -TimeoutSeconds $ReadinessTimeoutSeconds
+            Stop-HybridIisAfterGpuDrain
             [void](New-DeploymentValidationHold -Path $ValidationHoldPath -ReleaseId $releaseId)
             if (-not $deploymentValidation.HoldCreated) {
                 $deploymentValidation.HoldCreated = $true
@@ -1540,6 +1555,10 @@ try {
             else {
                 Invoke-RequiredLoopbackProbes -Origin $loopbackOrigin.Origin -TimeoutSeconds $ReadinessTimeoutSeconds
             }
+            Assert-RetainedPipelineStateUnchanged `
+                -Baseline $deploymentValidation.Baseline `
+                -Current (Get-RetainedPipelineStateBaseline)
+            $deploymentValidation.PayloadRollbackVerified = $true
         } `
         -PrepareRollbackApplication {
             if ($ApplyCorpusChunkFullTextMigration) {
@@ -1620,9 +1639,13 @@ catch {
     throw
 }
 finally {
-    if ($leaseAcquired -and $null -ne $deploymentValidation -and $deploymentValidation.HoldCreated -and
-        (-not $ApplyMigrations -or $deploymentValidation.RollbackVerified) -and
-        (-not $ApplyCorpusChunkFullTextMigration -or ($corpusMigrationState.RollbackVerified -and $interactiveHostRollbackVerified))) {
+    if ($leaseAcquired -and $null -ne $deploymentValidation -and
+        (Test-IncrementalRollbackHoldRelease -Validation $deploymentValidation `
+            -ApplyMigrations ([bool]$ApplyMigrations) `
+            -ApplyCorpusChunkFullTextMigration ([bool]$ApplyCorpusChunkFullTextMigration) `
+            -CorpusRollbackVerified $(if ($ApplyCorpusChunkFullTextMigration) { [bool]$corpusMigrationState.RollbackVerified } else { $true }) `
+            -InteractiveHostMutationStarted $interactiveHostMutationStarted `
+            -InteractiveHostRollbackVerified $interactiveHostRollbackVerified)) {
         Remove-DeploymentValidationHold -Path $ValidationHoldPath -ReleaseId $releaseId
     }
     if ($leaseAcquired) {

@@ -46,6 +46,7 @@ if ($plan.mode -ne "plan-only" -or
     $plan.clean_slate -ne $false -or
     $plan.payload_acl -ne "inherit-from-live-root" -or
     $plan.rollback -ne "automatic-application-and-interactive-host-payload-restore" -or
+    $plan.gpu_drain -ne 'deny admissions; allow active OCR page and native cleanup to finish; prove exact IIS worker exit before each payload swap stop' -or
     $plan.deployment_validation_hold -ne $true -or
     $plan.candidate_validation -ne "held-loopback-probes-and-unchanged-retained-pipeline-state") {
     throw "The incremental IIS plan is not restricted to the existing application payload and loopback site."

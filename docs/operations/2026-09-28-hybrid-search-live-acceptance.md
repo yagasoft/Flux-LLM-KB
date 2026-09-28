@@ -26,7 +26,10 @@ not p95 estimates or a proof that residency would meet the two-second target.
 Next, retain only the exact hash-verified model-file handles for the web process,
 so repeated requests do not hash the same protected bytes. Keep each ONNX GPU
 session inside its existing scheduler-owned request and dispose it before capacity
-release. Recheck cross-surface parity, full-search latency, the frozen English
+release. The routine incremental updater must acquire the existing GPU admission
+fence, let an active OCR page finish and prove IIS worker exit before swapping
+payloads; failed rollback must leave the validation hold in place. Recheck
+cross-surface parity, full-search latency, the frozen English
 quality set and OCR waiting after deployment of that bounded change. Model
 residency remains conditional on a separate warm full-search and memory/OCR
 experiment and an independently reviewed ownership/release/recovery design.
