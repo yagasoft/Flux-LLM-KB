@@ -31,7 +31,7 @@ internal static class BgeSearchRuntimeComposition
             TimeSpan.FromMinutes(5), TimeSpan.FromMinutes(1), TimeSpan.FromMinutes(10), policy)));
         services.Replace(ServiceDescriptor.Singleton<IGpuAdmissionGate>(new SharedGpuAdmissionGate(policy,
             EmbeddingGpuExecutor.Name, EstimatedGpuBytes)));
-        services.AddSingleton(CreateModelStores());
+        services.AddSingleton(_ => CreateModelStores());
         services.AddSingleton<IBgeGpuModelFactory, BgeGpuModelFactory>();
         services.AddSingleton<BgeGpuInferenceSession>();
         services.AddSingleton<ScopedGpuExecutorLifecycleSink>();
@@ -78,6 +78,6 @@ internal static class BgeSearchRuntimeComposition
         Store(["bundles", "bge-reranker-v2-m3-onnx", BgeOfflineModels.RerankerRevision, BgeOfflineModels.RerankerExport]),
         Store(["bundles", "bge-reranker-v2-m3", BgeOfflineModels.RerankerRevision]),
         Store(["runtimes", "bge-onnx-net-tokenizer-1.4.0-win-x64"]));
-    private static LocalModelStore Store(string[] components) =>
-        new(() => WindowsModelVerificationFiles.OpenProductionBundle(components));
+    private static PinnedLocalModelStore Store(string[] components) =>
+        new(new LocalModelStore(() => WindowsModelVerificationFiles.OpenProductionBundle(components)));
 }

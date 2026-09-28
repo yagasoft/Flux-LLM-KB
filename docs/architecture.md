@@ -156,9 +156,10 @@ proxies and redirects; public responses are bounded and secret-filtered.
 
 [Scoped corpus search and cited passage reading](design/corpus-retrieval.md)
 provide deployed published-text lexical search and bounded cited reads through
-MCP, REST and CLI. The one-time SQL chunk Full-Text index is active. No learned
-provider is active; the BGE-M3 ONNX pilot verified offline execution but failed
-its frozen relevance gates.
+MCP, REST and CLI. SQL Full-Text remains the lexical index. A learned BGE passage
+path is active, but live latency and English relevance acceptance have not passed;
+the earlier BGE-M3 ONNX pilot evaluated different windows and failed its own
+relevance gates.
 
 The proposed [hybrid passage architecture](design/hybrid-passage-retrieval.md)
 and [implementation plan](design/hybrid-passage-retrieval-plan.md), dated
@@ -169,47 +170,49 @@ search adapters. English is the initial acceptance scope. Existing indexed text
 is disposable: adoption uses a controlled clean rebuild with a new evidence
 epoch, without an old-passage or concurrent-model migration system.
 
-The proposed first pair is BGE-M3 and BGE-reranker-v2-m3, with GPU execution
-through the existing scheduler and optional validated CPU placement. Extend
-interactive ownership and runtime admission while retaining batch ownership,
-trusted release and recovery. The proposed baseline unloads models after each
+The selected pair is BGE-M3 and BGE-reranker-v2-m3, with GPU execution
+through the existing scheduler and optional validated CPU placement. Interactive
+ownership and runtime admission retain batch ownership, trusted release and
+recovery. The deployed baseline unloads models after each
 request/batch, and guarantees an OCR turn after at most three new non-OCR
 retrieval/embedding admissions while OCR waits, without interrupting an active
 page. Identify OCR by validated runtime identity and preserve existing lanes;
 document OCR currently shares `DocumentIndexing` with other work. Keeping models
 loaded between requests is a separate enhancement requiring measured loading,
 memory and full-search benefit before retention-specific scheduler changes.
-The existing OCR-only gate does not already provide search admission.
-GPU parity, local relevance, concurrency/recovery and latency gates
-remain implementation work. Current source publication, disclosure and citation
+The shared gate now provides search admission. GPU numeric parity, local
+relevance, live OCR fairness and latency gates remain acceptance work. Source publication, disclosure and citation
 safeguards are retained. No OCR or extractor upgrade is implied.
 
-The implementation branch now has a locally verified complete-passage path from
+The implementation has a locally verified complete-passage path from
 synthetic ingress through SQL/USearch publication to REST search and citation
 reading, including separate context headers and evidence v2 corpus epochs.
 The shared scheduler core also supports exclusive interactive ownership,
 bounded admission and the durable OCR turn exception. Both slices passed
-independent review. The combined engine, native adapter and rebuild flow are now
-merged and activated in a held production rebuild. Background GPU embeddings have
-executed with confirmed cleanup; full semantic search is not ready. Separator-only
-passages caused a terminal embedding failure. The local v2 passage correction and
-proposed replacement recovery are documented in the
-[recovery record](operations/2026-09-27-hybrid-rebuild-recovery.md). Quality, full-search
-latency and live OCR fairness remain acceptance gates.
+independent review. The combined engine, native adapter and rebuild flow are
+deployed. The corrected 35-input rebuild completed with 3,596 passages and the
+validation hold was released after healthy startup recovery. Background GPU
+embeddings executed with confirmed cleanup. Earlier separator-only passages
+caused a terminal embedding failure; the corrected replacement is documented in
+the [recovery record](operations/2026-09-27-hybrid-rebuild-recovery.md). Live
+search is intermittently hybrid and sometimes reaches its ten-second deadline,
+so quality, latency and OCR fairness remain acceptance gates. The
+[live acceptance record](operations/2026-09-28-hybrid-search-live-acceptance.md)
+contains the measured failure.
 
 The pinned reranker source and a float32 ONNX export are now verified in
 `J:\Models`. An isolated CPU conversion runtime reused cached packages with no
 additional downloads; its numeric reference checks passed. This is model
-preparation, not native provider activation or a semantic-search accuracy claim.
+preparation, not a semantic-search accuracy claim.
 The [conversion record](design/bge-reranker-offline-conversion.md) states its scope
-and remaining native/GPU checks.
+and remaining numeric GPU checks.
 
 The [native CPU adapter record](design/bge-native-cpu-adapters.md) now establishes
 offline .NET tokenizer and numeric parity for both fixed models, including the
 512-token boundary and verified-file/native-library lifetimes. Models are loaded
 from explicit protected bundle paths in the canonical store, without acquisition.
 The shared admission gate uses the existing OCR physical slot and an exact-owner/
-dispatch/slot execution read. It is registered in the held production composition;
+dispatch/slot execution read. It is registered in production;
 background GPU execution is observed, while full-search quality and latency
 acceptance remain pending.
 
@@ -218,7 +221,8 @@ growth required a pause. Isolated tokenizer-only cycles identified repeated nati
 tokenizer DLL unload as the main source of that growth. The local correction pins
 only the verified tokenizer runtime DLL and its protected file lease for the IIS
 process lifetime; each tokenizer and ONNX model session retains per-request
-disposal. The corrected payload has not been deployed into the held rebuild.
+disposal. The corrected payload finished the held rebuild and passed startup
+readiness after an exact-release restart.
 
 Interactive ownership now records an opaque Windows machine fingerprint, PID and
 process start time. Independently reviewed recovery proves the exact local process
@@ -230,15 +234,19 @@ cleanup. Before native execution starts, cancellation can reconcile an undeliver
 uncertain admission using its single-owner no-start proof. Confirmed cleanup can
 also reconcile watchdog uncertainty. Failed cleanup retains capacity. This adapter
 passed independent review with 26 focused ownership/executor tests. It is registered
-in the held composition; live foreground search and OCR handover remain pending.
+in production; live foreground search executes, while sustained-load OCR handover
+remains an acceptance gate.
 
 The native GPU factories now require an active executor-owned context bound to
 the pinned BGE runtime/settings profile. The context expires before capacity
 settlement; model sessions retain verified local-file leases and dispose before
 those leases are released. DirectML uses sequential execution with memory patterns
 disabled. Guard checks and the cached CPU reference regression pass. Background GPU
-execution, loading and sampled process memory are now observed; GPU numeric parity
-and full-search latency remain unverified.
+execution, loading and sampled process memory are now observed. A successful
+50-passage search took 9.954 seconds, including 6.650 seconds of model loading;
+this is one trace, not p95. GPU numeric parity and accepted full-search latency
+remain unverified. A locally reviewed process-held verified-file cache is the
+next bounded change; it does not retain native GPU sessions between requests.
 
 Publication preview, activation, lexical search/read and deletion survivor
 selection now share one SQL publication rule in the shared implementation. Pending

@@ -1,7 +1,9 @@
 # Hybrid passage retrieval design
 
 Date: 25 September 2026. Source baseline: `1f4aa16`.
-Status: proposed architecture and implementation specification; no runtime change.
+Status: selected architecture, deployed baseline under live acceptance. The
+28 September rebuild and startup health passed; cross-surface search and latency
+acceptance failed. See the [live acceptance record](../operations/2026-09-28-hybrid-search-live-acceptance.md).
 Companion: [implementation plan](hybrid-passage-retrieval-plan.md).
 
 ## Decision and scope

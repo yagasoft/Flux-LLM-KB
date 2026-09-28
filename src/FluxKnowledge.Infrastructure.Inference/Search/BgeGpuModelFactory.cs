@@ -18,7 +18,15 @@ public sealed class BgeGpuModelLease<T>(T model, Action release) : IDisposable w
 }
 
 public sealed record BgeGpuModelStores(ILocalModelStore Embedding, ILocalModelStore Reranker,
-    ILocalModelStore RerankerTokenizer, ILocalModelStore TokenizerRuntime);
+    ILocalModelStore RerankerTokenizer, ILocalModelStore TokenizerRuntime) : IDisposable
+{
+    public void Dispose()
+    {
+        foreach (var store in new[] { Embedding, Reranker, RerankerTokenizer, TokenizerRuntime }
+                     .Distinct(ReferenceEqualityComparer.Instance))
+            (store as IDisposable)?.Dispose();
+    }
+}
 
 /// <summary>Fixed verified local models; each lease owns its native session and tokenizer.</summary>
 public sealed class BgeGpuModelFactory(BgeGpuModelStores stores) : IBgeGpuModelFactory

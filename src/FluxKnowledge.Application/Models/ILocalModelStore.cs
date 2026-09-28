@@ -52,20 +52,32 @@ public sealed record ModelResolutionResult(
 
 public sealed class VerifiedLocalModelLease : IDisposable
 {
-    private readonly IReadOnlyDictionary<string, IModelVerificationFile> _files;
-    private readonly IDisposable _owner;
+    private readonly SharedFiles _shared;
     private bool _disposed;
 
     internal VerifiedLocalModelLease(
         IReadOnlyDictionary<string, IModelVerificationFile> files,
         IDisposable owner)
     {
-        _files = files;
-        _owner = owner;
+        _shared = new SharedFiles(files, owner);
+    }
+
+    private VerifiedLocalModelLease(SharedFiles shared) => _shared = shared;
+
+    /// <summary>Retains the same verified, protected file handles for another native
+    /// session. The files and their protected ancestors close after the last lease.</summary>
+    public VerifiedLocalModelLease Retain()
+    {
+        lock (_shared.Sync)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            _shared.ReferenceCount++;
+            return new VerifiedLocalModelLease(_shared);
+        }
     }
 
     public IReadOnlyList<VerifiedModelFile> Files =>
-        _files.Select(static item => new VerifiedModelFile(item.Key, item.Value.ByteLength)).ToArray();
+        _shared.Files.Select(static item => new VerifiedModelFile(item.Key, item.Value.ByteLength)).ToArray();
 
     /// <summary>Only for local native loaders. Keep this lease alive until the loader/session
     /// is disposed; a returned path has no protection after lease disposal.</summary>
@@ -73,7 +85,7 @@ public sealed class VerifiedLocalModelLease : IDisposable
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         ArgumentException.ThrowIfNullOrWhiteSpace(filename);
-        if (!_files.TryGetValue(filename, out var file)) throw new KeyNotFoundException(filename);
+        if (!_shared.Files.TryGetValue(filename, out var file)) throw new KeyNotFoundException(filename);
         return file.ProtectedLocalPath ?? throw new ModelVerificationFilesException(ModelStoreReasons.PathUnsafe);
     }
 
@@ -85,7 +97,7 @@ public sealed class VerifiedLocalModelLease : IDisposable
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         ArgumentException.ThrowIfNullOrWhiteSpace(filename);
-        if (offset < 0 || !_files.TryGetValue(filename, out var file))
+        if (offset < 0 || !_shared.Files.TryGetValue(filename, out var file))
         {
             throw new ArgumentOutOfRangeException(nameof(offset));
         }
@@ -95,10 +107,22 @@ public sealed class VerifiedLocalModelLease : IDisposable
 
     public void Dispose()
     {
-        if (_disposed) return;
-        _disposed = true;
-        foreach (var file in _files.Values) file.Dispose();
-        _owner.Dispose();
+        lock (_shared.Sync)
+        {
+            if (_disposed) return;
+            _disposed = true;
+            if (--_shared.ReferenceCount != 0) return;
+        }
+        try { foreach (var file in _shared.Files.Values) file.Dispose(); }
+        finally { _shared.Owner.Dispose(); }
+    }
+
+    private sealed class SharedFiles(IReadOnlyDictionary<string, IModelVerificationFile> files, IDisposable owner)
+    {
+        public object Sync { get; } = new();
+        public IReadOnlyDictionary<string, IModelVerificationFile> Files { get; } = files;
+        public IDisposable Owner { get; } = owner;
+        public int ReferenceCount = 1;
     }
 }
 

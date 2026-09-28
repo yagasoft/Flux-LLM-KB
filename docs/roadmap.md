@@ -34,7 +34,7 @@ behaviour and limitations.
 | --- | --- | --- | ---: | --- |
 | Scoped corpus search and cited passage reading | P1 | complete | 100% | Maintain the deployed one-time chunk Full-Text index and MCP/REST/CLI parity. Live checks cover OCR image, native PDF, DOCX, XLSX and Visio search/read; extraction fidelity, same-page region OCR and failed-revision retry remain separate work. |
 | Scoped lexical passage ranking investigation | P1 | complete (no ranking change) | 100% | Historical investigation closed after aggregate gains regressed DOCX. Future passage/ranking work follows the hybrid passage plan, without reopening these excerpt heuristics. The frozen source audit and experiment records remain evidence of their original scope. |
-| Hybrid passage and semantic corpus retrieval | P1 | replacement committed; held rebuild and native-memory correction pending | 20% | The approved replacement committed the same 35 canonical inputs under a new operation and epoch. It permanently superseded 55 old jobs and retained their history; 28 inputs and 908 vectors completed before a memory-safety pause. A bounded resume preserved checkpoints. Isolated tokenizer-only tests traced major native memory growth to repeated DLL unloading; a local correction retains only the verified tokenizer runtime DLL for the process lifetime while unloading tokenizer instances and ONNX models. That correction still needs complete closeout and a supported forward-patch deployment into the held rebuild. See the [recovery record](operations/2026-09-27-hybrid-rebuild-recovery.md). The 24-source, 96-question English acceptance set and lexical baseline remain frozen. Full query/reranker latency, healthy one/two-caller behaviour, sustained-search OCR waiting, numeric GPU parity and held-out quality remain pending. Retaining model weights remains conditional on loading, memory and complete full-search measurements. No healthy semantic-search delivery is claimed. |
+| Hybrid passage and semantic corpus retrieval | P1 | rebuilt and activated; live acceptance failed on latency | 40% | The corrected forward patch finished the same 35-input rebuild with 3,596 passages and no failed embedding or publication jobs. The deployment hold was released after the restarted web host reported the active generation healthy. Live REST/CLI/MCP search/read parity failed: repeated real-model loads made some calls hit the ten-second deadline, while successful hybrid calls took nearly ten seconds. A trace attributed about 6.65 seconds to the two model loads, including repeated verification of multi-gigabyte files. A process-held verified-file cache passed focused local checks and independent technical review; it awaits a separately approved incremental deployment. It retains no native GPU session and changes no scheduler ownership. The 24-source, 96-question English acceptance set and lexical baseline remain frozen. Full quality, two-caller latency, sustained-search OCR waiting, numeric GPU parity and any conditional model-residency design remain pending. See the [live acceptance record](operations/2026-09-28-hybrid-search-live-acceptance.md). |
 
 The [original retrieval design](design/corpus-retrieval.md) and
 [scoped retrieval plan](design/scoped-corpus-retrieval-plan.md) retain the
@@ -43,17 +43,18 @@ deployed contract history. Future delivery follows the
 [implementation plan](design/hybrid-passage-retrieval-plan.md), superseding the
 earlier [semantic transition plan](design/semantic-corpus-retrieval-plan.md).
 The scoped operations and one-time SQL Full-Text index are deployed and
-live-validated. Production semantic retrieval is enabled only within the held incomplete rebuild;
-the [BGE-M3 ONNX evaluation](operations/2026-09-24-bge-m3-onnx-evaluation.md)
-records a failed relevance pilot and does not activate an embedding provider.
+live-validated. The hybrid passage projection is now active in production, but
+semantic retrieval has not passed its English quality or latency acceptance gates.
+The [BGE-M3 ONNX evaluation](operations/2026-09-24-bge-m3-onnx-evaluation.md)
+records the earlier failed relevance pilot, not a result for the new passage pipeline.
 
-The hybrid item's 20% counts one completed, independently reviewed delivery gate
-out of the plan's five equally counted milestone gates. It is not an effort,
-elapsed-time or accuracy estimate. The partial scheduler-core work does not yet
-count as completed milestone 2 without hardware acceptance. The locally implemented
-query/runtime slices likewise do not count as whole-release acceptance. The implementation plan records the local
-focused checks; real-model quality, full-search latency and deployment remain
-unverified.
+The hybrid item's 40% counts two completed, independently reviewed delivery gates
+out of the plan's five equally counted milestone gates: complete passages and the
+coherent publication/rebuild. It is not an effort, elapsed-time or accuracy
+estimate. The scheduler/model gate still needs measured hardware acceptance, the
+shared retrieval gate needs live parity, and the final gate needs the frozen
+quality and operational checks. The [live acceptance record](operations/2026-09-28-hybrid-search-live-acceptance.md)
+separates the verified activation from the failed search-performance gate.
 
 The separate [lexical passage ranking investigation](operations/2026-09-24-scoped-lexical-ranking-investigation.md)
 used the old pilot for diagnosis and fresh development data for two bounded
