@@ -1,14 +1,21 @@
 # Hybrid passage retrieval implementation plan
 
 Date: 25 September 2026. Baseline: `1f4aa16`.
-Status: rebuilt and activated in production; live search acceptance in progress.
+Status: rebuilt and active in the installed app, treated as staging for final
+English acceptance. The frozen 96-question, two-caller run passed 96/96 ready,
+80/84 strict top-five answer support and 480/480 exact citations. Full REST
+p95 was 16.46 seconds within the measured 20-second staging envelope and the
+25-second request deadline; the OCR handover check also passed. The original
+two-second aspiration and the earlier ten-second GPU bound are historical,
+superseded targets, not passed gates.
 Milestone 1 and the bounded scheduler-core slice of milestone 2 are implemented
 and independently reviewed locally. The shared engine and opt-in runtime are now
 implemented with bounded independent review. The earlier no-activation status is
 superseded by the [28 September live acceptance record](../operations/2026-09-28-hybrid-search-live-acceptance.md).
 Authority: [design and acceptance contract](hybrid-passage-retrieval.md).
 
-The 35-input rebuild and startup health passed, but cross-surface search failed
+The paragraphs below retain the implementation history and intermediate
+failures. The 35-input rebuild and startup health passed, but cross-surface search failed
 because repeated model loads approached the ten-second deadline. A process-held
 verified-file cache passed focused local checks and independent technical review;
 its production deployment remains separate. The exact file handles and protected

@@ -1,9 +1,12 @@
 using System.Collections.Immutable;
 using System.Data;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using FluxKnowledge.Application.Indexing;
 using FluxKnowledge.Application.Gpu;
 using FluxKnowledge.Application.Ports;
+using FluxKnowledge.Application.Sources;
 using FluxKnowledge.Application.Workers;
 using FluxKnowledge.Domain.Jobs;
 using FluxKnowledge.Domain.Pipeline;
@@ -16,7 +19,8 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
 
 public sealed class SqlDerivedIndexRecoveryStore(
     IDbContextFactory<FluxKnowledgeDbContext> contextFactory,
-    TimeProvider timeProvider, IGpuInteractiveOwnerProbe? queryOwnerProbe = null) : IDerivedIndexRecoveryStore
+    TimeProvider timeProvider, IGpuInteractiveOwnerProbe? queryOwnerProbe = null,
+    IDeploymentValidationHold? deploymentHold = null) : IDerivedIndexRecoveryStore
 {
     internal const string LockResource = "FluxKnowledge.DerivedIndexRecovery";
     private const string AuditEventType = "derived_index_recovery";
@@ -136,8 +140,9 @@ public sealed class SqlDerivedIndexRecoveryStore(
         if (generation?.CorpusStamp is { } generationStamp && generationStamp.CorpusEpoch == stamp.CorpusEpoch &&
             generationStamp.CorpusVersion > stamp.CorpusVersion)
             throw new InvalidOperationException("active-index-generation-future-version");
-        var isProjectionUnavailable = indexState.CorpusRebuildOperationId is not null ||
+        var isPublicationLag = indexState.CorpusRebuildOperationId is null &&
             generation?.CorpusStamp is { } capturedStamp && capturedStamp != stamp;
+        var isProjectionUnavailable = indexState.CorpusRebuildOperationId is not null || isPublicationLag;
         if (!isValidatedEmptyCatalogue && activeGenerationId is null &&
             (recognisedDraftIds.Count > 0 || (hasVectors || hasGenerations || hasMembership) &&
                 await context.SourceRootConfigurations.AnyAsync(root => root.State == (int)SourceRootState.Deleting, cancellationToken).ConfigureAwait(false)))
@@ -154,7 +159,8 @@ public sealed class SqlDerivedIndexRecoveryStore(
             referencedGenerationIds.ToImmutableHashSet(),
             referencedIndexPaths,
             isValidatedEmptyCatalogue,
-            isProjectionUnavailable);
+            isProjectionUnavailable,
+            isPublicationLag);
     }
 
     private static async Task<ImmutableHashSet<Guid>> ReadRecognisedUnplacedDraftIdsAsync(
@@ -605,6 +611,103 @@ public sealed class SqlDerivedIndexRecoveryStore(
         {
             throw TranslateSqlException(sqlException);
         }
+    }
+
+    public async ValueTask<bool> TryActivatePublicationCandidateAsync(
+        IndexGenerationCandidateSnapshot candidate,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(candidate);
+        var descriptor = candidate.Generation;
+        if (candidate.ExpectedCorpusStamp is null || descriptor.CorpusStamp != candidate.ExpectedCorpusStamp ||
+            descriptor.Id == Guid.Empty || string.IsNullOrWhiteSpace(descriptor.IndexPath) ||
+            descriptor.Dimensions <= 0 || candidate.Vectors.Count == 0 ||
+            descriptor.VectorCount != candidate.Vectors.Count ||
+            candidate.Vectors.Select(vector => vector.VectorId).Distinct().Count() != candidate.Vectors.Count ||
+            candidate.Vectors.Any(vector => vector.Dimensions != descriptor.Dimensions ||
+                vector.Values.Length != descriptor.Dimensions * sizeof(float) ||
+                !string.Equals(vector.ModelFingerprint, descriptor.ModelFingerprint, StringComparison.Ordinal) ||
+                !string.Equals(vector.PayloadChecksum, Convert.ToHexStringLower(SHA256.HashData(vector.Values)), StringComparison.Ordinal)) ||
+            !string.Equals(descriptor.MetadataChecksum, PublicationChecksum(descriptor.ModelFingerprint,
+                descriptor.Dimensions, candidate.Vectors), StringComparison.Ordinal))
+            throw new InvalidOperationException("publication-refresh-candidate-invalid");
+
+        try
+        {
+            await using var executionContext = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+            return await executionContext.Database.CreateExecutionStrategy().ExecuteAsync(async () =>
+            {
+                await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+                await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken).ConfigureAwait(false);
+                await SqlPublishedPassageSelection.AcquireFenceAsync(context, cancellationToken).ConfigureAwait(false);
+                if (deploymentHold?.IsHeld == true) return false;
+                var state = await context.IndexState.SingleAsync(value => value.Id == 1, cancellationToken).ConfigureAwait(false);
+                if (state.CorpusRebuildOperationId is not null || state.ActiveIndexGenerationId is null ||
+                    new CorpusPublicationStamp(state.CorpusEpoch, state.CorpusVersion) != candidate.ExpectedCorpusStamp)
+                    return false;
+                var previous = await context.IndexGenerations.AsNoTracking()
+                    .SingleOrDefaultAsync(value => value.Id == state.ActiveIndexGenerationId, cancellationToken).ConfigureAwait(false);
+                if (previous is null || previous.RetiredAtUtc is not null ||
+                    previous.CorpusEpoch != state.CorpusEpoch || previous.CorpusVersion == state.CorpusVersion ||
+                    !string.Equals(previous.ModelFingerprint, descriptor.ModelFingerprint, StringComparison.Ordinal) ||
+                    previous.Dimensions != descriptor.Dimensions)
+                    return false;
+                var current = await SqlPublishedPassageSelection.ReadVectorsAsync(context, cancellationToken).ConfigureAwait(false);
+                if (!SamePublicationVectors(candidate.Vectors, current)) return false;
+
+                var existing = await context.IndexGenerations.SingleOrDefaultAsync(value => value.Id == descriptor.Id, cancellationToken).ConfigureAwait(false);
+                if (existing is null)
+                {
+                    existing = new IndexGenerationEntity
+                    {
+                        Id = descriptor.Id, ModelFingerprint = descriptor.ModelFingerprint, Dimensions = descriptor.Dimensions,
+                        IndexPath = descriptor.IndexPath, MetadataChecksum = descriptor.MetadataChecksum,
+                        VectorCount = descriptor.VectorCount, CorpusEpoch = descriptor.CorpusStamp.CorpusEpoch,
+                        CorpusVersion = descriptor.CorpusStamp.CorpusVersion, CreatedAtUtc = timeProvider.GetUtcNow(),
+                        ValidatedAtUtc = timeProvider.GetUtcNow()
+                    };
+                    context.IndexGenerations.Add(existing);
+                }
+                else if (existing.RetiredAtUtc is not null || existing.ModelFingerprint != descriptor.ModelFingerprint ||
+                    existing.Dimensions != descriptor.Dimensions || existing.IndexPath != descriptor.IndexPath ||
+                    existing.MetadataChecksum != descriptor.MetadataChecksum || existing.VectorCount != descriptor.VectorCount ||
+                    existing.CorpusEpoch != descriptor.CorpusStamp.CorpusEpoch || existing.CorpusVersion != descriptor.CorpusStamp.CorpusVersion)
+                    throw new InvalidOperationException("publication-refresh-generation-conflict");
+
+                var memberIds = await context.IndexGenerationVectors.Where(value => value.GenerationId == descriptor.Id)
+                    .OrderBy(value => value.VectorId).Select(value => value.VectorId).ToArrayAsync(cancellationToken).ConfigureAwait(false);
+                if (memberIds.Length != 0 && !memberIds.SequenceEqual(current.Select(value => value.VectorId)))
+                    throw new InvalidOperationException("publication-refresh-membership-conflict");
+                if (memberIds.Length == 0)
+                    context.IndexGenerationVectors.AddRange(current.Select(vector => new IndexGenerationVectorEntity
+                    { GenerationId = descriptor.Id, VectorId = vector.VectorId }));
+                state.ActiveIndexGenerationId = descriptor.Id;
+                state.EmptyCatalogueValidatedAtUtc = null;
+                state.UpdatedAtUtc = timeProvider.GetUtcNow();
+                if (deploymentHold?.IsHeld == true) return false;
+                await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+                await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+                return true;
+            }).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (TryGetSqlException(exception, out var sqlException))
+        {
+            throw TranslateSqlException(sqlException);
+        }
+    }
+
+    private static bool SamePublicationVectors(IReadOnlyList<CanonicalVector> expected, IReadOnlyList<CanonicalVector> actual) =>
+        expected.Count == actual.Count && expected.Zip(actual, static (left, right) =>
+            left.VectorId == right.VectorId && left.TextChunkId == right.TextChunkId &&
+            left.SourceRevision == right.SourceRevision && left.Values.AsSpan().SequenceEqual(right.Values) &&
+            left.Dimensions == right.Dimensions && left.ModelFingerprint == right.ModelFingerprint &&
+            left.TextChunkContentHash == right.TextChunkContentHash && left.PayloadChecksum == right.PayloadChecksum)
+            .All(static equal => equal);
+
+    private static string PublicationChecksum(string fingerprint, int dimensions, IReadOnlyList<CanonicalVector> vectors)
+    {
+        var material = $"{fingerprint}|cos|{dimensions}|{string.Join(',', vectors.Select(vector => $"{vector.VectorId}:{vector.PayloadChecksum}"))}";
+        return Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(material)));
     }
 
     public async ValueTask AppendAuditAsync(

@@ -123,6 +123,7 @@ public sealed partial class SqlGpuSchedulerStore
             await using var context = await _contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
             await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken).ConfigureAwait(false);
             await AcquireAdmissionLockAsync(context, transaction.GetDbTransaction(), cancellationToken).ConfigureAwait(false);
+            await AcquireMutationLockAsync(context, transaction.GetDbTransaction(), cancellationToken).ConfigureAwait(false);
             var existing = await context.GpuMiniTasks.SingleOrDefaultAsync(t => t.Id == request.RequestId, cancellationToken).ConfigureAwait(false);
             if (existing is not null)
             {
@@ -144,9 +145,19 @@ public sealed partial class SqlGpuSchedulerStore
                  t.InteractiveOwnerMachineFingerprint != owner.MachineFingerprint), cancellationToken).ConfigureAwait(false))
                 throw new InvalidOperationException("interactive-executor-process-conflict");
             if (request.QueueDeadlineUtc <= now || request.QueueDeadlineUtc > now.AddSeconds(2) ||
-                request.ExecutionDeadlineUtc <= request.QueueDeadlineUtc || request.ExecutionDeadlineUtc > now.AddSeconds(10))
+                request.ExecutionDeadlineUtc <= request.QueueDeadlineUtc || request.ExecutionDeadlineUtc > now.Add(_interactiveExecutionTimeout))
                 throw new ArgumentException("interactive-request-deadline-invalid", nameof(request));
             await CancelExpiredInteractiveAsync(context, now, cancellationToken).ConfigureAwait(false);
+            if (request.DeclineWhenGpuBusy &&
+                (!await context.GpuCapacitySlots.AnyAsync(cancellationToken).ConfigureAwait(false) ||
+                 await context.GpuCapacitySlots.AnyAsync(slot =>
+                     slot.State != (int)GpuCapacitySlotState.Available || slot.ActiveBatchId != null,
+                     cancellationToken).ConfigureAwait(false) ||
+                 await context.GpuMiniTasks.AnyAsync(task =>
+                     task.ExecutionState == (int)GpuMiniTaskExecutionState.Ready ||
+                     task.ExecutionState == (int)GpuMiniTaskExecutionState.Active,
+                     cancellationToken).ConfigureAwait(false)))
+                throw new GpuInteractiveBusyWithoutHandoffException();
             if (await context.GpuMiniTasks.CountAsync(t => t.InteractiveExecutorInstanceId != null &&
                 (t.ExecutionState == (int)GpuMiniTaskExecutionState.Ready || t.ExecutionState == (int)GpuMiniTaskExecutionState.Active ||
                  context.GpuCapacitySlots.Any(slot => slot.ActiveBatchId != null && slot.ActiveBatchId == t.BatchId)),
@@ -181,6 +192,7 @@ public sealed partial class SqlGpuSchedulerStore
             await using var context = await _contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
             await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken).ConfigureAwait(false);
             await AcquireAdmissionLockAsync(context, transaction.GetDbTransaction(), cancellationToken).ConfigureAwait(false);
+            await AcquireMutationLockAsync(context, transaction.GetDbTransaction(), cancellationToken).ConfigureAwait(false);
             var task = await context.GpuMiniTasks.SingleOrDefaultAsync(t => t.Id == requestId &&
                 t.InteractiveExecutorInstanceId == executorInstanceId && t.InteractiveOwnerProcessId == owner.ProcessId &&
                 t.InteractiveOwnerStartedAtUtc == owner.StartedAtUtc && t.InteractiveOwnerMachineFingerprint == owner.MachineFingerprint,
@@ -221,6 +233,7 @@ public sealed partial class SqlGpuSchedulerStore
         await using var context = await _contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken).ConfigureAwait(false);
         await AcquireAdmissionLockAsync(context, transaction.GetDbTransaction(), cancellationToken).ConfigureAwait(false);
+        await AcquireMutationLockAsync(context, transaction.GetDbTransaction(), cancellationToken).ConfigureAwait(false);
         var receipt = await context.GpuSchedulerOperationReceipts.SingleOrDefaultAsync(r => r.OperationId == operationId, cancellationToken).ConfigureAwait(false);
         if (receipt is not null) return AdmissionResultFromReceipt(receipt, wakeReason, options);
         await context.GpuMiniTasks.Where(t => t.Id == expired.RequestId && t.InteractiveExecutorInstanceId == expired.ExecutorInstanceId &&

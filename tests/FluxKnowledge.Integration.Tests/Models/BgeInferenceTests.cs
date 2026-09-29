@@ -155,6 +155,20 @@ public sealed class BgeInferenceTests
         Assert.Equal(0, store.Calls);
     }
 
+    [Theory]
+    [InlineData(-1)]
+    [InlineData(33)]
+    public async Task Invalid_cpu_thread_count_refuses_before_model_store_access(int threads)
+    {
+        using var tokenizer = new FakeTokenizer();
+        var store = new RefusingStore("unexpected-model-access");
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() =>
+            BgeOfflineModels.OpenCpuEmbeddingAsync(store, tokenizer, CancellationToken.None, threads).AsTask());
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() =>
+            BgeOfflineModels.OpenCpuRerankerAsync(store, tokenizer, CancellationToken.None, threads).AsTask());
+        Assert.Equal(0, store.Calls);
+    }
+
     [Fact]
     public void Pair_template_preserves_both_complete_inputs_and_pads_only_with_mask_zero()
     {

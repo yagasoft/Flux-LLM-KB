@@ -64,6 +64,25 @@ public sealed class HybridPassageRetrievalTests
     }
 
     [Fact]
+    public async Task Explicit_twenty_five_second_deadline_extends_the_whole_search_without_changing_the_default()
+    {
+        var clock = new ManualClock();
+        var reader = new Reader { BlockStage = "scope" };
+        var leases = new Leases();
+        var engine = new HybridPassageRetrievalEngine(reader, reader, leases, leases,
+            new Models(), new Probe(), new Codec(), new LocalPrivateContentDisclosure(), clock,
+            TimeSpan.FromSeconds(25));
+        var responseTask = engine.SearchAsync(new CorpusSearchRequest("query", 2, "all", null, null), CancellationToken.None).AsTask();
+        await reader.BlockStarted.Task.WaitAsync(TimeSpan.FromSeconds(1));
+        clock.Advance(TimeSpan.FromSeconds(10));
+        Assert.False(responseTask.IsCompleted);
+        clock.Advance(TimeSpan.FromSeconds(15));
+        var response = await responseTask.WaitAsync(TimeSpan.FromSeconds(1));
+        Assert.Equal("timeout", response.SemanticStatus);
+        reader.ReleaseBlock.TrySetResult();
+    }
+
+    [Fact]
     public async Task Dense_only_match_keeps_complete_body_identity_and_citation_with_no_lexical_anchor()
     {
         var reader = new Reader { Dense = [Passage(8, "Employees receive twenty days of annual leave.")] };

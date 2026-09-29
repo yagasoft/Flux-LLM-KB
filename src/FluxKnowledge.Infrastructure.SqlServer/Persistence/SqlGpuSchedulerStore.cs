@@ -27,6 +27,7 @@ public sealed partial class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecu
     private readonly TimeProvider _timeProvider;
     private readonly Lazy<GpuInteractiveOwnerIdentity> _interactiveOwner;
     private readonly IDeploymentValidationHold? _deploymentValidationHold;
+    private readonly TimeSpan _interactiveExecutionTimeout;
 
     public SqlGpuSchedulerStore(
         IDbContextFactory<FluxKnowledgeDbContext> contextFactory,
@@ -39,8 +40,13 @@ public sealed partial class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecu
         Func<CancellationToken, ValueTask>? afterLifecycleCommitted = null,
         Func<CancellationToken, ValueTask>? afterWakeConsumptionCommitted = null,
         GpuInteractiveOwnerIdentity? interactiveOwner = null,
-        IDeploymentValidationHold? deploymentValidationHold = null)
+        IDeploymentValidationHold? deploymentValidationHold = null,
+        TimeSpan? interactiveExecutionTimeout = null)
     {
+        _interactiveExecutionTimeout = interactiveExecutionTimeout ?? TimeSpan.FromSeconds(10);
+        if (_interactiveExecutionTimeout < TimeSpan.FromSeconds(10) ||
+            _interactiveExecutionTimeout > TimeSpan.FromSeconds(25))
+            throw new ArgumentOutOfRangeException(nameof(interactiveExecutionTimeout));
         _contextFactory = contextFactory;
         _afterMiniTaskPersisted = afterMiniTaskPersisted;
         _timeProvider = timeProvider ?? TimeProvider.System;
@@ -154,6 +160,7 @@ public sealed partial class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecu
         }
 
         await AcquireAdmissionLockAsync(context, transaction.GetDbTransaction(), cancellationToken).ConfigureAwait(false);
+        await AcquireMutationLockAsync(context, transaction.GetDbTransaction(), cancellationToken).ConfigureAwait(false);
         var receipt = await context.GpuSchedulerOperationReceipts
             .SingleOrDefaultAsync(candidate => candidate.OperationId == operationId, cancellationToken)
             .ConfigureAwait(false);
@@ -301,6 +308,7 @@ public sealed partial class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecu
         {
             await using var context = await _contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
             await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken).ConfigureAwait(false);
+            await AcquireMutationLockAsync(context, transaction.GetDbTransaction(), cancellationToken).ConfigureAwait(false);
             await AcquireLifecycleOperationFencesAsync(
                 context, transaction.GetDbTransaction(), receipt.OperationId, receipt.Handle.BatchId, cancellationToken)
                 .ConfigureAwait(false);
@@ -415,6 +423,7 @@ public sealed partial class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecu
     {
         await using var context = await _contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken).ConfigureAwait(false);
+        await AcquireMutationLockAsync(context, transaction.GetDbTransaction(), cancellationToken).ConfigureAwait(false);
         await AcquireLifecycleOperationFencesAsync(
             context, transaction.GetDbTransaction(), operationId, callback.BatchId, cancellationToken)
             .ConfigureAwait(false);
@@ -579,6 +588,7 @@ public sealed partial class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecu
     {
         await using var context = await _contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken).ConfigureAwait(false);
+        await AcquireMutationLockAsync(context, transaction.GetDbTransaction(), cancellationToken).ConfigureAwait(false);
         await AcquireLifecycleOperationFencesAsync(
             context, transaction.GetDbTransaction(), operationId, request.BatchId, cancellationToken)
             .ConfigureAwait(false);
@@ -674,6 +684,7 @@ public sealed partial class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecu
     {
         await using var context = await _contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken).ConfigureAwait(false);
+        await AcquireMutationLockAsync(context, transaction.GetDbTransaction(), cancellationToken).ConfigureAwait(false);
         await AcquireLifecycleOperationFencesAsync(
             context, transaction.GetDbTransaction(), operationId, request.BatchId, cancellationToken)
             .ConfigureAwait(false);
@@ -759,6 +770,7 @@ public sealed partial class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecu
     {
         await using var context = await _contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken).ConfigureAwait(false);
+        await AcquireMutationLockAsync(context, transaction.GetDbTransaction(), cancellationToken).ConfigureAwait(false);
         await AcquireLifecycleOperationFencesAsync(
             context, transaction.GetDbTransaction(), operationId, request.BatchId, cancellationToken)
             .ConfigureAwait(false);
@@ -907,6 +919,7 @@ public sealed partial class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecu
         await using var transaction = await context.Database
             .BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken)
             .ConfigureAwait(false);
+        await AcquireMutationLockAsync(context, transaction.GetDbTransaction(), cancellationToken).ConfigureAwait(false);
         var receipt = await context.GpuSchedulerOperationReceipts
             .SingleOrDefaultAsync(candidate => candidate.OperationId == operationId, cancellationToken)
             .ConfigureAwait(false);
@@ -1016,6 +1029,7 @@ public sealed partial class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecu
     {
         await using var context = await _contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken).ConfigureAwait(false);
+        await AcquireMutationLockAsync(context, transaction.GetDbTransaction(), cancellationToken).ConfigureAwait(false);
         var receipt = await context.GpuSchedulerOperationReceipts.SingleOrDefaultAsync(
             candidate => candidate.OperationId == operationId,
             cancellationToken).ConfigureAwait(false);
@@ -1120,14 +1134,15 @@ public sealed partial class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecu
         await using var transaction = await context.Database
             .BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken)
             .ConfigureAwait(false);
-
-        if (await context.CorpusRebuildSupersededJobs.AnyAsync(value => value.JobId == request.ParentJob.JobId.Value, cancellationToken))
-            throw new InvalidOperationException("corpus-rebuild-job-superseded");
-
         if (_beforeIdempotencyRead is not null)
         {
             await _beforeIdempotencyRead(cancellationToken).ConfigureAwait(false);
         }
+
+        await AcquireMutationLockAsync(context, transaction.GetDbTransaction(), cancellationToken).ConfigureAwait(false);
+
+        if (await context.CorpusRebuildSupersededJobs.AnyAsync(value => value.JobId == request.ParentJob.JobId.Value, cancellationToken))
+            throw new InvalidOperationException("corpus-rebuild-job-superseded");
 
         var existing = await context.GpuMiniTasks.SingleOrDefaultAsync(
                 task => task.IdempotencyKey == request.IdempotencyKey,
@@ -1617,6 +1632,13 @@ public sealed partial class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecu
         }
     }
 
+    private static Task AcquireMutationLockAsync(
+        FluxKnowledgeDbContext context,
+        DbTransaction transaction,
+        CancellationToken cancellationToken) =>
+        AcquireTransactionApplicationLockAsync(context, transaction,
+            "FluxKnowledge.GpuScheduler.Mutation", cancellationToken, "mutation");
+
     private static async Task AcquireLifecycleOperationFencesAsync(
         FluxKnowledgeDbContext context,
         DbTransaction transaction,
@@ -1642,7 +1664,8 @@ public sealed partial class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecu
         FluxKnowledgeDbContext context,
         DbTransaction transaction,
         string resource,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string fenceKind = "lifecycle")
     {
         await context.Database.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var command = context.Database.GetDbConnection().CreateCommand();
@@ -1657,7 +1680,7 @@ public sealed partial class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecu
         var result = Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false));
         if (result is not 0 and not 1)
         {
-            throw new InvalidOperationException("Could not acquire the GPU scheduler lifecycle fence. Check SQL Server locking and permissions.");
+            throw new InvalidOperationException($"Could not acquire the GPU scheduler {fenceKind} fence. Check SQL Server locking and permissions.");
         }
     }
 
@@ -2071,6 +2094,7 @@ public sealed partial class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecu
         {
             await using var context = await _contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
             await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken).ConfigureAwait(false);
+            await AcquireMutationLockAsync(context, transaction.GetDbTransaction(), cancellationToken).ConfigureAwait(false);
             await AcquireLifecycleOperationFencesAsync(
                 context, transaction.GetDbTransaction(), operationId, handle.BatchId, cancellationToken)
                 .ConfigureAwait(false);

@@ -33,7 +33,7 @@ public sealed class SqlToUsearchRebuildTests(NativeSqlServerFixture fixture) : I
     private readonly NativeSqlServerFixture _fixture = fixture;
 
     [NativeSqlServerFact]
-    public async Task Stale_stamped_projection_waits_for_publication_then_recovers_without_repairing_old_files()
+    public async Task Stale_stamped_projection_refreshes_from_sql_without_reembedding_or_repairing_old_files()
     {
         await using var environment = await PipelineEnvironment.CreateAsync(_fixture, "Projection version baseline.");
         var active = await environment.ActiveGenerationAsync();
@@ -49,14 +49,272 @@ public sealed class SqlToUsearchRebuildTests(NativeSqlServerFixture fixture) : I
         using var provider = CreateRecoveryProvider(environment.Factory, environment.IndexRoot);
         var coordinator = provider.GetRequiredService<DerivedIndexRecoveryCoordinator>();
         await coordinator.RunOnceAsync(CancellationToken.None);
-        Assert.Equal(DerivedIndexRecoveryState.IndexUpdating, coordinator.Snapshot.State);
+        Assert.Equal(DerivedIndexRecoveryState.Healthy, coordinator.Snapshot.State);
         Assert.Equal(metadataBefore, File.ReadAllText(Path.Combine(active.IndexPath, UsearchGenerationValidator.MetadataFileName)));
+        Assert.False(coordinator.Snapshot.IsProjectionUnavailable);
+        Assert.NotEqual(active.Id, coordinator.Snapshot.ActiveGenerationId);
+        await using var verification = await environment.Factory.CreateDbContextAsync();
+        var currentState = await verification.IndexState.SingleAsync();
+        var refreshed = await verification.IndexGenerations.SingleAsync(value => value.Id == currentState.ActiveIndexGenerationId);
+        Assert.Equal(currentState.CorpusEpoch, refreshed.CorpusEpoch);
+        Assert.Equal(currentState.CorpusVersion, refreshed.CorpusVersion);
+        Assert.Equal(await verification.TextChunks.CountAsync(), await verification.Vectors.CountAsync());
+    }
+
+    [NativeSqlServerFact]
+    public async Task Suppressed_source_is_removed_from_refreshed_membership_without_deleting_canonical_vectors()
+    {
+        await using var environment = await PipelineEnvironment.CreateAsync(_fixture, "Surviving public passage.");
+        var recordId = await environment.AddRetainedAndPumpAsync("Temporary passage to suppress.");
+        long suppressedVectorId;
+        await using (var context = await environment.Factory.CreateDbContextAsync())
+        {
+            var record = await context.PipelineRecords.SingleAsync(value => value.Id == recordId);
+            var revision = await context.SourceRevisions.SingleAsync(value => value.Id == record.SourceRevisionId);
+            suppressedVectorId = await (from vector in context.Vectors
+                join chunk in context.TextChunks on vector.TextChunkId equals chunk.Id
+                join artifact in context.Artifacts on chunk.ArtifactId equals artifact.Id
+                where artifact.PipelineRecordId == recordId
+                select vector.VectorId).SingleAsync();
+            revision.SuppressedAtUtc = DateTimeOffset.UtcNow;
+            var state = await context.IndexState.SingleAsync();
+            state.CorpusVersion++;
+            await context.SaveChangesAsync();
+        }
+        using var provider = CreateRecoveryProvider(environment.Factory, environment.IndexRoot);
+        await provider.GetRequiredService<DerivedIndexRecoveryCoordinator>().RunOnceAsync(CancellationToken.None);
+        Assert.Equal(DerivedIndexRecoveryState.Healthy, provider.GetRequiredService<DerivedIndexRecoveryCoordinator>().Snapshot.State);
+        await using var verification = await environment.Factory.CreateDbContextAsync();
+        var active = (await verification.IndexState.SingleAsync()).ActiveIndexGenerationId;
+        Assert.DoesNotContain(suppressedVectorId, await verification.IndexGenerationVectors
+            .Where(value => value.GenerationId == active).Select(value => value.VectorId).ToArrayAsync());
+        Assert.NotNull(await verification.Vectors.SingleOrDefaultAsync(value => value.VectorId == suppressedVectorId));
+    }
+
+    [NativeSqlServerFact]
+    public async Task Publication_refresh_refuses_a_candidate_when_the_corpus_stamp_changes()
+    {
+        await using var environment = await PipelineEnvironment.CreateAsync(_fixture, "Stable source.");
+        var original = await environment.ActiveGenerationAsync();
+        await using (var context = await environment.Factory.CreateDbContextAsync())
+        {
+            var state = await context.IndexState.SingleAsync();
+            state.CorpusVersion++;
+            await context.SaveChangesAsync();
+        }
         var candidate = await environment.Builder.BuildAndPlaceAsync(Guid.NewGuid(), CancellationToken.None);
-        await new SqlStageTransitionStore(environment.Factory).TransitionAsync(await ClaimPublishAsync(environment, candidate), CancellationToken.None);
+        await using (var context = await environment.Factory.CreateDbContextAsync())
+        {
+            var state = await context.IndexState.SingleAsync();
+            state.CorpusVersion++;
+            await context.SaveChangesAsync();
+        }
+        Assert.False(await new SqlDerivedIndexRecoveryStore(environment.Factory, TimeProvider.System)
+            .TryActivatePublicationCandidateAsync(candidate, CancellationToken.None));
+        Assert.Equal(original.Id, await environment.Store.GetActiveGenerationIdAsync(CancellationToken.None));
+    }
+
+    [NativeSqlServerFact]
+    public async Task Deployment_hold_defers_automatic_publication_refresh()
+    {
+        await using var environment = await PipelineEnvironment.CreateAsync(_fixture, "Held source.");
+        var original = await environment.ActiveGenerationAsync();
+        await using (var context = await environment.Factory.CreateDbContextAsync())
+        {
+            var state = await context.IndexState.SingleAsync();
+            state.CorpusVersion++;
+            await context.SaveChangesAsync();
+        }
+        environment.PermitRebuild(Guid.NewGuid());
+        using var provider = CreateRecoveryProvider(environment.Factory, environment.IndexRoot, environment.DeploymentHold);
+        var coordinator = provider.GetRequiredService<DerivedIndexRecoveryCoordinator>();
+        await coordinator.RunOnceAsync(CancellationToken.None);
+        Assert.Equal(DerivedIndexRecoveryState.IndexUpdating, coordinator.Snapshot.State);
+        Assert.Equal(original.Id, await environment.Store.GetActiveGenerationIdAsync(CancellationToken.None));
+        environment.ReleaseRebuild();
         await coordinator.RunOnceAsync(CancellationToken.None);
         Assert.Equal(DerivedIndexRecoveryState.Healthy, coordinator.Snapshot.State);
-        Assert.False(coordinator.Snapshot.IsProjectionUnavailable);
-        Assert.Equal(candidate.Generation.Id, coordinator.Snapshot.ActiveGenerationId);
+    }
+
+    [NativeSqlServerFact]
+    public async Task Placed_candidate_and_two_recovery_processes_converge_on_one_current_generation()
+    {
+        await using var environment = await PipelineEnvironment.CreateAsync(_fixture, "Concurrent recovery source.");
+        await using (var context = await environment.Factory.CreateDbContextAsync())
+        {
+            var state = await context.IndexState.SingleAsync();
+            state.CorpusVersion++;
+            await context.SaveChangesAsync();
+        }
+        var placed = await environment.Builder.BuildAndPlaceAsync(Guid.NewGuid(), CancellationToken.None);
+        using var first = CreateRecoveryProvider(environment.Factory, environment.IndexRoot);
+        using var second = CreateRecoveryProvider(environment.Factory, environment.IndexRoot);
+        await Task.WhenAll(
+            first.GetRequiredService<DerivedIndexRecoveryCoordinator>().RunOnceAsync(CancellationToken.None).AsTask(),
+            second.GetRequiredService<DerivedIndexRecoveryCoordinator>().RunOnceAsync(CancellationToken.None).AsTask());
+        var stateAfter = await environment.ActiveGenerationAsync();
+        Assert.Equal(placed.Generation.Id, stateAfter.Id);
+        Assert.Equal(placed.Generation.CorpusStamp, stateAfter.CorpusStamp);
+        await using var contextAfter = await environment.Factory.CreateDbContextAsync();
+        Assert.Equal(1, await contextAfter.IndexGenerations.CountAsync(value => value.Id == placed.Generation.Id));
+        Assert.Equal(placed.Vectors.Count, await contextAfter.IndexGenerationVectors.CountAsync(value => value.GenerationId == placed.Generation.Id));
+    }
+
+    [NativeSqlServerFact]
+    public async Task Publication_refresh_preserves_canonical_rows_when_no_vectors_remain_eligible()
+    {
+        await using var environment = await PipelineEnvironment.CreateAsync(_fixture, "Only source.");
+        var original = await environment.ActiveGenerationAsync();
+        await using (var context = await environment.Factory.CreateDbContextAsync())
+        {
+            (await context.PipelineRecords.SingleAsync()).IsDeleted = true;
+            (await context.IndexState.SingleAsync()).CorpusVersion++;
+            await context.SaveChangesAsync();
+        }
+        using var provider = CreateRecoveryProvider(environment.Factory, environment.IndexRoot);
+        var coordinator = provider.GetRequiredService<DerivedIndexRecoveryCoordinator>();
+        await coordinator.RunOnceAsync(CancellationToken.None);
+        Assert.Equal(DerivedIndexRecoveryState.IndexUpdating, coordinator.Snapshot.State);
+        Assert.Equal(original.Id, await environment.Store.GetActiveGenerationIdAsync(CancellationToken.None));
+        await using var verification = await environment.Factory.CreateDbContextAsync();
+        Assert.True(await verification.Vectors.AnyAsync());
+        Assert.True(await verification.TextChunks.AnyAsync());
+        Assert.Null((await verification.IndexState.SingleAsync()).EmptyCatalogueValidatedAtUtc);
+        await coordinator.RunOnceAsync(CancellationToken.None);
+        Assert.Equal(DerivedIndexRecoveryState.IndexUpdating, coordinator.Snapshot.State);
+        await using (var restoration = await environment.Factory.CreateDbContextAsync())
+        {
+            (await restoration.PipelineRecords.SingleAsync()).IsDeleted = false;
+            (await restoration.IndexState.SingleAsync()).CorpusVersion++;
+            await restoration.SaveChangesAsync();
+        }
+        await coordinator.RunOnceAsync(CancellationToken.None);
+        Assert.Equal(DerivedIndexRecoveryState.Healthy, coordinator.Snapshot.State);
+    }
+
+    [NativeSqlServerFact]
+    public async Task Candidate_activation_refuses_membership_change_even_at_the_same_stamp_and_a_new_hold()
+    {
+        await using var environment = await PipelineEnvironment.CreateAsync(_fixture, "Membership source.");
+        await using (var context = await environment.Factory.CreateDbContextAsync())
+        {
+            (await context.IndexState.SingleAsync()).CorpusVersion++;
+            await context.SaveChangesAsync();
+        }
+        var candidate = await environment.Builder.BuildAndPlaceAsync(Guid.NewGuid(), CancellationToken.None);
+        var original = await environment.ActiveGenerationAsync();
+        environment.PermitRebuild(Guid.NewGuid());
+        var heldStore = new SqlDerivedIndexRecoveryStore(environment.Factory, TimeProvider.System,
+            deploymentHold: environment.DeploymentHold);
+        Assert.False(await heldStore.TryActivatePublicationCandidateAsync(candidate, CancellationToken.None));
+        await using (var heldVerification = await environment.Factory.CreateDbContextAsync())
+        {
+            Assert.False(await heldVerification.IndexGenerations.AnyAsync(value => value.Id == candidate.Generation.Id));
+            Assert.False(await heldVerification.IndexGenerationVectors.AnyAsync(value => value.GenerationId == candidate.Generation.Id));
+        }
+        environment.ReleaseRebuild();
+        await using (var context = await environment.Factory.CreateDbContextAsync())
+        {
+            (await context.Vectors.SingleAsync()).IsDeleted = true;
+            await context.SaveChangesAsync();
+        }
+        Assert.False(await heldStore.TryActivatePublicationCandidateAsync(candidate, CancellationToken.None));
+        Assert.Equal(original.Id, await environment.Store.GetActiveGenerationIdAsync(CancellationToken.None));
+    }
+
+    [NativeSqlServerFact]
+    public async Task Active_corpus_rebuild_operation_prevents_automatic_publication_refresh()
+    {
+        await using var environment = await PipelineEnvironment.CreateAsync(_fixture, "Maintenance source.");
+        var original = await environment.ActiveGenerationAsync();
+        var operationId = Guid.NewGuid();
+        await using (var context = await environment.Factory.CreateDbContextAsync())
+        {
+            context.CorpusRebuildOperations.Add(new CorpusRebuildOperationEntity
+            {
+                Id = operationId, TargetEpoch = Guid.NewGuid(), ManifestHash = new string('a', 64),
+                ManifestJson = "{}", CreatedAtUtc = DateTimeOffset.UtcNow
+            });
+            var state = await context.IndexState.SingleAsync();
+            state.CorpusVersion++;
+            state.CorpusRebuildOperationId = operationId;
+            await context.SaveChangesAsync();
+        }
+        using var provider = CreateRecoveryProvider(environment.Factory, environment.IndexRoot);
+        var coordinator = provider.GetRequiredService<DerivedIndexRecoveryCoordinator>();
+        await coordinator.RunOnceAsync(CancellationToken.None);
+        Assert.Equal(DerivedIndexRecoveryState.IndexUpdating, coordinator.Snapshot.State);
+        Assert.Equal(original.Id, await environment.Store.GetActiveGenerationIdAsync(CancellationToken.None));
+    }
+
+    [NativeSqlServerFact]
+    public async Task Hosted_recovery_reprobes_after_hold_release_and_a_later_publication_change()
+    {
+        await using var environment = await PipelineEnvironment.CreateAsync(_fixture, "Repeated source change.");
+        var original = await environment.ActiveGenerationAsync();
+        await using (var context = await environment.Factory.CreateDbContextAsync())
+        {
+            (await context.IndexState.SingleAsync()).CorpusVersion++;
+            await context.SaveChangesAsync();
+        }
+        environment.PermitRebuild(Guid.NewGuid());
+        using var provider = CreateRecoveryProvider(environment.Factory, environment.IndexRoot, environment.DeploymentHold);
+        var coordinator = provider.GetRequiredService<DerivedIndexRecoveryCoordinator>();
+        using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        var probes = 0;
+        var service = new DerivedIndexRecoveryService(coordinator, DerivedIndexRecoveryOptions.Default, TimeProvider.System,
+            async (_, _) =>
+            {
+                probes++;
+                if (probes == 1)
+                {
+                    Assert.Equal(DerivedIndexRecoveryState.IndexUpdating, coordinator.Snapshot.State);
+                    Assert.Equal(original.Id, await environment.Store.GetActiveGenerationIdAsync(CancellationToken.None));
+                    environment.ReleaseRebuild();
+                }
+                else if (probes == 2)
+                {
+                    Assert.Equal(DerivedIndexRecoveryState.Healthy, coordinator.Snapshot.State);
+                    await using var changed = await environment.Factory.CreateDbContextAsync();
+                    (await changed.IndexState.SingleAsync()).CorpusVersion++;
+                    await changed.SaveChangesAsync();
+                }
+                else
+                {
+                    Assert.Equal(DerivedIndexRecoveryState.Healthy, coordinator.Snapshot.State);
+                    stop.Cancel();
+                }
+            });
+        await service.RunForTestingAsync(stop.Token);
+        Assert.Equal(3, probes);
+        await using var verification = await environment.Factory.CreateDbContextAsync();
+        var state = await verification.IndexState.SingleAsync();
+        var active = await verification.IndexGenerations.SingleAsync(value => value.Id == state.ActiveIndexGenerationId);
+        Assert.Equal(state.CorpusEpoch, active.CorpusEpoch);
+        Assert.Equal(state.CorpusVersion, active.CorpusVersion);
+    }
+
+    [NativeSqlServerFact]
+    public async Task Live_query_lease_defers_publication_refresh_until_its_native_owner_releases_it()
+    {
+        await using var environment = await PipelineEnvironment.CreateAsync(_fixture, "Leased source.");
+        var original = await environment.ActiveGenerationAsync();
+        var lease = await new SqlCorpusGenerationLeaseStore(environment.Factory, TimeProvider.System).TryAcquireAsync(Guid.NewGuid(),
+            new GpuInteractiveOwnerIdentity(Environment.ProcessId, DateTimeOffset.UtcNow, new string('b', 64)),
+            original.ModelFingerprint, original.Dimensions, CancellationToken.None);
+        Assert.NotNull(lease);
+        await using (var context = await environment.Factory.CreateDbContextAsync())
+        {
+            (await context.IndexState.SingleAsync()).CorpusVersion++;
+            await context.SaveChangesAsync();
+        }
+        using var provider = CreateRecoveryProvider(environment.Factory, environment.IndexRoot);
+        var coordinator = provider.GetRequiredService<DerivedIndexRecoveryCoordinator>();
+        await coordinator.RunOnceAsync(CancellationToken.None);
+        Assert.Equal(original.Id, await environment.Store.GetActiveGenerationIdAsync(CancellationToken.None));
+        await lease.DisposeAsync();
+        await coordinator.RunOnceAsync(CancellationToken.None);
+        Assert.Equal(DerivedIndexRecoveryState.Healthy, coordinator.Snapshot.State);
     }
 
     [NativeSqlServerFact]
@@ -1432,9 +1690,11 @@ public sealed class SqlToUsearchRebuildTests(NativeSqlServerFixture fixture) : I
 
     private static ServiceProvider CreateRecoveryProvider(
         IDbContextFactory<FluxKnowledgeDbContext> factory,
-        string root)
+        string root,
+        IDeploymentValidationHold? hold = null)
     {
         var services = new ServiceCollection();
+        if (hold is not null) services.AddSingleton(hold);
         services.AddSingleton(factory);
         services.AddSingleton<IDerivedIndexRecoveryStore, SqlDerivedIndexRecoveryStore>();
         services.AddScoped<SqlPipelineStore>();
@@ -1734,6 +1994,7 @@ public sealed class SqlToUsearchRebuildTests(NativeSqlServerFixture fixture) : I
         public IEmbeddingProvider Embeddings { get; }
         public IDeploymentValidationHold DeploymentHold => _provider.GetRequiredService<IDeploymentValidationHold>();
         public void PermitRebuild(Guid operationId) => ((RebuildTestHold)DeploymentHold).OperationId = operationId;
+        public void ReleaseRebuild() => ((RebuildTestHold)DeploymentHold).OperationId = null;
         public FluxKnowledge.Application.Contracts.RegisterUtf8FileResult? LastReceipt { get; private set; }
 
         public static async Task<PipelineEnvironment> CreateAsync(NativeSqlServerFixture fixture, string text,

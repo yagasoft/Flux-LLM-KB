@@ -115,6 +115,95 @@ public sealed class SourceRootWatchStoreIntegrationTests(NativeSqlServerFixture 
         Assert.Equal(2, await verification.AuditEvents.CountAsync(@event => @event.SourceRootId == rootId && @event.EventType == "watch.batch_detected"));
     }
 
+    [NativeSqlServerFact]
+    public async Task Separate_watch_bursts_after_state_cleanup_create_distinct_outbox_keys()
+    {
+        var now = DateTimeOffset.Parse("2026-08-09T12:00:00+00:00");
+        var rootId = Guid.NewGuid();
+        await using (var setup = CreateContext())
+        {
+            setup.SourceRootConfigurations.Add(Root(rootId, now));
+            await setup.SaveChangesAsync();
+        }
+
+        var store = new SqlSourceRootWatchStore(new ContextFactory(_fixture.ConnectionString), new FixedTimeProvider(now));
+        await store.RecordSignalAsync(new SourceWatchSignal(new SourceRootId(rootId), SourceWatchSignalKind.Created, now), CancellationToken.None);
+        var first = Assert.IsType<ClaimedSourceWatchBatch>(await store.ClaimDueBatchAsync(now.AddSeconds(3), "first", TimeSpan.FromMinutes(1), CancellationToken.None));
+        await store.ReleaseScanAsync(first, CancellationToken.None);
+
+        await using (var complete = CreateContext())
+        {
+            var request = await complete.SourceScanRequests.SingleAsync(value => value.SourceRootId == rootId);
+            var job = await complete.SourceScanJobs.SingleAsync(value => value.SourceScanRequestId == request.Id);
+            request.State = (int)SourceScanRequestState.Completed;
+            job.State = (int)SourceScanJobState.Completed;
+            await complete.SaveChangesAsync();
+        }
+
+        await store.RecordSignalAsync(new SourceWatchSignal(new SourceRootId(rootId), SourceWatchSignalKind.Changed, now.AddSeconds(5)), CancellationToken.None);
+        var second = Assert.IsType<ClaimedSourceWatchBatch>(await store.ClaimDueBatchAsync(now.AddSeconds(8), "second", TimeSpan.FromMinutes(1), CancellationToken.None));
+        await store.ReleaseScanAsync(second, CancellationToken.None);
+
+        await using var verify = CreateContext();
+        Assert.Equal(2, await verify.SourceScanRequests.CountAsync(value => value.SourceRootId == rootId));
+        var keys = await verify.SourceScanOutbox.Where(value => value.SourceScanRequest.SourceRootId == rootId)
+            .Select(value => value.IdempotencyKey).ToListAsync();
+        Assert.Equal(2, keys.Distinct(StringComparer.Ordinal).Count());
+    }
+
+    [NativeSqlServerFact]
+    public async Task Expired_watch_claim_releases_once_with_a_retained_legacy_outbox()
+    {
+        var now = DateTimeOffset.Parse("2026-08-09T12:00:00+00:00");
+        var rootId = Guid.NewGuid();
+        var oldRequestId = Guid.NewGuid();
+        await using (var setup = CreateContext())
+        {
+            setup.SourceRootConfigurations.Add(Root(rootId, now));
+            setup.SourceScanRequests.Add(new SourceScanRequestEntity
+            {
+                Id = oldRequestId, SourceRootId = rootId, RequestKind = 2,
+                RequestedBy = "watcher", RequestedAtUtc = now.AddMinutes(-5),
+                IsReleased = true, ReleasedAtUtc = now.AddMinutes(-5),
+                State = (int)SourceScanRequestState.Completed
+            });
+            setup.SourceScanJobs.Add(new SourceScanJobEntity
+            {
+                Id = Guid.NewGuid(), SourceScanRequestId = oldRequestId,
+                State = (int)SourceScanJobState.Completed, DueAtUtc = now.AddMinutes(-5),
+                CreatedAtUtc = now.AddMinutes(-5), UpdatedAtUtc = now.AddMinutes(-4)
+            });
+            setup.SourceScanOutbox.Add(new SourceScanOutboxEntity
+            {
+                Id = Guid.NewGuid(), SourceScanRequestId = oldRequestId,
+                Operation = "source.scan", IdempotencyKey = $"source-watch:{rootId:N}:1",
+                DueAtUtc = now.AddMinutes(-5), CreatedAtUtc = now.AddMinutes(-5)
+            });
+            setup.SourceRootWatchStates.Add(new SourceRootWatchStateEntity
+            {
+                SourceRootId = rootId, FirstSignalAtUtc = now, LastSignalAtUtc = now,
+                SignalCount = 1, DebounceGeneration = 1, DueAtUtc = now,
+                LeaseOwner = "previous-host", LeaseGeneration = 1,
+                LeaseExpiresAtUtc = now.AddMinutes(1)
+            });
+            await setup.SaveChangesAsync();
+        }
+
+        var store = new SqlSourceRootWatchStore(new ContextFactory(_fixture.ConnectionString), new FixedTimeProvider(now.AddMinutes(2)));
+        Assert.Null(await store.ClaimDueBatchAsync(now.AddSeconds(30), "new-host", TimeSpan.FromMinutes(1), CancellationToken.None));
+        var claim = Assert.IsType<ClaimedSourceWatchBatch>(await store.ClaimDueBatchAsync(now.AddMinutes(2), "new-host", TimeSpan.FromMinutes(1), CancellationToken.None));
+        await store.ReleaseScanAsync(claim, CancellationToken.None);
+
+        await using var verify = CreateContext();
+        Assert.Equal(2, await verify.SourceScanRequests.CountAsync(value => value.SourceRootId == rootId));
+        Assert.Equal(2, await verify.SourceScanJobs.CountAsync(value => value.SourceScanRequest.SourceRootId == rootId));
+        var outbox = await verify.SourceScanOutbox.Where(value => value.SourceScanRequest.SourceRootId == rootId)
+            .Select(value => value.IdempotencyKey).ToListAsync();
+        Assert.Contains($"source-watch:{rootId:N}:1", outbox);
+        Assert.Equal(2, outbox.Distinct(StringComparer.Ordinal).Count());
+        Assert.False(await verify.SourceRootWatchStates.AnyAsync(value => value.SourceRootId == rootId));
+    }
+
     private FluxKnowledgeDbContext CreateContext() => new(new DbContextOptionsBuilder<FluxKnowledgeDbContext>().UseSqlServer(_fixture.ConnectionString).Options);
 
     private sealed class ContextFactory(string connectionString) : IDbContextFactory<FluxKnowledgeDbContext>

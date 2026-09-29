@@ -173,16 +173,40 @@ epoch, without an old-passage or concurrent-model migration system.
 The selected pair is BGE-M3 and BGE-reranker-v2-m3, with GPU execution
 through the existing scheduler and optional validated CPU placement. Interactive
 ownership and runtime admission retain batch ownership, trusted release and
-recovery. The deployed baseline unloads models after each
-request/batch, and guarantees an OCR turn after at most three new non-OCR
+recovery. The GPU path unloads models after each request/batch, and the
+scheduler guarantees an OCR turn after at most three new non-OCR
 retrieval/embedding admissions while OCR waits, without interrupting an active
 page. Identify OCR by validated runtime identity and preserve existing lanes;
 document OCR currently shares `DocumentIndexing` with other work. Keeping models
-loaded between requests is a separate enhancement requiring measured loading,
-memory and full-search benefit before retention-specific scheduler changes.
-The shared gate now provides search admission. GPU numeric parity, local
-relevance, live OCR fairness and latency gates remain acceptance work. Source publication, disclosure and citation
-safeguards are retained. No OCR or extractor upgrade is implied.
+loaded on the GPU between requests is a separate enhancement requiring measured
+loading, memory and full-search benefit before retention-specific scheduler
+changes. The CPU fallback keeps verified model sessions resident in RAM.
+The shared gate provides search admission. GPU numeric parity, English
+relevance, live OCR fairness and the measured two-caller latency gate passed
+staging acceptance. Source publication, disclosure and citation safeguards
+are retained. No OCR or extractor upgrade is implied.
+
+The GPU-first search candidate now makes its placement decision inside the
+existing serialised scheduler admission transaction. An idle GPU receives the
+usual durable, owner-bound request. If queued work or reserved/uncertain GPU
+capacity makes it busy, the transaction proves that no search request was
+created before the caller enters CPU inference. Ambiguous SQL or GPU delivery
+failures never trigger CPU. CPU inference uses two resident lanes, each with
+one embedding session and four parallel reranking sessions, loaded only from
+verified local model files. A lane stays owned until the complete search and
+all native shards settle, including after caller cancellation. A protected,
+stable Runtime file grants just one IIS worker ownership of this pool across
+overlapping recycles; a waiting worker remains GPU-capable. The outer search
+deadline is 25 seconds for either placement, with a 20-second BGE GPU
+execution limit. The scheduler serialises state-changing SQL transactions with
+a transaction-scoped mutation lock, acquired after the admission lock where
+that lock is required. This prevents wake acknowledgements and interactive
+handoffs from deadlocking on the scheduler state row. GPU model residency
+remains a separate uncommitted enhancement. The final two-caller 96-question
+staging run returned 96/96 trained, ready searches at 16.46-second full REST
+p95, with 49 GPU tasks and 47 CPU fallbacks. An OCR page arriving during a
+GPU search waited for that active batch, then ran without interruption before
+new search admissions.
 
 The implementation has a locally verified complete-passage path from
 synthetic ingress through SQL/USearch publication to REST search and citation
@@ -195,10 +219,10 @@ validation hold was released after healthy startup recovery. Background GPU
 embeddings executed with confirmed cleanup. Earlier separator-only passages
 caused a terminal embedding failure; the corrected replacement is documented in
 the [recovery record](operations/2026-09-27-hybrid-rebuild-recovery.md). Live
-search is intermittently hybrid and sometimes reaches its ten-second deadline,
-so quality, latency and OCR fairness remain acceptance gates. The
-[live acceptance record](operations/2026-09-28-hybrid-search-live-acceptance.md)
-contains the measured failure.
+search was intermittently hybrid and sometimes reached its former ten-second
+deadline. The corrected GPU-first/CPU-fallback path and its subsequent
+acceptance evidence are recorded in the
+[live acceptance record](operations/2026-09-28-hybrid-search-live-acceptance.md).
 
 The pinned reranker source and a float32 ONNX export are now verified in
 `J:\Models`. An isolated CPU conversion runtime reused cached packages with no
@@ -269,9 +293,15 @@ lease release. Losing a SQL session refuses results but retains ownership: clean
 requires explicit release or verified owner-process exit. Live or unknown owners
 block purge, recovery and generation-file deletion. The shared hybrid engine
 retains this lease through final hydration and rechecks eligibility/currentness.
-Recovery now reports a stale stamped projection or a recognised pending draft as
-`IndexUpdating`, without attempting to repair superseded files or declaring the
-canonical catalogue empty. An unknown absent pointer still fails validation.
+Recovery reports a recognised pending draft or active corpus rebuild as
+`IndexUpdating`. When a source change leaves the active generation behind the
+corpus version, the periodic recovery probe builds a new immutable USearch
+generation from already eligible SQL vectors. A publication-fenced transaction
+rechecks the exact stamp, complete vector membership and model profile before
+activating it. It preserves the old generation and all canonical rows; a
+concurrent publication retries from a fresh snapshot. Deployment holds defer
+this refresh. Zero eligible vectors remain `IndexUpdating` without claiming an
+empty canonical catalogue. An unknown absent pointer still fails validation.
 
 The implemented embedding path accepts batches of at most four passages. SQL stores
 an unplaced draft owned by the existing Embed job and saves exact search-input and
@@ -282,8 +312,9 @@ Embed-to-Publish transition. Checksum validation reads bounded keyset pages, inc
 when SQL retry buffering is enabled. Deletion withdraws its own pending draft in the
 first durable phase, then captures cleanup and releases its job reference in the
 second phase. BGE batch and synthetic disposable-SQL pipeline tests cover this path;
-the model/scheduler composition and controlled reset/drain are merged. Live rebuild
-recovery and the remaining acceptance gates are not complete.
+the model/scheduler composition and controlled reset/drain are merged. Live
+rebuild recovery, two-caller retrieval, OCR handover and the frozen English
+holdout have since passed staging validation.
 
 The implemented foreground BGE wrapper now loads, runs and unloads embedding before
 opening the reranker. Native allocations register against the acknowledged owner;
@@ -369,8 +400,8 @@ of this recovery.
 The shared query engine retrieves at most 100 lexical and 100 dense passage IDs,
 fuses by identity, reranks at most 50 and revalidates complete bodies/citations.
 Root/workspace dense retrieval scores the entire eligible captured scope up to
-10,000 vectors; larger scopes explicitly refuse semantic retrieval. The ten-second
-budget includes scope resolution, SQL, models and final hydration. Timeout stops
+10,000 vectors; larger scopes explicitly refuse semantic retrieval. The current
+25-second budget includes scope resolution, SQL, models and final hydration. Timeout stops
 caller waiting while late native work retains its leases until confirmed cleanup.
 Search scores are reciprocal returned positions, not calibrated probabilities.
 Corpus and useful existing-search fallback results expose degradation; an empty

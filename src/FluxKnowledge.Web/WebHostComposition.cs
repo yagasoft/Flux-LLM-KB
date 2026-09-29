@@ -111,6 +111,11 @@ public static class WebHostComposition
         var allowedHostedServiceTypes = new HashSet<Type>();
         allowedHostedServiceTypes.Add(typeof(OutboxPumpService));
         allowedHostedServiceTypes.Add(typeof(RetainedProcessorActivationHostedService));
+        if (bool.TryParse(configuration["Search:HybridPassagesEnabled"], out var hybridEnabled) && hybridEnabled)
+        {
+            allowedHostedServiceTypes.Add(typeof(DerivedIndexRecoveryService));
+            allowedHostedServiceTypes.Add(typeof(BgeCpuWarmupService));
+        }
         if (runtime.WorkerEnabled)
         {
             allowedHostedServiceTypes.Add(typeof(SourceReconciliationService));

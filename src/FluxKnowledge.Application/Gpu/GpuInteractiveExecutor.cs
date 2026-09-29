@@ -16,6 +16,7 @@ public sealed class GpuInteractiveExecutor : IGpuExecutorAdapter, IGpuExecutorRe
     private readonly TimeProvider _clock;
     private readonly string _runtimeKey, _settingsFingerprint;
     private readonly long _estimatedBytes;
+    private readonly TimeSpan _executionTimeout;
     private readonly CancellationToken _stopping;
     private readonly GpuInteractiveOwnerRecovery? _ownerRecovery;
     private readonly Guid _instance = Guid.NewGuid();
@@ -25,11 +26,14 @@ public sealed class GpuInteractiveExecutor : IGpuExecutorAdapter, IGpuExecutorRe
     public GpuInteractiveExecutor(IGpuInteractiveRequestStore requests, IGpuExecutorLifecycleSink lifecycle,
         IGpuSchedulerStore scheduler, IGpuSchedulerWakeSignal wakeSignal, TimeProvider clock,
         string runtimeKey, string settingsFingerprint, long estimatedBytes, CancellationToken stoppingToken = default,
-        GpuInteractiveOwnerRecovery? ownerRecovery = null)
+        GpuInteractiveOwnerRecovery? ownerRecovery = null, TimeSpan? executionTimeout = null)
     {
         GpuSchedulerOpaqueKeyValidator.RequireCanonical(runtimeKey, nameof(runtimeKey), 256);
         GpuSchedulerOpaqueKeyValidator.RequireCanonical(settingsFingerprint, nameof(settingsFingerprint), 256);
         if (estimatedBytes <= 0) throw new ArgumentOutOfRangeException(nameof(estimatedBytes));
+        _executionTimeout = executionTimeout ?? TimeSpan.FromSeconds(10);
+        if (_executionTimeout < TimeSpan.FromSeconds(10) || _executionTimeout > TimeSpan.FromSeconds(25))
+            throw new ArgumentOutOfRangeException(nameof(executionTimeout));
         _requests = requests; _lifecycle = lifecycle; _scheduler = scheduler; _wakeSignal = wakeSignal; _clock = clock;
         _runtimeKey = runtimeKey; _settingsFingerprint = settingsFingerprint; _estimatedBytes = estimatedBytes; _stopping = stoppingToken;
         _ownerRecovery = ownerRecovery;
@@ -47,28 +51,42 @@ public sealed class GpuInteractiveExecutor : IGpuExecutorAdapter, IGpuExecutorRe
         return ExecuteWithOwnershipAsync<T>(context => work(context.CancellationToken), cancellationToken);
     }
 
-    public async ValueTask<T> ExecuteWithOwnershipAsync<T>(Func<GpuOwnedWorkContext, ValueTask<GpuInteractiveNativeResult<T>>> work, CancellationToken cancellationToken)
+    public async ValueTask<T> ExecuteWithOwnershipAsync<T>(Func<GpuOwnedWorkContext, ValueTask<GpuInteractiveNativeResult<T>>> work,
+        CancellationToken cancellationToken, bool declineWhenGpuBusy = false)
     {
         ArgumentNullException.ThrowIfNull(work);
         cancellationToken.ThrowIfCancellationRequested();
         var now = _clock.GetUtcNow();
         var request = new GpuInteractiveHandoffRequest(Guid.NewGuid(), _instance, ExecutorKey, _runtimeKey,
-            _settingsFingerprint, _estimatedBytes, now.AddSeconds(2), now.AddSeconds(10));
-        var entry = new Entry(request, new CancellationTokenSource(TimeSpan.FromSeconds(10), _clock), cancellationToken, _stopping,
+            _settingsFingerprint, _estimatedBytes, now.AddSeconds(2), now.Add(_executionTimeout), declineWhenGpuBusy);
+        var entry = new Entry(request, new CancellationTokenSource(_executionTimeout, _clock), cancellationToken, _stopping,
             async context => { var result = await work(context).ConfigureAwait(false); return new(result.Value, result.NativeCapacityReleased, result.RefusalReason); });
         lock (_sync)
         {
-            if (_entries.Count >= 2) { entry.Dispose(); throw new InvalidOperationException("interactive-queue-full"); }
+            if (_entries.Count >= 2)
+            {
+                entry.Dispose();
+                if (declineWhenGpuBusy) throw new GpuInteractiveBusyWithoutHandoffException();
+                throw new InvalidOperationException("interactive-queue-full");
+            }
             _entries.Add(request.RequestId, entry);
         }
+        var handedOff = false;
         try
         {
             await _requests.HandoffInteractiveAsync(request, entry.Cancellation.Token).ConfigureAwait(false);
+            handedOff = true;
             _wakeSignal.Notify(GpuSchedulerWakeReason.WorkReady);
             var queueRemaining = request.QueueDeadlineUtc - _clock.GetUtcNow();
             if (queueRemaining <= TimeSpan.Zero) throw new TimeoutException("interactive-queue-expired");
             await entry.Started.Task.WaitAsync(queueRemaining, _clock, entry.Cancellation.Token).ConfigureAwait(false);
             return (T)(await entry.Result.Task.WaitAsync(entry.Cancellation.Token).ConfigureAwait(false))!;
+        }
+        catch (GpuInteractiveBusyWithoutHandoffException) when (!handedOff)
+        {
+            // The admission transaction refused before insertion. There is no durable request to cancel.
+            Remove(entry);
+            throw;
         }
         catch
         {

@@ -5,6 +5,7 @@ using FluxKnowledge.Infrastructure.SqlServer.Persistence;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
 using FluxKnowledge.Infrastructure.SqlServer.Workers;
 using FluxKnowledge.Integration.Tests.Support;
+using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Migrations;
@@ -16,6 +17,86 @@ public sealed class SqlGpuInteractiveRequestTests(NativeSqlServerFixture fixture
 {
     private static readonly DateTimeOffset Now = new(2026, 9, 26, 12, 0, 0, TimeSpan.Zero);
     private static readonly GpuSchedulerOptions Options = new(4, 1024, TimeSpan.FromMinutes(1), TimeSpan.FromSeconds(1), TimeSpan.FromMinutes(1));
+
+    [NativeSqlServerFact]
+    public async Task Wake_acknowledgement_and_new_interactive_handoff_share_a_short_mutation_fence()
+    {
+        await SqlTestData.ClearPipelineAsync(fixture);
+        var factory = SqlTestData.CreateFactory(fixture);
+        var consumptionId = Guid.NewGuid();
+        await using (var setup = await factory.CreateDbContextAsync())
+        {
+            setup.GpuCapacitySlots.Add(new GpuCapacitySlotEntity
+                { SlotKey = "gpu-0", State = 0, UpdatedAtUtc = Now });
+            var state = await setup.GpuSchedulerStates.SingleAsync();
+            state.WakeGeneration = 1;
+            state.InFlightWakeOperationId = consumptionId;
+            state.InFlightWakeGeneration = 1;
+            state.InFlightWakeReasons = (int)GpuSchedulerWakeReason.CapacityReleased;
+            state.InFlightEffectiveAdmissionReasons = (int)GpuSchedulerWakeReason.CapacityReleased;
+            await setup.SaveChangesAsync();
+        }
+
+        await using var blocker = new SqlConnection(fixture.ConnectionString);
+        await blocker.OpenAsync();
+        await using var transaction = (SqlTransaction)await blocker.BeginTransactionAsync();
+        await using (var command = blocker.CreateCommand())
+        {
+            command.Transaction = transaction;
+            command.CommandText = "DECLARE @result int; EXEC @result = sp_getapplock @Resource = N'FluxKnowledge.GpuScheduler.Mutation', @LockMode = N'Exclusive', @LockOwner = N'Transaction', @LockTimeout = 10000; SELECT @result;";
+            Assert.True(Convert.ToInt32(await command.ExecuteScalarAsync()) >= 0);
+        }
+
+        var store = new SqlGpuSchedulerStore(factory, timeProvider: new FixedTimeProvider(Now));
+        Task<bool>? acknowledgement = null;
+        Task<GpuMiniTaskHandoffResult>? handoff = null;
+        try
+        {
+            acknowledgement = store.AcknowledgeWakeAsync(Guid.NewGuid(), consumptionId, CancellationToken.None).AsTask();
+            await Task.Delay(250);
+            Assert.False(acknowledgement.IsCompleted);
+            handoff = store.HandoffInteractiveAsync(Request(), CancellationToken.None).AsTask();
+            await Task.Delay(250);
+            Assert.False(handoff.IsCompleted);
+        }
+        finally { await transaction.CommitAsync(); }
+        Assert.True(await acknowledgement!.WaitAsync(TimeSpan.FromSeconds(10)));
+        Assert.True((await handoff!.WaitAsync(TimeSpan.FromSeconds(10))).Committed);
+
+        var pending = await store.ReadWakeStateAsync(CancellationToken.None);
+        Assert.Equal(GpuSchedulerWakeReason.WorkReady, pending.Reasons);
+        var consumed = await store.ConsumeWakeAsync(Guid.NewGuid(), pending.Generation, CancellationToken.None);
+        Assert.True(consumed.Consumed);
+        var admitted = await store.RunAdmissionRoundAsync(Guid.NewGuid(), GpuSchedulerWakeReason.WorkReady, Options,
+            (candidate, _) => ValueTask.FromResult(new GpuAdmissionDecision(
+                GpuAdmissionDisposition.Admit, "gpu-0", "owner", null, candidate.RequiredExecutorKey)), CancellationToken.None);
+        Assert.True(admitted.Committed);
+        Assert.Equal(GpuAdmissionDisposition.Admit, admitted.Disposition);
+        Assert.True(await store.AcknowledgeWakeAsync(Guid.NewGuid(), consumed.Snapshot.ConsumptionOperationId!.Value,
+            CancellationToken.None));
+        await using var verify = await factory.CreateDbContextAsync();
+        Assert.Single(await verify.GpuMiniTasks.Where(t => t.ExecutionState == (int)GpuMiniTaskExecutionState.Active).ToArrayAsync());
+        Assert.Single(await verify.GpuBatches.ToArrayAsync());
+    }
+
+    [NativeSqlServerFact]
+    public async Task Diagnostic_deadline_is_explicitly_bounded_and_default_store_still_refuses_it()
+    {
+        await SqlTestData.ClearPipelineAsync(fixture);
+        var factory = SqlTestData.CreateFactory(fixture);
+        var request = Request() with { ExecutionDeadlineUtc = Now.AddSeconds(25) };
+        var defaultStore = new SqlGpuSchedulerStore(factory, timeProvider: new FixedTimeProvider(Now));
+        await Assert.ThrowsAsync<ArgumentException>(async () =>
+            await defaultStore.HandoffInteractiveAsync(request, CancellationToken.None));
+        var diagnosticStore = new SqlGpuSchedulerStore(factory, timeProvider: new FixedTimeProvider(Now),
+            interactiveExecutionTimeout: TimeSpan.FromSeconds(25));
+        Assert.True((await diagnosticStore.HandoffInteractiveAsync(request, CancellationToken.None)).Committed);
+        await Assert.ThrowsAsync<ArgumentException>(async () =>
+            await diagnosticStore.HandoffInteractiveAsync(Request() with { ExecutionDeadlineUtc = Now.AddSeconds(26) },
+                CancellationToken.None));
+        await using var verify = await factory.CreateDbContextAsync();
+        Assert.Equal(request.ExecutionDeadlineUtc, (await verify.GpuMiniTasks.SingleAsync()).ExecutionDeadlineUtc);
+    }
 
     [NativeSqlServerTheory]
     [InlineData(1)]
@@ -343,6 +424,80 @@ public sealed class SqlGpuInteractiveRequestTests(NativeSqlServerFixture fixture
         await using var verify = await factory.CreateDbContextAsync();
         Assert.Equal(2, await verify.GpuMiniTasks.CountAsync());
         Assert.Empty(await verify.Jobs.ToArrayAsync());
+    }
+
+    [NativeSqlServerFact]
+    public async Task Conditional_search_handoff_declines_busy_gpu_without_persisting_a_request()
+    {
+        await SqlTestData.ClearPipelineAsync(fixture);
+        var factory = SqlTestData.CreateFactory(fixture);
+        var store = new SqlGpuSchedulerStore(factory, timeProvider: new FixedTimeProvider(Now));
+        await using (var context = await factory.CreateDbContextAsync())
+        {
+            context.GpuCapacitySlots.Add(new GpuCapacitySlotEntity { SlotKey = "gpu-0", State = 0, UpdatedAtUtc = Now });
+            await context.SaveChangesAsync();
+        }
+        var first = Request() with { DeclineWhenGpuBusy = true };
+        var admitted = await store.HandoffInteractiveAsync(first, CancellationToken.None);
+        Assert.True(admitted.Committed);
+        var second = Request() with { DeclineWhenGpuBusy = true };
+        await Assert.ThrowsAsync<GpuInteractiveBusyWithoutHandoffException>(async () =>
+            await store.HandoffInteractiveAsync(second, CancellationToken.None));
+        Assert.True((await store.HandoffInteractiveAsync(first, CancellationToken.None)).IsIdempotentReplay);
+        await using var verify = await factory.CreateDbContextAsync();
+        Assert.Single(await verify.GpuMiniTasks.ToArrayAsync());
+        Assert.Null(await verify.GpuMiniTasks.SingleOrDefaultAsync(task => task.Id == second.RequestId));
+    }
+
+    [NativeSqlServerFact]
+    public async Task Conditional_search_handoff_declines_reserved_or_uncertain_capacity()
+    {
+        await SqlTestData.ClearPipelineAsync(fixture);
+        var factory = SqlTestData.CreateFactory(fixture);
+        var store = new SqlGpuSchedulerStore(factory, timeProvider: new FixedTimeProvider(Now));
+        await using (var context = await factory.CreateDbContextAsync())
+        {
+            context.GpuCapacitySlots.Add(new GpuCapacitySlotEntity { SlotKey = "gpu-0", State = (int)GpuCapacitySlotState.Reserved, UpdatedAtUtc = Now });
+            await context.SaveChangesAsync();
+        }
+        var request = Request() with { DeclineWhenGpuBusy = true };
+        await Assert.ThrowsAsync<GpuInteractiveBusyWithoutHandoffException>(async () =>
+            await store.HandoffInteractiveAsync(request, CancellationToken.None));
+        await using (var context = await factory.CreateDbContextAsync())
+        {
+            var slot = await context.GpuCapacitySlots.SingleAsync();
+            slot.State = (int)GpuCapacitySlotState.Uncertain;
+            await context.SaveChangesAsync();
+        }
+        await Assert.ThrowsAsync<GpuInteractiveBusyWithoutHandoffException>(async () =>
+            await store.HandoffInteractiveAsync(request, CancellationToken.None));
+        await using var verify = await factory.CreateDbContextAsync();
+        Assert.Empty(await verify.GpuMiniTasks.ToArrayAsync());
+    }
+
+    [NativeSqlServerFact]
+    public async Task Racing_conditional_search_arrivals_commit_only_one_gpu_handoff()
+    {
+        await SqlTestData.ClearPipelineAsync(fixture);
+        var factory = SqlTestData.CreateFactory(fixture);
+        await using (var context = await factory.CreateDbContextAsync())
+        {
+            context.GpuCapacitySlots.Add(new GpuCapacitySlotEntity { SlotKey = "gpu-0", State = 0, UpdatedAtUtc = Now });
+            await context.SaveChangesAsync();
+        }
+        var arrivals = Enumerable.Range(0, 8).Select(async _ =>
+        {
+            try
+            {
+                await new SqlGpuSchedulerStore(factory, timeProvider: new FixedTimeProvider(Now))
+                    .HandoffInteractiveAsync(Request() with { DeclineWhenGpuBusy = true }, CancellationToken.None);
+                return true;
+            }
+            catch (GpuInteractiveBusyWithoutHandoffException) { return false; }
+        });
+        Assert.Equal(1, (await Task.WhenAll(arrivals)).Count(value => value));
+        await using var verify = await factory.CreateDbContextAsync();
+        Assert.Single(await verify.GpuMiniTasks.ToArrayAsync());
     }
 
     [NativeSqlServerFact]

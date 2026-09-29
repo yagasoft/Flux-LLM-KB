@@ -79,19 +79,23 @@ public static class BgeOfflineModels
     }
 
     public static async ValueTask<BgeEmbeddingProvider> OpenCpuEmbeddingAsync(
-        ILocalModelStore store, IBgeTokenizer tokenizer, CancellationToken cancellationToken)
+        ILocalModelStore store, IBgeTokenizer tokenizer, CancellationToken cancellationToken, int intraOpThreads = 4)
     {
+        if (intraOpThreads is < 0 or > 32) throw new ArgumentOutOfRangeException(nameof(intraOpThreads));
         RequireTokenizer(tokenizer, reranker: false);
         var lease = await ResolveLeaseAsync(store, EmbeddingModel, cancellationToken).ConfigureAwait(false);
-        return new(tokenizer, BgeOnnxTensorRunner.Open(lease, embedding: true, cancellationToken), EmbeddingFingerprint);
+        return new(tokenizer, BgeOnnxTensorRunner.Open(lease, embedding: true, cancellationToken,
+            cpuIntraOpThreads: intraOpThreads), EmbeddingFingerprint);
     }
 
     public static async ValueTask<BgeReranker> OpenCpuRerankerAsync(
-        ILocalModelStore store, IBgeTokenizer tokenizer, CancellationToken cancellationToken)
+        ILocalModelStore store, IBgeTokenizer tokenizer, CancellationToken cancellationToken, int intraOpThreads = 4)
     {
+        if (intraOpThreads is < 0 or > 32) throw new ArgumentOutOfRangeException(nameof(intraOpThreads));
         RequireTokenizer(tokenizer, reranker: true);
         var lease = await ResolveLeaseAsync(store, RerankerModel, cancellationToken).ConfigureAwait(false);
-        return new(tokenizer, BgeOnnxTensorRunner.Open(lease, embedding: false, cancellationToken), RerankerFingerprint);
+        return new(tokenizer, BgeOnnxTensorRunner.Open(lease, embedding: false, cancellationToken,
+            cpuIntraOpThreads: intraOpThreads), RerankerFingerprint);
     }
 
     public static async ValueTask<BgeEmbeddingProvider> OpenGpuEmbeddingAsync(

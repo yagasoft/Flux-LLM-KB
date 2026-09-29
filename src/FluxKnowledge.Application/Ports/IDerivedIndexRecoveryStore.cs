@@ -10,7 +10,8 @@ public sealed record DerivedIndexRecoverySqlSnapshot(
     ImmutableHashSet<Guid> ReferencedGenerationIds,
     ImmutableHashSet<string> ReferencedIndexPaths,
     bool IsValidatedEmptyCatalogue = false,
-    bool IsProjectionUnavailable = false);
+    bool IsProjectionUnavailable = false,
+    bool IsPublicationLag = false);
 
 public interface IDerivedIndexRecoveryLease : IAsyncDisposable;
 
@@ -47,6 +48,10 @@ public interface IDerivedIndexRecoveryStore
         string replacementIndexPath,
         DateTimeOffset validatedAtUtc,
         CancellationToken cancellationToken);
+
+    ValueTask<bool> TryActivatePublicationCandidateAsync(
+        IndexGenerationCandidateSnapshot candidate,
+        CancellationToken cancellationToken) => throw new NotSupportedException();
 
     ValueTask AppendAuditAsync(
         DerivedIndexRecoveryAuditEvent auditEvent,

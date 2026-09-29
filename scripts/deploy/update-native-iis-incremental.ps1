@@ -27,6 +27,7 @@ $CanonicalDeployRoot = "$CanonicalLiveRoot\App"
 $CanonicalRecoveryRoot = "$CanonicalLiveRoot\Recovery"
 $IncrementalRecoveryRoot = "$CanonicalRecoveryRoot\IncrementalUpdates"
 $ValidationHoldPath = "$CanonicalLiveRoot\Runtime\deployment-validation-hold.json"
+$CpuSearchOwnerPath = "$CanonicalLiveRoot\Runtime\bge-cpu-search-owner.lock"
 $InteractiveHostRoot = "C:\inetpub\FluxKnowledge\outlook-host"
 $InteractiveHostTaskName = "FluxKnowledge.OutlookHost"
 $SourceDeletionMigrationBaseline = "20260826160702_AddEmptyCatalogueReadiness"
@@ -212,7 +213,8 @@ function Invoke-ScopedReadinessRemediationProbes {
         [Parameter(Mandatory)]
         [string]$Origin,
         [Parameter(Mandatory)]
-        [int]$TimeoutSeconds
+        [int]$TimeoutSeconds,
+        [switch]$AfterHoldRelease
     )
 
     foreach ($path in @("/health/live", "/api/index-health")) {
@@ -233,9 +235,10 @@ function Invoke-ScopedReadinessRemediationProbes {
             throw
         }
     }
-    if (-not $readinessWasUnavailable) {
+    if (-not $readinessWasUnavailable -and -not $AfterHoldRelease) {
         throw "Scoped readiness remediation requires readiness to return exact HTTP 503."
     }
+    return $(if ($readinessWasUnavailable) { 'pending' } else { 'ready' })
 }
 
 function New-DeploymentValidationHold {
@@ -557,6 +560,59 @@ function Assert-NotReparsePoint {
     if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
         throw $Message
     }
+}
+
+function Assert-CpuSearchOwnerAcl {
+    param([Parameter(Mandatory)][string]$Path)
+    $acl = Get-Acl -LiteralPath $Path -ErrorAction Stop
+    $unsafeRights = [int]([Security.AccessControl.FileSystemRights]::WriteData -bor
+        [Security.AccessControl.FileSystemRights]::AppendData -bor
+        [Security.AccessControl.FileSystemRights]::WriteAttributes -bor
+        [Security.AccessControl.FileSystemRights]::WriteExtendedAttributes -bor
+        [Security.AccessControl.FileSystemRights]::Delete -bor
+        [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
+        [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
+        [Security.AccessControl.FileSystemRights]::TakeOwnership)
+    $workerRead = $false
+    foreach ($rule in $acl.Access) {
+        if ($rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow) { continue }
+        $identity = $rule.IdentityReference.Value
+        if ($identity -ieq 'IIS APPPOOL\FluxKnowledge' -and
+            (([int]$rule.FileSystemRights -band [int][Security.AccessControl.FileSystemRights]::ReadData) -ne 0)) {
+            $workerRead = $true
+        }
+        if ($identity -notin @('NT AUTHORITY\SYSTEM', 'BUILTIN\Administrators') -and
+            (([int]$rule.FileSystemRights -band $unsafeRights) -ne 0)) {
+            throw "The CPU search owner path grants untrusted write or delete access: $Path"
+        }
+    }
+    if (-not $workerRead) { throw "The CPU search owner path does not grant the IIS worker read access: $Path" }
+}
+
+function Get-CpuSearchOwnerFilePlan {
+    $runtimeRoot = Join-Path $CanonicalLiveRoot 'Runtime'
+    foreach ($path in @($CanonicalLiveRoot, $runtimeRoot)) {
+        Assert-NotReparsePoint -Path $path -Message 'cpu-search-owner-directory-unsafe'
+        Assert-CpuSearchOwnerAcl -Path $path
+    }
+    if (Test-Path -LiteralPath $CpuSearchOwnerPath) {
+        if (-not (Test-Path -LiteralPath $CpuSearchOwnerPath -PathType Leaf)) { throw 'cpu-search-owner-file-invalid' }
+        Assert-NotReparsePoint -Path $CpuSearchOwnerPath -Message 'cpu-search-owner-file-unsafe'
+        Assert-CpuSearchOwnerAcl -Path $CpuSearchOwnerPath
+        return [ordered]@{ path=$CpuSearchOwnerPath; action='preserve-existing' }
+    }
+    return [ordered]@{ path=$CpuSearchOwnerPath; action='create-new-before-activation' }
+}
+
+function Ensure-CpuSearchOwnerFile {
+    $plan = Get-CpuSearchOwnerFilePlan
+    if ($plan.action -eq 'create-new-before-activation') {
+        $stream = [IO.FileStream]::new($CpuSearchOwnerPath, [IO.FileMode]::CreateNew,
+            [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+        $stream.Dispose()
+    }
+    $verified = Get-CpuSearchOwnerFilePlan
+    if ($verified.action -ne 'preserve-existing') { throw 'cpu-search-owner-file-unavailable' }
 }
 
 function Get-HybridIisWorkerIds {
@@ -1332,6 +1388,7 @@ if ($PlanOnly) {
         interactive_host_task = $InteractiveHostTaskName
         interactive_host_activation = "next ordinary scheduled run; never triggered by deployment"
         recovery_root = $CanonicalRecoveryRoot
+        cpu_search_owner_file = Get-CpuSearchOwnerFilePlan
         migrations = [bool]$applyAnyMigration
         migration_plan = $migrationPlan
         clean_slate = $false
@@ -1347,7 +1404,7 @@ if ($PlanOnly) {
             "held-loopback-probes-and-unchanged-retained-pipeline-state"
         }
         readiness_remediation = if ($DeferReadinessForScopedRemediation) {
-            "requires exact readiness HTTP 503; post-activation readiness remains pending"
+            "requires exact readiness HTTP 503 under hold; after release accepts HTTP 200 ready or HTTP 503 pending"
         }
         else {
             $null
@@ -1423,6 +1480,7 @@ try {
     }
 
     Assert-IncrementalIisPreflight
+    Ensure-CpuSearchOwnerFile
     if ($ApplyHybridPassageRebuild) {
         if ($PatchHybridRebuildRelease -or $ResumeHybridPatchRelease) {
             Invoke-HybridPassageIisPatch -SourceRoot $SourceRoot -Commit $commit -PredecessorRelease $PatchHybridRebuildRelease -ResumeRelease $ResumeHybridPatchRelease `
@@ -1533,7 +1591,7 @@ try {
         } `
         -ValidateApplication {
             if ($DeferReadinessForScopedRemediation) {
-                Invoke-ScopedReadinessRemediationProbes -Origin $loopbackOrigin.Origin -TimeoutSeconds $ReadinessTimeoutSeconds
+                [void](Invoke-ScopedReadinessRemediationProbes -Origin $loopbackOrigin.Origin -TimeoutSeconds $ReadinessTimeoutSeconds)
             }
             else {
                 Invoke-RequiredLoopbackProbes -Origin $loopbackOrigin.Origin -TimeoutSeconds $ReadinessTimeoutSeconds
@@ -1550,7 +1608,7 @@ try {
                 }
             }
             elseif ($DeferReadinessForScopedRemediation) {
-                Invoke-ScopedReadinessRemediationProbes -Origin $loopbackOrigin.Origin -TimeoutSeconds $ReadinessTimeoutSeconds
+                [void](Invoke-ScopedReadinessRemediationProbes -Origin $loopbackOrigin.Origin -TimeoutSeconds $ReadinessTimeoutSeconds)
             }
             else {
                 Invoke-RequiredLoopbackProbes -Origin $loopbackOrigin.Origin -TimeoutSeconds $ReadinessTimeoutSeconds
@@ -1580,7 +1638,7 @@ try {
     # Commit boundary: workers may now write. No automatic schema or mixed-payload rollback after this point.
     $holdReleased = $true
     if ($DeferReadinessForScopedRemediation) {
-        Invoke-ScopedReadinessRemediationProbes -Origin $loopbackOrigin.Origin -TimeoutSeconds $ReadinessTimeoutSeconds
+        $postHoldReadiness = Invoke-ScopedReadinessRemediationProbes -Origin $loopbackOrigin.Origin -TimeoutSeconds $ReadinessTimeoutSeconds -AfterHoldRelease
     }
     else {
         Invoke-RequiredLoopbackProbes -Origin $loopbackOrigin.Origin -TimeoutSeconds $ReadinessTimeoutSeconds
@@ -1611,7 +1669,7 @@ try {
             rollback_payload = $interactiveHostPreviousRoot
         }
         readiness_remediation = if ($DeferReadinessForScopedRemediation) {
-            "pending scoped source remediation"
+            $postHoldReadiness
         }
         else {
             $null

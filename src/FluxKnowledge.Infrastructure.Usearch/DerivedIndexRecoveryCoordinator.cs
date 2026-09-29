@@ -3,6 +3,7 @@ using System.Threading.Channels;
 using FluxKnowledge.Application.Contracts;
 using FluxKnowledge.Application.Indexing;
 using FluxKnowledge.Application.Ports;
+using FluxKnowledge.Application.Sources;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace FluxKnowledge.Infrastructure.Usearch;
@@ -13,6 +14,7 @@ public sealed class DerivedIndexRecoveryCoordinator : IDerivedIndexRecoveryStatu
     private readonly InvalidOperationException? _configurationFailure;
     private readonly DerivedIndexFileSystem? _fileSystem;
     private readonly IStatusEventPublisher? _statusPublisher;
+    private readonly IDeploymentValidationHold? _deploymentHold;
     private readonly TimeProvider _timeProvider;
     private readonly DerivedIndexRecoveryOptions _options;
     private readonly Func<string, FileAttributes> _getActivePathAttributes;
@@ -23,18 +25,22 @@ public sealed class DerivedIndexRecoveryCoordinator : IDerivedIndexRecoveryStatu
 
     public DerivedIndexRecoveryCoordinator(IServiceScopeFactory scopeFactory,
         UsearchIndexConfiguration configuration, TimeProvider timeProvider, IStatusEventPublisher? statusPublisher = null,
-        DerivedIndexRecoveryOptions? options = null, Func<string, FileAttributes>? getActivePathAttributes = null)
+        DerivedIndexRecoveryOptions? options = null, Func<string, FileAttributes>? getActivePathAttributes = null,
+        IDeploymentValidationHold? deploymentHold = null)
     {
         _scopeFactory = scopeFactory; _configurationFailure = configuration.Failure; _timeProvider = timeProvider; _statusPublisher = statusPublisher;
+        _deploymentHold = deploymentHold;
         _options = options ?? DerivedIndexRecoveryOptions.Default;
         _getActivePathAttributes = getActivePathAttributes ?? File.GetAttributes;
     }
 
     public DerivedIndexRecoveryCoordinator(IServiceScopeFactory scopeFactory,
         DerivedIndexFileSystem fileSystem, TimeProvider timeProvider, IStatusEventPublisher? statusPublisher = null,
-        DerivedIndexRecoveryOptions? options = null, Func<string, FileAttributes>? getActivePathAttributes = null)
+        DerivedIndexRecoveryOptions? options = null, Func<string, FileAttributes>? getActivePathAttributes = null,
+        IDeploymentValidationHold? deploymentHold = null)
     {
         _scopeFactory = scopeFactory; _timeProvider = timeProvider; _statusPublisher = statusPublisher;
+        _deploymentHold = deploymentHold;
         _options = options ?? DerivedIndexRecoveryOptions.Default;
         _fileSystem = fileSystem;
         _getActivePathAttributes = getActivePathAttributes ?? File.GetAttributes;
@@ -115,6 +121,26 @@ public sealed class DerivedIndexRecoveryCoordinator : IDerivedIndexRecoveryStatu
 
             var sql = await recoveryStore.ReadActiveAsync(cancellationToken);
             activeId = sql.ActiveGenerationId;
+            if (sql.IsPublicationLag && _deploymentHold?.IsHeld != true)
+            {
+                var publisher = scope.ServiceProvider.GetRequiredService<UsearchGenerationBuilder>();
+                try
+                {
+                    var candidate = await publisher.BuildAndPlaceAsync(Guid.NewGuid(), cancellationToken);
+                    scope.ServiceProvider.GetRequiredService<UsearchGenerationValidator>()
+                        .Validate(candidate.Generation.IndexPath, candidate.Generation, candidate.Vectors);
+                    if (await recoveryStore.TryActivatePublicationCandidateAsync(candidate, cancellationToken))
+                    {
+                        sqlUpdated = true;
+                        sql = await recoveryStore.ReadActiveAsync(cancellationToken);
+                        activeId = sql.ActiveGenerationId;
+                    }
+                }
+                catch (NoEligibleVectorsException)
+                {
+                    // Suppressed vectors may still exist in SQL; this is not a validated empty catalogue.
+                }
+            }
             if (sql.IsProjectionUnavailable)
             {
                 if (sql.IsValidatedEmptyCatalogue) throw new SqlMembershipValidationException();

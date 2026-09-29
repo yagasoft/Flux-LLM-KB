@@ -34,27 +34,40 @@ behaviour and limitations.
 | --- | --- | --- | ---: | --- |
 | Scoped corpus search and cited passage reading | P1 | complete | 100% | Maintain the deployed one-time chunk Full-Text index and MCP/REST/CLI parity. Live checks cover OCR image, native PDF, DOCX, XLSX and Visio search/read; extraction fidelity, same-page region OCR and failed-revision retry remain separate work. |
 | Scoped lexical passage ranking investigation | P1 | complete (no ranking change) | 100% | Historical investigation closed after aggregate gains regressed DOCX. Future passage/ranking work follows the hybrid passage plan, without reopening these excerpt heuristics. The frozen source audit and experiment records remain evidence of their original scope. |
-| Hybrid passage and semantic corpus retrieval | P1 | rebuilt and activated; live acceptance failed on latency | 40% | The corrected forward patch finished the same 35-input rebuild with 3,596 passages and no failed embedding or publication jobs. The deployment hold was released after the restarted web host reported the active generation healthy. Live REST/CLI/MCP search/read parity failed: repeated real-model loads made some calls hit the ten-second deadline, while successful hybrid calls took nearly ten seconds. A trace attributed about 6.65 seconds to the two model loads, including repeated verification of multi-gigabyte files. A process-held verified-file cache passed local checks and independent technical review; the routine updater was corrected to drain GPU work before stopping IIS and to retain the validation hold after failed rollback. This payload awaits a separately approved incremental deployment. It retains no native GPU session and changes no scheduler ownership. The 24-source, 96-question English acceptance set and lexical baseline remain frozen. Full quality, two-caller latency, sustained-search OCR waiting, numeric GPU parity and any conditional model-residency design remain pending. See the [live acceptance record](operations/2026-09-28-hybrid-search-live-acceptance.md). |
+| Hybrid passage and semantic corpus retrieval | P1 | complete; staging accepted | 100% | Maintain the GPU-first/resident-CPU-fallback path, 20-second BGE GPU bound, 25-second outer deadline and OCR-safe scheduler ownership. The final two-caller staging run returned 96/96 ready searches, 80/84 strict top-five answer support (95.24%) across 24 English sources and 480/480 exact citations; full REST p95 was 16.46 seconds under the measured 20-second staging envelope. OCR waited 7.06 seconds for an active GPU batch, then completed without interruption; source deletion and watcher recovery were verified. Preserve these gates during future model, scheduler or passage changes. See the [live acceptance record](operations/2026-09-28-hybrid-search-live-acceptance.md). |
 
 The [original retrieval design](design/corpus-retrieval.md) and
 [scoped retrieval plan](design/scoped-corpus-retrieval-plan.md) retain the
-deployed contract history. Future delivery follows the
+deployed contract history. The delivered implementation follows the
 [hybrid passage design](design/hybrid-passage-retrieval.md) and
 [implementation plan](design/hybrid-passage-retrieval-plan.md), superseding the
 earlier [semantic transition plan](design/semantic-corpus-retrieval-plan.md).
 The scoped operations and one-time SQL Full-Text index are deployed and
-live-validated. The hybrid passage projection is now active in production, but
-semantic retrieval has not passed its English quality or latency acceptance gates.
+live-validated. The hybrid passage projection is active in the installed app,
+which was treated as staging for this acceptance. The frozen English relevance,
+exact-citation, availability, two-caller latency and OCR-handover gates passed.
 The [BGE-M3 ONNX evaluation](operations/2026-09-24-bge-m3-onnx-evaluation.md)
 records the earlier failed relevance pilot, not a result for the new passage pipeline.
 
-The hybrid item's 40% counts two completed, independently reviewed delivery gates
-out of the plan's five equally counted milestone gates: complete passages and the
-coherent publication/rebuild. It is not an effort, elapsed-time or accuracy
-estimate. The scheduler/model gate still needs measured hardware acceptance, the
-shared retrieval gate needs live parity, and the final gate needs the frozen
-quality and operational checks. The [live acceptance record](operations/2026-09-28-hybrid-search-live-acceptance.md)
-separates the verified activation from the failed search-performance gate.
+The hybrid item's 100% counts five completed delivery gates: complete passages,
+coherent publication/rebuild, the shared retrieval engine with transport
+parity, reviewed GPU-first/CPU-fallback scheduler ownership, and measured
+English staging acceptance. It is not a claim about other languages, answer
+abstention or every higher-concurrency workload. The [live acceptance record](operations/2026-09-28-hybrid-search-live-acceptance.md)
+preserves the failed intermediate runs and the final evidence.
+
+A current-stamp USearch refresh is implemented and passed focused SQL/USearch
+recovery and publication tests. It rebuilds ANN membership from existing SQL
+vectors after source suppression or restoration, without resetting passages or
+running embedding inference. The first incremental staging release installed
+the refresh without a migration, but remained `IndexUpdating`: the strict host
+ran recovery only at startup while its deployment hold was active. A bounded
+periodic recovery service is now registered for strict hybrid hosts and has
+passed a held-startup, hold-release and repeated-publication integration test.
+A follow-up incremental staging release recovered healthy index readiness and
+exact-citation live search. The later GPU-first/CPU-fallback release, scheduler
+mutation lock and watcher outbox fix passed the final two-caller and OCR
+acceptance checks described above.
 
 The separate [lexical passage ranking investigation](operations/2026-09-24-scoped-lexical-ranking-investigation.md)
 used the old pilot for diagnosis and fresh development data for two bounded

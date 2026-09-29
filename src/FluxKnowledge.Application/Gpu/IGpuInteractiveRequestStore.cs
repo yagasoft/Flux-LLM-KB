@@ -28,4 +28,11 @@ public sealed record GpuInteractiveHandoffRequest(
     string SettingsFingerprint,
     long EstimatedBytes,
     DateTimeOffset QueueDeadlineUtc,
-    DateTimeOffset ExecutionDeadlineUtc);
+    DateTimeOffset ExecutionDeadlineUtc,
+    bool DeclineWhenGpuBusy = false);
+
+/// <summary>The admission transaction proved that no GPU request was persisted.</summary>
+public sealed class GpuInteractiveBusyWithoutHandoffException : InvalidOperationException
+{
+    public GpuInteractiveBusyWithoutHandoffException() : base("interactive-gpu-busy-without-handoff") { }
+}

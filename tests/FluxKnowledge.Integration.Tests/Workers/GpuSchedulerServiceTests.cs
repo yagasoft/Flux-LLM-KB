@@ -4,6 +4,7 @@ using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Domain.Gpu;
 using FluxKnowledge.Domain.Jobs;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
+using FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
 using FluxKnowledge.Integration.Tests.Gpu;
 using FluxKnowledge.Integration.Tests.Support;
 using FluxKnowledge.Infrastructure.SqlServer.Workers;
@@ -34,6 +35,106 @@ public sealed class GpuSchedulerServiceTests(NativeSqlServerFixture fixture)
         Assert.Equal(
             GpuSchedulerWakeReason.WorkReady | GpuSchedulerWakeReason.CapacityReleased,
             observed);
+    }
+
+    [NativeSqlServerFact]
+    public async Task Hosted_scheduler_and_dispatch_admit_a_handoff_arriving_before_release_wake_acknowledgement()
+    {
+        await SqlTestData.ClearPipelineAsync(_fixture);
+        var factory = SqlTestData.CreateFactory(_fixture);
+        await using (var setup = await factory.CreateDbContextAsync())
+        {
+            setup.GpuCapacitySlots.Add(new GpuCapacitySlotEntity
+                { SlotKey = "gpu-0", State = (int)GpuCapacitySlotState.Available, UpdatedAtUtc = DateTimeOffset.UtcNow });
+            await setup.SaveChangesAsync();
+        }
+        var startup = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseRound = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var resumeReleaseRound = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var rounds = 0;
+        async ValueTask AfterAdmission(CancellationToken ct)
+        {
+            var round = Interlocked.Increment(ref rounds);
+            if (round == 1) startup.TrySetResult();
+            if (round == 3)
+            {
+                releaseRound.TrySetResult();
+                await resumeReleaseRound.Task.WaitAsync(ct);
+            }
+        }
+
+        var executorInstance = Guid.NewGuid();
+        var adapter = new RecordingInteractiveAdapter($"retrieval-gpu:{executorInstance:N}");
+        var services = new ServiceCollection();
+        services.AddLogging();
+        services.AddScoped<IGpuSchedulerStore>(_ => new SqlGpuSchedulerStore(factory,
+            timeProvider: TimeProvider.System, afterAdmissionCommitted: AfterAdmission,
+            interactiveExecutionTimeout: TimeSpan.FromSeconds(20)));
+        services.AddScoped<IGpuExecutorDispatchStore>(_ => new SqlGpuSchedulerStore(factory));
+        services.AddSingleton<IGpuAdmissionGate, AdmittingInteractiveGate>();
+        services.AddSingleton<IStatusEventPublisher, NullPublisher>();
+        services.AddSingleton<TimeProvider>(TimeProvider.System);
+        services.AddSingleton(new GpuSchedulerOptions(1, 1024, TimeSpan.FromMinutes(5),
+            TimeSpan.FromMinutes(1), TimeSpan.FromMinutes(10)));
+        services.AddSingleton<ChannelGpuSchedulerWakeSignal>();
+        services.AddSingleton<IGpuSchedulerWakeSignal>(sp => sp.GetRequiredService<ChannelGpuSchedulerWakeSignal>());
+        services.AddSingleton<ChannelGpuExecutorDispatchSignal>();
+        services.AddSingleton<IGpuExecutorDispatchSignal>(sp => sp.GetRequiredService<ChannelGpuExecutorDispatchSignal>());
+        services.AddSingleton<IGpuExecutorAdapter>(adapter);
+        services.AddScoped<GpuSchedulerCoordinator>();
+        services.AddSingleton<GpuSchedulerService>();
+        services.AddSingleton<GpuExecutorDispatchRecoveryService>();
+        await using var provider = services.BuildServiceProvider();
+        var scheduler = provider.GetRequiredService<GpuSchedulerService>();
+        var dispatcher = provider.GetRequiredService<GpuExecutorDispatchRecoveryService>();
+        var signal = provider.GetRequiredService<IGpuSchedulerWakeSignal>();
+        var store = new SqlGpuSchedulerStore(factory, interactiveExecutionTimeout: TimeSpan.FromSeconds(20));
+        GpuInteractiveHandoffRequest Request()
+        {
+            var now = DateTimeOffset.UtcNow;
+            return new(Guid.NewGuid(), executorInstance, adapter.ExecutorKey, "synthetic-retrieval-v1",
+                "synthetic-settings-v1", 10, now.AddSeconds(2), now.AddSeconds(20), true);
+        }
+
+        await scheduler.StartAsync(CancellationToken.None);
+        await dispatcher.StartAsync(CancellationToken.None);
+        try
+        {
+            await startup.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            var first = Request();
+            Assert.True((await store.HandoffInteractiveAsync(first, CancellationToken.None)).Committed);
+            signal.Notify(GpuSchedulerWakeReason.WorkReady);
+            var firstHandle = await adapter.Deliveries.Reader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.True((await store.AcknowledgeAsync(new(Guid.NewGuid(), firstHandle), CancellationToken.None)).Committed);
+            Assert.True((await store.RecordReceiptAsync(new(Guid.NewGuid(), firstHandle, first.RequestId,
+                GpuMiniTaskBoundaryDisposition.Completed, null, GpuExecutorEvidenceClass.TaskOutcomeConfirmed),
+                CancellationToken.None)).Committed);
+            Assert.True((await store.ApplyBatchCallbackAsync(Guid.NewGuid(),
+                new(firstHandle, GpuBatchCallbackKind.Completed,
+                    [new(first.RequestId, GpuMiniTaskBoundaryDisposition.Completed)], true),
+                CancellationToken.None)).Committed);
+            signal.Notify(GpuSchedulerWakeReason.CapacityReleased);
+            await releaseRound.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+            var second = Request();
+            Assert.True((await store.HandoffInteractiveAsync(second, CancellationToken.None)).Committed);
+            signal.Notify(GpuSchedulerWakeReason.WorkReady);
+            resumeReleaseRound.TrySetResult();
+            var secondHandle = await adapter.Deliveries.Reader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.NotEqual(firstHandle.BatchId, secondHandle.BatchId);
+            await using var verify = await factory.CreateDbContextAsync();
+            var admitted = await verify.GpuMiniTasks.SingleAsync(task => task.Id == second.RequestId);
+            var batch = await verify.GpuBatches.SingleAsync(candidate => candidate.Id == secondHandle.BatchId);
+            Assert.Equal((int)GpuMiniTaskExecutionState.Active, admitted.ExecutionState);
+            Assert.True(batch.CreatedAtUtc - admitted.CreatedAtUtc < TimeSpan.FromSeconds(2));
+            Assert.Single(await verify.GpuBatches.Where(candidate => candidate.State == (int)GpuBatchState.Active).ToArrayAsync());
+        }
+        finally
+        {
+            resumeReleaseRound.TrySetResult();
+            await dispatcher.StopAsync(CancellationToken.None);
+            await scheduler.StopAsync(CancellationToken.None);
+        }
     }
 
     [Fact]
@@ -1655,6 +1756,25 @@ public sealed class GpuSchedulerServiceTests(NativeSqlServerFixture fixture)
     private sealed class NullPublisher : IStatusEventPublisher
     {
         public ValueTask PublishAsync(StatusChanged statusChanged, CancellationToken cancellationToken) => ValueTask.CompletedTask;
+    }
+
+    private sealed class AdmittingInteractiveGate : IGpuAdmissionGate
+    {
+        public ValueTask<GpuAdmissionDecision> DecideAsync(GpuBatchCandidate candidate,
+            CancellationToken cancellationToken) => ValueTask.FromResult(
+            new GpuAdmissionDecision(GpuAdmissionDisposition.Admit, "gpu-0", "hosted-test", null,
+                candidate.RequiredExecutorKey));
+    }
+
+    private sealed class RecordingInteractiveAdapter(string executorKey) : IGpuExecutorAdapter
+    {
+        public string ExecutorKey { get; } = executorKey;
+        public Channel<GpuExecutorBatchHandle> Deliveries { get; } = Channel.CreateUnbounded<GpuExecutorBatchHandle>();
+        public ValueTask DeliverAsync(GpuExecutorBatchHandle handle, CancellationToken cancellationToken)
+        {
+            Deliveries.Writer.TryWrite(handle);
+            return ValueTask.CompletedTask;
+        }
     }
 
     private sealed class FailOncePublisher : IStatusEventPublisher

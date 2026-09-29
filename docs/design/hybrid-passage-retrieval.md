@@ -1,9 +1,14 @@
 # Hybrid passage retrieval design
 
 Date: 25 September 2026. Source baseline: `1f4aa16`.
-Status: selected architecture, deployed baseline under live acceptance. The
-28 September rebuild and startup health passed; cross-surface search and latency
-acceptance failed. See the [live acceptance record](../operations/2026-09-28-hybrid-search-live-acceptance.md).
+Status: selected architecture implemented and English staging acceptance passed
+on 29 September. The installed app returned 96/96 ready searches with 80/84
+strict top-five answer support and 480/480 exact citations; two-caller full
+REST p95 was 16.46 seconds within the measured 20-second staging envelope.
+The earlier two-second aspiration and ten-second GPU execution bound below
+are historical design targets superseded by the measured 20-second BGE GPU
+bound and 25-second outer request deadline. See the
+[live acceptance record](../operations/2026-09-28-hybrid-search-live-acceptance.md).
 Companion: [implementation plan](hybrid-passage-retrieval-plan.md).
 
 ## Decision and scope

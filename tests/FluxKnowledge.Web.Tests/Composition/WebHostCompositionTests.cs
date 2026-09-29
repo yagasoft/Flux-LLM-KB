@@ -63,10 +63,17 @@ public sealed class WebHostCompositionTests : IDisposable
         Assert.IsType<SharedGpuAdmissionGate>(provider.GetRequiredService<IGpuAdmissionGate>());
         Assert.Equal(2, provider.GetRequiredService<GpuSchedulerOptions>().WorkloadPolicy!.Profiles.Count);
         Assert.Contains(provider.GetServices<IGpuExecutorAdapter>(), value => value is GpuInteractiveExecutor && value is IGpuExecutorRecoveryAdapter);
+        var interactive = provider.GetRequiredService<GpuInteractiveExecutor>();
+        var executionTimeout = typeof(GpuInteractiveExecutor).GetField("_executionTimeout",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+        Assert.Equal(TimeSpan.FromSeconds(20), executionTimeout?.GetValue(interactive));
         Assert.Contains(provider.GetServices<IGpuExecutorAdapter>(), value => value is EmbeddingGpuExecutor);
         Assert.Contains(provider.GetServices<IGpuExecutorAdapter>(), value => value is PaddleOcrVlmExecutorAdapter);
         Assert.IsType<SqlEmbeddingGpuRequestStore>(scope.ServiceProvider.GetRequiredService<IEmbeddingGpuHandoff>());
         Assert.IsType<HybridPassageRetrievalEngine>(scope.ServiceProvider.GetRequiredService<IHybridPassageRetrieval>());
+        Assert.IsType<GpuFirstPassageInference>(provider.GetRequiredService<IScheduledPassageInference>());
+        Assert.Single(provider.GetServices<IHostedService>().OfType<BgeCpuWarmupService>());
+        Assert.Single(provider.GetServices<IHostedService>().OfType<DerivedIndexRecoveryService>());
         Assert.IsType<PassageSearchService>(scope.ServiceProvider.GetRequiredService<ISearchService>());
         Assert.True(provider.GetRequiredService<CorpusRetrievalOptions>().CoherentPassagesEnabled);
         Assert.NotNull(provider.GetRequiredService<PassageBuilder>());
@@ -282,6 +289,23 @@ public sealed class WebHostCompositionTests : IDisposable
         WebHostComposition.AddProductionFluxKnowledgeServicesForTests(services, configuration);
 
         Assert.Equal(5, services.Count(descriptor => descriptor.ServiceType == typeof(IHostedService)));
+        WebHostComposition.ValidateNativeGoLiveComposition(services, configuration);
+    }
+
+    [Fact]
+    public void Strict_hybrid_composition_registers_only_one_periodic_index_recovery_service()
+    {
+        var configuration = new ConfigurationBuilder().AddConfiguration(CreateProductionConfiguration())
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Runtime:Model:Enabled"] = "true", ["Runtime:Gpu:Enabled"] = "true", ["Runtime:Ocr:Enabled"] = "true",
+                ["Search:HybridPassagesEnabled"] = "true"
+            }).Build();
+        var services = new ServiceCollection();
+        services.AddLogging();
+        WebHostComposition.AddProductionFluxKnowledgeServicesForTests(services, configuration);
+        Assert.Equal(1, services.Count(descriptor => descriptor.ServiceType == typeof(IHostedService) &&
+            descriptor.ImplementationType == typeof(DerivedIndexRecoveryService)));
         WebHostComposition.ValidateNativeGoLiveComposition(services, configuration);
     }
 

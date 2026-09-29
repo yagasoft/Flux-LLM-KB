@@ -42,6 +42,8 @@ if ($plan.mode -ne "plan-only" -or
     $plan.interactive_host_task -ne "FluxKnowledge.OutlookHost" -or
     $plan.interactive_host_activation -ne "next ordinary scheduled run; never triggered by deployment" -or
     $plan.recovery_root -ne "I:\FluxKnowledge\Recovery" -or
+    $plan.cpu_search_owner_file.path -ne 'I:\FluxKnowledge\Runtime\bge-cpu-search-owner.lock' -or
+    $plan.cpu_search_owner_file.action -notin @('preserve-existing','create-new-before-activation') -or
     $plan.migrations -ne $false -or
     $plan.clean_slate -ne $false -or
     $plan.payload_acl -ne "inherit-from-live-root" -or
@@ -58,7 +60,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 $remediationPlan = $remediationPlanOutput | ConvertFrom-Json
 if ($remediationPlan.migrations -ne $false -or
-    $remediationPlan.readiness_remediation -ne "requires exact readiness HTTP 503; post-activation readiness remains pending") {
+    $remediationPlan.readiness_remediation -ne "requires exact readiness HTTP 503 under hold; after release accepts HTTP 200 ready or HTTP 503 pending") {
     throw "The scoped readiness-remediation plan is not explicitly restricted to the unready, no-migration repair path."
 }
 

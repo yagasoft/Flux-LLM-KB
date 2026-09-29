@@ -15,10 +15,19 @@ namespace FluxKnowledge.Application.Search;
 public sealed class HybridPassageRetrievalEngine(ICorpusRetrievalReader reader, IHybridPassageCandidateReader candidates,
     ICorpusGenerationLeaseStore leases, ICorpusAnnLeaseFactory annFactory, IScheduledPassageInference inference,
     IGpuInteractiveOwnerProbe owner, ICorpusEvidenceCodec evidence, ILocalPrivateContentDisclosure disclosure,
-    TimeProvider? timeProvider = null) : IHybridPassageRetrieval
+    TimeProvider? timeProvider = null, TimeSpan? searchTimeout = null) : IHybridPassageRetrieval
 {
     private readonly Guid _instance = Guid.NewGuid();
     private readonly TimeProvider _clock = timeProvider ?? TimeProvider.System;
+    private readonly TimeSpan _searchTimeout = ValidatedTimeout(searchTimeout);
+
+    private static TimeSpan ValidatedTimeout(TimeSpan? timeout)
+    {
+        var value = timeout ?? TimeSpan.FromSeconds(10);
+        if (value < TimeSpan.FromSeconds(10) || value > TimeSpan.FromSeconds(60))
+            throw new ArgumentOutOfRangeException(nameof(timeout));
+        return value;
+    }
 
     public ValueTask<CorpusSearchResponse> SearchAsync(string query, ResolvedCorpusScope scope, int limit,
         CancellationToken cancellationToken)
@@ -52,11 +61,11 @@ public sealed class HybridPassageRetrievalEngine(ICorpusRetrievalReader reader, 
         var searchId = Guid.NewGuid().ToString("N");
         var timer = Stopwatch.StartNew();
         CorpusSearchResponse? returned = null;
-        var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10), _clock);
+        var deadline = new CancellationTokenSource(_searchTimeout, _clock);
         var budget = CancellationTokenSource.CreateLinkedTokenSource(callerToken, deadline.Token);
         ResolvedCorpusScope? resolved = null;
         var work = SearchCoreAsync(query, limit, resolveScope, scope => resolved = scope, traceId, spanId, searchId, budget.Token).AsTask();
-        try { return returned = await work.WaitAsync(TimeSpan.FromSeconds(10), _clock, callerToken).ConfigureAwait(false); }
+        try { return returned = await work.WaitAsync(_searchTimeout, _clock, callerToken).ConfigureAwait(false); }
         catch (Exception exception) when (!callerToken.IsCancellationRequested &&
             (exception is TimeoutException || exception is OperationCanceledException && deadline.IsCancellationRequested))
         {

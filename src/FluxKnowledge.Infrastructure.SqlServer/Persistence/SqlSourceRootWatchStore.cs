@@ -88,7 +88,7 @@ public sealed class SqlSourceRootWatchStore(IDbContextFactory<FluxKnowledgeDbCon
             {
                 context.SourceScanRequests.Add(new SourceScanRequestEntity { Id = requestId, SourceRootId = batch.SourceRootId.Value, RequestKind = 2, RequestedBy = "watcher", RequestedAtUtc = now, IsReleased = true, ReleasedAtUtc = now, State = (int)SourceScanRequestState.Released });
                 context.SourceScanJobs.Add(new SourceScanJobEntity { Id = Guid.NewGuid(), SourceScanRequestId = requestId, State = (int)SourceScanJobState.Pending, DueAtUtc = now, CreatedAtUtc = now, UpdatedAtUtc = now });
-                context.SourceScanOutbox.Add(new SourceScanOutboxEntity { Id = Guid.NewGuid(), SourceScanRequestId = requestId, Operation = "source.scan", IdempotencyKey = $"source-watch:{batch.SourceRootId.Value:N}:{batch.DebounceGeneration}", DueAtUtc = now, CreatedAtUtc = now });
+                context.SourceScanOutbox.Add(new SourceScanOutboxEntity { Id = Guid.NewGuid(), SourceScanRequestId = requestId, Operation = "source.scan", IdempotencyKey = $"source-scan:{requestId:N}", DueAtUtc = now, CreatedAtUtc = now });
             }
             else if (existing.State == (int)SourceScanRequestState.Held)
             {

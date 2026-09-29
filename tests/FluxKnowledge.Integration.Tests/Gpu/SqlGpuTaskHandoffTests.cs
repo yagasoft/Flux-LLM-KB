@@ -88,16 +88,17 @@ public sealed class SqlGpuTaskHandoffTests(NativeSqlServerFixture fixture)
         var firstMiniTaskPersisted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var secondAtIdempotencyDecision = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var releaseFirstTransaction = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(60));
         var idempotencyDecisionCount = 0;
         var persistedCount = 0;
         var store = new SqlGpuSchedulerStore(
             factory,
-            afterMiniTaskPersisted: async _ =>
+            afterMiniTaskPersisted: async cancellationToken =>
             {
                 if (Interlocked.Increment(ref persistedCount) == 1)
                 {
                     firstMiniTaskPersisted.SetResult();
-                    await releaseFirstTransaction.Task;
+                    await releaseFirstTransaction.Task.WaitAsync(cancellationToken);
                 }
             },
             beforeIdempotencyRead: _ =>
@@ -110,12 +111,41 @@ public sealed class SqlGpuTaskHandoffTests(NativeSqlServerFixture fixture)
                 return ValueTask.CompletedTask;
             });
 
-        var first = store.GpuTaskHandoffAsync(request, CancellationToken.None).AsTask();
-        await firstMiniTaskPersisted.Task;
-        var second = store.GpuTaskHandoffAsync(request, CancellationToken.None).AsTask();
-        await secondAtIdempotencyDecision.Task;
-        releaseFirstTransaction.SetResult();
-        var results = await Task.WhenAll(first, second);
+        var first = store.GpuTaskHandoffAsync(request, timeout.Token).AsTask();
+        Task<GpuMiniTaskHandoffResult>? second = null;
+        GpuMiniTaskHandoffResult[] results;
+        Exception? originalFailure = null;
+        try
+        {
+            await firstMiniTaskPersisted.Task.WaitAsync(timeout.Token);
+            second = store.GpuTaskHandoffAsync(request, timeout.Token).AsTask();
+            await secondAtIdempotencyDecision.Task.WaitAsync(timeout.Token);
+            releaseFirstTransaction.TrySetResult();
+            results = await Task.WhenAll(first, second).WaitAsync(timeout.Token);
+        }
+        catch (Exception exception)
+        {
+            originalFailure = exception;
+            throw;
+        }
+        finally
+        {
+            releaseFirstTransaction.TrySetResult();
+            timeout.Cancel();
+            Task pending = second is null ? first : Task.WhenAll(first, second);
+            try
+            {
+                await pending.WaitAsync(TimeSpan.FromSeconds(30));
+            }
+            catch (Exception) when (pending.IsCompleted)
+            {
+                // The original result wait reports a fault or cancellation after both handoffs settle.
+            }
+            catch (TimeoutException cleanupTimeout) when (originalFailure is not null)
+            {
+                throw new AggregateException(originalFailure, cleanupTimeout);
+            }
+        }
 
         Assert.Single(results.Select(result => result.MiniTaskId).Distinct());
         Assert.Single(results, result => !result.IsIdempotentReplay);

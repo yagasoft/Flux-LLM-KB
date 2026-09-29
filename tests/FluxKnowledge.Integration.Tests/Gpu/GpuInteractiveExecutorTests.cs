@@ -14,6 +14,112 @@ namespace FluxKnowledge.Integration.Tests.Gpu;
 public sealed class GpuInteractiveExecutorTests(NativeSqlServerFixture fixture) : IClassFixture<NativeSqlServerFixture>
 {
     [NativeSqlServerFact]
+    public async Task Conditional_executor_busy_refusal_does_not_create_or_cancel_gpu_work()
+    {
+        await SqlTestData.ClearPipelineAsync(fixture);
+        var factory = SqlTestData.CreateFactory(fixture);
+        var store = new SqlGpuSchedulerStore(factory);
+        await using (var setup = await factory.CreateDbContextAsync())
+        {
+            setup.GpuCapacitySlots.Add(new GpuCapacitySlotEntity
+                { SlotKey = "gpu-0", State = (int)GpuCapacitySlotState.Reserved, UpdatedAtUtc = DateTimeOffset.UtcNow });
+            await setup.SaveChangesAsync();
+        }
+        var executor = new GpuInteractiveExecutor(store, new Lifecycle(store), store, new ChannelGpuSchedulerWakeSignal(),
+            TimeProvider.System, "synthetic-retrieval-v1", "synthetic-settings-v1", 10);
+        await Assert.ThrowsAsync<GpuInteractiveBusyWithoutHandoffException>(() =>
+            executor.ExecuteWithOwnershipAsync<int>(_ => throw new InvalidOperationException("Native callback ran"),
+                CancellationToken.None, declineWhenGpuBusy: true).AsTask());
+        await using var verify = await factory.CreateDbContextAsync();
+        Assert.Empty(await verify.GpuMiniTasks.ToArrayAsync());
+        Assert.Empty(await verify.GpuBatches.ToArrayAsync());
+    }
+
+    [NativeSqlServerFact]
+    public async Task Twenty_second_owner_can_complete_after_ten_seconds_without_early_capacity_release()
+    {
+        await SqlTestData.ClearPipelineAsync(fixture);
+        var factory = SqlTestData.CreateFactory(fixture);
+        var clock = new ManualClock(DateTimeOffset.UtcNow);
+        var store = new SqlGpuSchedulerStore(factory, timeProvider: clock,
+            interactiveExecutionTimeout: TimeSpan.FromSeconds(20));
+        await using (var setup = await factory.CreateDbContextAsync())
+        {
+            setup.GpuCapacitySlots.Add(new GpuCapacitySlotEntity { SlotKey = "gpu-0", State = 0, UpdatedAtUtc = clock.GetUtcNow() });
+            await setup.SaveChangesAsync();
+        }
+        var executor = new GpuInteractiveExecutor(store, new Lifecycle(store), store, new ChannelGpuSchedulerWakeSignal(),
+            clock, "synthetic-retrieval-v1", "synthetic-settings-v1", 10,
+            executionTimeout: TimeSpan.FromSeconds(20));
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var finishNative = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var result = executor.ExecuteWithOwnershipAsync<int>(async ownership =>
+        {
+            started.TrySetResult();
+            await finishNative.Task;
+            return new(42, true, ownership.CancellationToken.IsCancellationRequested ? "expired" : null);
+        }, CancellationToken.None).AsTask();
+        await using var waiting = await factory.CreateDbContextAsync();
+        for (var attempt = 0; await waiting.GpuMiniTasks.CountAsync() == 0 && attempt < 50; attempt++) await Task.Delay(10);
+        Assert.Equal(clock.GetUtcNow().AddSeconds(20), (await waiting.GpuMiniTasks.SingleAsync()).ExecutionDeadlineUtc);
+        var options = new GpuSchedulerOptions(4, 1024, TimeSpan.FromMinutes(1), TimeSpan.FromSeconds(1), TimeSpan.FromMinutes(1));
+        await store.RunAdmissionRoundAsync(Guid.NewGuid(), GpuSchedulerWakeReason.WorkReady, options,
+            (candidate, _) => ValueTask.FromResult(new GpuAdmissionDecision(GpuAdmissionDisposition.Admit, "gpu-0", "owner", null, candidate.RequiredExecutorKey)), CancellationToken.None);
+        var delivery = executor.DeliverAsync(Assert.Single(await store.ReadPendingDispatchesAsync(CancellationToken.None)), CancellationToken.None).AsTask();
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        clock.Advance(TimeSpan.FromSeconds(11));
+        Assert.False(result.IsCompleted);
+        await using (var beforeCleanup = await factory.CreateDbContextAsync())
+            Assert.Equal((int)GpuCapacitySlotState.Reserved, (await beforeCleanup.GpuCapacitySlots.SingleAsync()).State);
+        finishNative.SetResult();
+        await delivery.WaitAsync(TimeSpan.FromSeconds(8));
+        Assert.Equal(42, await result);
+        await using var afterCleanup = await factory.CreateDbContextAsync();
+        Assert.Equal((int)GpuCapacitySlotState.Available, (await afterCleanup.GpuCapacitySlots.SingleAsync()).State);
+    }
+
+    [NativeSqlServerFact]
+    public async Task Twenty_second_owner_expiry_keeps_capacity_until_native_cleanup()
+    {
+        await SqlTestData.ClearPipelineAsync(fixture);
+        var factory = SqlTestData.CreateFactory(fixture);
+        var clock = new ManualClock(DateTimeOffset.UtcNow);
+        var store = new SqlGpuSchedulerStore(factory, timeProvider: clock,
+            interactiveExecutionTimeout: TimeSpan.FromSeconds(20));
+        await using (var setup = await factory.CreateDbContextAsync())
+        {
+            setup.GpuCapacitySlots.Add(new GpuCapacitySlotEntity { SlotKey = "gpu-0", State = 0, UpdatedAtUtc = clock.GetUtcNow() });
+            await setup.SaveChangesAsync();
+        }
+        var executor = new GpuInteractiveExecutor(store, new Lifecycle(store), store, new ChannelGpuSchedulerWakeSignal(),
+            clock, "synthetic-retrieval-v1", "synthetic-settings-v1", 10,
+            executionTimeout: TimeSpan.FromSeconds(20));
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var finishNative = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var result = executor.ExecuteWithOwnershipAsync<int>(async _ =>
+        {
+            started.TrySetResult();
+            await finishNative.Task;
+            return new(42, true);
+        }, CancellationToken.None).AsTask();
+        await using var waiting = await factory.CreateDbContextAsync();
+        for (var attempt = 0; await waiting.GpuMiniTasks.CountAsync() == 0 && attempt < 50; attempt++) await Task.Delay(10);
+        var options = new GpuSchedulerOptions(4, 1024, TimeSpan.FromMinutes(1), TimeSpan.FromSeconds(1), TimeSpan.FromMinutes(1));
+        await store.RunAdmissionRoundAsync(Guid.NewGuid(), GpuSchedulerWakeReason.WorkReady, options,
+            (candidate, _) => ValueTask.FromResult(new GpuAdmissionDecision(GpuAdmissionDisposition.Admit, "gpu-0", "owner", null, candidate.RequiredExecutorKey)), CancellationToken.None);
+        var delivery = executor.DeliverAsync(Assert.Single(await store.ReadPendingDispatchesAsync(CancellationToken.None)), CancellationToken.None).AsTask();
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        clock.Advance(TimeSpan.FromSeconds(20));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => result);
+        await using (var beforeCleanup = await factory.CreateDbContextAsync())
+            Assert.Equal((int)GpuCapacitySlotState.Reserved, (await beforeCleanup.GpuCapacitySlots.SingleAsync()).State);
+        finishNative.SetResult();
+        await delivery.WaitAsync(TimeSpan.FromSeconds(8));
+        await using var afterCleanup = await factory.CreateDbContextAsync();
+        Assert.Equal((int)GpuCapacitySlotState.Available, (await afterCleanup.GpuCapacitySlots.SingleAsync()).State);
+        Assert.Equal((int)GpuMiniTaskExecutionState.OutcomeUncertain, (await afterCleanup.GpuMiniTasks.SingleAsync()).ExecutionState);
+    }
+    [NativeSqlServerFact]
     public async Task Two_requests_sharing_one_trace_remain_distinct_through_owned_native_batch_measurements()
     {
         using var trace = new HybridSearchTraceListener();

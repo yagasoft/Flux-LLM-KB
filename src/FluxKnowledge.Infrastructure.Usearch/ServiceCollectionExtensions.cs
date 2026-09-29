@@ -1,6 +1,7 @@
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Indexing;
 using FluxKnowledge.Application.Operations;
+using FluxKnowledge.Application.Sources;
 using FluxKnowledge.Infrastructure.Usearch.Search;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -78,7 +79,8 @@ public static class ServiceCollectionExtensions
             provider.GetRequiredService<UsearchIndexConfiguration>(),
             provider.GetRequiredService<TimeProvider>(),
             provider.GetService<IStatusEventPublisher>(),
-            provider.GetRequiredService<DerivedIndexRecoveryOptions>()));
+            provider.GetRequiredService<DerivedIndexRecoveryOptions>(),
+            deploymentHold: provider.GetService<IDeploymentValidationHold>()));
         services.AddSingleton<IDerivedIndexRecoveryStatus>(provider => provider.GetRequiredService<DerivedIndexRecoveryCoordinator>());
         services.AddSingleton<IDerivedIndexRecoverySignal>(provider => provider.GetRequiredService<DerivedIndexRecoveryCoordinator>());
         if (registerRecoveryBackgroundService)

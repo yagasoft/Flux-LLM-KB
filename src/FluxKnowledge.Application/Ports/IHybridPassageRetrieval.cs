@@ -33,6 +33,13 @@ public interface IScheduledPassageInference
         CancellationToken cancellationToken);
 }
 
+/// <summary>Attempts GPU admission only when the transaction can prove that no other GPU work is waiting or owned.</summary>
+public interface IConditionalGpuPassageInference : IScheduledPassageInference
+{
+    ValueTask<T> ExecuteWhenIdleAsync<T>(Func<IEmbeddingProvider, IPassageReranker, CancellationToken, ValueTask<T>> work,
+        CancellationToken cancellationToken);
+}
+
 public interface IHybridPassageRetrieval
 {
     ValueTask<CorpusSearchResponse> SearchAsync(CorpusSearchRequest request, CancellationToken cancellationToken);

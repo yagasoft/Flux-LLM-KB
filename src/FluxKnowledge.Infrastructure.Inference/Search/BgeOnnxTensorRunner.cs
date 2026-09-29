@@ -24,7 +24,7 @@ internal sealed class BgeOnnxTensorRunner : IBgeTensorRunner
     }
 
     internal static BgeOnnxTensorRunner Open(VerifiedLocalModelLease lease, bool embedding, CancellationToken cancellationToken,
-        GpuOwnedWorkContext? ownership = null)
+        GpuOwnedWorkContext? ownership = null, int cpuIntraOpThreads = 4)
     {
         InferenceSession? session = null;
         GpuOwnedWorkContext.NativeAllocation? allocation = null;
@@ -39,7 +39,7 @@ internal sealed class BgeOnnxTensorRunner : IBgeTensorRunner
             using var options = new SessionOptions
             {
                 ExecutionMode = ExecutionMode.ORT_SEQUENTIAL,
-                IntraOpNumThreads = 4,
+                IntraOpNumThreads = ownership is null ? cpuIntraOpThreads : 4,
                 InterOpNumThreads = 1,
                 GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL
             };
