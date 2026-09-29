@@ -1,7 +1,8 @@
 # Workspace-aware Codex context
 
 Date: 29 September 2026. Baseline: `b3c80182`.
-Status: implemented in the development branch; not deployed to the installed app.
+Status: implemented and deployed to the installed IIS app on 30 September 2026;
+live Codex-client and loopback validation passed.
 
 ## Intended result
 
@@ -21,7 +22,7 @@ bindings. It will miss some paraphrases and short queries. That is an explicit
 trade-off for predictable prompt overhead and less irrelevant injected text;
 manual hybrid search retains the existing semantic capabilities.
 
-## Evidence and present behaviour
+## Baseline evidence before implementation
 
 - [NativeCodexHookService](../../src/FluxKnowledge.Web/Mcp/NativeCodexHookService.cs)
   sends only the prompt and a limit of five to `NativeKnowledgeQuery`. It does
@@ -220,8 +221,8 @@ rewriting it or changing hook trust/registration as part of this increment.
 | Compatibility | Existing manual MCP/REST/CLI hybrid behaviour, Stop replay/capture, PreCompact, loopback, UTF-8 forwarding and safe error contracts still pass |
 
 Freeze cases and labels before policy tuning. Use a separate small development
-set for adjustments; do not relabel the held-out cases to obtain a pass. These
-the disposable SQL/HTTP run on 30 September 2026 measured 12/12 useful
+set for adjustments; do not relabel the held-out cases to obtain a pass. The
+disposable SQL/HTTP run on 30 September 2026 measured 12/12 useful
 positive cases, 0/12 irrelevant negative injections and 12/12 passing boundary
 cases. Its 40-call, two-caller p95 was 16 ms. These are test-host measurements,
 not installed-service latency or production readiness. A relevant
@@ -252,8 +253,28 @@ updater plan, exact release, verification and rollback first. A deployment plan
 must confirm whether it changes plugin material; any uncovered registration or
 trust change needs separate direction. Use the context-disable setting for a
 runtime regression, subject to the same operational approval; retain models and
-canonical data. The implementation approval does not authorise source
+canonical data. The original implementation approval did not authorise source
 registration, migration, restart or deployment.
+
+The separately authorised incremental update deployed commit `2c6712dc` to
+`I:\FluxKnowledge\App` on 30 September 2026 without migration, model acquisition
+or plugin-material changes. Recovery release
+`20260929T215634Z-2c6712dcd77a` retains the previous application and
+interactive-host payloads. The updater released its validation hold after
+unchanged-state checks; post-deployment live, ready and index-health probes all
+returned HTTP 200. The installed binary matched the staged candidate.
+
+Live hook calls with missing and unregistered `cwd` returned no context. The
+existing public Mercury acceptance workspace returned one 2,493-character
+record whose passage matched an exact `corpus.read` response. The installed
+PowerShell adapter returned the cited passage containing the 176-Earth-day solar
+day answer. An ephemeral read-only Codex CLI run from that workspace triggered
+`UserPromptSubmit`; its operator event recorded `context-injected` with one
+record under `workspace-lexical-v1`, and the client answered 176 Earth days.
+The unindexed repository workspace returned no context. Audit details contained
+reason, policy, counts and elapsed time, without prompt or passage text. IIS site
+and application pool remained started. The existing client `Stop` hook also ran
+and saved captures during the CLI probes.
 
 The deferred source-lifecycle, OCR and Outlook items stay deferred. Research
 briefs, document comparison, scoped saved-memory persistence, semantic admission,

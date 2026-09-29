@@ -128,9 +128,12 @@ records only a closed reason, policy version, counts and elapsed milliseconds,
 never the prompt, workspace path, passage or reference. Unexpected prompt
 failures omit exception text. See the [design](design/workspace-codex-context.md).
 
-This behaviour is implemented and verified in the development branch. It has
-not been deployed to the installed app; production activation requires its own
-reviewed incremental update and approval.
+This behaviour was deployed to the installed IIS app on 30 September 2026 after
+independent operational review. Live loopback and installed-adapter checks
+verified exact citations and empty context for unregistered workspaces; an
+actual Codex CLI prompt from the public acceptance workspace recorded one
+injected context event. See the [design](design/workspace-codex-context.md) for
+release and validation evidence.
 
 ## Operational actions and planned extensions
 

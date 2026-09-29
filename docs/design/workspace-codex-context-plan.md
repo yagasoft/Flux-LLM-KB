@@ -1,7 +1,7 @@
 # Workspace-aware Codex context implementation plan
 
 Date: 29 September 2026. Baseline: `b3c80182`.
-Status: implementation underway in the development branch; no deployment.
+Status: implemented, closed out and live-validated on 30 September 2026.
 
 **Goal:** Inject a bounded, workspace-scoped set of exact cited passages into
 Codex prompts, or continue without context when the workspace or evidence is
@@ -21,8 +21,8 @@ package, model or persistent schema.
 
 **Execution:** One implementation owner. Follow the repository's proportionate
 workflow and test changed behaviour first. No automatic per-task agent handoffs.
-The user approved the plan and implementation resumed. The design remains the
-source for release acceptance; production activation still needs separate authority.
+The user approved implementation, then separately authorised deployment and live
+validation. The design remains the source for release acceptance.
 
 ## Constraints and fixed values
 
@@ -223,18 +223,18 @@ to the milestones above:
 - [x] Self-review the complete diff against the spec and preserve evidence.
   Obtain one focused independent review for the boundaries above before
   operational activation; resolve blocking findings within this scope.
-- [ ] Use `scripts/dev/complete-feature.ps1` for feature closeout on the task
+- [x] Use `scripts/dev/complete-feature.ps1` for feature closeout on the task
   branch; do not manually substitute its commit/merge/push sequence. Default
   closeout does not authorise production actions. Report `failed_step` and
   `log_path` if it fails, and repair/rerun within authorised scope.
-- [ ] Prepare, but do not apply, an incremental deployment plan only when
-  deployment enters the user's requested scope. Obtain the required independent
-  operational review and explicit user authority before applying or restarting.
-  Validate plugin-material handling; do not assume registration/trust changes
-  are covered by the updater.
-- [ ] For an authorised activation, verify the actual client sends cwd and that
-  a registered synthetic workspace injects exact citations while an unindexed
-  workspace stays empty. The disabling setting is the operational fallback;
+- [x] Review and apply an incremental deployment plan after deployment enters
+  the user's requested scope. Obtain the required independent operational review
+  and explicit user authority before applying or restarting. Validate
+  plugin-material handling; do not assume registration/trust changes are covered
+  by the updater.
+- [x] For the authorised activation, verify the actual client sends cwd and that
+  an existing public acceptance workspace injects exact citations while an
+  unindexed workspace stays empty. The disabling setting is the operational fallback;
   do not restore global injection as the new feature's fallback.
 
 ## Implementation evidence
@@ -245,5 +245,14 @@ unknown workspaces returned no packet. The frozen public/synthetic cohort ran
 through the HTTP hook on 30 September 2026: 12/12 positive cases supplied useful
 evidence, 0/12 negatives injected irrelevant context, and 12/12 boundary cases
 passed. Forty requests with two callers measured 16 ms p95 in that test host.
-This is not installed-service evidence. Branch checks and independent review
-passed; closeout and any separately authorised production activation remain.
+These are disposable test-host results. Branch checks, independent code review
+and `complete-feature.ps1` closeout passed. A separately authorised incremental
+IIS release `20260929T215634Z-2c6712dcd77a` deployed commit `2c6712dc` with
+no migrations and preserved `CodexPlugin`. The independent operational review
+approved the exact no-migration update. Live probes returned HTTP 200 for live,
+ready and index health; the validation hold was released, and IIS site and pool
+remained started. The installed adapter returned one exact re-readable public
+Mercury passage; missing and unindexed workspaces returned no context. An actual
+read-only Codex CLI run from the registered workspace recorded one injected
+context event and answered the 176-Earth-day question. The metadata-only audit
+contained no prompt, passage or reference.

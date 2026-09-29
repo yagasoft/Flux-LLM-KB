@@ -74,11 +74,11 @@ used the old pilot for diagnosis and fresh development data for two bounded
 prototypes. Neither passed the no-regression gate; no held-out ranking run
 occurred and the deployed ranking remains unchanged.
 
-## Planned next increment
+## Recent increment
 
 | Item | Priority | Status | Progress % | Remaining Work |
 | --- | --- | --- | ---: | --- |
-| Workspace-aware Codex prompt context | P1 | implemented and reviewed in development branch; not deployed | 90% | Complete branch closeout, then obtain separate operational approval for the incremental update and verify the installed client supplies `cwd`. Disposable SQL/HTTP acceptance passed 12/12 useful positives, 0/12 irrelevant negatives and 12/12 boundaries; 40 calls at two callers measured 16 ms p95. Retain the disable setting as the activation fallback. |
+| Workspace-aware Codex prompt context | P1 | deployed and live-validated | 100% | No remaining work for the bounded lexical scope. Incremental IIS release `20260929T215634Z-2c6712dcd77a` deployed commit `2c6712dc` without migration; live health probes returned 200, the installed adapter yielded an exact re-readable public citation, the actual Codex client injected one record with `cwd`, and an unindexed workspace stayed empty. Disposable acceptance passed 12/12 useful positives, 0/12 irrelevant negatives and 12/12 boundaries; 40 calls at two callers measured 16 ms p95. The disable setting remains the operational fallback, subject to approval for any future use; broader relevance work remains deferred. |
 
 ## Deferred follow-ups
 
