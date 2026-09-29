@@ -145,9 +145,10 @@ Credentials, mail contents and spool data are private runtime material.
 ## Retrieval and integration surfaces
 
 Current search combines eligible retained corpus text with knowledge records.
-SQL Full-Text and USearch serve the native retrieval path; the registered
-embedding provider is a deterministic token-hash baseline. It is not a learned
-semantic model. SQL publication eligibility controls which revision can appear.
+The installed hybrid passage runtime combines SQL Full-Text, learned BGE
+embeddings, USearch and a cross-encoder reranker for source retrieval. The
+deterministic token-hash provider remains the non-hybrid baseline. SQL
+publication eligibility controls which revision can appear.
 
 The eleven native tools, their REST routes, envelopes, cursors and CLI verbs are
 specified in [integrations](integrations.md). Mutations require a preview-bound
@@ -155,13 +156,13 @@ confirmation and an idempotency key. Direct-loopback checks refuse forwarding,
 proxies and redirects; public responses are bounded and secret-filtered.
 
 [Scoped corpus search and cited passage reading](design/corpus-retrieval.md)
-provide deployed published-text lexical search and bounded cited reads through
-MCP, REST and CLI. SQL Full-Text remains the lexical index. A learned BGE passage
-path is active, but live latency and English relevance acceptance have not passed;
-the earlier BGE-M3 ONNX pilot evaluated different windows and failed its own
-relevance gates.
+provide published-text search and bounded cited reads through MCP, REST and CLI.
+SQL Full-Text remains the lexical index. The learned BGE passage path is active
+in the installed app and has passed the scoped English staging acceptance
+recorded below. The earlier BGE-M3 ONNX pilot evaluated different windows and
+failed its own relevance gates; it is not the delivered passage pipeline's result.
 
-The proposed [hybrid passage architecture](design/hybrid-passage-retrieval.md)
+The delivered [hybrid passage architecture](design/hybrid-passage-retrieval.md)
 and [implementation plan](design/hybrid-passage-retrieval-plan.md), dated
 25 September 2026, supersede the earlier semantic transition plan. They retain
 SQL Server, Full-Text and USearch, use coherent shared passages, learned
@@ -186,7 +187,7 @@ relevance, live OCR fairness and the measured two-caller latency gate passed
 staging acceptance. Source publication, disclosure and citation safeguards
 are retained. No OCR or extractor upgrade is implied.
 
-The GPU-first search candidate now makes its placement decision inside the
+The GPU-first search runtime makes its placement decision inside the
 existing serialised scheduler admission transaction. An idle GPU receives the
 usual durable, owner-bound request. If queued work or reserved/uncertain GPU
 capacity makes it busy, the transaction proves that no search request was
@@ -208,6 +209,18 @@ p95, with 49 GPU tasks and 47 CPU fallbacks. An OCR page arriving during a
 GPU search waited for that active batch, then ran without interruption before
 new search admissions.
 
+The final English holdout covered 24 sources, with strict top-five answer
+support for 80/84 answerable questions and exact reads for all 480 cited
+passages. Acceptance used a full REST p95 target of at most 20 seconds under
+two callers, within the 25-second request deadline. The 12-search OCR-overlap
+probe passed at 19.30-second p95; OCR waited 7.06 seconds for an active GPU
+batch, then completed without interruption. These are measured staging results,
+not guarantees for sustained OCR, cold CPU warmup, higher concurrency or other
+languages. Negative controls returned related passages; answer abstention is
+not an accepted capability. The
+[live acceptance record](operations/2026-09-28-hybrid-search-live-acceptance.md)
+retains the failed intermediate runs and final evidence.
+
 The implementation has a locally verified complete-passage path from
 synthetic ingress through SQL/USearch publication to REST search and citation
 reading, including separate context headers and evidence v2 corpus epochs.
@@ -228,17 +241,18 @@ The pinned reranker source and a float32 ONNX export are now verified in
 `J:\Models`. An isolated CPU conversion runtime reused cached packages with no
 additional downloads; its numeric reference checks passed. This is model
 preparation, not a semantic-search accuracy claim.
-The [conversion record](design/bge-reranker-offline-conversion.md) states its scope
-and remaining numeric GPU checks.
+The [conversion record](design/bge-reranker-offline-conversion.md) states the
+original conversion scope; the later integrated staging results are recorded
+in the live acceptance record above.
 
 The [native CPU adapter record](design/bge-native-cpu-adapters.md) now establishes
 offline .NET tokenizer and numeric parity for both fixed models, including the
 512-token boundary and verified-file/native-library lifetimes. Models are loaded
 from explicit protected bundle paths in the canonical store, without acquisition.
 The shared admission gate uses the existing OCR physical slot and an exact-owner/
-dispatch/slot execution read. It is registered in production;
-background GPU execution is observed, while full-search quality and latency
-acceptance remain pending.
+dispatch/slot execution read. It is registered in the installed app, where
+background GPU execution and the scoped full-search quality and latency gates
+have passed staging validation.
 
 A held 35-input rebuild reached 28 completed inputs before native process memory
 growth required a pause. Isolated tokenizer-only cycles identified repeated native
@@ -258,19 +272,21 @@ cleanup. Before native execution starts, cancellation can reconcile an undeliver
 uncertain admission using its single-owner no-start proof. Confirmed cleanup can
 also reconcile watchdog uncertainty. Failed cleanup retains capacity. This adapter
 passed independent review with 26 focused ownership/executor tests. It is registered
-in production; live foreground search executes, while sustained-load OCR handover
-remains an acceptance gate.
+in the installed app; live foreground search and the bounded two-caller/OCR
+handover probe have passed staging validation. Sustained OCR workloads remain
+outside that measured acceptance envelope.
 
 The native GPU factories now require an active executor-owned context bound to
 the pinned BGE runtime/settings profile. The context expires before capacity
 settlement; model sessions retain verified local-file leases and dispose before
 those leases are released. DirectML uses sequential execution with memory patterns
-disabled. Guard checks and the cached CPU reference regression pass. Background GPU
-execution, loading and sampled process memory are now observed. A successful
-50-passage search took 9.954 seconds, including 6.650 seconds of model loading;
-this is one trace, not p95. GPU numeric parity and accepted full-search latency
-remain unverified. A locally reviewed process-held verified-file cache is the
-next bounded change; it does not retain native GPU sessions between requests.
+disabled. Guard checks, the cached CPU reference regression and GPU numeric
+parity passed. An earlier 50-passage trace took 9.954 seconds, including 6.650
+seconds of model loading; it is historical diagnostic evidence, not the final
+p95. The deployed process-held verified-file cache retains protected,
+hash-verified model-file handles to avoid repeated hashing. It does not retain
+native GPU sessions between requests. The corrected GPU-first/CPU-fallback
+runtime passed the full-search staging latency gate described above.
 
 Publication preview, activation, lexical search/read and deletion survivor
 selection now share one SQL publication rule in the shared implementation. Pending
@@ -341,15 +357,16 @@ GPU release. The background adapter now joins checkpoint, confirmed cleanup,
 existing lifecycle settlement and ordinary Embed requeue. Response-loss, disposal
 uncertainty, process recovery and source withdrawal checks cover this path.
 
-`Search:HybridPassagesEnabled` selects the unreleased shared runtime only when the
+`Search:HybridPassagesEnabled` selects the shared runtime only when the
 complete existing local OCR/GPU runtime is enabled. It retains the existing physical
 slot, durable recovery loop and OCR turn policy. Singleton adapters call scoped
 lifecycle services through fresh scopes. Model stores use pinned verified paths
-under `J:\Models`; DI construction loads no weights. Each batch/request unloads its
-embedding session before any reranker session opens. The flag remains disabled
-pending maintenance, real GPU measurements and relevance acceptance.
+under `J:\Models`; DI construction loads no weights. Each GPU batch/request
+unloads its embedding session before any reranker session opens; the separate
+CPU fallback pool keeps its verified sessions resident. The flag is enabled in
+the installed app that passed the scoped staging acceptance above.
 
-The unreleased controlled rebuild captures canonical inputs and existing publication
+The deployed controlled rebuild captures canonical inputs and existing publication
 bindings in an immutable operation manifest. SQL reset preserves extraction and
 completion history, advances the corpus epoch and records a durable worklist. Each
 item prepares coherent passages outside its commit transaction, then queues one
@@ -383,8 +400,10 @@ resume verifies the same release, database, operation and file hashes. A stopped
 compatible candidate can run existing dead-owner recovery under deny-all admission
 before draining again. Foreign holds and journal/schema disagreement refuse without
 service changes. Disposable SQL checks exercise actual idempotent migration/replay,
-session loss and exited-owner recovery. Canonical GPU measurements, English quality,
-deployment and live validation remain pending.
+session loss and exited-owner recovery. The recorded incremental releases,
+rebuild recovery, GPU measurements and scoped English staging acceptance have
+completed. Future deployment or rebuild operations still require their own
+explicit operational authority.
 
 An interrupted schema-54 worklist can be replaced explicitly through that updater.
 The successor binds the immutable predecessor packet and the same canonical inputs,

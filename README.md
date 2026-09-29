@@ -18,14 +18,15 @@ search projections. The application endpoint is `http://127.0.0.1:5137`.
   interactive Visio processing through the logged-in Windows companion host.
 - SQL-authoritative scheduling, leases, idempotent operations, publication
   fences and rebuildable search indexes.
-- Nine native MCP tools with corresponding REST and CLI operations for knowledge,
+- Eleven native MCP tools with corresponding REST and CLI operations for knowledge,
   retained code, corpus management and operational evidence.
 - A local operator interface for sources, corpus, pipeline records, events,
   search, Outlook capture and retained C# facts.
 
 Supported formats and important limits are listed in
-[file-type coverage](docs/file-type-coverage.md). Learned semantic retrieval is
-[planned work](docs/roadmap.md); the current embedding baseline is deterministic.
+[file-type coverage](docs/file-type-coverage.md). Learned hybrid passage retrieval
+is active in the installed app and has passed scoped English staging acceptance;
+the [roadmap](docs/roadmap.md) records the measured limits and remaining work.
 
 ## Build and verify
 

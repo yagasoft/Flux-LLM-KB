@@ -74,6 +74,18 @@ used the old pilot for diagnosis and fresh development data for two bounded
 prototypes. Neither passed the no-regression gate; no held-out ranking run
 occurred and the deployed ranking remains unchanged.
 
+## Deferred follow-ups
+
+The following items are deferred as of 29 September 2026. Their delivery
+estimates and outstanding acceptance requirements above remain unchanged:
+
+- Source pause/resume and complete deletion: remaining deployment and complete
+  disposable-source live acceptance.
+- English OCR: supported retry of terminal failed revisions, mixed native/scanned
+  regions on one page and repeated-text fidelity.
+- Native Outlook ingress: remaining separately authorised desktop operational
+  acceptance.
+
 ## Update rules
 
 Update affected `Progress %` and `Remaining Work` entries when capability or

@@ -32,7 +32,7 @@ Codex and local scripts. All supported clients share the native application faca
 | `operations.status` | `GET /api/v1/operations/status` | `FluxKnowledge.Cli operations status` |
 | `operations.audit` | `POST /api/v1/operations/audit/query` | `FluxKnowledge.Cli operations audit` |
 
-The unreleased trusted-local `corpus-rebuild` CLI is an operator interface used by
+The trusted-local `corpus-rebuild` CLI is an operator interface used by
 the incremental IIS updater. It accepts `plan --operation <guid>`,
 `commit --manifest <path>`, `prepare --operation <guid>`,
 `status --operation <guid>` and `finish --operation <guid>`. Its
@@ -50,10 +50,11 @@ passages, source and owner identity, typed locations where retained provenance
 supports them, and an opaque `evidence_ref`. `corpus.read` accepts that reference
 and returns up to 4,096 UTF-16 units of surrounding retained context while
 rechecking current publication and deletion state. Both operations have a
-256 KiB response limit. Their `retrieval_mode` is `lexical`; learned semantic
-ranking remains a separate evaluated increment.
+256 KiB response limit. Search responses identify the actual `retrieval_mode` as
+`hybrid` or `lexical`, together with semantic status and warnings. The installed
+app uses the learned hybrid passage runtime described below.
 
-The unreleased `Search:HybridPassagesEnabled` runtime shares coherent passage
+The `Search:HybridPassagesEnabled` runtime shares coherent passage
 retrieval across corpus, existing search and knowledge-source search. Successful
 wire shapes and public limits remain unchanged. Corpus responses identify hybrid
 or lexical mode, semantic status and warnings. Existing search keeps complete fallback
@@ -65,7 +66,13 @@ Native REST/MCP/remote CLI share named `search-busy`, `search-timeout`,
 these transient failures are retryable (REST HTTP 503). Input-length and scoped
 capacity refusals are non-retryable. `/api/search` exposes equivalent problem
 codes. Its numeric score is reciprocal result position, not a relevance probability.
-Activation and real-model acceptance remain pending.
+The runtime is active in the installed app and has passed scoped English
+staging acceptance across MCP, REST and CLI. The final two-caller holdout
+returned 96/96 ready searches and 480/480 exact citation reads at 16.46-second
+full REST p95, within the measured 20-second staging target and 25-second
+request deadline. This does not establish answer abstention or performance
+under sustained OCR, cold CPU warmup or higher concurrency. See the
+[live acceptance record](operations/2026-09-28-hybrid-search-live-acceptance.md).
 
 ## Mutations
 
@@ -109,5 +116,6 @@ Unrelated plugin registrations are not removed. The application has no plugin
 retirement or migration task.
 
 The [retrieval design](design/corpus-retrieval.md) records the scoped lexical
-contract. Current hybrid search still uses a deterministic embedding baseline;
-learned semantic corpus retrieval remains a separate delivery.
+contract history. The delivered [hybrid passage design](design/hybrid-passage-retrieval.md)
+defines the shared learned retrieval path; the deterministic embedding provider
+remains the non-hybrid baseline.
