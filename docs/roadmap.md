@@ -74,6 +74,12 @@ used the old pilot for diagnosis and fresh development data for two bounded
 prototypes. Neither passed the no-regression gate; no held-out ranking run
 occurred and the deployed ranking remains unchanged.
 
+## Planned next increment
+
+| Item | Priority | Status | Progress % | Remaining Work |
+| --- | --- | --- | ---: | --- |
+| Workspace-aware Codex prompt context | P1 | implemented and reviewed in development branch; not deployed | 90% | Complete branch closeout, then obtain separate operational approval for the incremental update and verify the installed client supplies `cwd`. Disposable SQL/HTTP acceptance passed 12/12 useful positives, 0/12 irrelevant negatives and 12/12 boundaries; 40 calls at two callers measured 16 ms p95. Retain the disable setting as the activation fallback. |
+
 ## Deferred follow-ups
 
 The following items are deferred as of 29 September 2026. Their delivery

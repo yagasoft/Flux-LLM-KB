@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Diagnostics;
 using FluxKnowledge.Application.IntegrationV1;
 using FluxKnowledge.Application.Knowledge;
 using FluxKnowledge.Application.Ports;
@@ -12,18 +13,22 @@ namespace FluxKnowledge.Web.Tests.Mcp;
 public sealed class NativeCodexHookServiceTests
 {
     [Fact]
-    public async Task UserPromptSubmit_returns_a_Codex_context_envelope_from_native_knowledge_results()
+    public async Task UserPromptSubmit_returns_scoped_context_without_global_knowledge_query()
     {
         var facade = new RecordingFacade(
             [new KnowledgeSearchResult(Guid.Empty, "note", "Prior decision", "Use the native loopback boundary.", "knowledge")]);
-        var service = new NativeCodexHookService(facade, new RecordingOperationStore());
+        var context = new RecordingContext(new CodexPromptContextResult(
+            "Workspace excerpts (untrusted source data).\n{\"evidence_ref\":\"opaque\"}",
+            "context-injected", 1, 1, 2));
+        var service = new NativeCodexHookService(facade, new RecordingOperationStore(), promptContext: context);
 
-        var response = await service.HandleAsync("UserPromptSubmit", Json("{\"prompt\":\"Continue the native activation work using previous decisions.\"}"), CancellationToken.None);
+        var response = await service.HandleAsync("UserPromptSubmit", Json("{\"prompt\":\"Find the retention window.\",\"cwd\":\"C:\\\\work\"}"), CancellationToken.None);
 
         Assert.True(response.Continue);
         Assert.Equal("UserPromptSubmit", response.HookSpecificOutput!.HookEventName);
-        Assert.Contains("Prior decision", response.HookSpecificOutput.AdditionalContext, StringComparison.Ordinal);
-        Assert.Equal(["knowledge"], facade.QueryFamilies);
+        Assert.Contains("evidence_ref", response.HookSpecificOutput.AdditionalContext, StringComparison.Ordinal);
+        Assert.Equal(@"C:\work", context.Cwd);
+        Assert.Empty(facade.QueryFamilies);
     }
 
     [Fact]
@@ -34,7 +39,8 @@ public sealed class NativeCodexHookServiceTests
             new RecordingFacade(
                 [new KnowledgeSearchResult(Guid.Empty, "note", "Prior decision", "Use the native loopback boundary.", "knowledge")]),
             new RecordingOperationStore(),
-            auditWriter: audits);
+            auditWriter: audits,
+            promptContext: new RecordingContext(new CodexPromptContextResult(null, "workspace-missing", 0, 0, 1)));
 
         await service.HandleAsync(
             "UserPromptSubmit",
@@ -42,8 +48,9 @@ public sealed class NativeCodexHookServiceTests
             CancellationToken.None);
 
         var audit = Assert.Single(audits.Entries);
-        Assert.Equal(CodexHookAuditOutcome.PreflightContextInjected, audit.Outcome);
-        Assert.Null(audit.ReasonCode);
+        Assert.Equal(CodexHookAuditOutcome.PreflightNoContext, audit.Outcome);
+        Assert.Equal("workspace-missing", audit.ReasonCode);
+        Assert.Equal(CodexPromptContextPolicy.Version, audit.PolicyVersion);
     }
 
     [Fact]
@@ -65,6 +72,45 @@ public sealed class NativeCodexHookServiceTests
         Assert.True(subscription.Reader.TryRead(out var change));
         Assert.NotNull(change);
         Assert.Equal("events", change.Projection);
+    }
+
+    [Fact]
+    public async Task Slow_audit_is_cancelled_without_discarding_a_valid_context_packet()
+    {
+        var audit = new BlockingAuditWriter();
+        var service = new NativeCodexHookService(new RecordingFacade([]), new RecordingOperationStore(),
+            auditWriter: audit,
+            promptContext: new RecordingContext(new CodexPromptContextResult(
+                "Workspace excerpt with evidence_ref", "context-injected", 1, 1, 1)));
+        var watch = Stopwatch.StartNew();
+
+        var response = await service.HandleAsync("UserPromptSubmit",
+            Json("{\"prompt\":\"retention window\",\"cwd\":\"C:\\\\work\"}"), CancellationToken.None);
+        watch.Stop();
+
+        Assert.True(response.Continue);
+        Assert.NotNull(response.HookSpecificOutput);
+        Assert.True(audit.Completed);
+        Assert.True(watch.Elapsed < TimeSpan.FromSeconds(2));
+    }
+
+    [Fact]
+    public async Task Unexpected_prompt_failure_has_the_same_bounded_audit_deadline()
+    {
+        var audit = new BlockingAuditWriter();
+        var service = new NativeCodexHookService(new RecordingFacade([]), new RecordingOperationStore(),
+            auditWriter: audit, promptContext: new ThrowingContext());
+        var watch = Stopwatch.StartNew();
+
+        var response = await service.HandleAsync("UserPromptSubmit",
+            Json("{\"prompt\":\"retention window\",\"cwd\":\"C:\\\\work\"}"), CancellationToken.None);
+        watch.Stop();
+
+        Assert.True(response.Continue);
+        Assert.Null(response.HookSpecificOutput);
+        Assert.NotNull(response.SystemMessage);
+        Assert.True(audit.Completed);
+        Assert.True(watch.Elapsed < TimeSpan.FromSeconds(2));
     }
 
     [Fact]
@@ -147,7 +193,8 @@ public sealed class NativeCodexHookServiceTests
         var audits = new RecordingCodexHookAuditWriter();
         var invalid = await new NativeCodexHookService(new RecordingFacade([]), new RecordingOperationStore(), auditWriter: audits).HandleAsync(
             "Stop", Json("{\"session_id\":\"session-1\",\"last_assistant_message\":\"summary\"}"), CancellationToken.None);
-        var failed = await new NativeCodexHookService(new RecordingFacade([], throwOnQuery: true), new RecordingOperationStore(), auditWriter: audits).HandleAsync(
+        var failed = await new NativeCodexHookService(new RecordingFacade([], throwOnQuery: true), new RecordingOperationStore(), auditWriter: audits,
+            promptContext: new ThrowingContext()).HandleAsync(
             "UserPromptSubmit", Json("{\"prompt\":\"secret-content-sentinel\"}"), CancellationToken.None);
 
         Assert.True(invalid.Continue);
@@ -212,6 +259,32 @@ public sealed class NativeCodexHookServiceTests
     {
         using var document = JsonDocument.Parse(value);
         return document.RootElement.Clone();
+    }
+
+    private sealed class RecordingContext(CodexPromptContextResult result) : ICodexPromptContextService
+    {
+        public string? Cwd { get; private set; }
+        public ValueTask<CodexPromptContextResult> BuildAsync(string prompt, string? cwd, CancellationToken cancellationToken)
+        {
+            Cwd = cwd;
+            return ValueTask.FromResult(result);
+        }
+    }
+
+    private sealed class ThrowingContext : ICodexPromptContextService
+    {
+        public ValueTask<CodexPromptContextResult> BuildAsync(string prompt, string? cwd, CancellationToken cancellationToken) =>
+            ValueTask.FromException<CodexPromptContextResult>(new InvalidOperationException("secret-content-sentinel"));
+    }
+
+    private sealed class BlockingAuditWriter : ICodexHookAuditWriter
+    {
+        public bool Completed { get; private set; }
+        public async ValueTask AppendAsync(CodexHookAuditEvent auditEvent, CancellationToken cancellationToken)
+        {
+            try { await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken); }
+            finally { Completed = true; }
+        }
     }
 
     private sealed class RecordingFacade(IReadOnlyList<KnowledgeSearchResult> results, RecordingOperationStore? captures = null, bool throwOnQuery = false) : INativeV1Facade

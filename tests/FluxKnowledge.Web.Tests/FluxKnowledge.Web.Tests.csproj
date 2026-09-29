@@ -12,4 +12,7 @@
     <PackageReference Include="Microsoft.AspNetCore.SignalR.Client" />
     <PackageReference Include="Microsoft.Playwright" />
   </ItemGroup>
+  <ItemGroup>
+    <Content Include="../FluxKnowledge.Integration.Tests/Fixtures/WorkspaceCodexContext/cohort.json" Link="Fixtures/WorkspaceCodexContext/cohort.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
 </Project>

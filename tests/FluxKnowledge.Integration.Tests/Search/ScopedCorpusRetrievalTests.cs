@@ -1,6 +1,8 @@
 using System.Security.Cryptography;
 using System.Text;
 using FluxKnowledge.Application.Contracts;
+using FluxKnowledge.Application.IntegrationV1;
+using FluxKnowledge.Application.Knowledge;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Search;
 using FluxKnowledge.Application.Documents;
@@ -10,8 +12,10 @@ using FluxKnowledge.Domain.Pipeline;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
 using FluxKnowledge.Infrastructure.SqlServer.Search;
+using FluxKnowledge.Web.Mcp;
 using FluxKnowledge.Integration.Tests.Support;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Data.SqlClient;
 using Xunit;
 
 namespace FluxKnowledge.Integration.Tests.Search;
@@ -186,6 +190,129 @@ public sealed class ScopedCorpusRetrievalTests(NativeSqlServerFixture fixture) :
         Assert.NotNull(driveRoot);
         var driveMatches = await reader.SearchAsync("workspace marker", driveRoot, 5, CancellationToken.None);
         Assert.Equal(3, driveMatches.Count);
+    }
+
+    [NativeSqlServerFact]
+    public async Task WorkspaceCodexContext_hook_uses_current_scoped_SQL_evidence_without_hybrid_or_global_notes()
+    {
+        var factory = SqlTestData.CreateFactory(fixture);
+        var id = Guid.NewGuid().ToString("N");
+        var workspace = @"C:\context-" + id + @"\main";
+        var sibling = @"C:\context-" + id + @"\main-old";
+        var root = Guid.NewGuid();
+        await using (var context = await factory.CreateDbContextAsync())
+        {
+            AddPublishedText(context, root, workspace, "answer.txt", ["retention window records 30 days"]);
+            AddPublishedText(context, Guid.NewGuid(), sibling, "other.txt", ["retention window records 90 days"]);
+            await context.SaveChangesAsync();
+        }
+
+        var codec = new TestEvidenceCodec();
+        var hybrid = new ThrowingHybrid();
+        var corpus = new CorpusRetrievalService(new SqlCorpusRetrievalReader(factory), codec,
+            new LocalPrivateContentDisclosure(), hybrid: hybrid);
+        var hook = new NativeCodexHookService(new ThrowingFacade(),
+            new SqlNativeOperationStore(factory, TimeProvider.System),
+            auditWriter: new SqlCodexHookAuditWriter(factory),
+            promptContext: new CodexPromptContextService(corpus));
+
+        var response = await hook.HandleAsync("UserPromptSubmit",
+            JsonSerializer.SerializeToElement(new { prompt = "retention window records", cwd = workspace }),
+            CancellationToken.None);
+        Assert.True(response.Continue);
+        var packet = Assert.IsType<NativeCodexHookSpecificOutput>(response.HookSpecificOutput);
+        Assert.Contains("30 days", packet.AdditionalContext, StringComparison.Ordinal);
+        Assert.DoesNotContain("90 days", packet.AdditionalContext, StringComparison.Ordinal);
+        Assert.Equal(0, hybrid.Calls);
+        using var record = JsonDocument.Parse(packet.AdditionalContext[(packet.AdditionalContext.IndexOf('\n') + 1)..]);
+        var reference = record.RootElement.GetProperty("evidence_ref").GetString()!;
+        var current = await corpus.ReadAsync(new CorpusReadRequest(reference, 0), CancellationToken.None);
+        Assert.Equal(current.Text, record.RootElement.GetProperty("passage").GetString());
+        Assert.Equal(root, current.RootId);
+
+        var missing = await hook.HandleAsync("UserPromptSubmit",
+            JsonSerializer.SerializeToElement(new { prompt = "retention window records" }), CancellationToken.None);
+        var unknown = await hook.HandleAsync("UserPromptSubmit",
+            JsonSerializer.SerializeToElement(new { prompt = "retention window records", cwd = @"C:\unindexed-" + id }), CancellationToken.None);
+        Assert.Null(missing.HookSpecificOutput);
+        Assert.Null(unknown.HookSpecificOutput);
+        Assert.Equal(0, hybrid.Calls);
+
+        await using var persisted = await factory.CreateDbContextAsync();
+        var audits = await persisted.AuditEvents.Where(item => item.EventType == "codex_hook.preflight_completed")
+            .Select(item => item.DetailsJson).ToListAsync();
+        Assert.Equal(3, audits.Count);
+        Assert.Contains(audits, details => details.Contains("context-injected", StringComparison.Ordinal));
+        Assert.DoesNotContain(audits, details => details.Contains(workspace, StringComparison.Ordinal) ||
+            details.Contains("retention window", StringComparison.Ordinal) || details.Contains(reference, StringComparison.Ordinal));
+    }
+
+    [NativeSqlServerTheory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task WorkspaceCodexContext_cancelled_SQL_scope_read_finishes_before_its_dependency_is_reused(bool callerCancellation)
+    {
+        var factory = SqlTestData.CreateFactory(fixture);
+        var workspace = @"C:\context-cancel-" + Guid.NewGuid().ToString("N");
+        await using (var context = await factory.CreateDbContextAsync())
+        {
+            AddPublishedText(context, Guid.NewGuid(), workspace, "answer.txt", ["retention window records 30 days"]);
+            await context.SaveChangesAsync();
+        }
+        var corpus = new CorpusRetrievalService(new SqlCorpusRetrievalReader(factory),
+            new TestEvidenceCodec(), new LocalPrivateContentDisclosure());
+        var promptContext = new CodexPromptContextService(corpus);
+
+        await using var blocker = new SqlConnection(fixture.ConnectionString);
+        await blocker.OpenAsync();
+        await using var transaction = (SqlTransaction)await blocker.BeginTransactionAsync();
+        await using (var command = new SqlCommand(
+            "SELECT [Id] FROM [SourceRootConfigurations] WITH (TABLOCKX, HOLDLOCK) WHERE [CanonicalPath] = @path",
+            blocker, transaction))
+        {
+            command.Parameters.AddWithValue("@path", workspace);
+            await command.ExecuteNonQueryAsync();
+        }
+        using var cancellation = new CancellationTokenSource();
+        var pending = promptContext.BuildAsync("retention window", workspace, cancellation.Token).AsTask();
+        await Task.Delay(100);
+        Assert.False(pending.IsCompleted);
+        if (callerCancellation)
+        {
+            cancellation.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => pending);
+        }
+        else
+        {
+            var result = await pending;
+            Assert.Equal("retrieval-timeout", result.ReasonCode);
+            Assert.Null(result.AdditionalContext);
+        }
+        await transaction.RollbackAsync();
+
+        var healthy = await corpus.SearchLexicalAsync(new CorpusSearchRequest(
+            "retention window", 10, "workspace", null, workspace), CancellationToken.None);
+        Assert.Single(healthy.Results);
+    }
+
+    private sealed class ThrowingHybrid : IHybridPassageRetrieval
+    {
+        public int Calls { get; private set; }
+        public ValueTask<CorpusSearchResponse> SearchAsync(CorpusSearchRequest request, CancellationToken cancellationToken)
+        {
+            Calls++;
+            throw new InvalidOperationException("Hybrid retrieval must not run for Codex context.");
+        }
+    }
+
+    private sealed class ThrowingFacade : INativeV1Facade
+    {
+        public ValueTask<object> ExecuteQueryAsync(string family, object request, CancellationToken cancellationToken) =>
+            throw new InvalidOperationException("Global knowledge query must not run.");
+        public ValueTask<NativeActionPreview> PreviewAsync(string family, object command, string surface, CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+        public ValueTask<NativeActionReceipt> CommitAsync(string family, object command, string confirmationId, string idempotencyKey, string surface, CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
     }
 
     [NativeSqlServerFact]

@@ -58,7 +58,7 @@ public static class OperatorEventAppender
         return json.Length <= maximumLength ? json : "{\"truncated\":true}";
     }
 
-    private static readonly string[] AllowedDetailKeys = ["revision", "classification", "kind", "executionClass", "stage", "sourceActivity", "reasonCode", "descriptor", "action", "state", "phase", "exceptionType", "sqlErrorNumber", "exceptionText"];
+    private static readonly string[] AllowedDetailKeys = ["revision", "classification", "kind", "executionClass", "stage", "sourceActivity", "reasonCode", "descriptor", "action", "state", "phase", "exceptionType", "sqlErrorNumber", "exceptionText", "policyVersion", "examinedCount", "injectedCount", "elapsedMilliseconds"];
 
     private static bool TrySanitiseScalar(string eventType, string key, JsonValue value, out JsonNode? sanitised)
     {
@@ -68,6 +68,20 @@ public static class OperatorEventAppender
             return true;
         }
         if (key == "sourceActivity" && value.TryGetValue<bool>(out var boolean)) { sanitised = JsonValue.Create(boolean); return true; }
+        if (string.Equals(eventType, "codex_hook.preflight_completed", StringComparison.Ordinal))
+        {
+            if (key == "examinedCount" && value.TryGetValue<int>(out var examined) && examined is >= 0 and <= 10 ||
+                key == "injectedCount" && value.TryGetValue<int>(out var injected) && injected is >= 0 and <= 3)
+            {
+                sanitised = value.DeepClone();
+                return true;
+            }
+            if (key == "elapsedMilliseconds" && value.TryGetValue<long>(out var elapsed) && elapsed is >= 0 and <= 60_000)
+            {
+                sanitised = JsonValue.Create(elapsed);
+                return true;
+            }
+        }
         if (key == "sqlErrorNumber" &&
             string.Equals(eventType, "codex_hook.processing_failed", StringComparison.Ordinal) &&
             value.TryGetValue<int>(out var sqlErrorNumber) &&
@@ -86,6 +100,18 @@ public static class OperatorEventAppender
         }
         if (value.TryGetValue<string>(out var text) && text.Length <= 128 && text.All(character => char.IsLetterOrDigit(character) || character is '.' or '-' or '_'))
         {
+            if (key == "policyVersion" && (!string.Equals(eventType, "codex_hook.preflight_completed", StringComparison.Ordinal) ||
+                text != CodexPromptContextPolicy.Version))
+            {
+                sanitised = null;
+                return false;
+            }
+            if (key == "reasonCode" && string.Equals(eventType, "codex_hook.preflight_completed", StringComparison.Ordinal) &&
+                !CodexHookPreflightMetadata.IsReasonCode(text))
+            {
+                sanitised = null;
+                return false;
+            }
             if (key == "phase" && (!string.Equals(eventType, "codex_hook.processing_failed", StringComparison.Ordinal) || !CodexHookFailureMetadata.IsPhase(text)))
             {
                 sanitised = null;

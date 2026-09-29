@@ -7,6 +7,7 @@ using FluxKnowledge.Application.Contracts;
 using FluxKnowledge.Application.Pipeline;
 using FluxKnowledge.Application.Sources;
 using FluxKnowledge.Application.Indexing;
+using FluxKnowledge.Application.IntegrationV1;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Search;
 using FluxKnowledge.Application.Workers;
@@ -484,7 +485,10 @@ public sealed class WebHostCompositionTests : IDisposable
 
         Assert.False(provider.GetRequiredService<OutlookCaptureRecoveryOptions>().Enabled);
         using var retrievalScope = provider.CreateScope();
-        Assert.IsType<CorpusRetrievalService>(retrievalScope.ServiceProvider.GetRequiredService<ICorpusRetrievalService>());
+        var retrieval = Assert.IsType<CorpusRetrievalService>(retrievalScope.ServiceProvider.GetRequiredService<ICorpusRetrievalService>());
+        Assert.Same(retrieval, retrievalScope.ServiceProvider.GetRequiredService<ICorpusLexicalRetrievalService>());
+        Assert.IsType<CodexPromptContextService>(retrievalScope.ServiceProvider.GetRequiredService<ICodexPromptContextService>());
+        Assert.True(provider.GetRequiredService<CodexPromptContextOptions>().Enabled);
         Assert.Empty(provider.GetServices<IHostedService>().OfType<OutlookCaptureRecoveryService>());
         Assert.DoesNotContain(
             typeof(WebHostComposition).Assembly.GetReferencedAssemblies(),
@@ -497,6 +501,28 @@ public sealed class WebHostCompositionTests : IDisposable
                 descriptor.ImplementationType?.Assembly.GetName().Name?.Contains(
                 "OutlookHost",
                 StringComparison.Ordinal) == true);
+    }
+
+    [Fact]
+    public void Codex_prompt_context_can_be_disabled_without_changing_corpus_service_registration()
+    {
+        var configuration = new ConfigurationBuilder()
+            .AddConfiguration(CreateOutlookRecoveryConfiguration(enabled: null))
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Codex:PromptContextEnabled"] = "false"
+            }).Build();
+        var services = new ServiceCollection();
+        services.AddLogging();
+        WebHostComposition.AddFluxKnowledgeServices(services, configuration);
+        using var provider = services.BuildServiceProvider(
+            new ServiceProviderOptions { ValidateScopes = true, ValidateOnBuild = true });
+        using var scope = provider.CreateScope();
+
+        Assert.False(provider.GetRequiredService<CodexPromptContextOptions>().Enabled);
+        Assert.IsType<CodexPromptContextService>(scope.ServiceProvider.GetRequiredService<ICodexPromptContextService>());
+        Assert.Same(scope.ServiceProvider.GetRequiredService<ICorpusRetrievalService>(),
+            scope.ServiceProvider.GetRequiredService<ICorpusLexicalRetrievalService>());
     }
 
     [Fact]

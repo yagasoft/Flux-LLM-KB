@@ -48,11 +48,10 @@ public sealed class NativeCodexHookService(
     ILogger<NativeCodexHookService>? logger = null,
     ICodexHookAuditWriter? auditWriter = null,
     IStatusEventPublisher? statusPublisher = null,
-    TimeProvider? timeProvider = null)
+    TimeProvider? timeProvider = null,
+    ICodexPromptContextService? promptContext = null)
 {
-    private const int SearchLimit = 5;
     private const int MaximumSummaryCharacters = 8_000;
-    private const int MaximumContextCharacters = 4_096;
     private const string ActorSurface = "codex-hook";
     private readonly INativeV1Facade _facade = facade ?? throw new ArgumentNullException(nameof(facade));
     private readonly INativeOperationStore _operationStore = operationStore ?? throw new ArgumentNullException(nameof(operationStore));
@@ -60,6 +59,7 @@ public sealed class NativeCodexHookService(
     private readonly ICodexHookAuditWriter? _auditWriter = auditWriter;
     private readonly IStatusEventPublisher? _statusPublisher = statusPublisher;
     private readonly TimeProvider _timeProvider = timeProvider ?? TimeProvider.System;
+    private readonly ICodexPromptContextService? _promptContext = promptContext;
 
     public async ValueTask<NativeCodexHookResponse> HandleAsync(
         string? eventName,
@@ -118,22 +118,52 @@ public sealed class NativeCodexHookService(
     private async ValueTask<NativeCodexHookResponse> HandleUserPromptSubmitAsync(JsonElement payload, CancellationToken cancellationToken)
     {
         var prompt = RequiredText(payload, "prompt", NativeV1ContractLimits.MaximumKnowledgeQueryCharacters);
+        var cwd = OptionalCwd(payload);
+        using var overallBudget = new CancellationTokenSource(TimeSpan.FromSeconds(2), _timeProvider);
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, overallBudget.Token);
         try
         {
-            var results = await _facade.ExecuteQueryAsync(
-                "knowledge",
-                new NativeKnowledgeQuery(prompt, SearchLimit),
-                cancellationToken).ConfigureAwait(false);
-            var context = FormatContext(results);
-            await RecordAuditAsync(CodexHookAuditEvent.Preflight(!string.IsNullOrEmpty(context), _timeProvider.GetUtcNow()), cancellationToken).ConfigureAwait(false);
-            return string.IsNullOrEmpty(context)
+            CodexPromptContextResult result;
+            try
+            {
+                result = _promptContext is null
+                    ? new CodexPromptContextResult(null, "context-disabled", 0, 0, 0)
+                    : await _promptContext.BuildAsync(prompt, cwd, linked.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && overallBudget.IsCancellationRequested)
+            {
+                result = new CodexPromptContextResult(null, "retrieval-timeout", 0, 0, 2000);
+            }
+
+            await RecordPromptAuditAsync(CodexHookAuditEvent.Preflight(result, _timeProvider.GetUtcNow()),
+                cancellationToken, overallBudget.Token).ConfigureAwait(false);
+            return string.IsNullOrEmpty(result.AdditionalContext)
                 ? new NativeCodexHookResponse(true)
-                : new NativeCodexHookResponse(true, new NativeCodexHookSpecificOutput("UserPromptSubmit", context));
+                : new NativeCodexHookResponse(true, new NativeCodexHookSpecificOutput("UserPromptSubmit", result.AdditionalContext));
         }
         catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
         {
-            throw new NativeCodexHookFailureException("user_prompt", [prompt], exception);
+            var failure = DescribeFailure(exception);
+            await RecordPromptAuditAsync(CodexHookAuditEvent.ProcessingFailed(
+                failure.Classification, "user_prompt", failure.ExceptionType,
+                failure.SqlErrorNumber, _timeProvider.GetUtcNow()),
+                cancellationToken, overallBudget.Token).ConfigureAwait(false);
+            return new NativeCodexHookResponse(true,
+                SystemMessage: "Native Codex hook could not access local knowledge; continuing.");
         }
+    }
+
+    private async ValueTask RecordPromptAuditAsync(CodexHookAuditEvent auditEvent,
+        CancellationToken callerToken, CancellationToken overallToken)
+    {
+        if (overallToken.IsCancellationRequested) return;
+        using var auditBudget = new CancellationTokenSource(TimeSpan.FromMilliseconds(250), _timeProvider);
+        using var auditLinked = CancellationTokenSource.CreateLinkedTokenSource(callerToken, overallToken, auditBudget.Token);
+        try
+        {
+            await RecordAuditAsync(auditEvent, auditLinked.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (!callerToken.IsCancellationRequested) { }
     }
 
     private async ValueTask<NativeCodexHookResponse> HandleStopAsync(JsonElement payload, CancellationToken cancellationToken)
@@ -203,7 +233,7 @@ public sealed class NativeCodexHookService(
             FailureClassification(exception),
             ExceptionType(exception),
             SqlErrorNumber(exception),
-            ExceptionText(exception, sensitiveValues));
+            phase == "user_prompt" ? null : ExceptionText(exception, sensitiveValues));
     }
 
     private static string FailureClassification(Exception exception) => exception switch
@@ -315,21 +345,14 @@ public sealed class NativeCodexHookService(
         return value;
     }
 
-    private static string FormatContext(object result)
+    private static string? OptionalCwd(JsonElement payload)
     {
-        if (result is not IEnumerable<KnowledgeSearchResult> rows) return string.Empty;
-        var builder = new StringBuilder("Relevant local knowledge:");
-        foreach (var row in rows)
-        {
-            var title = Normalise(row.Title);
-            var content = Normalise(row.Content);
-            if (string.IsNullOrWhiteSpace(title) || string.IsNullOrWhiteSpace(content)) continue;
-            var next = $"\n- {title}: {content}";
-            if (builder.Length + next.Length > MaximumContextCharacters) break;
-            builder.Append(next);
-        }
-
-        return builder.Length == "Relevant local knowledge:".Length ? string.Empty : builder.ToString();
+        if (!payload.TryGetProperty("cwd", out var property)) return null;
+        if (property.ValueKind != JsonValueKind.String) throw new NativeCodexHookInputException();
+        var cwd = property.GetString();
+        if (string.IsNullOrWhiteSpace(cwd) || cwd.Length > 2048 || cwd.Any(char.IsControl))
+            throw new NativeCodexHookInputException();
+        return cwd;
     }
 
     private static string Normalise(string? value) => new string((value ?? string.Empty)
@@ -358,6 +381,6 @@ public sealed class NativeCodexHookService(
             .ToArray();
     }
 
-    private sealed record HookFailure(string Phase, string Classification, string ExceptionType, int? SqlErrorNumber, string ExceptionText);
+    private sealed record HookFailure(string Phase, string Classification, string ExceptionType, int? SqlErrorNumber, string? ExceptionText);
 
 }

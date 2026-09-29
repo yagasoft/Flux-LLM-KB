@@ -28,11 +28,11 @@ public sealed class NativeCodexHookEndpointTests
 
         using var response = await host.Client.PostAsJsonAsync(
             "/native/v1/codex/hooks/UserPromptSubmit",
-            new { prompt = "Continue the native activation work using prior decisions." });
+            new { prompt = "Find the retention window.", cwd = @"C:\work" });
         var body = await response.Content.ReadAsStringAsync();
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        Assert.Equal("{\"continue\":true,\"hookSpecificOutput\":{\"hookEventName\":\"UserPromptSubmit\",\"additionalContext\":\"Relevant local knowledge:\\n- Prior decision: Use the native loopback boundary.\"}}", body);
+        Assert.Equal("{\"continue\":true,\"hookSpecificOutput\":{\"hookEventName\":\"UserPromptSubmit\",\"additionalContext\":\"Workspace excerpt with evidence_ref\"}}", body);
     }
 
     [Theory]
@@ -162,6 +162,7 @@ public sealed class NativeCodexHookEndpointTests
         builder.Services.AddSingleton<INativeOperationStore>(new OperationStore());
         var audits = new RecordingCodexHookAuditWriter();
         builder.Services.AddSingleton<ICodexHookAuditWriter>(audits);
+        builder.Services.AddSingleton<ICodexPromptContextService>(new StubContext());
         builder.Services.AddSingleton<NativeCodexHookService>();
         var app = builder.Build();
         app.Use(async (context, next) =>
@@ -187,6 +188,14 @@ public sealed class NativeCodexHookEndpointTests
 
         public ValueTask<NativeActionReceipt> CommitAsync(string family, object command, string confirmationId, string idempotencyKey, string surface, CancellationToken cancellationToken) =>
             ValueTask.FromResult(new NativeActionReceipt(Guid.Empty, false, "completed", null));
+    }
+
+    private sealed class StubContext : ICodexPromptContextService
+    {
+        public ValueTask<CodexPromptContextResult> BuildAsync(string prompt, string? cwd, CancellationToken cancellationToken) =>
+            ValueTask.FromResult(cwd is null
+                ? new CodexPromptContextResult(null, "workspace-missing", 0, 0, 0)
+                : new CodexPromptContextResult("Workspace excerpt with evidence_ref", "context-injected", 1, 1, 0));
     }
 
     private sealed class OperationStore : INativeOperationStore

@@ -336,7 +336,12 @@ public static class WebHostComposition
             nativeRuntimeOptions?.LocalOcrEnabled == true));
         services.AddSingleton<IEmbeddingProvider, DeterministicTokenHashEmbeddingProvider>();
         services.AddScoped<ISearchService, HybridSearchService>();
-        services.AddScoped<ICorpusRetrievalService, CorpusRetrievalService>();
+        services.AddScoped<CorpusRetrievalService>();
+        services.AddScoped<ICorpusRetrievalService>(provider => provider.GetRequiredService<CorpusRetrievalService>());
+        services.AddScoped<ICorpusLexicalRetrievalService>(provider => provider.GetRequiredService<CorpusRetrievalService>());
+        services.AddSingleton(new CodexPromptContextOptions(
+            configuration.GetValue<bool?>("Codex:PromptContextEnabled") ?? true));
+        services.AddScoped<ICodexPromptContextService, CodexPromptContextService>();
         services.AddScoped<SqlNativeOperationStore>();
         services.AddScoped<INativeOperationStore>(provider => provider.GetRequiredService<SqlNativeOperationStore>());
         services.AddScoped<SqlKnowledgeStore>();

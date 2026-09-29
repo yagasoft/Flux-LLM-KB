@@ -104,6 +104,34 @@ registration, leaving unrelated Codex configuration unchanged.
 go-live authority; ordinary CLI composition denies it. Normal application
 startup does not register, repair or otherwise alter Codex plugin state.
 
+### Automatic prompt context
+
+`UserPromptSubmit` reads the client's `cwd` and uses only published retained
+passages beneath a registered Windows workspace. It uses the model-free lexical
+corpus path, makes one search and at most five zero-context citation reads, and
+injects at most three complete JSON records within 4,096 UTF-16 units. Every
+record includes an opaque `evidence_ref`, source identity, revision and exact
+passage. The preamble labels excerpts as untrusted, potentially incomplete
+source data. A missing or unavailable workspace, a vague prompt or unsuitable
+evidence produces only `{"continue":true}`; it never searches all sources or
+falls back to unscoped saved notes. Explicit `knowledge.search` and
+`corpus.search` keep their wider contracts and hybrid behaviour.
+
+The conservative `workspace-lexical-v1` selector requires two meaningful prompt
+terms or an exact identifier and checks the passage body, not its title or
+header. It can omit useful paraphrases and short follow-ups. The hook has a
+1,750 ms cooperative retrieval budget inside a two-second overall budget;
+`Stop`, `PreCompact` and the command adapter's ten-second transport backstop
+are unchanged. `Codex:PromptContextEnabled=false` suppresses automatic context
+without disabling explicit tools or other hooks. The operator Events projection
+records only a closed reason, policy version, counts and elapsed milliseconds,
+never the prompt, workspace path, passage or reference. Unexpected prompt
+failures omit exception text. See the [design](design/workspace-codex-context.md).
+
+This behaviour is implemented and verified in the development branch. It has
+not been deployed to the installed app; production activation requires its own
+reviewed incremental update and approval.
+
 ## Operational actions and planned extensions
 
 External listeners and remote MCP are outside this private local contract.

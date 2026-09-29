@@ -17,10 +17,30 @@ public sealed record CodexHookAuditEvent(
     string? FailurePhase = null,
     string? ExceptionType = null,
     int? SqlErrorNumber = null,
-    string? ExceptionText = null)
+    string? ExceptionText = null,
+    string? PolicyVersion = null,
+    int? ExaminedCount = null,
+    int? InjectedCount = null,
+    long? ElapsedMilliseconds = null)
 {
     public static CodexHookAuditEvent Preflight(bool contextInjected, DateTimeOffset occurredAtUtc) =>
         new(contextInjected ? CodexHookAuditOutcome.PreflightContextInjected : CodexHookAuditOutcome.PreflightNoContext, occurredAtUtc);
+
+    public static CodexHookAuditEvent Preflight(CodexPromptContextResult result, DateTimeOffset occurredAtUtc)
+    {
+        if (!CodexHookPreflightMetadata.IsReasonCode(result.ReasonCode))
+            throw new ArgumentException("A known preflight reason is required.", nameof(result));
+        if (result.ExaminedCount is < 0 or > 10 || result.InjectedCount is < 0 or > 3 ||
+            result.ElapsedMilliseconds is < 0 or > 60_000 ||
+            (result.AdditionalContext is null) != (result.InjectedCount == 0) ||
+            (result.ReasonCode == "context-injected") != (result.AdditionalContext is not null))
+            throw new ArgumentOutOfRangeException(nameof(result));
+        return new(result.AdditionalContext is null ? CodexHookAuditOutcome.PreflightNoContext :
+            CodexHookAuditOutcome.PreflightContextInjected, occurredAtUtc, result.ReasonCode,
+            PolicyVersion: CodexPromptContextPolicy.Version,
+            ExaminedCount: result.ExaminedCount, InjectedCount: result.InjectedCount,
+            ElapsedMilliseconds: result.ElapsedMilliseconds);
+    }
 
     public static CodexHookAuditEvent InputRejected(DateTimeOffset occurredAtUtc) =>
         new(CodexHookAuditOutcome.InputRejected, occurredAtUtc);
@@ -40,6 +60,15 @@ public sealed record CodexHookAuditEvent(
         if (!CodexHookFailureMetadata.IsExceptionText(exceptionText)) throw new ArgumentException("Codex hook exception text exceeds the diagnostic limit.", nameof(exceptionText));
         return new(CodexHookAuditOutcome.ProcessingFailed, occurredAtUtc, reasonCode, failurePhase, exceptionType, sqlErrorNumber, exceptionText);
     }
+}
+
+public static class CodexHookPreflightMetadata
+{
+    public static bool IsReasonCode(string? value) => value is
+        "context-injected" or "context-disabled" or "workspace-missing" or
+        "scope-unavailable" or "query-insufficient" or "no-matching-evidence" or
+        "evidence-unavailable" or "context-budget" or "retrieval-unavailable" or
+        "retrieval-timeout";
 }
 
 /// <summary>Closed metadata vocabulary permitted for a failed Codex-hook event.</summary>

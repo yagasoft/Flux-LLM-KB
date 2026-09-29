@@ -429,6 +429,18 @@ metadata, so degraded source retrieval produces the same explicit refusal instea
 of an apparently complete notes/source union. Healthy notes/claims interleaving is
 unchanged; its source shortlist remains bounded at 50 even for a knowledge limit of 100.
 
+Automatic Codex `UserPromptSubmit` context bypasses that general knowledge
+union. It calls the same corpus service through an explicit lexical-only
+interface, resolves only the supplied registered `cwd` subtree and validates
+each selected hit with a zero-context retained read before rendering a cited
+JSON record. The `workspace-lexical-v1` policy admits body matches only,
+deduplicates documents and equal normalised passages, and emits no context on
+missing scope or weak queries. The hook's cooperative retrieval deadline is
+1,750 ms, with a two-second overall deadline and metadata-only audit.
+Manual corpus, knowledge, MCP, REST and CLI hybrid dispatch is unchanged.
+The [context design](design/workspace-codex-context.md) records the policy
+and operational boundary.
+
 ## Operations and verification
 
 The operator UI projects committed source, job, scheduler, corpus and audit

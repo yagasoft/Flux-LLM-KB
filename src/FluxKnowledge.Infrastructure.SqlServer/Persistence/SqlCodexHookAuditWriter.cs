@@ -15,8 +15,8 @@ public sealed class SqlCodexHookAuditWriter(
         ArgumentNullException.ThrowIfNull(auditEvent);
         var draft = auditEvent.Outcome switch
         {
-            CodexHookAuditOutcome.PreflightContextInjected => Draft("codex_hook.preflight_completed", "information", new { state = "context_injected" }, auditEvent.OccurredAtUtc),
-            CodexHookAuditOutcome.PreflightNoContext => Draft("codex_hook.preflight_completed", "information", new { state = "no_context" }, auditEvent.OccurredAtUtc),
+            CodexHookAuditOutcome.PreflightContextInjected => Draft("codex_hook.preflight_completed", "information", PreflightDetails("context_injected", auditEvent), auditEvent.OccurredAtUtc),
+            CodexHookAuditOutcome.PreflightNoContext => Draft("codex_hook.preflight_completed", "information", PreflightDetails("no_context", auditEvent), auditEvent.OccurredAtUtc),
             CodexHookAuditOutcome.InputRejected => Draft("codex_hook.input_rejected", "warning", new { reasonCode = "invalid_input" }, auditEvent.OccurredAtUtc),
             CodexHookAuditOutcome.ProcessingFailed => Draft("codex_hook.processing_failed", "warning", FailureDetails(auditEvent), auditEvent.OccurredAtUtc),
             _ => throw new ArgumentOutOfRangeException(nameof(auditEvent))
@@ -36,6 +36,26 @@ public sealed class SqlCodexHookAuditWriter(
             occurredAtUtc.ToUniversalTime(),
             CorrelationId: "codex-hook:" + Guid.NewGuid().ToString("N"),
             Details: details);
+
+    private static object PreflightDetails(string state, CodexHookAuditEvent auditEvent)
+    {
+        if (auditEvent.ReasonCode is null) return new { state };
+        if (!CodexHookPreflightMetadata.IsReasonCode(auditEvent.ReasonCode) ||
+            auditEvent.PolicyVersion != CodexPromptContextPolicy.Version ||
+            auditEvent.ExaminedCount is not (>= 0 and <= 10) ||
+            auditEvent.InjectedCount is not (>= 0 and <= 3) ||
+            auditEvent.ElapsedMilliseconds is not (>= 0 and <= 60_000))
+            throw new ArgumentException("Invalid preflight metadata.", nameof(auditEvent));
+        return new
+        {
+            state,
+            reasonCode = auditEvent.ReasonCode,
+            policyVersion = auditEvent.PolicyVersion,
+            examinedCount = auditEvent.ExaminedCount,
+            injectedCount = auditEvent.InjectedCount,
+            elapsedMilliseconds = auditEvent.ElapsedMilliseconds
+        };
+    }
 
     private static string ValidateReasonCode(string? reasonCode)
     {

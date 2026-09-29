@@ -25,6 +25,22 @@ browser helper. Use an existing browser installation where available. The
 normal suite reports browser tests as skipped unless that route is enabled.
 No ordinary test is allowed to acquire a real model.
 
+The opt-in workspace-context acceptance check uses a disposable SQL database,
+public synthetic source text and the loopback HTTP hook. It runs a frozen
+36-case relevance/boundary cohort and 40 requests at two callers. It does not
+register a workspace in the installed app or acquire a model:
+
+```powershell
+$env:FLUXKNOWLEDGE_RUN_WORKSPACE_CONTEXT_ACCEPTANCE = '1'
+dotnet test tests/FluxKnowledge.Web.Tests/FluxKnowledge.Web.Tests.csproj -c Release `
+  --filter FullyQualifiedName~WorkspaceCodexContextAcceptanceTests
+Remove-Item Env:FLUXKNOWLEDGE_RUN_WORKSPACE_CONTEXT_ACCEPTANCE
+```
+
+After an approved deployment, `Codex:PromptContextEnabled=false` is the
+configuration fallback for automatic prompt context. Changing this setting
+on an installed service is an operational action requiring its own approval.
+
 Production startup loads canonical configuration with no-follow path checks;
 an unrestricted development `dotnet run` is not an installation procedure.
 Tests provide their own isolated host composition and synthetic fixtures.

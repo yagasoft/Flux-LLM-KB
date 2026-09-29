@@ -19,6 +19,7 @@ using FluxKnowledge.Integrations.Windows;
 using FluxKnowledge.Integration.Tests.Support;
 using FluxKnowledge.Integration.Tests.Indexing;
 using FluxKnowledge.Web.Endpoints;
+using FluxKnowledge.Web.Mcp;
 using FluxKnowledge.Web.NativeV1;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.DataProtection;
@@ -148,8 +149,19 @@ public sealed class CorpusRetrievalEndToEndTests(NativeSqlServerFixture fixture)
         builder.WebHost.UseTestServer();
         builder.Services.AddSingleton<INativeV1Facade>(new CorpusOnlyFacade(service));
         builder.Services.AddSingleton<NativeV1RequestMapper>();
+        builder.Services.AddSingleton<INativeOperationStore>(new SqlNativeOperationStore(factory, TimeProvider.System));
+        builder.Services.AddSingleton<ICodexHookAuditWriter>(new SqlCodexHookAuditWriter(factory));
+        builder.Services.AddSingleton<ICodexPromptContextService>(new CodexPromptContextService(service));
+        builder.Services.AddSingleton<NativeCodexHookService>();
         await using var app = builder.Build();
+        app.Use(async (context, next) =>
+        {
+            context.Connection.RemoteIpAddress = System.Net.IPAddress.Loopback;
+            await next(context);
+        });
+        app.UseLocalOperatorLoopbackGate();
         app.MapFluxKnowledgeNativeV1();
+        app.MapFluxKnowledgeNativeCodexHooks();
         await app.StartAsync();
         using var client = app.GetTestClient();
 
@@ -167,6 +179,19 @@ public sealed class CorpusRetrievalEndToEndTests(NativeSqlServerFixture fixture)
         Assert.Equal(HttpStatusCode.OK, read.StatusCode);
         using var readJson = JsonDocument.Parse(await read.Content.ReadAsStringAsync());
         Assert.Equal(canonicalText, readJson.RootElement.GetProperty("result").GetProperty("text").GetString());
+
+        using var hook = await client.PostAsJsonAsync("/native/v1/codex/hooks/UserPromptSubmit",
+            new { prompt = "evidence marker", cwd = @"C:\retained-corpus" });
+        Assert.Equal(HttpStatusCode.OK, hook.StatusCode);
+        using var hookJson = JsonDocument.Parse(await hook.Content.ReadAsStringAsync());
+        var packet = hookJson.RootElement.GetProperty("hookSpecificOutput").GetProperty("additionalContext").GetString()!;
+        using var packetRecord = JsonDocument.Parse(packet[(packet.IndexOf('\n') + 1)..]);
+        Assert.Equal(canonicalText, packetRecord.RootElement.GetProperty("passage").GetString());
+        var hookReference = packetRecord.RootElement.GetProperty("evidence_ref").GetString()!;
+        Assert.Equal(canonicalText, (await service.ReadAsync(new CorpusReadRequest(hookReference, 0), CancellationToken.None)).Text);
+        using var unscopedHook = await client.PostAsJsonAsync("/native/v1/codex/hooks/UserPromptSubmit",
+            new { prompt = "evidence marker" });
+        Assert.Equal("{\"continue\":true}", await unscopedHook.Content.ReadAsStringAsync());
 
         await using (var context = await factory.CreateDbContextAsync())
         {

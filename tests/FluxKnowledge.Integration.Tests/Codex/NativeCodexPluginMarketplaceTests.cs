@@ -29,6 +29,14 @@ public sealed class NativeCodexPluginMarketplaceTests
         "{\"prompt\":\"نعم 😀 — هذا صحي.\"}")]
     [InlineData(
         "powershell.exe",
+        "UserPromptSubmit",
+        "{\"prompt\":\"workspace context\",\"cwd\":\"C:\\\\work\\\\alpha\"}")]
+    [InlineData(
+        "pwsh",
+        "UserPromptSubmit",
+        "{\"prompt\":\"workspace context\",\"cwd\":\"C:\\\\work\\\\alpha\"}")]
+    [InlineData(
+        "powershell.exe",
         "PreCompact",
         "{\"prompt\":\"Yes - this is healthy.\"}")]
     [InlineData(

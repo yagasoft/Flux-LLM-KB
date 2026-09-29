@@ -15,6 +15,13 @@ public interface ICorpusRetrievalService
     ValueTask<CorpusPassageResponse> ReadAsync(CorpusReadRequest request, CancellationToken token);
 }
 
+/// <summary>Internal model-free path for bounded automatic workspace context.</summary>
+public interface ICorpusLexicalRetrievalService
+{
+    ValueTask<CorpusSearchResponse> SearchLexicalAsync(CorpusSearchRequest request, CancellationToken token);
+    ValueTask<CorpusPassageResponse> ReadAsync(CorpusReadRequest request, CancellationToken token);
+}
+
 /// <summary>Local release gate; enable coherent passages only with the corresponding clean rebuild.</summary>
 public sealed record CorpusRetrievalOptions(bool CoherentPassagesEnabled = false);
 
@@ -23,13 +30,24 @@ public sealed class CorpusRetrievalService(
     ICorpusEvidenceCodec evidenceCodec,
     ILocalPrivateContentDisclosure disclosure,
     CorpusRetrievalOptions? options = null,
-    IHybridPassageRetrieval? hybrid = null) : ICorpusRetrievalService
+    IHybridPassageRetrieval? hybrid = null) : ICorpusRetrievalService, ICorpusLexicalRetrievalService
 {
     private static readonly CompareInfo EnglishCompare = CultureInfo.GetCultureInfo("en-US").CompareInfo;
     private const CompareOptions FullTextCompareOptions = CompareOptions.IgnoreCase | CompareOptions.IgnoreNonSpace;
 
     public async ValueTask<CorpusSearchResponse> SearchAsync(
         CorpusSearchRequest request, CancellationToken token)
+    {
+        var query = ValidateSearchRequest(request);
+        if (hybrid is not null) return await hybrid.SearchAsync(request with { Query = query }, token).ConfigureAwait(false);
+        return await SearchLexicalCoreAsync(request, query, token).ConfigureAwait(false);
+    }
+
+    public ValueTask<CorpusSearchResponse> SearchLexicalAsync(
+        CorpusSearchRequest request, CancellationToken token) =>
+        SearchLexicalCoreAsync(request, ValidateSearchRequest(request), token);
+
+    private static string ValidateSearchRequest(CorpusSearchRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
         var query = request.Query?.Trim().Normalize(NormalizationForm.FormC);
@@ -42,8 +60,12 @@ public sealed class CorpusRetrievalService(
             request.Scope == "root" && (!request.RootId.HasValue || request.Cwd is not null) ||
             request.Scope == "workspace" && (request.RootId.HasValue || string.IsNullOrWhiteSpace(request.Cwd)))
             throw new NativeOperationException("invalid-request");
+        return query;
+    }
 
-        if (hybrid is not null) return await hybrid.SearchAsync(request with { Query = query }, token).ConfigureAwait(false);
+    private async ValueTask<CorpusSearchResponse> SearchLexicalCoreAsync(
+        CorpusSearchRequest request, string query, CancellationToken token)
+    {
         var scope = await reader.ResolveScopeAsync(request.Scope, request.RootId, request.Cwd, token)
             .ConfigureAwait(false) ?? throw new NativeOperationException("scope-unavailable");
         var readiness = await reader.GetLexicalReadinessAsync(token).ConfigureAwait(false);

@@ -121,7 +121,8 @@ public sealed class NativeCodexHookPersistenceIntegrationTests(NativeSqlServerFi
         var service = new NativeCodexHookService(
             new PreflightFacade(),
             new SqlNativeOperationStore(factory, TimeProvider.System),
-            auditWriter: new SqlCodexHookAuditWriter(factory));
+            auditWriter: new SqlCodexHookAuditWriter(factory),
+            promptContext: new FixedPromptContext());
 
         var response = await service.HandleAsync(
             "UserPromptSubmit",
@@ -137,6 +138,8 @@ public sealed class NativeCodexHookPersistenceIntegrationTests(NativeSqlServerFi
         Assert.Equal("information", audit.Severity);
         Assert.Equal("codex-hook", audit.Actor);
         Assert.Contains("context_injected", audit.DetailsJson, StringComparison.Ordinal);
+        Assert.Contains("context-injected", audit.DetailsJson, StringComparison.Ordinal);
+        Assert.Contains(CodexPromptContextPolicy.Version, audit.DetailsJson, StringComparison.Ordinal);
         Assert.DoesNotContain("private-prompt-sentinel", audit.DetailsJson, StringComparison.Ordinal);
         await AssertProjectedAsync(factory, audit);
     }
@@ -175,7 +178,8 @@ public sealed class NativeCodexHookPersistenceIntegrationTests(NativeSqlServerFi
         var service = new NativeCodexHookService(
             new FailingPreflightFacade(),
             new SqlNativeOperationStore(factory, TimeProvider.System),
-            auditWriter: new SqlCodexHookAuditWriter(factory));
+            auditWriter: new SqlCodexHookAuditWriter(factory),
+            promptContext: new FailingPromptContext());
 
         var startedAt = DateTimeOffset.UtcNow;
         var response = await service.HandleAsync(
@@ -192,7 +196,7 @@ public sealed class NativeCodexHookPersistenceIntegrationTests(NativeSqlServerFi
             .ToListAsync());
         Assert.Equal("warning", audit.Severity);
         Assert.Contains("unexpected", audit.DetailsJson, StringComparison.Ordinal);
-        Assert.Contains("preflight-exception-detail-sentinel", audit.DetailsJson, StringComparison.Ordinal);
+        Assert.DoesNotContain("preflight-exception-detail-sentinel", audit.DetailsJson, StringComparison.Ordinal);
         Assert.DoesNotContain("private-prompt-sentinel", audit.DetailsJson, StringComparison.Ordinal);
         await AssertProjectedAsync(factory, audit);
     }
@@ -327,7 +331,8 @@ public sealed class NativeCodexHookPersistenceIntegrationTests(NativeSqlServerFi
         var service = new NativeCodexHookService(
             new EchoingPreflightFailureFacade(),
             new SqlNativeOperationStore(factory, TimeProvider.System),
-            auditWriter: new SqlCodexHookAuditWriter(factory));
+            auditWriter: new SqlCodexHookAuditWriter(factory),
+            promptContext: new EchoingPromptFailure());
 
         var startedAt = DateTimeOffset.UtcNow;
         var response = await service.HandleAsync(
@@ -341,7 +346,7 @@ public sealed class NativeCodexHookPersistenceIntegrationTests(NativeSqlServerFi
             .Where(value => value.EventType == "codex_hook.processing_failed" &&
                             value.OccurredAtUtc >= startedAt)
             .ToListAsync());
-        Assert.Contains("query failure", audit.DetailsJson, StringComparison.Ordinal);
+        Assert.DoesNotContain("query failure", audit.DetailsJson, StringComparison.Ordinal);
         Assert.DoesNotContain("private-prompt-sentinel", audit.DetailsJson, StringComparison.Ordinal);
     }
 
@@ -527,6 +532,24 @@ public sealed class NativeCodexHookPersistenceIntegrationTests(NativeSqlServerFi
 
         public ValueTask<NativeActionReceipt> CommitAsync(string family, object command, string confirmationId, string idempotencyKey, string surface, CancellationToken cancellationToken) =>
             throw new NotSupportedException();
+    }
+
+    private sealed class FixedPromptContext : ICodexPromptContextService
+    {
+        public ValueTask<CodexPromptContextResult> BuildAsync(string prompt, string? cwd, CancellationToken cancellationToken) =>
+            ValueTask.FromResult(new CodexPromptContextResult("Synthetic cited packet", "context-injected", 1, 1, 1));
+    }
+
+    private sealed class FailingPromptContext : ICodexPromptContextService
+    {
+        public ValueTask<CodexPromptContextResult> BuildAsync(string prompt, string? cwd, CancellationToken cancellationToken) =>
+            ValueTask.FromException<CodexPromptContextResult>(new InvalidOperationException("preflight-exception-detail-sentinel"));
+    }
+
+    private sealed class EchoingPromptFailure : ICodexPromptContextService
+    {
+        public ValueTask<CodexPromptContextResult> BuildAsync(string prompt, string? cwd, CancellationToken cancellationToken) =>
+            ValueTask.FromException<CodexPromptContextResult>(new InvalidOperationException("query failure: " + prompt));
     }
 
     private sealed class FailingPreflightFacade : INativeV1Facade
