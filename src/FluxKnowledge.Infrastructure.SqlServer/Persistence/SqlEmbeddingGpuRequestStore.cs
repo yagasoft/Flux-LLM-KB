@@ -6,6 +6,7 @@ using System.Text.Json;
 using FluxKnowledge.Application.Gpu;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Workers;
+using FluxKnowledge.Application.Sources;
 using FluxKnowledge.Domain.Gpu;
 using FluxKnowledge.Domain.Jobs;
 using FluxKnowledge.Domain.Pipeline;
@@ -18,7 +19,8 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
 
 /// <summary>Background batches use the existing parent job and GPU lifecycle, never a worker lease fabricated from GPU ownership.</summary>
 public sealed class SqlEmbeddingGpuRequestStore(IDbContextFactory<FluxKnowledgeDbContext> contextFactory,
-    IGpuSchedulerStore scheduler, IGpuSchedulerWakeSignal wake, EmbeddingGpuRuntime runtime, TimeProvider clock) : IEmbeddingGpuRequestStore
+    IGpuSchedulerStore scheduler, IGpuSchedulerWakeSignal wake, EmbeddingGpuRuntime runtime, TimeProvider clock,
+    IDeploymentValidationHold? deploymentValidationHold = null) : IEmbeddingGpuRequestStore
 {
     private sealed record Input(long Id, string Hash);
     public EmbeddingProfile Profile => runtime.Profile;
@@ -178,11 +180,13 @@ public sealed class SqlEmbeddingGpuRequestStore(IDbContextFactory<FluxKnowledgeD
     public ValueTask<IReadOnlyList<EmbeddingGpuRecoveryWork>> ReadRecoveryAsync(CancellationToken cancellationToken)
         => TransactionAsync<IReadOnlyList<EmbeddingGpuRecoveryWork>>(async context =>
         {
+            var allowLegacySettlement = deploymentValidationHold?.IsHeld != true;
             var candidates = await (from request in context.EmbeddingGpuRequests.AsNoTracking()
                 join task in context.GpuMiniTasks.AsNoTracking() on request.MiniTaskId equals task.Id
                 join batch in context.GpuBatches.AsNoTracking() on task.BatchId equals batch.Id
                 join dispatch in context.GpuExecutorDispatches.AsNoTracking() on batch.Id equals dispatch.BatchId
-                where request.State < 2 && batch.ItemCount == 1 && request.ParentJobId == task.ParentJobId &&
+                where (request.State < 2 || allowLegacySettlement && RecoverableSettledRequestIds(context).Contains(request.MiniTaskId)) &&
+                    batch.ItemCount == 1 && request.ParentJobId == task.ParentJobId &&
                     request.SourceRevision == task.SourceRevision && request.ModelFingerprint == runtime.Profile.ModelFingerprint &&
                     request.Dimensions == runtime.Profile.Dimensions &&
                     task.AdmissionGeneration == batch.AdmissionGeneration && dispatch.AdmissionGeneration == batch.AdmissionGeneration &&
@@ -266,8 +270,17 @@ public sealed class SqlEmbeddingGpuRequestStore(IDbContextFactory<FluxKnowledgeD
         {
             var request = await ReadBoundRequestAsync(context, handle, cancellationToken).ConfigureAwait(false);
             if (request is null || request.MiniTaskId != miniTaskId || !request.NativeCleanupConfirmed) return false;
+            if (request.State == 2 && deploymentValidationHold?.IsHeld == true) return false;
             if (await context.CorpusRebuildSupersededJobs.AnyAsync(value => value.JobId == request.ParentJobId, cancellationToken).ConfigureAwait(false)) return false;
-            if (request.State == 2) return true;
+            var parent = await context.Jobs.SingleAsync(value => value.Id == request.ParentJobId, cancellationToken).ConfigureAwait(false);
+            if (request.State == 2 && parent.PublicState != (int)PublicJobState.GpuProcessing) return true;
+            var sequence = await context.GpuMiniTasks.Where(task => task.Id == miniTaskId)
+                .Select(task => task.CreatedSequence).SingleAsync(cancellationToken).ConfigureAwait(false);
+            if (await context.GpuMiniTasks.AnyAsync(task => task.ParentJobId == request.ParentJobId && task.CreatedSequence > sequence,
+                    cancellationToken).ConfigureAwait(false)) return request.State == 2;
+            if (request.State == 2 && !await RecoverableSettledRequestIds(context).ContainsAsync(miniTaskId, cancellationToken).ConfigureAwait(false)) return false;
+            if (await context.EmbeddingGpuRequests.AnyAsync(other => other.ParentJobId == request.ParentJobId &&
+                    other.MiniTaskId != miniTaskId && other.State < 2, cancellationToken).ConfigureAwait(false)) return false;
             var terminal = await (from task in context.GpuMiniTasks
                 join batch in context.GpuBatches on task.BatchId equals batch.Id
                 join dispatch in context.GpuExecutorDispatches on batch.Id equals dispatch.BatchId
@@ -283,7 +296,7 @@ public sealed class SqlEmbeddingGpuRequestStore(IDbContextFactory<FluxKnowledgeD
                     (task.ExecutionState == (int)GpuMiniTaskExecutionState.Completed || task.ExecutionState == (int)GpuMiniTaskExecutionState.OutcomeUncertain)
                 select task.Id).AnyAsync(cancellationToken).ConfigureAwait(false);
             if (!terminal) return false;
-            if (!await SourceAvailableAsync(context, request, cancellationToken).ConfigureAwait(false))
+            if (!await SourceAvailableAsync(context, request, cancellationToken, allowPaused: true).ConfigureAwait(false))
             {
                 // Finish the cleanup record without resurrecting a withdrawn source.
                 request.State = 2;
@@ -291,13 +304,24 @@ public sealed class SqlEmbeddingGpuRequestStore(IDbContextFactory<FluxKnowledgeD
                 await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
                 return false;
             }
-            var parent = await context.Jobs.SingleAsync(value => value.Id == request.ParentJobId, cancellationToken).ConfigureAwait(false);
+            var epoch = (await SqlPublishedPassageSelection.ReadStampAsync(context, cancellationToken).ConfigureAwait(false)).CorpusEpoch;
+            if (epoch != request.CorpusEpoch || request.InputDigest != Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(request.InputsJson)))) return false;
+            var draft = await context.IndexGenerations.SingleOrDefaultAsync(value => value.Id == request.GenerationId, cancellationToken).ConfigureAwait(false);
+            if (draft is null) return false;
+            try
+            {
+                SqlEmbeddingCheckpointStore.ValidateDraft(draft, request.ParentJobId, runtime.Profile, epoch);
+                _ = await ReadBatchAsync(context, request.PipelineRecordId, request.SourceRevision, request.GenerationId,
+                    epoch, request.InputsJson, cancellationToken).ConfigureAwait(false);
+            }
+            catch (InvalidOperationException) { return false; }
             if (parent.PublicState != (int)PublicJobState.GpuProcessing || parent.Stage != (int)PipelineStage.Embed || parent.Operation != PipelineOperations.Embed ||
                 parent.PipelineRecordId != request.PipelineRecordId || parent.SourceRevision != request.SourceRevision) return false;
             var outbox = await context.OutboxMessages.SingleOrDefaultAsync(value => value.JobId == parent.Id && value.PipelineRecordId == request.PipelineRecordId &&
                 value.SourceRevision == request.SourceRevision && value.Stage == (int)PipelineStage.Embed &&
                 value.Operation == PipelineOperations.Embed && value.DispatchedAtUtc == null, cancellationToken).ConfigureAwait(false);
             if (outbox is null) return false;
+            if (request.State == 2 && deploymentValidationHold?.IsHeld == true) return false;
             parent.PublicState = (int)PublicJobState.WorkerQueued;
             parent.LeaseOwner = null;
             parent.LeaseExpiresAtUtc = null;
@@ -401,7 +425,46 @@ public sealed class SqlEmbeddingGpuRequestStore(IDbContextFactory<FluxKnowledgeD
         return requests[0];
     }
 
-    private static async Task<bool> SourceAvailableAsync(FluxKnowledgeDbContext context, EmbeddingGpuRequestEntity request, CancellationToken ct)
+    // A settled request from an older release is resumable only while it remains the
+    // latest attempt for the exact current checkpoint, with terminal cleanup/release proof.
+    internal static IQueryable<Guid> RecoverableSettledRequestIds(FluxKnowledgeDbContext context)
+        => from request in context.EmbeddingGpuRequests
+            join task in context.GpuMiniTasks on request.MiniTaskId equals task.Id
+            join parent in context.Jobs on request.ParentJobId equals parent.Id
+            join draft in context.IndexGenerations on request.GenerationId equals draft.Id
+            join record in context.PipelineRecords on request.PipelineRecordId equals record.Id
+            join outbox in context.OutboxMessages on parent.Id equals outbox.JobId
+            join batch in context.GpuBatches on task.BatchId equals batch.Id
+            join dispatch in context.GpuExecutorDispatches on batch.Id equals dispatch.BatchId
+            where request.State == 2 && request.NativeCleanupConfirmed && request.CleanupConfirmedAtUtc != null &&
+                request.ExecutorInstanceId != null && request.ClaimOperationId != null && request.DispatchId == dispatch.DispatchId &&
+                parent.PublicState == (int)PublicJobState.GpuProcessing && parent.Stage == (int)PipelineStage.Embed && parent.Operation == PipelineOperations.Embed &&
+                parent.PipelineRecordId == record.Id && parent.SourceRevision == request.SourceRevision &&
+                !record.IsDeleted && record.Revision == request.SourceRevision && record.CurrentStage == (int)PipelineStage.Embed &&
+                (record.SourceRevisionId == null || record.SourceRevision!.SuppressedAtUtc == null &&
+                    (record.SourceRevision!.SourceRoot.State == (int)SourceRootState.Enabled || record.SourceRevision!.SourceRoot.State == (int)SourceRootState.Paused)) &&
+                draft.EmbeddingJobId == parent.Id && draft.CorpusEpoch == request.CorpusEpoch && draft.RetiredAtUtc == null && draft.IndexPath == string.Empty &&
+                EF.Functions.Collate(draft.ModelFingerprint, SchemaConfiguration.SchedulerFenceCollation) == request.ModelFingerprint && draft.Dimensions == request.Dimensions &&
+                context.IndexState.Any(state => state.Id == 1 && state.CorpusEpoch == request.CorpusEpoch && state.ActiveIndexGenerationId != draft.Id) &&
+                outbox.PipelineRecordId == record.Id && outbox.SourceRevision == request.SourceRevision && outbox.Stage == (int)PipelineStage.Embed &&
+                outbox.Operation == PipelineOperations.Embed && outbox.DispatchedAtUtc == null &&
+                task.ParentJobId == parent.Id && task.SourceRevision == request.SourceRevision && task.PriorityLane == (int)GpuPriorityLane.DocumentIndexing &&
+                task.AdmissionGeneration == batch.AdmissionGeneration && batch.ItemCount == 1 &&
+                batch.ModelRuntimeKey == task.ModelRuntimeKey && batch.SettingsFingerprint == task.SettingsFingerprint &&
+                dispatch.AdmissionGeneration == batch.AdmissionGeneration && dispatch.CapacitySlotKey == batch.CapacitySlotKey && dispatch.OwnerKey == batch.OwnerKey &&
+                dispatch.ExecutorKey == EmbeddingGpuExecutor.Name &&
+                (task.ExecutionState == (int)GpuMiniTaskExecutionState.Completed || task.ExecutionState == (int)GpuMiniTaskExecutionState.OutcomeUncertain) &&
+                (dispatch.State == (int)GpuExecutorDispatchState.Terminal || dispatch.State == (int)GpuExecutorDispatchState.DeliveryUncertain) &&
+                (batch.State == (int)GpuBatchState.Completed && dispatch.State == (int)GpuExecutorDispatchState.Terminal ||
+                    batch.State == (int)GpuBatchState.Released || batch.State == (int)GpuBatchState.CapacityUncertain &&
+                    context.GpuSchedulerOperationReceipts.Any(receipt => receipt.OperationKind == "capacity-reconciliation" && receipt.Accepted && receipt.Committed &&
+                        receipt.BatchId == batch.Id && receipt.AdmissionGeneration == batch.AdmissionGeneration &&
+                        receipt.CapacitySlotKey == batch.CapacitySlotKey && receipt.OwnerKey == batch.OwnerKey)) &&
+                !context.EmbeddingGpuRequests.Any(other => other.ParentJobId == parent.Id && other.MiniTaskId != request.MiniTaskId && other.State < 2) &&
+                !context.GpuMiniTasks.Any(later => later.ParentJobId == parent.Id && later.CreatedSequence > task.CreatedSequence)
+            select request.MiniTaskId;
+
+    private static async Task<bool> SourceAvailableAsync(FluxKnowledgeDbContext context, EmbeddingGpuRequestEntity request, CancellationToken ct, bool allowPaused = false)
     {
         bool maintenance;
         try { maintenance = await SqlCorpusRebuildStore.ValidateMaintenanceJobAsync(context, request.ParentJobId, ct).ConfigureAwait(false); }
@@ -409,7 +472,8 @@ public sealed class SqlEmbeddingGpuRequestStore(IDbContextFactory<FluxKnowledgeD
         return await context.PipelineRecords.AnyAsync(record => record.Id == request.PipelineRecordId && record.Revision == request.SourceRevision &&
             !record.IsDeleted && record.CurrentStage == (int)PipelineStage.Embed &&
             (record.SourceRevisionId == null || record.SourceRevision!.SuppressedAtUtc == null &&
-                (record.SourceRevision.SourceRoot.State == (int)SourceRootState.Enabled || maintenance)), ct).ConfigureAwait(false);
+                (record.SourceRevision.SourceRoot.State == (int)SourceRootState.Enabled ||
+                    allowPaused && record.SourceRevision.SourceRoot.State == (int)SourceRootState.Paused || maintenance)), ct).ConfigureAwait(false);
     }
 
     private async Task<EmbeddingWorkBatch> ReadBatchAsync(FluxKnowledgeDbContext context, Guid recordId, long revision,

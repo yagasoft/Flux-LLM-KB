@@ -220,6 +220,135 @@ public sealed class EmbeddingGpuRequestTests(NativeSqlServerFixture fixture) : I
         Assert.True(await requests.RequeueSettledAsync(handle, work.MiniTaskId, CancellationToken.None));
     }
 
+    [NativeSqlServerTheory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public async Task Paused_embedding_settles_to_a_resumable_parent_and_recovers_the_latest_legacy_attempt(bool saved, bool legacy)
+    {
+        await using var environment = await PrepareRetainedEnvironmentAsync();
+        var (requests, handle, work, instance) = await PrepareOwnedAsync(environment);
+        if (legacy)
+        {
+            for (var i = 0; i < 2; i++)
+            {
+                await requests.CommitAsync(handle, instance, work, Outputs(work.Batch.Chunks.Count), CancellationToken.None);
+                await requests.RecordNativeCleanupAsync(handle, instance, work.ClaimOperationId, CancellationToken.None);
+                await DeliverCleanedAsync(environment, requests, handle);
+                (requests, handle, work, instance) = await PrepareOwnedAsync(environment);
+            }
+        }
+        if (saved) await requests.CommitAsync(handle, instance, work, Outputs(work.Batch.Chunks.Count), CancellationToken.None);
+        await using var context = await environment.Factory.CreateDbContextAsync();
+        var root = await context.SourceRootConfigurations.SingleAsync();
+        root.State = (int)SourceRootState.Paused;
+        await context.SaveChangesAsync();
+        await requests.RecordNativeCleanupAsync(handle, instance, work.ClaimOperationId, CancellationToken.None);
+        await DeliverCleanedAsync(environment, requests, handle);
+        if (legacy)
+        {
+            // Persist the exact old release's stranded state, with older settled attempts present.
+            await context.Jobs.Where(job => job.Id == work.ParentJobId)
+                .ExecuteUpdateAsync(set => set.SetProperty(job => job.PublicState, (int)PublicJobState.GpuProcessing));
+            Assert.Single(await requests.ReadRecoveryAsync(CancellationToken.None), value => value.MiniTaskId == work.MiniTaskId);
+            await new SqlDerivedIndexRecoveryStore(environment.Factory, TimeProvider.System).ReadActiveAsync(CancellationToken.None);
+            var hold = new RecoveryHold();
+            var guarded = new SqlEmbeddingGpuRequestStore(environment.Factory, new SqlGpuSchedulerStore(environment.Factory),
+                new ChannelGpuSchedulerWakeSignal(), Runtime, TimeProvider.System, hold);
+            Assert.Empty(await guarded.ReadRecoveryAsync(CancellationToken.None));
+            Assert.False(await guarded.RequeueSettledAsync(handle, work.MiniTaskId, CancellationToken.None));
+            Assert.Equal((int)PublicJobState.GpuProcessing, await context.Jobs.AsNoTracking().Where(job => job.Id == work.ParentJobId).Select(job => job.PublicState).SingleAsync());
+            hold.Current = new(false, null);
+            await Task.WhenAll(DeliverCleanedAsync(environment, guarded, handle, recover: true),
+                DeliverCleanedAsync(environment, guarded, handle, recover: true));
+        }
+        await new SqlDerivedIndexRecoveryStore(environment.Factory, TimeProvider.System).ReadActiveAsync(CancellationToken.None);
+        Assert.Equal((int)PublicJobState.WorkerQueued, await context.Jobs.AsNoTracking().Where(job => job.Id == work.ParentJobId).Select(job => job.PublicState).SingleAsync());
+        Assert.True(await requests.RequeueSettledAsync(handle, work.MiniTaskId, CancellationToken.None));
+        Assert.Empty(await requests.ReadRecoveryAsync(CancellationToken.None));
+        Assert.Null(await new SqlOutboxStore(environment.Factory).ClaimNextDueAsync("paused", DateTimeOffset.UtcNow.AddSeconds(10),
+            TimeSpan.FromMinutes(1), [PipelineOperations.Embed], CancellationToken.None));
+        root.State = (int)SourceRootState.Enabled;
+        await context.SaveChangesAsync();
+        var resumed = await ClaimAsync(environment, now: DateTimeOffset.UtcNow.AddSeconds(10));
+        Assert.Equal(work.ParentJobId, resumed.Job.JobId.Value);
+        var next = await new SqlEmbeddingCheckpointStore(environment.Factory, TimeProvider.System).ReadNextAsync(resumed, Runtime.Profile, CancellationToken.None);
+        if (saved) Assert.DoesNotContain(next.Chunks, chunk => work.Batch.Chunks.Any(previous => previous.Id == chunk.Id));
+        else Assert.Equal(work.Batch.Chunks, next.Chunks);
+        Assert.Null(await new SqlOutboxStore(environment.Factory).ClaimNextDueAsync("duplicate", DateTimeOffset.UtcNow.AddSeconds(10),
+            TimeSpan.FromMinutes(1), [PipelineOperations.Embed], CancellationToken.None));
+    }
+
+    [NativeSqlServerFact]
+    public async Task Historical_settled_replay_cannot_requeue_a_newer_active_embedding_attempt()
+    {
+        await using var environment = await PrepareRetainedEnvironmentAsync();
+        var (requests, oldHandle, oldWork, instance) = await PrepareOwnedAsync(environment);
+        await requests.CommitAsync(oldHandle, instance, oldWork, Outputs(oldWork.Batch.Chunks.Count), CancellationToken.None);
+        await requests.RecordNativeCleanupAsync(oldHandle, instance, oldWork.ClaimOperationId, CancellationToken.None);
+        await DeliverCleanedAsync(environment, requests, oldHandle);
+        var (_, _, next, _) = await PrepareOwnedAsync(environment);
+        Assert.True(await requests.RequeueSettledAsync(oldHandle, oldWork.MiniTaskId, CancellationToken.None));
+        Assert.Equal(next.MiniTaskId, Assert.Single(await requests.ReadRecoveryAsync(CancellationToken.None)).MiniTaskId);
+        await new SqlDerivedIndexRecoveryStore(environment.Factory, TimeProvider.System).ReadActiveAsync(CancellationToken.None);
+        await using var context = await environment.Factory.CreateDbContextAsync();
+        Assert.Equal((int)PublicJobState.GpuProcessing, await context.Jobs.AsNoTracking().Where(job => job.Id == next.ParentJobId).Select(job => job.PublicState).SingleAsync());
+        Assert.Equal((int)GpuCapacitySlotState.Reserved, await context.GpuCapacitySlots.AsNoTracking().Select(slot => slot.State).SingleAsync());
+    }
+
+    [NativeSqlServerTheory]
+    [InlineData("epoch")]
+    [InlineData("revision")]
+    [InlineData("suppressed")]
+    [InlineData("deleting")]
+    [InlineData("dispatch-owner")]
+    [InlineData("capacity-proof")]
+    public async Task Legacy_settlement_refuses_changed_authority_or_missing_cleanup_capacity_proof(string fault)
+    {
+        await using var environment = await PrepareRetainedEnvironmentAsync();
+        var (requests, handle, work, instance) = await PrepareOwnedAsync(environment);
+        await requests.RecordNativeCleanupAsync(handle, instance, work.ClaimOperationId, CancellationToken.None);
+        await DeliverCleanedAsync(environment, requests, handle);
+        await using var context = await environment.Factory.CreateDbContextAsync();
+        (await context.Jobs.SingleAsync(job => job.Id == work.ParentJobId)).PublicState = (int)PublicJobState.GpuProcessing;
+        switch (fault)
+        {
+            case "epoch": (await context.IndexState.SingleAsync()).CorpusEpoch = Guid.NewGuid(); break;
+            case "revision": (await context.EmbeddingGpuRequests.SingleAsync()).SourceRevision++; break;
+            case "suppressed": (await context.SourceRevisions.SingleAsync()).SuppressedAtUtc = DateTimeOffset.UtcNow; break;
+            case "deleting": (await context.SourceRootConfigurations.SingleAsync()).State = (int)SourceRootState.Deleting; break;
+            case "dispatch-owner": (await context.GpuExecutorDispatches.SingleAsync()).OwnerKey = "foreign"; break;
+            case "capacity-proof": (await context.GpuBatches.SingleAsync()).State = (int)GpuBatchState.CapacityUncertain; break;
+        }
+        await context.SaveChangesAsync();
+        Assert.False(await requests.RequeueSettledAsync(handle, work.MiniTaskId, CancellationToken.None));
+        Assert.DoesNotContain(await requests.ReadRecoveryAsync(CancellationToken.None), candidate => candidate.MiniTaskId == work.MiniTaskId);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => new SqlDerivedIndexRecoveryStore(environment.Factory, TimeProvider.System)
+            .ReadActiveAsync(CancellationToken.None).AsTask());
+        Assert.Equal((int)PublicJobState.GpuProcessing, await context.Jobs.AsNoTracking().Where(job => job.Id == work.ParentJobId).Select(job => job.PublicState).SingleAsync());
+    }
+
+    private async Task<SqlToUsearchRebuildTests.PipelineEnvironment> PrepareRetainedEnvironmentAsync()
+    {
+        var environment = await SqlToUsearchRebuildTests.PipelineEnvironment.CreateAsync(fixture, "Control draft.", embed: false);
+        _ = await ClaimAsync(environment);
+        await environment.AddRetainedAndPumpAsync(string.Join("\n\n", Enumerable.Repeat(Text, 4)));
+        return environment;
+    }
+
+    private static async Task DeliverCleanedAsync(SqlToUsearchRebuildTests.PipelineEnvironment environment,
+        SqlEmbeddingGpuRequestStore requests, GpuExecutorBatchHandle handle, bool recover = false)
+    {
+        var scheduler = new SqlGpuSchedulerStore(environment.Factory);
+        var models = new BgeGpuInferenceTests.RecordingModels();
+        var executor = new EmbeddingGpuExecutor(requests, new Lifecycle(scheduler), scheduler, new BgeGpuInferenceSession(models),
+            new WindowsInteractiveGpuOwnerProbe(), Runtime, new ChannelOutboxWakeSignal(), new ChannelGpuSchedulerWakeSignal(), TimeProvider.System);
+        if (recover) await executor.RecoverAsync(CancellationToken.None);
+        else await executor.DeliverAsync(handle, CancellationToken.None);
+        Assert.Empty(models.Events);
+    }
+
     [NativeSqlServerFact]
     public async Task Embed_worker_queues_the_profiled_batch_without_running_inference_under_its_worker_lease()
     {
@@ -753,13 +882,14 @@ public sealed class EmbeddingGpuRequestTests(NativeSqlServerFixture fixture) : I
     private static async Task<(SqlEmbeddingGpuRequestStore Requests, GpuExecutorBatchHandle Handle, EmbeddingGpuExecutionWork Work, Guid Instance)>
         PrepareOwnedAsync(SqlToUsearchRebuildTests.PipelineEnvironment environment)
     {
-        var work = await ClaimAsync(environment);
+        var work = await ClaimAsync(environment, now: DateTimeOffset.UtcNow.AddSeconds(10));
         var batch = await new SqlEmbeddingCheckpointStore(environment.Factory, TimeProvider.System).ReadNextAsync(work, Runtime.Profile, CancellationToken.None);
         var scheduler = new SqlGpuSchedulerStore(environment.Factory);
         var requests = new SqlEmbeddingGpuRequestStore(environment.Factory, scheduler, new ChannelGpuSchedulerWakeSignal(), Runtime, TimeProvider.System);
         await requests.QueueAsync(work, batch, CancellationToken.None);
         await using var context = await environment.Factory.CreateDbContextAsync();
-        context.GpuCapacitySlots.Add(new GpuCapacitySlotEntity { SlotKey = "gpu-0", State = 0, UpdatedAtUtc = DateTimeOffset.UtcNow });
+        if (!await context.GpuCapacitySlots.AnyAsync())
+            context.GpuCapacitySlots.Add(new GpuCapacitySlotEntity { SlotKey = "gpu-0", State = 0, UpdatedAtUtc = DateTimeOffset.UtcNow });
         await context.SaveChangesAsync();
         await scheduler.RunAdmissionRoundAsync(Guid.NewGuid(), GpuSchedulerWakeReason.WorkReady,
             new(4, 4096, TimeSpan.FromMinutes(1), TimeSpan.FromSeconds(1), TimeSpan.FromMinutes(1)),
