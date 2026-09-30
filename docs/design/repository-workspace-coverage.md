@@ -1,6 +1,6 @@
 # Automatic repository code and documentation coverage
 
-Date: 30 September 2026. Status: initial release deployed and one repository source registered; source paused during correction of live publication blockers. Retrieval/freshness acceptance remains pending.
+Date: 30 September 2026. Status: corrective release `3b92f17b` deployed and the single repository source enabled. Publication is advancing; complete retrieval/brief/freshness acceptance remains pending.
 
 ## Outcome and scope
 

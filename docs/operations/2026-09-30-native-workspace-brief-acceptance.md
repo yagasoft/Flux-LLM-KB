@@ -99,3 +99,28 @@ public design tables use purpose cells and list positions. The unchanged
 repository contract then passed, as did all five remaining lightweight native
 contract scripts. The required closeout sequence is rerun rather than replaced
 with manual integration commands.
+
+## Later deployment and repository evidence
+
+The subsequent authorised incremental deployment installed
+`30a986a8a24083003950b87c47e938e109f78ab1` in release
+`20260930T074853Z-30a986a8a240`. The private deployment receipt records matching
+candidate/installed application hashes, HTTP 200 live/readiness/index probes,
+Healthy index state and release of the owned validation hold. Application and
+interactive-host recovery payloads were preserved. No migration or clean-slate
+installation occurred.
+
+Later repository-coverage work registered one Git-tracked `E:\LLM KB` source.
+Release `3b92f17b96de1dc53f646b9bd1b10ae035bc7be3` is installed; native resume
+completed at configuration revision 7. Main and nested workspace searches now
+resolve to this registered root; sibling prefixes and the separate unregistered
+worktree still return `scope-unavailable`. The earlier unavailable-main result
+above remains an accurate historical observation.
+
+At 20:14 UTC, 595 of 1,032 current paths were text-published with no terminal
+failures on current revisions. One genuine fresh CLI brief used three searches
+and four successful 1,024-context reads, preserving scope and exact citation
+bindings. It reported publication/retrieval warnings and evidence gaps rather
+than claiming complete coverage or live health. This addendum is a genuine
+tracked documentation update for the normal watcher/rescan freshness check;
+replacement publication and stale-reference refusal are verified separately.

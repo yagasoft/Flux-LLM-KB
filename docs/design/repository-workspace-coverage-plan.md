@@ -1,6 +1,6 @@
 # Automatic repository code and documentation implementation plan
 
-Date: 30 September 2026. Status: C# corrective release `8a8f578f` deployed; the single repository source is enabled and has discovered 1,031 current files. Complete live publication/retrieval/freshness acceptance awaits the verified dispatch-eligibility correction.
+Date: 30 September 2026. Status: dispatch correction `3b92f17b` deployed; the single repository source is enabled and has discovered 1,032 current files. Complete live publication/brief/freshness acceptance remains pending.
 
 **Goal:** configure one repository source once, automatically maintain Git-tracked code/docs coverage, preserve searchable source text and C# facts, and remove the aggregate application request cap without replacing it with an arbitrary limit.
 
@@ -130,7 +130,7 @@ Deliver live repository search and code facts with a single durable source confi
 - [ ] Observe discovery, retained revisions, text publication and C# branches. Establish a bounded observation window from actual queue/progress and report meaningful stage/count changes. A scan summary alone is not publication proof.
 - [ ] Account for every eligible/discovered outcome, distinguishing excluded/untracked, unsupported/absent, retained, text-published, structured, withheld and failed. Enumerate all inventory pages. Do not treat lack of search hits as exclusion proof or withheld content as searchable coverage.
 - [ ] Verify cited implementation bodies across C#, scripts, Razor/CSS, SQL and project/build files present in the repository, plus document passages and C# symbols/references. Check MCP, CLI and REST source/revision bindings.
-- [ ] Verify main workspace containment, nested scopes, sibling prefixes and the separate task worktree. Obtain branch IDs through verified root inventory. Do not silently substitute main for an unregistered worktree.
+- [x] Verify main workspace containment, nested scopes, sibling prefixes and the separate task worktree. Obtain branch IDs through verified root inventory. Do not silently substitute main for an unregistered worktree.
 - [ ] Run three genuine brief requests, including one explicit skill invocation, each retaining three searches/eight reads. Review every factual claim against readback and the expected-answer sheet. Distinguish proposals/tests/historical acceptance from delivered capability or current live state.
 - [ ] Prove live freshness with genuine tracked documentation changes, such as the verified later-deployment addendum to `docs/operations/2026-09-30-native-workspace-brief-acceptance.md`. Read the private supporting receipt before writing facts, preserve historical context and retain an old reference for comparison.
 - [ ] Update/create the truthful final acceptance record and integrate it through required feature closeout. If a document is newly tracked after source creation, its automatic discovery must require no root edit; already tracked edits must replace evidence. Observe normal watcher/reconciliation processing, allowing one cadence plus five minutes before diagnosing a stalled single-file refresh. Documentation changes need no application redeployment.

@@ -125,12 +125,13 @@ public sealed class GpuInteractiveExecutorTests(NativeSqlServerFixture fixture) 
         using var trace = new HybridSearchTraceListener();
         await SqlTestData.ClearPipelineAsync(fixture);
         var factory = SqlTestData.CreateFactory(fixture);
-        var store = new SqlGpuSchedulerStore(factory);
+        var clock = new ManualClock(DateTimeOffset.UtcNow);
+        var store = new SqlGpuSchedulerStore(factory, timeProvider: clock);
         await using var context = await factory.CreateDbContextAsync();
-        context.GpuCapacitySlots.Add(new GpuCapacitySlotEntity { SlotKey = "gpu-0", State = 0, UpdatedAtUtc = DateTimeOffset.UtcNow });
+        context.GpuCapacitySlots.Add(new GpuCapacitySlotEntity { SlotKey = "gpu-0", State = 0, UpdatedAtUtc = clock.GetUtcNow() });
         await context.SaveChangesAsync();
         var executor = new GpuInteractiveExecutor(store, new Lifecycle(store), store, new ChannelGpuSchedulerWakeSignal(),
-            TimeProvider.System, BgeOfflineModels.GpuRuntimeKey, BgeOfflineModels.GpuSettingsFingerprint, 10);
+            clock, BgeOfflineModels.GpuRuntimeKey, BgeOfflineModels.GpuSettingsFingerprint, 10);
         var inference = new BgeScheduledPassageInference(executor, new BgeGpuInferenceSession(new BgeGpuInferenceTests.RecordingModels()));
         var traceId = System.Diagnostics.ActivityTraceId.CreateRandom().ToString();
         async Task<string> RequestAsync()
@@ -149,6 +150,7 @@ public sealed class GpuInteractiveExecutorTests(NativeSqlServerFixture fixture) 
         var first = RequestAsync();
         var second = RequestAsync();
         for (var attempt = 0; await context.GpuMiniTasks.CountAsync() < 2 && attempt < 50; attempt++) await Task.Delay(10);
+        Assert.Equal(2, await context.GpuMiniTasks.CountAsync());
         var options = new GpuSchedulerOptions(4, 1024, TimeSpan.FromMinutes(1), TimeSpan.FromSeconds(1), TimeSpan.FromMinutes(1));
         for (var index = 0; index < 2; index++)
         {
