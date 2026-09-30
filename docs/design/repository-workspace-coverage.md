@@ -1,6 +1,6 @@
 # Automatic repository code and documentation coverage
 
-Date: 30 September 2026. Status: release `de32b49a` corrected retained-checkpoint readiness and passed live health and payload checks. The single repository source is paused at configuration revision 10 while a verified Git file replacement conflict receives a narrow correction; complete live acceptance remains pending.
+Date: 30 September 2026. Status: release `09ce4dac` is deployed and healthy. The single repository source is enabled at configuration revision 11; authoritative rescans converge 1,032 unique current paths, including verified Git file replacement. Initial text publication and complete live acceptance remain pending.
 
 ## Outcome and scope
 

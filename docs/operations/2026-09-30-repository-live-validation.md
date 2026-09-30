@@ -93,5 +93,21 @@ one tracked acceptance document had identical retained bytes but a different
 NTFS identity after Git recreated it. Incomplete scans preserved older owners,
 leaving 1,034 unsuppressed rows for 1,032 paths; this is not completed convergence.
 Native pause at revision 10 contained the failure. The service remains healthy.
-A reviewed Git-only retained-owner reuse correction is undergoing disposable
-verification; complete publication and current-document readback remain pending.
+The reviewed Git-only retained-owner reuse correction was subsequently deployed
+as recorded below; complete publication and current-document readback remain pending.
+
+Release `20260930T221405Z-09ce4dace581` installed exact commit `09ce4dac` after
+38 focused checks, independent technical/operational approval and all 21 required
+closeout steps. Each checkout passed 2,819 tests with 20 unchanged opt-in skips;
+builds had zero warnings/errors. All 272 reviewed/actual/installed payload files
+matched, held fingerprints were unchanged and healthy probes passed after hold
+release. Native resume completed at configuration revision 11. By 22:16 UTC,
+authoritative scans converged 1,032 unique current owners, reused the original
+same-byte document owner and removed the incomplete-scan duplicates. At 22:19,
+all 11 asset and nine branch pages contained every current owner and C# outcome:
+881 completed branches and one normal existing parser-limit refusal. The three
+unretained tracked paths are `.gitattributes`, `.gitignore` and `LICENSE`; no
+current retained path is untracked. Text publication reached 742 at 22:16.
+Python cited readback passed MCP, REST and CLI binding checks; larger context
+remained withheld by existing safety checks. Initial publication and the current
+documentation/C# body readbacks are still pending; no completion claim is made.
