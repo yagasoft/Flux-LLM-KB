@@ -72,8 +72,9 @@ used that same eligibility rule for retained checkpoint evidence. The narrow
 correction separates these purposes without enabling suppressed work. Four
 disposable transition cases reproduced the failure before the correction; the
 corrected read-only probe validates the current production catalogue without
-mutation. Focused negative checks, full closeout and exact operational review
-precede another incremental release; the installed process remains uncorrected.
+mutation. The focused suite passed 118 cases; required closeout passed 2,805
+tests in each checkout with 20 unchanged opt-in skips and zero build warnings.
+Independent technical and operational reviews approved the exact release.
 
 All three genuine brief runs now have audited scope, budgets, exact readback
 bindings and reviewed factual claims. They used three searches each and four,
@@ -82,3 +83,15 @@ Each reported evidence gaps and distinguished proposals, historical acceptance
 and implementation evidence from current live health. Complete initial text
 publication, representative pending implementation reads, current documentation
 replacement and healthy final readiness remain open.
+
+The approved incremental updater deployed `de32b49aa90c50c34c0c7ddd5cf1899f9be023e6`
+in `20260930T213553Z-de32b49aa90c`. All 272 reviewed, actual candidate and
+installed files matched in hash and length; held fingerprints were preserved,
+the owned hold was released and all three health probes passed. Native resume
+at configuration revision 9 exposed a separate rescan ownership refusal:
+one tracked acceptance document had identical retained bytes but a different
+NTFS identity after Git recreated it. Incomplete scans preserved older owners,
+leaving 1,034 unsuppressed rows for 1,032 paths; this is not completed convergence.
+Native pause at revision 10 contained the failure. The service remains healthy.
+A reviewed Git-only retained-owner reuse correction is undergoing disposable
+verification; complete publication and current-document readback remain pending.

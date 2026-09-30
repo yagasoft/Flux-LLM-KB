@@ -78,12 +78,14 @@ public sealed class SqlSourceScanStore(
         await context.Database.ExecuteSqlInterpolatedAsync(
             $"SELECT [Id] FROM [SourceRootConfigurations] WITH (UPDLOCK, HOLDLOCK) WHERE [Id] = {sourceRoot.Id.Value};",
             cancellationToken).ConfigureAwait(false);
+        string? admittedGitRepositoryIdentity = null;
         if (sourceRoot.DiscoveryMode == SourceDiscoveryMode.GitTracked)
         {
             var currentRoot = await context.SourceRootConfigurations.SingleAsync(value => value.Id == sourceRoot.Id.Value, cancellationToken).ConfigureAwait(false);
+            admittedGitRepositoryIdentity = ParseGitAdmissionIdentity(currentRoot.HealthEvidenceJson);
             if (currentRoot.State != (int)SourceRootState.Enabled || currentRoot.CrawlMode != (int)SourceDiscoveryMode.GitTracked ||
                 currentRoot.ConfigurationRevision != sourceRoot.ConfigurationRevision || file.GitInventory is null ||
-                file.GitInventory.RepositoryIdentity != ParseGitAdmissionIdentity(currentRoot.HealthEvidenceJson) || file.ScanOwnership is null ||
+                file.GitInventory.RepositoryIdentity != admittedGitRepositoryIdentity || file.ScanOwnership is null ||
                 !await OwnsRootScanAsync(context, sourceRoot.Id.Value, file.ScanOwnership, timeProvider.GetUtcNow(), cancellationToken).ConfigureAwait(false))
                 throw new InvalidDataException("Git source configuration or inventory admission is stale.");
         }
@@ -94,14 +96,19 @@ public sealed class SqlSourceScanStore(
         var pathAndHash = await context.SourceRevisions
             .FromSqlInterpolated($"SELECT * FROM [SourceRevisions] WITH (UPDLOCK, HOLDLOCK, INDEX([IX_SourceRevisions_SourceRootId_CanonicalPathFingerprint_ContentSha256])) WHERE [SourceRootId] = {sourceRoot.Id.Value} AND [CanonicalPathFingerprint] = CONVERT(char(64), HASHBYTES('SHA2_256', {file.CanonicalPath}), 2) AND [ContentSha256] = {file.ContentSha256}")
             .ToListAsync(cancellationToken).ConfigureAwait(false);
-        if (pathAndHash.Any(value =>
-                string.Equals(value.CanonicalPath, file.CanonicalPath, StringComparison.Ordinal) &&
-                !string.Equals(value.StableSourceIdentity, file.StableSourceIdentity, StringComparison.Ordinal)))
+        var exactOwners = pathAndHash.Where(value => string.Equals(value.CanonicalPath, file.CanonicalPath, StringComparison.Ordinal)).ToList();
+        SourceRevisionEntity? revision = null;
+        if (exactOwners.Any(value => !string.Equals(value.StableSourceIdentity, file.StableSourceIdentity, StringComparison.Ordinal)))
         {
-            throw new InvalidOperationException("A canonical source path and content hash are already owned by another stable source identity.");
+            // Git checkout/atomic saves can replace the physical file while retaining identical tracked bytes.
+            // Reuse only a proven Git owner; its immutable identity, artifact and existing work remain unchanged.
+            if (sourceRoot.DiscoveryMode != SourceDiscoveryMode.GitTracked || exactOwners.Count != 1 ||
+                !IsRetainedGitOwner(exactOwners[0], file.ByteLength, admittedGitRepositoryIdentity))
+                throw new InvalidOperationException("A canonical source path and content hash are already owned by another stable source identity.");
+            revision = exactOwners[0];
         }
 
-        var revision = revisions.FirstOrDefault(value =>
+        revision ??= revisions.FirstOrDefault(value =>
             string.Equals(value.ContentSha256, file.ContentSha256, StringComparison.Ordinal) &&
             string.Equals(value.CanonicalPath, file.CanonicalPath, StringComparison.Ordinal));
         var eventType = "source.unchanged";
@@ -182,6 +189,20 @@ public sealed class SqlSourceScanStore(
     private static bool ReceiptMatchesFile(SourceArtifactReceipt receipt, SourceDiscoveredFile file) =>
         receipt.ByteLength == file.ByteLength &&
         string.Equals(receipt.ContentSha256, file.ContentSha256, StringComparison.Ordinal);
+
+    private static bool IsRetainedGitOwner(SourceRevisionEntity revision, long byteLength, string? repositoryIdentity)
+    {
+        if (revision.OriginKind != 0 || revision.ByteLength != byteLength || repositoryIdentity is null) return false;
+        try
+        {
+            using var evidence = JsonDocument.Parse(revision.DiscoveryEvidenceJson ?? "{}");
+            if (!evidence.RootElement.TryGetProperty("gitInventory", out var inventory)) return false;
+            var retained = inventory.Deserialize<GitInventoryEvidence>();
+            return retained is not null && retained.RepositoryIdentity == repositoryIdentity &&
+                retained.Generation is not null && IsValidFingerprint(retained.Generation);
+        }
+        catch (Exception exception) when (exception is JsonException or InvalidOperationException) { return false; }
+    }
 
     private static bool MarkRetentionBlocked(SourceRevisionEntity revision, string reason)
     {

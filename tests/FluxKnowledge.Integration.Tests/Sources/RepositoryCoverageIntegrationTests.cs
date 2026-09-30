@@ -9,7 +9,10 @@ using FluxKnowledge.Application.Search;
 using FluxKnowledge.Application.Sources;
 using FluxKnowledge.Application.Visibility;
 using FluxKnowledge.Domain.Sources;
+using FluxKnowledge.Domain.Pipeline;
+using FluxKnowledge.Domain.Jobs;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
+using FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
 using FluxKnowledge.Infrastructure.SqlServer.Search;
 using FluxKnowledge.Infrastructure.SqlServer.Visibility;
 using FluxKnowledge.Integrations.Files;
@@ -103,6 +106,25 @@ public sealed class RepositoryCoverageIntegrationTests(NativeSqlServerFixture fi
         Assert.Equal(formats.Keys.OrderBy(value => value), formatHits.Select(value => value.Title).OrderBy(value => value));
         foreach (var hit in formatHits) Assert.Contains("lighthouse", (await retrieval.ReadAsync(new CorpusReadRequest(hit.EvidenceRef, 0), default)).Text);
 
+        // Git checkout and atomic editor saves can replace a physical file without changing its bytes.
+        string retainedBefore, workBefore;
+        await using (var db = await environment.Factory.CreateDbContextAsync())
+        {
+            retainedBefore = await RetainedSnapshot(db, rootId);
+            workBefore = await WorkSnapshot(db, rootId);
+        }
+        repository.Replace("Code.cs", File.ReadAllText(System.IO.Path.Combine(repository.Path, "Code.cs")));
+        repository.Replace("Guide.md", File.ReadAllText(System.IO.Path.Combine(repository.Path, "Guide.md")));
+        await Commit(service, Mutation("source_sync", new { rootId }));
+        await ScanAndPublish(environment, scanStore, clock);
+        await using (var db = await environment.Factory.CreateDbContextAsync())
+        {
+            Assert.Equal(retainedBefore, await RetainedSnapshot(db, rootId));
+            Assert.Equal(workBefore, await WorkSnapshot(db, rootId));
+            Assert.Equal(codeBranchId, Assert.Single(await db.SourceProcessorCodeDocuments.Where(value => db.SourceRevisions.Any(r => r.Id == value.SourceRevisionId && r.SourceRootId == rootId)).ToListAsync()).SourceProcessorBranchId);
+        }
+        Assert.Contains("needle quartz is retained with citations", (await retrieval.ReadAsync(new CorpusReadRequest(original.EvidenceRef, 0), default)).Text);
+
         // Watcher hints release normal durable scans; no configuration or per-file list changes.
         repository.Write("Guide.md", "Replacement documentation needle amber.");
         repository.Write("Added.py", "# Added source needle amber\nprint('hello')\n"); repository.Git("add", "Added.py");
@@ -172,6 +194,147 @@ public sealed class RepositoryCoverageIntegrationTests(NativeSqlServerFixture fi
             new RetainedTextActivityPlanner(new SqlRetainedTextRegistrationStore(environment.Factory, clock)));
         var result = await worker.ScanAsync(claim.SourceRoot, claim.ScanRequest, default);
         await store.CompleteAsync(claim, result, null, default); await environment.PumpAsync(); return claim.SourceRoot.Id.Value;
+    }
+
+    [NativeSqlServerTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Git_recreated_historical_bytes_restore_the_owner_without_replaying_completed_or_failed_work(bool failed)
+    {
+        // Published C# receipts in this class's existing database are immutable. Use a fresh disposable catalogue.
+        var isolated = new NativeSqlServerFixture();
+        await isolated.InitializeAsync();
+        try
+        {
+            var clock = new Clock();
+            await using var environment = await SqlToUsearchRebuildTests.PipelineEnvironment.CreateAsync(isolated, "Baseline", clock: clock);
+            using var repository = new Repository(); repository.Write("Guide.md", "Original retained document."); repository.Git("add", ".");
+            var commands = Commands(repository.Path, environment.Factory, clock);
+            await Commit(commands, Mutation("root_create", new { path = repository.Path, displayName = "Restoration", discoveryMode = "git-tracked", indexSourceText = true }));
+            var store = new SqlSourceScanStore(environment.Factory, clock);
+            var rootId = await ScanAndPublish(environment, store, clock);
+            SourceRevisionEntity first;
+            await using (var db = await environment.Factory.CreateDbContextAsync())
+            {
+                first = await db.SourceRevisions.AsNoTracking().SingleAsync(value => value.SourceRootId == rootId);
+                if (failed)
+                {
+                    var record = await db.PipelineRecords.SingleAsync(value => value.SourceRevisionId == first.Id);
+                    record.CompletionCriteriaMet = false;
+                    var job = await db.Jobs.SingleAsync(value => value.PipelineRecordId == record.Id && value.Stage == (int)PipelineStage.Publish);
+                    job.PublicState = (int)PublicJobState.Failed; job.Reason = "Disposable failed-owner fixture";
+                    await db.SaveChangesAsync();
+                }
+            }
+            repository.Replace("Guide.md", "Changed retained document.");
+            await Commit(commands, Mutation("source_sync", new { rootId })); await ScanAndPublish(environment, store, clock);
+            string workBefore;
+            await using (var db = await environment.Factory.CreateDbContextAsync())
+            {
+                Assert.NotNull((await db.SourceRevisions.FindAsync(first.Id))!.SuppressedAtUtc);
+                workBefore = await WorkSnapshot(db, rootId);
+            }
+            repository.Replace("Guide.md", "Original retained document.");
+            await Commit(commands, Mutation("source_sync", new { rootId }));
+            var claim = Assert.IsType<ClaimedSourceScan>(await store.ClaimNextReleasedAsync("restoration", clock.Now, TimeSpan.FromMinutes(10), default));
+            var enumerator = new LocalSourceEnumerator(); var files = new List<SourceDiscoveredFile>();
+            await foreach (var value in enumerator.EnumerateAsync(claim.SourceRoot, default)) files.Add(value);
+            var file = Assert.Single(files) with { ScanOwnership = new(claim.ScanRequest.Id, claim.ScanRequest.Lease!) };
+            Assert.NotEqual(first.StableSourceIdentity, file.StableSourceIdentity);
+            using var artifacts = new ContentAddressedSourceArtifactStore(environment.ArtifactRoot);
+            var receipt = await artifacts.PutFileAsync(file, new(file.ContentSha256, "application/octet-stream", file.ByteLength), default);
+            async Task<SourceRevisionId> Converge() => await store.ConvergeRevisionAndArtifactAsync(claim.SourceRoot, file, receipt, default);
+            var concurrent = await Task.WhenAll(Converge(), Converge());
+            Assert.All(concurrent, value => Assert.Equal(first.Id, value.Value));
+            var worker = new SourceScanWorker(new LocalSourceEnumerator(), store, artifacts, new SqlSourceActivityStore(environment.Factory, clock),
+                new RetainedTextActivityPlanner(new SqlRetainedTextRegistrationStore(environment.Factory, clock)));
+            var result = await worker.ScanAsync(claim.SourceRoot, claim.ScanRequest, default);
+            await store.CompleteAsync(claim, result, null, default);
+            await using var verify = await environment.Factory.CreateDbContextAsync();
+            var current = Assert.Single(await verify.SourceRevisions.Where(value => value.SourceRootId == rootId && value.SuppressedAtUtc == null).ToListAsync());
+            Assert.Equal(first.Id, current.Id); Assert.Equal(first.StableSourceIdentity, current.StableSourceIdentity);
+            Assert.Equal(first.DiscoveryEvidenceJson, current.DiscoveryEvidenceJson);
+            Assert.Equal(2, await verify.SourceRevisions.CountAsync(value => value.SourceRootId == rootId));
+            Assert.Equal(workBefore, await WorkSnapshot(verify, rootId));
+        }
+        finally { await isolated.DisposeAsync(); }
+    }
+
+    [NativeSqlServerTheory]
+    [InlineData("foreign-repository")]
+    [InlineData("missing-inventory")]
+    [InlineData("malformed-json")]
+    [InlineData("invalid-generation")]
+    [InlineData("null-generation")]
+    [InlineData("non-file-origin")]
+    [InlineData("wrong-length")]
+    [InlineData("artifact-mismatch")]
+    [InlineData("paused")]
+    [InlineData("stale-config")]
+    [InlineData("expired-lease")]
+    [InlineData("foreign-lease")]
+    public async Task Git_replacement_cannot_reuse_an_owner_without_retained_provenance_and_current_authority(string mismatch)
+    {
+        using var repository = new Repository(); repository.Write("Guide.md", "Retained bytes."); repository.Git("add", ".");
+        var factory = SqlTestData.CreateFactory(fixture); var clock = new Clock();
+        await Commit(Commands(repository.Path, factory, clock), Mutation("root_create", new { path = repository.Path, displayName = "Replacement refusal", discoveryMode = "git-tracked", indexSourceText = true }));
+        var store = new SqlSourceScanStore(factory, clock);
+        var claim = Assert.IsType<ClaimedSourceScan>(await store.ClaimNextReleasedAsync("replacement-refusal", clock.Now, TimeSpan.FromMinutes(10), default));
+        var enumerator = new LocalSourceEnumerator(); var files = new List<SourceDiscoveredFile>();
+        await foreach (var value in enumerator.EnumerateAsync(claim.SourceRoot, default)) files.Add(value);
+        var file = Assert.Single(files) with { ScanOwnership = new(claim.ScanRequest.Id, claim.ScanRequest.Lease!) };
+        var inventory = file.GitInventory!;
+        var evidence = mismatch switch
+        {
+            "foreign-repository" => JsonSerializer.Serialize(new { gitInventory = inventory with { RepositoryIdentity = new string('f', 64) } }),
+            "missing-inventory" => "{}", "malformed-json" => "{",
+            "invalid-generation" => JsonSerializer.Serialize(new { gitInventory = inventory with { Generation = "invalid" } }),
+            "null-generation" => JsonSerializer.Serialize(new { gitInventory = inventory with { Generation = (string)null! } }),
+            _ => JsonSerializer.Serialize(new { gitInventory = inventory })
+        };
+        var owner = new SourceRevisionEntity { Id = Guid.NewGuid(), SourceRootId = claim.SourceRoot.Id.Value,
+            StableSourceIdentity = "retained-previous-physical-file", Revision = 1, ContentSha256 = file.ContentSha256,
+            CanonicalPath = file.CanonicalPath, Classification = file.Classification.Classification.ToString(), Extension = ".md",
+            OriginKind = mismatch == "non-file-origin" ? 2 : 0, ByteLength = file.ByteLength + (mismatch == "wrong-length" ? 1 : 0),
+            DiscoveredAtUtc = clock.Now, DiscoveryEvidenceJson = evidence, SuppressedAtUtc = clock.Now };
+        var receipt = new SourceArtifactReceipt(SourceArtifactId.New(), file.ContentSha256, "sha256/retained.bin", file.ByteLength, false);
+        await using (var setup = await factory.CreateDbContextAsync())
+        {
+            setup.SourceRevisions.Add(owner);
+            setup.SourceArtifacts.Add(new SourceArtifactEntity { Id = receipt.SourceArtifactId.Value, SourceRevisionId = owner.Id,
+                ContentSha256 = file.ContentSha256, StoreRelativePath = mismatch == "artifact-mismatch" ? "sha256/different.bin" : receipt.StoreRelativePath,
+                ByteLength = file.ByteLength, ChecksumVerifiedAtUtc = clock.Now, ReferenceCount = 1 });
+            var root = (await setup.SourceRootConfigurations.FindAsync(claim.SourceRoot.Id.Value))!;
+            if (mismatch == "paused") root.State = (int)SourceRootState.Paused;
+            if (mismatch == "stale-config") root.ConfigurationRevision++;
+            await setup.SaveChangesAsync();
+        }
+        if (mismatch == "expired-lease") clock.Advance(TimeSpan.FromMinutes(11));
+        if (mismatch == "foreign-lease") file = file with { ScanOwnership = new(SourceScanRequestId.New(), claim.ScanRequest.Lease!) };
+        if (mismatch is "paused" or "stale-config" or "expired-lease" or "foreign-lease")
+            await Assert.ThrowsAsync<InvalidDataException>(() => store.ConvergeRevisionAndArtifactAsync(claim.SourceRoot, file, receipt, default).AsTask());
+        else
+            await Assert.ThrowsAsync<InvalidOperationException>(() => store.ConvergeRevisionAndArtifactAsync(claim.SourceRoot, file, receipt, default).AsTask());
+        await using var verify = await factory.CreateDbContextAsync();
+        var retained = Assert.Single(await verify.SourceRevisions.Where(value => value.SourceRootId == claim.SourceRoot.Id.Value).ToListAsync());
+        Assert.NotNull(retained.SuppressedAtUtc); Assert.Equal(owner.DiscoveryEvidenceJson, retained.DiscoveryEvidenceJson);
+        Assert.Equal(owner.StableSourceIdentity, retained.StableSourceIdentity);
+        Assert.Empty(await verify.SourceActivities.Where(value => value.SourceRevisionId == owner.Id).ToListAsync());
+    }
+
+    private static async Task<string> RetainedSnapshot(FluxKnowledgeDbContext db, Guid rootId) => JsonSerializer.Serialize(
+        await db.SourceRevisions.Where(value => value.SourceRootId == rootId).OrderBy(value => value.Id)
+            .Select(value => new { value.Id, value.StableSourceIdentity, value.ContentSha256, value.DiscoveryEvidenceJson, value.SuppressedAtUtc }).ToListAsync());
+
+    private static async Task<string> WorkSnapshot(FluxKnowledgeDbContext db, Guid rootId)
+    {
+        var recordIds = db.PipelineRecords.Where(record => db.SourceRevisions.Any(revision => revision.Id == record.SourceRevisionId && revision.SourceRootId == rootId)).Select(value => value.Id);
+        return JsonSerializer.Serialize(new {
+            Records = await db.PipelineRecords.Where(value => recordIds.Contains(value.Id)).OrderBy(value => value.Id).Select(value => new { value.Id, value.RowVersion }).ToListAsync(),
+            Activities = await db.SourceActivities.Where(value => db.SourceRevisions.Any(revision => revision.Id == value.SourceRevisionId && revision.SourceRootId == rootId)).OrderBy(value => value.Id).Select(value => new { value.Id, value.RowVersion }).ToListAsync(),
+            Jobs = await db.Jobs.Where(value => recordIds.Contains(value.PipelineRecordId)).OrderBy(value => value.Id).Select(value => new { value.Id, value.RowVersion }).ToListAsync(),
+            Outbox = await db.OutboxMessages.Where(value => recordIds.Contains(value.PipelineRecordId)).OrderBy(value => value.Id).Select(value => new { value.Id, value.RowVersion }).ToListAsync()
+        });
     }
 
     [NativeSqlServerTheory]
@@ -293,6 +456,11 @@ public sealed class RepositoryCoverageIntegrationTests(NativeSqlServerFixture fi
         public void Write(string name, string text)
         {
             var full = System.IO.Path.Combine(Path, name); Directory.CreateDirectory(System.IO.Path.GetDirectoryName(full)!); File.WriteAllText(full, text);
+        }
+        public void Replace(string name, string text)
+        {
+            var full = System.IO.Path.Combine(Path, name); var replacement = full + ".replacement";
+            File.WriteAllText(replacement, text); File.Move(replacement, full, overwrite: true);
         }
         public void Git(params string[] arguments)
         {

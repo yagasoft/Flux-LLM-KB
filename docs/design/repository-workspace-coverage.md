@@ -1,6 +1,6 @@
 # Automatic repository code and documentation coverage
 
-Date: 30 September 2026. Status: release `3b92f17b` is deployed; the single repository source is paused after a readiness regression. A narrow retained-checkpoint validation correction is undergoing verification; complete live acceptance remains pending.
+Date: 30 September 2026. Status: release `de32b49a` corrected retained-checkpoint readiness and passed live health and payload checks. The single repository source is paused at configuration revision 10 while a verified Git file replacement conflict receives a narrow correction; complete live acceptance remains pending.
 
 ## Outcome and scope
 
