@@ -1,6 +1,6 @@
 # Repository live validation
 
-Date: 30 September 2026. Status: dispatch-correction deployment verified; the existing source is enabled and publication is advancing. Complete repository retrieval/brief/freshness acceptance remains pending.
+Date: 30 September 2026. Status: dispatch-correction deployment verified; the existing source is paused after a readiness regression. A retained-checkpoint correction and complete live acceptance remain pending.
 
 The routine incremental IIS update deployed `597bf0bea4812c885bd6cf40d81cc438af490e3e`. The reviewed and actual release candidates and installed application/interactive-host payloads matched across all 272 files. The updater completed held readiness and unchanged retained/pipeline-state checks before releasing its owned validation hold. Subsequent live, readiness and index probes returned HTTP 200 with Healthy index state. No schema migration, index rebuild or model acquisition occurred; recovery payloads are retained.
 
@@ -58,3 +58,27 @@ for scheduler and executor, checks both handoffs and preserves every trace,
 span, batch, native-measurement and capacity assertion. The probe delay is
 removed. Production deadlines and the separate expiry tests are unchanged;
 this test-only correction requires no application redeployment.
+
+At 21:03 UTC, live HTTP remained 200 but readiness was 503 and index health
+reported `OperatorActionRequired / ConfigurationInvalid`. SQL audit dates the
+latched failure to 19:43:51 UTC; its original offending draft was not logged.
+The source was paused through native controls at configuration revision 8,
+preserving 1,032 current paths and 723 published text records. Read-only
+`ReadActiveAsync` reproduced `embedding-checkpoint-recovery-provenance-invalid`
+for a later documentation revision suppressed at 20:25 and settled with native
+cleanup/capacity-release evidence at 20:29. Its parent remained GPU-processing.
+Execution recovery correctly excludes suppressed sources; validation incorrectly
+used that same eligibility rule for retained checkpoint evidence. The narrow
+correction separates these purposes without enabling suppressed work. Four
+disposable transition cases reproduced the failure before the correction; the
+corrected read-only probe validates the current production catalogue without
+mutation. Focused negative checks, full closeout and exact operational review
+precede another incremental release; the installed process remains uncorrected.
+
+All three genuine brief runs now have audited scope, budgets, exact readback
+bindings and reviewed factual claims. They used three searches each and four,
+four and six reads respectively; the second run excluded one withheld read.
+Each reported evidence gaps and distinguished proposals, historical acceptance
+and implementation evidence from current live health. Complete initial text
+publication, representative pending implementation reads, current documentation
+replacement and healthy final readiness remain open.

@@ -349,7 +349,7 @@ public sealed class SqlDerivedIndexRecoveryStore(
         var requests = await (from request in context.EmbeddingGpuRequests.AsNoTracking()
             join task in context.GpuMiniTasks.AsNoTracking() on request.MiniTaskId equals task.Id
             where request.ParentJobId == job.Id && request.GenerationId == draft.Id &&
-                (request.State < 2 || SqlEmbeddingGpuRequestStore.RecoverableSettledRequestIds(context).Contains(request.MiniTaskId)) &&
+                (request.State < 2 || SqlEmbeddingGpuRequestStore.RetainedSettledRequestIds(context).Contains(request.MiniTaskId)) &&
                 request.PipelineRecordId == job.PipelineRecordId && request.SourceRevision == job.SourceRevision &&
                 request.CorpusEpoch == draft.CorpusEpoch && request.ModelFingerprint == draft.ModelFingerprint &&
                 request.Dimensions == draft.Dimensions && task.ParentJobId == job.Id && task.SourceRevision == job.SourceRevision &&

@@ -1,6 +1,6 @@
 # Automatic repository coverage acceptance
 
-Date: 30 September 2026. Corrective release `3b92f17b` is deployed and the single main-repository source is enabled. Publication is advancing; complete live retrieval/brief/freshness acceptance remains pending.
+Date: 30 September 2026. Release `3b92f17b` is deployed; the single main-repository source is paused after a readiness regression. Retained-checkpoint correction and complete live acceptance remain pending.
 
 ## Delivered locally
 
@@ -68,3 +68,7 @@ Read-only evidence confirmed further publication delay: an earlier GPU-owned del
 Before an application downgrade, quiesce workers, pause/disable every Git root and drain/fence its claims. Older binaries ignore the discovery mode; they must never run against an enabled Git root. Keep these roots paused until compatible code returns. The disposable pause/renewal/resume check proves the control sequence; it is not a production rollback.
 
 The dispatch correction is installed and native resume completed at configuration revision 7. At 20:14 UTC, 595 of 1,032 distinct current paths were text-published, with no current terminal failures; C# has 881 completed branches and one normal reference-limit refusal. Main/nested scope containment, sibling/worktree refusal, exact MCP/REST/CLI documentation citation binding and native C# symbol matches passed. Source-text readback includes SQL, props, Razor and CSS. Existing content safety withheld a PowerShell context; its safe cited passage remained readable with no extra context. The first genuine brief respected three searches/eight reads and supported its claims through four reads, with explicit retrieval warnings and gaps. Complete live publication, the other two briefs, code-body retrieval, documentation freshness and final health remain pending. Deferred OCR, Outlook desktop and wider lifecycle operational acceptance remain separate.
+
+Later acceptance completed all three genuine briefs, including exact citation and factual-claim review with reported evidence gaps. Native implementation readback additionally covered JavaScript, PowerShell modules and two C# bodies. Old documentation evidence returned `evidence-stale` through MCP, REST and CLI after a genuine tracked edit; publication/readback of its current replacement remains pending.
+
+At 21:03 UTC readiness was HTTP 503 with `OperatorActionRequired / ConfigurationInvalid`; SQL audit dates the latched failure to 19:43:51. Supported source pause completed at configuration revision 8, preserving 1,032 current paths and 723 published records. A SELECT-only production probe reproduced invalid checkpoint provenance for a suppressed, cleaned embedding attempt. The validator must recognise its exact retained evidence while execution continues refusing suppressed work. Independent design review approved this narrow separation; four disposable transition cases reproduced the failure and the corrected read-only probe validates the catalogue. Integrity negatives, required closeout and exact operational review precede deployment. Complete live publication, current-document freshness and healthy readiness remain required before cleanup.

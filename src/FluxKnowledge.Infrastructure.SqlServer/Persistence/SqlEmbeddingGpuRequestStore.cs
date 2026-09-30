@@ -428,6 +428,14 @@ public sealed class SqlEmbeddingGpuRequestStore(IDbContextFactory<FluxKnowledgeD
     // A settled request from an older release is resumable only while it remains the
     // latest attempt for the exact current checkpoint, with terminal cleanup/release proof.
     internal static IQueryable<Guid> RecoverableSettledRequestIds(FluxKnowledgeDbContext context)
+        => SettledCheckpointRequestIds(context, includeSuppressedSource: false);
+
+    // Recovery validation retains withdrawn checkpoint evidence without authorising
+    // execution. Suppressed sources remain excluded from the resumable query above.
+    internal static IQueryable<Guid> RetainedSettledRequestIds(FluxKnowledgeDbContext context)
+        => SettledCheckpointRequestIds(context, includeSuppressedSource: true);
+
+    private static IQueryable<Guid> SettledCheckpointRequestIds(FluxKnowledgeDbContext context, bool includeSuppressedSource)
         => from request in context.EmbeddingGpuRequests
             join task in context.GpuMiniTasks on request.MiniTaskId equals task.Id
             join parent in context.Jobs on request.ParentJobId equals parent.Id
@@ -441,7 +449,7 @@ public sealed class SqlEmbeddingGpuRequestStore(IDbContextFactory<FluxKnowledgeD
                 parent.PublicState == (int)PublicJobState.GpuProcessing && parent.Stage == (int)PipelineStage.Embed && parent.Operation == PipelineOperations.Embed &&
                 parent.PipelineRecordId == record.Id && parent.SourceRevision == request.SourceRevision &&
                 !record.IsDeleted && record.Revision == request.SourceRevision && record.CurrentStage == (int)PipelineStage.Embed &&
-                (record.SourceRevisionId == null || record.SourceRevision!.SuppressedAtUtc == null &&
+                (record.SourceRevisionId == null || (includeSuppressedSource || record.SourceRevision!.SuppressedAtUtc == null) &&
                     (record.SourceRevision!.SourceRoot.State == (int)SourceRootState.Enabled || record.SourceRevision!.SourceRoot.State == (int)SourceRootState.Paused)) &&
                 draft.EmbeddingJobId == parent.Id && draft.CorpusEpoch == request.CorpusEpoch && draft.RetiredAtUtc == null && draft.IndexPath == string.Empty &&
                 EF.Functions.Collate(draft.ModelFingerprint, SchemaConfiguration.SchedulerFenceCollation) == request.ModelFingerprint && draft.Dimensions == request.Dimensions &&

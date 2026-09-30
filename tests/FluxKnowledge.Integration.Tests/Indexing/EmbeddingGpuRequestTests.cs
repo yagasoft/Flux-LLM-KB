@@ -298,9 +298,51 @@ public sealed class EmbeddingGpuRequestTests(NativeSqlServerFixture fixture) : I
     }
 
     [NativeSqlServerTheory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public async Task Withdrawn_cleaned_checkpoint_is_valid_retained_evidence_without_resuming_the_source(bool saved, bool historical)
+    {
+        await using var environment = await PrepareRetainedEnvironmentAsync();
+        var (requests, handle, work, instance) = await PrepareOwnedAsync(environment);
+        if (historical)
+        {
+            await requests.CommitAsync(handle, instance, work, Outputs(work.Batch.Chunks.Count), CancellationToken.None);
+            await requests.RecordNativeCleanupAsync(handle, instance, work.ClaimOperationId, CancellationToken.None);
+            await DeliverCleanedAsync(environment, requests, handle);
+            (requests, handle, work, instance) = await PrepareOwnedAsync(environment);
+        }
+        if (saved) await requests.CommitAsync(handle, instance, work, Outputs(work.Batch.Chunks.Count), CancellationToken.None);
+        await using var context = await environment.Factory.CreateDbContextAsync();
+        (await context.SourceRevisions.SingleAsync()).SuppressedAtUtc = DateTimeOffset.UtcNow;
+        await context.SaveChangesAsync();
+        await requests.RecordNativeCleanupAsync(handle, instance, work.ClaimOperationId, CancellationToken.None);
+        await DeliverCleanedAsync(environment, requests, handle);
+        var request = await context.EmbeddingGpuRequests.AsNoTracking().SingleAsync(value => value.MiniTaskId == work.MiniTaskId);
+        Assert.Equal(2, request.State);
+        Assert.True(request.NativeCleanupConfirmed);
+        Assert.Equal(saved, request.ResultDigest is not null);
+        var parentBefore = await context.Jobs.AsNoTracking().SingleAsync(value => value.Id == work.ParentJobId);
+        var dispatchBefore = await context.OutboxMessages.AsNoTracking().SingleAsync(value => value.JobId == work.ParentJobId);
+        Assert.Equal((int)PublicJobState.GpuProcessing, parentBefore.PublicState);
+        var recovery = new SqlDerivedIndexRecoveryStore(environment.Factory, TimeProvider.System);
+        var snapshot = await recovery.ReadActiveAsync(CancellationToken.None);
+        Assert.Contains(work.Batch.GenerationId, snapshot.ReferencedGenerationIds);
+        await recovery.ReadActiveAsync(CancellationToken.None);
+        Assert.Empty(await requests.ReadRecoveryAsync(CancellationToken.None));
+        Assert.False(await requests.RequeueSettledAsync(handle, work.MiniTaskId, CancellationToken.None));
+        Assert.Null(await new SqlOutboxStore(environment.Factory).ClaimNextDueAsync("withdrawn", DateTimeOffset.UtcNow.AddSeconds(10),
+            TimeSpan.FromMinutes(1), [PipelineOperations.Embed], CancellationToken.None));
+        Assert.Equal(parentBefore.RowVersion, (await context.Jobs.AsNoTracking().SingleAsync(value => value.Id == work.ParentJobId)).RowVersion);
+        Assert.Equal(dispatchBefore.RowVersion, (await context.OutboxMessages.AsNoTracking().SingleAsync(value => value.JobId == work.ParentJobId)).RowVersion);
+        Assert.Equal(request.RowVersion, (await context.EmbeddingGpuRequests.AsNoTracking().SingleAsync(value => value.MiniTaskId == work.MiniTaskId)).RowVersion);
+        Assert.False(await context.PipelineRecords.AnyAsync(value => value.Id == work.PipelineRecordId && value.CompletionCriteriaMet));
+    }
+
+    [NativeSqlServerTheory]
     [InlineData("epoch")]
     [InlineData("revision")]
-    [InlineData("suppressed")]
     [InlineData("deleting")]
     [InlineData("dispatch-owner")]
     [InlineData("capacity-proof")]
@@ -316,7 +358,6 @@ public sealed class EmbeddingGpuRequestTests(NativeSqlServerFixture fixture) : I
         {
             case "epoch": (await context.IndexState.SingleAsync()).CorpusEpoch = Guid.NewGuid(); break;
             case "revision": (await context.EmbeddingGpuRequests.SingleAsync()).SourceRevision++; break;
-            case "suppressed": (await context.SourceRevisions.SingleAsync()).SuppressedAtUtc = DateTimeOffset.UtcNow; break;
             case "deleting": (await context.SourceRootConfigurations.SingleAsync()).State = (int)SourceRootState.Deleting; break;
             case "dispatch-owner": (await context.GpuExecutorDispatches.SingleAsync()).OwnerKey = "foreign"; break;
             case "capacity-proof": (await context.GpuBatches.SingleAsync()).State = (int)GpuBatchState.CapacityUncertain; break;
@@ -326,6 +367,53 @@ public sealed class EmbeddingGpuRequestTests(NativeSqlServerFixture fixture) : I
         Assert.DoesNotContain(await requests.ReadRecoveryAsync(CancellationToken.None), candidate => candidate.MiniTaskId == work.MiniTaskId);
         await Assert.ThrowsAsync<InvalidOperationException>(() => new SqlDerivedIndexRecoveryStore(environment.Factory, TimeProvider.System)
             .ReadActiveAsync(CancellationToken.None).AsTask());
+        Assert.Equal((int)PublicJobState.GpuProcessing, await context.Jobs.AsNoTracking().Where(job => job.Id == work.ParentJobId).Select(job => job.PublicState).SingleAsync());
+    }
+
+    [NativeSqlServerTheory]
+    [InlineData("cleanup")]
+    [InlineData("cleanup-time")]
+    [InlineData("dispatch-owner")]
+    [InlineData("capacity-proof")]
+    [InlineData("input-digest")]
+    [InlineData("checkpoint-checksum")]
+    public async Task Withdrawn_checkpoint_still_requires_exact_cleanup_capacity_and_integrity_proof(string fault)
+    {
+        await using var environment = await PrepareRetainedEnvironmentAsync();
+        var (requests, handle, work, instance) = await PrepareOwnedAsync(environment);
+        await requests.CommitAsync(handle, instance, work, Outputs(work.Batch.Chunks.Count), CancellationToken.None);
+        await using var context = await environment.Factory.CreateDbContextAsync();
+        (await context.SourceRevisions.SingleAsync()).SuppressedAtUtc = DateTimeOffset.UtcNow;
+        await context.SaveChangesAsync();
+        await requests.RecordNativeCleanupAsync(handle, instance, work.ClaimOperationId, CancellationToken.None);
+        await DeliverCleanedAsync(environment, requests, handle);
+        var request = await context.EmbeddingGpuRequests.SingleAsync();
+        switch (fault)
+        {
+            case "cleanup": request.NativeCleanupConfirmed = false; break;
+            case "cleanup-time": request.CleanupConfirmedAtUtc = null; break;
+            case "dispatch-owner": (await context.GpuExecutorDispatches.SingleAsync()).OwnerKey = "foreign"; break;
+            case "capacity-proof": (await context.GpuBatches.SingleAsync()).State = (int)GpuBatchState.CapacityUncertain; break;
+            case "input-digest": request.InputDigest = new string('0', 64); break;
+            case "checkpoint-checksum": (await context.Vectors.FirstAsync()).PayloadChecksum = new string('0', 64); break;
+        }
+        if (fault is "cleanup" or "cleanup-time")
+        {
+            // SQL prohibits settled requests with missing or contradictory cleanup proof.
+            var refusal = await Assert.ThrowsAsync<DbUpdateException>(() => context.SaveChangesAsync());
+            Assert.Contains("CK_EmbeddingGpuRequests_Cleanup", Assert.IsType<SqlException>(refusal.InnerException).Message);
+            var retained = await context.EmbeddingGpuRequests.AsNoTracking().SingleAsync();
+            Assert.True(retained.NativeCleanupConfirmed);
+            Assert.NotNull(retained.CleanupConfirmedAtUtc);
+            Assert.Empty(await requests.ReadRecoveryAsync(CancellationToken.None));
+            Assert.False(await requests.RequeueSettledAsync(handle, work.MiniTaskId, CancellationToken.None));
+            return;
+        }
+        await context.SaveChangesAsync();
+        await Assert.ThrowsAsync<InvalidOperationException>(() => new SqlDerivedIndexRecoveryStore(environment.Factory, TimeProvider.System)
+            .ReadActiveAsync(CancellationToken.None).AsTask());
+        Assert.Empty(await requests.ReadRecoveryAsync(CancellationToken.None));
+        Assert.False(await requests.RequeueSettledAsync(handle, work.MiniTaskId, CancellationToken.None));
         Assert.Equal((int)PublicJobState.GpuProcessing, await context.Jobs.AsNoTracking().Where(job => job.Id == work.ParentJobId).Select(job => job.PublicState).SingleAsync());
     }
 

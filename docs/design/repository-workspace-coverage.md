@@ -1,6 +1,6 @@
 # Automatic repository code and documentation coverage
 
-Date: 30 September 2026. Status: corrective release `3b92f17b` deployed and the single repository source enabled. Publication is advancing; complete retrieval/brief/freshness acceptance remains pending.
+Date: 30 September 2026. Status: release `3b92f17b` is deployed; the single repository source is paused after a readiness regression. A narrow retained-checkpoint validation correction is undergoing verification; complete live acceptance remains pending.
 
 ## Outcome and scope
 

@@ -1,6 +1,6 @@
 # Automatic repository code and documentation implementation plan
 
-Date: 30 September 2026. Status: dispatch correction `3b92f17b` deployed; the single repository source is enabled and has discovered 1,032 current files. Complete live publication/brief/freshness acceptance remains pending.
+Date: 30 September 2026. Status: dispatch correction `3b92f17b` is deployed; the single source has 1,032 current files and is paused after a readiness regression. Retained-checkpoint verification and complete live acceptance remain pending.
 
 **Goal:** configure one repository source once, automatically maintain Git-tracked code/docs coverage, preserve searchable source text and C# facts, and remove the aggregate application request cap without replacing it with an arbitrary limit.
 
@@ -139,6 +139,8 @@ Deliver live repository search and code facts with a single durable source confi
 - [ ] Preserve worktree/recovery until all in-scope closeout and live checks succeed. Cleanup follows current authority and never triggers another deployment. Report actual commit/release, admitted/searchable/structured/withheld/failed outcomes and usable scoped queries.
 
 ## Stop and recovery rules
+
+Later readiness validation rejected a cleaned, settled embedding request after its source revision was suppressed. The parent remains GPU-processing, but execution recovery correctly refuses the withdrawn source. Read-only production reproduction and four disposable transition cases proved the checkpoint-validation failure. Separate retained-evidence recognition from resumable-request selection: only the validator may recognise the withdrawn checkpoint, with all existing ownership, latest-attempt, cleanup/capacity, epoch and checksum fences intact. Preserve strict suppression refusal for execution and publication. Independently review the correction, complete focused and required combined verification, then prepare the exact incremental release. Do not clear the latched health state through an unreviewed restart or change production SQL.
 
 Live C# processing of `SqlRetainedTextRegistrationStore.cs` produced reference displays exceeding the existing 4,096-unit bound; SQL correctly rejected the non-canonical completion, but the unhandled exception stopped the host. Enforce that existing protection before the processor returns success, use its normal blocked outcome and preserve SQL validation. Verify exact-bound acceptance, over-bound refusal and durable activation continuing to another file. Re-observe publication after correction before inferring another queue defect; do not suppress host exceptions or raise parser limits.
 
