@@ -1,0 +1,14 @@
+<details class="source-form">
+    <summary>Configure a repository</summary>
+    <form onsubmit="return false" oninput="fluxKnowledge.sources.invalidate(this)">
+        <p>Index Git-tracked code and documentation from one repository. Additions and changes update automatically; private, build and model paths are excluded.</p>
+        <label>Repository folder <input name="path" required /></label>
+        <label>Repository name <input name="displayName" required /></label>
+        <label>Optional include patterns (one per line) <textarea name="includePatterns"></textarea></label>
+        <label>Optional exclude patterns (one per line) <textarea name="excludePatterns"></textarea></label>
+        <p>Leave the patterns empty to discover eligible tracked files automatically.</p>
+        <button type="button" onclick="fluxKnowledge.sources.preview(this.form)">Preview</button>
+        <button type="button" data-source-commit disabled onclick="fluxKnowledge.sources.commit(this.form)">Configure and scan</button>
+        <p role="status" aria-live="polite" data-source-status></p>
+    </form>
+</details>

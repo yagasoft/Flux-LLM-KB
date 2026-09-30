@@ -1,5 +1,6 @@
 using FluxKnowledge.Application.Contracts;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
+using FluxKnowledge.Domain.Sources;
 using FluxKnowledge.Integration.Tests.Support;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
@@ -130,6 +131,20 @@ public sealed class SourceRootTransactionTests(NativeSqlServerFixture fixture)
         Assert.Contains("configurationFingerprint", evidence, StringComparison.Ordinal);
         Assert.Contains("releasedByFingerprint", evidence, StringComparison.Ordinal);
         Assert.DoesNotContain("operator", evidence, StringComparison.Ordinal);
+    }
+
+    [NativeSqlServerFact]
+    public async Task Repeat_create_rejects_replaced_Git_metadata_even_when_the_content_directory_is_unchanged()
+    {
+        var store = CreateStore();
+        var validation = Validation("same-directory") with { GitRepositoryIdentityFingerprint = new string('a', 64) };
+        var first = Request("C:\\source-transaction-tests\\git-identity") with
+        { DiscoveryMode = SourceDiscoveryMode.GitTracked, PathValidation = validation };
+        await store.CreateAsync(first, ScanStartIntent.SaveOnly, default);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => store.CreateAsync(first with
+            { PathValidation = validation with { GitRepositoryIdentityFingerprint = new string('b', 64) } }, ScanStartIntent.SaveOnly, default).AsTask());
+        await using var verify = CreateContext();
+        Assert.Single(await verify.SourceRootConfigurations.ToListAsync());
     }
 
     [NativeSqlServerFact]

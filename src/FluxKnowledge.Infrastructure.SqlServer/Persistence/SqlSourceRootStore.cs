@@ -42,7 +42,8 @@ public sealed class SqlSourceRootStore(
             request.IncludePatterns,
             request.ExcludePatterns,
             request.AllowedClassifications,
-            request.ReconciliationCadence);
+            request.ReconciliationCadence,
+            request.DiscoveryMode);
         var configuration = SourceRootControlConfiguration.From(request);
 
         await using var executionContext = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
@@ -132,7 +133,7 @@ public sealed class SqlSourceRootStore(
             FollowLinks = request.FollowLinks,
             MaximumFileBytes = request.MaximumFileBytes,
             AllowedClassificationsJson = configuration.AllowedClassificationsJson,
-            CrawlMode = 0,
+            CrawlMode = (int)request.DiscoveryMode,
             ReconciliationCadenceSeconds = checked((long)request.ReconciliationCadence.TotalSeconds),
             PermissionEvidenceJson = request.PathValidation?.PermissionEvidenceJson,
             HealthEvidenceJson = SourceRootControlAuditEvidence.CreateHealthEvidence(request.PathValidation, configuration),
@@ -365,7 +366,9 @@ public sealed class SqlSourceRootStore(
             return string.Equals(
                 persistedFingerprint,
                 validation.PhysicalIdentity.IdentityFingerprint,
-                StringComparison.Ordinal);
+                StringComparison.Ordinal) && string.Equals(
+                    root?["gitRepositoryIdentityFingerprint"]?.GetValue<string>(),
+                    validation.GitRepositoryIdentityFingerprint, StringComparison.Ordinal);
         }
         catch (JsonException exception)
         {

@@ -18,6 +18,26 @@ Codex and local scripts. All supported clients share the native application faca
 
 ## Native tools
 
+`corpus.write` action `root_create` accepts `discoveryMode: "git-tracked"` and
+`indexSourceText: true`, with optional `includePatterns` and `excludePatterns`
+arrays. Configure the repository path once; patterns narrow automatic Git
+membership rather than list individual files. Additions enter when added to the
+Git index, edits use working-tree bytes, and renames/deletions/untracking converge
+through watcher hints and periodic scans. Defaults preserve filesystem sources.
+
+Native REST, MCP, CLI stdin and Codex hook ingress have no aggregate 32 KiB
+application cap or rule/file-count cap. Incremental reads reserve estimated
+representation memory against runtime headroom. REST/MCP/CLI report retryable
+`resource-pressure` before durable mutation; hooks keep their existing invalid-input
+response behaviour. JSON depth, field validation,
+response bounds and file/parser protections remain. The repository browser form
+sends JSON directly over HTTP, avoiding Blazor's separate default 32 KB incoming
+message boundary. Deployment preflight observed IIS in-process
+`maxAllowedContentLength=30000000`; a host can reject larger bodies before Flux
+handles them. Kestrel deployments have their own configured body boundary.
+The disposable MCP HTTP transport accepts the tested >32 KiB / 900-rule payload;
+unmeasured Codex/client/proxy ceilings remain unverified.
+
 | MCP tool | REST | CLI |
 | --- | --- | --- |
 | `knowledge.search` | `POST /api/v1/knowledge/search` | `FluxKnowledge.Cli knowledge search` |

@@ -46,19 +46,23 @@ public static class NativeV1Command
         if (command is null) return await WriteFailureAsync(output, "invalid-command").ConfigureAwait(false);
 
         JsonObject body;
+        using var reservation = new NativeRequestInput.Reservation();
         try
         {
-            var requestText = await ReadBoundedTextAsync(
-                input,
-                NativeV1ContractLimits.MaximumRequestBytes,
-                cancellationToken).ConfigureAwait(false);
-            if (requestText is null) return await WriteFailureAsync(output, "body-too-large").ConfigureAwait(false);
+            var requestText = await NativeRequestInput.ReadTextAsync(input, reservation, cancellationToken).ConfigureAwait(false);
+            using var validation = JsonDocument.Parse(requestText);
+            NativeRequestInput.Validate(validation.RootElement);
             body = (JsonNode.Parse(requestText) as JsonObject)
                 ?? throw new JsonException();
         }
         catch (JsonException)
         {
             return await WriteFailureAsync(output, "invalid-json").ConfigureAwait(false);
+        }
+
+        catch (NativeOperationException exception)
+        {
+            return await WriteFailureAsync(output, exception.ReasonCode, exception.ReasonCode == "resource-pressure").ConfigureAwait(false);
         }
 
         if (command.IsMutation)
@@ -180,29 +184,6 @@ public static class NativeV1Command
         AllowAutoRedirect = false,
         UseProxy = false
     };
-
-    private static async ValueTask<string?> ReadBoundedTextAsync(
-        TextReader reader,
-        int maximumUtf8Bytes,
-        CancellationToken cancellationToken)
-    {
-        var builder = new StringBuilder(Math.Min(maximumUtf8Bytes, 4096));
-        var buffer = new char[4096];
-        var utf8Bytes = 0;
-        while (true)
-        {
-            var remainingCharacters = maximumUtf8Bytes + 1 - builder.Length;
-            if (remainingCharacters <= 0) return null;
-            var read = await reader.ReadAsync(
-                buffer.AsMemory(0, Math.Min(buffer.Length, remainingCharacters)),
-                cancellationToken).ConfigureAwait(false);
-            if (read == 0) break;
-            builder.Append(buffer, 0, read);
-            utf8Bytes = Encoding.UTF8.GetByteCount(builder.ToString());
-            if (utf8Bytes > maximumUtf8Bytes) return null;
-        }
-        return builder.ToString();
-    }
 
     private static async ValueTask<string?> ReadBoundedUtf8Async(
         HttpContent content,

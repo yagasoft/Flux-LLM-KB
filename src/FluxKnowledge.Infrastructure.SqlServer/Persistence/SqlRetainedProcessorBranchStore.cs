@@ -1191,7 +1191,14 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
         return await ExecuteWithRetryAsync(async () =>
         {
         await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        var rootId = await context.SourceRevisions.AsNoTracking().Where(value => value.Id == candidate.SourceRevisionId.Value)
+            .Select(value => (Guid?)value.SourceRootId).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+        if (rootId is null) return false;
         await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken).ConfigureAwait(false);
+        await SqlPublishedPassageSelection.AcquireFenceAsync(context, cancellationToken).ConfigureAwait(false);
+        var root = await context.SourceRootConfigurations.FromSqlInterpolated($"SELECT * FROM [SourceRootConfigurations] WITH (UPDLOCK, HOLDLOCK) WHERE [Id] = {rootId.Value}")
+            .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+        if (root is null || root.State != (int)SourceRootState.Enabled) return false;
         var holding = await context.SourceActivities.FromSqlInterpolated($"""
             SELECT * FROM [SourceActivities] WITH (UPDLOCK, HOLDLOCK)
             WHERE [Id] = {candidate.LegacyActivityId}
@@ -1226,7 +1233,7 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
                   AND [ContentSha256] = {holding.InputFingerprint}
                   AND [ByteLength] = {revision.ByteLength}
                 """).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
-        if (revision is null || artifact is null)
+        if (revision is null || artifact is null || revision.SuppressedAtUtc is not null)
         {
             return false;
         }
@@ -1242,6 +1249,8 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
                   {(int)SourceActivityState.DeferredUnsupported},
                   {(int)SourceActivityState.FailedRetryable})
             """).ToListAsync(cancellationToken).ConfigureAwait(false);
+        if (RepositorySourceTextAdmission.IsAdmitted(root, revision))
+            legacyTextRoutes.RemoveAll(route => RepositorySourceTextAdmission.IsIntentional(route, revision));
         var hasConflict = legacyTextRoutes.Any(value =>
             value.State == (int)SourceActivityState.Running ||
             value.ResultingPipelineRecordId is not null) ||

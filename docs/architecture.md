@@ -64,9 +64,26 @@ reach 200 MiB without changing package security limits.
 The C# processor parses retained syntax without building or executing a project,
 restoring packages or running source generators/analyzers. Its code facts,
 relationships and diagnostics have durable completion and secret-disclosure
-guards. Other code formats require their own supported capability.
+guards. Opted-in Git sources also publish strict UTF-8 source text through a
+separate, fingerprinted text activity; only that admitted route can coexist
+with the C# branch. Other languages have searchable source text for the
+supported extensions, without implied symbol/reference analysis.
 
 ## Source lifecycle
+
+Repository sources use `CrawlMode=1` (`git-tracked`) and one configured root.
+Local, helper-disabled `git ls-files` supplies membership; retained bytes come
+from no-follow reads of tracked working files. Private untracked content,
+private/runtime/build paths and model payload locations remain excluded.
+Authored `src/**/Models/*.cs` is code, not a model payload directory. Watcher
+hints include validated linked-worktree control paths; periodic rescans handle
+missed hints and changes in tracking status. Complete, stable inventory evidence
+and the current serialised root scan lease are required for unseen suppression.
+Every Git revision convergence and scan completion also fences configuration
+and the owned lease. Active scans renew that lease; renewal loss cancels work.
+Older binaries ignore this mode: quiesce workers and pause/disable Git roots,
+drain/fence their claims, then roll back; keep those roots paused until compatible
+code returns. Existing filesystem sources retain mode zero.
 
 Local source roots must pass fixed-drive NTFS and root-overlap/path policies.
 Registration uses preview/commit fencing and maintains stable revision identity.

@@ -21,7 +21,8 @@ public sealed record SourceRootCreateRequest(
     IReadOnlyList<string> AllowedClassifications,
     TimeSpan ReconciliationCadence,
     string RequestedBy,
-    SourceRootPathValidation? PathValidation = null);
+    SourceRootPathValidation? PathValidation = null,
+    SourceDiscoveryMode DiscoveryMode = SourceDiscoveryMode.Filesystem);
 
 public sealed record SourceRootPathValidation(
     string CanonicalPath,
@@ -29,6 +30,7 @@ public sealed record SourceRootPathValidation(
     SourceRootPermissionEvidence PermissionEvidence)
 {
     public string PermissionEvidenceJson => PermissionEvidence.SanitisedJson;
+    public string? GitRepositoryIdentityFingerprint { get; init; }
 }
 
 public sealed record SourceRootPhysicalIdentity(

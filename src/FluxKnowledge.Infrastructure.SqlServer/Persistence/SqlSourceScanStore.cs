@@ -78,6 +78,15 @@ public sealed class SqlSourceScanStore(
         await context.Database.ExecuteSqlInterpolatedAsync(
             $"SELECT [Id] FROM [SourceRootConfigurations] WITH (UPDLOCK, HOLDLOCK) WHERE [Id] = {sourceRoot.Id.Value};",
             cancellationToken).ConfigureAwait(false);
+        if (sourceRoot.DiscoveryMode == SourceDiscoveryMode.GitTracked)
+        {
+            var currentRoot = await context.SourceRootConfigurations.SingleAsync(value => value.Id == sourceRoot.Id.Value, cancellationToken).ConfigureAwait(false);
+            if (currentRoot.State != (int)SourceRootState.Enabled || currentRoot.CrawlMode != (int)SourceDiscoveryMode.GitTracked ||
+                currentRoot.ConfigurationRevision != sourceRoot.ConfigurationRevision || file.GitInventory is null ||
+                file.GitInventory.RepositoryIdentity != ParseGitAdmissionIdentity(currentRoot.HealthEvidenceJson) || file.ScanOwnership is null ||
+                !await OwnsRootScanAsync(context, sourceRoot.Id.Value, file.ScanOwnership, timeProvider.GetUtcNow(), cancellationToken).ConfigureAwait(false))
+                throw new InvalidDataException("Git source configuration or inventory admission is stale.");
+        }
         var revisions = await context.SourceRevisions
             .FromSqlInterpolated($"SELECT * FROM [SourceRevisions] WITH (UPDLOCK, HOLDLOCK, INDEX([IX_SourceRevisions_SourceRootId_StableSourceIdentity_Revision])) WHERE [SourceRootId] = {sourceRoot.Id.Value} AND [StableSourceIdentity] = {file.StableSourceIdentity}")
             .OrderByDescending(value => value.Revision)
@@ -106,7 +115,7 @@ public sealed class SqlSourceScanStore(
                 CanonicalPath = file.CanonicalPath, ParentSourceRevisionId = latest?.Id,
                 Classification = file.Classification.Classification.ToString(), Extension = Path.GetExtension(file.CanonicalPath),
                 ByteLength = file.ByteLength, FileLastWriteAtUtc = file.LastWriteAtUtc, DiscoveredAtUtc = timeProvider.GetUtcNow(),
-                DiscoveryEvidenceJson = JsonSerializer.Serialize(new { relativePath = file.RelativePath, stableIdentity = file.StableSourceIdentity })
+                DiscoveryEvidenceJson = JsonSerializer.Serialize(new { relativePath = file.RelativePath, stableIdentity = file.StableSourceIdentity, gitInventory = file.GitInventory })
             };
             context.SourceRevisions.Add(revision);
             eventType = revisions.Count == 0 ? "source.added" : "source.updated";
@@ -262,10 +271,23 @@ public sealed class SqlSourceScanStore(
         await strategy.ExecuteAsync(() => SuppressUnseenOnceAsync(sourceRootId, convergedRevisionIds, cancellationToken)).ConfigureAwait(false);
     }
 
-    private async Task SuppressUnseenOnceAsync(
+    public async ValueTask<bool> SuppressUnseenAuthoritativelyAsync(
+        SourceRootConfiguration root, SourceScanRequest request, GitInventoryEvidence inventory,
+        IReadOnlySet<SourceRevisionId> convergedRevisionIds, CancellationToken cancellationToken)
+    {
+        if (request.Lease is null || request.SourceRootId != root.Id || root.DiscoveryMode != SourceDiscoveryMode.GitTracked ||
+            inventory.RepositoryIdentity != root.RepositoryIdentityFingerprint || !IsValidFingerprint(inventory.Generation)) return false;
+        await using var executionContext = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        var strategy = executionContext.Database.CreateExecutionStrategy();
+        return await strategy.ExecuteAsync(() => SuppressUnseenOnceAsync(root.Id, convergedRevisionIds, cancellationToken,
+            root, request, inventory)).ConfigureAwait(false);
+    }
+
+    private async Task<bool> SuppressUnseenOnceAsync(
         SourceRootId sourceRootId,
         IReadOnlySet<SourceRevisionId> convergedRevisionIds,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, SourceRootConfiguration? expectedRoot = null,
+        SourceScanRequest? request = null, GitInventoryEvidence? inventory = null)
     {
         await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await context.Database
@@ -277,6 +299,14 @@ public sealed class SqlSourceScanStore(
         await context.Database.ExecuteSqlInterpolatedAsync(
             $"SELECT [Id] FROM [SourceRootConfigurations] WITH (UPDLOCK, HOLDLOCK) WHERE [Id] = {sourceRootId.Value};",
             cancellationToken).ConfigureAwait(false);
+        var root = await context.SourceRootConfigurations.SingleAsync(value => value.Id == sourceRootId.Value, cancellationToken).ConfigureAwait(false);
+        if (root.CrawlMode != (int)SourceDiscoveryMode.Filesystem)
+        {
+            if (root.CrawlMode != (int)SourceDiscoveryMode.GitTracked || expectedRoot is null || request?.Lease is not { } lease || inventory is null ||
+                root.State != (int)SourceRootState.Enabled || root.ConfigurationRevision != expectedRoot.ConfigurationRevision ||
+                inventory.RepositoryIdentity != ParseGitAdmissionIdentity(root.HealthEvidenceJson)) return false;
+            if (!await OwnsRootScanAsync(context, root.Id, new(request.Id, lease), timeProvider.GetUtcNow(), cancellationToken).ConfigureAwait(false)) return false;
+        }
         var active = await context.SourceRevisions
             .FromSqlInterpolated($"SELECT * FROM [SourceRevisions] WITH (UPDLOCK, HOLDLOCK) WHERE [SourceRootId] = {sourceRootId.Value} AND [SuppressedAtUtc] IS NULL AND [OriginKind] = 0")
             .ToListAsync(cancellationToken).ConfigureAwait(false);
@@ -304,6 +334,7 @@ public sealed class SqlSourceScanStore(
             await SqlPublishedPassageSelection.AdvanceVersionAsync(context, now, cancellationToken).ConfigureAwait(false);
         await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        return true;
     }
 
     public async ValueTask RecordEnumerationEvidenceAsync(
@@ -342,6 +373,10 @@ public sealed class SqlSourceScanStore(
                 value.DueAtUtc <= nowUtc &&
                 value.SourceScanRequest.IsReleased &&
                 value.SourceScanRequest.SourceRoot.State == (int)SourceRootState.Enabled &&
+                (value.SourceScanRequest.SourceRoot.CrawlMode != (int)SourceDiscoveryMode.GitTracked ||
+                    !context.SourceScanJobs.Any(other => other.Id != value.Id &&
+                        other.SourceScanRequest.SourceRootId == value.SourceScanRequest.SourceRootId &&
+                        other.State == (int)SourceScanJobState.Running && other.LeaseExpiresAtUtc > nowUtc)) &&
                 (value.LeaseExpiresAtUtc == null || value.LeaseExpiresAtUtc <= nowUtc))
             .OrderBy(value => value.DueAtUtc).ThenBy(value => value.Id)
             .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
@@ -373,11 +408,36 @@ public sealed class SqlSourceScanStore(
                 DeserializeRules(root.AllowedClassificationsJson), TimeSpan.FromSeconds(root.ReconciliationCadenceSeconds),
                 (SourceRootState)root.State, root.ConfigurationRevision,
                 physicalIdentityFingerprint: physicalIdentityFingerprint,
-                requiresPhysicalIdentityValidation: true),
+                requiresPhysicalIdentityValidation: true, discoveryMode: (SourceDiscoveryMode)root.CrawlMode, repositoryIdentityFingerprint: ParseGitAdmissionIdentity(root.HealthEvidenceJson)),
             SourceScanRequest.Restore(
                 new SourceScanRequestId(candidate.SourceScanRequest.Id), new SourceRootId(root.Id),
                 candidate.SourceScanRequest.RequestedBy, candidate.SourceScanRequest.RequestedAtUtc,
-                (SourceScanRequestState)candidate.SourceScanRequest.State, candidate.SourceScanRequest.ReleasedAtUtc ?? nowUtc));
+                (SourceScanRequestState)candidate.SourceScanRequest.State, candidate.SourceScanRequest.ReleasedAtUtc ?? nowUtc,
+                new SourceScanLease(candidate.Id, leaseOwner, candidate.LeaseGeneration)));
+        }).ConfigureAwait(false);
+    }
+
+    public async ValueTask<bool> RenewLeaseAsync(ClaimedSourceScan claim, TimeSpan leaseDuration, CancellationToken cancellationToken)
+    {
+        if (leaseDuration <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(leaseDuration));
+        await using var executionContext = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        return await executionContext.Database.CreateExecutionStrategy().ExecuteAsync(async () =>
+        {
+            await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+            await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken).ConfigureAwait(false);
+            var root = await context.SourceRootConfigurations.FromSqlInterpolated(
+                $"SELECT * FROM [SourceRootConfigurations] WITH (UPDLOCK, HOLDLOCK) WHERE [Id] = {claim.SourceRoot.Id.Value}")
+                .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+            var now = timeProvider.GetUtcNow();
+            if (root is null || root.State != (int)SourceRootState.Enabled || root.CrawlMode != (int)SourceDiscoveryMode.GitTracked ||
+                root.ConfigurationRevision != claim.SourceRoot.ConfigurationRevision ||
+                !await OwnsRootScanAsync(context, root.Id, new(claim.ScanRequest.Id,
+                    new(claim.ControlJobId, claim.LeaseOwner, claim.LeaseGeneration)), now, cancellationToken).ConfigureAwait(false)) return false;
+            var job = await context.SourceScanJobs.SingleAsync(value => value.Id == claim.ControlJobId, cancellationToken).ConfigureAwait(false);
+            job.LeaseExpiresAtUtc = now.Add(leaseDuration); job.UpdatedAtUtc = now;
+            await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            return true;
         }).ConfigureAwait(false);
     }
 
@@ -387,16 +447,31 @@ public sealed class SqlSourceScanStore(
         string? failureReason,
         CancellationToken cancellationToken)
     {
+        await using var executionContext = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        var strategy = executionContext.Database.CreateExecutionStrategy();
+        await strategy.ExecuteAsync(async () =>
+        {
         await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken).ConfigureAwait(false);
+        var root = await context.SourceRootConfigurations.FromSqlInterpolated(
+            $"SELECT * FROM [SourceRootConfigurations] WITH (UPDLOCK, HOLDLOCK) WHERE [Id] = {claim.SourceRoot.Id.Value}")
+            .SingleAsync(cancellationToken).ConfigureAwait(false);
+        var now = timeProvider.GetUtcNow();
+        if (claim.SourceRoot.DiscoveryMode == SourceDiscoveryMode.GitTracked &&
+            (root.State != (int)SourceRootState.Enabled || root.CrawlMode != (int)SourceDiscoveryMode.GitTracked ||
+             root.ConfigurationRevision != claim.SourceRoot.ConfigurationRevision ||
+             !await OwnsRootScanAsync(context, root.Id, new(claim.ScanRequest.Id,
+                 new(claim.ControlJobId, claim.LeaseOwner, claim.LeaseGeneration)), now, cancellationToken).ConfigureAwait(false)))
+        {
+            throw new InvalidOperationException("The Git source scan completion no longer owns current root authority.");
+        }
         var job = await context.SourceScanJobs.SingleAsync(value => value.Id == claim.ControlJobId, cancellationToken).ConfigureAwait(false);
         if (job.State != (int)SourceScanJobState.Running || job.LeaseGeneration != claim.LeaseGeneration ||
-            !string.Equals(job.LeaseOwner, claim.LeaseOwner, StringComparison.Ordinal))
+            job.SourceScanRequestId != claim.ScanRequest.Id.Value || !string.Equals(job.LeaseOwner, claim.LeaseOwner, StringComparison.Ordinal))
         {
             throw new InvalidOperationException("The source scan control lease is no longer owned by this worker.");
         }
         var request = await context.SourceScanRequests.SingleAsync(value => value.Id == claim.ScanRequest.Id.Value, cancellationToken).ConfigureAwait(false);
-        var root = await context.SourceRootConfigurations.SingleAsync(value => value.Id == claim.SourceRoot.Id.Value, cancellationToken).ConfigureAwait(false);
-        var now = timeProvider.GetUtcNow();
         job.State = failureReason is null ? (int)SourceScanJobState.Completed : (int)SourceScanJobState.Pending;
         job.Reason = failureReason;
         job.LeaseOwner = null;
@@ -415,6 +490,8 @@ public sealed class SqlSourceScanStore(
             job.DueAtUtc = now.AddMinutes(1);
         }
         await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        }).ConfigureAwait(false);
     }
 
     private static async Task CreateDueRecurringRequestsAsync(
@@ -492,6 +569,32 @@ public sealed class SqlSourceScanStore(
             cancellationToken);
 
     private static IReadOnlyList<string> DeserializeRules(string json) => JsonSerializer.Deserialize<string[]>(json) ?? [];
+
+    private static async Task<bool> OwnsRootScanAsync(FluxKnowledgeDbContext context, Guid rootId,
+        SourceScanOwnership ownership, DateTimeOffset now, CancellationToken token)
+    {
+        // Caller holds the root lock used by claim creation/reclaim: no second job can become authoritative here.
+        var lease = ownership.Lease;
+        var job = await context.SourceScanJobs.FromSqlInterpolated($"SELECT * FROM [SourceScanJobs] WITH (UPDLOCK, HOLDLOCK) WHERE [Id] = {lease.JobId}")
+            .SingleOrDefaultAsync(token).ConfigureAwait(false);
+        return job is not null && job.SourceScanRequestId == ownership.RequestId.Value &&
+            job.State == (int)SourceScanJobState.Running && job.LeaseOwner == lease.Owner && job.LeaseGeneration == lease.Generation &&
+            job.LeaseExpiresAtUtc > now && await context.SourceScanRequests.AnyAsync(value => value.Id == job.SourceScanRequestId &&
+                value.SourceRootId == rootId && value.State == (int)SourceScanRequestState.Running && value.IsReleased, token).ConfigureAwait(false) &&
+            !await context.SourceScanJobs.AnyAsync(value => value.Id != job.Id && value.SourceScanRequest.SourceRootId == rootId &&
+                value.State == (int)SourceScanJobState.Running && value.LeaseExpiresAtUtc > now, token).ConfigureAwait(false);
+    }
+
+    public static string? ParseGitAdmissionIdentity(string? healthEvidenceJson)
+    {
+        try
+        {
+            var evidence = JsonNode.Parse(healthEvidenceJson ?? "{}") as JsonObject;
+            var fingerprint = evidence?["gitRepositoryIdentityFingerprint"]?.GetValue<string>();
+            return fingerprint is not null && IsValidFingerprint(fingerprint) ? fingerprint : null;
+        }
+        catch (Exception exception) when (exception is JsonException or InvalidOperationException) { return null; }
+    }
 
     public static string? ParseAdmissionIdentityFingerprint(string? healthEvidenceJson)
     {

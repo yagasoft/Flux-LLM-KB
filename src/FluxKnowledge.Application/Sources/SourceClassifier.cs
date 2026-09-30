@@ -22,6 +22,8 @@ public sealed record SourceClassificationResult(
 public static class SourceClassifier
 {
     public const long MaximumAcceptedTextBytes = 16L * 1024 * 1024;
+    public static bool IsSourceTextExtension(string path) => Path.GetExtension(path).ToLowerInvariant() is
+        ".cs" or ".ps1" or ".psm1" or ".py" or ".js" or ".sql" or ".razor" or ".css" or ".csproj" or ".props" or ".slnx";
 
     private static readonly HashSet<string> TextExtensions = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -40,7 +42,8 @@ public static class SourceClassifier
         ReadOnlySpan<byte> bytes,
         long declaredByteLength,
         bool hasFullBoundedBuffer = true,
-        long maximumAcceptedTextBytes = MaximumAcceptedTextBytes)
+        long maximumAcceptedTextBytes = MaximumAcceptedTextBytes,
+        bool indexSourceText = false)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(fileName);
         if (declaredByteLength < 0)
@@ -68,7 +71,7 @@ public static class SourceClassifier
             return DeferredPolicy("File bytes contain binary control values and are not accepted as text.");
         }
 
-        if (string.Equals(extension, ".cs", StringComparison.OrdinalIgnoreCase))
+        if (string.Equals(extension, ".cs", StringComparison.OrdinalIgnoreCase) || indexSourceText && IsSourceTextExtension(fileName))
         {
             if (declaredByteLength > maximumAcceptedTextBytes)
             {

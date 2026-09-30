@@ -34,7 +34,8 @@ public static class NativeV1Endpoints
     {
         try
         {
-            var arguments = await ReadBodyAsync(request, cancellationToken).ConfigureAwait(false);
+            using var document = await ReadBodyAsync(request, cancellationToken).ConfigureAwait(false);
+            var arguments = document.RootElement;
             var result = await facade.ExecuteQueryAsync(Family(toolName), mapper.MapQuery(toolName, arguments), cancellationToken).ConfigureAwait(false);
             return NativeResult(McpResultFactory.NativeSuccess(result), maximumBytes: toolName is "corpus.search" or "corpus.read" ? 256 * 1024 : NativeV1ContractLimits.MaximumResponseBytes);
         }
@@ -58,7 +59,8 @@ public static class NativeV1Endpoints
         if (!LocalOperatorLoopbackGate.IsDirectLoopback(context)) return Failure("loopback-required", StatusCodes.Status403Forbidden);
         try
         {
-            var arguments = await ReadBodyAsync(context.Request, cancellationToken).ConfigureAwait(false);
+            using var document = await ReadBodyAsync(context.Request, cancellationToken).ConfigureAwait(false);
+            var arguments = document.RootElement;
             var command = mapper.MapAction(toolName, arguments);
             var family = mapper.ActionFamily(toolName, command);
             if (mode == "preview")
@@ -78,19 +80,10 @@ public static class NativeV1Endpoints
         catch (Exception exception) { return Failure(exception); }
     }
 
-    private static async Task<JsonElement> ReadBodyAsync(HttpRequest request, CancellationToken cancellationToken)
+    private static async Task<JsonDocument> ReadBodyAsync(HttpRequest request, CancellationToken cancellationToken)
     {
-        if (request.ContentLength is > NativeV1RequestMapper.MaximumBodyBytes) throw new NativeOperationException("body-too-large");
-        try
-        {
-            await using var bounded = new BoundedReadStream(request.Body, NativeV1RequestMapper.MaximumBodyBytes);
-            using var document = await JsonDocument.ParseAsync(bounded, cancellationToken: cancellationToken).ConfigureAwait(false);
-            return document.RootElement.Clone();
-        }
-        catch (JsonException)
-        {
-            throw new NativeOperationException("invalid-json");
-        }
+        try { return await NativeRequestInput.ReadJsonAsync(request.Body, cancellationToken).ConfigureAwait(false); }
+        catch (JsonException) { throw new NativeOperationException("invalid-json"); }
     }
 
     private static IResult Failure(Exception exception)
@@ -119,7 +112,6 @@ public static class NativeV1Endpoints
     {
         { Retryable: true } => StatusCodes.Status503ServiceUnavailable,
         { ReasonCode: "loopback-required" } => StatusCodes.Status403Forbidden,
-        { ReasonCode: "body-too-large" } => StatusCodes.Status413PayloadTooLarge,
         { ReasonCode: "response-too-large" } => StatusCodes.Status500InternalServerError,
         { ReasonCode: "invalid-json" or "invalid-request" or "invalid-query" or "invalid-limit" or "cursor-invalid" or "confirmation-required" or "idempotency-key-required" or "invalid-mode" } => StatusCodes.Status400BadRequest,
         _ => StatusCodes.Status409Conflict
@@ -136,41 +128,4 @@ public static class NativeV1Endpoints
         _ => throw new NativeOperationException("tool-not-allowed")
     };
 
-    private sealed class BoundedReadStream(Stream inner, int maximumBytes) : Stream
-    {
-        private int _bytesRead;
-        public override bool CanRead => inner.CanRead;
-        public override bool CanSeek => false;
-        public override bool CanWrite => false;
-        public override long Length => throw new NotSupportedException();
-        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
-        public override void Flush() => throw new NotSupportedException();
-        public override int Read(byte[] buffer, int offset, int count) => Count(inner.Read(buffer, offset, Limit(count)));
-        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default) =>
-            Count(await inner.ReadAsync(buffer[..Limit(buffer.Length)], cancellationToken).ConfigureAwait(false));
-        public override async Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken) =>
-            Count(await inner.ReadAsync(buffer, offset, Limit(count), cancellationToken).ConfigureAwait(false));
-        public override int ReadByte()
-        {
-            var value = inner.ReadByte();
-            if (value >= 0) Count(1);
-            return value;
-        }
-        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
-        public override void SetLength(long value) => throw new NotSupportedException();
-        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
-
-        private int Limit(int requested)
-        {
-            if (requested == 0) return 0;
-            return Math.Min(requested, maximumBytes + 1 - _bytesRead);
-        }
-
-        private int Count(int read)
-        {
-            _bytesRead += read;
-            if (_bytesRead > maximumBytes) throw new NativeOperationException("body-too-large");
-            return read;
-        }
-    }
 }

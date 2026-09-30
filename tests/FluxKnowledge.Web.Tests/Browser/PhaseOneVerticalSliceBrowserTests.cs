@@ -4,6 +4,7 @@ using FluxKnowledge.Application.Contracts;
 using FluxKnowledge.Application.Operations;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Integration.Tests.Support;
+using FluxKnowledge.Web.NativeV1;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
 using FluxKnowledge.Web;
 using FluxKnowledge.Web.Components;
@@ -188,6 +189,7 @@ public sealed class PhaseOneVerticalSliceBrowserTests
             configureServices?.Invoke(builder.Services);
 
             var application = builder.Build();
+            application.UseNativeRequestResources();
             application.UseLocalOperatorLoopbackGate();
             application.UseAntiforgery();
             application.MapStaticAssets();
@@ -199,6 +201,7 @@ public sealed class PhaseOneVerticalSliceBrowserTests
             application.MapFluxKnowledgeLocalRetainedDetails();
             application.MapFluxKnowledgeLocalRetainedCsharpCode();
             application.MapMcp("/mcp");
+            application.MapFluxKnowledgeNativeV1();
             await application.StartAsync();
             return new BrowserHost(application, new Uri(application.Urls.Single()));
         }

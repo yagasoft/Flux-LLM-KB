@@ -2,6 +2,8 @@ using FluxKnowledge.Domain.Common;
 
 namespace FluxKnowledge.Domain.Sources;
 
+public sealed record SourceScanLease(Guid JobId, string Owner, long Generation);
+
 public sealed record SourceScanRequestId(Guid Value)
 {
     public static SourceScanRequestId New() => new(Guid.NewGuid());
@@ -22,6 +24,8 @@ public sealed record SourceScanRequest
     public bool IsReleased => State != SourceScanRequestState.Held;
 
     public DateTimeOffset? ReleasedAtUtc { get; private init; }
+
+    public SourceScanLease? Lease { get; private init; }
 
     public static SourceScanRequest CreateHeld(SourceRootId sourceRootId, string requestedBy)
     {
@@ -52,7 +56,8 @@ public sealed record SourceScanRequest
         string requestedBy,
         DateTimeOffset requestedAtUtc,
         SourceScanRequestState state,
-        DateTimeOffset? releasedAtUtc)
+        DateTimeOffset? releasedAtUtc,
+        SourceScanLease? lease = null)
     {
         ArgumentNullException.ThrowIfNull(id);
         ArgumentNullException.ThrowIfNull(sourceRootId);
@@ -67,7 +72,7 @@ public sealed record SourceScanRequest
             throw new DomainInvariantException("A released source scan request requires a release time.");
         }
 
-        return new SourceScanRequest(id, sourceRootId, requestedBy, requestedAtUtc, state, releasedAtUtc);
+        return new SourceScanRequest(id, sourceRootId, requestedBy, requestedAtUtc, state, releasedAtUtc) { Lease = lease };
     }
 
     private SourceScanRequest(

@@ -22,7 +22,7 @@ public sealed class SqlNativeCorpusActionStore(
         if (action == "root_create")
         {
             var admission = RootAdmission(canonicalPayload);
-            return [new NativeTargetVersion(CanonicalPathTargetId(admission.CanonicalPath), "absent")];
+            return [new NativeTargetVersion(CanonicalPathTargetId(admission.CanonicalPath) + (admission.GitRepositoryIdentityFingerprint is null ? "" : ":git:" + admission.GitRepositoryIdentityFingerprint), "absent")];
         }
         var id = RequiredGuid(canonicalPayload, action == "job_retry" ? "jobId" : "rootId");
         await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
@@ -66,7 +66,10 @@ public sealed class SqlNativeCorpusActionStore(
         if (!root.TryGetProperty("path", out var path) || string.IsNullOrWhiteSpace(path.GetString()) || !root.TryGetProperty("displayName", out var displayName) || string.IsNullOrWhiteSpace(displayName.GetString())) throw new NativeOperationException("invalid-payload");
         try
         {
-            return sourceRootPathPolicy.ValidateAndCanonicalise(new SourceRootCreateRequest(path.GetString()!, displayName.GetString()!, OptionalBool(root, "recursive", true), [], [], OptionalBool(root, "followLinks", false), OptionalLong(root, "maximumFileBytes", 16L * 1024 * 1024), [], TimeSpan.FromSeconds(OptionalLong(root, "reconciliationSeconds", 900)), "native-v1"));
+            var request = NativeSourceRootCreation.Parse(root, "native-v1");
+            _ = SourceRootConfiguration.Create(Path.GetFullPath(request.FullPath), request.DisplayName, request.Recursive, request.FollowLinks,
+                request.MaximumFileBytes, request.IncludePatterns, request.ExcludePatterns, request.AllowedClassifications, request.ReconciliationCadence, request.DiscoveryMode);
+            return sourceRootPathPolicy.ValidateAndCanonicalise(request);
         }
         catch (Exception exception) when (exception is ArgumentException or InvalidOperationException or UnauthorizedAccessException or IOException or DirectoryNotFoundException)
         {
@@ -149,7 +152,7 @@ public sealed class SqlNativeCorpusActionStore(
             if (root.ValueKind != JsonValueKind.Object) throw new NativeOperationException("invalid-payload");
             var allowed = action switch
             {
-                "root_create" => new[] { "path", "displayName", "recursive", "followLinks", "maximumFileBytes", "reconciliationSeconds" },
+                "root_create" => new[] { "path", "displayName", "recursive", "followLinks", "maximumFileBytes", "reconciliationSeconds", "discoveryMode", "indexSourceText", "includePatterns", "excludePatterns" },
                 "root_update" => new[] { "rootId", "displayName" },
                 "root_disable" or "root_pause" or "root_resume" or "root_delete" or "source_sync" => new[] { "rootId" },
                 "watcher_set" => new[] { "rootId", "enabled" },
@@ -163,6 +166,7 @@ public sealed class SqlNativeCorpusActionStore(
                     _ = RequiredString(root, "path", 2048); RequireSafeDisplayName(RequiredString(root, "displayName", 256));
                     _ = OptionalBool(root, "recursive", true); _ = OptionalBool(root, "followLinks", false);
                     _ = OptionalLong(root, "maximumFileBytes", 16L * 1024 * 1024); _ = OptionalLong(root, "reconciliationSeconds", 900);
+                    _ = NativeSourceRootCreation.Parse(root, "native-v1");
                     break;
                 case "root_update": _ = RequiredGuid(root, "rootId"); RequireSafeDisplayName(RequiredString(root, "displayName", 256)); break;
                 case "root_disable": case "root_pause": case "root_resume": case "root_delete": case "source_sync": _ = RequiredGuid(root, "rootId"); break;

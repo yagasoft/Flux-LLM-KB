@@ -5,7 +5,6 @@ namespace FluxKnowledge.Application.IntegrationV1;
 /// <summary>Canonical, transport-neutral hostile-input and envelope bounds for native v1.</summary>
 public static class NativeV1ContractLimits
 {
-    public const int MaximumRequestBytes = 32 * 1024;
     public const int MaximumKnowledgeQueryCharacters = 2048;
     public const int MaximumGraphNodeCharacters = 2048;
     public const int MaximumCodeQueryCharacters = 2048;

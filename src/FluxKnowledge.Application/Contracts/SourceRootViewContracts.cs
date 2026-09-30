@@ -9,7 +9,9 @@ public sealed record SourceRootDraft(
     IReadOnlyList<string> IncludePatterns,
     IReadOnlyList<string> ExcludePatterns,
     long MaximumFileBytes,
-    string RequestedBy)
+    string RequestedBy,
+    FluxKnowledge.Domain.Sources.SourceDiscoveryMode DiscoveryMode = FluxKnowledge.Domain.Sources.SourceDiscoveryMode.Filesystem,
+    bool IndexSourceText = false)
 {
     public static SourceRootDraft Empty { get; } = new(
         string.Empty,

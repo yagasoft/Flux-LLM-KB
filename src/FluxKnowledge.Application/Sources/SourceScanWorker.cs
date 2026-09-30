@@ -31,8 +31,10 @@ public sealed class SourceScanWorker(
         var indexed = 0;
         var deferred = 0;
         var blocked = 0;
-        await foreach (var file in enumerator.EnumerateAsync(sourceRoot, cancellationToken).ConfigureAwait(false))
+        await foreach (var discoveredFile in enumerator.EnumerateAsync(sourceRoot, cancellationToken).ConfigureAwait(false))
         {
+            var file = sourceRoot.DiscoveryMode == SourceDiscoveryMode.GitTracked && scanRequest.Lease is { } lease
+                ? discoveredFile with { ScanOwnership = new(scanRequest.Id, lease) } : discoveredFile;
             cancellationToken.ThrowIfCancellationRequested();
             discovered++;
             SourceRevisionId revisionId;
@@ -96,7 +98,7 @@ public sealed class SourceScanWorker(
                         SourceActivityState.DeferredUnsupported),
                     cancellationToken).ConfigureAwait(false);
                 deferred++;
-                continue;
+                if (!RepositorySourceTextPolicy.IsEnabled(sourceRoot, file.RelativePath)) continue;
             }
             if (acceptedByRootPolicy)
             {
@@ -105,10 +107,11 @@ public sealed class SourceScanWorker(
                         revisionId,
                         SourceActivityKind.TextExtraction,
                         ExecutionClass.InProcess,
-                        TextProcessorVersion,
+                        RepositorySourceTextPolicy.IsEnabled(sourceRoot, file.RelativePath) ? RepositorySourceTextPolicy.ProcessorVersion : TextProcessorVersion,
                         file.ContentSha256,
                         RequiredCapability: null,
-                        Reason: null),
+                        Reason: null,
+                        DescriptorFingerprint: RepositorySourceTextPolicy.IsEnabled(sourceRoot, file.RelativePath) ? RepositorySourceTextPolicy.DescriptorFingerprint : null),
                     cancellationToken).ConfigureAwait(false);
                 if (retainedTextActivityPlanner is not null)
                 {
@@ -153,7 +156,13 @@ public sealed class SourceScanWorker(
         await scanStore.RecordEnumerationEvidenceAsync(scanRequest.Id, evidence, cancellationToken).ConfigureAwait(false);
         if (evidence.Count == 0)
         {
-            await scanStore.SuppressUnseenAsync(sourceRoot.Id, convergedRevisionIds, cancellationToken).ConfigureAwait(false);
+            if (sourceRoot.DiscoveryMode == SourceDiscoveryMode.GitTracked)
+            {
+                if (enumerator is IAuthoritativeSourceFileEnumerator authoritative && authoritative.LastInventory is { } inventory &&
+                    await authoritative.ValidateInventoryAsync(sourceRoot, cancellationToken).ConfigureAwait(false))
+                    await scanStore.SuppressUnseenAuthoritativelyAsync(sourceRoot, scanRequest, inventory, convergedRevisionIds, cancellationToken).ConfigureAwait(false);
+            }
+            else await scanStore.SuppressUnseenAsync(sourceRoot.Id, convergedRevisionIds, cancellationToken).ConfigureAwait(false);
         }
         return new SourceScanResult(sourceRoot.Id, scanRequest.Id, discovered, indexed, deferred, blocked);
     }

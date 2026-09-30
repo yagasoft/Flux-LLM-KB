@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using System.Data.Common;
 using System.Diagnostics;
 using FluxKnowledge.Application.Pipeline;
@@ -253,6 +254,80 @@ public sealed class RetainedCsharpCodeLifecycleCorrectionIntegrationTests(
         Assert.Single(await verification.AuditEvents.Where(value =>
             value.SourceActivityId == seeded.HoldingActivityId &&
             value.EventType == "retained_processor.csharp_replan_conflict").ToListAsync());
+    }
+
+    [NativeSqlServerTheory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Csharp_replan_preserves_the_holding_route_while_paused_or_suppressed(bool pauseRoot)
+    {
+        var seeded = await SeedHoldingRouteAsync("csharp-code-writer-not-ready",
+            RetainedCsharpCodeProcessor.ProcessorKind, RetainedCsharpCodeProcessor.ProcessorVersion, includeLegacyTextRoute: false);
+        var store = Store();
+        var candidate = Assert.Single(await store.ReadPromotionCandidatesAsync(16, RetainedCsharpCodeProcessor.Capability, default),
+            value => value.LegacyActivityId == seeded.HoldingActivityId);
+        await using (var setup = Context())
+        {
+            var revision = await setup.SourceRevisions.SingleAsync(value => value.Id == seeded.RevisionId);
+            if (pauseRoot) (await setup.SourceRootConfigurations.FindAsync(revision.SourceRootId))!.State = (int)SourceRootState.Paused;
+            else revision.SuppressedAtUtc = DateTimeOffset.UtcNow;
+            await setup.SaveChangesAsync();
+        }
+        Assert.False(await store.PromoteAsync(candidate, RetainedCsharpCodeProcessor.Capability, default));
+        await using (var verify = Context())
+        {
+            var holding = await verify.SourceActivities.SingleAsync(value => value.Id == seeded.HoldingActivityId);
+            Assert.Equal("csharp-code-writer-not-ready", holding.Reason);
+            Assert.Equal((int)SourceActivityState.DeferredUnsupported, holding.State);
+            Assert.False(await verify.SourceProcessorBranches.AnyAsync(value => value.SourceRevisionId == seeded.RevisionId));
+            var revision = await verify.SourceRevisions.SingleAsync(value => value.Id == seeded.RevisionId);
+            (await verify.SourceRootConfigurations.FindAsync(revision.SourceRootId))!.State = (int)SourceRootState.Enabled;
+            revision.SuppressedAtUtc = null;
+            await verify.SaveChangesAsync();
+        }
+        Assert.True(await store.PromoteAsync(candidate, RetainedCsharpCodeProcessor.Capability, default));
+        await using var cleanup = Context();
+        var sourceRootId = await cleanup.SourceRevisions.Where(value => value.Id == seeded.RevisionId).Select(value => value.SourceRootId).SingleAsync();
+        (await cleanup.SourceRootConfigurations.FindAsync(sourceRootId))!.State = (int)SourceRootState.Paused;
+        await cleanup.SaveChangesAsync();
+    }
+
+    [NativeSqlServerTheory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Intentional_repository_text_and_Csharp_routes_coexist_in_either_order_and_replay(bool codeFirst)
+    {
+        var seeded = await SeedHoldingRouteAsync("csharp-code-writer-not-ready",
+            RetainedCsharpCodeProcessor.ProcessorKind, RetainedCsharpCodeProcessor.ProcessorVersion, includeLegacyTextRoute: false, repositoryText: true);
+        SourceActivity text;
+        await using (var setup = Context())
+        {
+            var revision = await setup.SourceRevisions.SingleAsync(value => value.Id == seeded.RevisionId);
+            text = SourceActivity.Create(new(seeded.RevisionId), SourceActivityKind.TextExtraction, ExecutionClass.InProcess,
+                RepositorySourceTextPolicy.ProcessorVersion, revision.ContentSha256, null, null,
+                descriptorFingerprint: RepositorySourceTextPolicy.DescriptorFingerprint);
+            setup.SourceActivities.Add(new SourceActivityEntity {
+                Id = text.Id.Value, SourceRevisionId = revision.Id, ActivityKind = (int)text.Kind, ExecutionClass = (int)text.ExecutionClass,
+                ProcessorVersion = text.ProcessorVersion, InputFingerprint = text.InputFingerprint, DescriptorFingerprint = text.DescriptorFingerprint,
+                State = (int)SourceActivityState.Pending, CreatedAtUtc = DateTimeOffset.UtcNow, UpdatedAtUtc = DateTimeOffset.UtcNow });
+            await setup.SaveChangesAsync();
+        }
+        var store = Store(); var registration = new SqlRetainedTextRegistrationStore(SqlTestData.CreateFactory(fixture), TimeProvider.System);
+        var candidate = Assert.Single(await store.ReadPromotionCandidatesAsync(16, RetainedCsharpCodeProcessor.Capability, default),
+            value => value.LegacyActivityId == seeded.HoldingActivityId);
+        if (codeFirst) Assert.True(await store.PromoteAsync(candidate, RetainedCsharpCodeProcessor.Capability, default));
+        Assert.True(await registration.RegisterAsync(text, default));
+        if (!codeFirst) Assert.True(await store.PromoteAsync(candidate, RetainedCsharpCodeProcessor.Capability, default));
+        Assert.False(await registration.RegisterAsync(text, default));
+        Assert.False(await store.PromoteAsync(candidate, RetainedCsharpCodeProcessor.Capability, default));
+        await using var verify = Context();
+        Assert.Single(await verify.PipelineRecords.Where(value => value.SourceRevisionId == seeded.RevisionId).ToListAsync());
+        Assert.Single(await verify.SourceProcessorBranches.Where(value => value.SourceRevisionId == seeded.RevisionId).ToListAsync());
+        Assert.NotNull((await verify.SourceActivities.FindAsync(text.Id.Value))!.ResultingPipelineRecordId);
+        Assert.Equal((int)SourceActivityState.CancelledSuperseded, (await verify.SourceActivities.FindAsync(seeded.HoldingActivityId))!.State);
+        var sourceRootId = await verify.SourceRevisions.Where(value => value.Id == seeded.RevisionId).Select(value => value.SourceRootId).SingleAsync();
+        (await verify.SourceRootConfigurations.FindAsync(sourceRootId))!.State = (int)SourceRootState.Paused;
+        await verify.SaveChangesAsync();
     }
 
     [NativeSqlServerFact]
@@ -1265,7 +1340,8 @@ public sealed class RetainedCsharpCodeLifecycleCorrectionIntegrationTests(
         SourceActivityKind holdingKind = SourceActivityKind.DocumentParsing,
         string? holdingDescriptor = null,
         string extension = ".cs",
-        string classification = "AcceptedUtf8Text")
+        string classification = "AcceptedUtf8Text",
+        bool repositoryText = false)
     {
         var bytes = Encoding.UTF8.GetBytes("class Replan { }");
         var hash = Sha256(bytes);
@@ -1275,15 +1351,25 @@ public sealed class RetainedCsharpCodeLifecycleCorrectionIntegrationTests(
         var textId = Guid.NewGuid();
         var now = DateTimeOffset.UtcNow;
         await using var context = Context();
-        context.SourceRootConfigurations.Add(Root(rootId, now));
-        context.SourceRevisions.Add(Revision(
+        var root = Root(rootId, now);
+        var revision = Revision(
             rootId,
             revisionId,
             hash,
             bytes.Length,
             now,
             extension: extension,
-            classification: classification));
+            classification: classification);
+        if (repositoryText)
+        {
+            var identity = new string('a', 64);
+            root.CrawlMode = (int)SourceDiscoveryMode.GitTracked;
+            root.AllowedClassificationsJson = "[\"text/plain\",\"text/x-source-code\"]";
+            root.HealthEvidenceJson = JsonSerializer.Serialize(new { gitRepositoryIdentityFingerprint = identity });
+            revision.DiscoveryEvidenceJson = JsonSerializer.Serialize(new { gitInventory = new GitInventoryEvidence(identity, new string('b', 64), 1, 0) });
+        }
+        context.SourceRootConfigurations.Add(root);
+        context.SourceRevisions.Add(revision);
         context.SourceArtifacts.Add(Artifact(revisionId, hash, bytes.Length, now));
         context.SourceActivities.Add(new SourceActivityEntity
         {

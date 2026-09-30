@@ -12,6 +12,7 @@
 
 <section aria-labelledby="sources-heading">
     <h1 id="sources-heading">Sources and indexing</h1>
+    <RepositorySourceForm />
     <p role="status" aria-live="polite">@_statusMessage</p>
     @if (PageState.Roots.Count == 0 && !_showAddFolder)
     {
@@ -164,9 +165,9 @@
                 _draft.ExcludePatterns,
                 FollowLinks: false,
                 _draft.MaximumFileBytes,
-                ["text/plain"],
+                _draft.IndexSourceText ? ["text/plain", "text/x-source-code"] : ["text/plain"],
                 TimeSpan.FromMinutes(15),
-                _draft.RequestedBy);
+                _draft.RequestedBy, DiscoveryMode: _draft.DiscoveryMode);
             var receipt = await SourceRootService.CreateAsync(request, intent, _stopping.Token);
             _savedRootId = receipt.SourceRootId.Value;
             _receiptMessage = receipt.IsHeld

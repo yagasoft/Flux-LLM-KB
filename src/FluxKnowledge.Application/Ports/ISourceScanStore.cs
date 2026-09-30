@@ -23,6 +23,11 @@ public interface ISourceScanStore
         IReadOnlySet<SourceRevisionId> convergedRevisionIds,
         CancellationToken cancellationToken);
 
+    // Implementations without transactional lease/configuration fencing must refuse Git deletion reconciliation.
+    ValueTask<bool> SuppressUnseenAuthoritativelyAsync(
+        SourceRootConfiguration root, SourceScanRequest request, GitInventoryEvidence inventory,
+        IReadOnlySet<SourceRevisionId> convergedRevisionIds, CancellationToken cancellationToken) => ValueTask.FromResult(false);
+
     ValueTask RecordEnumerationEvidenceAsync(
         SourceScanRequestId sourceScanRequestId,
         IReadOnlyList<SourceEnumerationEvidence> evidence,

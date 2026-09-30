@@ -131,7 +131,7 @@ public sealed class NativeCodexHookEndpointTests
     public async Task Oversized_hook_body_returns_a_fail_open_Codex_envelope()
     {
         await using var host = await StartAsync();
-        var body = "{\"prompt\":\"" + new string('x', NativeV1ContractLimits.MaximumRequestBytes) + "\"}";
+        var body = "{\"prompt\":\"" + new string('x', 64 * 1024) + "\"}";
         using var response = await host.Client.PostAsync(
             "/native/v1/codex/hooks/UserPromptSubmit",
             new StringContent(body, System.Text.Encoding.UTF8, "application/json"));

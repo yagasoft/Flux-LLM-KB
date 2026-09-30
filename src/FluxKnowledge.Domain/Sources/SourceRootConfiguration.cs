@@ -2,6 +2,8 @@ using FluxKnowledge.Domain.Common;
 
 namespace FluxKnowledge.Domain.Sources;
 
+public enum SourceDiscoveryMode { Filesystem = 0, GitTracked = 1 }
+
 public sealed record SourceRootId(Guid Value)
 {
     public static SourceRootId New() => new(Guid.NewGuid());
@@ -18,6 +20,10 @@ public sealed record SourceRootConfiguration
     public bool Recursive { get; private init; }
 
     public bool FollowLinks { get; private init; }
+
+    public SourceDiscoveryMode DiscoveryMode { get; private init; }
+
+    public bool IndexSourceText => AllowedClassifications.Contains("text/x-source-code", StringComparer.OrdinalIgnoreCase);
 
     public long MaximumFileBytes { get; private init; }
 
@@ -40,6 +46,7 @@ public sealed record SourceRootConfiguration
 
     /// <summary>Persisted roots are admitted only with a durable physical identity.</summary>
     public bool RequiresPhysicalIdentityValidation { get; private init; }
+    public string? RepositoryIdentityFingerprint { get; private init; }
 
     public static SourceRootConfiguration Create(
         string canonicalPath,
@@ -50,7 +57,9 @@ public sealed record SourceRootConfiguration
         IReadOnlyList<string>? includePatterns = null,
         IReadOnlyList<string>? excludePatterns = null,
         IReadOnlyList<string>? allowedClassifications = null,
-        TimeSpan? reconciliationCadence = null)
+        TimeSpan? reconciliationCadence = null,
+        SourceDiscoveryMode discoveryMode = SourceDiscoveryMode.Filesystem,
+        string? repositoryIdentityFingerprint = null)
     {
         EnsureCanonicalPath(canonicalPath);
         ArgumentException.ThrowIfNullOrWhiteSpace(displayName);
@@ -62,6 +71,12 @@ public sealed record SourceRootConfiguration
         var effectiveIncludePatterns = CopyRules(includePatterns, nameof(includePatterns));
         var effectiveExcludePatterns = CopyRules(excludePatterns, nameof(excludePatterns));
         var effectiveAllowedClassifications = CopyRules(allowedClassifications, nameof(allowedClassifications));
+        if (!Enum.IsDefined(discoveryMode) ||
+            effectiveAllowedClassifications.Contains("text/x-source-code", StringComparer.OrdinalIgnoreCase) && discoveryMode != SourceDiscoveryMode.GitTracked ||
+            discoveryMode == SourceDiscoveryMode.GitTracked && (!recursive || followLinks))
+        {
+            throw new DomainInvariantException("Git source discovery requires a recognised mode, recursive scanning and no links; source text requires Git discovery.");
+        }
         var effectiveReconciliationCadence = reconciliationCadence ?? TimeSpan.FromMinutes(15);
         if (effectiveReconciliationCadence <= TimeSpan.Zero)
         {
@@ -81,7 +96,7 @@ public sealed record SourceRootConfiguration
             effectiveReconciliationCadence,
             SourceRootState.Enabled,
             1,
-            null);
+            null) { DiscoveryMode = discoveryMode, RepositoryIdentityFingerprint = repositoryIdentityFingerprint };
     }
 
     public SourceRootConfiguration Pause(string reason) => Transition(SourceRootState.Enabled, SourceRootState.Paused, reason);
@@ -103,7 +118,9 @@ public sealed record SourceRootConfiguration
         long configurationRevision,
         string? stateReason = null,
         string? physicalIdentityFingerprint = null,
-        bool requiresPhysicalIdentityValidation = false)
+        bool requiresPhysicalIdentityValidation = false,
+        SourceDiscoveryMode discoveryMode = SourceDiscoveryMode.Filesystem,
+        string? repositoryIdentityFingerprint = null)
     {
         ArgumentNullException.ThrowIfNull(id);
         if (configurationRevision <= 0)
@@ -112,7 +129,7 @@ public sealed record SourceRootConfiguration
         }
 
         var created = Create(canonicalPath, displayName, recursive, followLinks, maximumFileBytes,
-            includePatterns, excludePatterns, allowedClassifications, reconciliationCadence);
+            includePatterns, excludePatterns, allowedClassifications, reconciliationCadence, discoveryMode, repositoryIdentityFingerprint);
         return created with
         {
             Id = id,

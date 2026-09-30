@@ -266,8 +266,8 @@ public sealed class SourceRootProjectionReader(
             request.MaximumFileBytes,
             request.IncludePatterns,
             request.ExcludePatterns,
-            ["text/plain"],
-            TimeSpan.FromMinutes(15));
+            request.AllowedClassifications,
+            TimeSpan.FromMinutes(15), request.DiscoveryMode, validation.GitRepositoryIdentityFingerprint);
         var matched = 0;
         var planned = 0;
         var deferred = 0;
@@ -413,9 +413,9 @@ public sealed class SourceRootProjectionReader(
             draft.ExcludePatterns,
             FollowLinks: false,
             draft.MaximumFileBytes,
-            ["text/plain"],
+            draft.IndexSourceText ? ["text/plain", "text/x-source-code"] : ["text/plain"],
             TimeSpan.FromMinutes(15),
-            string.IsNullOrWhiteSpace(draft.RequestedBy) ? "local-operator" : draft.RequestedBy);
+            string.IsNullOrWhiteSpace(draft.RequestedBy) ? "local-operator" : draft.RequestedBy, DiscoveryMode: draft.DiscoveryMode);
 
     private static IReadOnlyList<SourceFileProjection> ProjectFiles(
         string rootCanonicalPath,

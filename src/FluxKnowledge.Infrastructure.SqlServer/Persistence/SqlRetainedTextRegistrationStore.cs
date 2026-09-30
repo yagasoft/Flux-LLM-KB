@@ -228,19 +228,20 @@ public sealed class SqlRetainedTextRegistrationStore(
         RegisteredSourceCapability? replayCapability,
         CancellationToken cancellationToken)
     {
+        var rootId = await context.SourceRevisions.AsNoTracking().Where(value => value.Id == activity.SourceRevisionId.Value)
+            .Select(value => (Guid?)value.SourceRootId).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+        if (rootId is null) return false;
         await using var transaction = await context.Database
             .BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken).ConfigureAwait(false);
-        // Retained registration follows Task 4's source lock order before it locks an activity.
+        await SqlPublishedPassageSelection.AcquireFenceAsync(context, cancellationToken).ConfigureAwait(false);
+        var sourceRoot = await context.SourceRootConfigurations
+            .FromSqlInterpolated($"SELECT * FROM [SourceRootConfigurations] WITH (UPDLOCK, HOLDLOCK) WHERE [Id] = {rootId.Value}")
+            .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+        // Same publication/root/revision order as reconciliation and processor promotion.
         var sourceRevision = await context.SourceRevisions
             .FromSqlInterpolated($"SELECT * FROM [SourceRevisions] WITH (UPDLOCK, HOLDLOCK) WHERE [Id] = {activity.SourceRevisionId.Value}")
             .SingleOrDefaultAsync(cancellationToken)
             .ConfigureAwait(false);
-        var sourceRoot = sourceRevision is null
-            ? null
-            : await context.SourceRootConfigurations
-                .FromSqlInterpolated($"SELECT * FROM [SourceRootConfigurations] WITH (UPDLOCK, HOLDLOCK) WHERE [Id] = {sourceRevision.SourceRootId}")
-                .SingleOrDefaultAsync(cancellationToken)
-                .ConfigureAwait(false);
         var artifact = await context.SourceArtifacts
             .FromSqlInterpolated($"SELECT * FROM [SourceArtifacts] WITH (UPDLOCK, HOLDLOCK, INDEX([IX_SourceArtifacts_SourceRevisionId])) WHERE [SourceRevisionId] = {activity.SourceRevisionId.Value}")
             .SingleOrDefaultAsync(cancellationToken)
@@ -258,6 +259,14 @@ public sealed class SqlRetainedTextRegistrationStore(
         var isUtf8Input = sourceRevision is not null &&
             sourceRevision.Classification == AcceptedUtf8Classification &&
             activity.Kind is SourceActivityKind.TextExtraction or SourceActivityKind.MetadataExtraction;
+        if ((sourceRoot?.CrawlMode == (int)SourceDiscoveryMode.GitTracked && sourceRevision?.OriginKind == 0 && SourceClassifier.IsSourceTextExtension(sourceRevision.CanonicalPath)) ||
+            activity.ProcessorVersion == RepositorySourceTextPolicy.ProcessorVersion ||
+            activity.DescriptorFingerprint == RepositorySourceTextPolicy.DescriptorFingerprint)
+        {
+            if (sourceRevision is null || sourceRoot is null || !RepositorySourceTextAdmission.IsAdmitted(sourceRoot, sourceRevision) ||
+                activity.Kind != SourceActivityKind.TextExtraction || activity.RequiredCapability is not null ||
+                !RepositorySourceTextPolicy.MatchesActivity(activity.ProcessorVersion, activity.DescriptorFingerprint)) return false;
+        }
         var isBoundOoxmlText = isUtf8Input && sourceRevision!.OriginKind == 2 &&
             await context.SourceProcessorBranchMembers.AnyAsync(member =>
                 member.ChildSourceRevisionId == sourceRevision.Id && member.ChildSourceActivityId == activity.Id.Value &&
@@ -500,6 +509,8 @@ public sealed class SqlRetainedTextRegistrationStore(
         entity.ActivityKind == (int)activity.Kind &&
         entity.ExecutionClass == (int)activity.ExecutionClass &&
         entity.ProcessorVersion == activity.ProcessorVersion &&
+        entity.DescriptorFingerprint == activity.DescriptorFingerprint &&
+        entity.RequiredCapability == activity.RequiredCapability &&
         entity.InputFingerprint == activity.InputFingerprint;
 
     private static bool IsReplayEligible(SourceActivityEntity activity, RegisteredSourceCapability? capability) =>

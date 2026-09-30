@@ -49,7 +49,9 @@ public sealed class LocalSourceRootWatchHostedService(
             try
             {
                 Revalidate(root);
-                var watcher = new FileSystemWatcher(root.CanonicalPath)
+                foreach (var watchPath in GetWatchPaths(root))
+                {
+                var watcher = new FileSystemWatcher(watchPath)
                 {
                     IncludeSubdirectories = root.Recursive,
                     NotifyFilter = NotifyFilters.FileName | NotifyFilters.LastWrite | NotifyFilters.Size | NotifyFilters.CreationTime,
@@ -61,6 +63,7 @@ public sealed class LocalSourceRootWatchHostedService(
                 watcher.Renamed += (_, _) => Signal(root.Id, SourceWatchSignalKind.Renamed);
                 watcher.Error += (_, _) => Signal(root.Id, SourceWatchSignalKind.Overflow);
                 watchers.Add(watcher);
+                }
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -90,6 +93,17 @@ public sealed class LocalSourceRootWatchHostedService(
         PhysicalFileIdentity.EnsureNoReparsePointTraversal(root.CanonicalPath);
         var identity = PhysicalFileIdentity.GetDirectory(root.CanonicalPath);
         if (root.RequiresPhysicalIdentityValidation && !string.Equals(identity.IdentityFingerprint, root.PhysicalIdentityFingerprint, StringComparison.Ordinal)) throw new IOException("Source-root identity changed.");
+    }
+
+    public static IReadOnlyList<string> GetWatchPaths(SourceRootConfiguration root)
+    {
+        if (root.DiscoveryMode != SourceDiscoveryMode.GitTracked) return [root.CanonicalPath];
+        var repository = GitTrackedSourceDiscovery.ResolveRepository(root.CanonicalPath);
+        if (root.RequiresPhysicalIdentityValidation && repository.Identity != root.RepositoryIdentityFingerprint)
+            throw new IOException("Git watcher repository identity changed.");
+        // Ordinary .git is already covered; linked worktrees also need their validated common control directory.
+        return repository.CommonDirectory.StartsWith(root.CanonicalPath.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
+            ? [root.CanonicalPath] : [root.CanonicalPath, repository.CommonDirectory];
     }
 
     private sealed class CompositeDisposable(IReadOnlyList<FileSystemWatcher> watchers) : IDisposable

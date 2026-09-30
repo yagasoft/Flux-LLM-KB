@@ -13,9 +13,21 @@ public sealed record SourceDiscoveredFile(
     string ContentSha256,
     long ByteLength,
     DateTimeOffset LastWriteAtUtc,
-    SourceClassificationResult Classification);
+    SourceClassificationResult Classification,
+    GitInventoryEvidence? GitInventory = null,
+    SourceScanOwnership? ScanOwnership = null);
+
+public sealed record SourceScanOwnership(SourceScanRequestId RequestId, SourceScanLease Lease);
 
 public sealed record SourceEnumerationEvidence(string Kind, string RelativePath, string Detail);
+
+public sealed record GitInventoryEvidence(string RepositoryIdentity, string Generation, int TrackedCount, int ExcludedCount);
+
+public interface IAuthoritativeSourceFileEnumerator : ISourceFileEnumerator
+{
+    GitInventoryEvidence? LastInventory { get; }
+    ValueTask<bool> ValidateInventoryAsync(SourceRootConfiguration root, CancellationToken cancellationToken);
+}
 
 public interface ISourceFileEnumerator
 {

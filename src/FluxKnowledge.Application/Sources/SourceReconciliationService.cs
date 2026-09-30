@@ -2,6 +2,7 @@ using System.Threading.Channels;
 using FluxKnowledge.Application.Contracts;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Workers;
+using FluxKnowledge.Domain.Sources;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 
@@ -137,7 +138,7 @@ public sealed class SourceReconciliationService(
             try
             {
                 var scanner = scope.ServiceProvider.GetRequiredService<ISourceScanner>();
-                result = await scanner.ScanAsync(claim.SourceRoot, claim.ScanRequest, cancellationToken).ConfigureAwait(false);
+                result = await ScanWithRenewalAsync(scanner, control, claim, cancellationToken).ConfigureAwait(false);
             }
             catch (Exception exception) when (!cancellationToken.IsCancellationRequested)
             {
@@ -162,6 +163,49 @@ public sealed class SourceReconciliationService(
             {
                 // The durable claim remains fenced for recovery; do not reclassify successful work as failed.
             }
+        }
+    }
+
+    private async Task<SourceScanResult> ScanWithRenewalAsync(ISourceScanner scanner, ISourceScanControlStore control,
+        ClaimedSourceScan claim, CancellationToken token)
+    {
+        using var ownedScan = CancellationTokenSource.CreateLinkedTokenSource(token);
+        using var stopRenewal = CancellationTokenSource.CreateLinkedTokenSource(token);
+        var renewal = claim.SourceRoot.DiscoveryMode == SourceDiscoveryMode.GitTracked
+            ? RenewWhileActiveAsync(control, claim, ownedScan, stopRenewal.Token) : Task.CompletedTask;
+        try
+        {
+            var result = await scanner.ScanAsync(claim.SourceRoot, claim.ScanRequest, ownedScan.Token).ConfigureAwait(false);
+            ownedScan.Token.ThrowIfCancellationRequested();
+            return result;
+        }
+        finally
+        {
+            await stopRenewal.CancelAsync().ConfigureAwait(false);
+            await renewal.ConfigureAwait(false);
+        }
+    }
+
+    private async Task RenewWhileActiveAsync(ISourceScanControlStore control, ClaimedSourceScan claim,
+        CancellationTokenSource ownedScan, CancellationToken token)
+    {
+        try
+        {
+            while (true)
+            {
+                await Task.Delay(DefaultCadence / 3, timeProvider, token).ConfigureAwait(false);
+                if (!await control.RenewLeaseAsync(claim, DefaultCadence, token).ConfigureAwait(false))
+                {
+                    await ownedScan.CancelAsync().ConfigureAwait(false);
+                    return;
+                }
+            }
+        }
+        catch (OperationCanceledException) when (token.IsCancellationRequested) { }
+        catch (Exception) when (!token.IsCancellationRequested)
+        {
+            // Uncertain authority stops work; SQL recovery can reclaim after expiry.
+            await ownedScan.CancelAsync().ConfigureAwait(false);
         }
     }
 

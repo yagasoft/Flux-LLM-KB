@@ -3,6 +3,7 @@ using FluxKnowledge.Web.Components;
 using FluxKnowledge.Web.Components.Status;
 using FluxKnowledge.Web.Endpoints;
 using FluxKnowledge.Web.Mcp;
+using FluxKnowledge.Web.NativeV1;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
 using FluxKnowledge.Infrastructure.SqlServer.Visibility;
 using Microsoft.AspNetCore.Components.Server.Circuits;
@@ -84,6 +85,7 @@ builder.Services
     .WithHttpTransport(options => options.Stateless = true)
     .WithTools<NativeV1McpTools>();
 var app = builder.Build();
+app.UseNativeRequestResources();
 if (!WebHostComposition.IsIsolatedTestComposition)
 {
     await WebHostComposition.InitialiseStrictProductionRecoveryAsync(

@@ -49,6 +49,8 @@ public sealed class SourceRootPageState(ISourceRootProjectionReader reader)
         draft.Recursive ? "1" : "0",
         draft.MaximumFileBytes.ToString(System.Globalization.CultureInfo.InvariantCulture),
         draft.RequestedBy,
+        ((int)draft.DiscoveryMode).ToString(System.Globalization.CultureInfo.InvariantCulture),
+        draft.IndexSourceText ? "1" : "0",
         string.Join("\u001e", draft.IncludePatterns),
         string.Join("\u001e", draft.ExcludePatterns));
 }

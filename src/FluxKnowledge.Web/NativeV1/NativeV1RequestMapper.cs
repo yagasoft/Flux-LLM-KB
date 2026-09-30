@@ -13,7 +13,6 @@ namespace FluxKnowledge.Web.NativeV1;
 /// <summary>Maps the deliberately small native v1 wire contract to Application-owned requests.</summary>
 public sealed class NativeV1RequestMapper
 {
-    public const int MaximumBodyBytes = NativeV1ContractLimits.MaximumRequestBytes;
 
     public object MapQuery(string toolName, JsonElement arguments)
     {
@@ -76,10 +75,7 @@ public sealed class NativeV1RequestMapper
             throw new NativeOperationException("invalid-request");
         }
 
-        if (Encoding.UTF8.GetByteCount(arguments.GetRawText()) > MaximumBodyBytes)
-        {
-            throw new NativeOperationException("body-too-large");
-        }
+        NativeRequestInput.Validate(arguments);
 
         return arguments;
     }
@@ -193,7 +189,7 @@ public sealed class NativeV1RequestMapper
             throw new NativeOperationException("invalid-request");
         }
 
-        return payload.Clone();
+        return payload;
     }
 
     private static string KnowledgeActionFamily(KnowledgeMutation mutation)

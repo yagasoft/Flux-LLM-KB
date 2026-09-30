@@ -32,7 +32,9 @@ public sealed class SourceRootService(
             canonicalRequest.IncludePatterns,
             canonicalRequest.ExcludePatterns,
             canonicalRequest.AllowedClassifications,
-            canonicalRequest.ReconciliationCadence);
+            canonicalRequest.ReconciliationCadence,
+            canonicalRequest.DiscoveryMode,
+            validation.GitRepositoryIdentityFingerprint);
         var receipt = await rootStore.CreateAsync(canonicalRequest, startIntent, cancellationToken)
             .ConfigureAwait(false);
         if (startIntent == ScanStartIntent.SaveAndScan && !receipt.IsHeld)

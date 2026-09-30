@@ -507,28 +507,19 @@ public sealed class SqlNativeOperationStore(
         {
             if (operation.RootAdmission is null) throw new NativeOperationException("invalid-commit-operation");
             var path = operation.RootAdmission.CanonicalPath; var name = String(payload, "displayName", 256);
-            EnsureAbsentTarget(targets, CanonicalPathTargetId(path));
+            EnsureAbsentTarget(targets, CanonicalPathTargetId(path) + (operation.RootAdmission.GitRepositoryIdentityFingerprint is null ? "" : ":git:" + operation.RootAdmission.GitRepositoryIdentityFingerprint));
             await LockCanonicalRootAsync(context, path, cancellationToken);
             if (await context.SourceRootConfigurations.AnyAsync(value => value.CanonicalPath == path, cancellationToken)) throw new NativeOperationException("operation-fenced");
             var rootId = Guid.NewGuid();
             var recursive = Bool(payload, "recursive", true); var followLinks = Bool(payload, "followLinks", false); var maximumFileBytes = Long(payload, "maximumFileBytes", 16L * 1024 * 1024); var cadenceSeconds = Long(payload, "reconciliationSeconds", 900);
-            var configuration = SourceRootControlConfiguration.From(new SourceRootCreateRequest(
-                path,
-                name,
-                recursive,
-                [],
-                [],
-                followLinks,
-                maximumFileBytes,
-                [],
-                TimeSpan.FromSeconds(cadenceSeconds),
-                actor));
+            var creation = NativeSourceRootCreation.Parse(payload, actor) with { FullPath = path };
+            var configuration = SourceRootControlConfiguration.From(creation);
             context.SourceRootConfigurations.Add(new SourceRootConfigurationEntity
             {
                 Id = rootId, CanonicalPath = path, DisplayName = name, State = (int)SourceRootState.Enabled,
                 Recursive = recursive, FollowLinks = followLinks, IncludePatternsJson = configuration.IncludePatternsJson,
                 ExcludePatternsJson = configuration.ExcludePatternsJson, AllowedClassificationsJson = configuration.AllowedClassificationsJson,
-                MaximumFileBytes = maximumFileBytes, CrawlMode = 0, ReconciliationCadenceSeconds = cadenceSeconds,
+                MaximumFileBytes = maximumFileBytes, CrawlMode = (int)creation.DiscoveryMode, ReconciliationCadenceSeconds = cadenceSeconds,
                 PermissionEvidenceJson = operation.RootAdmission.PermissionEvidenceJson,
                 HealthEvidenceJson = SourceRootControlAuditEvidence.CreateHealthEvidence(operation.RootAdmission, configuration),
                 ConfigurationRevision = 1, CreatedAtUtc = now, UpdatedAtUtc = now

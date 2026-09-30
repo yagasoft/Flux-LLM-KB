@@ -7,6 +7,28 @@ namespace FluxKnowledge.Domain.Tests.Sources;
 public sealed class SourceRootConfigurationTests
 {
     [Fact]
+    public void Source_text_policy_cannot_enable_code_on_an_unrestricted_filesystem_root()
+    {
+        Assert.Throws<DomainInvariantException>(() => SourceRootConfiguration.Create(
+            @"C:\Corpus", "Corpus", true, false, 16 * 1024 * 1024,
+            allowedClassifications: ["text/plain", "text/x-source-code"]));
+    }
+
+    [Fact]
+    public void Git_mode_preserves_policy_on_restore_and_unknown_modes_fail_closed()
+    {
+        var root = SourceRootConfiguration.Create(@"C:\Corpus", "Corpus", true, false, 1024,
+            allowedClassifications: ["text/plain", "text/x-source-code"], discoveryMode: SourceDiscoveryMode.GitTracked);
+        var restored = SourceRootConfiguration.Restore(root.Id, root.CanonicalPath, root.DisplayName,
+            root.Recursive, root.FollowLinks, root.MaximumFileBytes, [], [], root.AllowedClassifications,
+            root.ReconciliationCadence, root.State, 1, discoveryMode: root.DiscoveryMode);
+        Assert.Equal(SourceDiscoveryMode.GitTracked, restored.DiscoveryMode);
+        Assert.True(restored.IndexSourceText);
+        Assert.Throws<DomainInvariantException>(() => SourceRootConfiguration.Create(@"C:\Corpus", "Corpus", true,
+            false, 1024, discoveryMode: (SourceDiscoveryMode)42));
+    }
+
+    [Fact]
     public void Root_can_only_move_between_enabled_and_paused_once_per_transition()
     {
         var root = SourceRootConfiguration.Create("C:\\Corpus", "Corpus", recursive: true, followLinks: false, 16 * 1024 * 1024);

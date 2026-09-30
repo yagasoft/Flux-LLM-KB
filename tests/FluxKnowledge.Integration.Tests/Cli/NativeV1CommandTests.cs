@@ -140,26 +140,19 @@ public sealed class NativeV1CommandTests
     }
 
     [Fact]
-    public async Task Request_input_stops_at_max_plus_one_without_materialising_the_remainder()
+    public async Task Large_configuration_input_is_sent_without_truncation()
     {
         var handler = new RecordingHandler("{\"ok\":true,\"result\":{},\"reasonCode\":null,\"message\":null,\"retryable\":false}");
         using var client = new HttpClient(handler) { BaseAddress = NativeV1Command.LoopbackBaseAddress };
-        var input = new GuardedTextReader(
-            NativeV1ContractLimits.MaximumRequestBytes + 100,
-            NativeV1ContractLimits.MaximumRequestBytes + 1);
+        var payload = System.Text.Json.JsonSerializer.Serialize(new { action = "root_create", payload = new { excludePatterns = Enumerable.Range(0, 900).Select(i => new string('a', 70) + i).ToArray() } });
         var output = new StringWriter();
-
-        var exitCode = await NativeV1Command.ExecuteAsync(
-            ["knowledge", "search"],
-            input,
-            client,
-            output,
-            TextWriter.Null);
-
-        Assert.Equal(1, exitCode);
-        Assert.Equal(NativeV1ContractLimits.MaximumRequestBytes + 1, input.CharactersRead);
-        Assert.Contains("body-too-large", output.ToString(), StringComparison.Ordinal);
-        Assert.Null(handler.Request);
+        var result = await NativeV1Command.ExecuteAsync(["corpus", "write", "--preview"], new StringReader(payload), client, output, TextWriter.Null);
+        Assert.Equal(0, result);
+        Assert.NotNull(handler.Request);
+        using var expected = JsonDocument.Parse(payload);
+        using var actual = JsonDocument.Parse(handler.Body);
+        Assert.Equal(expected.RootElement.GetProperty("payload").GetProperty("excludePatterns").GetRawText(),
+            actual.RootElement.GetProperty("payload").GetProperty("excludePatterns").GetRawText());
     }
 
     [Fact]

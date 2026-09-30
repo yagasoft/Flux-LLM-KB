@@ -21,6 +21,20 @@ namespace FluxKnowledge.Web.Tests.Endpoints;
 public sealed class NativeV1EndpointTests
 {
     [Fact]
+    public async Task Repository_configuration_above_32KiB_is_dispatched_without_a_rule_count_ceiling()
+    {
+        await using var host = await StartAsync();
+        var rules = Enumerable.Range(0, 900).Select(index => $"documentation/{new string('a', 55)}/{index}/**").ToArray();
+        using var response = await host.Client.PostAsJsonAsync("/api/v1/corpus/actions/preview", new
+        {
+            action = "root_create", payload = new { path = @"C:\Repository", displayName = "Repository", discoveryMode = "git-tracked", indexSourceText = true, excludePatterns = rules }
+        });
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.True((await ReadAsync(response)).GetProperty("ok").GetBoolean());
+        Assert.Equal(1, host.Facade.PreviewCalls);
+    }
+
+    [Fact]
     public async Task Corpus_search_route_preserves_the_requested_root_scope()
     {
         await using var host = await StartAsync();
@@ -122,14 +136,14 @@ public sealed class NativeV1EndpointTests
     }
 
     [Fact]
-    public async Task Oversize_bodies_and_invalid_limits_are_rejected_before_facade_dispatch()
+    public async Task Oversize_queries_and_invalid_limits_are_rejected_before_facade_dispatch()
     {
         await using var host = await StartAsync();
 
-        using var oversized = await host.Client.PostAsync("/api/v1/knowledge/search", new StringContent("{\"query\":\"" + new string('x', NativeV1RequestMapper.MaximumBodyBytes) + "\",\"limit\":3}", System.Text.Encoding.UTF8, "application/json"));
+        using var oversized = await host.Client.PostAsync("/api/v1/knowledge/search", new StringContent("{\"query\":\"" + new string('x', 64 * 1024) + "\",\"limit\":3}", System.Text.Encoding.UTF8, "application/json"));
         using var invalidLimit = await host.Client.PostAsJsonAsync("/api/v1/code/query", new { view = "symbols", limit = -1 });
 
-        Assert.Equal("body-too-large", (await ReadAsync(oversized)).GetProperty("reasonCode").GetString());
+        Assert.Equal("invalid-query", (await ReadAsync(oversized)).GetProperty("reasonCode").GetString());
         Assert.Equal("invalid-limit", (await ReadAsync(invalidLimit)).GetProperty("reasonCode").GetString());
         Assert.Equal(0, host.Facade.QueryCalls);
     }
@@ -272,11 +286,11 @@ public sealed class NativeV1EndpointTests
     }
 
     [Fact]
-    public async Task Content_length_null_oversize_body_stops_at_the_stream_bound_before_json_parsing_or_dispatch()
+    public async Task Unknown_content_length_large_query_is_semantically_rejected_without_dispatch()
     {
         await using var host = await StartAsync();
         var source = new CountingNonSeekableStream(System.Text.Encoding.UTF8.GetBytes(
-            "{\"query\":\"" + new string('x', NativeV1RequestMapper.MaximumBodyBytes) + "\",\"limit\":3}"));
+            "{\"query\":\"" + new string('x', 64 * 1024) + "\",\"limit\":3}"));
 
         var response = await host.Server.SendAsync(context =>
         {
@@ -290,8 +304,8 @@ public sealed class NativeV1EndpointTests
 
         using var reader = new StreamReader(response.Response.Body, System.Text.Encoding.UTF8, leaveOpen: true);
         using var document = JsonDocument.Parse(await reader.ReadToEndAsync());
-        Assert.Equal("body-too-large", document.RootElement.GetProperty("reasonCode").GetString());
-        Assert.InRange(source.BytesRead, 1, NativeV1RequestMapper.MaximumBodyBytes + 1);
+        Assert.Equal("invalid-query", document.RootElement.GetProperty("reasonCode").GetString());
+        Assert.True(source.BytesRead > 32 * 1024);
         Assert.Equal(0, host.Facade.QueryCalls);
     }
 

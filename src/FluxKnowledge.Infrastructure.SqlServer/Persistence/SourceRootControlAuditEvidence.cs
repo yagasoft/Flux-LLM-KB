@@ -17,7 +17,8 @@ internal sealed record SourceRootControlConfiguration(
     bool Recursive,
     bool FollowLinks,
     long MaximumFileBytes,
-    long ReconciliationCadenceSeconds)
+    long ReconciliationCadenceSeconds,
+    int CrawlMode)
 {
     public static SourceRootControlConfiguration From(SourceRootCreateRequest request) =>
         From(
@@ -28,7 +29,7 @@ internal sealed record SourceRootControlConfiguration(
             CanonicalJson(request.IncludePatterns),
             CanonicalJson(request.ExcludePatterns),
             CanonicalJson(request.AllowedClassifications),
-            checked((long)request.ReconciliationCadence.TotalSeconds));
+            checked((long)request.ReconciliationCadence.TotalSeconds), (int)request.DiscoveryMode);
 
     public static SourceRootControlConfiguration From(SourceRootConfigurationEntity entity) =>
         From(
@@ -39,7 +40,7 @@ internal sealed record SourceRootControlConfiguration(
             entity.IncludePatternsJson,
             entity.ExcludePatternsJson,
             entity.AllowedClassificationsJson,
-            entity.ReconciliationCadenceSeconds);
+            entity.ReconciliationCadenceSeconds, entity.CrawlMode);
 
     private static SourceRootControlConfiguration From(
         string displayName,
@@ -49,7 +50,7 @@ internal sealed record SourceRootControlConfiguration(
         string includePatternsJson,
         string excludePatternsJson,
         string allowedClassificationsJson,
-        long reconciliationCadenceSeconds)
+        long reconciliationCadenceSeconds, int crawlMode)
     {
         var framed = string.Join(
             "\n",
@@ -61,6 +62,7 @@ internal sealed record SourceRootControlConfiguration(
             followLinks ? "1" : "0",
             maximumFileBytes.ToString(System.Globalization.CultureInfo.InvariantCulture),
             reconciliationCadenceSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        if (crawlMode != 0) framed += "\n" + crawlMode.ToString(System.Globalization.CultureInfo.InvariantCulture);
         return new SourceRootControlConfiguration(
             includePatternsJson,
             excludePatternsJson,
@@ -70,7 +72,7 @@ internal sealed record SourceRootControlConfiguration(
             recursive,
             followLinks,
             maximumFileBytes,
-            reconciliationCadenceSeconds);
+            reconciliationCadenceSeconds, crawlMode);
     }
 
     public bool Matches(SourceRootConfigurationEntity entity) =>
@@ -81,7 +83,7 @@ internal sealed record SourceRootControlConfiguration(
         Recursive == entity.Recursive &&
         FollowLinks == entity.FollowLinks &&
         MaximumFileBytes == entity.MaximumFileBytes &&
-        ReconciliationCadenceSeconds == entity.ReconciliationCadenceSeconds;
+        ReconciliationCadenceSeconds == entity.ReconciliationCadenceSeconds && CrawlMode == entity.CrawlMode;
 
     private static string CanonicalJson(IReadOnlyList<string>? values) =>
         JsonSerializer.Serialize((values ?? Array.Empty<string>()).OrderBy(static value => value, StringComparer.Ordinal).ToArray());
@@ -100,7 +102,8 @@ internal static class SourceRootControlAuditEvidence
                     validation.PhysicalIdentity.IsFixedNtfs,
                     validation.PhysicalIdentity.IdentityFingerprint
                 },
-            configurationFingerprint = configuration.Fingerprint
+            configurationFingerprint = configuration.Fingerprint,
+            gitRepositoryIdentityFingerprint = validation?.GitRepositoryIdentityFingerprint
         });
 
     public static string CreateRequestEvidence(

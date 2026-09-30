@@ -23,4 +23,7 @@ public interface ISourceScanControlStore
         SourceScanResult result,
         string? failureReason,
         CancellationToken cancellationToken);
+
+    ValueTask<bool> RenewLeaseAsync(ClaimedSourceScan claim, TimeSpan leaseDuration, CancellationToken cancellationToken) =>
+        ValueTask.FromResult(false);
 }

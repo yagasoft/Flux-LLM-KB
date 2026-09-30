@@ -4,6 +4,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using FluxKnowledge.Application.Contracts;
+using FluxKnowledge.Domain.Sources;
 using Microsoft.Win32.SafeHandles;
 
 namespace FluxKnowledge.Integrations.Files;
@@ -68,6 +69,13 @@ public sealed class SourceRootPathPolicy : ISourceRootPathPolicy
         }
 
         EnsureCanEnumerate(physical.CanonicalPath);
+        GitTrackedSourceDiscovery.Repository? repository = null;
+        if (request.DiscoveryMode == SourceDiscoveryMode.GitTracked)
+        {
+            repository = GitTrackedSourceDiscovery.ResolveRepository(physical.CanonicalPath);
+            if (_protectedRoots.Any(root => Overlaps(root, repository.GitDirectory) || Overlaps(root, repository.CommonDirectory)))
+                throw new UnauthorizedAccessException("Git control metadata overlaps a protected location.");
+        }
         var fingerprint = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(physical.CanonicalPath)));
         var identityFingerprint = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(
             $"{physical.VolumeSerialNumber:X8}:{physical.FileIndexHigh:X8}{physical.FileIndexLow:X8}")));
@@ -82,7 +90,7 @@ public sealed class SourceRootPathPolicy : ISourceRootPathPolicy
         return new SourceRootPathValidation(
             physical.CanonicalPath,
             new SourceRootPhysicalIdentity(physical.CanonicalPath, drive.Name, IsFixedNtfs: true, identityFingerprint),
-            new SourceRootPermissionEvidence(true, fingerprint, evidenceJson));
+            new SourceRootPermissionEvidence(true, fingerprint, evidenceJson)) { GitRepositoryIdentityFingerprint = repository?.Identity };
     }
 
     private static string CanonicalExistingDirectory(string suppliedPath)

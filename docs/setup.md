@@ -47,6 +47,17 @@ Tests provide their own isolated host composition and synthetic fixtures.
 
 ## Production prerequisites and layout
 
+For repository coverage, open **Sources and indexing → Configure a repository**,
+enter the main repository path and preview, then configure and scan. Leave
+patterns empty for automatic eligible Git-tracked code/docs discovery. CLI/MCP
+users can create the same single source with `discoveryMode="git-tracked"` and
+`indexSourceText=true`. No per-file manifest or partitioned roots are required.
+Git must exist at `%ProgramFiles%\Git\cmd\git.exe`; discovery uses explicit local
+arguments, disables fsmonitor/hooks, clears inherited Git overrides and performs
+no checkout, restore, helper execution or model acquisition. Source/private/build
+and model-store path policies still apply. New application code must be deployed
+before enabling a Git source; ordinary repository edits need no redeployment.
+
 The native installation requires IIS with the matching ASP.NET Core hosting
 support, a supported local SQL Server with Full-Text, and the required Windows
 filesystem and permissions. Desktop Outlook/Visio processing additionally

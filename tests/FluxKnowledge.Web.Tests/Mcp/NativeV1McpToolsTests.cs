@@ -106,9 +106,9 @@ public sealed class NativeV1McpToolsTests
         var facade = new RecordingFacade();
         var tools = CreateTools(facade);
 
-        var result = await tools.KnowledgeSearch(new string('x', NativeV1RequestMapper.MaximumBodyBytes), 3, CancellationToken.None);
+        var result = await tools.KnowledgeSearch(new string('x', 64 * 1024), 3, CancellationToken.None);
 
-        Assert.Equal("body-too-large", Read(result).GetProperty("reasonCode").GetString());
+        Assert.Equal("invalid-query", Read(result).GetProperty("reasonCode").GetString());
         Assert.Equal(0, facade.QueryCalls);
     }
 

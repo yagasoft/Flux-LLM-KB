@@ -1987,6 +1987,7 @@ public sealed class SqlToUsearchRebuildTests(NativeSqlServerFixture fixture) : I
             Reader = _provider.GetRequiredService<UsearchAnnIndex>(); Embeddings = _provider.GetRequiredService<IEmbeddingProvider>();
         }
         public string IndexRoot { get; }
+        public string ArtifactRoot => _artifactRoot;
         public IDbContextFactory<FluxKnowledgeDbContext> Factory { get; }
         public SqlPipelineStore Store { get; }
         public UsearchGenerationBuilder Builder { get; }
@@ -1998,7 +1999,7 @@ public sealed class SqlToUsearchRebuildTests(NativeSqlServerFixture fixture) : I
         public FluxKnowledge.Application.Contracts.RegisterUtf8FileResult? LastReceipt { get; private set; }
 
         public static async Task<PipelineEnvironment> CreateAsync(NativeSqlServerFixture fixture, string text,
-            PassageBuilder? passageBuilder = null, bool publish = true, bool embed = true)
+            PassageBuilder? passageBuilder = null, bool publish = true, bool embed = true, TimeProvider? clock = null)
         {
             await SqlTestData.ClearPipelineAsync(fixture);
             var ingress = Path.Combine(Path.GetTempPath(), $"FluxKnowledgeIngress_{Guid.NewGuid():N}");
@@ -2009,6 +2010,7 @@ public sealed class SqlToUsearchRebuildTests(NativeSqlServerFixture fixture) : I
             var services = new ServiceCollection();
             services.AddSingleton<IDeploymentValidationHold>(new RebuildTestHold());
             services.AddSingleton(SqlTestData.CreateFactory(fixture));
+            if (clock is not null) services.AddSingleton(clock);
             if (passageBuilder is not null) services.AddSingleton(passageBuilder);
             services.AddSingleton<IUtf8FileSourceReader>(new Utf8FileSourceReader(new LocalIngressOptions([ingress])));
             services.AddScoped<IRetainedSourceReader>(provider => new SqlRetainedSourceReader(

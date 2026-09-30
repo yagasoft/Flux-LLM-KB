@@ -182,14 +182,14 @@ public static class PhysicalFileIdentity
         foreach (var component in relative.Split([Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar], StringSplitOptions.RemoveEmptyEntries))
         {
             current = Path.Combine(current, component);
-            var directory = new DirectoryInfo(current);
-            directory.Refresh();
-            if (!directory.Exists)
+            // Preserve access-denied/IO errors; Exists would disguise them as deletion.
+            var attributes = File.GetAttributes(current);
+            if ((attributes & FileAttributes.Directory) == 0)
             {
                 throw new DirectoryNotFoundException("The source root no longer exists.");
             }
 
-            if ((directory.Attributes & FileAttributes.ReparsePoint) != 0)
+            if ((attributes & FileAttributes.ReparsePoint) != 0)
             {
                 throw new UnauthorizedAccessException("Source root reparse-point traversal is not allowed.");
             }

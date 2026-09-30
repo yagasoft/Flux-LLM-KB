@@ -8,7 +8,8 @@ establish successful extraction.
 | Input | Current route | Bounds and limitations |
 | --- | --- | --- |
 | UTF-8 text, Markdown, logs, CSV/TSV, JSON, XML and YAML | Bounded retained text, normalisation, indexing and publication. | Strict UTF-8 and binary-signature checks; ordinary text is capped at 16 MiB. |
-| C# | Retained syntax, symbols, relationships, diagnostics and searchable projections. | No builds, dependency restore, execution or project-supplied generators/analyzers. |
+| C# | Retained syntax, symbols, relationships and diagnostics; opted-in Git sources also publish searchable source text. | Text uses the existing 16 MiB bound; structured C# retains its separate 4 MiB/parser bounds. No builds, dependency restore, execution or project-supplied generators/analyzers. |
+| PowerShell (`.ps1`, `.psm1`), Python, JavaScript, SQL, Razor, CSS, `.csproj`, `.props` and `.slnx` | Searchable strict UTF-8 source text when `indexSourceText=true` on a Git-tracked source. | Existing text/signature/disclosure protections apply. No structured symbols/references for these formats. |
 | Other code languages | Recognised and explicitly deferred when no supported capability exists. | Do not infer semantic code analysis from extension recognition. |
 | ZIP and TAR | Bounded archive expansion using retained members and durable processor branches. | Path traversal, links, excessive expansion and unsupported members are refused or deferred. |
 | DOCX, XLSX and PPTX | Office Open XML structural extraction under the original document identity. | One logical document; package members are not corpus entries. Extracted text is capped at 200 MiB within package security bounds. |

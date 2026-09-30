@@ -11,6 +11,27 @@ namespace FluxKnowledge.Domain.Tests.Sources;
 public sealed class SourceScanWorkerTests
 {
     [Fact]
+    public async Task Git_source_text_schedules_search_and_csharp_routes_without_unverified_suppression()
+    {
+        var root = SourceRootConfiguration.Create(Path.GetFullPath(Path.GetTempPath()), "git", true, false,
+            16 * 1024 * 1024, allowedClassifications: ["text/plain", "text/x-source-code"],
+            discoveryMode: SourceDiscoveryMode.GitTracked);
+        var file = new SourceDiscoveredFile(Path.Combine(root.CanonicalPath, "Code.cs"), "Code.cs", "test:code",
+            "class Code {}"u8.ToArray(), true, new string('a', 64), 13, DateTimeOffset.UtcNow,
+            new SourceClassificationResult(SourceClassification.AcceptedUtf8Text, "class Code {}", null));
+        var store = new RecordingScanStore();
+        var activities = new RecordingActivityStore();
+        var worker = new SourceScanWorker(new ReturningEnumerator(file), store, new RecordingArtifactStore(), activities);
+
+        await worker.ScanAsync(root, SourceScanRequest.CreateHeld(root.Id, "test").Release(DateTimeOffset.UtcNow), CancellationToken.None);
+
+        Assert.Equal(2, activities.Drafts.Count);
+        Assert.Contains(activities.Drafts, draft => draft.ActivityKind == SourceActivityKind.TextExtraction && draft.DescriptorFingerprint is not null);
+        Assert.Contains(activities.Drafts, draft => draft.ActivityKind == SourceActivityKind.DocumentParsing);
+        Assert.Equal(0, store.SuppressionCalls);
+    }
+
+    [Fact]
     public async Task Scan_creates_one_deferred_activity_for_a_binary_file_without_retaining_an_artifact()
     {
         var root = SourceRootConfiguration.Create(
