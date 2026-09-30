@@ -78,6 +78,7 @@ occurred and the deployed ranking remains unchanged.
 
 | Item | Priority | Status | Progress % | Remaining Work |
 | --- | --- | --- | ---: | --- |
+| Native instruction alignment and on-demand workspace brief | P1 | installed and locally accepted | 100% | No remaining work for the approved personal workflow. Machine AGENTS received only the approved cell/token edits, with unrelated bytes preserved. The cited brief skill is installed; 12 CLI/MCP fixture cases passed and real native search/read was checked separately. Unregistered workspaces report a gap; registration and plugin-wide distribution remain outside scope. See [acceptance](operations/2026-09-30-native-workspace-brief-acceptance.md). |
 | Workspace-aware Codex prompt context | P1 | deployed and live-validated | 100% | No remaining work for the bounded lexical scope. Incremental IIS release `20260929T215634Z-2c6712dcd77a` deployed commit `2c6712dc` without migration; live health probes returned 200, the installed adapter yielded an exact re-readable public citation, the actual Codex client injected one record with `cwd`, and an unindexed workspace stayed empty. Disposable acceptance passed 12/12 useful positives, 0/12 irrelevant negatives and 12/12 boundaries; 40 calls at two callers measured 16 ms p95. The disable setting remains the operational fallback, subject to approval for any future use; broader relevance work remains deferred. |
 
 ## Deferred follow-ups

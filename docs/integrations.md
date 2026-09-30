@@ -135,6 +135,26 @@ actual Codex CLI prompt from the public acceptance workspace recorded one
 injected context event. See the [design](design/workspace-codex-context.md) for
 release and validation evidence.
 
+## On-demand workspace brief
+
+The personal `flux-workspace-brief` Codex skill combines the existing
+`corpus.search` and `corpus.read` tools into a cited snapshot of current state,
+decisions, open issues and next actions. Invoke `$flux-workspace-brief` or ask
+for a cited workspace brief, optionally supplying a directory and focus. The
+repository source is [SKILL.md](../scripts/codex/skills/flux-workspace-brief/SKILL.md); personal
+installation is described in [setup](setup.md#personal-workspace-brief-skill).
+
+Each brief stays within the exact requested workspace, with at most three
+searches at limit five and eight reads at 1,024 context characters. Claims need
+successful readback and source/revision/location/reference details. Unavailable
+scope ends the KB brief; conflicts, partial evidence and material retrieval
+warnings are reported as gaps. Documented actions and proposed recommendations
+are distinguished. This is retained-document evidence, not live health.
+
+The workflow adds no native server tool or explicit knowledge write. Its budgets
+are model instructions; the existing server scope/disclosure checks remain
+authoritative. The existing Stop hook retains its usual capture behaviour.
+
 ## Operational actions and planned extensions
 
 External listeners and remote MCP are outside this private local contract.

@@ -493,7 +493,7 @@ public sealed class NativeCodexPluginRegistrarTests
 
     private static async Task<(int ExitCode, string Output)> RunCanonicalValidatorAsync(string pluginRoot)
     {
-        var validator = Path.Combine(
+        var validator = Environment.GetEnvironmentVariable("FLUXKNOWLEDGE_PLUGIN_VALIDATOR_PATH") ?? Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
             ".codex",
             "skills",

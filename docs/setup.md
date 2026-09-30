@@ -138,6 +138,23 @@ The native marketplace belongs under `I:\FluxKnowledge\CodexPlugin`. Normal
 startup and CLI diagnostics do not install, repair or alter plugin registrations.
 Hook trust remains a user action in Codex.
 
+## Personal workspace brief skill
+
+The installed FluxKnowledge plugin supplies the native tools. To add the
+instruction-only brief workflow, copy
+`scripts/codex/skills/flux-workspace-brief/SKILL.md` into a new
+`flux-workspace-brief` folder beneath the active personal Codex skill root.
+This environment discovers personal skills under `%USERPROFILE%\.codex\skills`.
+Check for an existing same-name skill before copying and preserve user edits.
+Verify the source/installed hashes match and the skill appears in a fresh Codex
+session. No application deployment or plugin registration is needed.
+
+Invoke `$flux-workspace-brief` or request a cited workspace brief. The current
+directory is used unless a directory is supplied. It must resolve to registered
+retained corpus evidence; an unregistered workspace returns an explicit gap.
+See [integrations](integrations.md#on-demand-workspace-brief) for the retrieval
+budgets and citation contract. Installation does not register a workspace.
+
 ## Feature closeout
 
 Use a dedicated `codex/` worktree and run `scripts/dev/complete-feature.ps1` for
@@ -145,3 +162,11 @@ feature closeout. Its default path verifies, commits, integrates and pushes the
 change without deploying. It emits step evidence including `failed_step` and
 `log_path`; resolve failures before rerunning. `-KeepWorktree` preserves the
 checkout. `-GoLive` is a separate operational action with the gates above.
+
+The canonical plugin-validator test uses the bundled validator by default.
+If that file is absent, set `FLUXKNOWLEDGE_PLUGIN_VALIDATOR_PATH` for the test
+or closeout process to a trusted development copy of OpenAI's validator; keep
+its `identifier_validation.py` helper beside it. The assertion still requires
+successful canonical validation. Tests do not download or install this tool.
+The [brief acceptance record](operations/2026-09-30-native-workspace-brief-acceptance.md)
+records the pinned upstream copy used for this closeout.
