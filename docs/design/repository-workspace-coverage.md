@@ -1,6 +1,6 @@
 # Automatic repository code and documentation coverage
 
-Date: 30 September 2026. Status: approved implementation under final local verification; release and live source registration pending.
+Date: 30 September 2026. Status: initial release deployed and one repository source registered; source paused during correction of live publication blockers. Retrieval/freshness acceptance remains pending.
 
 ## Outcome and scope
 

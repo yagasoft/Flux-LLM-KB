@@ -81,11 +81,17 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
                         WHERE [trigger].[object_id] IS NULL
                            OR [trigger].[is_disabled] <> 0
                            OR [module].[definition] IS NULL
-                           OR HASHBYTES('SHA2_256', [module].[definition]) <> CASE
+                           OR (HASHBYTES('SHA2_256', [module].[definition]) <> CASE
                                WHEN EXISTS (SELECT 1 FROM [dbo].[__EFMigrationsHistory] WHERE [MigrationId] = @sourceDeletionMigration)
                                    THEN [expected].[DeletionDefinitionHash]
                                ELSE [expected].[DefinitionHash]
-                           END)
+                           END
+                           AND NOT (
+                               [expected].[Name] = N'TR_SourceProcessorCodeBlockedDiagnostics_Immutable'
+                               AND EXISTS (SELECT 1 FROM [dbo].[__EFMigrationsHistory] WHERE [MigrationId] = @sourceDeletionMigration)
+                               -- The scripted CREATE/CRLF form of the same migration guard.
+                               AND HASHBYTES('SHA2_256', [module].[definition]) = 0xDE3C1AD1140C9FB7AD04ED29BAD4B54741E36744537CAFA7A49D99765F34B598))
+                        )
                     AND EXISTS (
                         SELECT 1 FROM sys.foreign_keys
                         WHERE [name] = N'FK_SourceProcessorCodeCompletionReceipts_SourceProcessorCodeDocuments_SuccessIdentity'

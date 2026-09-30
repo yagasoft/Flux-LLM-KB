@@ -1483,12 +1483,23 @@ public sealed partial class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecu
                 candidate => candidate.SlotKey == decision.CapacitySlotKey,
                 cancellationToken)
             .ConfigureAwait(false);
+        var activeBatchStates = new[] { (int)GpuBatchState.Active, (int)GpuBatchState.AtSafeBoundary };
+        if (slot is { State: (int)GpuCapacitySlotState.Reserved, ActiveBatchId: not null, OwnerKey: not null } &&
+            await context.GpuBatches.AnyAsync(batch => batch.Id == slot.ActiveBatchId &&
+                batch.CapacitySlotKey == slot.SlotKey && batch.OwnerKey == slot.OwnerKey &&
+                activeBatchStates.Contains(batch.State), cancellationToken).ConfigureAwait(false) &&
+            !await context.GpuBatches.AnyAsync(batch => batch.Id != slot.ActiveBatchId &&
+                batch.CapacitySlotKey == slot.SlotKey && activeBatchStates.Contains(batch.State),
+                cancellationToken).ConfigureAwait(false))
+        {
+            return await CommitBusyAsync(context, transaction, selected, now, wakeReason, options,
+                operationId, batchId, cancellationToken).ConfigureAwait(false);
+        }
         if (slot is null || slot.State != (int)GpuCapacitySlotState.Available || slot.ActiveBatchId is not null)
         {
             throw new InvalidOperationException("The admission decision named a capacity slot that is not available.");
         }
 
-        var activeBatchStates = new[] { (int)GpuBatchState.Active, (int)GpuBatchState.AtSafeBoundary };
         if (await context.GpuBatches.AnyAsync(
                 batch => batch.CapacitySlotKey == slot.SlotKey && activeBatchStates.Contains(batch.State),
                 cancellationToken).ConfigureAwait(false))
