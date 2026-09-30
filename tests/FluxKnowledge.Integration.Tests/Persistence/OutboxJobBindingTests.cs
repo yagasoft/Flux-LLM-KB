@@ -18,11 +18,16 @@ public sealed class OutboxJobBindingTests(NativeSqlServerFixture fixture) : ICla
     {
         await SqlTestData.ClearPipelineAsync(fixture);
         var now = DateTimeOffset.UtcNow;
-        var seeded = await SqlTestData.SeedWorkItemAsync(fixture, now, PublicJobState.Completed, null);
+        var seeded = await SqlTestData.SeedWorkItemAsync(fixture, now, PublicJobState.WorkerQueued, null);
         var factory = SqlTestData.CreateFactory(fixture);
+        var dispatch = await new SqlOutboxStore(factory).ClaimNextDueAsync("old-delivery", now, TimeSpan.FromMinutes(1),
+            [PipelineOperations.ExtractUtf8], CancellationToken.None);
+        Assert.NotNull(dispatch);
+        Assert.Equal(seeded.DispatchMessageId, dispatch.DispatchMessageId);
         await using (var context = await factory.CreateDbContextAsync())
         {
             var original = await context.Jobs.SingleAsync();
+            original.PublicState = (int)PublicJobState.Completed;
             context.Jobs.Add(new JobEntity
             {
                 Id = Guid.NewGuid(), PipelineRecordId = original.PipelineRecordId,
@@ -32,10 +37,6 @@ public sealed class OutboxJobBindingTests(NativeSqlServerFixture fixture) : ICla
             });
             await context.SaveChangesAsync();
         }
-        var dispatch = await new SqlOutboxStore(factory).ClaimNextDueAsync("old-delivery", now, TimeSpan.FromMinutes(1),
-            [PipelineOperations.ExtractUtf8], CancellationToken.None);
-        Assert.NotNull(dispatch);
-        Assert.Equal(seeded.DispatchMessageId, dispatch.DispatchMessageId);
         var claim = await new SqlJobClaimStore(factory).ClaimForDispatchAsync(dispatch, "worker", now, TimeSpan.FromMinutes(1), CancellationToken.None);
         Assert.Null(claim);
         await using var verification = await factory.CreateDbContextAsync();

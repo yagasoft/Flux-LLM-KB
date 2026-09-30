@@ -123,6 +123,23 @@ public sealed class SqlOutboxStore(
                    AND [DueAtUtc] <= @nowUtc
                    AND ([LeaseExpiresAtUtc] IS NULL OR [LeaseExpiresAtUtc] <= @nowUtc)
                    AND [Operation] IN ({operationParameters})
+                   AND EXISTS
+                   (
+                       SELECT 1 FROM [Jobs] AS [workerJob] WITH (READPAST, READCOMMITTEDLOCK)
+                       WHERE [workerJob].[Id] = [OutboxMessages].[JobId]
+                         AND [workerJob].[PipelineRecordId] = [OutboxMessages].[PipelineRecordId]
+                         AND [workerJob].[SourceRevision] = [OutboxMessages].[SourceRevision]
+                         AND [workerJob].[Stage] = [OutboxMessages].[Stage]
+                         AND [workerJob].[Operation] = [OutboxMessages].[Operation] COLLATE Latin1_General_100_BIN2
+                         AND [workerJob].[DueAtUtc] <= @nowUtc
+                         AND
+                         (
+                             ([workerJob].[PublicState] = @workerQueued AND
+                                 ([workerJob].[LeaseExpiresAtUtc] IS NULL OR [workerJob].[LeaseExpiresAtUtc] <= @nowUtc))
+                             OR
+                             ([workerJob].[PublicState] = @workerProcessing AND [workerJob].[LeaseExpiresAtUtc] <= @nowUtc)
+                         )
+                   )
                    {exactPredicate}
                    AND {SqlCorpusRebuildEligibility.Admission("[OutboxMessages].[JobId]")}
                    AND {SqlCorpusRebuildEligibility.DeploymentAdmission("[OutboxMessages].[JobId]")}
@@ -177,6 +194,8 @@ public sealed class SqlOutboxStore(
         AddParameter(command, "@permittedRebuildOperationId", SqlDbType.UniqueIdentifier,
             (object?)admission.PermittedCorpusRebuildOperationId ?? DBNull.Value);
         AddParameter(command, "@nowUtc", SqlDbType.DateTimeOffset, nowUtc);
+        AddParameter(command, "@workerQueued", SqlDbType.Int, (int)PublicJobState.WorkerQueued);
+        AddParameter(command, "@workerProcessing", SqlDbType.Int, (int)PublicJobState.WorkerProcessing);
         AddParameter(
             command,
             "@leaseExpiresAtUtc",

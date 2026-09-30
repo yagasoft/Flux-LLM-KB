@@ -755,7 +755,7 @@ public sealed class ScopedCorpusRetrievalTests(NativeSqlServerFixture fixture) :
                 ByteLength = 12, DiscoveredAtUtc = now
             });
             selected = AddDocumentInput(context, rootId, ownerId, "selected metadata phrase", "first", now, originKind: 3);
-            successor = AddDocumentInput(context, rootId, ownerId, "successor OCR phrase", "second", now);
+            successor = AddDocumentInput(context, rootId, ownerId, "successor OCR transcript", "second", now);
             context.DocumentPublications.Add(new DocumentPublicationEntity
             {
                 OwnerSourceRevisionId = ownerId, DocumentInputSourceRevisionId = selected.InputId,
@@ -775,7 +775,7 @@ public sealed class ScopedCorpusRetrievalTests(NativeSqlServerFixture fixture) :
         Assert.Equal(@"C:\documents\scan.pdf", original.SourceIdentity);
         Assert.Equal("metadata", original.ExtractionMethod);
         Assert.Empty((await service.SearchAsync(
-            new CorpusSearchRequest("successor OCR phrase", 5, "root", rootId, null),
+            new CorpusSearchRequest("successor OCR transcript", 5, "root", rootId, null),
             CancellationToken.None)).Results);
 
         await using (var context = await factory.CreateDbContextAsync())
@@ -792,9 +792,11 @@ public sealed class ScopedCorpusRetrievalTests(NativeSqlServerFixture fixture) :
         var stale = await Assert.ThrowsAsync<FluxKnowledge.Application.IntegrationV1.NativeOperationException>(
             async () => await service.ReadAsync(new CorpusReadRequest(original.EvidenceRef, 0), CancellationToken.None));
         Assert.Equal("evidence-stale", stale.ReasonCode);
-        Assert.Single((await service.SearchAsync(
-            new CorpusSearchRequest("successor OCR phrase", 5, "root", rootId, null),
+        var replacement = Assert.Single((await service.SearchAsync(
+            new CorpusSearchRequest("successor OCR transcript", 5, "root", rootId, null),
             CancellationToken.None)).Results);
+        Assert.Equal(successor.RecordId, replacement.PipelineRecordId);
+        Assert.Equal(ownerId, replacement.OwnerSourceRevisionId);
     }
 
     [NativeSqlServerFact]
