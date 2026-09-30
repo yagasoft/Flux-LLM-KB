@@ -164,6 +164,54 @@ public sealed class RetainedCsharpCodeReplayIntegrationTests(NativeSqlServerFixt
         }
     }
 
+    [NativeSqlServerFact]
+    public async Task Hosted_activation_records_an_oversized_query_reference_and_continues_to_the_next_file()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"flux-csharp-reference-limit-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            var query = "query" + string.Concat(Enumerable.Repeat(
+                ".Where(value => value == \"" + new string('x', 700) + "\")", 6));
+            var seeds = new List<(Guid ActivityId, Guid RevisionId)>();
+            foreach (var source in new[] { "class Oversized { void M() { " + query + ".ToList(); } }", "class AfterLimit { }" })
+            {
+                var bytes = Encoding.UTF8.GetBytes(source);
+                var hash = Convert.ToHexStringLower(SHA256.HashData(bytes));
+                var relative = Path.Combine("sha256", hash[..2], $"{hash}.bin");
+                Directory.CreateDirectory(Path.GetDirectoryName(Path.Combine(root, relative))!);
+                await File.WriteAllBytesAsync(Path.Combine(root, relative), bytes);
+                seeds.Add(await SeedDeferredCsharpAsync(hash, bytes.Length, relative));
+            }
+            var factory = SqlTestData.CreateFactory(fixture);
+            var reader = new SqlRetainedSourceReader(factory, root);
+            var activation = new RetainedProcessorActivationService(
+                new SourceCapabilityService(new SqlSourceActivityStore(factory, TimeProvider.System), new LocalSourceCapabilityHandlerRegistry([new RetainedCsharpCodeCapabilityHandler()])),
+                new SqlRetainedProcessorBranchStore(factory, TimeProvider.System), reader,
+                new ZipArchiveRetainedProcessor(new SqlRetainedArtifactWriter(factory, root)),
+                new RetainedProcessorOptions { CsharpCodeEnabled = true, ArchiveZipExpandEnabled = false }, TimeProvider.System,
+                csharpProcessor: new RetainedCsharpCodeProcessor(reader, new LocalPrivateContentDisclosure()));
+
+            var result = await activation.RunOnceAsync(CancellationToken.None);
+
+            Assert.Equal(1, result.CompletedBranches);
+            Assert.Equal(1, result.FailedBranches);
+            await using var verification = CreateContext();
+            var blocked = await verification.SourceProcessorBranches.SingleAsync(value => value.SourceRevisionId == seeds[0].RevisionId);
+            Assert.Equal((int)RetainedProcessorBranchState.Blocked, blocked.State);
+            var attempt = await verification.SourceProcessorAttempts.SingleAsync(value => value.BranchId == blocked.Id);
+            Assert.Equal("csharp-code-signature-limit", attempt.OutcomeCode);
+            Assert.NotNull(attempt.FinishedAtUtc);
+            Assert.Empty(await verification.SourceProcessorCodeDocuments.Where(value => value.SourceRevisionId == seeds[0].RevisionId).ToListAsync());
+            Assert.Single(await verification.SourceProcessorCodeDocuments.Where(value => value.SourceRevisionId == seeds[1].RevisionId).ToListAsync());
+            Assert.Equal(0, (await activation.RunOnceAsync(CancellationToken.None)).ClaimedBranches);
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
     private async Task<(Guid BranchId, Guid RevisionId)> SeedCsharpBranchAsync(byte[] bytes)
     {
         var rootId = Guid.NewGuid(); var revisionId = Guid.NewGuid(); var activityId = Guid.NewGuid(); var branchId = Guid.NewGuid();

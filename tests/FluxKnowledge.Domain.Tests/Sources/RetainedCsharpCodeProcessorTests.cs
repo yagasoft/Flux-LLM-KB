@@ -744,6 +744,30 @@ public sealed class RetainedCsharpCodeProcessorTests
         Assert.Equal("csharp-code-signature-limit", completion.OutcomeCode);
     }
 
+    [Theory]
+    [InlineData(RetainedCsharpCodeProcessor.MaximumSignatureUtf16CodeUnits, true)]
+    [InlineData(RetainedCsharpCodeProcessor.MaximumSignatureUtf16CodeUnits + 1, false)]
+    public async Task Reference_display_obeys_the_existing_signature_boundary(int length, bool accepted)
+    {
+        const string prefix = "Build(\"";
+        const string suffix = "\").Run";
+        var target = prefix + new string('x', length - prefix.Length - suffix.Length) + suffix;
+        var (processor, claim, _) = Create("class C { void M() { " + target + "(); } }");
+
+        var completion = await processor.ProcessAsync(claim, CancellationToken.None);
+
+        Assert.Equal(accepted ? "success" : "csharp-code-signature-limit", completion.OutcomeCode);
+        if (accepted)
+        {
+            Assert.Contains(completion.References, reference => reference.TargetDisplay == target);
+        }
+        else
+        {
+            Assert.Empty(completion.Symbols);
+            Assert.Empty(completion.References);
+        }
+    }
+
     [Fact]
     public async Task Symbol_limit_is_enforced_before_reference_collection()
     {

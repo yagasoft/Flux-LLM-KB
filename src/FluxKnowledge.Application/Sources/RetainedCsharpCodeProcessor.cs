@@ -263,6 +263,10 @@ public sealed class RetainedCsharpCodeProcessor(
             foreach (var reference in nodeReferences)
             {
                 cancellationToken.ThrowIfCancellationRequested();
+                if (reference.TargetDisplay.Length > MaximumSignatureUtf16CodeUnits)
+                {
+                    return Blocked(claim, "csharp-code-signature-limit");
+                }
                 if (rawReferences.Count + 1 > MaximumReferences)
                 {
                     return Blocked(claim, "csharp-code-reference-limit");

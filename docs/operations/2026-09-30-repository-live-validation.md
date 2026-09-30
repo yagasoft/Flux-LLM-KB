@@ -1,0 +1,13 @@
+# Repository live validation
+
+Date: 30 September 2026. Status: corrective deployment verified; the source is paused after a C# reference-validation failure. Complete repository retrieval acceptance is pending.
+
+The routine incremental IIS update deployed `597bf0bea4812c885bd6cf40d81cc438af490e3e`. The reviewed and actual release candidates and installed application/interactive-host payloads matched across all 272 files. The updater completed held readiness and unchanged retained/pipeline-state checks before releasing its owned validation hold. Subsequent live, readiness and index probes returned HTTP 200 with Healthy index state. No schema migration, index rebuild or model acquisition occurred; recovery payloads are retained.
+
+The existing Git-tracked source was resumed through native preview/commit with a retained idempotency command. The next complete scan discovered 1,030 current files, including the two added corrective tests, without changing the root's discovery policy or maintaining filenames. Its 900-second cadence, source-text opt-in, empty optional patterns and existing 16 MiB per-file protection remain configured.
+
+At 17:11 UTC, 880 of 881 C# branches were complete. Text publication was still processing. Four rejected embedding attempts belonged to older document revisions suppressed by the resumed scan; they cannot publish those superseded revisions. Complete current publication counts, cited code/document retrieval, brief quality, scope and live documentation freshness remain unverified. This record will be completed from observed outcomes rather than from scan counts alone.
+
+Subsequent investigation found repeated host-stop events from an oversized C# reference display in `SqlRetainedTextRegistrationStore.cs`. The processor omitted the existing 4,096-unit bound that SQL correctly enforces. Supported native pause completed at root configuration revision 4; subsequent live/readiness/index probes were HTTP 200 with Healthy index state. Retention and recovery remain preserved. The processor-side check passed 44 domain and 85 integration tests with no skips, a zero-warning build and independent technical review; local verification of the actual file returned the expected blocked outcome. Full closeout and exact-release operational review precede another corrective deployment. GPU completions alone are insufficient evidence that publication is advancing.
+
+This newly tracked operational record provides a genuine addition for the automatic-discovery check after normal Git closeout. No additional source or discovery-policy edit is required. See the [coverage acceptance](2026-09-30-repository-workspace-coverage-acceptance.md) for the local invariant tests, transport restrictions and deferred scope.

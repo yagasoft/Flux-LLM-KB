@@ -1,6 +1,6 @@
 # Automatic repository code and documentation implementation plan
 
-Date: 30 September 2026. Status: implementation approved and resumed; local verification and release preparation in progress. Production apply and live registration remain pending.
+Date: 30 September 2026. Status: corrective release deployed; the single repository source is paused after a C# reference-validation failure. Its narrow processor correction and complete live publication/retrieval/freshness acceptance remain pending.
 
 **Goal:** configure one repository source once, automatically maintain Git-tracked code/docs coverage, preserve searchable source text and C# facts, and remove the aggregate application request cap without replacing it with an arbitrary limit.
 
@@ -124,9 +124,9 @@ Obtain independent review of the meaningful automatic-discovery milestone and th
 Deliver live repository search and code facts with a single durable source configuration. No temporary docs/code subroots or manual configuration manifests.
 
 - [x] Final integrated main and existing rendered canonical root paths were inspected; neither existing validation source overlaps `E:\LLM KB`. No existing source was converted.
-- [ ] Verify Git executable/service-account admission, root/control metadata identity, mandatory exclusions, permissions, verified local models and live health. The scan-generated path/hash inventory is an audit receipt, not an input the user must maintain.
+- [x] Verify Git executable/service-account admission, root/control metadata identity, mandatory exclusions, permissions, verified local models and live health. The resumed scan completed without enumeration errors and corrective release readiness is healthy. The scan-generated path/hash inventory is an audit receipt, not an input the user must maintain.
 - [x] Twelve document-grounded expected-answer questions and representative code-body/symbol queries were frozen from current files before live retrieval.
-- [x] One `E:\LLM KB` root was previewed and committed with `discoveryMode="git-tracked"`, source text enabled, no patterns/file list, no links, 900-second cadence and unchanged 16 MiB file protection. Confirmation/idempotency receipts were retained. Its first complete scan discovered 1,028 files; it is now paused while live blockers are corrected.
+- [x] One `E:\LLM KB` root was previewed and committed with `discoveryMode="git-tracked"`, source text enabled, no patterns/file list, no links, 900-second cadence and unchanged 16 MiB file protection. Confirmation/idempotency receipts were retained. Its first complete scan discovered 1,028 files. After corrective release `597bf0be`, native resume queued a complete 1,030-file scan, including the two newly tracked tests without a policy edit. The source was subsequently paused to contain the reference-validation failure; resume this same root after its verified correction.
 - [ ] Observe discovery, retained revisions, text publication and C# branches. Establish a bounded observation window from actual queue/progress and report meaningful stage/count changes. A scan summary alone is not publication proof.
 - [ ] Account for every eligible/discovered outcome, distinguishing excluded/untracked, unsupported/absent, retained, text-published, structured, withheld and failed. Enumerate all inventory pages. Do not treat lack of search hits as exclusion proof or withheld content as searchable coverage.
 - [ ] Verify cited implementation bodies across C#, scripts, Razor/CSS, SQL and project/build files present in the repository, plus document passages and C# symbols/references. Check MCP, CLI and REST source/revision bindings.
@@ -139,6 +139,8 @@ Deliver live repository search and code facts with a single durable source confi
 - [ ] Preserve worktree/recovery until all in-scope closeout and live checks succeed. Cleanup follows current authority and never triggers another deployment. Report actual commit/release, admitted/searchable/structured/withheld/failed outcomes and usable scoped queries.
 
 ## Stop and recovery rules
+
+Live C# processing of `SqlRetainedTextRegistrationStore.cs` produced reference displays exceeding the existing 4,096-unit bound; SQL correctly rejected the non-canonical completion, but the unhandled exception stopped the host. Enforce that existing protection before the processor returns success, use its normal blocked outcome and preserve SQL validation. Verify exact-bound acceptance, over-bound refusal and durable activation continuing to another file. Re-observe publication after correction before inferring another queue defect; do not suppress host exceptions or raise parser limits.
 
 The initial live run reached retained/pipeline work but failed acceptance: the C# readiness probe rejected the existing migration's exact scripted `CREATE`/CRLF blocked-diagnostic guard, while ordinary occupied GPU capacity raised an admission exception. The source was paused through native controls. Independently reviewed narrow corrections retain exact-definition checking and return Busy only for a valid, uniquely owned reservation; their full closeout integrated `59c41158` without deployment. Further preflight identified a cleaned, settled embedding attempt whose parent remained GPU-processing after pause. The additional correction preserves paused continuation and recovers only the latest exact attempt under existing cleanup, capacity, source, epoch and checkpoint fences; historical replay cannot disturb newer work. Disposable reproductions and regression checks precede the combined corrective review, integration/release and resume. No production SQL alteration, missing-slot repair, rebuild or model acquisition is needed for these corrections.
 
