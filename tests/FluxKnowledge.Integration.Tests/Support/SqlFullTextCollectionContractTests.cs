@@ -14,7 +14,8 @@ public sealed class SqlFullTextCollectionContractTests
         {
             typeof(SqlToUsearchRebuildTests),
             typeof(Task5RegressionTests),
-            typeof(HybridSearchIntegrationTests)
+            typeof(HybridSearchIntegrationTests),
+            typeof(ScopedCorpusRetrievalTests)
         };
 
         Assert.All(

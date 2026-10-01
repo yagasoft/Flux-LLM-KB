@@ -11,8 +11,13 @@ using Xunit;
 
 namespace FluxKnowledge.Integration.Tests.Gpu;
 
-public sealed class GpuInteractiveExecutorTests(NativeSqlServerFixture fixture) : IClassFixture<NativeSqlServerFixture>
+public sealed class GpuInteractiveExecutorTests : IAsyncLifetime
 {
+    // Cancellation may finish after the caller returns; never share that database with the next test.
+    private readonly NativeSqlServerFixture fixture = new();
+    public Task InitializeAsync() => fixture.InitializeAsync();
+    public Task DisposeAsync() => fixture.DisposeAsync();
+
     [NativeSqlServerFact]
     public async Task Conditional_executor_busy_refusal_does_not_create_or_cancel_gpu_work()
     {

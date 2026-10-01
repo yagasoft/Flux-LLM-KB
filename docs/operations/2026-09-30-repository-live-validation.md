@@ -1,6 +1,6 @@
 # Repository live validation
 
-Date: 30 September 2026. Status: dispatch-correction deployment verified; the existing source is paused after a readiness regression. A retained-checkpoint correction and complete live acceptance remain pending.
+Date: 30 September 2026. Status: release `09ce4dac` is deployed and healthy; the existing source is enabled at configuration revision 11. Authoritative scans converge 1,032 unique current paths. Initial publication and final live acceptance remain pending.
 
 The routine incremental IIS update deployed `597bf0bea4812c885bd6cf40d81cc438af490e3e`. The reviewed and actual release candidates and installed application/interactive-host payloads matched across all 272 files. The updater completed held readiness and unchanged retained/pipeline-state checks before releasing its owned validation hold. Subsequent live, readiness and index probes returned HTTP 200 with Healthy index state. No schema migration, index rebuild or model acquisition occurred; recovery payloads are retained.
 
@@ -109,5 +109,7 @@ all 11 asset and nine branch pages contained every current owner and C# outcome:
 unretained tracked paths are `.gitattributes`, `.gitignore` and `LICENSE`; no
 current retained path is untracked. Text publication reached 742 at 22:16.
 Python cited readback passed MCP, REST and CLI binding checks; larger context
-remained withheld by existing safety checks. Initial publication and the current
-documentation/C# body readbacks are still pending; no completion claim is made.
+remained withheld by existing safety checks. At 22:58 UTC, current replacement
+documentation readback and old-reference `evidence-stale` refusal passed MCP,
+REST and CLI binding checks. Initial publication and the final C# body readback
+remain pending; no completion claim is made.

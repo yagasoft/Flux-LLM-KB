@@ -20,6 +20,7 @@ using Xunit;
 
 namespace FluxKnowledge.Integration.Tests.Search;
 
+[Collection("sql-full-text")]
 public sealed class ScopedCorpusRetrievalTests(NativeSqlServerFixture fixture) : IClassFixture<NativeSqlServerFixture>
 {
     [NativeSqlServerFact]
