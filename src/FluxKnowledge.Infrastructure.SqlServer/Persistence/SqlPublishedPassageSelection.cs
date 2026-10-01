@@ -86,7 +86,9 @@ internal static class SqlPublishedPassageSelection
                    [vector].[Dimensions], [vector].[Values], [vector].[TextChunkContentHash],
                    [vector].[PayloadChecksum], [vector].[SourceRevision]
             FROM [Vectors] AS [vector]
-            INNER JOIN [TextChunks] AS [chunk] ON [vector].[TextChunkId] = [chunk].[Id]
+            -- Resolve chunk identity before revision predicates can combine unrelated
+            -- records/vectors. LOOP also fixes this query's join order in SQL Server.
+            INNER LOOP JOIN [TextChunks] AS [chunk] ON [vector].[TextChunkId] = [chunk].[Id]
             INNER JOIN [Artifacts] AS [artifact] ON [chunk].[ArtifactId] = [artifact].[Id]
             INNER JOIN [PipelineRecords] AS [record] ON [artifact].[PipelineRecordId] = [record].[Id]
             /*publication-bindings*/

@@ -464,4 +464,9 @@ if ($LASTEXITCODE -ne 0) {
     throw "The hybrid IIS worker exit/recovery contract failed: $workerProofOutput"
 }
 
+$stoppedPoolOutput = & pwsh -NoProfile -File (Join-Path $SourceRoot 'tests/native/stopped-pool-iis-recovery.ps1') -SourceRoot $SourceRoot 2>&1 | Out-String
+if ($LASTEXITCODE -ne 0) {
+    throw "The stopped-pool IIS recovery contract failed: $stoppedPoolOutput"
+}
+
 Write-Output "Native deployment plan contract passed."

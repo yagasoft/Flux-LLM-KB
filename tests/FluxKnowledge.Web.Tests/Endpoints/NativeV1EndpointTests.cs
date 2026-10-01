@@ -20,6 +20,27 @@ namespace FluxKnowledge.Web.Tests.Endpoints;
 
 public sealed class NativeV1EndpointTests
 {
+    [Theory]
+    [InlineData("preview")]
+    [InlineData("commit")]
+    public async Task Publication_recovery_preserves_single_job_identity_on_the_existing_preview_and_commit_routes(string mode)
+    {
+        await using var host = await StartAsync();
+        var jobId = Guid.NewGuid();
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/api/v1/corpus/actions/" + mode)
+        {
+            Content = JsonContent.Create(new { action = "publication_retry", payload = new { jobId }, confirmation_id = "opaque-confirmation" })
+        };
+        request.Headers.Add("Idempotency-Key", "recovery-key");
+        using var response = await host.Client.SendAsync(request);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var command = Assert.IsType<NativeCorpusMutation>(host.Facade.LastCommand);
+        Assert.Equal("publication_retry", command.Action);
+        Assert.Equal(jobId, command.Payload.GetProperty("jobId").GetGuid());
+        Assert.Single(command.Payload.EnumerateObject());
+        Assert.Equal(mode == "preview" ? 1 : 0, host.Facade.PreviewCalls);
+        Assert.Equal(mode == "commit" ? 1 : 0, host.Facade.CommitCalls);
+    }
     [Fact]
     public async Task Repository_configuration_above_32KiB_is_dispatched_without_a_rule_count_ceiling()
     {
@@ -398,6 +419,7 @@ public sealed class NativeV1EndpointTests
 
     private sealed class RecordingFacade(object? queryResult = null) : INativeV1Facade
     {
+        public object? LastCommand { get; private set; }
         public List<string> Queries { get; } = [];
         public object? LastQueryRequest { get; private set; }
         public int QueryCalls => Queries.Count;
@@ -416,6 +438,7 @@ public sealed class NativeV1EndpointTests
 
         public ValueTask<NativeActionPreview> PreviewAsync(string family, object command, string surface, CancellationToken cancellationToken)
         {
+            LastCommand = command is NativeCorpusMutation corpusCommand ? corpusCommand with { Payload = corpusCommand.Payload.Clone() } : command;
             if (command is NativeCorpusMutation corpus &&
                 corpus.Payload.TryGetProperty("displayName", out var displayName) &&
                 displayName.ValueKind == JsonValueKind.String &&
@@ -432,6 +455,7 @@ public sealed class NativeV1EndpointTests
 
         public ValueTask<NativeActionReceipt> CommitAsync(string family, object command, string confirmationId, string idempotencyKey, string surface, CancellationToken cancellationToken)
         {
+            LastCommand = command is NativeCorpusMutation corpusCommand ? corpusCommand with { Payload = corpusCommand.Payload.Clone() } : command;
             CommitCalls++;
             CommitFamilies.Add(family);
             return ValueTask.FromResult(new NativeActionReceipt(Guid.Empty, false, "committed", null));

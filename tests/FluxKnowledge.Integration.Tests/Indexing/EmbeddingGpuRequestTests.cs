@@ -52,6 +52,19 @@ public sealed class EmbeddingGpuRequestTests(NativeSqlServerFixture fixture) : I
     public Task DisposeAsync() => Task.CompletedTask;
 
     [NativeSqlServerFact]
+    public async Task Read_only_recovery_discovery_does_not_acquire_the_publication_mutation_fence()
+    {
+        var factory = SqlTestData.CreateFactory(fixture);
+        await using var holder = await factory.CreateDbContextAsync();
+        await using var transaction = await holder.Database.BeginTransactionAsync(System.Data.IsolationLevel.Serializable);
+        await SqlPublishedPassageSelection.AcquireFenceAsync(holder, CancellationToken.None);
+        var requests = new SqlEmbeddingGpuRequestStore(factory, new SqlGpuSchedulerStore(factory),
+            new ChannelGpuSchedulerWakeSignal(), Runtime, TimeProvider.System);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+        Assert.Empty(await requests.ReadRecoveryAsync(timeout.Token));
+    }
+
+    [NativeSqlServerFact]
     public async Task Deny_all_held_recovery_proves_an_exited_process_and_settles_a_real_rebuild_reservation_without_native_inference()
     {
         await using var environment = await SqlToUsearchRebuildTests.PipelineEnvironment.CreateAsync(fixture, "Rebuild recovery input.");

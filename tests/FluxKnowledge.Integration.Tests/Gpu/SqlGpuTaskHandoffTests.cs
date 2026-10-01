@@ -8,6 +8,7 @@ using FluxKnowledge.Infrastructure.SqlServer.Persistence;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
 using FluxKnowledge.Integration.Tests.Support;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Data.SqlClient;
 using Xunit;
 
 namespace FluxKnowledge.Integration.Tests.Gpu;
@@ -16,6 +17,109 @@ public sealed class SqlGpuTaskHandoffTests(NativeSqlServerFixture fixture)
     : IClassFixture<NativeSqlServerFixture>
 {
     private readonly NativeSqlServerFixture _fixture = fixture;
+
+    [NativeSqlServerFact]
+    public async Task Recovery_parent_read_arriving_first_can_read_children_and_release_before_handoff_inserts_them()
+    {
+        var (factory, claim, request) = await CreateClaimedRequestAsync("handoff:recovery-arrives-first");
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        var inserted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var store = new SqlGpuSchedulerStore(factory, afterMiniTaskPersisted: async ct =>
+        {
+            inserted.TrySetResult();
+            await release.Task.WaitAsync(ct);
+        });
+        await using var reader = new SqlConnection(_fixture.ConnectionString);
+        await reader.OpenAsync(timeout.Token);
+        await using var transaction = (SqlTransaction)await reader.BeginTransactionAsync(System.Data.IsolationLevel.Serializable, timeout.Token);
+        await using (var parent = new SqlCommand("SELECT Id FROM Jobs WHERE Id=@id", reader, transaction))
+        {
+            parent.Parameters.AddWithValue("@id", claim.JobId.Value);
+            Assert.Equal(claim.JobId.Value, await parent.ExecuteScalarAsync(timeout.Token));
+        }
+        var handoff = store.GpuTaskHandoffAsync(request, timeout.Token).AsTask();
+        try
+        {
+            // Observe the actual lock wait, rather than relying on a scheduler sleep.
+            // Old code reaches the inserted-child callback with only a shared parent
+            // lock, establishing the captured S-parent / X-child inversion.
+            await using var observer = new SqlConnection(_fixture.ConnectionString);
+            await observer.OpenAsync(timeout.Token);
+            while (!inserted.Task.IsCompleted)
+            {
+                await using var waiting = new SqlCommand("SELECT COUNT(*) FROM sys.dm_exec_requests WHERE blocking_session_id=@reader", observer);
+                waiting.Parameters.AddWithValue("@reader", reader.ServerProcessId);
+                if ((int)(await waiting.ExecuteScalarAsync(timeout.Token))! > 0) break;
+                if (handoff.IsCompleted) await handoff;
+                await Task.Delay(20, timeout.Token);
+            }
+            await using var children = new SqlCommand("SELECT COUNT(*) FROM GpuMiniTasks WHERE ParentJobId=@id", reader, transaction);
+            children.Parameters.AddWithValue("@id", claim.JobId.Value);
+            var childRead = children.ExecuteScalarAsync(timeout.Token);
+            if (inserted.Task.IsCompleted)
+            {
+                // Complete the old cycle deterministically: reader waits for child,
+                // then writer attempts the parent S->X conversion.
+                while (!childRead.IsCompleted)
+                {
+                    await using var waiting = new SqlCommand("SELECT COUNT(*) FROM sys.dm_exec_requests WHERE session_id=@reader AND blocking_session_id<>0", observer);
+                    waiting.Parameters.AddWithValue("@reader", reader.ServerProcessId);
+                    if ((int)(await waiting.ExecuteScalarAsync(timeout.Token))! > 0) break;
+                    await Task.Delay(20, timeout.Token);
+                }
+            }
+            release.TrySetResult();
+            Assert.Equal(0, await childRead);
+            await transaction.CommitAsync(timeout.Token);
+            Assert.True((await handoff).Committed);
+        }
+        finally
+        {
+            release.TrySetResult();
+            await timeout.CancelAsync();
+            try { await transaction.RollbackAsync(); } catch (InvalidOperationException) { }
+            try { await handoff; } catch (Exception) when (timeout.IsCancellationRequested) { }
+        }
+        Assert.True((await store.GpuTaskHandoffAsync(request, CancellationToken.None)).IsIdempotentReplay);
+        await using var verification = await factory.CreateDbContextAsync();
+        Assert.Single(await verification.GpuMiniTasks.ToArrayAsync());
+        Assert.Equal((int)PublicJobState.GpuQueued, (await verification.Jobs.SingleAsync(value => value.Id == claim.JobId.Value)).PublicState);
+    }
+
+    [NativeSqlServerFact]
+    public async Task Handoff_excludes_parent_recovery_reads_before_inserting_a_child_without_changing_replay()
+    {
+        var (factory, claim, request) = await CreateClaimedRequestAsync("handoff:parent-before-child");
+        var inserted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        var store = new SqlGpuSchedulerStore(factory, afterMiniTaskPersisted: async ct =>
+        {
+            inserted.TrySetResult();
+            await release.Task.WaitAsync(ct);
+        });
+        var handoff = store.GpuTaskHandoffAsync(request, timeout.Token).AsTask();
+        try
+        {
+            await inserted.Task.WaitAsync(timeout.Token);
+            await using var reader = new SqlConnection(_fixture.ConnectionString);
+            await reader.OpenAsync(timeout.Token);
+            await using var transaction = await reader.BeginTransactionAsync(System.Data.IsolationLevel.Serializable, timeout.Token);
+            await using var command = new SqlCommand("SET LOCK_TIMEOUT 1000; SELECT Id FROM Jobs WHERE Id=@id;", reader, (SqlTransaction)transaction);
+            command.Parameters.AddWithValue("@id", claim.JobId.Value);
+            var blocked = await Assert.ThrowsAsync<SqlException>(() => command.ExecuteScalarAsync(timeout.Token));
+            Assert.Equal(1222, blocked.Number);
+        }
+        finally { release.TrySetResult(); }
+        Assert.True((await handoff).Committed);
+        var replay = await store.GpuTaskHandoffAsync(request, timeout.Token);
+        Assert.True(replay.IsIdempotentReplay);
+        await using var verification = await factory.CreateDbContextAsync(timeout.Token);
+        Assert.Single(await verification.GpuMiniTasks.ToArrayAsync(timeout.Token));
+        Assert.Equal((int)PublicJobState.GpuQueued,
+            await verification.Jobs.Where(job => job.Id == claim.JobId.Value).Select(job => job.PublicState).SingleAsync(timeout.Token));
+    }
 
     [NativeSqlServerFact]
     public async Task Handoff_commits_mini_task_parent_transition_and_work_ready_wake_together()

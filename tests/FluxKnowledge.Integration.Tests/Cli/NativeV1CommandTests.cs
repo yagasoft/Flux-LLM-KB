@@ -10,6 +10,28 @@ namespace FluxKnowledge.Integration.Tests.Cli;
 public sealed class NativeV1CommandTests
 {
     [Theory]
+    [InlineData("preview")]
+    [InlineData("commit")]
+    public async Task Publication_recovery_forwards_single_job_payload_and_confirmation_to_the_existing_native_routes(string mode)
+    {
+        var handler = new RecordingHandler("{\"ok\":true,\"result\":{},\"reasonCode\":null,\"message\":null,\"retryable\":false}");
+        var jobId = Guid.NewGuid();
+        var input = JsonSerializer.Serialize(new { action = "publication_retry", payload = new { jobId } });
+        var result = await ExecuteAsync(["corpus", "write", "--" + mode, "--confirmation-id", "opaque-confirmation", "--idempotency-key", "recovery-key"], input, handler);
+        Assert.Equal(0, result.ExitCode);
+        Assert.Equal("/api/v1/corpus/actions/" + mode, handler.Request!.RequestUri!.AbsolutePath);
+        using var body = JsonDocument.Parse(handler.Body!);
+        Assert.Equal("publication_retry", body.RootElement.GetProperty("action").GetString());
+        var payload = body.RootElement.GetProperty("payload");
+        Assert.Equal(jobId, payload.GetProperty("jobId").GetGuid());
+        Assert.Single(payload.EnumerateObject());
+        if (mode == "commit")
+        {
+            Assert.Equal("opaque-confirmation", body.RootElement.GetProperty("confirmation_id").GetString());
+            Assert.Equal("recovery-key", handler.Request.Headers.GetValues("Idempotency-Key").Single());
+        }
+    }
+    [Theory]
     [InlineData("knowledge search", "POST", "/api/v1/knowledge/search", "{\"query\":\"needle\",\"limit\":3}")]
     [InlineData("knowledge graph", "POST", "/api/v1/knowledge/graph/query", "{\"node\":\"n\",\"max_depth\":1,\"max_results\":3}")]
     [InlineData("code query", "POST", "/api/v1/code/query", "{\"view\":\"status\",\"limit\":3}")]

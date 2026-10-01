@@ -2,6 +2,8 @@ using System.Text.Json;
 using Cloud.Unum.USearch;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Operations;
+using FluxKnowledge.Application.Indexing;
+using Microsoft.Extensions.Logging;
 
 namespace FluxKnowledge.Infrastructure.Usearch;
 
@@ -18,17 +20,19 @@ public sealed class UsearchGenerationBuilder : IIndexGenerationPublisher
     private readonly UsearchGenerationValidator validator;
     private readonly LiveRootStorageSafety? _storageSafety;
     private readonly IUsearchDirectoryCreator _directoryCreator;
+    private readonly ILogger<UsearchGenerationBuilder>? _logger;
 
     public UsearchGenerationBuilder(
         IIndexGenerationStore store,
         UsearchIndexOptions options,
-        UsearchGenerationValidator validator)
+        UsearchGenerationValidator validator,
+        ILogger<UsearchGenerationBuilder>? logger = null)
         : this(
             store,
             options,
             validator,
             storageSafety: null,
-            FileSystemUsearchDirectoryCreator.Instance)
+            FileSystemUsearchDirectoryCreator.Instance, logger)
     {
     }
 
@@ -37,7 +41,8 @@ public sealed class UsearchGenerationBuilder : IIndexGenerationPublisher
         UsearchIndexOptions options,
         UsearchGenerationValidator validator,
         LiveRootStorageSafety? storageSafety,
-        IUsearchDirectoryCreator directoryCreator)
+        IUsearchDirectoryCreator directoryCreator,
+        ILogger<UsearchGenerationBuilder>? logger = null)
     {
         ArgumentNullException.ThrowIfNull(store);
         ArgumentNullException.ThrowIfNull(options);
@@ -48,6 +53,7 @@ public sealed class UsearchGenerationBuilder : IIndexGenerationPublisher
         this.validator = validator;
         _storageSafety = storageSafety;
         _directoryCreator = directoryCreator;
+        _logger = logger;
     }
 
     public ValueTask<IndexGenerationDescriptor> BuildRecoveryCandidateAsync(
@@ -139,6 +145,20 @@ public sealed class UsearchGenerationBuilder : IIndexGenerationPublisher
         Guid indexGenerationId,
         CancellationToken cancellationToken)
     {
+        var phase = "snapshot-vector-loading";
+        try
+        {
+            return await BuildAndPlaceCoreAsync(indexGenerationId, () => phase = "placement", cancellationToken);
+        }
+        catch (Exception exception) when (!cancellationToken.IsCancellationRequested)
+        {
+            PublicationDiagnostics.Failure(_logger, indexGenerationId, phase, exception);
+            throw;
+        }
+    }
+
+    private async ValueTask<IndexGenerationCandidateSnapshot> BuildAndPlaceCoreAsync(Guid indexGenerationId, Action placing, CancellationToken cancellationToken)
+    {
         var publication = await store.ReadPublicationSnapshotAsync(indexGenerationId, cancellationToken);
         var vectors = publication.Vectors;
         if (vectors.Count == 0)
@@ -163,6 +183,7 @@ public sealed class UsearchGenerationBuilder : IIndexGenerationPublisher
         var finalDirectory = Path.Combine(options.RootPath, "generations", candidateId.ToString("N"));
         var candidate = new IndexGenerationDescriptor(candidateId, fingerprint, dimensions,
             finalDirectory, membershipChecksum, vectors.Count, publication.PublicationStamp);
+        placing();
         EnsureStorageSafe(finalDirectory);
         if (Directory.Exists(finalDirectory))
         {

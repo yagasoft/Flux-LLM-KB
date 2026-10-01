@@ -336,6 +336,18 @@ concurrent publication retries from a fresh snapshot. Deployment holds defer
 this refresh. Zero eligible vectors remain `IndexUpdating` without claiming an
 empty canonical catalogue. An unknown absent pointer still fails validation.
 
+Explicit `publication_retry` recovery uses the shared native confirmation and
+idempotency boundary. It reopens one failed current retained Publish job and its
+same completed delivery under the publication fence, locks dispatch before job,
+preserves the old failure in an atomic audit and advances both lease generations.
+It verifies immutable Embed inputs and current lifecycle state before restoring
+the exact text activity. Normal publication still rebuilds and validates the
+current corpus stamp; a receipt replay cannot reopen a later failed attempt.
+SQL vector selection resolves chunk identity before record revision predicates
+to exclude the observed pair expansion, retaining all eligibility checks. Its
+LOOP join fixes join order and trades additional point lookups on mostly
+ineligible corpora for predictable input-proportional work.
+
 The implemented embedding path accepts batches of at most four passages. SQL stores
 an unplaced draft owned by the existing Embed job and saves exact search-input and
 payload hashes. Each delivery performs one batch and requeues through the existing
@@ -466,8 +478,12 @@ The [operator guide](user-guide/dashboard-user-manual.md) describes the current
 pages and [safety policy](safety.md) defines disclosure and storage limits.
 
 Routine IIS changes use the incremental updater with an inspected plan, explicit
-approval, retained-state validation and payload rollback. Clean-slate installation
-uses a separate guarded one-shot GoLive path with independent clean-slate, VSS,
+approval, retained-state validation and payload rollback.
+For explicit stopped-pool recovery, the same updater starts only the candidate;
+failed held validation restores exact prior bytes without predecessor startup and
+retains the hold. It refuses migration/rebuild/deferral combinations and preserves
+the existing boundary against automatic rollback after hold release.
+Clean-slate installation uses a separate guarded one-shot GoLive path with independent clean-slate, VSS,
 SQL destruction and native Codex registration acknowledgements. The GoLive path
 does not offer automatic recovery or resume after an interrupted destructive run.
 See [setup](setup.md) for the supported workflow and verification commands.

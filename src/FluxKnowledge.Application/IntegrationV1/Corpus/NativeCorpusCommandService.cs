@@ -21,7 +21,8 @@ public sealed class NativeCorpusCommandService
         ["root_delete"] = "Delete the selected local source root and its owned data.",
         ["source_sync"] = "Queue source synchronisation.",
         ["watcher_set"] = "Set persisted watcher state.",
-        ["job_retry"] = "Queue a supported job retry."
+        ["job_retry"] = "Queue a supported job retry.",
+        ["publication_retry"] = "Requeue exactly the selected terminal Publish job and its completed delivery."
     };
     private readonly NativeOperationService _operations;
     private readonly IOutboxWakeSignal? _outboxWakeSignal;
@@ -69,6 +70,7 @@ public sealed class NativeCorpusCommandService
         var receipt = await _operations.CommitAsync(
             new NativeActionCommitRequest(action, Payload(command), confirmationId, idempotencyKey, surface),
             cancellationToken).ConfigureAwait(false);
+        if (action == "publication_retry") _outboxWakeSignal?.Notify();
         if (action is "root_create" or "root_resume" or "root_delete")
         {
             // A durable replay can follow a process stop immediately after the

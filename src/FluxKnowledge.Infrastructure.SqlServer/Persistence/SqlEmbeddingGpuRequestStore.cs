@@ -177,37 +177,39 @@ public sealed class SqlEmbeddingGpuRequestStore(IDbContextFactory<FluxKnowledgeD
                 ? new(request.MiniTaskId, request.ResultDigest?.ToArray(), request.CleanupConfirmedAtUtc.Value) : null;
         }, cancellationToken);
 
-    public ValueTask<IReadOnlyList<EmbeddingGpuRecoveryWork>> ReadRecoveryAsync(CancellationToken cancellationToken)
-        => TransactionAsync<IReadOnlyList<EmbeddingGpuRecoveryWork>>(async context =>
-        {
-            var allowLegacySettlement = deploymentValidationHold?.IsHeld != true;
-            var candidates = await (from request in context.EmbeddingGpuRequests.AsNoTracking()
-                join task in context.GpuMiniTasks.AsNoTracking() on request.MiniTaskId equals task.Id
-                join batch in context.GpuBatches.AsNoTracking() on task.BatchId equals batch.Id
-                join dispatch in context.GpuExecutorDispatches.AsNoTracking() on batch.Id equals dispatch.BatchId
-                where (request.State < 2 || allowLegacySettlement && RecoverableSettledRequestIds(context).Contains(request.MiniTaskId)) &&
-                    batch.ItemCount == 1 && request.ParentJobId == task.ParentJobId &&
-                    request.SourceRevision == task.SourceRevision && request.ModelFingerprint == runtime.Profile.ModelFingerprint &&
-                    request.Dimensions == runtime.Profile.Dimensions &&
-                    task.AdmissionGeneration == batch.AdmissionGeneration && dispatch.AdmissionGeneration == batch.AdmissionGeneration &&
-                    task.ModelRuntimeKey == runtime.RuntimeKey && task.SettingsFingerprint == runtime.SettingsFingerprint &&
-                    batch.ModelRuntimeKey == runtime.RuntimeKey && batch.SettingsFingerprint == runtime.SettingsFingerprint &&
-                    batch.CapacitySlotKey == dispatch.CapacitySlotKey && batch.OwnerKey == dispatch.OwnerKey &&
-                    dispatch.ExecutorKey == EmbeddingGpuExecutor.Name &&
-                    (request.DispatchId == null || request.DispatchId == dispatch.DispatchId) &&
-                    (dispatch.State == (int)GpuExecutorDispatchState.Acknowledged ||
-                        dispatch.State == (int)GpuExecutorDispatchState.DeliveryUncertain ||
-                        request.NativeCleanupConfirmed && dispatch.State == (int)GpuExecutorDispatchState.Terminal)
-                orderby request.UpdatedAtUtc, request.MiniTaskId
-                select new { Request = request, Dispatch = dispatch }).Take(128).ToArrayAsync(cancellationToken).ConfigureAwait(false);
-            return candidates.Select(candidate => new EmbeddingGpuRecoveryWork(candidate.Request.MiniTaskId,
-                new(candidate.Dispatch.BatchId, candidate.Dispatch.CapacitySlotKey, candidate.Dispatch.ExecutorKey,
-                    candidate.Dispatch.AdmissionGeneration, candidate.Dispatch.DispatchId),
-                candidate.Request.ExecutorInstanceId, candidate.Request.ClaimOperationId,
-                candidate.Request.OwnerProcessId is null ? null : new(candidate.Request.OwnerProcessId.Value,
-                    candidate.Request.OwnerStartedAtUtc!.Value, candidate.Request.OwnerMachineFingerprint!),
-                candidate.Request.NativeCleanupConfirmed)).ToArray();
-        }, cancellationToken);
+    public async ValueTask<IReadOnlyList<EmbeddingGpuRecoveryWork>> ReadRecoveryAsync(CancellationToken cancellationToken)
+    {
+        // Discovery grants no authority: claims, cleanup and settlement revalidate
+        // exact ownership under their existing transaction/publication fences.
+        await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        var allowLegacySettlement = deploymentValidationHold?.IsHeld != true;
+        var candidates = await (from request in context.EmbeddingGpuRequests.AsNoTracking()
+            join task in context.GpuMiniTasks.AsNoTracking() on request.MiniTaskId equals task.Id
+            join batch in context.GpuBatches.AsNoTracking() on task.BatchId equals batch.Id
+            join dispatch in context.GpuExecutorDispatches.AsNoTracking() on batch.Id equals dispatch.BatchId
+            where (request.State < 2 || allowLegacySettlement && RecoverableSettledRequestIds(context).Contains(request.MiniTaskId)) &&
+                batch.ItemCount == 1 && request.ParentJobId == task.ParentJobId &&
+                request.SourceRevision == task.SourceRevision && request.ModelFingerprint == runtime.Profile.ModelFingerprint &&
+                request.Dimensions == runtime.Profile.Dimensions &&
+                task.AdmissionGeneration == batch.AdmissionGeneration && dispatch.AdmissionGeneration == batch.AdmissionGeneration &&
+                task.ModelRuntimeKey == runtime.RuntimeKey && task.SettingsFingerprint == runtime.SettingsFingerprint &&
+                batch.ModelRuntimeKey == runtime.RuntimeKey && batch.SettingsFingerprint == runtime.SettingsFingerprint &&
+                batch.CapacitySlotKey == dispatch.CapacitySlotKey && batch.OwnerKey == dispatch.OwnerKey &&
+                dispatch.ExecutorKey == EmbeddingGpuExecutor.Name &&
+                (request.DispatchId == null || request.DispatchId == dispatch.DispatchId) &&
+                (dispatch.State == (int)GpuExecutorDispatchState.Acknowledged ||
+                    dispatch.State == (int)GpuExecutorDispatchState.DeliveryUncertain ||
+                    request.NativeCleanupConfirmed && dispatch.State == (int)GpuExecutorDispatchState.Terminal)
+            orderby request.UpdatedAtUtc, request.MiniTaskId
+            select new { Request = request, Dispatch = dispatch }).Take(128).ToArrayAsync(cancellationToken).ConfigureAwait(false);
+        return candidates.Select(candidate => new EmbeddingGpuRecoveryWork(candidate.Request.MiniTaskId,
+            new(candidate.Dispatch.BatchId, candidate.Dispatch.CapacitySlotKey, candidate.Dispatch.ExecutorKey,
+                candidate.Dispatch.AdmissionGeneration, candidate.Dispatch.DispatchId),
+            candidate.Request.ExecutorInstanceId, candidate.Request.ClaimOperationId,
+            candidate.Request.OwnerProcessId is null ? null : new(candidate.Request.OwnerProcessId.Value,
+                candidate.Request.OwnerStartedAtUtc!.Value, candidate.Request.OwnerMachineFingerprint!),
+            candidate.Request.NativeCleanupConfirmed)).ToArray();
+    }
 
     public ValueTask<bool> ConfirmUnstartedCleanupAsync(EmbeddingGpuRecoveryWork work, Guid executorInstance,
         Guid claimOperation, GpuInteractiveOwnerIdentity owner, CancellationToken cancellationToken)

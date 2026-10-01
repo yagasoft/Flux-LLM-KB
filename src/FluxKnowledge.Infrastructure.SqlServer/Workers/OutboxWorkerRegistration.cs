@@ -103,6 +103,7 @@ public static class OutboxWorkerServiceCollectionExtensions
             provider.GetRequiredService<ILocalPrivateContentDisclosure>(),
             csharpCompilerServiceRegistrationProbe));
         services.TryAddScoped<RetainedProcessorActivationService>();
+        services.TryAddSingleton<IRetainedProcessorFailureClassifier, SqlRetainedProcessorFailureClassifier>();
         services.TryAddEnumerable(ServiceDescriptor.Singleton<IHostedService, RetainedProcessorActivationHostedService>());
         services.TryAddScoped<DeferredActivityReplayService>();
         services.TryAddScoped<IDeferredContentReprocessor>(

@@ -17,6 +17,7 @@ param(
     [string]$ExpectedPatchOperatorHash = '',
     [ValidateRange(30, 3600)][int]$RebuildTimeoutSeconds = 1800,
     [switch]$DeferReadinessForScopedRemediation,
+    [switch]$RecoverStoppedPool,
     [switch]$PlanOnly,
     [switch]$Apply
 )
@@ -680,9 +681,10 @@ function Test-IncrementalRollbackHoldRelease {
         [bool]$ApplyCorpusChunkFullTextMigration,
         [bool]$CorpusRollbackVerified,
         [bool]$InteractiveHostMutationStarted,
-        [bool]$InteractiveHostRollbackVerified
+        [bool]$InteractiveHostRollbackVerified,
+        [bool]$RecoverStoppedPool = $false
     )
-    return [bool]($Validation.HoldCreated -and $Validation.PayloadRollbackVerified -and
+    return [bool](-not $RecoverStoppedPool -and $Validation.HoldCreated -and $Validation.PayloadRollbackVerified -and
         (-not $ApplyMigrations -or $Validation.RollbackVerified) -and
         (-not $ApplyCorpusChunkFullTextMigration -or $CorpusRollbackVerified) -and
         (-not $InteractiveHostMutationStarted -or $InteractiveHostRollbackVerified))
@@ -1209,6 +1211,16 @@ function Invoke-HybridPassageIisPatch {
         deployment_validation_hold='released-after-same-operation-rebuild-and-input-validation' } | ConvertTo-Json
 }
 
+function Assert-StoppedPoolRecoveryBaseline {
+    if ((Get-WebAppPoolState -Name $SiteName).Value -ne 'Stopped') {
+        throw 'The FluxKnowledge pool must be stopped for explicit stopped-pool recovery.'
+    }
+    $appcmd = Join-Path $env:SystemRoot 'System32/inetsrv/appcmd.exe'
+    if (@(Get-HybridIisWorkerIds -AppCmdPath $appcmd -PoolName $SiteName).Count -ne 0) {
+        throw 'Stopped-pool recovery requires proof that no FluxKnowledge worker remains.'
+    }
+}
+
 function Assert-IncrementalIisPreflight {
     $site = Get-Website -Name $SiteName -ErrorAction Stop
     Assert-CanonicalPath `
@@ -1221,7 +1233,10 @@ function Assert-IncrementalIisPreflight {
     if ($site.State -ne "Started") {
         throw "The fixed FluxKnowledge IIS site must be started before an incremental update."
     }
-    if ((Get-WebAppPoolState -Name $SiteName).Value -ne "Started" -and [string]::IsNullOrWhiteSpace($ResumeHybridRebuildRelease) -and
+    if ($RecoverStoppedPool) {
+        Assert-StoppedPoolRecoveryBaseline
+    }
+    elseif ((Get-WebAppPoolState -Name $SiteName).Value -ne "Started" -and [string]::IsNullOrWhiteSpace($ResumeHybridRebuildRelease) -and
         [string]::IsNullOrWhiteSpace($ResumeHybridPatchRelease)) {
         throw "The fixed FluxKnowledge IIS application pool must be started before an incremental update."
     }
@@ -1256,6 +1271,11 @@ if ($SiteName -cne "FluxKnowledge") {
 }
 if ($PlanOnly -and $Apply) {
     throw "-PlanOnly cannot be combined with -Apply."
+}
+if ($RecoverStoppedPool -and ($ApplyMigrations -or $ApplyCorpusChunkFullTextMigration -or $ApplyHybridPassageRebuild -or
+    $ResumeHybridRebuildRelease -or $ReplaceHybridRebuildRelease -or $PatchHybridRebuildRelease -or $ResumeHybridPatchRelease -or
+    $DeferReadinessForScopedRemediation)) {
+    throw 'Stopped-pool recovery cannot combine with migration, rebuild, hybrid recovery or readiness deferral.'
 }
 if ($DeferReadinessForScopedRemediation -and $ApplyMigrations) {
     throw "-DeferReadinessForScopedRemediation cannot be combined with -ApplyMigrations."
@@ -1393,8 +1413,9 @@ if ($PlanOnly) {
         migration_plan = $migrationPlan
         clean_slate = $false
         preserved = @("Config", "Data", "Runtime", "Recovery", "CodexPlugin")
+        recover_stopped_pool = [bool]$RecoverStoppedPool
         payload_acl = "inherit-from-live-root"
-        rollback = if ($PatchHybridRebuildRelease -or $ResumeHybridPatchRelease) { 'forward-only after activation intent; predecessor payload/packet retained, hold denied on failure' } elseif ($ApplyHybridPassageRebuild) { 'before-schema: original payload; after-schema: held forward recovery with retained original payload/configuration' } else { "automatic-application-and-interactive-host-payload-restore" }
+        rollback = if ($RecoverStoppedPool) { 'restore-prior-payloads-with-pool-stopped-and-hold-retained' } elseif ($PatchHybridRebuildRelease -or $ResumeHybridPatchRelease) { 'forward-only after activation intent; predecessor payload/packet retained, hold denied on failure' } elseif ($ApplyHybridPassageRebuild) { 'before-schema: original payload; after-schema: held forward recovery with retained original payload/configuration' } else { "automatic-application-and-interactive-host-payload-restore" }
         gpu_drain = 'deny admissions; allow active OCR page and native cleanup to finish; prove exact IIS worker exit before each payload swap stop'
         deployment_validation_hold = $true
         candidate_validation = if ($PatchHybridRebuildRelease -or $ResumeHybridPatchRelease) { 'same-operation-epoch-checkpoint-continuity-preserved-inputs-and-loopback-probes' } elseif ($ApplyHybridPassageRebuild) { 'held-exact-rebuild-finalisation-preserved-inputs-and-loopback-probes' } elseif ($DeferReadinessForScopedRemediation) {
@@ -1524,6 +1545,20 @@ try {
     }
     Assert-NotReparsePoint -Path $InteractiveHostRoot -Message "The installed interactive-host payload root cannot be a reparse point."
     Test-InteractiveHostPayload -Path $InteractiveHostRoot
+    if ($RecoverStoppedPool) {
+        # Recovery never starts the failed predecessor just to admit deployment.
+        # Deny work and capture exact rollback bytes before either payload changes.
+        Assert-StoppedPoolRecoveryBaseline
+        $recoveryOriginalPayloadHash = Get-HybridPayloadFingerprint -Path $CanonicalDeployRoot
+        $recoveryOriginalInteractiveHostHash = Get-HybridPayloadFingerprint -Path $InteractiveHostRoot
+        Stop-HybridIisAfterGpuDrain
+        [void](New-DeploymentValidationHold -Path $ValidationHoldPath -ReleaseId $releaseId)
+        $deploymentValidation.HoldCreated = $true
+        $deploymentValidation.Baseline = Get-RetainedPipelineStateBaseline
+        [ordered]@{ observed_at_utc=[DateTime]::UtcNow.ToString('O'); pool='Stopped';
+            application_hash=$recoveryOriginalPayloadHash; interactive_host_hash=$recoveryOriginalInteractiveHostHash } |
+            ConvertTo-Json | Set-Content -LiteralPath (Join-Path $releaseRoot 'stopped-pool-recovery-baseline.json') -Encoding utf8
+    }
     $interactiveHostTask = Get-ScheduledTask -TaskName $InteractiveHostTaskName -ErrorAction Stop
     $interactiveHostTaskWasEnabled = [bool]$interactiveHostTask.Settings.Enabled
     if ($interactiveHostTaskWasEnabled) {
@@ -1557,6 +1592,7 @@ try {
         -CandidateRoot $candidateRoot `
         -PreviousRoot $previousRoot `
         -FailedRoot $failedRoot `
+        -RestartPreviousApplication:(-not $RecoverStoppedPool) `
         -ActivateCandidate {
             Invoke-CandidatePayloadActivation -CandidateRoot $candidateRoot -ApplicationRoot $CanonicalDeployRoot
         } `
@@ -1601,7 +1637,13 @@ try {
                 -Current (Get-RetainedPipelineStateBaseline)
         } `
         -ValidateRollbackApplication {
-            if ($ApplyCorpusChunkFullTextMigration) {
+            if ($RecoverStoppedPool) {
+                Assert-StoppedPoolRecoveryBaseline
+                if ((Get-HybridPayloadFingerprint -Path $CanonicalDeployRoot) -cne $recoveryOriginalPayloadHash) {
+                    throw 'Stopped-pool recovery did not restore the exact prior application bytes.'
+                }
+            }
+            elseif ($ApplyCorpusChunkFullTextMigration) {
                 Confirm-CorpusFullTextMigrationRollback -State $corpusMigrationState -ValidatePriorApplication {
                     Invoke-RequiredLoopbackProbes -Origin $loopbackOrigin.Origin -TimeoutSeconds $ReadinessTimeoutSeconds
                     Assert-RetainedPipelineStateUnchanged -Baseline $deploymentValidation.Baseline -Current (Get-RetainedPipelineStateBaseline)
@@ -1677,18 +1719,35 @@ try {
     } | ConvertTo-Json -Depth 3
 }
 catch {
+    $deploymentFailure = $_
     if ($holdReleased) {
         throw "Deployment activated and the validation hold was released, but a post-activation check failed. Current application and schema are retained; do not replay the one-time migration. Inspect recovery release $releaseRoot. Failure: $($_.Exception.Message)"
     }
     if ($interactiveHostMutationStarted) {
-        if ($null -eq $interactiveHostPreviousRoot -or
-            -not (Test-Path -LiteralPath $interactiveHostPreviousRoot -PathType Container)) {
-            throw "Deployment failed after the interactive-host payload was mutated, and no rollback payload is available. The scheduled task remains disabled."
+        try {
+            if ($null -eq $interactiveHostPreviousRoot -or
+                -not (Test-Path -LiteralPath $interactiveHostPreviousRoot -PathType Container)) {
+                throw "Deployment failed after the interactive-host payload was mutated, and no rollback payload is available. The scheduled task remains disabled."
+            }
+            if ($RecoverStoppedPool) { Assert-StoppedPoolRecoveryBaseline }
+            Test-InteractiveHostPayload -Path $interactiveHostPreviousRoot
+            Restore-InteractiveHostPayload -PreviousRoot $interactiveHostPreviousRoot -LiveRoot $InteractiveHostRoot
+            Test-InteractiveHostPayload -Path $InteractiveHostRoot
+            if ($RecoverStoppedPool -and
+                (Get-HybridPayloadFingerprint -Path $InteractiveHostRoot) -cne $recoveryOriginalInteractiveHostHash) {
+                throw 'Stopped-pool recovery did not restore the exact prior interactive-host bytes.'
+            }
         }
-        Test-InteractiveHostPayload -Path $interactiveHostPreviousRoot
-        Restore-InteractiveHostPayload -PreviousRoot $interactiveHostPreviousRoot -LiveRoot $InteractiveHostRoot
-        Test-InteractiveHostPayload -Path $InteractiveHostRoot
+        catch {
+            if ($RecoverStoppedPool) {
+                throw "Stopped-pool recovery failed; application rollback verified=$($deploymentValidation.PayloadRollbackVerified); companion restored=False; hold retained; recovery=$releaseRoot. Original failure: $($deploymentFailure.Exception.Message) Companion restoration failure: $($_.Exception.Message)"
+            }
+            throw
+        }
         $interactiveHostRollbackVerified = $true
+        if ($RecoverStoppedPool) {
+            throw "Stopped-pool recovery failed; application rollback verified=$($deploymentValidation.PayloadRollbackVerified); companion restored=True; hold retained; recovery=$releaseRoot. Original failure: $($deploymentFailure.Exception.Message)"
+        }
         throw "Deployment failed after the interactive-host payload was mutated. The prior payload was restored and the scheduled task remains disabled for operator review."
     }
     if ($interactiveHostTaskWasEnabled -and -not $interactiveHostMutationStarted) {
@@ -1703,7 +1762,8 @@ finally {
             -ApplyCorpusChunkFullTextMigration ([bool]$ApplyCorpusChunkFullTextMigration) `
             -CorpusRollbackVerified $(if ($ApplyCorpusChunkFullTextMigration) { [bool]$corpusMigrationState.RollbackVerified } else { $true }) `
             -InteractiveHostMutationStarted $interactiveHostMutationStarted `
-            -InteractiveHostRollbackVerified $interactiveHostRollbackVerified)) {
+            -InteractiveHostRollbackVerified $interactiveHostRollbackVerified `
+            -RecoverStoppedPool ([bool]$RecoverStoppedPool))) {
         Remove-DeploymentValidationHold -Path $ValidationHoldPath -ReleaseId $releaseId
     }
     if ($leaseAcquired) {

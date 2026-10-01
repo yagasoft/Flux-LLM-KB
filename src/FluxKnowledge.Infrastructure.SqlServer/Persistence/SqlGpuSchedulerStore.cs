@@ -1141,6 +1141,13 @@ public sealed partial class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecu
 
         await AcquireMutationLockAsync(context, transaction.GetDbTransaction(), cancellationToken).ConfigureAwait(false);
 
+        // Recovery can inspect the parent before reaching a child. Exclude that shared
+        // read before inserting/locking a child, avoiding a later S-to-X conversion cycle.
+        // Lock by identity only: an identical handoff may replay after its parent advances.
+        _ = await context.Jobs.FromSqlInterpolated($"SELECT * FROM [Jobs] WITH (XLOCK, HOLDLOCK) WHERE [Id] = {request.ParentJob.JobId.Value}")
+            .AsNoTracking().SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false)
+            ?? throw new InvalidOperationException("The GPU hand-off parent Job no longer exists.");
+
         if (await context.CorpusRebuildSupersededJobs.AnyAsync(value => value.JobId == request.ParentJob.JobId.Value, cancellationToken))
             throw new InvalidOperationException("corpus-rebuild-job-superseded");
 

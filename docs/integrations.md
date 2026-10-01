@@ -60,6 +60,21 @@ the incremental IIS updater. It accepts `plan --operation <guid>`,
 The rebuild requires the updater's owned hold and scheduler drain; these commands
 do not grant production authority or replace normal public search/write contracts.
 
+`corpus.write` also supports explicit terminal Publish recovery with
+`action: "publication_retry"` and `payload: { "jobId": "<guid>" }` through the same
+preview/confirmed commit routes. It only admits one current retained record,
+enabled root, terminal failed Publish job, completed unsuccessful delivery and
+verified immutable Embed inputs. It requeues the same job/delivery, preserves
+failure evidence and attempts, advances both lease generations and restores its
+exact text activity for normal publication. Pause, deletion, suppression, live
+ownership, competing work, contradictory success or invalid inputs refuse
+without scheduling. Confirmation binds current versions and inputs; exact
+idempotent replay returns its original receipt even after a later failure.
+Another recovery requires a new preview and explicit authority. Deployment
+holds and corpus rebuilds fence recovery. Existing `job_retry` still applies to
+supported source-scan controls. Production terminal replay needs separate
+approval; installing this action does not authorise a replay.
+
 `operations.status` accepts the bounded views `overview`, `sources`, `jobs`,
 `workers`, `processors`, and `recovery`. Code, corpus and audit queries use
 bounded pages and opaque query-bound cursors.

@@ -4,6 +4,7 @@ using FluxKnowledge.Application.Pipeline;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Workers;
 using FluxKnowledge.Domain.Pipeline;
+using Microsoft.Extensions.Logging;
 
 namespace FluxKnowledge.Application.Indexing;
 
@@ -12,11 +13,26 @@ public sealed class PublishStageWorker(
     IPipelineStageReader pipelineReader,
     IIndexGenerationPublisher publisher,
     StageTransitionService transitions,
-    TimeProvider timeProvider) : IStageWorker
+    TimeProvider timeProvider,
+    ILogger<PublishStageWorker>? logger = null) : IStageWorker
 {
     public string Operation => PipelineOperations.Publish;
 
     public async ValueTask ExecuteAsync(StageWorkItem workItem, CancellationToken cancellationToken)
+    {
+        var phase = "generation-resolution";
+        try
+        {
+            await ExecuteCoreAsync(workItem, value => phase = value, cancellationToken);
+        }
+        catch (Exception exception) when (!cancellationToken.IsCancellationRequested)
+        {
+            PublicationDiagnostics.Failure(logger, workItem.Job.JobId.Value, phase, exception);
+            throw;
+        }
+    }
+
+    private async ValueTask ExecuteCoreAsync(StageWorkItem workItem, Action<string> setPhase, CancellationToken cancellationToken)
     {
         var generation = await FindGenerationAsync(workItem, cancellationToken);
         if (generation is null)
@@ -29,10 +45,12 @@ public sealed class PublishStageWorker(
         for (var attempt = 0; attempt < 3; attempt++)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            setPhase("snapshot-vector-loading-and-placement");
             var candidate = await publisher.BuildAndPlaceAsync(generation.Id, cancellationToken);
             var placed = candidate.Generation;
             try
             {
+                setPhase("activation");
                 await transitions.TransitionAsync(new StageTransitionRequest(
                     workItem.DispatchMessage, workItem.Job,
                     new StageArtifact(Guid.NewGuid(), PipelineStage.Publish,
@@ -44,8 +62,9 @@ public sealed class PublishStageWorker(
                         ExpectedCorpusStamp: candidate.ExpectedCorpusStamp)), cancellationToken);
                 return;
             }
-            catch (PublicationSnapshotConflictException)
+            catch (PublicationSnapshotConflictException exception)
             {
+                PublicationDiagnostics.Failure(logger, workItem.Job.JobId.Value, "activation-snapshot-conflict", exception);
                 // Valid vectors and immutable placements are reusable; only membership changed.
             }
         }

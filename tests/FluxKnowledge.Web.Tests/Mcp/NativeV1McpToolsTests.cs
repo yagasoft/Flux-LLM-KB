@@ -17,6 +17,23 @@ namespace FluxKnowledge.Web.Tests.Mcp;
 
 public sealed class NativeV1McpToolsTests
 {
+    [Theory]
+    [InlineData("preview")]
+    [InlineData("commit")]
+    public async Task Publication_recovery_maps_the_single_job_payload_and_confirmation_through_the_native_corpus_surface(string mode)
+    {
+        var facade = new RecordingFacade();
+        var jobId = Guid.NewGuid();
+        var result = await CreateTools(facade).CorpusWrite(mode, "publication_retry", JsonSerializer.SerializeToElement(new { jobId }),
+            "opaque-confirmation", "recovery-key", CancellationToken.None);
+        Assert.True(Read(result).GetProperty("ok").GetBoolean());
+        var command = Assert.IsType<NativeCorpusMutation>(facade.LastCommand);
+        Assert.Equal("publication_retry", command.Action);
+        Assert.Equal(jobId, command.Payload.GetProperty("jobId").GetGuid());
+        Assert.Single(command.Payload.EnumerateObject());
+        Assert.Equal(mode == "preview" ? 1 : 0, facade.PreviewCalls);
+        Assert.Equal(mode == "commit" ? 1 : 0, facade.CommitCalls);
+    }
     [Fact]
     public void Native_MCP_class_advertises_the_v1_tools_including_corpus_retrieval()
     {
@@ -229,6 +246,7 @@ public sealed class NativeV1McpToolsTests
 
     private sealed class RecordingFacade(object? queryResult = null) : INativeV1Facade
     {
+        public object? LastCommand { get; private set; }
         public int QueryCalls { get; private set; }
         public int PreviewCalls { get; private set; }
         public int CommitCalls { get; private set; }
@@ -242,6 +260,7 @@ public sealed class NativeV1McpToolsTests
 
         public ValueTask<NativeActionPreview> PreviewAsync(string family, object command, string surface, CancellationToken cancellationToken)
         {
+            LastCommand = command;
             if (command is NativeCorpusMutation corpus &&
                 corpus.Payload.TryGetProperty("displayName", out var displayName) &&
                 displayName.ValueKind == JsonValueKind.String &&
@@ -257,6 +276,7 @@ public sealed class NativeV1McpToolsTests
 
         public ValueTask<NativeActionReceipt> CommitAsync(string family, object command, string confirmationId, string idempotencyKey, string surface, CancellationToken cancellationToken)
         {
+            LastCommand = command;
             CommitCalls++;
             return ValueTask.FromResult(new NativeActionReceipt(Guid.Empty, false, "committed", null));
         }

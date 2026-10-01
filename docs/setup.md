@@ -102,6 +102,15 @@ changes require its separate reviewed migration opt-in and compatible rollback
 conditions. Updating code in Git does not authorise deployment, restart or
 migration. Model caches and source originals are outside the update payload.
 
+For an already stopped FluxKnowledge pool, inspect `-PlanOnly -RecoverStoppedPool`
+and obtain explicit approval for that recovery mode before using `-Apply`.
+It requires no remaining Flux worker, retains GPU drain checks and starts only
+the corrected candidate. Failed validation restores verified prior payload bytes
+with the pool stopped and the owned hold retained; it does not restart the failed
+predecessor. Migration, rebuild and readiness-deferral switches are incompatible.
+After the hold is released, a failed probe retains the candidate for reviewed
+recovery. Terminal Publish replay requires separate native confirmation and authority.
+
 The one-time `-ApplyCorpusChunkFullTextMigration` switch applies only
 `20260924125920_AddCorpusChunkFullTextIndex` from the exact OCR-metadata baseline
 `20260920122758_AddDocumentOcrRequestsAndArtifactMetadata`. Include that switch

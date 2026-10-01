@@ -15,77 +15,97 @@ public sealed class LocalSourceRootWatchHostedService(
     IDeploymentValidationHold? deploymentValidationHold = null) : BackgroundService
 {
     private static readonly TimeSpan RebuildCadence = TimeSpan.FromMinutes(15);
+    private static readonly TimeSpan PersistenceCadence = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan PersistenceFailureDelay = TimeSpan.FromSeconds(30);
+    private readonly LocalSourceWatchSignalBuffer _signals = new(coordinator, logger);
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         await (deploymentValidationHold ?? DeploymentValidationHold.None)
             .WaitUntilReleasedAsync(stoppingToken).ConfigureAwait(false);
-        while (!stoppingToken.IsCancellationRequested)
+        using var persistenceCancellation = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+        var persistence = PersistHintsAsync(persistenceCancellation.Token);
+        try
         {
-            IDisposable? watchers = null;
-            try
+            while (!stoppingToken.IsCancellationRequested)
             {
-                watchers = await BuildWatchersAsync(stoppingToken).ConfigureAwait(false);
+                IDisposable? watchers = null;
+                try { watchers = await BuildWatchersAsync(stoppingToken).ConfigureAwait(false); }
+                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { return; }
+                catch (Exception exception)
+                {
+                    logger.LogWarning(exception, "Source-root watchers could not be restored; periodic reconciliation remains authoritative.");
+                }
+                try { await Task.Delay(RebuildCadence, timeProvider, stoppingToken).ConfigureAwait(false); }
+                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { }
+                finally { watchers?.Dispose(); }
             }
-            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
-            {
-                return;
-            }
-            catch (Exception exception)
-            {
-                logger.LogWarning(exception, "Source-root watchers could not be restored; periodic reconciliation remains authoritative.");
-            }
-            try { await Task.Delay(RebuildCadence, stoppingToken).ConfigureAwait(false); }
-            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { }
-            watchers?.Dispose();
         }
+        finally
+        {
+            await persistenceCancellation.CancelAsync().ConfigureAwait(false);
+            await persistence.ConfigureAwait(false);
+        }
+    }
+
+    private async Task PersistHintsAsync(CancellationToken stoppingToken)
+    {
+        try
+        {
+            var delay = PersistenceCadence;
+            while (!stoppingToken.IsCancellationRequested)
+            {
+                await Task.Delay(delay, timeProvider, stoppingToken).ConfigureAwait(false);
+                delay = await _signals.FlushAsync(stoppingToken).ConfigureAwait(false)
+                    ? PersistenceCadence : PersistenceFailureDelay;
+            }
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { }
     }
 
     private async Task<IDisposable> BuildWatchersAsync(CancellationToken cancellationToken)
     {
         var watchers = new List<FileSystemWatcher>();
-        foreach (var root in await store.ReadEnabledRootsAsync(cancellationToken).ConfigureAwait(false))
+        var roots = await store.ReadEnabledRootsAsync(cancellationToken).ConfigureAwait(false);
+        _signals.ConfigureRoots(roots.Select(root => root.Id));
+        foreach (var root in roots)
         {
             try
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 Revalidate(root);
                 foreach (var watchPath in GetWatchPaths(root))
                 {
-                var watcher = new FileSystemWatcher(watchPath)
-                {
-                    IncludeSubdirectories = root.Recursive,
-                    NotifyFilter = NotifyFilters.FileName | NotifyFilters.LastWrite | NotifyFilters.Size | NotifyFilters.CreationTime,
-                    EnableRaisingEvents = true
-                };
-                watcher.Created += (_, _) => Signal(root.Id, SourceWatchSignalKind.Created);
-                watcher.Changed += (_, _) => Signal(root.Id, SourceWatchSignalKind.Changed);
-                watcher.Deleted += (_, _) => Signal(root.Id, SourceWatchSignalKind.Deleted);
-                watcher.Renamed += (_, _) => Signal(root.Id, SourceWatchSignalKind.Renamed);
-                watcher.Error += (_, _) => Signal(root.Id, SourceWatchSignalKind.Overflow);
-                watchers.Add(watcher);
+                    var watcher = new FileSystemWatcher(watchPath)
+                    {
+                        IncludeSubdirectories = root.Recursive,
+                        NotifyFilter = NotifyFilters.FileName | NotifyFilters.LastWrite | NotifyFilters.Size | NotifyFilters.CreationTime
+                    };
+                    watchers.Add(watcher);
+                    watcher.Created += (_, _) => Signal(root.Id, SourceWatchSignalKind.Created);
+                    watcher.Changed += (_, _) => Signal(root.Id, SourceWatchSignalKind.Changed);
+                    watcher.Deleted += (_, _) => Signal(root.Id, SourceWatchSignalKind.Deleted);
+                    watcher.Renamed += (_, _) => Signal(root.Id, SourceWatchSignalKind.Renamed);
+                    watcher.Error += (_, _) => Signal(root.Id, SourceWatchSignalKind.Overflow);
+                    watcher.EnableRaisingEvents = true;
                 }
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
+                new CompositeDisposable(watchers).Dispose();
                 throw;
             }
             catch (Exception exception)
             {
                 logger.LogWarning(exception, "Source-root watcher was not opened for {SourceRootId}; periodic reconciliation remains authoritative.", root.Id.Value);
-                await RecordSafeAsync(new SourceWatchSignal(root.Id, SourceWatchSignalKind.Overflow, timeProvider.GetUtcNow())).ConfigureAwait(false);
+                Signal(root.Id, SourceWatchSignalKind.Overflow);
             }
         }
         return new CompositeDisposable(watchers);
     }
 
     private void Signal(SourceRootId rootId, SourceWatchSignalKind kind) =>
-        _ = RecordSafeAsync(new SourceWatchSignal(rootId, kind, timeProvider.GetUtcNow()));
-
-    private async Task RecordSafeAsync(SourceWatchSignal signal)
-    {
-        try { await coordinator.RecordAsync(signal, CancellationToken.None).ConfigureAwait(false); }
-        catch (Exception exception) { logger.LogWarning(exception, "Source-root watcher hint could not be persisted for {SourceRootId}.", signal.RootId.Value); }
-    }
+        _signals.Signal(new SourceWatchSignal(rootId, kind, timeProvider.GetUtcNow()));
 
     private static void Revalidate(SourceRootConfiguration root)
     {

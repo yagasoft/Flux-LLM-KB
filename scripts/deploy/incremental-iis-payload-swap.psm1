@@ -20,7 +20,8 @@ function Invoke-IncrementalApplicationPayloadSwap {
         [Parameter(Mandatory)]
         [scriptblock]$ValidateApplication,
         [scriptblock]$ValidateRollbackApplication,
-        [scriptblock]$PrepareRollbackApplication
+        [scriptblock]$PrepareRollbackApplication,
+        [bool]$RestartPreviousApplication = $true
     )
 
     if (-not (Test-Path -LiteralPath $ApplicationRoot -PathType Container)) {
@@ -87,8 +88,10 @@ function Invoke-IncrementalApplicationPayloadSwap {
             if ($null -ne $PrepareRollbackApplication) {
                 & $PrepareRollbackApplication
             }
-            & $StartApplication
-            $poolStopped = $false
+            if ($RestartPreviousApplication) {
+                & $StartApplication
+                $poolStopped = $false
+            }
             & $ValidateRollbackApplication
         }
         catch {
