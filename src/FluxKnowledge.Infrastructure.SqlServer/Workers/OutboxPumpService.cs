@@ -81,6 +81,7 @@ public sealed class OutboxPumpService(
 
             try
             {
+                await transitions.ValidateRepositorySourceAsync(new(dispatch, job), cancellationToken).ConfigureAwait(false);
                 await worker.ExecuteAsync(
                         new StageWorkItem(dispatch, job),
                         cancellationToken)
@@ -89,6 +90,11 @@ public sealed class OutboxPumpService(
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
                 throw;
+            }
+            catch (RepositorySourceDeferredException exception)
+            {
+                await transitions.RetryAsync(new(dispatch, job, timeProvider.GetUtcNow().AddMinutes(1),
+                    "repository-source-deferred", nameof(OutboxPumpService), exception.Deferral), cancellationToken).ConfigureAwait(false);
             }
             catch (Exception exception)
             {

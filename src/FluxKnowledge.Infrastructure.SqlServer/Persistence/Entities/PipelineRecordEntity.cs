@@ -13,6 +13,7 @@ public sealed class PipelineRecordEntity
     public bool CompletionCriteriaMet { get; set; }
     public bool IsDeleted { get; set; }
     public DateTimeOffset RegisteredAtUtc { get; set; }
+    public string? RepositoryRecoveryBindingJson { get; set; }
     public byte[] RowVersion { get; set; } = [];
     public SourceIdentityEntity SourceIdentity { get; set; } = null!;
     public SourceRevisionEntity? SourceRevision { get; set; }

@@ -147,6 +147,7 @@ public sealed class SqlJobClaimStore(
                      [RowVersion]
                  FROM [Jobs] WITH (UPDLOCK, READPAST, READCOMMITTEDLOCK)
                  WHERE [DueAtUtc] <= @nowUtc
+                   AND ([Reason] IS NULL OR [Reason] NOT IN ('repository-source-deferred','repository-source-blocked'))
                    AND {{SqlCorpusRebuildEligibility.Admission("[Jobs].[Id]")}}
                    AND {{SqlCorpusRebuildEligibility.DeploymentAdmission("[Jobs].[Id]")}}
                    AND

@@ -118,7 +118,8 @@ public static class OutboxWorkerServiceCollectionExtensions
             provider => new SqlStageTransitionStore(
                 provider.GetRequiredService<IDbContextFactory<FluxKnowledgeDbContext>>(),
                 provider.GetService<IStageTransitionFailureInjector>(),
-                provider.GetRequiredService<TimeProvider>()));
+                provider.GetRequiredService<TimeProvider>(),
+                provider.GetService<Application.Gpu.EmbeddingGpuRuntime>()));
         services.TryAddScoped<StageTransitionService>();
         services.TryAddScoped<RegisterUtf8FileHandler>();
         services.TryAddScoped<VsdxDocumentExtractor>();

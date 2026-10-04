@@ -3,6 +3,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using FluxKnowledge.Application.Contracts;
 using FluxKnowledge.Application.Ports;
+using FluxKnowledge.Application.Gpu;
 using FluxKnowledge.Domain.Sources;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
 using Microsoft.EntityFrameworkCore;
@@ -11,7 +12,7 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
 
 public sealed class SqlSourceScanStore(
     IDbContextFactory<FluxKnowledgeDbContext> contextFactory,
-    TimeProvider timeProvider) : ISourceScanStore, ISourceScanControlStore
+    TimeProvider timeProvider, EmbeddingGpuRuntime? embeddingRuntime = null) : ISourceScanStore, ISourceScanControlStore
 {
     private const string SourceArtifactStoreCapability = "source-artifact-store";
     private const string SourceProcessorVersion = "phase-3a-v1";
@@ -79,9 +80,11 @@ public sealed class SqlSourceScanStore(
             $"SELECT [Id] FROM [SourceRootConfigurations] WITH (UPDLOCK, HOLDLOCK) WHERE [Id] = {sourceRoot.Id.Value};",
             cancellationToken).ConfigureAwait(false);
         string? admittedGitRepositoryIdentity = null;
+        SourceRootConfigurationEntity? currentGitRoot = null;
         if (sourceRoot.DiscoveryMode == SourceDiscoveryMode.GitTracked)
         {
             var currentRoot = await context.SourceRootConfigurations.SingleAsync(value => value.Id == sourceRoot.Id.Value, cancellationToken).ConfigureAwait(false);
+            currentGitRoot = currentRoot;
             admittedGitRepositoryIdentity = ParseGitAdmissionIdentity(currentRoot.HealthEvidenceJson);
             if (currentRoot.State != (int)SourceRootState.Enabled || currentRoot.CrawlMode != (int)SourceDiscoveryMode.GitTracked ||
                 currentRoot.ConfigurationRevision != sourceRoot.ConfigurationRevision || file.GitInventory is null ||
@@ -127,7 +130,7 @@ public sealed class SqlSourceScanStore(
             context.SourceRevisions.Add(revision);
             eventType = revisions.Count == 0 ? "source.added" : "source.updated";
         }
-        else if (revision.SuppressedAtUtc is not null)
+        else if (revision.SuppressedAtUtc is not null && currentGitRoot is null)
         {
             await SqlPublishedPassageSelection.AdvanceVersionAsync(context, timeProvider.GetUtcNow(), cancellationToken).ConfigureAwait(false);
             revision.SuppressedAtUtc = null;
@@ -173,6 +176,10 @@ public sealed class SqlSourceScanStore(
                 SourceRootId: sourceRoot.Id.Value, SourceRevisionId: revision.Id, CorrelationId: $"source:{revision.Id:N}",
                 Details: new { reasonCode = "artifact-retention-failed" }));
         }
+
+        if (currentGitRoot is not null && receipt is not null)
+            revision.CurrentDiscoveryEvidenceJson = SqlRepositoryWorkRecovery.Observe(currentGitRoot, revision,
+                artifact?.Id ?? receipt.SourceArtifactId.Value, file, timeProvider.GetUtcNow());
 
         if (eventType != "source.unchanged")
         {
@@ -329,7 +336,7 @@ public sealed class SqlSourceScanStore(
             if (!await OwnsRootScanAsync(context, root.Id, new(request.Id, lease), timeProvider.GetUtcNow(), cancellationToken).ConfigureAwait(false)) return false;
         }
         var active = await context.SourceRevisions
-            .FromSqlInterpolated($"SELECT * FROM [SourceRevisions] WITH (UPDLOCK, HOLDLOCK) WHERE [SourceRootId] = {sourceRootId.Value} AND [SuppressedAtUtc] IS NULL AND [OriginKind] = 0")
+            .FromSqlInterpolated($"SELECT * FROM [SourceRevisions] WITH (UPDLOCK, HOLDLOCK) WHERE [SourceRootId] = {sourceRootId.Value} AND [OriginKind] = 0")
             .ToListAsync(cancellationToken).ConfigureAwait(false);
         var now = timeProvider.GetUtcNow();
         var suppressionChanged = false;
@@ -337,8 +344,37 @@ public sealed class SqlSourceScanStore(
         {
             if (convergedRevisionIds.Contains(new SourceRevisionId(revision.Id)))
             {
+                if (inventory is not null && request is not null)
+                {
+                    var proof = SqlRepositoryWorkRecovery.ReadObservation(revision.CurrentDiscoveryEvidenceJson);
+                    var artifact = await context.SourceArtifacts.SingleOrDefaultAsync(value => value.SourceRevisionId == revision.Id, cancellationToken);
+                    if (proof is { Version: 1, Authoritative: false } && proof.SourceId == revision.Id &&
+                        proof.ScanRequestId == request.Id.Value && proof.LeaseGeneration == request.Lease!.Generation &&
+                        proof.ConfigurationRevision == root.ConfigurationRevision && proof.Policy == SqlRepositoryWorkRecovery.Policy(root) &&
+                        proof.Repository == inventory.RepositoryIdentity && proof.Inventory == inventory.Generation &&
+                        artifact is not null && artifact.Id == proof.ArtifactId && artifact.ContentSha256 == proof.Hash &&
+                        artifact.ByteLength == proof.Bytes && proof.Hash == revision.ContentSha256 && proof.Bytes == revision.ByteLength &&
+                        artifact.ChecksumVerifiedAtUtc != default && artifact.ReferenceCount > 0 &&
+                        (revision.Classification != "AcceptedUtf8Text" || proof.EligibleText) &&
+                        !(revision.SuppressedAtUtc != null && revision.RetainUntilUtc <= now) &&
+                        await context.SourceScanRequests.AnyAsync(value => value.Id == request.Id.Value && value.ErrorFileCount == 0, cancellationToken))
+                    {
+                        revision.CurrentDiscoveryEvidenceJson = SqlRepositoryWorkRecovery.Authorize(proof, SqlRepositoryWorkRecovery.RequiresRecovery(revision));
+                        if (revision.SuppressedAtUtc is not null)
+                        {
+                            revision.SuppressedAtUtc = null;
+                            revision.RetentionEvidenceJson = null;
+                            suppressionChanged = true;
+                            OperatorEventAppender.Add(context, OperatorEventDraft.SourceUpdated(root.Id, null, revision.Id,
+                                $"source:{revision.Id:N}", new { revision = revision.Revision, reason = "authoritative-rediscovery" }));
+                        }
+                    }
+                }
                 continue;
             }
+
+            revision.CurrentDiscoveryEvidenceJson = SqlRepositoryWorkRecovery.Withdraw();
+            if (revision.SuppressedAtUtc is not null) continue;
 
             revision.SuppressedAtUtc = now;
             suppressionChanged = true;
@@ -354,6 +390,8 @@ public sealed class SqlSourceScanStore(
         if (suppressionChanged)
             await SqlPublishedPassageSelection.AdvanceVersionAsync(context, now, cancellationToken).ConfigureAwait(false);
         await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        if (inventory is not null)
+            await SqlRepositoryWorkRecovery.ReconcileAsync(context, root.Id, now, embeddingRuntime, cancellationToken).ConfigureAwait(false);
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
         return true;
     }

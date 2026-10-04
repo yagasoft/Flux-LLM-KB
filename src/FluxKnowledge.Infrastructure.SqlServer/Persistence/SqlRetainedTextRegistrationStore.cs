@@ -436,6 +436,7 @@ public sealed class SqlRetainedTextRegistrationStore(
             RootLineageRecordId = latest?.RootLineageRecordId ?? recordId,
             ParentRevisionRecordId = latest?.Id,
             CurrentStage = (int)PipelineStage.Extract,
+            RepositoryRecoveryBindingJson = SqlRepositoryWorkRecovery.Capture(sourceRoot, sourceRevision, artifact, durableActivity),
             RegisteredAtUtc = now
         };
         context.PipelineRecords.Add(record);

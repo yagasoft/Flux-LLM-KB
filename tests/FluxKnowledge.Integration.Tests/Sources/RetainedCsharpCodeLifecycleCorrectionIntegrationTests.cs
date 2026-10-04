@@ -1251,7 +1251,7 @@ public sealed class RetainedCsharpCodeLifecycleCorrectionIntegrationTests(
     {
         await using var database = await fixture.CreateRetainedCsharpLifecyclePreviousMigrationDatabaseAsync();
         await using var context = database.CreateContext();
-        var blockedReceiptWithDocument = await SeedCsharpBranchAsync(context, Encoding.UTF8.GetBytes("class OldBlockedReceipt { }"));
+        var blockedReceiptWithDocument = await SeedCsharpBranchAsync(context, Encoding.UTF8.GetBytes("class OldBlockedReceipt { }"), historicalSchema: true);
         var blockedAttempt = Guid.NewGuid();
         var now = DateTimeOffset.UtcNow;
         context.SourceProcessorAttempts.Add(
@@ -1272,7 +1272,7 @@ public sealed class RetainedCsharpCodeLifecycleCorrectionIntegrationTests(
     {
         await using var database = await fixture.CreateRetainedCsharpLifecyclePreviousMigrationDatabaseAsync();
         await using var context = database.CreateContext();
-        var successReceiptWithBlockedDiagnostic = await SeedCsharpBranchAsync(context, Encoding.UTF8.GetBytes("class OldSuccessReceipt { }"));
+        var successReceiptWithBlockedDiagnostic = await SeedCsharpBranchAsync(context, Encoding.UTF8.GetBytes("class OldSuccessReceipt { }"), historicalSchema: true);
         var successAttempt = Guid.NewGuid();
         context.SourceProcessorAttempts.Add(
             new SourceProcessorAttemptEntity
@@ -1414,7 +1414,8 @@ public sealed class RetainedCsharpCodeLifecycleCorrectionIntegrationTests(
 
     private static async Task<CsharpSeed> SeedCsharpBranchAsync(
         FluxKnowledgeDbContext context,
-        byte[] bytes)
+        byte[] bytes,
+        bool historicalSchema = false)
     {
         var hash = Sha256(bytes);
         var rootId = Guid.NewGuid();
@@ -1424,7 +1425,21 @@ public sealed class RetainedCsharpCodeLifecycleCorrectionIntegrationTests(
         var stableIdentity = $"retained-csharp:{revisionId:N}";
         var now = DateTimeOffset.UtcNow;
         context.SourceRootConfigurations.Add(Root(rootId, now));
-        context.SourceRevisions.Add(Revision(rootId, revisionId, hash, bytes.Length, now, stableIdentity));
+        var revision = Revision(rootId, revisionId, hash, bytes.Length, now, stableIdentity);
+        if (historicalSchema)
+        {
+            await context.SaveChangesAsync();
+            // The older migration contract has no current discovery authority column.
+            await context.Database.ExecuteSqlInterpolatedAsync($"""
+                INSERT INTO [SourceRevisions]
+                    ([Id], [SourceRootId], [StableSourceIdentity], [Revision], [ContentSha256], [CanonicalPath],
+                     [Classification], [Extension], [OriginKind], [ByteLength], [DiscoveredAtUtc], [DiscoveryEvidenceJson])
+                VALUES ({revision.Id}, {revision.SourceRootId}, {revision.StableSourceIdentity}, {revision.Revision},
+                    {revision.ContentSha256}, {revision.CanonicalPath}, {revision.Classification}, {revision.Extension},
+                    {revision.OriginKind}, {revision.ByteLength}, {revision.DiscoveredAtUtc}, {revision.DiscoveryEvidenceJson});
+                """);
+        }
+        else context.SourceRevisions.Add(revision);
         context.SourceArtifacts.Add(Artifact(revisionId, hash, bytes.Length, now));
         context.SourceActivities.Add(new SourceActivityEntity
         {

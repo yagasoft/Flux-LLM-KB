@@ -18,6 +18,7 @@ public sealed class SourceRevisionEntity
     public DateTimeOffset? FileLastWriteAtUtc { get; set; }
     public DateTimeOffset DiscoveredAtUtc { get; set; }
     public string? DiscoveryEvidenceJson { get; set; }
+    public string? CurrentDiscoveryEvidenceJson { get; set; }
     public DateTimeOffset? SuppressedAtUtc { get; set; }
     public DateTimeOffset? RetainUntilUtc { get; set; }
     public string? RetentionEvidenceJson { get; set; }

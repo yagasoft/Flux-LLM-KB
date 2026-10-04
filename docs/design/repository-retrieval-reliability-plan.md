@@ -385,3 +385,72 @@ requires separate explicit approval of a fresh exact cohort. The scoped unattend
 prepared locally; its production action and idle-window acceptance are pending.
 Preserve the worktree, prior branch/stash and
 ignored evidence until all required release/acceptance steps succeed.
+
+## Local automatic withdrawal recovery and publication collision correction
+
+This focused increment is locally authorised. It does not inherit historical
+production or terminal-cohort authority from the handoff above. Follow the
+automatic-continuation section of the design; keep one implementation owner.
+
+- [x] Reproduce the exact repository failure through native root creation, real Git
+  enumeration, retained canonical input, four saved vectors and authoritative
+  withdrawal. Reproduce both deterministic immutable-placement collision timings
+  and the unrelated directory-creator failure swallowed by the broad I/O catch.
+- [x] Obtain independent review of the focused durable authority, compatibility,
+  GPU settlement and publication design before consequential implementation.
+- [x] Add nullable versioned original pipeline binding and current discovery-proof
+  JSON columns; no automatic backfill for pre-existing work and no downgrade dropping non-null
+  recovery evidence. Bind the semantic admission policy,
+  original processing activity and exact retained owner. Require fresh authority at
+  the current configuration revision; permit operational pause/re-enable only with
+  unchanged effective policy and a successful fresh scan.
+  Follow-on correction verified: include later origin-0 source revision lineage
+  without widening accepted-text or processing scope; ordinary new Embed writes
+  retain epoch and exact chunk search-input hashes atomically. Resolve sealed Publish
+  inputs through the exact completed parent delivery/artifact, validate optional
+  checkpoint ownership and complete checksum, and never backfill evidence for pre-existing work.
+- [x] Record per-file observation provisionally; promote current authority and
+  clear prior Git suppression only at successful authoritative inventory/suppression
+  reconciliation. Refuse failed retention, policy rejection, stale ownership and
+  incomplete scans even when the revision is present in the converged set.
+- [x] Implement exact typed source deferral and durable visible waiting using the
+  existing job/outbox identities and queued state. Fence claims and wake-up; retain
+  attempts/checkpoints/vectors. Exclude waiting work from both claim paths and use
+  existing reconciliation with 60-second backoff doubling to 15 minutes and keyset
+  paging, without total caps or processing-attempt consumption.
+  Prove both lost-wake orderings and restart/duplicate convergence.
+- [x] Settle source-withdrawn GPU requests and parent waiting together without
+  weakening ownership, dispatch, lease, digest, idempotency or cleanup checks.
+  Require a known completed result and cleanup before further inference; uncertain
+  histories remain actionable blocked work. Preserve missing-only continuation.
+- [x] Normalise only confirmed precheck/move destination-directory collisions to
+  a typed outcome; keep unrelated creator/move errors explicit. Validate the winner
+  and path safety, clean only owned staging, and retain corpus-stamp activation.
+- [x] Pass the disposable end-to-end withdrawal/restart/identical-return result
+  through normal publication and cited readback. Cover the design's lifecycle,
+  configuration, retention, missing original bindings, processing/GPU and publication refusal
+  matrix with deterministic focused tests. Assert saved-vector bytes and all
+  retained work identities; no model downloads or production access.
+  Focused runs pass 11 collision, 12 source-matrix and four GPU settlement cases;
+  the midpoint-Publish red/green check proves the fenced snapshot correction.
+  The first combined run passed 173/175, with two fixture cleanup foreign-key
+  failures before the midpoint-Publish cases ran; the corrected combined run passes 227/227.
+  A later focused run passed 27/27; expanded lineage regressions then passed 16/19,
+  exposing later-revision enrollment and ordinary Publish recovery in both SQL-retry
+  modes. Final focused lineage/integrity checks pass 33/33 and collision checks pass
+  13/13. Independent implementation review is approved; the local verification gate passes.
+- [ ] After these two coherent implementation batches, reassess executable progress,
+  run affected combined checks, fix introduced warnings and obtain independent
+  final review. Update affected roadmap entries and use
+  `complete-feature.ps1 -KeepWorktree`; preserve required evidence and the worktree.
+  Combined verification and independent implementation review passed; mandatory
+  feature closeout remains pending.
+- [ ] Prepare a separate concrete migration/deployment proposal. Review incremental
+  PlanOnly support and disclose any unsupported migration gap; obtain fresh user
+  authority and operational review before any production action. Preserve additive
+  data on rollback and keep incompatible predecessors admission-held. Existing
+  terminal recovery and live acceptance remain separate, explicitly authorised
+  work. Preserve the scheduled task and hidden launcher.
+  A separate private proposal is prepared: the supported PlanOnly output confirms
+  the new migration target needs a narrowly scoped canonical-updater extension;
+  user direction and operational approval remain outstanding.

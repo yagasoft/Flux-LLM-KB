@@ -2,6 +2,8 @@ using System.Data;
 using System.Security.Cryptography;
 using FluxKnowledge.Application.Indexing;
 using FluxKnowledge.Application.Ports;
+using FluxKnowledge.Application.Pipeline;
+using FluxKnowledge.Application.Gpu;
 using FluxKnowledge.Application.Workers;
 using FluxKnowledge.Domain.Jobs;
 using FluxKnowledge.Domain.Pipeline;
@@ -12,7 +14,7 @@ using Microsoft.EntityFrameworkCore;
 namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
 
 public sealed class SqlEmbeddingCheckpointStore(
-    IDbContextFactory<FluxKnowledgeDbContext> contextFactory, TimeProvider timeProvider) : IEmbeddingCheckpointStore
+    IDbContextFactory<FluxKnowledgeDbContext> contextFactory, TimeProvider timeProvider, EmbeddingGpuRuntime? embeddingRuntime = null) : IEmbeddingCheckpointStore
 {
     internal const int MaximumBatchSize = 4;
 
@@ -22,6 +24,9 @@ public sealed class SqlEmbeddingCheckpointStore(
             ValidateProfile(profile);
             await SqlCorpusRebuildStore.ValidateMaintenanceJobAsync(context, work.Job.JobId.Value, cancellationToken, profile).ConfigureAwait(false);
             await ValidateClaimAsync(context, work, timeProvider.GetUtcNow(), cancellationToken).ConfigureAwait(false);
+            var checkpointJob = await context.Jobs.SingleAsync(value => value.Id == work.Job.JobId.Value, cancellationToken).ConfigureAwait(false);
+            var refusal = await SqlRepositoryWorkRecovery.CheckCheckpointAsync(context, checkpointJob, embeddingRuntime, cancellationToken, profile).ConfigureAwait(false);
+            if (refusal is not null) throw new RepositorySourceDeferredException(refusal);
             var state = await context.IndexState.SingleAsync(value => value.Id == 1, cancellationToken).ConfigureAwait(false);
             var draft = await context.IndexGenerations.SingleOrDefaultAsync(value => value.EmbeddingJobId == work.Job.JobId.Value, cancellationToken).ConfigureAwait(false);
             if (draft is null)
@@ -146,6 +151,7 @@ public sealed class SqlEmbeddingCheckpointStore(
             !await context.PipelineRecords.AnyAsync(record => record.Id == job.PipelineRecordId && record.Revision == job.SourceRevision &&
                 !record.IsDeleted && record.CurrentStage == (int)PipelineStage.Embed, ct).ConfigureAwait(false))
             throw new InvalidOperationException("embedding-checkpoint-lease-lost");
+        await SqlRepositoryWorkRecovery.ValidateAsync(context, job, now, ct).ConfigureAwait(false);
         var unavailable = await (from record in context.PipelineRecords
             join retained in context.SourceRevisions on record.SourceRevisionId equals retained.Id
             join root in context.SourceRootConfigurations on retained.SourceRootId equals root.Id

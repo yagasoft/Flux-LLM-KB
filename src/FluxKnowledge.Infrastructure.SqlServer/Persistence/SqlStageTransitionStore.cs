@@ -18,18 +18,45 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
 
 public sealed partial class SqlStageTransitionStore : IStageTransitionStore
 {
+    public async ValueTask ValidateRepositorySourceAsync(StageWorkItem work, CancellationToken cancellationToken)
+    {
+        await using var executionContext = await _contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        await executionContext.Database.CreateExecutionStrategy().ExecuteAsync(async () =>
+        {
+        await using var context = await _contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken).ConfigureAwait(false);
+        await SqlPublishedPassageSelection.AcquireFenceAsync(context, cancellationToken).ConfigureAwait(false);
+        var job = await context.Jobs.AsNoTracking().SingleAsync(value => value.Id == work.Job.JobId.Value, cancellationToken).ConfigureAwait(false);
+        var now = _timeProvider.GetUtcNow();
+        if (job.PipelineRecordId != work.Job.PipelineRecordId.Value || job.SourceRevision != work.Job.SourceRevision ||
+            job.Stage != (int)work.Job.Stage || job.Operation != work.Job.Operation ||
+            job.PublicState != (int)PublicJobState.WorkerProcessing || job.LeaseOwner != work.Job.LeaseOwner ||
+            job.LeaseGeneration != work.Job.LeaseGeneration || job.LeaseExpiresAtUtc is null || job.LeaseExpiresAtUtc <= now ||
+            !await context.OutboxMessages.AnyAsync(value => value.Id == work.DispatchMessage.DispatchMessageId.Value &&
+                value.JobId == job.Id && value.PipelineRecordId == job.PipelineRecordId && value.SourceRevision == job.SourceRevision &&
+                value.Stage == job.Stage && value.Operation == job.Operation && value.DispatchedAtUtc == null &&
+                value.IdempotencyKey == work.DispatchMessage.IdempotencyKey && value.DispatchGeneration == work.DispatchMessage.DispatchGeneration &&
+                value.LeaseOwner == work.DispatchMessage.LeaseOwner && value.LeaseGeneration == work.DispatchMessage.LeaseGeneration &&
+                value.LeaseExpiresAtUtc > now, cancellationToken).ConfigureAwait(false))
+            throw new InvalidOperationException("Repository preflight lost its worker lease.");
+        await SqlRepositoryWorkRecovery.ValidateAsync(context, job, _timeProvider.GetUtcNow(), cancellationToken).ConfigureAwait(false);
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        }).ConfigureAwait(false);
+    }
     private readonly IDbContextFactory<FluxKnowledgeDbContext> _contextFactory;
     private readonly IStageTransitionFailureInjector? _failureInjector;
     private readonly TimeProvider _timeProvider;
+    private readonly Application.Gpu.EmbeddingGpuRuntime? _embeddingRuntime;
 
     public SqlStageTransitionStore(
         IDbContextFactory<FluxKnowledgeDbContext> contextFactory,
         IStageTransitionFailureInjector? failureInjector,
-        TimeProvider timeProvider)
+        TimeProvider timeProvider, Application.Gpu.EmbeddingGpuRuntime? embeddingRuntime = null)
     {
         _contextFactory = contextFactory;
         _failureInjector = failureInjector;
         _timeProvider = timeProvider;
+        _embeddingRuntime = embeddingRuntime;
     }
 
     public SqlStageTransitionStore(
@@ -69,16 +96,22 @@ public sealed partial class SqlStageTransitionStore : IStageTransitionStore
         StageTransitionRequest request,
         CancellationToken cancellationToken)
     {
+        var repositoryWork = await (from record in context.PipelineRecords
+            join source in context.SourceRevisions on record.SourceRevisionId equals source.Id
+            join root in context.SourceRootConfigurations on source.SourceRootId equals root.Id
+            where record.Id == request.CurrentJob.PipelineRecordId.Value &&
+                (record.RepositoryRecoveryBindingJson != null || root.CrawlMode == (int)SourceDiscoveryMode.GitTracked)
+            select record.Id).AnyAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await context.Database
             .BeginTransactionAsync(
                 request.IndexingOutput?.ActivateGeneration is null && request.IndexingOutput?.UsePersistedEmbeddingDraft != true && request.Artifact.Stage != PipelineStage.Publish &&
-                request.CurrentJob.Operation != PipelineOperations.ExtractVisio
+                request.CurrentJob.Operation != PipelineOperations.ExtractVisio && !repositoryWork
                     ? IsolationLevel.ReadCommitted
                     : IsolationLevel.Serializable,
                 cancellationToken)
             .ConfigureAwait(false);
 
-        if (request.Artifact.Stage >= PipelineStage.Embed || request.IndexingOutput?.ActivateGeneration is not null || request.IndexingOutput?.UsePersistedEmbeddingDraft == true)
+        if (repositoryWork || request.Artifact.Stage >= PipelineStage.Embed || request.IndexingOutput?.ActivateGeneration is not null || request.IndexingOutput?.UsePersistedEmbeddingDraft == true)
             await SqlPublishedPassageSelection.AcquireFenceAsync(context, cancellationToken).ConfigureAwait(false);
 
         var validated = await ValidateClaimAsync(context, request, cancellationToken)
@@ -160,7 +193,7 @@ public sealed partial class SqlStageTransitionStore : IStageTransitionStore
                 DocumentMetadataJson = request.Artifact.DocumentMetadataJson,
                 CreatedAtUtc = request.Artifact.CreatedAtUtc
             });
-        WriteIndexingOutput(context, request);
+        await WriteIndexingOutputAsync(context, request, validated.PipelineRecord.RepositoryRecoveryBindingJson is not null, cancellationToken).ConfigureAwait(false);
         if (request.IndexingOutput?.DisclosureProof is { } proof)
         {
             if (request.Artifact.Stage != PipelineStage.CanonicalIndex)
@@ -518,7 +551,7 @@ public sealed partial class SqlStageTransitionStore : IStageTransitionStore
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
     }
 
-    private static async Task<ValidatedClaim> ValidateClaimAsync(
+    private async Task<ValidatedClaim> ValidateClaimAsync(
         FluxKnowledgeDbContext context,
         StageTransitionRequest request,
         CancellationToken cancellationToken)
@@ -576,6 +609,8 @@ public sealed partial class SqlStageTransitionStore : IStageTransitionStore
                 throw new InvalidOperationException(
                     "The Job lease does not match the claimed stage work.");
             }
+            var currentJob = await context.Jobs.SingleAsync(value => value.Id == request.CurrentJob.JobId.Value, cancellationToken).ConfigureAwait(false);
+            await SqlRepositoryWorkRecovery.ValidateAsync(context, currentJob, _timeProvider.GetUtcNow(), cancellationToken).ConfigureAwait(false);
         }
 
         return new ValidatedClaim(record, dispatch);
@@ -922,7 +957,8 @@ public sealed partial class SqlStageTransitionStore : IStageTransitionStore
         }
     }
 
-    private void WriteIndexingOutput(FluxKnowledgeDbContext context, StageTransitionRequest request)
+    private async Task WriteIndexingOutputAsync(FluxKnowledgeDbContext context, StageTransitionRequest request,
+        bool enrolledRepositoryWork, CancellationToken cancellationToken)
     {
         var output = request.IndexingOutput;
         if (output is null)
@@ -952,9 +988,17 @@ public sealed partial class SqlStageTransitionStore : IStageTransitionStore
 
         if (!output.UsePersistedEmbeddingDraft && output.IndexGenerationId is { } generationId)
         {
+            var stamp = enrolledRepositoryWork ? await SqlPublishedPassageSelection.ReadStampAsync(context, cancellationToken).ConfigureAwait(false) : null;
+            var inputs = enrolledRepositoryWork ? await SqlEmbeddingCheckpointStore.Chunks(context, request.CurrentJob.PipelineRecordId.Value,
+                request.CurrentJob.SourceRevision).AsNoTracking().ToDictionaryAsync(value => value.Id, cancellationToken).ConfigureAwait(false) : null;
+            if (inputs is not null && (output.Vectors is null || output.Vectors.Count != inputs.Count ||
+                output.Vectors.Select(value => value.TextChunkId).Distinct().Count() != inputs.Count))
+                throw new InvalidOperationException("repository-ordinary-embedding-membership-invalid");
             context.IndexGenerations.Add(new IndexGenerationEntity
             {
                 Id = generationId,
+                CorpusEpoch = stamp?.CorpusEpoch,
+                CorpusVersion = stamp?.CorpusVersion,
                 ModelFingerprint = output.ModelFingerprint!,
                 Dimensions = output.Vectors?.FirstOrDefault()?.Dimensions ?? EmbedDraftDefaults.Dimensions,
                 IndexPath = string.Empty,
@@ -964,6 +1008,16 @@ public sealed partial class SqlStageTransitionStore : IStageTransitionStore
             });
             foreach (var vector in output.Vectors ?? [])
             {
+                string? searchInputHash = null;
+                if (inputs is not null)
+                {
+                    if (!inputs.TryGetValue(vector.TextChunkId, out var input) || input.ContentHash != vector.TextChunkContentHash ||
+                        vector.SourceRevision != request.CurrentJob.SourceRevision || vector.ModelFingerprint != output.ModelFingerprint ||
+                        new CanonicalTextChunk(input.Id, input.Ordinal, input.StartOffset, input.Length, input.Content, input.ContentHash,
+                            input.PassagePolicyFingerprint, input.ContextHeader).SearchInputHash != input.SearchInputHash)
+                        throw new InvalidOperationException("repository-ordinary-embedding-input-binding-invalid");
+                    searchInputHash = input.SearchInputHash;
+                }
                 context.Vectors.Add(new VectorEntity
                 {
                     TextChunkId = vector.TextChunkId,
@@ -972,6 +1026,7 @@ public sealed partial class SqlStageTransitionStore : IStageTransitionStore
                     Values = vector.Values,
                     TextChunkContentHash = vector.TextChunkContentHash,
                     PayloadChecksum = vector.PayloadChecksum,
+                    SearchInputHash = searchInputHash,
                     SourceRevision = vector.SourceRevision,
                     IsDeleted = false,
                     IndexGenerationId = generationId,

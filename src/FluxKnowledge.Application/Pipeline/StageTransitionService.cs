@@ -6,6 +6,7 @@ namespace FluxKnowledge.Application.Pipeline;
 
 public interface IStageTransitionStore
 {
+    ValueTask ValidateRepositorySourceAsync(StageWorkItem work, CancellationToken cancellationToken) => ValueTask.CompletedTask;
     ValueTask<StageTransitionResult> TransitionAsync(
         StageTransitionRequest request,
         CancellationToken cancellationToken);
@@ -29,6 +30,8 @@ public sealed class StageTransitionService(
     IOutboxWakeSignal wakeSignal,
     TimeProvider timeProvider)
 {
+    public ValueTask ValidateRepositorySourceAsync(StageWorkItem work, CancellationToken cancellationToken) =>
+        store.ValidateRepositorySourceAsync(work, cancellationToken);
     public async ValueTask RetryAsync(StageRetryRequest request, CancellationToken cancellationToken)
     {
         await store.RetryAsync(request, cancellationToken).ConfigureAwait(false);

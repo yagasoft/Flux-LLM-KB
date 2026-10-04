@@ -7,6 +7,7 @@ using FluxKnowledge.Application.Gpu;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Workers;
 using FluxKnowledge.Application.Sources;
+using FluxKnowledge.Application.Pipeline;
 using FluxKnowledge.Domain.Gpu;
 using FluxKnowledge.Domain.Jobs;
 using FluxKnowledge.Domain.Pipeline;
@@ -298,6 +299,27 @@ public sealed class SqlEmbeddingGpuRequestStore(IDbContextFactory<FluxKnowledgeD
                     (task.ExecutionState == (int)GpuMiniTaskExecutionState.Completed || task.ExecutionState == (int)GpuMiniTaskExecutionState.OutcomeUncertain)
                 select task.Id).AnyAsync(cancellationToken).ConfigureAwait(false);
             if (!terminal) return false;
+            var sourceRefusal = await SqlRepositoryWorkRecovery.ReadEligibilityAsync(context, parent, clock.GetUtcNow(), cancellationToken).ConfigureAwait(false);
+            if (sourceRefusal is not null)
+            {
+                // The native lifecycle has settled. Keep the exact delivery, but never
+                // turn cleanup or capacity release into proof of an unknown result.
+                var deliveries = await context.OutboxMessages.FromSqlInterpolated($"SELECT * FROM OutboxMessages WITH (UPDLOCK,HOLDLOCK) WHERE JobId={parent.Id}")
+                    .ToArrayAsync(cancellationToken).ConfigureAwait(false);
+                var delivery = deliveries.SingleOrDefault();
+                if (parent.PublicState != (int)PublicJobState.GpuProcessing || delivery is null || delivery.DispatchedAtUtc is not null ||
+                    delivery.PipelineRecordId != parent.PipelineRecordId || delivery.SourceRevision != parent.SourceRevision ||
+                    delivery.Stage != parent.Stage || delivery.Operation != parent.Operation) return false;
+                request.State = 2;
+                request.UpdatedAtUtc = clock.GetUtcNow();
+                await SqlRepositoryWorkRecovery.MarkRecoveryRequiredAsync(context, parent, cancellationToken).ConfigureAwait(false);
+                await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+                var checkpointRefusal = await SqlRepositoryWorkRecovery.CheckCheckpointAsync(context, parent, runtime, cancellationToken).ConfigureAwait(false);
+                SqlRepositoryWorkRecovery.SetWaiting(context, parent, delivery, checkpointRefusal ?? sourceRefusal, clock.GetUtcNow());
+                await SqlRepositoryWorkRecovery.UpdateActivityAsync(context, parent, checkpointRefusal ?? sourceRefusal, clock.GetUtcNow(), cancellationToken).ConfigureAwait(false);
+                await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+                return true;
+            }
             if (!await SourceAvailableAsync(context, request, cancellationToken, allowPaused: true).ConfigureAwait(false))
             {
                 // Finish the cleanup record without resurrecting a withdrawn source.
@@ -474,11 +496,13 @@ public sealed class SqlEmbeddingGpuRequestStore(IDbContextFactory<FluxKnowledgeD
                 !context.GpuMiniTasks.Any(later => later.ParentJobId == parent.Id && later.CreatedSequence > task.CreatedSequence)
             select request.MiniTaskId;
 
-    private static async Task<bool> SourceAvailableAsync(FluxKnowledgeDbContext context, EmbeddingGpuRequestEntity request, CancellationToken ct, bool allowPaused = false)
+    private async Task<bool> SourceAvailableAsync(FluxKnowledgeDbContext context, EmbeddingGpuRequestEntity request, CancellationToken ct, bool allowPaused = false)
     {
         bool maintenance;
         try { maintenance = await SqlCorpusRebuildStore.ValidateMaintenanceJobAsync(context, request.ParentJobId, ct).ConfigureAwait(false); }
         catch (CorpusRebuildRefusalException) { return false; }
+        var parent = await context.Jobs.SingleAsync(value => value.Id == request.ParentJobId, ct).ConfigureAwait(false);
+        if (await SqlRepositoryWorkRecovery.ReadEligibilityAsync(context, parent, clock.GetUtcNow(), ct).ConfigureAwait(false) is not null) return false;
         return await context.PipelineRecords.AnyAsync(record => record.Id == request.PipelineRecordId && record.Revision == request.SourceRevision &&
             !record.IsDeleted && record.CurrentStage == (int)PipelineStage.Embed &&
             (record.SourceRevisionId == null || record.SourceRevision!.SuppressedAtUtc == null &&

@@ -396,3 +396,226 @@ recycle and rapid-fail protection. No second scheduler or model acquisition is n
 Reassess after the two substantive implementation batches, or earlier if either
 safe end-to-end result is blocked. Finish only when the stated supported code and
 scope cases pass. Keep the existing roadmap progress unchanged until then.
+
+## Automatic continuation after repository withdrawal
+
+Locally implemented, 4 October 2026; independent design and implementation review
+are approved, and focused and combined verification pass. Mandatory feature closeout
+and all production/live gates remain pending. This
+correction covers future nonterminal repository work. Existing
+terminal jobs retain the separately authorised explicit recovery workflow above.
+It does not authorise production migration, deployment, restart or recovery.
+
+The reproduced failure is a source disappearing after canonical indexing and a
+partial Embed checkpoint: authoritative discovery suppresses the retained source,
+checkpoint validation throws `embedding-checkpoint-source-unavailable`, and the
+worker records a terminal failure. Identical rediscovery reuses the linked activity
+and cannot repair that terminal job. A second path settles GPU cleanup while leaving
+the unavailable source's parent in `GpuProcessing`. Both paths must preserve work
+and expose a durable waiting reason instead of losing the continuation.
+
+### Durable authority and compatibility
+
+The implementation uses two nullable, versioned JSON columns, with an additive
+migration and no automatic backfill. Migration `Down` refuses to drop non-null
+recovery evidence. `PipelineRecords.RepositoryRecoveryBindingJson` is immutable after new
+repository pipeline registration. It records root ID, original configuration
+revision, admission-policy fingerprint binding physical/repository identity, exact source
+revision and retained artifact IDs/hash/byte length, and the originating activity's
+ID and processing fingerprint binding its kind, input, processor version and
+descriptor fingerprint. Existing
+checkpoint, canonical chunk and GPU request rows remain authoritative for the
+draft/epoch/model/dimensions, passage/search inputs and runtime/settings bindings;
+do not create a second vector/checkpoint representation.
+
+Enrollment includes later ordinary Git source revisions: `ParentSourceRevisionId`
+records their revision lineage and is not an exclusion. Retain the `OriginKind = 0`,
+accepted UTF-8 text, in-process text-extraction and current processing-policy scope;
+this change does not enrol derived processor outputs.
+
+Newly enrolled ordinary Embed transitions must atomically retain the current
+fenced `IndexState.CorpusEpoch` and each vector's `SearchInputHash`, derived and
+validated against its exact immutable canonical chunk. Validate record/revision,
+complete chunk membership, input/content hashes and configured model/dimensions
+under the existing claim, publication and maintenance fences. Keep the normal
+generation's `EmbeddingJobId` null; that field remains checkpoint ownership.
+Existing epoch/input-hash columns provide the evidence without another representation.
+
+For a sealed Publish input, resolve the generation GUID stored in the immutable
+Embed artifact of the exact preceding completed successful delivery, not solely
+through `EmbeddingJobId`. Require the same record/revision, adjacent dispatch
+generation, completed parent job, correct Embed operation/content type and artifact
+binding. A non-null `EmbeddingJobId` must equal that parent job; null is allowed only
+for the proven ordinary generation. Validate unchanged epoch, current profile,
+canonical input and complete vectors; compare the computed vector checksum with the
+immutable Embed artifact's content hash before resumption. Missing/conflicting
+lineage or integrity evidence blocks recovery. Never substitute another generation,
+backfill pre-existing null bindings/epochs/input hashes, or relax checkpoint-owned draft
+validation to accommodate ordinary generation ownership.
+
+The admission-policy fingerprint deterministically binds the effective canonical
+root, physical and repository identities, discovery mode, recursive/follow-links
+settings, include/exclude rules, maximum file bytes and allowed classifications.
+Bind the processing policy through the immutable activity descriptors and existing
+canonical/checkpoint contracts. Do not omit an effective admission or processing
+input. Exclude only operational state, display name and reconciliation cadence from
+the policy fingerprint. Preserve the original configuration revision as provenance;
+the fresh discovery proof must match the *current* configuration revision. This
+allows pause/re-enable after a fresh scan when the policy is unchanged, while a
+different effective policy or repository identity fails closed. An enabled root is
+always required for automatic execution, irrespective of fingerprint equality.
+
+`SourceRevisions.CurrentDiscoveryEvidenceJson` holds provisional observation and
+latest authoritative admission separately. Bind each observation to the exact
+retained revision/artifact, root/configuration/policy, admitted repository identity,
+current inventory generation and scan request/control-job lease generation. A
+provisional observation must never overwrite the last valid authority as if it were
+authoritative. Suppression invalidates positive authority. The original immutable
+`DiscoveryEvidenceJson` is historical evidence; `RetentionEvidenceJson` keeps its
+existing suppression/retention purpose. Job `ErrorDetails` and activity
+`AttemptEvidenceJson` are unsuitable binding storage because claims replace them.
+
+Per-file convergence may record provisional evidence but cannot release waiting
+work or clear existing Git suppression. Promote admission and unsuppress only in
+the successful `SuppressUnseenAuthoritativelyAsync` transaction: no enumeration
+errors, successfully revalidated inventory, exact current root/configuration and
+live scan ownership, and the exact revision in that scan's converged set. Recheck
+retention success, current classification/policy acceptance and retained artifact
+identity; membership of the converged set alone is insufficient because blocked
+retention/classification paths also enter it. A false authoritative result, stale
+lease, incomplete scan or inventory change produces no positive proof. This is the
+completed discovery boundary; later control-job bookkeeping in `CompleteAsync`
+does not grant authority and needs no new lock ordering.
+
+Missing/malformed original bindings, unknown versions and contradictory evidence
+fail closed with an actionable blocked reason. Never infer an unenrolled record's binding from
+current root state, path/hash equality or an old Git inventory. Existing records
+are not automatically enrolled. Deletion, retention expiry, exclusion, source
+replacement, changed processor/profile/epoch, supersession or rebuilding cannot be
+overridden by this feature. Physical checkout replacement may reuse only the exact
+retained owner already admitted by the existing Git convergence rules; a matching
+path and content hash alone do not establish that owner.
+
+### Deferral, wake-up and GPU settlement
+
+Use existing `WorkerQueued`, `Reason` and `DueAtUtc` for visible nonterminal waiting;
+no new public state is necessary. A typed repository-source-unavailable outcome
+reaches a dedicated fenced deferral path before generic terminal exception handling.
+Recognise this precise condition, not arbitrary `InvalidOperationException`, lease
+loss, corrupt checkpoints or deletion. Keep ordinary bounded SQL retry unchanged.
+
+`SqlRepositoryWorkRecovery.ReadEligibilityAsync` returns no refusal for eligible
+work or a `RepositorySourceDeferral` carrying the waiting/blocked reason;
+`RepositorySourceDeferredException` routes the exact claimed stage delivery to
+fenced deferral. Within a serializable transaction, acquire the existing
+publication fence, root/source authority and dispatch-before-job locks; validate
+the real claim, relinquish its leases and persist the waiting reason/due time.
+Preserve job/outbox IDs, dispatch generation/key, attempts, canonical artifacts,
+draft and saved vectors. Advance ownership fences when releasing a claim so old
+owners and callbacks cannot mutate the resumed work. Update the linked activity
+and existing operator event/status surfaces with the same waiting/blocked reason.
+
+Both job and outbox claim predicates exclude source-deferred/blocked work until
+eligibility reconciliation explicitly releases it. Waiting does not claim jobs,
+poll inference, increment processing attempts or exhaust a retry budget. A bounded
+durable next-check time starts at 60 seconds and doubles to a 15-minute maximum;
+it controls reconciliation and is not permission to
+retry inference while absent. Authoritative discovery wakes the affected work;
+startup/periodic reconciliation can recover interrupted notifications from durable
+proof. Process candidates in keyset pages with no arbitrary total-job/vector cap.
+Use the existing hosted reconciliation path, not a new scheduler.
+
+Recheck eligibility inside both deferral and wake-up transactions. If valid
+rediscovery wins before deferral, queue the same delivery with its bounded due
+time; if deferral wins, discovery releases it. This closes the lost-wake race.
+Revalidate source authority and processing bindings at execution/commit boundaries,
+so withdrawal or configuration changes after queueing cannot admit stale work.
+The Publish snapshot also validates source authority under its publication fence,
+closing withdrawal after worker preflight while retaining SQL execution-strategy retries.
+Suppressed content remains excluded from lexical, semantic and cited read paths.
+
+`SqlEmbeddingGpuRequestStore.RequeueSettledAsync` must settle the request and move
+its exact nonterminal parent/delivery into source waiting atomically after cleanup
+when the source is unavailable. Preserve all handle, owner, lease, admission,
+dispatch, idempotency, input/result-digest and slot-release checks. A numeric request
+state or native-cleanup flag alone is not proof of a known inference outcome.
+Automatic new inference requires the preceding request's known completed result,
+confirmed cleanup and released capacity, plus exact checkpoint/input/result proof
+checked against the configured GPU runtime.
+`OutcomeUncertain`/`DeliveryUncertain` or ownership/digest contradictions stay visibly
+blocked; capacity reconciliation alone cannot make their inference outcome known.
+Do not strand the parent in unexplained `GpuProcessing`, fabricate ownership or
+repeat a request whose prior outcome is unknown. After safe resumption, the normal
+checkpoint reader embeds only missing vectors and follows ordinary publication.
+
+### Concurrent immutable generation placement
+
+The reproduced race has two legitimate collision timings: the winner exists before
+`AtomicGenerationPlacement.Place` checks the final path, or appears between that
+check and `Directory.Move`. Return one narrow typed collision outcome for an
+existing directory at the precheck and a confirmed destination-directory collision
+from the move itself. Keep directory-creator failures outside the move catch;
+the move must report a destination-exists error as well as a confirmed directory.
+unrelated I/O failures must remain failures even if a winner appears concurrently.
+A file at the destination, unsafe path or unconfirmed error is not this outcome.
+
+`UsearchGenerationBuilder` catches only that typed outcome. Revalidate storage
+safety and fully validate the winning immutable generation against the candidate's
+deterministic ID, SQL vectors, model/dimensions, checksum and publication stamp.
+Conflicting, corrupt or unsafe winners fail explicitly. Clean up only this builder's
+owned staging directory after validating its safety; never overwrite or delete the
+winner. Preserve the existing expected corpus-stamp activation fence and retry on
+a genuine snapshot conflict. Successful placement/reuse alone is not activation.
+
+### Verification and release boundary
+
+The first observable result is a disposable repository's normal scan/retention/
+canonical path, partial saved vectors, authoritative withdrawal, durable waiting,
+restart and authoritative identical return, followed by the same job's missing-only
+embedding, normal publication and exact cited readback. Assert unchanged job,
+delivery, checkpoint and saved-vector identities and bytes, no work while absent,
+and no source disclosure while suppressed. Use synthetic providers and no model
+acquisition.
+
+Deterministic focused integration checks must additionally cover duplicate scans,
+both deferral/rediscovery orderings, interrupted wake-up, paused/re-enabled roots,
+changed policy or current configuration, exclusions, deletion/retention expiry,
+repository replacement, partial/failed/stale scans, failed artifact retention,
+missing original bindings, changed processor/profile/epoch/input and GPU cleanup,
+known-result and uncertain-result paths. Prove stale callbacks cannot change the
+new claim. Cover zero/partial/complete checkpoint continuation without losing
+vectors. Publication tests cover both collision timings, unrelated creator/move
+failures with a concurrent directory, corrupt/conflicting/unsafe winners, staging
+ownership and unchanged corpus-stamp activation.
+
+Focused evidence records 11 passing publication-collision cases, 12 passing source
+matrix cases and four passing GPU settlement cases. The midpoint-Publish regression
+failed before the fenced snapshot check and passed after it. Existing repository
+coverage tests exercise actual watcher and periodic discovery. The first combined
+run passed 173 of 175 checks; both failures occurred in fixture cleanup at the code
+completion receipt foreign key, before the midpoint-Publish cases executed. Combined
+verification subsequently passed 227/227 after fixture cleanup/schema restoration
+was corrected without weakening refusal assertions. These results do not establish
+production activation, live acceptance or further terminal recovery.
+A subsequent focused run passed 27/27 before two lineage gaps were isolated: later
+origin-0 source revisions were excluded from enrollment, and ordinary Embed
+generations could not resume Publish because they have no checkpoint owner. The
+expanded lineage red run passed 16/19; the later-revision case and both ordinary
+Publish SQL-retry modes failed, while checkpointed Publish passed. Their focused
+corrections now pass within the final 33/33 focused cases, including refusal of missing original
+evidence, wrong parent/artifact/owner, changed epoch/profile and altered vector input
+or checksum. The final collision suite passes 13/13 and independent implementation
+review is approved. Local verification is complete; mandatory closeout remains open.
+
+Independent design and implementation review approved the focused correction.
+Integrate through the
+required feature closeout script. The additive schema requires an explicit future
+migration/deployment plan: inspect the incremental updater's PlanOnly support and
+report a migration gap rather than substituting another deployment path. Fresh
+PlanOnly confirms no supported migration flag for the new target; a separate
+proposal recommends a narrowly guarded extension of the canonical updater. Prepare
+exact target, migration, verification and rollback for separate user authority.
+Retain additive data on rollback; a predecessor that cannot honour waiting markers
+must remain admission-held until compatibility is demonstrated. Do not automatically
+process existing terminal jobs. Preserve the scheduled task/hidden launcher and
+the outstanding live retrieval acceptance gates.

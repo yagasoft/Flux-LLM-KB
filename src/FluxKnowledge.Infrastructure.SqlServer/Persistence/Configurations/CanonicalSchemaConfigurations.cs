@@ -272,6 +272,8 @@ public sealed class PipelineRecordConfiguration : IEntityTypeConfiguration<Pipel
         builder.Property(entity => entity.Id).ValueGeneratedNever();
         SchemaConfiguration.ConfigureHash(builder.Property(entity => entity.ContentHash));
         builder.Property(entity => entity.RegisteredAtUtc).HasColumnType("datetimeoffset(7)");
+        builder.Property(entity => entity.RepositoryRecoveryBindingJson).HasColumnType("nvarchar(max)");
+        SchemaConfiguration.ConfigureImmutableAfterInsert(builder.Property(entity => entity.RepositoryRecoveryBindingJson));
         SchemaConfiguration.ConfigureRowVersion(builder.Property(entity => entity.RowVersion));
         builder.HasAlternateKey(entity => new { entity.Id, entity.Revision });
         builder.HasIndex(entity => new { entity.SourceIdentityId, entity.Revision }).IsUnique();
@@ -1211,6 +1213,7 @@ public sealed class SourceRevisionConfiguration : IEntityTypeConfiguration<Sourc
         builder.Property(entity => entity.FileLastWriteAtUtc).HasColumnType("datetimeoffset(7)");
         builder.Property(entity => entity.DiscoveredAtUtc).HasColumnType("datetimeoffset(7)");
         builder.Property(entity => entity.DiscoveryEvidenceJson).HasColumnType("nvarchar(max)");
+        builder.Property(entity => entity.CurrentDiscoveryEvidenceJson).HasColumnType("nvarchar(max)");
         builder.Property(entity => entity.SuppressedAtUtc).HasColumnType("datetimeoffset(7)");
         builder.Property(entity => entity.RetainUntilUtc).HasColumnType("datetimeoffset(7)");
         builder.Property(entity => entity.RetentionEvidenceJson).HasColumnType("nvarchar(max)");

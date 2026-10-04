@@ -91,7 +91,7 @@ internal sealed record SqlEmbeddingRetry(JobEntity Job, OutboxMessageEntity Disp
         ]);
     }
 
-    private static async Task<string> ReadInputBindingAsync(FluxKnowledgeDbContext context, PipelineRecordEntity record,
+    internal static async Task<string> ReadInputBindingAsync(FluxKnowledgeDbContext context, PipelineRecordEntity record,
         ArtifactEntity canonical, IndexGenerationEntity draft, CancellationToken ct)
     {
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
@@ -127,7 +127,7 @@ internal sealed record SqlEmbeddingRetry(JobEntity Job, OutboxMessageEntity Disp
     }
 
     private sealed record GpuInput(long Id, string Hash);
-    private static async Task<string> ReadSettledGpuBindingAsync(FluxKnowledgeDbContext context, JobEntity job,
+    internal static async Task<string> ReadSettledGpuBindingAsync(FluxKnowledgeDbContext context, JobEntity job,
         IndexGenerationEntity draft, EmbeddingGpuRuntime runtime, CancellationToken ct)
     {
         var requests = await context.EmbeddingGpuRequests.AsNoTracking().Where(value => value.ParentJobId == job.Id)

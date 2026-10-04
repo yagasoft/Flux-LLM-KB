@@ -104,8 +104,12 @@ public sealed class CorpusRebuildReplacementTests(NativeSqlServerFixture fixture
             await store.PrepareAsync(old.OperationId, old.Inputs[0].PipelineRecordId, builder, CancellationToken.None))).Message);
         await using var context = environment.Factory.CreateDbContext();
         Assert.Single(await context.CorpusRebuildSupersededJobs.ToArrayAsync());
-        var error = await Assert.ThrowsAsync<SqlException>(() => context.GetService<IMigrator>().MigrateAsync("20260927121634_AddCorpusRebuildWorklist"));
-        Assert.Contains("corpus-rebuild-supersession-downgrade-refused", error.Message);
+        try
+        {
+            var error = await Assert.ThrowsAsync<SqlException>(() => context.GetService<IMigrator>().MigrateAsync("20260927121634_AddCorpusRebuildWorklist"));
+            Assert.Contains("corpus-rebuild-supersession-downgrade-refused", error.Message);
+        }
+        finally { await context.Database.MigrateAsync(); }
         Assert.Equal(replacement.OperationId, (await context.IndexState.AsNoTracking().SingleAsync()).CorpusRebuildOperationId);
     }
 

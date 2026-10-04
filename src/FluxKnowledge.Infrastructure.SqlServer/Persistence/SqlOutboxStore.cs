@@ -1,5 +1,6 @@
 using System.Data;
 using FluxKnowledge.Application.Ports;
+using FluxKnowledge.Application.Gpu;
 using FluxKnowledge.Application.Documents;
 using FluxKnowledge.Application.Sources;
 using FluxKnowledge.Application.Workers;
@@ -14,7 +15,7 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
 
 public sealed class SqlOutboxStore(
     IDbContextFactory<FluxKnowledgeDbContext> contextFactory,
-    IDeploymentValidationHold? deploymentValidationHold = null) : IOutboxStore
+    IDeploymentValidationHold? deploymentValidationHold = null, EmbeddingGpuRuntime? embeddingRuntime = null) : IOutboxStore
 {
     public async ValueTask EnqueueAsync(
         DispatchMessage message,
@@ -67,6 +68,7 @@ public sealed class SqlOutboxStore(
     {
         var admission = deploymentValidationHold?.ReadAdmissionState() ?? new(false, null);
         if (admission is { IsHeld: true, PermittedCorpusRebuildOperationId: null }) return null;
+        await SqlRepositoryWorkRecovery.ReconcileDueAsync(contextFactory, nowUtc, embeddingRuntime, cancellationToken).ConfigureAwait(false);
         ArgumentException.ThrowIfNullOrWhiteSpace(leaseOwner);
         ArgumentNullException.ThrowIfNull(registeredOperations);
         if (leaseDuration <= TimeSpan.Zero)
@@ -132,6 +134,7 @@ public sealed class SqlOutboxStore(
                          AND [workerJob].[Stage] = [OutboxMessages].[Stage]
                          AND [workerJob].[Operation] = [OutboxMessages].[Operation] COLLATE Latin1_General_100_BIN2
                          AND [workerJob].[DueAtUtc] <= @nowUtc
+                         AND ([workerJob].[Reason] IS NULL OR [workerJob].[Reason] NOT IN ('repository-source-deferred','repository-source-blocked'))
                          AND
                          (
                              ([workerJob].[PublicState] = @workerQueued AND

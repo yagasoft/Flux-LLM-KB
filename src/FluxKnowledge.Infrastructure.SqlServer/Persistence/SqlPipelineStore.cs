@@ -1,5 +1,6 @@
 using System.Data;
 using System.Text.Json;
+using FluxKnowledge.Application.Indexing;
 using FluxKnowledge.Application.Pipeline;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Workers;
@@ -327,6 +328,32 @@ public sealed class SqlPipelineStore(
             {
                 if (record.IsDeleted || record.CurrentStage != (int)PipelineStage.Publish)
                     throw new InvalidOperationException("The publication draft is no longer publishable.");
+                // Withdrawal may happen after worker preflight. Check the exact source
+                // again under the same fence used to select the publication snapshot.
+                if (record.RepositoryRecoveryBindingJson is not null || await (from source in context.SourceRevisions
+                    join root in context.SourceRootConfigurations on source.SourceRootId equals root.Id
+                    where source.Id == record.SourceRevisionId && root.CrawlMode == (int)Domain.Sources.SourceDiscoveryMode.GitTracked
+                    select source.Id).AnyAsync(cancellationToken))
+                {
+                    var draftReference = draftGenerationId.ToString("D");
+                    var job = await (from draft in context.IndexGenerations
+                        from parent in context.OutboxMessages
+                        join completed in context.Artifacts on parent.CompletedArtifactId equals completed.Id
+                        join producer in context.Jobs on parent.JobId equals producer.Id
+                        join publication in context.OutboxMessages on new { parent.PipelineRecordId, parent.SourceRevision } equals new { publication.PipelineRecordId, publication.SourceRevision }
+                        join current in context.Jobs on publication.JobId equals current.Id
+                        where draft.Id == draftGenerationId && parent.PipelineRecordId == record.Id && parent.SourceRevision == record.Revision &&
+                            (draft.EmbeddingJobId == null || draft.EmbeddingJobId == parent.JobId) && parent.DispatchedAtUtc != null &&
+                            completed.PipelineRecordId == record.Id && completed.SourceRevision == record.Revision && completed.Stage == (int)PipelineStage.Embed &&
+                            completed.ContentType == EmbedDraftDefaults.ArtifactContentType && completed.SearchText == draftReference &&
+                            producer.PipelineRecordId == record.Id && producer.SourceRevision == record.Revision && producer.Stage == (int)PipelineStage.Embed &&
+                            producer.Operation == PipelineOperations.Embed && producer.PublicState == (int)Domain.Jobs.PublicJobState.Completed &&
+                            parent.Stage == (int)PipelineStage.Embed && parent.Operation == PipelineOperations.Embed &&
+                            publication.DispatchGeneration == parent.DispatchGeneration + 1 && publication.Stage == (int)PipelineStage.Publish && publication.Operation == PipelineOperations.Publish &&
+                            current.PipelineRecordId == record.Id && current.SourceRevision == record.Revision && current.Stage == (int)PipelineStage.Publish && current.Operation == PipelineOperations.Publish
+                        select current).SingleAsync(cancellationToken);
+                    await SqlRepositoryWorkRecovery.ValidateAsync(context, job, timeProvider.GetUtcNow(), cancellationToken);
+                }
                 await SqlStageTransitionStore.PublishDocumentIfApplicableAsync(context, record, timeProvider.GetUtcNow(), cancellationToken);
                 record.CompletionCriteriaMet = true;
                 await context.SaveChangesAsync(cancellationToken);

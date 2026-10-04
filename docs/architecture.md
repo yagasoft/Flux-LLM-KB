@@ -378,6 +378,17 @@ and exact settled GPU input/result/cleanup/slot provenance. The atomic audit,
 lease-generation increments and same-delivery requeue preserve saved vectors;
 normal workers resume missing batches and publication. Independent recovery review
 and separate human terminal-processing approval precede production use.
+
+The locally implemented [automatic repository continuation](design/repository-retrieval-reliability.md#automatic-continuation-after-repository-withdrawal)
+preserves nonterminal jobs, deliveries, checkpoints and vectors during withdrawal.
+An immutable original processing/admission binding and mutable authoritative Git
+discovery proof gate resumption; queued waiting work consumes no processing attempts.
+Fresh compatible discovery, canonical/vector integrity and known completed GPU
+results with confirmed cleanup are required. Publish rechecks source authority
+inside its snapshot fence and reuses only fully validated safe immutable collision
+winners. The additive schema preserves evidence on rollback; production migration,
+deployment and live acceptance remain separately gated.
+
 SQL vector selection resolves chunk identity before record revision predicates
 to exclude the observed pair expansion, retaining all eligibility checks. Its
 LOOP join fixes join order and trades additional point lookups on mostly

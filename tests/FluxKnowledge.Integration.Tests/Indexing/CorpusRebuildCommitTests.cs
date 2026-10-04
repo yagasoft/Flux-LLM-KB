@@ -41,9 +41,13 @@ public sealed class CorpusRebuildCommitTests(NativeSqlServerFixture fixture) : I
         var plan = await store.ReadPlanAsync(Guid.NewGuid(), new("next-profile", 1024), new string('b', 64), CancellationToken.None);
         await store.CommitAsync(plan, "slot-a", CancellationToken.None);
         await using var context = environment.Factory.CreateDbContext();
-        var error = await Assert.ThrowsAsync<SqlException>(() =>
-            context.GetService<IMigrator>().MigrateAsync("20260927115909_BindCompletedDeliveryArtifacts"));
-        Assert.Contains("corpus-rebuild-downgrade-requires-empty-receipts", error.Message);
+        try
+        {
+            var error = await Assert.ThrowsAsync<SqlException>(() =>
+                context.GetService<IMigrator>().MigrateAsync("20260927115909_BindCompletedDeliveryArtifacts"));
+            Assert.Contains("corpus-rebuild-downgrade-requires-empty-receipts", error.Message);
+        }
+        finally { await context.Database.MigrateAsync(); }
         Assert.Contains("20260927121634_AddCorpusRebuildWorklist", await context.Database.GetAppliedMigrationsAsync());
         Assert.Equal(plan.ManifestHash, (await context.CorpusRebuildOperations.SingleAsync()).ManifestHash);
         Assert.Equal(plan.OperationId, (await context.CorpusRebuildWorkItems.SingleAsync()).OperationId);

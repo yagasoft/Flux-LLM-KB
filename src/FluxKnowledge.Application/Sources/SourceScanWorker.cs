@@ -12,7 +12,7 @@ public sealed class SourceScanWorker(
     ISourceActivityStore activityStore,
     RetainedTextActivityPlanner? retainedTextActivityPlanner = null) : ISourceScanner
 {
-    private const string TextProcessorVersion = "phase-3a-v1";
+    public const string TextProcessorVersion = "phase-3a-v1";
 
     public async ValueTask<SourceScanResult> ScanAsync(
         SourceRootConfiguration sourceRoot,

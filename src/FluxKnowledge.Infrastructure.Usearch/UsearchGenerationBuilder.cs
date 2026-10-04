@@ -209,15 +209,18 @@ public sealed class UsearchGenerationBuilder : IIndexGenerationPublisher
                 candidate = candidate with { IndexPath = finalPath };
                 return new IndexGenerationCandidateSnapshot(candidate, vectors, publication.ExpectedCorpusStamp);
             }
-            catch (IOException) when (Directory.Exists(finalDirectory))
+            catch (GenerationPlacementCollisionException exception) when (exception.DestinationPath == finalDirectory)
             {
+                EnsureStorageSafe(finalDirectory);
                 validator.Validate(finalDirectory, candidate, vectors);
+                EnsureStorageSafe(staging);
                 if (Directory.Exists(staging)) Directory.Delete(staging, recursive: true);
                 return new IndexGenerationCandidateSnapshot(candidate, vectors, publication.ExpectedCorpusStamp);
             }
         }
         catch
         {
+            EnsureStorageSafe(staging);
             if (Directory.Exists(staging))
             {
                 Directory.Delete(staging, recursive: true);

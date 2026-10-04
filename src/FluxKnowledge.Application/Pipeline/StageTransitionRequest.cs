@@ -53,4 +53,5 @@ public sealed record StageRetryRequest(
     ClaimedJob CurrentJob,
     DateTimeOffset DueAtUtc,
     string Reason,
-    string Actor);
+    string Actor,
+    RepositorySourceDeferral? SourceDeferral = null);
