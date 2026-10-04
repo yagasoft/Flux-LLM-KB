@@ -187,9 +187,10 @@ remain. Root/workspace semantic search scans exact SQL membership in 256-vector
 keyset pages under its generation lease and retains at most 100 candidates,
 without a total-vector cap or opening global ANN. All-corpus search still uses
 USearch. Release `a248811a` applied the additive migration and automatic proof
-backfill. Live acceptance remains incomplete; the measured scoped query-plan and
-whole-file disclosure corrections are locally verified for the next release.
-Scoped SQL now uses constant ordered membership seek/loop hints without changing
+backfill. Correction release `4f9393ef` deployed the whole-file disclosure and
+initial scoped query-plan changes; exact current code/docs reads pass. Complete
+semantic live acceptance remains pending after a parallel page-plan timeout.
+Scoped SQL now uses constant serial ordered membership seek/loop hints without changing
 eligibility or deadlines. Full guards retain credential checks and proof spans;
 Protected refusal applies to returned text, and completed bounded code candidates
 are not enlarged by unrelated trailing guard text.

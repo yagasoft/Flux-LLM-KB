@@ -90,11 +90,13 @@ public sealed partial class SqlCorpusRetrievalReader
             {
                 // Seek the existing (GenerationId, VectorId) key in order. Every
                 // publication/scope predicate still applies before the page limit.
+                // Serial pages avoid parallel sorts that consume the generation
+                // before returning TOP, while the bounded page keeps memory fixed.
                 pageQuery = FormattableStringFactory.Create(pageQuery.Format
                     .Replace("[IndexGenerationVectors] AS [member]", "[IndexGenerationVectors] AS [member] WITH (FORCESEEK)", StringComparison.Ordinal)
                     .Replace("[vector].[VectorId] >", "[member].[VectorId] >", StringComparison.Ordinal)
                     .Replace("ORDER BY [vector].[VectorId]", "ORDER BY [member].[VectorId]", StringComparison.Ordinal)
-                    + " OPTION (LOOP JOIN, FORCE ORDER)", pageQuery.GetArguments());
+                    + " OPTION (LOOP JOIN, FORCE ORDER, MAXDOP 1)", pageQuery.GetArguments());
             }
             var vectors = await context.Database.SqlQuery<DenseVectorRow>(pageQuery)
                 .ToArrayAsync(cancellationToken).ConfigureAwait(false);

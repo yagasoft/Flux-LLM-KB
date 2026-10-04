@@ -1,6 +1,7 @@
 using System.Collections;
 using System.Data.Common;
 using System.Security.Cryptography;
+using System.Xml.Linq;
 using FluxKnowledge.Application.Indexing;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Infrastructure.Inference;
@@ -19,6 +20,51 @@ namespace FluxKnowledge.Integration.Tests.Search;
 [Collection("sql-full-text")]
 public sealed class ScopedDensePagingIntegrationTests(NativeSqlServerFixture fixture) : IClassFixture<NativeSqlServerFixture>
 {
+    [NativeSqlServerFact]
+    public async Task A_scoped_page_stops_before_reading_the_whole_generation_when_SQL_prefers_parallel_plans()
+    {
+        var (pipeline, root, _) = await SeedAsync(count: 2049);
+        await using var environment = pipeline;
+        await using var lease = await AcquireAsync(pipeline.Factory);
+        var observer = new ParallelPageObserver();
+        var query = await pipeline.Embeddings.CreateEmbeddingAsync("Background evidence.", CancellationToken.None);
+        var result = await new SqlCorpusRetrievalReader(new Factory(new DbContextOptionsBuilder<FluxKnowledgeDbContext>()
+            .UseSqlServer(fixture.ConnectionString).AddInterceptors(observer).Options))
+            .ReadDenseCandidatesAsync(lease, new("root", [root], null), query.Values, CancellationToken.None);
+        Assert.Equal("ready", result.Status);
+        Assert.Equal(100, result.Candidates.Count);
+        Assert.NotNull(observer.FirstSql);
+        await using var connection = new SqlConnection(fixture.ConnectionString);
+        await connection.OpenAsync();
+        await using var command = new SqlCommand("SET STATISTICS XML ON; " + observer.FirstSql + "; SET STATISTICS XML OFF;", connection);
+        command.Parameters.AddRange(observer.FirstParameters);
+        await using var reader = await command.ExecuteReaderAsync();
+        XDocument? plan = null;
+        var pageRows = 0;
+        do
+        {
+            if (reader.FieldCount == 1 && reader.GetName(0) == "Microsoft SQL Server 2005 XML Showplan")
+            {
+                Assert.True(await reader.ReadAsync());
+                plan = XDocument.Parse(reader.GetString(0));
+            }
+            else while (await reader.ReadAsync()) pageRows++;
+        } while (await reader.NextResultAsync());
+        Assert.Equal(256, pageRows);
+        Assert.NotNull(plan);
+        XNamespace ns = "http://schemas.microsoft.com/sqlserver/2004/07/showplan";
+        var accesses = plan.Descendants(ns + "RelOp").Where(node =>
+            node.Element(ns + "IndexScan")?.Element(ns + "Object")?.Attribute("Table")?.Value == "[TextChunks]").ToArray();
+        Assert.NotEmpty(accesses);
+        var executions = accesses.Sum(node => node.Element(ns + "RunTimeInformation")!
+            .Elements(ns + "RunTimeCountersPerThread").Sum(counter => (long?)counter.Attribute("ActualExecutions") ?? 0));
+        Assert.True(executions >= pageRows, "The actual plan did not report all page chunk lookups.");
+        // This fixture has one contiguous eligible root and one preceding unrooted vector.
+        // Reject the observed full-generation sort per page without a timing assertion.
+        Assert.True(executions <= 2L * pageRows + 16,
+            $"A {pageRows}-row page accessed chunks {executions} times in a 2,050-vector generation.");
+    }
+
     [NativeSqlServerTheory]
     [InlineData("checksum")]
     [InlineData("nonfinite")]
@@ -223,6 +269,29 @@ public sealed class ScopedDensePagingIntegrationTests(NativeSqlServerFixture fix
     private sealed class Factory(DbContextOptions<FluxKnowledgeDbContext> options) : IDbContextFactory<FluxKnowledgeDbContext>
     {
         public FluxKnowledgeDbContext CreateDbContext() => new(options);
+    }
+
+    private sealed class ParallelPageObserver : DbCommandInterceptor
+    {
+        public string? FirstSql { get; private set; }
+        public SqlParameter[] FirstParameters { get; private set; } = [];
+        public override ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(DbCommand command,
+            CommandEventData eventData, InterceptionResult<DbDataReader> result, CancellationToken cancellationToken = default)
+        {
+            if (command.CommandText.Contains("FROM [IndexGenerationVectors] AS [member]", StringComparison.Ordinal))
+            {
+                // Optimiser stress is confined to the fixture's generated disposable catalogue.
+                command.CommandText = command.CommandText.Insert(command.CommandText.LastIndexOf(')'),
+                    ", USE HINT('ENABLE_PARALLEL_PLAN_PREFERENCE')");
+                if (FirstSql is null)
+                {
+                    FirstSql = command.CommandText;
+                    FirstParameters = command.Parameters.Cast<SqlParameter>()
+                        .Select(parameter => (SqlParameter)((ICloneable)parameter).Clone()).ToArray();
+                }
+            }
+            return ValueTask.FromResult(result);
+        }
     }
 
     private sealed class Words : IPassageTokenizer

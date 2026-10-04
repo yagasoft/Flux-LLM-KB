@@ -4,8 +4,9 @@ Date: 3 October 2026. Updated 4 October 2026: release `a248811a` completed manda
 integration and authorised incremental deployment, including the additive migration
 and automatic proof backfill. Live acceptance exposed scoped SQL latency, whole-file
 disclosure refusal and earlier terminal Embed checkpoints. The focused corrections
-and recovery action are locally verified; their release and complete live acceptance
-remain pending. Read the
+and recovery action were integrated and deployed as `4f9393ef`. Current exact
+method and documentation reads pass through MCP/REST/CLI. The subsequent serial
+page-plan correction and complete semantic live acceptance remain pending. Read the
 [design](repository-retrieval-reliability.md) before execution.
 Use one implementation owner. Apply focused execution guidance proportionately;
 independent review is required for the security/migration/concurrency gates and
@@ -19,8 +20,8 @@ cutoff. Add an optional canonical-text syntax proof; read SQL vectors in bounded
 pages under the existing generation lease. Preserve SQL Server, native .NET,
 USearch, existing Roslyn and the shared MCP/REST/CLI engine.
 
-- Baseline main is `687f1707`. Continue in the existing dedicated planning worktree
-  on `codex/repository-retrieval-reliability-plan`; inspect its state first.
+- Baseline main is `4f9393ef`. Continue in the existing dedicated task worktree
+  on `codex/retrieval-live-recovery`; inspect its state first.
 - Preserve the single Git-discovered source, automatic additions/edits/renames/
   deletions, exclusions, C# facts, all currently supported formats and citations.
 - Preserve all design safety/parser/transport budgets and deployed 20-second GPU/
@@ -268,10 +269,12 @@ still requires fresh exact-payload operational review under deployment authority
 ## Live acceptance correction and checkpoint recovery
 
 - [x] Identify the measured SQL bottleneck without changing deadlines, profiles or
-  memory bounds. Apply scoped-only ordered membership seek/loop hints; verify
+  memory bounds. Apply scoped-only serial ordered membership seek/loop hints; verify
   complete identical IDs for full, nested, sparse and empty scopes and retain
   actual plans, elapsed time and logical reads. Repeat existing oracle, corruption,
   containment, cancellation and publication/lease-race tests after the query change.
+  Under disposable optimiser stress, assert bounded per-page chunk access rather
+  than a timing threshold; retain current parallel and serial actual-plan evidence.
 - [x] Reproduce the actual complete source's declaration/body and cited method read.
   Keep the original guard and complete proof validation. Apply Protected refusal
   to actual output; distinguish a bounded closed JSON candidate from unrelated
@@ -313,9 +316,10 @@ still requires fresh exact-payload operational review under deployment authority
 ## Handoff
 
 The user approved implementation, deployment and live validation. Initial release
-`a248811a` is installed with its additive schema; proof backfill completed for the
-observed published C# artifacts. The same managed task worktree now holds the
-focused live corrections and explicit Embed recovery action. Source configuration
+`4f9393ef` is installed with the compatible additive schema, full-source disclosure
+correction and explicit Embed recovery action. Current exact cited code/docs reads
+pass; scoped semantic acceptance still times out under the parallel page plan.
+The same managed task worktree holds its focused serial correction. Source configuration
 and model cache remain unchanged. Terminal processing requires separate explicit
 approval of a fresh exact cohort. Preserve the worktree, prior branch/stash and
 ignored evidence until all required release/acceptance steps succeed.

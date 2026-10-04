@@ -5,8 +5,11 @@ Date: 3 October 2026. Baseline: main `687f1707`; installed stability release
 required closeout script and deployed with the additive proof migration and
 automatic backfill. Live acceptance exposed scoped SQL latency, a whole-file
 disclosure false positive and 43 terminal Embed checkpoints from an earlier
-source withdrawal. The corrections below are verified locally; their release and
-complete live acceptance remain pending. This design follows
+source withdrawal. Correction release `4f9393ef` completed mandatory integration
+and incremental deployment; current exact method and documentation reads pass
+through MCP/REST/CLI. Root semantic acceptance still timed out under a parallel
+page plan. The scoped-only serial correction below awaits release and complete
+live acceptance; terminal recovery remains separately gated. This design follows
 the [repository coverage design](repository-workspace-coverage.md)
 and has a separate [implementation plan](repository-retrieval-reliability-plan.md).
 
@@ -235,7 +238,9 @@ The existing composite generation/vector key supports the seek.
 
 Live measurement found repeated large joins/sorts for each page. Scoped pages
 now seek the existing `(GenerationId, VectorId)` membership key and order by its
-joined vector ID, using constant `FORCESEEK`, `LOOP JOIN` and `FORCE ORDER` hints.
+joined vector ID, using constant `FORCESEEK`, `LOOP JOIN`, `FORCE ORDER` and
+scoped-only `MAXDOP 1` hints. The serial page avoids parallel sorts that consume
+the generation before returning `TOP`; it does not serialise other queries.
 All eligibility predicates remain before `TOP`; argument binding and all-corpus
 ANN behaviour are unchanged. Complete drains returned identical IDs for full,
 nested, sparse and empty scopes. Sparse scopes incur more point lookups, so retain

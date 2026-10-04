@@ -2,8 +2,9 @@
 
 4 October 2026. Initial release `a248811a` completed mandatory integration and
 authorised incremental deployment with the additive migration and automatic proof
-backfill. Current live acceptance exposed the corrections described below; their
-release and complete acceptance remain pending. This note
+backfill. Correction release `4f9393ef` subsequently completed mandatory integration
+and incremental deployment. Current exact code/docs reads pass; complete semantic
+acceptance and the subsequent serial page-plan release remain pending. This note
 covers the [retrieval design](../design/repository-retrieval-reliability.md) and
 [implementation plan](../design/repository-retrieval-reliability-plan.md).
 
@@ -162,14 +163,30 @@ in 132 pages: original SQL took 20.158 seconds/10,057,718 logical reads, versus
 below 0.5 seconds but incurred more point lookups. This proves the measured SQL
 improvement, not the full model-backed workload's latency acceptance.
 
+Correction release `4f9393ef` passed 3,013 tests with 20 unchanged opt-in skips on
+both feature and main, with zero build warnings. All 273 installed payload files
+matched the candidate, probes passed and the validation hold was released.
+MCP/REST/CLI verified exact current method and documentation search/read bindings.
+Root semantic searches still timed out: the actual parallel plan visited 37,811
+generation members before returning a 256-row page. Its revision subquery for
+records without retained source files did not execute. A scoped-only `MAXDOP 1`
+diagnostic preserved compared vector IDs
+and completed 34,215 root vectors in 134 pages/1.081 seconds, with nested, sparse
+and empty scopes below 0.6 seconds on the same current generation. The regression
+test reproduces excessive per-page chunk access under disposable optimiser stress.
+This serial correction requires release and the full model-backed acceptance run.
+
 The explicit `embedding_retry` correction passes zero/partial/complete checkpoint
 continuation through normal publication and cited readback. Focused checks cover
 current binding/integrity, settled GPU input/result digests, cleanup/slot provenance,
 concurrent confirmations, old callback fencing, hold admission, atomic failure/
 cancellation and lost-response replay. The current evidence includes 42 proof
 unit checks, 99 combined disposable integration checks and 59 REST/MCP checks;
-CLI parity also passes. Final branch/operational review and correction closeout
-remain. Production terminal processing requires a fresh exact cohort and separate
+CLI parity also passes. The first correction's final branch/operational review and
+closeout passed. The current cohort contains 32 terminal jobs with matching source
+bytes, 329 saved vectors, 2,517 chunks and 85 settled GPU attempts; a REST eligibility
+preview passed without committing recovery. Production terminal processing requires
+a fresh exact cohort and separate
 explicit human approval; no terminal recovery has been performed.
 
 After an authorised release, verify proof completeness for accepted methods,
