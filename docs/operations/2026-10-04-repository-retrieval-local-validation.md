@@ -1,7 +1,9 @@
 # Repository retrieval local validation and release preparation
 
-4 October 2026. Local implementation approved; production deployment, migration
-and automatic proof backfill await a concrete operational decision. This note
+4 October 2026. Initial release `a248811a` completed mandatory integration and
+authorised incremental deployment with the additive migration and automatic proof
+backfill. Current live acceptance exposed the corrections described below; their
+release and complete acceptance remain pending. This note
 covers the [retrieval design](../design/repository-retrieval-reliability.md) and
 [implementation plan](../design/repository-retrieval-reliability-plan.md).
 
@@ -67,8 +69,8 @@ larger sizes and is distinct from retained memory. No deadline or total cap was
 increased after this checkpoint.
 
 Ignored receipts are retained under `.agents/test-results/retrieval-reliability`
-and `.agents/run-logs`; they contain synthetic/disposable evidence. No real model
-was acquired or loaded. SQL fixtures create isolated databases and do not use the
+and `.agents/run-logs`; they contain synthetic/disposable evidence. These ordinary
+local tests acquired and loaded no real model. SQL fixtures create isolated databases and do not use the
 installed application's production connection. The earlier 1 October 17:05 UTC
 documentation freshness receipt remains historical evidence, not acceptance of
 this new payload.
@@ -84,7 +86,8 @@ generation `ac432361be7c1135d0807012f1bb778a`.
 The verified repository root is `8133bdeb-86fc-4c04-a641-52346556753b`, enabled at
 configuration revision 11. These observations do not establish today's complete
 published-path/hash equality or proof coverage. Those checks require a fresh
-post-release inventory. No production write, deployment or restart has occurred.
+post-release inventory. No production write, deployment or restart had occurred at
+that baseline observation.
 
 ## Release target, limitation and rollback
 
@@ -95,7 +98,7 @@ rewrite canonical content, vectors, profiles or source configuration. The
 idempotent SQL generated from `20260927202655_AddCorpusRebuildSupersession` has
 SHA-256 `59CA9DCB89E5A8B272BA2934D25792034C3C0447FCE534C4874F86086B33E741` and is
 retained locally as `.agents/run-logs/retrieval-disclosure-proof-up.sql`; it has
-not been applied to production.
+now been applied by the authorised initial incremental release.
 
 The routine incremental updater now supports this migration with the exclusive
 `-ApplyCodeDisclosureProofMigration` option. PlanOnly verifies the prior or already
@@ -136,6 +139,38 @@ refusal. Do not reverse SQL, downgrade across the Git-root compatibility boundar
 delete caches, change model profiles or replay Publish/dead-letter jobs.
 
 ## Remaining live acceptance
+
+The initial incremental Apply completed at 01:22 UTC with payload `a248811a`,
+compatible additive schema, released validation hold and healthy probes. Fresh
+coverage then showed 1,023 of 1,066 current eligible paths published; 43 terminal
+Embed failures predated deployment. Their compatible retained drafts contained
+457 vectors and 2,889 chunks, with 117 completed, cleanup-confirmed GPU attempts
+and no active slot. These counts require fresh reconciliation after integration.
+
+Disposable whole-source verification reproduced the method declaration's original
+guard refusal. The corrected proof path validates the full unchanged guard and
+applies Protected refusal to actual output. Completed JSON candidates within the
+existing scanner budget are distinguished from unrelated long suffixes; generic,
+incomplete and oversized candidate handling stays conservative. The current
+complete source's method search and exact 2,048-unit context read pass.
+
+Read-only full drains on a stable installed generation returned identical complete
+IDs in all four measured scopes. Root selection visited 33,717 eligible vectors
+in 132 pages: original SQL took 20.158 seconds/10,057,718 logical reads, versus
+1.527 seconds/940,735 with the scoped ordered membership seek/loop plan. A nested
+5,621-vector scope fell from 3.255 to 0.703 seconds. Sparse/empty scopes stayed
+below 0.5 seconds but incurred more point lookups. This proves the measured SQL
+improvement, not the full model-backed workload's latency acceptance.
+
+The explicit `embedding_retry` correction passes zero/partial/complete checkpoint
+continuation through normal publication and cited readback. Focused checks cover
+current binding/integrity, settled GPU input/result digests, cleanup/slot provenance,
+concurrent confirmations, old callback fencing, hold admission, atomic failure/
+cancellation and lost-response replay. The current evidence includes 42 proof
+unit checks, 99 combined disposable integration checks and 59 REST/MCP checks;
+CLI parity also passes. Final branch/operational review and correction closeout
+remain. Production terminal processing requires a fresh exact cohort and separate
+explicit human approval; no terminal recovery has been performed.
 
 After an authorised release, verify proof completeness for accepted methods,
 unchanged canonical/vector identities, current Git membership, watcher/rescan

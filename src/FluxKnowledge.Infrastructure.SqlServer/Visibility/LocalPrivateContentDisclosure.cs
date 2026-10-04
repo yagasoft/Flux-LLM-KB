@@ -67,11 +67,25 @@ public sealed partial class LocalPrivateContentDisclosure : ILocalPrivateContent
 
     public LocalDisclosureResult EvaluateCode(string value, LocalDisclosureKind kind,
         CodeDisclosureWindow? proof, int headerLength = 0)
+        => EvaluateCodeCore(value, kind, proof, headerLength, proof?.Start ?? 0, proof?.Length ?? value.Length);
+
+    public LocalDisclosureResult EvaluateCodeGuard(string value, LocalDisclosureKind kind,
+        CodeDisclosureWindow? proof, int disclosedStart, int disclosedLength)
+    {
+        if (disclosedStart < 0 || disclosedLength < 0 || proof is not null &&
+            (disclosedStart < proof.Start || (long)disclosedStart + disclosedLength > (long)proof.Start + proof.Length))
+            return new(null, true, WithheldReason);
+        return EvaluateCodeCore(value, kind, proof, 0, disclosedStart, disclosedLength);
+    }
+
+    private LocalDisclosureResult EvaluateCodeCore(string value, LocalDisclosureKind kind,
+        CodeDisclosureWindow? proof, int headerLength, int disclosedStart, int disclosedLength)
     {
         ArgumentNullException.ThrowIfNull(value);
         if (proof is null) return Evaluate(value, kind);
         if (value.Length > MaximumScannedCharacters || !proof.IsValid(value, headerLength) ||
-            proof.Spans.Any(span => span.Kind == CodeDisclosureSpanKind.Protected))
+            proof.Spans.Any(span => span.Kind == CodeDisclosureSpanKind.Protected &&
+                span.Start < (long)disclosedStart + disclosedLength && span.End > disclosedStart))
             return new(null, true, WithheldReason);
         var structural = proof.Spans.Where(span => span.Kind == CodeDisclosureSpanKind.StructuralBrace)
             .Select(span => headerLength + span.Start - proof.Start).ToHashSet();
@@ -175,7 +189,8 @@ public sealed partial class LocalPrivateContentDisclosure : ILocalPrivateContent
                     value,
                     start,
                     scan.FollowingTailStartIndex,
-                    scan.IsEscaped))
+                    scan.IsEscaped,
+                    closedProvenCodeCandidate: structural is not null && scan.EndIndex is not null && !scan.IsMalformed))
             {
                 return true;
             }
@@ -224,10 +239,13 @@ public sealed partial class LocalPrivateContentDisclosure : ILocalPrivateContent
         string value,
         int candidateStart,
         int tailStart,
-        bool escapedJson)
+        bool escapedJson,
+        bool closedProvenCodeCandidate = false)
     {
         var scanLimit = Math.Min(value.Length, candidateStart + MaximumEmbeddedJsonCandidateCharacters);
-        return value.Length - candidateStart > MaximumEmbeddedJsonCandidateCharacters ||
+        // A completed candidate in validated code does not grow with unrelated
+        // suffix text. Full-guard credential scans still precede this bounded tail.
+        return !closedProvenCodeCandidate && value.Length - candidateStart > MaximumEmbeddedJsonCandidateCharacters ||
             ContainsCredentialPropertyToken(
                 value,
                 tailStart,

@@ -212,7 +212,8 @@ public sealed class HybridPassageRetrievalEngine(ICorpusRetrievalReader reader, 
             if (current is null || !Safe(current.Candidate, scope) ||
                 !PassageRanking.SamePassage(current.Candidate, passage) ||
                 current.Text != passage.Content || current.StartOffset != passage.StartOffset || current.DisclosureText is null ||
-                disclosure.EvaluateCode(current.DisclosureText, LocalDisclosureKind.RetainedDetail, current.GuardProof).Withheld ||
+                disclosure.EvaluateCodeGuard(current.DisclosureText, LocalDisclosureKind.RetainedDetail,
+                    current.GuardProof, current.StartOffset, current.Text.Length).Withheld ||
                 !NativeV1EnvelopeProtector.CanDiscloseResult(JsonSerializer.SerializeToElement(current.DisclosureText))) continue;
             var citation = CorpusCitationMapper.Map(current.DocumentMetadataJson, passage.StartOffset, passage.Length, passage.SourceIdentity);
             var explanation = new List<string>();

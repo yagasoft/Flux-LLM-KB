@@ -75,6 +75,17 @@ holds and corpus rebuilds fence recovery. Existing `job_retry` still applies to
 supported source-scan controls. Production terminal replay needs separate
 approval; installing this action does not authorise a replay.
 
+Explicit terminal Embed recovery uses `action: "embedding_retry"` with the same
+single `jobId` payload and native preview/confirmed commit routes. It requires a
+compatible retained checkpoint, current enabled source, completed unsuccessful
+delivery and fully settled, cleanup-confirmed GPU history whose input/result
+bindings match saved vectors. It rejects active slots/owners, contradictory
+downstream success, rebuilds or changed inputs. Recovery advances both lease
+generations while preserving job/delivery keys, attempts, draft and vectors;
+normal workers process only missing chunks and then publish. Confirmation binds
+current versions and hash commitments, and idempotent replay returns its receipt.
+Hold and terminal-processing approval requirements are the same as Publish recovery.
+
 `operations.status` accepts the bounded views `overview`, `sources`, `jobs`,
 `workers`, `processors`, and `recovery`. Code, corpus and audit queries use
 bounded pages and opaque query-bound cursors.

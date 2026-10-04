@@ -1,9 +1,11 @@
 # Repository retrieval reliability implementation plan
 
-Date: 3 October 2026. Updated 4 October 2026: local implementation and combined
-verification delivered; independent application and updater-support reviews
-approved. Repository integration requires the closeout script and its observed
-operation receipt; production deployment/acceptance remain pending. Read the
+Date: 3 October 2026. Updated 4 October 2026: release `a248811a` completed mandatory
+integration and authorised incremental deployment, including the additive migration
+and automatic proof backfill. Live acceptance exposed scoped SQL latency, whole-file
+disclosure refusal and earlier terminal Embed checkpoints. The focused corrections
+and recovery action are locally verified; their release and complete live acceptance
+remain pending. Read the
 [design](repository-retrieval-reliability.md) before execution.
 Use one implementation owner. Apply focused execution guidance proportionately;
 independent review is required for the security/migration/concurrency gates and
@@ -215,8 +217,9 @@ coverage. The incremental updater now has an exclusive
 `20261003220411_AddCanonicalCodeDisclosureProof`, with pinned SQL and complete
 schema verification. Fault tests retain the hold for uncertain schema or failed
 prior-payload probes; compatible rollback retains additive tables. Its read-only
-PlanOnly verifies the current production baseline. Production Apply and automatic
-backfill still require concrete user authority and immediate operational review.
+PlanOnly verified the prior production baseline before authorised release
+`a248811a`; its Apply and automatic backfill completed. The correction release
+still requires fresh exact-payload operational review under deployment authority.
 
 - [ ] Reconcile the existing 1 October publication/recovery/freshness receipts.
   Preserve completed evidence and remaining restrictions. Record fresh main,
@@ -229,10 +232,10 @@ backfill still require concrete user authority and immediate operational review.
 - [x] Obtain independent review of the full final diff, proof authority,
   migration/backfill idempotency, scoped lease ownership and test evidence.
   Resolve blocking findings without unrelated refactors.
-- [ ] Use `scripts/dev/complete-feature.ps1` with `-KeepWorktree` for authorised
+- [x] Use `scripts/dev/complete-feature.ps1` with `-KeepWorktree` for the initial authorised
   integration/closeout. Do not use `-GoLive`. If it fails, report its `failed_step`
   and `log_path`, repair within scope and rerun affected checks.
-- [ ] Prepare `scripts/deploy/update-native-iis-incremental.ps1 -PlanOnly` with
+- [x] Prepare `scripts/deploy/update-native-iis-incremental.ps1 -PlanOnly` for the initial release with
   the exact supported parameters. Include additive migration and automatic
   derived-proof backfill explicitly in the release target/rollback review.
   If the updater cannot cover the migration, explain that gap before any alternate
@@ -262,6 +265,42 @@ backfill still require concrete user authority and immediate operational review.
   cases pass. Preserve evidence/worktrees until all authorised closeout steps
   succeed. Keep genuine withheld content and operational/resource limits explicit.
 
+## Live acceptance correction and checkpoint recovery
+
+- [x] Identify the measured SQL bottleneck without changing deadlines, profiles or
+  memory bounds. Apply scoped-only ordered membership seek/loop hints; verify
+  complete identical IDs for full, nested, sparse and empty scopes and retain
+  actual plans, elapsed time and logical reads. Repeat existing oracle, corruption,
+  containment, cancellation and publication/lease-race tests after the query change.
+- [x] Reproduce the actual complete source's declaration/body and cited method read.
+  Keep the original guard and complete proof validation. Apply Protected refusal
+  to actual output; distinguish a bounded closed JSON candidate from unrelated
+  trailing guard text only for validated code. Verify raw/escaped/encoded/composite
+  credentials, invalid intervals/proofs and unfinished/oversized candidates.
+- [x] Add `Persistence/SqlEmbeddingRetry.cs` and wire `embedding_retry` into existing
+  native corpus preview/commit, confirmation, audit, idempotency and outbox wake.
+  Reuse checkpoint validators without fabricated worker/GPU ownership. Validate
+  current lifecycle, canonical inputs, draft/profile/epoch, vectors and exact
+  settled GPU input/result/cleanup/dispatch/slot bindings. Preserve draft and job/
+  delivery identity while advancing both lease generations atomically.
+- [x] Prove zero/partial/complete checkpoint continuation through normal publication
+  and cited readback with synthetic providers/disposable SQL. Verify changed inputs,
+  GPU contradictions, stale confirmations, concurrent commits, deployment hold,
+  cancellation/rollback, lost responses and old delivery callbacks. Cover REST,
+  MCP and CLI through their existing native routes.
+- [ ] Obtain independent review of the complete correction, affected invariants and
+  fresh combined evidence; integrate using `complete-feature.ps1 -KeepWorktree`.
+- [ ] Prepare/review and apply the exact incremental correction release under
+  current deployment authority. Keep the existing additive schema and compatible
+  prior payload for rollback; no further migration, profile or source-policy change.
+- [ ] Reconcile fresh Git/source publication and freeze only still-current eligible
+  terminal Embed jobs, binding source bytes, versions and settled checkpoints.
+  Obtain independent recovery review and explicit human approval for this exact
+  cohort before confirmed commit processing. Refuse drift rather than widening it.
+- [ ] Complete the already frozen 20-query, two-round/two-caller live workload,
+  method/docs readback, automatic freshness and health/worker continuity gates.
+  Report terminal recovery and retrieval acceptance separately from deployment.
+
 ## Side notes retained for later
 
 - The dirty `codex/corpus-retrieval-implementation` worktree contains an XLSX
@@ -273,9 +312,10 @@ backfill still require concrete user authority and immediate operational review.
 
 ## Handoff
 
-The user approved local implementation on 4 October. The existing task worktree
-contains the proof projection, bounded scoped scan and disposable verification.
-Release-support review is approved. `complete-feature.ps1 -KeepWorktree` closeout precedes
-the operational decision. Production payload, schema, data, source configuration
-and model cache have not been changed. Preserve the worktree and ignored evidence
-until the required release/acceptance steps succeed.
+The user approved implementation, deployment and live validation. Initial release
+`a248811a` is installed with its additive schema; proof backfill completed for the
+observed published C# artifacts. The same managed task worktree now holds the
+focused live corrections and explicit Embed recovery action. Source configuration
+and model cache remain unchanged. Terminal processing requires separate explicit
+approval of a fresh exact cohort. Preserve the worktree, prior branch/stash and
+ignored evidence until all required release/acceptance steps succeed.

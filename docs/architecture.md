@@ -179,15 +179,20 @@ in the installed app and has passed the scoped English staging acceptance
 recorded below. The earlier BGE-M3 ONNX pilot evaluated different windows and
 failed its own relevance gates; it is not the delivered passage pipeline's result.
 
-The locally verified [repository retrieval corrections](design/repository-retrieval-reliability.md)
+The deployed initial [repository retrieval corrections](design/repository-retrieval-reliability.md)
 add optional, versioned canonical C# disclosure proofs in two derived SQL tables.
 New indexing writes proofs atomically; a model-free worker backfills retained
 artifacts under the deployment hold. Credential, parser and transport protections
 remain. Root/workspace semantic search scans exact SQL membership in 256-vector
 keyset pages under its generation lease and retains at most 100 candidates,
 without a total-vector cap or opening global ANN. All-corpus search still uses
-USearch. Production activation requires the additive migration and reviewed
-incremental deployment; it is not yet live.
+USearch. Release `a248811a` applied the additive migration and automatic proof
+backfill. Live acceptance remains incomplete; the measured scoped query-plan and
+whole-file disclosure corrections are locally verified for the next release.
+Scoped SQL now uses constant ordered membership seek/loop hints without changing
+eligibility or deadlines. Full guards retain credential checks and proof spans;
+Protected refusal applies to returned text, and completed bounded code candidates
+are not enlarged by unrelated trailing guard text.
 
 The delivered [hybrid passage architecture](design/hybrid-passage-retrieval.md)
 and [implementation plan](design/hybrid-passage-retrieval-plan.md), dated
@@ -353,6 +358,12 @@ preserves the old failure in an atomic audit and advances both lease generations
 It verifies immutable Embed inputs and current lifecycle state before restoring
 the exact text activity. Normal publication still rebuilds and validates the
 current corpus stamp; a receipt replay cannot reopen a later failed attempt.
+Explicit `embedding_retry` uses the same boundary for terminal Embed work. It
+validates current retained lifecycle, canonical/checkpoint integrity, epoch/profile
+and exact settled GPU input/result/cleanup/slot provenance. The atomic audit,
+lease-generation increments and same-delivery requeue preserve saved vectors;
+normal workers resume missing batches and publication. Independent recovery review
+and separate human terminal-processing approval precede production use.
 SQL vector selection resolves chunk identity before record revision predicates
 to exclude the observed pair expansion, retaining all eligibility checks. Its
 LOOP join fixes join order and trades additional point lookups on mostly

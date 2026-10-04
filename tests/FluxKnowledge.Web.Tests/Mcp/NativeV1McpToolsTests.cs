@@ -18,17 +18,19 @@ namespace FluxKnowledge.Web.Tests.Mcp;
 public sealed class NativeV1McpToolsTests
 {
     [Theory]
-    [InlineData("preview")]
-    [InlineData("commit")]
-    public async Task Publication_recovery_maps_the_single_job_payload_and_confirmation_through_the_native_corpus_surface(string mode)
+    [InlineData("preview", "publication_retry")]
+    [InlineData("commit", "publication_retry")]
+    [InlineData("preview", "embedding_retry")]
+    [InlineData("commit", "embedding_retry")]
+    public async Task Terminal_recovery_maps_the_single_job_payload_and_confirmation_through_the_native_corpus_surface(string mode, string action)
     {
         var facade = new RecordingFacade();
         var jobId = Guid.NewGuid();
-        var result = await CreateTools(facade).CorpusWrite(mode, "publication_retry", JsonSerializer.SerializeToElement(new { jobId }),
+        var result = await CreateTools(facade).CorpusWrite(mode, action, JsonSerializer.SerializeToElement(new { jobId }),
             "opaque-confirmation", "recovery-key", CancellationToken.None);
         Assert.True(Read(result).GetProperty("ok").GetBoolean());
         var command = Assert.IsType<NativeCorpusMutation>(facade.LastCommand);
-        Assert.Equal("publication_retry", command.Action);
+        Assert.Equal(action, command.Action);
         Assert.Equal(jobId, command.Payload.GetProperty("jobId").GetGuid());
         Assert.Single(command.Payload.EnumerateObject());
         Assert.Equal(mode == "preview" ? 1 : 0, facade.PreviewCalls);

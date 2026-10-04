@@ -381,6 +381,16 @@ public sealed class SqlNativeOperationStore(
 
         if (prepared.Operation is NativeCorpusMutationCommitOperation corpus)
         {
+            if (corpus.Action == "embedding_retry")
+            {
+                using var payload = JsonDocument.Parse(corpus.CanonicalPayload);
+                var snapshot = await SqlEmbeddingRetry.ReadEligibleAsync(context, RequiredGuid(payload.RootElement, "jobId"), embeddingRuntime, forCommit: true, cancellationToken);
+                if (!string.Equals(NativeOperationCanonicalization.SerializeTargets(NativeOperationCanonicalization.CanonicalizeTargets(snapshot.Targets)),
+                    NativeOperationCanonicalization.SerializeTargets(prepared.Targets), StringComparison.Ordinal))
+                    throw new NativeOperationException("operation-fenced");
+                snapshot.Requeue(context, _timeProvider.GetUtcNow(), prepared.ActorSurface, prepared.IdempotencyKey, prepared.RequestFingerprint);
+                return;
+            }
             if (corpus.Action == "publication_retry")
             {
                 using var payload = JsonDocument.Parse(corpus.CanonicalPayload);
@@ -998,7 +1008,7 @@ public sealed class SqlNativeOperationStore(
         try
         {
             using var document = JsonDocument.Parse(operation.CanonicalPayload);
-            var property = operation.Action is "job_retry" or "publication_retry" ? "jobId" : "rootId";
+            var property = operation.Action is "job_retry" or "publication_retry" or "embedding_retry" ? "jobId" : "rootId";
             if (!document.RootElement.TryGetProperty(property, out var value) || !Guid.TryParse(value.GetString(), out var id))
             {
                 throw new NativeOperationException("invalid-commit-operation");
@@ -1007,6 +1017,7 @@ public sealed class SqlNativeOperationStore(
             {
                 "job_retry" => $"corpus-job:{id:D}",
                 "publication_retry" => $"publication-job:{id:D}",
+                "embedding_retry" => $"embedding-job:{id:D}",
                 _ => $"corpus-root:{id:D}"
             }, cancellationToken);
         }

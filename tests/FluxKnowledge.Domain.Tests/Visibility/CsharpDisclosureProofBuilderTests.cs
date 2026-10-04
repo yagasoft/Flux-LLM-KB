@@ -217,6 +217,71 @@ public sealed class CsharpDisclosureProofBuilderTests
     }
 
     [Fact]
+    public void Completed_candidate_with_long_safe_suffix_requires_valid_code_proof()
+    {
+        var text = "class C { object M() { var item = new { Value = 1 };\n" +
+            string.Concat(Enumerable.Repeat("var harmless = 1;\n", 300)) + "return item; } }";
+        var proof = Build(text);
+        var start = text.IndexOf("return item", StringComparison.Ordinal);
+        Assert.True(disclosure.Evaluate(text, LocalDisclosureKind.CodeExcerpt).Withheld);
+        Assert.False(disclosure.EvaluateCodeGuard(text, LocalDisclosureKind.CodeExcerpt,
+            proof.Window(0, text.Length), start, 12).Withheld);
+        Assert.True(disclosure.EvaluateCodeGuard(text, LocalDisclosureKind.CodeExcerpt,
+            proof.Window(0, text.Length) with { Fingerprint = "stale" }, start, 12).Withheld);
+    }
+
+    [Theory]
+    [InlineData("// \"password\":\"synthetic\"")]
+    [InlineData("// \\\"client_secret\\\":\\\"synthetic\\\"")]
+    [InlineData("var value = \"eyJwYXNzd29yZCI6InN5bnRoZXRpYyJ9\";")]
+    [InlineData("var value = (\"eyJw\") + (\"YXNzd29yZCI6InN5bnRoZXRpYyJ9\");")]
+    public void Closed_candidate_does_not_allow_distant_credential_output(string credential)
+    {
+        var text = "class C { void M() { var item = new { Value = 1 };\n" +
+            string.Concat(Enumerable.Repeat("var harmless = 1;\n", 300)) + credential + "\n} }";
+        var start = text.IndexOf(credential, StringComparison.Ordinal);
+        var proof = Build(text);
+        Assert.True(disclosure.EvaluateCodeGuard(text, LocalDisclosureKind.CodeExcerpt,
+            proof.Window(0, text.Length), start + credential.Length / 2, 4).Withheld);
+    }
+
+    [Theory]
+    [InlineData("// \"password\":\"synthetic\"")]
+    [InlineData("// \\\"client_secret\\\":\\\"synthetic\\\"")]
+    public void Raw_and_escaped_credential_evidence_outside_output_still_refuses_the_full_guard(string credential)
+    {
+        var text = "class C { void M() { var item = new { Value = 1 };\n" +
+            string.Concat(Enumerable.Repeat("var harmless = 1;\n", 300)) + credential + "\nreturn; } }";
+        var start = text.IndexOf("return;", StringComparison.Ordinal);
+        Assert.True(disclosure.EvaluateCodeGuard(text, LocalDisclosureKind.CodeExcerpt,
+            Build(text).Window(0, text.Length), start, 7).Withheld);
+    }
+
+    [Theory]
+    [InlineData(-1, 1)]
+    [InlineData(0, -1)]
+    [InlineData(0, 100)]
+    [InlineData(int.MaxValue, int.MaxValue)]
+    public void Guard_output_interval_must_be_wholly_inside_the_verified_window(int start, int length)
+    {
+        const string text = "class C { void M() { return; } }";
+        Assert.True(disclosure.EvaluateCodeGuard(text, LocalDisclosureKind.CodeExcerpt,
+            Build(text).Window(0, text.Length), start, length).Withheld);
+    }
+
+    [Theory]
+    [InlineData("[unfinished")]
+    [InlineData("{unfinished")]
+    public void Unfinished_candidate_with_long_suffix_remains_withheld_in_a_code_guard(string candidate)
+    {
+        var text = "class C { void M() { var value = \"" + candidate + "\";\n" +
+            string.Concat(Enumerable.Repeat("var harmless = 1;\n", 300)) + "return; } }";
+        var start = text.IndexOf("return;", StringComparison.Ordinal);
+        Assert.True(disclosure.EvaluateCodeGuard(text, LocalDisclosureKind.CodeExcerpt,
+            Build(text).Window(0, text.Length), start, 7).Withheld);
+    }
+
+    [Fact]
     public void Oversized_or_cancelled_input_does_not_publish_partial_proof()
     {
         Assert.Equal(CodeDisclosureProofState.Unsupported, Build(new string(' ', 4_000_001)).State);

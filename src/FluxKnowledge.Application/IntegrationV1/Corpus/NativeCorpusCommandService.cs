@@ -22,7 +22,8 @@ public sealed class NativeCorpusCommandService
         ["source_sync"] = "Queue source synchronisation.",
         ["watcher_set"] = "Set persisted watcher state.",
         ["job_retry"] = "Queue a supported job retry.",
-        ["publication_retry"] = "Requeue exactly the selected terminal Publish job and its completed delivery."
+        ["publication_retry"] = "Requeue exactly the selected terminal Publish job and its completed delivery.",
+        ["embedding_retry"] = "Requeue exactly the selected terminal Embed job while preserving its compatible checkpoint and settled GPU work."
     };
     private readonly NativeOperationService _operations;
     private readonly IOutboxWakeSignal? _outboxWakeSignal;
@@ -70,7 +71,7 @@ public sealed class NativeCorpusCommandService
         var receipt = await _operations.CommitAsync(
             new NativeActionCommitRequest(action, Payload(command), confirmationId, idempotencyKey, surface),
             cancellationToken).ConfigureAwait(false);
-        if (action == "publication_retry") _outboxWakeSignal?.Notify();
+        if (action is "publication_retry" or "embedding_retry") _outboxWakeSignal?.Notify();
         if (action is "root_create" or "root_resume" or "root_delete")
         {
             // A durable replay can follow a process stop immediately after the

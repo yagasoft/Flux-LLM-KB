@@ -242,7 +242,7 @@ public sealed class ScopedDensePagingIntegrationTests(NativeSqlServerFixture fix
             if (page)
             {
                 PageCount++;
-                Assert.Contains("[vector].[VectorId] >", command.CommandText, StringComparison.Ordinal);
+                Assert.Contains("[member].[VectorId] >", command.CommandText, StringComparison.Ordinal);
                 var budget = command.Parameters.Cast<DbParameter>().Select(value => value.Value).OfType<int>();
                 Assert.Contains(256, budget);
             }

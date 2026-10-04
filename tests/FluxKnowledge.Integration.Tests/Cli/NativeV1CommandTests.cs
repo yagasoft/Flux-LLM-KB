@@ -10,18 +10,20 @@ namespace FluxKnowledge.Integration.Tests.Cli;
 public sealed class NativeV1CommandTests
 {
     [Theory]
-    [InlineData("preview")]
-    [InlineData("commit")]
-    public async Task Publication_recovery_forwards_single_job_payload_and_confirmation_to_the_existing_native_routes(string mode)
+    [InlineData("preview", "publication_retry")]
+    [InlineData("commit", "publication_retry")]
+    [InlineData("preview", "embedding_retry")]
+    [InlineData("commit", "embedding_retry")]
+    public async Task Terminal_recovery_forwards_single_job_payload_and_confirmation_to_the_existing_native_routes(string mode, string action)
     {
         var handler = new RecordingHandler("{\"ok\":true,\"result\":{},\"reasonCode\":null,\"message\":null,\"retryable\":false}");
         var jobId = Guid.NewGuid();
-        var input = JsonSerializer.Serialize(new { action = "publication_retry", payload = new { jobId } });
+        var input = JsonSerializer.Serialize(new { action, payload = new { jobId } });
         var result = await ExecuteAsync(["corpus", "write", "--" + mode, "--confirmation-id", "opaque-confirmation", "--idempotency-key", "recovery-key"], input, handler);
         Assert.Equal(0, result.ExitCode);
         Assert.Equal("/api/v1/corpus/actions/" + mode, handler.Request!.RequestUri!.AbsolutePath);
         using var body = JsonDocument.Parse(handler.Body!);
-        Assert.Equal("publication_retry", body.RootElement.GetProperty("action").GetString());
+        Assert.Equal(action, body.RootElement.GetProperty("action").GetString());
         var payload = body.RootElement.GetProperty("payload");
         Assert.Equal(jobId, payload.GetProperty("jobId").GetGuid());
         Assert.Single(payload.EnumerateObject());

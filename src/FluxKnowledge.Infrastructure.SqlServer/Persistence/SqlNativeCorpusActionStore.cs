@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using FluxKnowledge.Application.Contracts;
+using FluxKnowledge.Application.Gpu;
 using FluxKnowledge.Application.IntegrationV1;
 using FluxKnowledge.Application.IntegrationV1.Corpus;
 using FluxKnowledge.Application.Ports;
@@ -14,7 +15,7 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
 public sealed class SqlNativeCorpusActionStore(
     IDbContextFactory<FluxKnowledgeDbContext> contextFactory,
     ISourceRootPathPolicy sourceRootPathPolicy,
-    ILocalPrivateContentDisclosure disclosure) : INativeCorpusActionStore
+    ILocalPrivateContentDisclosure disclosure, EmbeddingGpuRuntime? embeddingRuntime = null) : INativeCorpusActionStore
 {
     public async ValueTask<IReadOnlyList<NativeTargetVersion>> ResolveTargetsAsync(string action, string canonicalPayload, CancellationToken cancellationToken)
     {
@@ -24,10 +25,12 @@ public sealed class SqlNativeCorpusActionStore(
             var admission = RootAdmission(canonicalPayload);
             return [new NativeTargetVersion(CanonicalPathTargetId(admission.CanonicalPath) + (admission.GitRepositoryIdentityFingerprint is null ? "" : ":git:" + admission.GitRepositoryIdentityFingerprint), "absent")];
         }
-        var id = RequiredGuid(canonicalPayload, action is "job_retry" or "publication_retry" ? "jobId" : "rootId");
+        var id = RequiredGuid(canonicalPayload, action is "job_retry" or "publication_retry" or "embedding_retry" ? "jobId" : "rootId");
         await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         if (action == "publication_retry")
             return (await SqlPublicationRetry.ReadEligibleAsync(context, id, forCommit: false, cancellationToken).ConfigureAwait(false)).Targets;
+        if (action == "embedding_retry")
+            return (await SqlEmbeddingRetry.ReadEligibleAsync(context, id, embeddingRuntime, forCommit: false, cancellationToken).ConfigureAwait(false)).Targets;
         if (action == "job_retry")
         {
             var job = await context.SourceScanJobs.AsNoTracking().Where(value => value.Id == id).Select(value => new { value.Id, value.RowVersion, value.SourceScanRequestId }).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
@@ -158,7 +161,7 @@ public sealed class SqlNativeCorpusActionStore(
                 "root_update" => new[] { "rootId", "displayName" },
                 "root_disable" or "root_pause" or "root_resume" or "root_delete" or "source_sync" => new[] { "rootId" },
                 "watcher_set" => new[] { "rootId", "enabled" },
-                "job_retry" or "publication_retry" => new[] { "jobId" },
+                "job_retry" or "publication_retry" or "embedding_retry" => new[] { "jobId" },
                 _ => throw new NativeOperationException("action-not-allowed")
             };
             if (root.EnumerateObject().Any(property => !allowed.Contains(property.Name, StringComparer.Ordinal))) throw new NativeOperationException("invalid-payload");
@@ -173,7 +176,7 @@ public sealed class SqlNativeCorpusActionStore(
                 case "root_update": _ = RequiredGuid(root, "rootId"); RequireSafeDisplayName(RequiredString(root, "displayName", 256)); break;
                 case "root_disable": case "root_pause": case "root_resume": case "root_delete": case "source_sync": _ = RequiredGuid(root, "rootId"); break;
                 case "watcher_set": _ = RequiredGuid(root, "rootId"); if (!root.TryGetProperty("enabled", out var enabled) || enabled.ValueKind is not (JsonValueKind.True or JsonValueKind.False)) throw new NativeOperationException("invalid-payload"); break;
-                case "job_retry": case "publication_retry": _ = RequiredGuid(root, "jobId"); break;
+                case "job_retry": case "publication_retry": case "embedding_retry": _ = RequiredGuid(root, "jobId"); break;
             }
         }
         catch (JsonException) { throw new NativeOperationException("invalid-payload"); }

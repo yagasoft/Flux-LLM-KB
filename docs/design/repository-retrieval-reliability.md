@@ -1,10 +1,12 @@
 # Repository retrieval reliability
 
 Date: 3 October 2026. Baseline: main `687f1707`; installed stability release
-`1b5bd5f6`. Updated 4 October 2026: implemented and verified locally; independent
-application and updater-support reviews approved. Production activation and live
-acceptance remain pending. Repository integration must use the required closeout
-script and its observed operation receipt. This design follows
+`1b5bd5f6`. Updated 4 October 2026: release `a248811a` was integrated through the
+required closeout script and deployed with the additive proof migration and
+automatic backfill. Live acceptance exposed scoped SQL latency, a whole-file
+disclosure false positive and 43 terminal Embed checkpoints from an earlier
+source withdrawal. The corrections below are verified locally; their release and
+complete live acceptance remain pending. This design follows
 the [repository coverage design](repository-workspace-coverage.md)
 and has a separate [implementation plan](repository-retrieval-reliability-plan.md).
 
@@ -18,8 +20,9 @@ content-safety checks. No individual file lists or repository partitioning.
 
 This increment addresses two demonstrated retrieval failures and completes their
 acceptance. It does not reopen the completed publication recovery, acquire models,
-change ranking/model profiles, enlarge transport/parser limits, replay jobs or
-update dashboard manuals. AGENTS requires no change. Reconciliation of the retained
+change ranking/model profiles, enlarge transport/parser limits or update dashboard
+manuals. Terminal Embed recovery requires separate explicit operational authority;
+installing its action does not authorise processing jobs. AGENTS requires no change. Reconciliation of the retained
 older branch, OCR, Outlook and wider source-lifecycle acceptance remain side notes.
 
 ## Evidence and remaining uncertainty
@@ -131,9 +134,12 @@ same artifact/fingerprint. Compare the server-side count with the header without
 hydrating the complete map; verify each selected span's bound checksum. A missing
 row or a corrupt offset moved onto a brace inside a string must grant no exception.
 
-Any protected/ambiguous range intersecting the searched body/model input or the
-complete-line read guard withholds that value, including a literal whose beginning
-lies outside the window. A partially missing or invalid proof is never used to
+Any protected/ambiguous range intersecting the actual searched body/model input or
+returned context withholds that value, including a literal whose beginning lies
+outside the window. The complete guard retains and validates every intersecting
+proof span; a protected range wholly outside the returned interval does not alone
+withhold a safe excerpt. The returned interval must lie wholly inside the verified
+guard. A partially missing or invalid proof is never used to
 skip structural braces while losing its protected ranges. Current source
 eligibility is checked independently of proof.
 
@@ -145,14 +151,19 @@ disagree merely because their windows start at different positions.
 The detector continues scanning the original, unchanged text:
 
 1. Run existing sentinel, assignment, header, URI, private-key and encoded-content
-   checks over the whole value; honour all intersecting protected/ambiguous spans.
+   checks over the whole value; honour protected/ambiguous spans in actual output.
 2. Run conservative raw and transport-escaped quoted credential-property/token
    checks over the entire original bounded value, including malformed/truncated
    keys. This preserves protection formerly supplied incidentally by an enclosing
    body-brace candidate, including `// "password":"synthetic"`.
 3. Exclude only proved structural opening-brace positions from JSON-candidate
    enumeration and the leading-JSON heuristic. All other candidates, including
-   those in strings/comments/disabled text, retain existing JSON checks.
+   those in strings/comments/disabled text, retain existing JSON checks. In the
+   validated-code path only, a candidate closed within the existing 4,096-unit
+   scanner budget does not exceed that budget merely because unrelated guard text
+   follows it. Keep the bounded tail-token checks and full-guard raw/escaped scans.
+   Unclosed, malformed or oversized candidates retain conservative refusal;
+   unproved/generic evaluation is unchanged.
 4. Preserve the final native envelope protection.
 
 Preserve the complete-line disclosure guard and its 2,048-unit halo, 16 Ki-unit
@@ -222,6 +233,14 @@ batch size, not a total membership limit. At the current 1,024 dimensions, each
 full page carries approximately 1 MiB of vector payload, plus bounded row overhead.
 The existing composite generation/vector key supports the seek.
 
+Live measurement found repeated large joins/sorts for each page. Scoped pages
+now seek the existing `(GenerationId, VectorId)` membership key and order by its
+joined vector ID, using constant `FORCESEEK`, `LOOP JOIN` and `FORCE ORDER` hints.
+All eligibility predicates remain before `TOP`; argument binding and all-corpus
+ANN behaviour are unchanged. Complete drains returned identical IDs for full,
+nested, sparse and empty scopes. Sparse scopes incur more point lookups, so retain
+their measured cost in the release evidence rather than implying universal speedup.
+
 Every page repeats the current publication, root/workspace containment, active
 generation, epoch/version, model, dimension, source revision, chunk hash and
 search-input hash predicates. Validate all returned payloads, including low-ranked
@@ -248,6 +267,38 @@ revise the design; do not silently increase deadlines or introduce another
 repository-size refusal. The existing all-corpus ANN path is unchanged.
 
 ## Acceptance and release
+
+### Explicit recovery of retained terminal Embed checkpoints
+
+The first release found 1,023 of 1,066 current eligible paths published; the other
+43 had terminal `embedding-checkpoint-source-unavailable` failures predating Apply.
+Read-only evidence found compatible drafts, 457 saved vectors, 2,889 canonical
+chunks and 117 completed GPU attempts with confirmed cleanup and no active slot.
+The timing supports a temporary source withdrawal during repository recovery;
+it does not establish a new deployment failure. These are historical counts.
+
+Expose `embedding_retry` with one `jobId` through existing native preview/confirmed
+commit, idempotency and audit surfaces. Admit only the exact current retained
+record/source under an enabled root, a terminal failed Embed job and its completed
+unsuccessful delivery, with no live owner, competing work, rebuild/supersession or
+downstream success. Validate the retained draft's epoch/profile, canonical text,
+chunks/search inputs, vector payloads/counts/checksum and every GPU request/task/
+batch/dispatch. GPU history must be completed, cleanup-confirmed, slot-free and
+bound to the exact inputs and result-payload digest. Other histories refuse.
+
+Confirmation binds row versions and bounded hash commitments for paged inputs and
+GPU history. Commit revalidates under the existing publication fence, locks
+dispatch before job, audits the previous failure and advances both lease
+generations atomically with its receipt. Preserve job/delivery IDs, dispatch
+generation/key, attempts, draft and saved vectors; resume only missing batches
+through the normal worker and publication path. Old owners/callbacks must not
+replay inference or alter a new claim. A lost response replays its receipt; stale
+confirmation, cancellation or pre-commit failure cannot partially queue recovery.
+
+Prepare a fresh exact current cohort and source-byte/checkpoint evidence after
+integration. Independent review and explicit user approval precede any production
+terminal processing. Stop on changed bindings or contradictory state. Recovery
+does not reset drafts, fake ownership, republish files, rebuild ANN or acquire models.
 
 The first safe end-to-end result is a disposable Git source containing a supported
 C# method beyond 16 Ki units: normal discovery → canonical artifact and atomic

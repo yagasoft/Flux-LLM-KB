@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Runtime.InteropServices;
+using System.Runtime.CompilerServices;
 using System.Diagnostics;
 using System.Text.Json;
 using FluxKnowledge.Application.Ports;
@@ -53,7 +54,7 @@ public sealed partial class SqlCorpusRetrievalReader
         {
             cancellationToken.ThrowIfCancellationRequested();
             if (!await lease.IsCurrentAsync(cancellationToken).ConfigureAwait(false)) return new("index-updating", []);
-            var vectors = await context.Database.SqlQuery<DenseVectorRow>(SqlPublishedPassageSelection.Bind($"""
+            var pageQuery = SqlPublishedPassageSelection.Bind($"""
             SELECT TOP ({budget}) [vector].[VectorId], [vector].[TextChunkId],
                    CASE WHEN {kind} = N'all' THEN CAST(NULL AS varbinary(max)) ELSE [vector].[Values] END AS [Values],
                    [vector].[PayloadChecksum]
@@ -84,7 +85,19 @@ public sealed partial class SqlCorpusRetrievalReader
                   (CASE WHEN [publication].[OwnerSourceRevisionId] IS NOT NULL THEN [owner].[CanonicalPath] ELSE [retained].[CanonicalPath] END COLLATE Latin1_General_100_CI_AS = {cwd} OR
                    LEFT(CASE WHEN [publication].[OwnerSourceRevisionId] IS NOT NULL THEN [owner].[CanonicalPath] ELSE [retained].[CanonicalPath] END, LEN({prefix})) COLLATE Latin1_General_100_CI_AS = {prefix}))
             ORDER BY [vector].[VectorId]
-            """)).ToArrayAsync(cancellationToken).ConfigureAwait(false);
+            """);
+            if (kind != "all")
+            {
+                // Seek the existing (GenerationId, VectorId) key in order. Every
+                // publication/scope predicate still applies before the page limit.
+                pageQuery = FormattableStringFactory.Create(pageQuery.Format
+                    .Replace("[IndexGenerationVectors] AS [member]", "[IndexGenerationVectors] AS [member] WITH (FORCESEEK)", StringComparison.Ordinal)
+                    .Replace("[vector].[VectorId] >", "[member].[VectorId] >", StringComparison.Ordinal)
+                    .Replace("ORDER BY [vector].[VectorId]", "ORDER BY [member].[VectorId]", StringComparison.Ordinal)
+                    + " OPTION (LOOP JOIN, FORCE ORDER)", pageQuery.GetArguments());
+            }
+            var vectors = await context.Database.SqlQuery<DenseVectorRow>(pageQuery)
+                .ToArrayAsync(cancellationToken).ConfigureAwait(false);
             if (!await lease.IsCurrentAsync(cancellationToken).ConfigureAwait(false)) return new("index-updating", []);
             if (kind == "all" && vectors.Length != matches.Count) throw new InvalidOperationException("corpus-dense-membership-invalid");
             foreach (var row in vectors)

@@ -25,6 +25,56 @@ public sealed class CodeDisclosureProofIntegrationTests(NativeSqlServerFixture f
     : IClassFixture<NativeSqlServerFixture>
 {
     [NativeSqlServerFact]
+    public async Task Whole_current_source_returns_the_method_despite_a_remote_protected_expression()
+    {
+        const string relative = "src/FluxKnowledge.Infrastructure.SqlServer/Persistence/SqlSourceScanStore.cs";
+        var directory = new DirectoryInfo(AppContext.BaseDirectory);
+        while (directory is not null && !File.Exists(Path.Combine(directory.FullName, relative))) directory = directory.Parent;
+        Assert.NotNull(directory);
+        var text = (await File.ReadAllTextAsync(Path.Combine(directory.FullName, relative))).Replace("\r\n", "\n", StringComparison.Ordinal);
+        var method = Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree.ParseText(text).GetRoot().DescendantNodes()
+            .OfType<Microsoft.CodeAnalysis.CSharp.Syntax.MethodDeclarationSyntax>()
+            .Single(value => value.Identifier.ValueText == "OwnsRootScanAsync").ToString();
+        var factory = SqlTestData.CreateFactory(fixture);
+        await SqlTestData.ClearPipelineAsync(fixture);
+        var root = Guid.NewGuid();
+        await using (var db = await factory.CreateDbContextAsync())
+        {
+            var chunks = Enumerable.Range(0, (text.Length + 511) / 512)
+                .Select(index => text.Substring(index * 512, Math.Min(512, text.Length - index * 512))).ToArray();
+            ScopedCorpusRetrievalTests.AddPublishedText(db, root, $@"C:\proof\{root:N}", "SqlSourceScanStore.cs", chunks);
+            await db.SaveChangesAsync();
+        }
+        var disclosure = new LocalPrivateContentDisclosure();
+        var store = new SqlCodeDisclosureProofStore(factory);
+        var candidate = Assert.IsType<CodeDisclosureArtifact>(await store.ReadNextAsync(CancellationToken.None));
+        var built = new CsharpDisclosureProofBuilder(disclosure).Build(candidate.ArtifactId, candidate.Text!, CancellationToken.None);
+        Assert.Equal(text, candidate.Text);
+        Assert.Equal(CodeDisclosureProofState.Ready, built.State);
+        Assert.True(await store.CommitAsync(candidate, built, CancellationToken.None));
+        var rawReader = new SqlCorpusRetrievalReader(factory);
+        var rawCandidate = Assert.Single(await rawReader.SearchAsync("private static async Task<bool> OwnsRootScanAsync",
+            new("root", [root], null), 20, CancellationToken.None), value => value.Content.Contains("private static async Task<bool> OwnsRootScanAsync", StringComparison.Ordinal));
+        var directBinding = new CorpusEvidenceBinding(2, rawCandidate.RootId, rawCandidate.OwnerSourceRevisionId,
+            CodeDisclosureIntegrity.Hash(rawCandidate.SourceIdentity),rawCandidate.PipelineRecordId,rawCandidate.PipelineRecordRevision,
+            rawCandidate.ArtifactId,rawCandidate.ArtifactHash,rawCandidate.ChunkId,rawCandidate.ChunkHash,
+            rawCandidate.StartOffset,rawCandidate.Length,rawCandidate.CorpusEpoch);
+        var directRead = Assert.IsType<EligibleContext>(await rawReader.ReadAsync(directBinding,0,CancellationToken.None));
+        Assert.NotNull(directRead.DisclosureText);
+        Assert.False(disclosure.EvaluateCodeGuard(directRead.DisclosureText,LocalDisclosureKind.RetainedDetail,directRead.GuardProof,
+            directRead.StartOffset,directRead.Text.Length).Withheld);
+        var service = new CorpusRetrievalService(new SqlCorpusRetrievalReader(factory),
+            new ScopedCorpusRetrievalTests.TestEvidenceCodec(), disclosure);
+        var declarations = await service.SearchAsync(new("private static async Task<bool> OwnsRootScanAsync", 5, "root", root, null), CancellationToken.None);
+        Assert.Contains(declarations.Results, hit => hit.Passage.Contains("OwnsRootScanAsync", StringComparison.Ordinal));
+        var body = Assert.Single((await service.SearchAsync(new("var lease = ownership.Lease;", 5, "root", root, null), CancellationToken.None)).Results);
+        var read = await service.ReadAsync(new(body.EvidenceRef, 2048), CancellationToken.None);
+        Assert.Contains(method, read.Text, StringComparison.Ordinal);
+        Assert.Equal(text.Substring(read.StartOffset, read.Text.Length), read.Text);
+        Assert.True(read.StartOffset > 16_384);
+    }
+
+    [NativeSqlServerFact]
     public async Task Model_free_backfill_enables_late_method_search_and_exact_context_read()
     {
         var (factory, root, artifact, method) = await SeedAsync();

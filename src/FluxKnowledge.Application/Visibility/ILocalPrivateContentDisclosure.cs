@@ -9,4 +9,7 @@ public interface ILocalPrivateContentDisclosure
 
     LocalDisclosureResult EvaluateCode(string value, LocalDisclosureKind kind,
         CodeDisclosureWindow? proof, int headerLength = 0) => Evaluate(value, kind);
+
+    LocalDisclosureResult EvaluateCodeGuard(string value, LocalDisclosureKind kind,
+        CodeDisclosureWindow? proof, int disclosedStart, int disclosedLength) => EvaluateCode(value, kind, proof);
 }

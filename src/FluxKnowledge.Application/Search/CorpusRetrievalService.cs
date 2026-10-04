@@ -127,7 +127,8 @@ public sealed class CorpusRetrievalService(
             var current = await reader.ReadAsync(binding, 0, token).ConfigureAwait(false);
             if (current is null) continue;
             if (current.DisclosureText is null ||
-                disclosure.EvaluateCode(current.DisclosureText, LocalDisclosureKind.RetainedDetail, current.GuardProof).Withheld ||
+                disclosure.EvaluateCodeGuard(current.DisclosureText, LocalDisclosureKind.RetainedDetail,
+                    current.GuardProof, current.StartOffset, current.Text.Length).Withheld ||
                 !NativeV1EnvelopeProtector.CanDiscloseResult(JsonSerializer.SerializeToElement(current.DisclosureText)))
                 continue;
             var citation = CorpusCitationMapper.Map(current.DocumentMetadataJson,
@@ -213,7 +214,8 @@ public sealed class CorpusRetrievalService(
         var title = disclosure.Evaluate(Path.GetFileName(candidate.SourceIdentity), LocalDisclosureKind.CorpusMetadata);
         var text = disclosure.EvaluateCode(context.Text, LocalDisclosureKind.RetainedDetail, context.TextProof);
         var surroundingWithheld = context.DisclosureText is null ||
-            disclosure.EvaluateCode(context.DisclosureText, LocalDisclosureKind.RetainedDetail, context.GuardProof).Withheld ||
+            disclosure.EvaluateCodeGuard(context.DisclosureText, LocalDisclosureKind.RetainedDetail,
+                context.GuardProof, context.StartOffset, context.Text.Length).Withheld ||
             !NativeV1EnvelopeProtector.CanDiscloseResult(JsonSerializer.SerializeToElement(context.DisclosureText));
         if (source.Withheld || title.Withheld || text.Withheld || surroundingWithheld)
             throw new NativeOperationException("content-withheld");

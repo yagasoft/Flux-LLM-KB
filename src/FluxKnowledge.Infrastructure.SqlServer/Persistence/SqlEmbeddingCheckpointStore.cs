@@ -193,12 +193,16 @@ public sealed class SqlEmbeddingCheckpointStore(
         return bytes;
     }
 
-    internal static async Task ValidateStoredVectorsAsync(FluxKnowledgeDbContext context, IndexGenerationEntity draft, StageWorkItem work, CancellationToken ct)
+    internal static Task ValidateStoredVectorsAsync(FluxKnowledgeDbContext context, IndexGenerationEntity draft, StageWorkItem work, CancellationToken ct)
+        => ValidateStoredVectorsAsync(context, draft, work.Job.PipelineRecordId.Value, work.Job.SourceRevision, ct);
+
+    internal static async Task ValidateStoredVectorsAsync(FluxKnowledgeDbContext context, IndexGenerationEntity draft,
+        Guid recordId, long sourceRevision, CancellationToken ct)
     {
-        var chunks = Chunks(context, work);
+        var chunks = Chunks(context, recordId, sourceRevision);
         if (await context.Vectors.LongCountAsync(vector => vector.IndexGenerationId == draft.Id, ct).ConfigureAwait(false) != draft.VectorCount ||
             await context.Vectors.AnyAsync(vector => vector.IndexGenerationId == draft.Id && (vector.IsDeleted ||
-                vector.SourceRevision != work.Job.SourceRevision || vector.ModelFingerprint != draft.ModelFingerprint || vector.Dimensions != draft.Dimensions ||
+                vector.SourceRevision != sourceRevision || vector.ModelFingerprint != draft.ModelFingerprint || vector.Dimensions != draft.Dimensions ||
                 vector.SearchInputHash == null || !chunks.Any(chunk => chunk.Id == vector.TextChunkId &&
                     chunk.ContentHash == vector.TextChunkContentHash && chunk.SearchInputHash == vector.SearchInputHash)), ct).ConfigureAwait(false))
             throw new InvalidOperationException("embedding-checkpoint-stored-input-invalid");
@@ -207,10 +211,14 @@ public sealed class SqlEmbeddingCheckpointStore(
     internal static async Task<string> ReadCompletedChecksumAsync(FluxKnowledgeDbContext context, IndexGenerationEntity draft, StageWorkItem work, CancellationToken ct)
         => await ReadCheckpointChecksumAsync(context, draft, work, requireComplete: true, ct).ConfigureAwait(false);
 
-    internal static async Task<string> ReadCheckpointChecksumAsync(FluxKnowledgeDbContext context, IndexGenerationEntity draft, StageWorkItem work, bool requireComplete, CancellationToken ct)
+    internal static Task<string> ReadCheckpointChecksumAsync(FluxKnowledgeDbContext context, IndexGenerationEntity draft, StageWorkItem work, bool requireComplete, CancellationToken ct)
+        => ReadCheckpointChecksumAsync(context, draft, work.Job.PipelineRecordId.Value, work.Job.SourceRevision, requireComplete, ct);
+
+    internal static async Task<string> ReadCheckpointChecksumAsync(FluxKnowledgeDbContext context, IndexGenerationEntity draft,
+        Guid recordId, long sourceRevision, bool requireComplete, CancellationToken ct)
     {
-        await ValidateStoredVectorsAsync(context, draft, work, ct).ConfigureAwait(false);
-        if (requireComplete && await Chunks(context, work).LongCountAsync(ct).ConfigureAwait(false) != draft.VectorCount)
+        await ValidateStoredVectorsAsync(context, draft, recordId, sourceRevision, ct).ConfigureAwait(false);
+        if (requireComplete && await Chunks(context, recordId, sourceRevision).LongCountAsync(ct).ConfigureAwait(false) != draft.VectorCount)
             throw new InvalidOperationException("embedding-checkpoint-incomplete");
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         // EF's retrying SQL strategy can buffer an entire streaming result. Keyset

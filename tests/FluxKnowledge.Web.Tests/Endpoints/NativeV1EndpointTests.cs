@@ -21,21 +21,23 @@ namespace FluxKnowledge.Web.Tests.Endpoints;
 public sealed class NativeV1EndpointTests
 {
     [Theory]
-    [InlineData("preview")]
-    [InlineData("commit")]
-    public async Task Publication_recovery_preserves_single_job_identity_on_the_existing_preview_and_commit_routes(string mode)
+    [InlineData("preview", "publication_retry")]
+    [InlineData("commit", "publication_retry")]
+    [InlineData("preview", "embedding_retry")]
+    [InlineData("commit", "embedding_retry")]
+    public async Task Terminal_recovery_preserves_single_job_identity_on_the_existing_preview_and_commit_routes(string mode, string action)
     {
         await using var host = await StartAsync();
         var jobId = Guid.NewGuid();
         using var request = new HttpRequestMessage(HttpMethod.Post, "/api/v1/corpus/actions/" + mode)
         {
-            Content = JsonContent.Create(new { action = "publication_retry", payload = new { jobId }, confirmation_id = "opaque-confirmation" })
+            Content = JsonContent.Create(new { action, payload = new { jobId }, confirmation_id = "opaque-confirmation" })
         };
         request.Headers.Add("Idempotency-Key", "recovery-key");
         using var response = await host.Client.SendAsync(request);
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         var command = Assert.IsType<NativeCorpusMutation>(host.Facade.LastCommand);
-        Assert.Equal("publication_retry", command.Action);
+        Assert.Equal(action, command.Action);
         Assert.Equal(jobId, command.Payload.GetProperty("jobId").GetGuid());
         Assert.Single(command.Payload.EnumerateObject());
         Assert.Equal(mode == "preview" ? 1 : 0, host.Facade.PreviewCalls);
