@@ -1,4 +1,5 @@
 using FluxKnowledge.Application.Indexing;
+using FluxKnowledge.Application.Gpu;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Domain.Gpu;
 using FluxKnowledge.Domain.Jobs;
@@ -153,6 +154,86 @@ public sealed class CorpusRebuildCommitTests(NativeSqlServerFixture fixture) : I
         Assert.Single(await context.CorpusQueryLeases.ToArrayAsync());
         Assert.Empty(await context.CorpusRebuildOperations.ToArrayAsync());
         Assert.Equal(plan.VectorCount, await context.Vectors.LongCountAsync());
+    }
+
+    [NativeSqlServerFact]
+    public async Task Exited_query_registration_is_drained_at_rebuild_admission_without_a_healthy_exclusive_probe()
+    {
+        await using var environment = await SqlToUsearchRebuildTests.PipelineEnvironment.CreateAsync(fixture, "Exited query owner permits explicit rebuild admission.");
+        await AddSlotAsync(environment.Factory);
+        var owner = new GpuInteractiveOwnerIdentity(Environment.ProcessId, DateTimeOffset.UtcNow, new string('a', 64));
+        var store = new SqlCorpusRebuildStore(environment.Factory, queryOwnerProbe: new QueryOwnerProbe(owner, GpuInteractiveOwnerObservation.Exited));
+        var plan = await store.ReadPlanAsync(Guid.NewGuid(), new("next-profile", 1024), new string('b', 64), CancellationToken.None);
+        await AddQueryRegistrationAsync(environment.Factory, plan, owner);
+        await store.CommitAsync(plan, "slot-a", CancellationToken.None);
+        await using var context = await environment.Factory.CreateDbContextAsync();
+        Assert.Empty(await context.CorpusQueryLeases.ToArrayAsync());
+        Assert.Equal(plan.OperationId, (await context.IndexState.SingleAsync()).CorpusRebuildOperationId);
+    }
+
+    [NativeSqlServerTheory]
+    [InlineData(GpuInteractiveOwnerObservation.Alive)]
+    [InlineData(GpuInteractiveOwnerObservation.Unknown)]
+    public async Task Unproven_query_owner_preserves_its_registration_and_projection_at_rebuild_admission(GpuInteractiveOwnerObservation observation)
+    {
+        await using var environment = await SqlToUsearchRebuildTests.PipelineEnvironment.CreateAsync(fixture, "Unproven query owner preserves projection.");
+        await AddSlotAsync(environment.Factory);
+        var owner = new GpuInteractiveOwnerIdentity(Environment.ProcessId, DateTimeOffset.UtcNow, new string('a', 64));
+        var store = new SqlCorpusRebuildStore(environment.Factory, queryOwnerProbe: new QueryOwnerProbe(owner, observation));
+        var plan = await store.ReadPlanAsync(Guid.NewGuid(), new("next-profile", 1024), new string('b', 64), CancellationToken.None);
+        await AddQueryRegistrationAsync(environment.Factory, plan, owner);
+        var error = await Assert.ThrowsAsync<CorpusRebuildRefusalException>(async () => await store.CommitAsync(plan, "slot-a", CancellationToken.None));
+        Assert.Equal("corpus-rebuild-query-drain-required", error.Message);
+        await using var context = await environment.Factory.CreateDbContextAsync();
+        Assert.Single(await context.CorpusQueryLeases.ToArrayAsync());
+        Assert.Empty(await context.CorpusRebuildOperations.ToArrayAsync());
+        Assert.Equal(plan.VectorCount, await context.Vectors.LongCountAsync());
+    }
+
+    [NativeSqlServerFact]
+    public async Task Failed_rebuild_admission_rolls_back_exited_query_registration_cleanup()
+    {
+        await using var environment = await SqlToUsearchRebuildTests.PipelineEnvironment.CreateAsync(fixture, "Failed admission retains the prior receipt.");
+        await AddSlotAsync(environment.Factory);
+        var owner = new GpuInteractiveOwnerIdentity(Environment.ProcessId, DateTimeOffset.UtcNow, new string('a', 64));
+        var store = new SqlCorpusRebuildStore(environment.Factory, queryOwnerProbe: new QueryOwnerProbe(owner, GpuInteractiveOwnerObservation.Exited));
+        var plan = await store.ReadPlanAsync(Guid.NewGuid(), new("next-profile", 1024), new string('b', 64), CancellationToken.None);
+        await AddQueryRegistrationAsync(environment.Factory, plan, owner);
+        await using var context = await environment.Factory.CreateDbContextAsync();
+        await context.Artifacts.Where(value => value.Stage == (int)PipelineStage.CanonicalIndex)
+            .ExecuteUpdateAsync(update => update.SetProperty(value => value.DocumentMetadataJson, "{}"));
+        var error = await Assert.ThrowsAsync<CorpusRebuildRefusalException>(async () => await store.CommitAsync(plan, "slot-a", CancellationToken.None));
+        Assert.Equal("corpus-rebuild-manifest-changed", error.Message);
+        Assert.Single(await context.CorpusQueryLeases.ToArrayAsync());
+        Assert.Empty(await context.CorpusRebuildOperations.ToArrayAsync());
+        Assert.Equal(plan.VectorCount, await context.Vectors.LongCountAsync());
+    }
+
+    private static async Task AddQueryRegistrationAsync(IDbContextFactory<FluxKnowledgeDbContext> factory,
+        CorpusRebuildPlan plan, GpuInteractiveOwnerIdentity owner)
+    {
+        await using var context = await factory.CreateDbContextAsync();
+        var generationId = (await context.IndexState.SingleAsync()).ActiveIndexGenerationId;
+        var generation = await context.IndexGenerations.SingleAsync(value => value.Id == generationId);
+        context.CorpusQueryLeases.Add(new CorpusQueryLeaseEntity
+        {
+            Id = Guid.NewGuid(), GenerationId = generation.Id, CorpusEpoch = plan.PreviousStamp.CorpusEpoch,
+            CorpusVersion = plan.PreviousStamp.CorpusVersion, ModelFingerprint = generation.ModelFingerprint,
+            Dimensions = generation.Dimensions, OwnerInstanceId = Guid.NewGuid(), OwnerProcessId = owner.ProcessId,
+            OwnerStartedAtUtc = owner.StartedAtUtc, OwnerMachineFingerprint = owner.MachineFingerprint,
+            SqlSessionId = 100, CreatedAtUtc = DateTimeOffset.UtcNow
+        });
+        await context.SaveChangesAsync();
+    }
+
+    private sealed class QueryOwnerProbe(GpuInteractiveOwnerIdentity current, GpuInteractiveOwnerObservation observation) : IGpuInteractiveOwnerProbe
+    {
+        public GpuInteractiveOwnerIdentity Current => current;
+        public GpuInteractiveOwnerObservation Observe(GpuInteractiveOwnerIdentity owner)
+        {
+            Assert.Equal(current, owner);
+            return observation;
+        }
     }
 
     [NativeSqlServerFact]

@@ -36,17 +36,46 @@ public sealed class NativeCodexPluginRegistrarTests
     }
 
     [Fact]
-    public async Task Generated_marketplace_passes_the_current_bundled_canonical_plugin_validator()
+    public async Task Generated_marketplace_is_readable_by_the_installed_Codex_CLI()
     {
         await using var fixture = new WriterFixture();
         await fixture.Writer.WriteAsync(fixture.Paths.MarketplaceRoot);
 
         var validation = await fixture.Writer.ValidateAsync(fixture.Paths.MarketplaceRoot);
-        var validator = await RunCanonicalValidatorAsync(fixture.Paths.PluginRoot);
-
         Assert.True(validation.IsValid, validation.Reason);
-        Assert.True(validator.ExitCode == 0, validator.Output);
-        Assert.Contains("Plugin validation passed", validator.Output, StringComparison.Ordinal);
+        var added = await RunCodexAsync(fixture, "plugin", "marketplace", "add", fixture.Paths.MarketplaceRoot, "--json");
+        Assert.True(added.ExitCode == 0, added.Error);
+        using var registration = JsonDocument.Parse(added.Output);
+        Assert.Equal(CodexRegistrationPaths.MarketplaceName, registration.RootElement.GetProperty("marketplaceName").GetString());
+        Assert.Equal(fixture.Paths.MarketplaceRoot, registration.RootElement.GetProperty("installedRoot").GetString());
+
+        var listed = await RunCodexAsync(fixture, "plugin", "list", "--marketplace", CodexRegistrationPaths.MarketplaceName, "--available", "--json");
+        Assert.True(listed.ExitCode == 0, listed.Error);
+        using var catalogue = JsonDocument.Parse(listed.Output);
+        Assert.Empty(catalogue.RootElement.GetProperty("installed").EnumerateArray());
+        var plugin = Assert.Single(catalogue.RootElement.GetProperty("available").EnumerateArray());
+        Assert.Equal("fluxknowledge@fluxknowledge", plugin.GetProperty("pluginId").GetString());
+        Assert.Equal(CodexRegistrationPaths.PluginName, plugin.GetProperty("name").GetString());
+        Assert.Equal("1.0.0", plugin.GetProperty("version").GetString());
+        Assert.Equal("local", plugin.GetProperty("source").GetProperty("source").GetString());
+        Assert.Equal(fixture.Paths.PluginRoot, plugin.GetProperty("source").GetProperty("path").GetString());
+        Assert.Equal("AVAILABLE", plugin.GetProperty("installPolicy").GetString());
+        Assert.Equal("ON_INSTALL", plugin.GetProperty("authPolicy").GetString());
+        Assert.False(plugin.GetProperty("installed").GetBoolean());
+        Assert.False(plugin.GetProperty("enabled").GetBoolean());
+    }
+
+    [Fact]
+    public async Task Installed_Codex_CLI_rejects_malformed_marketplace_material()
+    {
+        await using var fixture = new WriterFixture();
+        await fixture.Writer.WriteAsync(fixture.Paths.MarketplaceRoot);
+        await File.WriteAllTextAsync(Path.Combine(fixture.Paths.MarketplaceRoot, ".agents", "plugins", "marketplace.json"), "{");
+
+        var added = await RunCodexAsync(fixture, "plugin", "marketplace", "add", fixture.Paths.MarketplaceRoot, "--json");
+
+        Assert.NotEqual(0, added.ExitCode);
+        Assert.Contains("invalid marketplace file", added.Error, StringComparison.Ordinal);
     }
 
     [Theory]
@@ -491,40 +520,37 @@ public sealed class NativeCodexPluginRegistrarTests
         }
     });
 
-    private static async Task<(int ExitCode, string Output)> RunCanonicalValidatorAsync(string pluginRoot)
+    private static async Task<(int ExitCode, string Output, string Error)> RunCodexAsync(WriterFixture fixture, params string[] arguments)
     {
-        var validator = Environment.GetEnvironmentVariable("FLUXKNOWLEDGE_PLUGIN_VALIDATOR_PATH") ?? Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-            ".codex",
-            "skills",
-            ".system",
-            "plugin-creator",
-            "scripts",
-            "validate_plugin.py");
-        var shimRoot = Path.Combine(Path.GetTempPath(), "FluxKnowledgeValidatorShim", Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(shimRoot);
-        await File.WriteAllTextAsync(Path.Combine(shimRoot, "yaml.py"), "def safe_load(value):\n    return {}\n");
-        var start = new ProcessStartInfo("python")
+        Directory.CreateDirectory(fixture.CodexHome);
+        var start = new ProcessStartInfo("codex")
         {
             RedirectStandardOutput = true,
             RedirectStandardError = true,
-            UseShellExecute = false
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            WorkingDirectory = fixture.Root
         };
-        start.ArgumentList.Add(validator);
-        start.ArgumentList.Add(pluginRoot);
-        start.Environment["PYTHONPATH"] = shimRoot;
+        foreach (var argument in arguments) start.ArgumentList.Add(argument);
+        start.Environment["CODEX_HOME"] = fixture.CodexHome;
+        using var process = Process.Start(start)
+            ?? throw new InvalidOperationException("Unable to start the installed Codex CLI.");
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var output = process.StandardOutput.ReadToEndAsync();
+        var error = process.StandardError.ReadToEndAsync();
         try
         {
-            using var process = Process.Start(start)
-                ?? throw new InvalidOperationException("Unable to start the bundled plugin validator.");
-            var output = await process.StandardOutput.ReadToEndAsync();
-            output += await process.StandardError.ReadToEndAsync();
-            await process.WaitForExitAsync();
-            return (process.ExitCode, output);
+            await process.WaitForExitAsync(timeout.Token);
+            return (process.ExitCode, await output.WaitAsync(timeout.Token), await error.WaitAsync(timeout.Token));
         }
         finally
         {
-            Directory.Delete(shimRoot, recursive: true);
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+                using var cleanupTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+                await process.WaitForExitAsync(cleanupTimeout.Token);
+            }
         }
     }
 
@@ -543,6 +569,8 @@ public sealed class NativeCodexPluginRegistrarTests
 
         public CodexRegistrationPaths Paths { get; }
         public NativeCodexPluginManifestWriter Writer { get; } = new();
+        public string Root => _root;
+        public string CodexHome => Path.Combine(_root, "CodexHome");
 
         public ValueTask DisposeAsync()
         {

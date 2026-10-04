@@ -3,8 +3,11 @@
 4 October 2026. Initial release `a248811a` completed mandatory integration and
 authorised incremental deployment with the additive migration and automatic proof
 backfill. Correction release `4f9393ef` subsequently completed mandatory integration
-and incremental deployment. Current exact code/docs reads pass; complete semantic
-acceptance and the subsequent serial page-plan release remain pending. This note
+and incremental deployment. Serial release `404a38b5` passed current exact code/docs
+reads and semantic workload acceptance before recovery. The separately approved
+32-job cohort is now fully published with missing-only embedding and exact cited
+readback. Final post-recovery semantic acceptance and the subsequently identified
+unattended IIS hosting correction remain pending. This note
 covers the [retrieval design](../design/repository-retrieval-reliability.md) and
 [implementation plan](../design/repository-retrieval-reliability-plan.md).
 
@@ -189,12 +192,64 @@ concurrent confirmations, old callback fencing, hold admission, atomic failure/
 cancellation and lost-response replay. The current evidence includes 42 proof
 unit checks, 99 combined disposable integration checks and 59 REST/MCP checks;
 CLI parity also passes. The first correction's final branch/operational review and
-closeout passed. The current cohort contains 32 terminal jobs with matching source
+closeout passed. The reviewed preflight cohort contained 32 terminal jobs with matching source
 bytes, 329 saved vectors, 2,517 chunks and 85 settled GPU attempts; REST eligibility
 previews passed for all 32 jobs without committing recovery. Independent post-live
 review approved the bounded approach. Production terminal processing requires
-a fresh exact cohort and separate
-explicit human approval; no terminal recovery has been performed.
+a fresh exact cohort and separate explicit human approval; no recovery had been
+committed at that preflight gate.
+
+Subsequent explicit approval recovered exactly those 32 original jobs through
+fresh native eligibility and idempotent requests. By 08:27 UTC all 32 original
+records were published, all 329 saved vectors were unchanged, and exactly 2,188
+missing positions had been embedded once. Original jobs, dispatches, checkpoints,
+canonical artifacts and source bindings were preserved. All 643 cohort GPU
+receipts (85 retained and 558 new) matched ordered stored-vector result digests
+and confirmed cleanup, with no active cohort slot or unsettled request. A replay
+returned the original operation receipt without repeating recovery. All 32
+sources then passed semantic-ready search and exact current cited readback.
+
+Final post-recovery validation has not passed. The unchanged 40-search/two-caller
+workload first returned 39 ready searches and one 20.59-second semantic timeout;
+p95 was 19.14 seconds. Its single independently reviewed complete repeat returned
+40 index-update fallbacks and also failed the all-ready gate. Both runs and the
+strict verifier failures are retained; no further workload rerun or deadline change
+has been made. REST/CLI method/docs searches and exact current reads passed.
+MCP documentation passed, but its method search reported index updating, so final
+MCP semantic parity remains open. The index snapshot retains the same 40,345-member
+generation and matching corpus version. An aggregate SQL timing snapshot and a
+trace without HybridSearch events do not identify the timed-out request's phase.
+A separate 55.9-second read-only maintenance observation captured the same host
+holding the exclusive generation-recovery lock in 12 consecutive samples, with
+unchanged corpus version and generation. That lock refuses new shared search
+leases; the observation supports investigating maintenance for index-update
+fallback, but does not attribute the earlier timeout.
+
+The subsequent local maintenance correction passed 155 combined integration
+checks and 62 web composition checks, with no build warnings. Its initial two
+tests reproduced healthy query refusal and unreported corruption; both now pass.
+Healthy checks use Shared session ownership without relaxing SQL/native integrity
+validation. Detected faults leave Healthy, dispose Shared and reread under
+Exclusive; tests prove concurrent notification retention and a generation changing
+at that boundary. Exclusive rebuild admission now drains only proven-exited query
+owners; running/unknown ownership refuses, and failed admission rolls back cleanup.
+Production activation of this correction remains pending.
+
+The broader ordinary suite exposed an obsolete external test dependency: its
+Plugin Creator Python validator was no longer installed. The replacement checks
+generated metadata against the installed Codex CLI using a disposable Codex home,
+asserts the exact local plugin identity/version/path and rejects malformed
+marketplace JSON. Existing strict manifest, MCP and hook checks remain. All 29
+registrar checks passed; no plugin was installed in the user's configuration.
+
+A bounded single-session full-mask live trace captured all five event types and
+153 events for a current-generation ready search in 9.7 seconds. It identifies
+model load/inference/unload and scoped page phases for that request, not the
+earlier timeout. A side-by-side mask comparison encountered diagnostic IPC
+timeouts and was stopped; it is not acceptance evidence or proof of mask causation.
+There was no new matching crash or uncertain GPU capacity. The 10:21 UTC refresh
+retains all original 32 jobs, 329 saved vectors, 2,188 missing-only positions,
+643 exact settled GPU results, unchanged source bindings and 1,068 published paths.
 
 After an authorised release, verify proof completeness for accepted methods,
 unchanged canonical/vector identities, current Git membership, watcher/rescan
@@ -206,8 +261,27 @@ generation require in-scope, semantic-ready, exactly cited results and p95 below
 existing 25-second outer deadline remains. Verify health/worker continuity and
 report new crash/debugger or SQL failures without processing dead letters.
 
-All 1,068 eligible paths match current Git/source bytes; 1,036 are published.
-The historical coverage gate remains 80% until the 32-job terminal recovery and
-final publication verification pass. AGENTS and dashboard manuals are unchanged; deferred
+All 1,068 eligible paths match current Git/source bytes and are published.
+The historical coverage gate remains 80% while final semantic acceptance and
+unattended hosting verification remain open. AGENTS and dashboard manuals are unchanged; deferred
 XLSX branch reconciliation, OCR, Outlook and broader lifecycle work remain side
 notes.
+
+## Normal idle shutdown and unattended hosting gap
+
+The post-documentation generation passed 40/40 semantic searches with p95
+17.5 seconds, 400 exact scoped passages and 40 cited reads. Windows WAS event 5186
+then distinguished the earlier worker's normal 20-minute idle shutdown from a crash;
+the replacement started before and served that second workload. Both repository
+watchers and periodic reconciliation run inside IIS. OnDemand startup, terminating
+idle timeout and disabled preload can therefore leave discovery stopped indefinitely
+without an HTTP request. Independent review requires a scoped hosting correction.
+
+The prepared opt-in incremental path captures the original three settings, requires
+the installed Application Initialization module, commits AlwaysRunning/zero idle/
+preload together after the existing drain/stop, and restores the exact original
+tuple before rollback startup. Synthetic native-management checks cover commit,
+rollback, drift, prerequisites, lost acknowledgement and hold retention. Production
+Apply, autonomous startup and publication beyond the old idle window remain
+unverified and require explicit operational authority. The approved cohort recovery
+completed separately; it does not authorise this hosting activation.

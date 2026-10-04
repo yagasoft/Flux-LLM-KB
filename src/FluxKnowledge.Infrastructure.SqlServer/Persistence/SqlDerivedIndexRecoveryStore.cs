@@ -506,9 +506,16 @@ public sealed class SqlDerivedIndexRecoveryStore(
         publicState == (int)PublicJobState.Completed ||
         publicState == (int)PublicJobState.Failed;
 
-    public async ValueTask<IDerivedIndexRecoveryLease?> TryAcquireExclusiveLeaseAsync(
+    public ValueTask<IDerivedIndexRecoveryLease?> TryAcquireExclusiveLeaseAsync(
         TimeSpan lockTimeout,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken) => TryAcquireLeaseAsync(lockTimeout, true, cancellationToken);
+
+    public ValueTask<IDerivedIndexRecoveryLease?> TryAcquireSharedLeaseAsync(
+        TimeSpan lockTimeout,
+        CancellationToken cancellationToken) => TryAcquireLeaseAsync(lockTimeout, false, cancellationToken);
+
+    private async ValueTask<IDerivedIndexRecoveryLease?> TryAcquireLeaseAsync(
+        TimeSpan lockTimeout, bool exclusive, CancellationToken cancellationToken)
     {
         if (lockTimeout < TimeSpan.Zero || lockTimeout.TotalMilliseconds > int.MaxValue)
         {
@@ -533,13 +540,14 @@ public sealed class SqlDerivedIndexRecoveryStore(
                 DECLARE @result int;
                 EXEC @result = sp_getapplock
                     @Resource = @resource,
-                    @LockMode = 'Exclusive',
+                    @LockMode = @lockMode,
                     @LockOwner = 'Session',
                     @LockTimeout = @lockTimeout;
                 SELECT @result;
                 """,
                 connection);
             command.Parameters.Add("@resource", SqlDbType.NVarChar, 255).Value = LockResource;
+            command.Parameters.Add("@lockMode", SqlDbType.NVarChar, 32).Value = exclusive ? "Exclusive" : "Shared";
             command.Parameters.Add("@lockTimeout", SqlDbType.Int).Value = (int)Math.Ceiling(lockTimeout.TotalMilliseconds);
             var result = (int)(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) ?? -999);
             if (result == -1)
@@ -559,11 +567,14 @@ public sealed class SqlDerivedIndexRecoveryStore(
                     $"SQL application-lock acquisition failed with result code {result}.");
             }
 
-            await using var queryContext = new FluxKnowledgeDbContext(new DbContextOptionsBuilder<FluxKnowledgeDbContext>().UseSqlServer(connection).Options);
-            if (!await SqlCorpusQueryLeaseRecovery.TryDrainAbandonedAsync(queryContext, queryOwnerProbe, cancellationToken).ConfigureAwait(false))
+            if (exclusive)
             {
-                await connection.DisposeAsync().ConfigureAwait(false);
-                return null;
+                await using var queryContext = new FluxKnowledgeDbContext(new DbContextOptionsBuilder<FluxKnowledgeDbContext>().UseSqlServer(connection).Options);
+                if (!await SqlCorpusQueryLeaseRecovery.TryDrainAbandonedAsync(queryContext, queryOwnerProbe, cancellationToken).ConfigureAwait(false))
+                {
+                    await connection.DisposeAsync().ConfigureAwait(false);
+                    return null;
+                }
             }
             return new SqlDerivedIndexRecoveryLease(connection);
         }

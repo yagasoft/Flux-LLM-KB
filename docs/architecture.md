@@ -195,6 +195,13 @@ eligibility or deadlines. Full guards retain credential checks and proof spans;
 Protected refusal applies to returned text, and completed bounded code candidates
 are not enlarged by unrelated trailing guard text.
 
+Automatic repository discovery also requires the IIS Web process to stay available
+without user requests. A normal idle shutdown exposed the current OnDemand/20-minute/
+preload-disabled gap. The prepared incremental `-EnableUnattendedDiscovery` path
+scopes AlwaysRunning, zero idle timeout and preload to FluxKnowledge, with atomic
+settings, exact rollback and existing admission/drain controls. Production activation
+and unattended startup/idle-window publication remain pending.
+
 The delivered [hybrid passage architecture](design/hybrid-passage-retrieval.md)
 and [implementation plan](design/hybrid-passage-retrieval-plan.md), dated
 25 September 2026, supersede the earlier semantic transition plan. They retain
@@ -351,6 +358,12 @@ activating it. It preserves the old generation and all canonical rows; a
 concurrent publication retries from a fresh snapshot. Deployment holds defer
 this refresh. Zero eligible vectors remain `IndexUpdating` without claiming an
 empty canonical catalogue. An unknown absent pointer still fails validation.
+
+The prepared maintenance correction keeps complete healthy projection checks
+under Shared ownership, allowing concurrent query leases. Detected faults leave
+Healthy, release Shared and reread under Exclusive before mutation. Rebuild
+admission drains only proven-exited query owners inside its Exclusive transaction;
+failed admission rolls back drainage. Production activation remains pending.
 
 Explicit `publication_retry` recovery uses the shared native confirmation and
 idempotency boundary. It reopens one failed current retained Publish job and its

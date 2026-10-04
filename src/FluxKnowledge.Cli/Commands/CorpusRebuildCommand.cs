@@ -9,6 +9,7 @@ using FluxKnowledge.Infrastructure.Inference.Search;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
 using FluxKnowledge.Infrastructure.Usearch;
 using FluxKnowledge.Integrations.Models;
+using FluxKnowledge.Integrations.Windows;
 using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 
@@ -40,7 +41,8 @@ public static class CorpusRebuildCommand
             using var tokenizer = new BgePassageTokenizer(stores);
             var safety = new LiveRootStorageSafety(LiveRootLayout.Production, FileSystemLiveRootPathInspector.Instance);
             return await ExecuteAsync(args, new Factory(connectionString), new(tokenizer),
-                new UsearchGenerationValidator(safety), output, error, ct).ConfigureAwait(false);
+                new UsearchGenerationValidator(safety), output, error, ct,
+                OperatingSystem.IsWindows() ? new WindowsInteractiveGpuOwnerProbe() : null).ConfigureAwait(false);
         }
         catch (Exception exception) when (exception is InvalidOperationException or IOException or SqlException or ArgumentException)
         {
@@ -51,12 +53,12 @@ public static class CorpusRebuildCommand
 
     internal static async Task<int> ExecuteAsync(string[] args, IDbContextFactory<FluxKnowledgeDbContext> factory,
         PassageBuilder builder, IIndexGenerationVerifier verifier, TextWriter output, TextWriter error,
-        CancellationToken ct = default)
+        CancellationToken ct = default, IGpuInteractiveOwnerProbe? queryOwnerProbe = null)
     {
         if (!IsValid(args)) return await UsageAsync(error).ConfigureAwait(false);
         try
         {
-            var store = new SqlCorpusRebuildStore(factory);
+            var store = new SqlCorpusRebuildStore(factory, queryOwnerProbe: queryOwnerProbe);
             var operationId = args[0] == "commit" ? Guid.Empty : Guid.Parse(args[2]);
             object result;
             switch (args[0])

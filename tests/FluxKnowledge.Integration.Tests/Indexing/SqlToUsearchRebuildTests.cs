@@ -295,6 +295,105 @@ public sealed class SqlToUsearchRebuildTests(NativeSqlServerFixture fixture) : I
     }
 
     [NativeSqlServerFact]
+    public async Task Healthy_probe_keeps_query_ownership_available_and_preserves_a_concurrent_fault()
+    {
+        await using var environment = await PipelineEnvironment.CreateAsync(_fixture, "Healthy native validation remains searchable.");
+        var active = await environment.ActiveGenerationAsync();
+        using var validator = new BlockingProbeValidator();
+        using var provider = CreateRecoveryProvider(environment.Factory, environment.IndexRoot, validator: validator);
+        var coordinator = provider.GetRequiredService<DerivedIndexRecoveryCoordinator>();
+        await coordinator.RunOnceAsync(CancellationToken.None);
+        Assert.Equal(DerivedIndexRecoveryState.Healthy, coordinator.Snapshot.State);
+        validator.Arm();
+        var probe = Task.Run(async () => await coordinator.RunOnceAsync(CancellationToken.None));
+        ICorpusGenerationLease? query = null;
+        try
+        {
+            await validator.Entered.Task.WaitAsync(TimeSpan.FromSeconds(30));
+            query = await new SqlCorpusGenerationLeaseStore(environment.Factory, TimeProvider.System).TryAcquireAsync(
+                Guid.NewGuid(), new GpuInteractiveOwnerIdentity(Environment.ProcessId, DateTimeOffset.UtcNow, new string('b', 64)),
+                active.ModelFingerprint, active.Dimensions, CancellationToken.None);
+            Assert.NotNull(query);
+            Assert.True(await query.IsCurrentAsync(CancellationToken.None));
+            var recovery = new SqlDerivedIndexRecoveryStore(environment.Factory, TimeProvider.System);
+            Assert.Null(await recovery.TryAcquireExclusiveLeaseAsync(TimeSpan.Zero, CancellationToken.None));
+            coordinator.Notify(new(DerivedIndexRecoveryFailureCategory.InvalidDerivedIndex, active.Id));
+            validator.Release();
+            await probe.WaitAsync(TimeSpan.FromSeconds(30));
+            Assert.Equal(DerivedIndexRecoveryState.Recovering, coordinator.Snapshot.State);
+            Assert.True(await query.IsCurrentAsync(CancellationToken.None));
+            Assert.Null(await recovery.TryAcquireExclusiveLeaseAsync(TimeSpan.Zero, CancellationToken.None));
+            await query.DisposeAsync();
+            query = null;
+            await coordinator.RunOnceAsync(CancellationToken.None);
+            Assert.Equal(DerivedIndexRecoveryState.Healthy, coordinator.Snapshot.State);
+            await using var exclusive = await recovery.TryAcquireExclusiveLeaseAsync(TimeSpan.Zero, CancellationToken.None);
+            Assert.NotNull(exclusive);
+            Assert.Equal(active.Id, await environment.Store.GetActiveGenerationIdAsync(CancellationToken.None));
+        }
+        finally
+        {
+            validator.Release();
+            await probe.WaitAsync(TimeSpan.FromSeconds(30));
+            if (query is not null) await query.DisposeAsync();
+        }
+    }
+
+    [NativeSqlServerFact]
+    public async Task Healthy_probe_reports_corruption_before_contended_exclusive_recovery()
+    {
+        await using var environment = await PipelineEnvironment.CreateAsync(_fixture, "Corruption waits for captured query ownership.");
+        var active = await environment.ActiveGenerationAsync();
+        using var provider = CreateRecoveryProvider(environment.Factory, environment.IndexRoot);
+        var coordinator = provider.GetRequiredService<DerivedIndexRecoveryCoordinator>();
+        await coordinator.RunOnceAsync(CancellationToken.None);
+        Assert.Equal(DerivedIndexRecoveryState.Healthy, coordinator.Snapshot.State);
+        var query = await new SqlCorpusGenerationLeaseStore(environment.Factory, TimeProvider.System).TryAcquireAsync(
+            Guid.NewGuid(), new GpuInteractiveOwnerIdentity(Environment.ProcessId, DateTimeOffset.UtcNow, new string('b', 64)),
+            active.ModelFingerprint, active.Dimensions, CancellationToken.None);
+        Assert.NotNull(query);
+        await using (query)
+        {
+            File.WriteAllText(Path.Combine(active.IndexPath, UsearchGenerationValidator.MetadataFileName), "{}");
+            await coordinator.RunOnceAsync(CancellationToken.None);
+            Assert.Equal(DerivedIndexRecoveryState.Recovering, coordinator.Snapshot.State);
+            Assert.Equal(DerivedIndexRecoveryFailureCategory.InvalidDerivedIndex, coordinator.Snapshot.FailureCategory);
+            Assert.Equal(active.IndexPath, (await environment.ActiveGenerationAsync()).IndexPath);
+            Assert.Single(Directory.EnumerateDirectories(Path.Combine(environment.IndexRoot, "generations")));
+        }
+        await coordinator.RunOnceAsync(CancellationToken.None);
+        Assert.Equal(DerivedIndexRecoveryState.Healthy, coordinator.Snapshot.State);
+        var recovered = await environment.ActiveGenerationAsync();
+        Assert.Equal(active.Id, recovered.Id);
+        Assert.NotEqual(active.IndexPath, recovered.IndexPath);
+        await using var context = await environment.Factory.CreateDbContextAsync();
+        Assert.Single(await context.Vectors.ToArrayAsync());
+    }
+
+    [NativeSqlServerFact]
+    public async Task Healthy_probe_releases_shared_ownership_and_rereads_a_changed_generation_before_recovery()
+    {
+        await using var environment = await PipelineEnvironment.CreateAsync(_fixture, "Original generation before the recovery boundary.");
+        var original = await environment.ActiveGenerationAsync();
+        var boundary = new ProbeBoundaryRecoveryStore(new SqlDerivedIndexRecoveryStore(environment.Factory, TimeProvider.System),
+            async () => await environment.AddAndPumpAtPathAsync("Current generation after shared ownership ends.", "initial.txt"));
+        using var provider = CreateRecoveryProvider(environment.Factory, environment.IndexRoot, recoveryStore: boundary);
+        var coordinator = provider.GetRequiredService<DerivedIndexRecoveryCoordinator>();
+        await coordinator.RunOnceAsync(CancellationToken.None);
+        Assert.Equal(DerivedIndexRecoveryState.Healthy, coordinator.Snapshot.State);
+        boundary.ReadGenerations.Clear();
+        File.WriteAllText(Path.Combine(original.IndexPath, UsearchGenerationValidator.MetadataFileName), "{}");
+        await coordinator.RunOnceAsync(CancellationToken.None);
+        var current = await environment.ActiveGenerationAsync();
+        Assert.NotEqual(original.Id, current.Id);
+        Assert.Equal(new Guid?[] { original.Id, current.Id }, boundary.ReadGenerations);
+        Assert.Equal(DerivedIndexRecoveryState.Healthy, coordinator.Snapshot.State);
+        Assert.Equal(current.Id, coordinator.Snapshot.ActiveGenerationId);
+        Assert.Equal(0, boundary.RecoveryPathUpdates);
+        Assert.Equal("{}", File.ReadAllText(Path.Combine(original.IndexPath, UsearchGenerationValidator.MetadataFileName)));
+    }
+
+    [NativeSqlServerFact]
     public async Task Live_query_lease_defers_publication_refresh_until_its_native_owner_releases_it()
     {
         await using var environment = await PipelineEnvironment.CreateAsync(_fixture, "Leased source.");
@@ -433,8 +532,15 @@ public sealed class SqlToUsearchRebuildTests(NativeSqlServerFixture fixture) : I
             await context.SaveChangesAsync();
         }
         var observer = new QueryOwnerProbe(owner, observation);
-        await using var exclusive = await new SqlDerivedIndexRecoveryStore(environment.Factory, TimeProvider.System, observer)
-            .TryAcquireExclusiveLeaseAsync(TimeSpan.Zero, CancellationToken.None);
+        var recovery = new SqlDerivedIndexRecoveryStore(environment.Factory, TimeProvider.System, observer);
+        await using (var shared = await recovery.TryAcquireSharedLeaseAsync(TimeSpan.Zero, CancellationToken.None))
+        {
+            Assert.NotNull(shared);
+            Assert.Null(await recovery.TryAcquireExclusiveLeaseAsync(TimeSpan.Zero, CancellationToken.None));
+            await using var unchanged = await environment.Factory.CreateDbContextAsync();
+            Assert.True(await unchanged.CorpusQueryLeases.AnyAsync(value => value.Id == id));
+        }
+        await using var exclusive = await recovery.TryAcquireExclusiveLeaseAsync(TimeSpan.Zero, CancellationToken.None);
         Assert.Equal(observation == GpuInteractiveOwnerObservation.Exited, exclusive is not null);
         await using var verification = await environment.Factory.CreateDbContextAsync();
         Assert.Equal(observation != GpuInteractiveOwnerObservation.Exited, await verification.CorpusQueryLeases.AnyAsync(value => value.Id == id));
@@ -1691,16 +1797,20 @@ public sealed class SqlToUsearchRebuildTests(NativeSqlServerFixture fixture) : I
     private static ServiceProvider CreateRecoveryProvider(
         IDbContextFactory<FluxKnowledgeDbContext> factory,
         string root,
-        IDeploymentValidationHold? hold = null)
+        IDeploymentValidationHold? hold = null,
+        UsearchGenerationValidator? validator = null,
+        IDerivedIndexRecoveryStore? recoveryStore = null)
     {
         var services = new ServiceCollection();
         if (hold is not null) services.AddSingleton(hold);
         services.AddSingleton(factory);
-        services.AddSingleton<IDerivedIndexRecoveryStore, SqlDerivedIndexRecoveryStore>();
+        if (recoveryStore is null) services.AddSingleton<IDerivedIndexRecoveryStore, SqlDerivedIndexRecoveryStore>();
+        else services.AddSingleton(recoveryStore);
         services.AddScoped<SqlPipelineStore>();
         services.AddScoped<IIndexGenerationStore>(provider => provider.GetRequiredService<SqlPipelineStore>());
         services.AddSingleton(UsearchIndexOptions.FromConfiguredRoot(root));
-        services.AddSingleton<UsearchGenerationValidator>();
+        if (validator is null) services.AddSingleton<UsearchGenerationValidator>();
+        else services.AddSingleton(validator);
         services.AddScoped<UsearchGenerationBuilder>();
         services.AddSingleton<DerivedIndexFileSystem>();
         services.AddSingleton(TimeProvider.System);
@@ -1953,6 +2063,62 @@ public sealed class SqlToUsearchRebuildTests(NativeSqlServerFixture fixture) : I
         DateTimeOffset? LeaseExpiresAtUtc,
         long LeaseGeneration,
         string RowVersion);
+
+    private sealed class ProbeBoundaryRecoveryStore(IDerivedIndexRecoveryStore inner, Func<Task> afterSharedRelease) : IDerivedIndexRecoveryStore
+    {
+        public List<Guid?> ReadGenerations { get; } = [];
+        public int RecoveryPathUpdates { get; private set; }
+        public async ValueTask<DerivedIndexRecoverySqlSnapshot> ReadActiveAsync(CancellationToken ct)
+        {
+            var snapshot = await inner.ReadActiveAsync(ct);
+            ReadGenerations.Add(snapshot.ActiveGenerationId);
+            return snapshot;
+        }
+        public ValueTask<IDerivedIndexRecoveryLease?> TryAcquireExclusiveLeaseAsync(TimeSpan timeout, CancellationToken ct) =>
+            inner.TryAcquireExclusiveLeaseAsync(timeout, ct);
+        public async ValueTask<IDerivedIndexRecoveryLease?> TryAcquireSharedLeaseAsync(TimeSpan timeout, CancellationToken ct)
+        {
+            var lease = await inner.TryAcquireSharedLeaseAsync(timeout, ct);
+            return lease is null ? null : new BoundaryLease(lease, afterSharedRelease);
+        }
+        public ValueTask<bool> TryUpdateRecoveryPathAsync(Guid id, string expected, string replacement, DateTimeOffset validated, CancellationToken ct)
+        {
+            RecoveryPathUpdates++;
+            return inner.TryUpdateRecoveryPathAsync(id, expected, replacement, validated, ct);
+        }
+        public ValueTask<bool> TryActivatePublicationCandidateAsync(IndexGenerationCandidateSnapshot candidate, CancellationToken ct) =>
+            inner.TryActivatePublicationCandidateAsync(candidate, ct);
+        public ValueTask AppendAuditAsync(DerivedIndexRecoveryAuditEvent audit, CancellationToken ct) => inner.AppendAuditAsync(audit, ct);
+        private sealed class BoundaryLease(IDerivedIndexRecoveryLease innerLease, Func<Task> afterRelease) : IDerivedIndexRecoveryLease
+        {
+            private int _disposed;
+            public async ValueTask DisposeAsync()
+            {
+                if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+                await innerLease.DisposeAsync();
+                await afterRelease();
+            }
+        }
+    }
+
+    private sealed class BlockingProbeValidator : UsearchGenerationValidator, IDisposable
+    {
+        private readonly ManualResetEventSlim _release = new();
+        private int _armed;
+        public TaskCompletionSource<bool> Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public void Arm() => Volatile.Write(ref _armed, 1);
+        public void Release() => _release.Set();
+        public override void Validate(string directory, IndexGenerationDescriptor expected, IReadOnlyList<CanonicalVector> vectors)
+        {
+            if (Interlocked.Exchange(ref _armed, 0) == 1)
+            {
+                Entered.TrySetResult(true);
+                if (!_release.Wait(TimeSpan.FromSeconds(30))) throw new TimeoutException("The test did not release native validation.");
+            }
+            base.Validate(directory, expected, vectors);
+        }
+        public void Dispose() => _release.Dispose();
+    }
 
     private sealed class ThrowingValidator : UsearchGenerationValidator
     {

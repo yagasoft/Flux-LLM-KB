@@ -9,8 +9,15 @@ source withdrawal. Correction release `4f9393ef` completed mandatory integration
 and incremental deployment; current exact method and documentation reads pass
 through MCP/REST/CLI. After the parallel page-plan timeout, scoped-only serial
 correction `404a38b5` was integrated and incrementally deployed. All 40 frozen
-semantic searches passed at two callers with p95 16.2 seconds, including exact
-current citations and reads. Terminal recovery remains separately gated. This design follows
+semantic searches passed before recovery at two callers with p95 16.2 seconds, including exact
+current citations and reads. The separately approved 32-job recovery has now
+published every original record, preserving 329 saved vectors and embedding only
+the 2,188 missing positions. All 32 sources passed exact current cited readback.
+Post-recovery semantic acceptance remains open: one timeout in the first frozen
+run and index-update fallback throughout its single complete repeat failed the gate.
+A later normal
+IIS idle shutdown exposed an unattended-discovery hosting gap; its scoped correction
+and live verification remain pending. This design follows
 the [repository coverage design](repository-workspace-coverage.md)
 and has a separate [implementation plan](repository-retrieval-reliability-plan.md).
 
@@ -340,6 +347,51 @@ payload through the reviewed incremental recovery path. Prior binaries ignore
 proof and revert to conservative disclosure and the former scoped capacity
 refusal; canonical text, vectors and source configuration are unchanged. Do not
 downgrade past the already documented Git-root compatibility boundary.
+
+## Healthy projection checks without search exclusion
+
+Post-recovery acceptance exposed periodic exclusive recovery ownership even while
+the projection remained healthy. The locally implemented correction uses Shared
+session ownership for healthy SQL/path/native validation. It retains the existing
+serializable publication fence and complete integrity checks. Startup, recovery,
+publication and filesystem mutation still require Exclusive ownership.
+
+A detected fault leaves Healthy before recovery admission; a concurrent reader
+notification is preserved. Shared ownership is disposed before Exclusive is
+acquired, and recovery rereads SQL rather than mutating from the earlier snapshot.
+Rebuild admission drains only proven-exited query owners inside its existing
+Exclusive transaction; running or unknown ownership refuses admission, and failed
+admission rolls back drainage. Shared probes leave query registrations untouched.
+Disposable concurrency, recovery and web composition checks pass. Production
+activation and the unchanged final semantic acceptance gate remain pending.
+
+## Unattended discovery hosting correction
+
+IIS currently uses `OnDemand`, a 20-minute terminating idle timeout and disabled
+application preload. Both watchers and the 15-minute reconciliation timer run in
+the Web process, so an idle shutdown can stop automatic discovery until another
+HTTP request. This is a hosting gap, distinct from the earlier unhandled crashes.
+
+Keep the existing host and discovery cadence. The incremental updater's opt-in
+`-EnableUnattendedDiscovery` applies `AlwaysRunning`, zero idle timeout and enabled
+root-application preload for FluxKnowledge only. Application Initialization must
+already be enabled. PlanOnly reports the captured and target settings; Apply records
+the original tuple, drains GPU work and proves worker exit before committing the
+three settings together. Failure restores and verifies the captured tuple before
+restarting the predecessor. Unknown configuration drift or unverified restoration
+retains the admission hold. Migrations, rebuilds and other recovery modes cannot
+combine with this change.
+
+Before HTTP probes, the updater requires a fresh native managed-start event bound
+to the current pool worker, its creation time and canonical application path.
+Missing or unreadable evidence follows the same held rollback path; predecessor
+startup uses its restored original hosting policy.
+
+Production Apply requires separate explicit authority and immediate independent
+operational review. Prove managed-host startup without an external request, then
+automatic watcher/rescan publication over more than the old idle window using
+read-only SQL/process observations without HTTP keep-alive probes. Preserve normal
+recycle and rapid-fail protection. No second scheduler or model acquisition is needed.
 
 Reassess after the two substantive implementation batches, or earlier if either
 safe end-to-end result is blocked. Finish only when the stated supported code and

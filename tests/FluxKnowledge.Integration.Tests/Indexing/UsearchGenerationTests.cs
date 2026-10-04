@@ -410,6 +410,8 @@ public sealed class UsearchGenerationTests : IDisposable
 
     private sealed class ProbeRecoveryStore(IndexGenerationCandidateSnapshot snapshot) : IDerivedIndexRecoveryStore
     {
+        public ValueTask<IDerivedIndexRecoveryLease?> TryAcquireSharedLeaseAsync(TimeSpan lockTimeout, CancellationToken cancellationToken) =>
+            ValueTask.FromResult<IDerivedIndexRecoveryLease?>(LeaseAvailable ? new Lease() : null);
         private readonly DerivedIndexRecoverySqlSnapshot _snapshot = new(
             snapshot.Generation.Id,
             snapshot.Generation,

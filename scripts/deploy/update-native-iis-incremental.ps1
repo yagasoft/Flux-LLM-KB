@@ -19,6 +19,7 @@ param(
     [ValidateRange(30, 3600)][int]$RebuildTimeoutSeconds = 1800,
     [switch]$DeferReadinessForScopedRemediation,
     [switch]$RecoverStoppedPool,
+    [switch]$EnableUnattendedDiscovery,
     [switch]$PlanOnly,
     [switch]$Apply
 )
@@ -687,6 +688,104 @@ function Stop-HybridIisAfterGpuDrain {
     }
 }
 
+function New-IncrementalIisServerManager {
+    [void][Reflection.Assembly]::LoadFrom((Join-Path $env:SystemRoot 'System32/inetsrv/Microsoft.Web.Administration.dll'))
+    return [Microsoft.Web.Administration.ServerManager]::new()
+}
+
+function Get-IncrementalIisHostingSettings {
+    param([object]$Manager = $null)
+    $ownsManager = $null -eq $Manager
+    if ($ownsManager) { $Manager = New-IncrementalIisServerManager }
+    try {
+        $pool = $Manager.ApplicationPools[$SiteName]
+        $site = $Manager.Sites[$SiteName]
+        if ($null -eq $pool -or $null -eq $site) { throw 'The canonical IIS pool/site is missing.' }
+        $application = $site.Applications['/']
+        if ($null -eq $application -or $application.ApplicationPoolName -cne $SiteName -or
+            $null -eq $application.VirtualDirectories['/']) { throw 'The canonical IIS application binding changed.' }
+        Assert-CanonicalPath -RequestedPath $application.VirtualDirectories['/'].PhysicalPath `
+            -ExpectedPath $CanonicalDeployRoot -Message 'The canonical IIS application path changed.'
+        $modules = @($Manager.GetWebConfiguration($SiteName).GetSection('system.webServer/modules').GetCollection() |
+            Where-Object { $_.GetAttributeValue('name') -ceq 'ApplicationInitializationModule' })
+        return [pscustomobject]@{
+            StartMode = [string]$pool.StartMode
+            IdleTimeout = $pool.ProcessModel.IdleTimeout.ToString()
+            PreloadEnabled = [bool]$application.GetAttributeValue('preloadEnabled')
+            ModuleEnabled = $modules.Count -eq 1
+            PoolState = [string]$pool.State
+        }
+    }
+    finally { if ($ownsManager) { $Manager.Dispose() } }
+}
+
+function Test-IisHostingSettingsMatch {
+    param([object]$Left, [object]$Right)
+    return [bool]($Left.StartMode -ceq $Right.StartMode -and $Left.IdleTimeout -ceq $Right.IdleTimeout -and
+        $Left.PreloadEnabled -eq $Right.PreloadEnabled)
+}
+
+function Set-IncrementalIisHostingSettings {
+    param([Parameter(Mandatory)][object]$Expected, [Parameter(Mandatory)][object]$Desired)
+    $manager = New-IncrementalIisServerManager
+    try {
+        $current = Get-IncrementalIisHostingSettings -Manager $manager
+        if ($current.PoolState -cne 'Stopped') { throw 'Hosting changes require the IIS pool to be stopped.' }
+        if (!(Test-IisHostingSettingsMatch $current $Expected)) { throw 'IIS hosting settings changed after capture.' }
+        if ($Desired.PreloadEnabled -and !$current.ModuleEnabled) { throw 'Application Initialization must be enabled.' }
+        $manager.ApplicationPools[$SiteName].StartMode = $Desired.StartMode
+        $manager.ApplicationPools[$SiteName].ProcessModel.IdleTimeout = [TimeSpan]::Parse(
+            $Desired.IdleTimeout, [Globalization.CultureInfo]::InvariantCulture)
+        $manager.Sites[$SiteName].Applications['/'].SetAttributeValue('preloadEnabled', [bool]$Desired.PreloadEnabled)
+        $manager.CommitChanges()
+    }
+    finally { $manager.Dispose() }
+    $actual = Get-IncrementalIisHostingSettings
+    if ($actual.PoolState -cne 'Stopped' -or !(Test-IisHostingSettingsMatch $actual $Desired)) {
+        throw 'The committed IIS hosting settings or stopped-pool state could not be verified.'
+    }
+}
+
+function Restore-IncrementalIisHostingSettings {
+    param([Parameter(Mandatory)][object]$Original, [Parameter(Mandatory)][object]$Desired)
+    $current = Get-IncrementalIisHostingSettings
+    if ($current.PoolState -cne 'Stopped') { throw 'Hosting rollback requires the IIS pool to be stopped.' }
+    if (Test-IisHostingSettingsMatch $current $Original) { return }
+    if (!(Test-IisHostingSettingsMatch $current $Desired)) { throw 'IIS hosting settings changed outside this release; hold retained.' }
+    Set-IncrementalIisHostingSettings -Expected $current -Desired $Original
+}
+
+function Wait-IncrementalIisPreloadStartup {
+    param([Parameter(Mandatory)][DateTime]$AfterUtc, [Parameter(Mandatory)][int]$TimeoutSeconds)
+    $timer = [Diagnostics.Stopwatch]::StartNew()
+    $appcmd = Join-Path $env:SystemRoot 'System32/inetsrv/appcmd.exe'
+    $quotedRoot = "'" + $CanonicalDeployRoot.TrimEnd('\') + "\'"
+    do {
+        $workers = @(foreach ($id in @(Get-HybridIisWorkerIds -AppCmdPath $appcmd -PoolName $SiteName)) {
+            Get-CimInstance Win32_Process -Filter "ProcessId = $id" -ErrorAction Stop
+        })
+        $events = @()
+        try {
+            $events = @(Get-WinEvent -FilterHashtable @{ LogName='Application'; ProviderName='IIS AspNetCore Module V2'
+                Id=1032; StartTime=$AfterUtc } -ErrorAction Stop)
+        }
+        catch { if ($_.FullyQualifiedErrorId -notlike 'NoMatchingEventsFound*') { throw } }
+        foreach ($event in $events) {
+            $worker = @($workers | Where-Object { $_.ProcessId -eq $event.ProcessId })
+            if ($worker.Count -ne 1) { continue }
+            $created = $worker[0].CreationDate.ToUniversalTime()
+            $eventTime = $event.TimeCreated.ToUniversalTime()
+            if ($created -lt $AfterUtc -or $eventTime -lt $AfterUtc -or $eventTime -lt $created -or
+                !([string]$event.Properties[0].Value).Contains($quotedRoot, [StringComparison]::OrdinalIgnoreCase)) { continue }
+            return [pscustomobject]@{ WorkerId=$worker[0].ProcessId; WorkerCreatedUtc=$created.ToString('O')
+                EventRecordId=$event.RecordId; EventTimeUtc=$eventTime.ToString('O') }
+        }
+        if ($timer.Elapsed.TotalSeconds -ge $TimeoutSeconds) { break }
+        Start-Sleep -Milliseconds 250
+    } while ($true)
+    throw 'Unattended managed-host startup evidence was not observed before HTTP probes.'
+}
+
 function Test-IncrementalRollbackHoldRelease {
     param(
         [Parameter(Mandatory)][hashtable]$Validation,
@@ -697,13 +796,14 @@ function Test-IncrementalRollbackHoldRelease {
         [bool]$CodeDisclosureRecoveryVerified = $false,
         [bool]$InteractiveHostMutationStarted,
         [bool]$InteractiveHostRollbackVerified,
-        [bool]$RecoverStoppedPool = $false
+        [bool]$RecoverStoppedPool = $false,
+        [bool]$HostingRollbackVerified = $true
     )
     return [bool](-not $RecoverStoppedPool -and $Validation.HoldCreated -and $Validation.PayloadRollbackVerified -and
         (-not $ApplyMigrations -or $Validation.RollbackVerified) -and
         (-not $ApplyCorpusChunkFullTextMigration -or $CorpusRollbackVerified) -and
         (-not $ApplyCodeDisclosureProofMigration -or $CodeDisclosureRecoveryVerified) -and
-        (-not $InteractiveHostMutationStarted -or $InteractiveHostRollbackVerified))
+        (-not $InteractiveHostMutationStarted -or $InteractiveHostRollbackVerified) -and $HostingRollbackVerified)
 }
 
 function Get-HybridPreservedInputFingerprint {
@@ -1288,6 +1388,12 @@ if ($SiteName -cne "FluxKnowledge") {
 if ($PlanOnly -and $Apply) {
     throw "-PlanOnly cannot be combined with -Apply."
 }
+if ($EnableUnattendedDiscovery -and ($ApplyMigrations -or $ApplyCorpusChunkFullTextMigration -or
+    $ApplyCodeDisclosureProofMigration -or $ApplyHybridPassageRebuild -or $RecoverStoppedPool -or
+    $DeferReadinessForScopedRemediation -or $ResumeHybridRebuildRelease -or $ReplaceHybridRebuildRelease -or
+    $PatchHybridRebuildRelease -or $ResumeHybridPatchRelease)) {
+    throw 'Unattended discovery hosting changes require an ordinary incremental update without migration, rebuild or recovery.'
+}
 if ($ApplyCodeDisclosureProofMigration -and ($ApplyMigrations -or $ApplyCorpusChunkFullTextMigration -or
     $ApplyHybridPassageRebuild -or $RecoverStoppedPool -or $DeferReadinessForScopedRemediation -or
     $ResumeHybridRebuildRelease -or $ReplaceHybridRebuildRelease -or $PatchHybridRebuildRelease -or $ResumeHybridPatchRelease)) {
@@ -1335,6 +1441,17 @@ if ($loopbackOrigin.Origin -cne "http://127.0.0.1:5137") {
 
 if ($PlanOnly) {
     $migrationPlan = $null
+    $hostingPlan = $null
+    if ($EnableUnattendedDiscovery) {
+        $hostingBefore = Get-IncrementalIisHostingSettings
+        if (!$hostingBefore.ModuleEnabled) { throw 'Application Initialization must be enabled before unattended discovery.' }
+        $hostingPlan = [ordered]@{
+            before = $hostingBefore
+            after = @{ StartMode='AlwaysRunning'; IdleTimeout='00:00:00'; PreloadEnabled=$true }
+            activation = 'held GPU drain and exact worker exit, then scoped atomic settings before application start'
+            rollback = 'restore and verify exact captured settings before predecessor start; drift or uncertainty retains hold'
+        }
+    }
     if ($ApplyHybridPassageRebuild) {
         $contract = Get-HybridPassageMigrationContract
         $history = @(Get-AppliedMigrationIds)
@@ -1455,6 +1572,7 @@ if ($PlanOnly) {
         clean_slate = $false
         preserved = @("Config", "Data", "Runtime", "Recovery", "CodexPlugin")
         recover_stopped_pool = [bool]$RecoverStoppedPool
+        unattended_discovery_hosting = $hostingPlan
         payload_acl = "inherit-from-live-root"
         rollback = if ($RecoverStoppedPool) { 'restore-prior-payloads-with-pool-stopped-and-hold-retained' } elseif ($PatchHybridRebuildRelease -or $ResumeHybridPatchRelease) { 'forward-only after activation intent; predecessor payload/packet retained, hold denied on failure' } elseif ($ApplyHybridPassageRebuild) { 'before-schema: original payload; after-schema: held forward recovery with retained original payload/configuration' } else { "automatic-application-and-interactive-host-payload-restore" }
         gpu_drain = 'deny admissions; allow active OCR page and native cleanup to finish; prove exact IIS worker exit before each payload swap stop'
@@ -1540,6 +1658,8 @@ $interactiveHostTaskWasEnabled = $false
 $interactiveHostPreviousRoot = $null
 $interactiveHostRollbackVerified = $true
 $holdReleased = $false
+$hostingChange = @{ Original=$null; Desired=@{ StartMode='AlwaysRunning'; IdleTimeout='00:00:00'; PreloadEnabled=$true }
+    Attempted=$false; RollbackVerified=$true }
 try {
     try {
         $leaseAcquired = $mutex.WaitOne([TimeSpan]::FromMinutes(1))
@@ -1552,6 +1672,10 @@ try {
     }
 
     Assert-IncrementalIisPreflight
+    if ($EnableUnattendedDiscovery) {
+        $hostingChange.Original = Get-IncrementalIisHostingSettings
+        if (!$hostingChange.Original.ModuleEnabled) { throw 'Application Initialization must be enabled before unattended discovery.' }
+    }
     Ensure-CpuSearchOwnerFile
     if ($ApplyHybridPassageRebuild) {
         if ($PatchHybridRebuildRelease -or $ResumeHybridPatchRelease) {
@@ -1578,6 +1702,10 @@ try {
     Assert-NotReparsePoint `
         -Path $releaseRoot `
         -Message "The incremental recovery release directory cannot be a reparse point."
+    if ($EnableUnattendedDiscovery) {
+        [ordered]@{ Original=$hostingChange.Original; Desired=$hostingChange.Desired } | ConvertTo-Json -Depth 3 |
+            Set-Content -LiteralPath (Join-Path $releaseRoot 'iis-hosting-settings.json') -Encoding utf8
+    }
     $candidateRoot = Join-Path $releaseRoot "candidate"
     $previousRoot = Join-Path $releaseRoot "previous"
     $failedRoot = Join-Path $releaseRoot "failed"
@@ -1649,6 +1777,11 @@ try {
         -RestartPreviousApplication:(-not $RecoverStoppedPool) `
         -ActivateCandidate {
             Invoke-CandidatePayloadActivation -CandidateRoot $candidateRoot -ApplicationRoot $CanonicalDeployRoot
+            if ($EnableUnattendedDiscovery) {
+                $hostingChange.Attempted = $true
+                $hostingChange.RollbackVerified = $false
+                Set-IncrementalIisHostingSettings -Expected $hostingChange.Original -Desired $hostingChange.Desired
+            }
         } `
         -StopApplication {
             Stop-HybridIisAfterGpuDrain
@@ -1681,10 +1814,21 @@ try {
             }
         } `
         -StartApplication {
+            $startAttemptUtc = [DateTime]::UtcNow
             Start-WebAppPool -Name $SiteName
             Wait-IisAppPoolState -Name $SiteName -ExpectedState "Started" -TimeoutSeconds $ReadinessTimeoutSeconds
+            if ($hostingChange.Attempted -and !$hostingChange.RollbackVerified) {
+                $hostingChange.PreloadReceipt = Wait-IncrementalIisPreloadStartup -AfterUtc $startAttemptUtc `
+                    -TimeoutSeconds $ReadinessTimeoutSeconds
+                $hostingChange.PreloadReceipt | ConvertTo-Json |
+                    Set-Content -LiteralPath (Join-Path $releaseRoot 'iis-preload-startup.json') -Encoding utf8
+            }
         } `
         -ValidateApplication {
+            if ($EnableUnattendedDiscovery -and
+                !(Test-IisHostingSettingsMatch (Get-IncrementalIisHostingSettings) $hostingChange.Desired)) {
+                throw 'The activated unattended discovery hosting settings changed.'
+            }
             if ($DeferReadinessForScopedRemediation) {
                 [void](Invoke-ScopedReadinessRemediationProbes -Origin $loopbackOrigin.Origin -TimeoutSeconds $ReadinessTimeoutSeconds)
             }
@@ -1696,6 +1840,10 @@ try {
                 -Current (Get-RetainedPipelineStateBaseline)
         } `
         -ValidateRollbackApplication {
+            if ($hostingChange.Attempted -and
+                !(Test-IisHostingSettingsMatch (Get-IncrementalIisHostingSettings) $hostingChange.Original)) {
+                throw 'The prior IIS hosting settings were not restored; hold retained.'
+            }
             if ($RecoverStoppedPool) {
                 Assert-StoppedPoolRecoveryBaseline
                 if ((Get-HybridPayloadFingerprint -Path $CanonicalDeployRoot) -cne $recoveryOriginalPayloadHash) {
@@ -1728,6 +1876,10 @@ try {
             $deploymentValidation.PayloadRollbackVerified = $true
         } `
         -PrepareRollbackApplication {
+            if ($hostingChange.Attempted) {
+                Restore-IncrementalIisHostingSettings -Original $hostingChange.Original -Desired $hostingChange.Desired
+                $hostingChange.RollbackVerified = $true
+            }
             if ($ApplyCodeDisclosureProofMigration) {
                 Confirm-CodeDisclosureSchemaRecovery -State $codeDisclosureMigrationState `
                     -ReadState { Get-CodeDisclosureDatabaseState -ConnectionString (Get-DeploymentSqlConnectionString) }
@@ -1766,6 +1918,8 @@ try {
         commit = $commit
         release_root = $releaseRoot
         rollback_payload = $swap.PreviousPayload
+        unattended_discovery_hosting = if ($EnableUnattendedDiscovery) { Get-IncrementalIisHostingSettings } else { $null }
+        unattended_discovery_startup = $hostingChange.PreloadReceipt
         migrations = [bool]$applyAnyMigration
         migration = if ($applyAnyMigration) { [ordered]@{ target = $migrationPlan.Up.To; script_sha256 = $migrationPlan.Up.Sha256 } } else { $null }
         clean_slate = $false
@@ -1836,7 +1990,8 @@ finally {
             -CodeDisclosureRecoveryVerified $(if ($ApplyCodeDisclosureProofMigration) { [bool]$codeDisclosureMigrationState.RollbackVerified } else { $true }) `
             -InteractiveHostMutationStarted $interactiveHostMutationStarted `
             -InteractiveHostRollbackVerified $interactiveHostRollbackVerified `
-            -RecoverStoppedPool ([bool]$RecoverStoppedPool))) {
+            -RecoverStoppedPool ([bool]$RecoverStoppedPool) `
+            -HostingRollbackVerified ([bool]$hostingChange.RollbackVerified))) {
         Remove-DeploymentValidationHold -Path $ValidationHoldPath -ReleaseId $releaseId
     }
     if ($leaseAcquired) {

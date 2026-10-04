@@ -28,6 +28,8 @@ public sealed partial class SqlCorpusRebuildStore
                 .UseSqlServer(connection).Options);
             await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, token).ConfigureAwait(false);
             await SqlPublishedPassageSelection.AcquireFenceAsync(context, token).ConfigureAwait(false);
+            if (!await SqlCorpusQueryLeaseRecovery.TryDrainAbandonedAsync(context, queryOwnerProbe, token).ConfigureAwait(false))
+                throw new CorpusRebuildRefusalException("corpus-rebuild-query-drain-required");
             var result = await action(context, token).ConfigureAwait(false);
             await transaction.CommitAsync(token).ConfigureAwait(false);
             return result;

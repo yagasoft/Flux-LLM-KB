@@ -1204,6 +1204,8 @@ public sealed class WebHostCompositionTests : IDisposable
 
     private sealed class CapturingRecoveryStore : IDerivedIndexRecoveryStore
     {
+        public ValueTask<IDerivedIndexRecoveryLease?> TryAcquireSharedLeaseAsync(TimeSpan lockTimeout, CancellationToken cancellationToken) =>
+            throw new InvalidOperationException("Invalid USearch configuration must not acquire a probe lease.");
         public List<DerivedIndexRecoveryAuditEvent> AuditEvents { get; } = [];
 
         public ValueTask<DerivedIndexRecoverySqlSnapshot> ReadActiveAsync(CancellationToken cancellationToken) =>
@@ -1231,6 +1233,8 @@ public sealed class WebHostCompositionTests : IDisposable
 
     private sealed class ValidatedEmptyCatalogueRecoveryStore : IDerivedIndexRecoveryStore
     {
+        public ValueTask<IDerivedIndexRecoveryLease?> TryAcquireSharedLeaseAsync(TimeSpan lockTimeout, CancellationToken cancellationToken) =>
+            ValueTask.FromResult<IDerivedIndexRecoveryLease?>(new Lease());
         private static readonly DerivedIndexRecoverySqlSnapshot Snapshot = new(
             null,
             null,

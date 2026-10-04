@@ -2,6 +2,7 @@ using System.Data;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using FluxKnowledge.Application.Gpu;
 using FluxKnowledge.Application.Indexing;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Domain.Jobs;
@@ -14,7 +15,7 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
 /// <summary>Captures a reviewed projection reset; reading a plan never changes corpus data.</summary>
 public sealed partial class SqlCorpusRebuildStore(IDbContextFactory<FluxKnowledgeDbContext> factory,
     TimeProvider? timeProvider = null, Func<CancellationToken, ValueTask>? afterProjectionReset = null,
-    Func<CancellationToken, ValueTask>? afterCommit = null)
+    Func<CancellationToken, ValueTask>? afterCommit = null, IGpuInteractiveOwnerProbe? queryOwnerProbe = null)
 {
     public async ValueTask<CorpusRebuildPlan> ReadPlanAsync(Guid operationId, EmbeddingProfile profile,
         string passagePolicyFingerprint, CancellationToken cancellationToken)

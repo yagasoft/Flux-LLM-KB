@@ -101,6 +101,15 @@ public sealed class DerivedIndexRecoveryCoordinator : IDerivedIndexRecoveryStatu
         {
             await using var scope = _scopeFactory.CreateAsyncScope();
             recoveryStore = scope.ServiceProvider.GetRequiredService<IDerivedIndexRecoveryStore>();
+            if (beforeAttempt.State == DerivedIndexRecoveryState.Healthy)
+            {
+                if (await TryCompleteHealthyProbeAsync(scope.ServiceProvider, recoveryStore, beforeAttempt, cancellationToken)) return;
+                // Shared ownership has ended. Recovery always uses fresh SQL under Exclusive.
+                beforeAttempt = Snapshot;
+                activeId = beforeAttempt.ActiveGenerationId;
+                recoveryEpisode = IsRecoveryEpisode(beforeAttempt);
+                detectionRecorded = Volatile.Read(ref _episodeDetectionRecorded) != 0;
+            }
             var started = _timeProvider.GetUtcNow();
             if (recoveryEpisode)
             {
@@ -176,37 +185,7 @@ public sealed class DerivedIndexRecoveryCoordinator : IDerivedIndexRecoveryStatu
             fileSystem = _fileSystem ?? scope.ServiceProvider.GetRequiredService<DerivedIndexFileSystem>();
             var builder = scope.ServiceProvider.GetRequiredService<UsearchGenerationBuilder>();
             var validator = scope.ServiceProvider.GetRequiredService<UsearchGenerationValidator>();
-            ValidateSql(sql);
-            if (!fileSystem.AreAllReferencedGenerationPathsSafe(sql.ReferencedIndexPaths) ||
-                !fileSystem.TryCanonicalIntendedGenerationPath(sql.Generation!.IndexPath, out var activePath))
-            {
-                throw new InvalidOperationException("The derived-index path configuration is invalid.");
-            }
-            EnsureActivePathMetadataIsAccessible(activePath);
-            if (Directory.Exists(activePath) && !fileSystem.IsValidDirectory(activePath))
-            {
-                throw new InvalidOperationException("The derived-index path configuration is invalid.");
-            }
-
-            DerivedIndexRecoveryFailureCategory? detectedCategory = null;
-            if (Directory.Exists(activePath))
-            {
-                try
-                {
-                    validator.Validate(activePath, sql.Generation with { IndexPath = activePath }, sql.Membership);
-                }
-                catch (Exception exception) when (exception is IndexGenerationValidationException or
-                    FileNotFoundException or DirectoryNotFoundException or IOException)
-                {
-                    detectedCategory = exception is FileNotFoundException or DirectoryNotFoundException
-                        ? DerivedIndexRecoveryFailureCategory.MissingDerivedIndex
-                        : DerivedIndexRecoveryFailureCategory.InvalidDerivedIndex;
-                }
-            }
-            else
-            {
-                detectedCategory = DerivedIndexRecoveryFailureCategory.MissingDerivedIndex;
-            }
+            var detectedCategory = ValidateProjection(sql, fileSystem, validator);
 
             if (detectedCategory is null)
             {
@@ -281,6 +260,65 @@ public sealed class DerivedIndexRecoveryCoordinator : IDerivedIndexRecoveryStatu
                 catch (Exception) { }
             }
             await RecordFaultAsync(recoveryStore, exception, activeId, detectionRecorded, cancellationToken);
+        }
+    }
+
+    private async ValueTask<bool> TryCompleteHealthyProbeAsync(IServiceProvider services,
+        IDerivedIndexRecoveryStore recoveryStore, DerivedIndexRecoverySnapshot expectedSnapshot,
+        CancellationToken cancellationToken)
+    {
+        await using var lease = await recoveryStore.TryAcquireSharedLeaseAsync(TimeSpan.Zero, cancellationToken);
+        if (lease is null) return true;
+        var sql = await recoveryStore.ReadActiveAsync(cancellationToken);
+        if (sql.IsProjectionUnavailable || sql.IsPublicationLag)
+        {
+            if (sql.IsValidatedEmptyCatalogue) throw new SqlMembershipValidationException();
+            var updating = new DerivedIndexRecoverySnapshot(DerivedIndexRecoveryState.IndexUpdating,
+                sql.ActiveGenerationId, expectedSnapshot.LastCompletedAtUtc, null, null, 0, IsProjectionUnavailable: true);
+            if (ReferenceEquals(Interlocked.CompareExchange(ref _snapshot, updating, expectedSnapshot), expectedSnapshot))
+                await PublishAsync(cancellationToken);
+            return false;
+        }
+        if (sql.IsValidatedEmptyCatalogue)
+        {
+            ValidateValidatedEmptyCatalogue(sql);
+            await CompleteProbeAsync(expectedSnapshot, null, cancellationToken, isValidatedEmptyCatalogue: true);
+            return true;
+        }
+
+        var fileSystem = _fileSystem ?? services.GetRequiredService<DerivedIndexFileSystem>();
+        var detected = ValidateProjection(sql, fileSystem, services.GetRequiredService<UsearchGenerationValidator>());
+        if (detected is { } category)
+        {
+            Notify(new(category, sql.ActiveGenerationId));
+            return false;
+        }
+        await CompleteProbeAsync(expectedSnapshot, sql.ActiveGenerationId, cancellationToken);
+        return true;
+    }
+
+    private DerivedIndexRecoveryFailureCategory? ValidateProjection(DerivedIndexRecoverySqlSnapshot sql,
+        DerivedIndexFileSystem fileSystem, UsearchGenerationValidator validator)
+    {
+        ValidateSql(sql);
+        if (!fileSystem.AreAllReferencedGenerationPathsSafe(sql.ReferencedIndexPaths) ||
+            !fileSystem.TryCanonicalIntendedGenerationPath(sql.Generation!.IndexPath, out var activePath))
+            throw new InvalidOperationException("The derived-index path configuration is invalid.");
+        EnsureActivePathMetadataIsAccessible(activePath);
+        if (!Directory.Exists(activePath)) return DerivedIndexRecoveryFailureCategory.MissingDerivedIndex;
+        if (!fileSystem.IsValidDirectory(activePath))
+            throw new InvalidOperationException("The derived-index path configuration is invalid.");
+        try
+        {
+            validator.Validate(activePath, sql.Generation with { IndexPath = activePath }, sql.Membership);
+            return null;
+        }
+        catch (Exception exception) when (exception is IndexGenerationValidationException or
+            FileNotFoundException or DirectoryNotFoundException or IOException)
+        {
+            return exception is FileNotFoundException or DirectoryNotFoundException
+                ? DerivedIndexRecoveryFailureCategory.MissingDerivedIndex
+                : DerivedIndexRecoveryFailureCategory.InvalidDerivedIndex;
         }
     }
 

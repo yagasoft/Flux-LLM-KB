@@ -469,4 +469,7 @@ if ($LASTEXITCODE -ne 0) {
     throw "The stopped-pool IIS recovery contract failed: $stoppedPoolOutput"
 }
 
+$unattendedOutput = & pwsh -NoProfile -File (Join-Path $SourceRoot 'tests/native/unattended-iis-discovery.ps1') -SourceRoot $SourceRoot 2>&1 | Out-String
+if ($LASTEXITCODE -ne 0) { throw "The unattended IIS discovery contract failed: $unattendedOutput" }
+
 Write-Output "Native deployment plan contract passed."

@@ -1342,6 +1342,7 @@ public sealed class DerivedIndexRecoveryIntegrationTests(NativeSqlServerFixture 
     private sealed class FaultingRecoveryStore(Exception fault) : IDerivedIndexRecoveryStore
     {
         public ValueTask<DerivedIndexRecoverySqlSnapshot> ReadActiveAsync(CancellationToken cancellationToken) => throw fault;
+        public ValueTask<IDerivedIndexRecoveryLease?> TryAcquireSharedLeaseAsync(TimeSpan lockTimeout, CancellationToken cancellationToken) => throw fault;
         public ValueTask<IDerivedIndexRecoveryLease?> TryAcquireExclusiveLeaseAsync(TimeSpan lockTimeout, CancellationToken cancellationToken) => throw fault;
         public ValueTask<bool> TryUpdateRecoveryPathAsync(Guid expectedActiveGenerationId, string expectedIndexPath, string replacementIndexPath, DateTimeOffset validatedAtUtc, CancellationToken cancellationToken) => throw fault;
         public ValueTask AppendAuditAsync(DerivedIndexRecoveryAuditEvent auditEvent, CancellationToken cancellationToken) => ValueTask.CompletedTask;
@@ -1352,6 +1353,8 @@ public sealed class DerivedIndexRecoveryIntegrationTests(NativeSqlServerFixture 
         public int PathUpdateAttempts { get; private set; }
         public int ReadCount { get; private set; }
         public int LeaseAcquisitions { get; private set; }
+        public ValueTask<IDerivedIndexRecoveryLease?> TryAcquireSharedLeaseAsync(TimeSpan lockTimeout, CancellationToken cancellationToken) =>
+            ValueTask.FromResult<IDerivedIndexRecoveryLease?>(new NoopRecoveryLease());
 
         public ValueTask<DerivedIndexRecoverySqlSnapshot> ReadActiveAsync(CancellationToken cancellationToken)
         {
@@ -1385,6 +1388,8 @@ public sealed class DerivedIndexRecoveryIntegrationTests(NativeSqlServerFixture 
     private sealed class SequencedRecoveryStore(IDerivedIndexRecoveryStore inner, int failures)
         : IDerivedIndexRecoveryStore
     {
+        public ValueTask<IDerivedIndexRecoveryLease?> TryAcquireSharedLeaseAsync(TimeSpan lockTimeout, CancellationToken cancellationToken) =>
+            inner.TryAcquireSharedLeaseAsync(lockTimeout, cancellationToken);
         public int Acquisitions { get; private set; }
         public ValueTask<DerivedIndexRecoverySqlSnapshot> ReadActiveAsync(CancellationToken cancellationToken) =>
             inner.ReadActiveAsync(cancellationToken);
@@ -1404,6 +1409,7 @@ public sealed class DerivedIndexRecoveryIntegrationTests(NativeSqlServerFixture 
     private sealed class ExhaustingRecoveryStore(CancellationTokenSource cancellation)
         : IDerivedIndexRecoveryStore
     {
+        public ValueTask<IDerivedIndexRecoveryLease?> TryAcquireSharedLeaseAsync(TimeSpan lockTimeout, CancellationToken cancellationToken) => throw new NotSupportedException();
         public int Acquisitions { get; private set; }
         public ValueTask<DerivedIndexRecoverySqlSnapshot> ReadActiveAsync(CancellationToken cancellationToken) =>
             throw new NotSupportedException();
@@ -1421,6 +1427,7 @@ public sealed class DerivedIndexRecoveryIntegrationTests(NativeSqlServerFixture 
 
     private sealed class CountingFailureRecoveryStore : IDerivedIndexRecoveryStore
     {
+        public ValueTask<IDerivedIndexRecoveryLease?> TryAcquireSharedLeaseAsync(TimeSpan lockTimeout, CancellationToken cancellationToken) => throw new NotSupportedException();
         public int Acquisitions { get; private set; }
         public ValueTask<DerivedIndexRecoverySqlSnapshot> ReadActiveAsync(CancellationToken cancellationToken) =>
             throw new NotSupportedException();

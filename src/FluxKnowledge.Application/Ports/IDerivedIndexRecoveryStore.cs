@@ -42,6 +42,10 @@ public interface IDerivedIndexRecoveryStore
         TimeSpan lockTimeout,
         CancellationToken cancellationToken);
 
+    ValueTask<IDerivedIndexRecoveryLease?> TryAcquireSharedLeaseAsync(
+        TimeSpan lockTimeout,
+        CancellationToken cancellationToken);
+
     ValueTask<bool> TryUpdateRecoveryPathAsync(
         Guid expectedActiveGenerationId,
         string expectedIndexPath,

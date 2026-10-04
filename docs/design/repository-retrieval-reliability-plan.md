@@ -7,7 +7,10 @@ disclosure refusal and earlier terminal Embed checkpoints. The focused correctio
 and recovery action were integrated and deployed as `4f9393ef`. Current exact
 method and documentation reads pass through MCP/REST/CLI. The subsequent serial
 page-plan correction was deployed as `404a38b5`; all 40 frozen semantic searches
-passed with p95 16.2 seconds. Exact-cohort terminal recovery remains pending. Read the
+passed with p95 16.2 seconds before recovery. The approved 32-job cohort is now
+published with its 329 saved vectors unchanged and only 2,188 missing positions
+embedded. All 32 sources passed exact cited readback. Post-recovery semantic and
+unattended IIS hosting acceptance remain pending. Read the
 [design](repository-retrieval-reliability.md) before execution.
 Use one implementation owner. Apply focused execution guidance proportionately;
 independent review is required for the security/migration/concurrency gates and
@@ -297,13 +300,64 @@ still requires fresh exact-payload operational review under deployment authority
 - [x] Prepare/review and apply the exact incremental correction release under
   current deployment authority. Keep the existing additive schema and compatible
   prior payload for rollback; no further migration, profile or source-policy change.
-- [ ] Reconcile fresh Git/source publication and freeze only still-current eligible
+- [x] Reconcile fresh Git/source publication and freeze only still-current eligible
   terminal Embed jobs, binding source bytes, versions and settled checkpoints.
   Obtain independent recovery review and explicit human approval for this exact
   cohort before confirmed commit processing. Refuse drift rather than widening it.
-- [x] Complete the already frozen 20-query, two-round/two-caller live workload,
+  The approved 32 original jobs and records completed; all 329 saved vectors and
+  job/checkpoint identities were preserved, with exactly 2,188 missing positions
+  embedded once and all 32 sources verified by exact current cited readback.
+- [x] Complete the initial frozen 20-query, two-round/two-caller live workload,
   method/docs readback, automatic freshness and health/worker continuity gates.
   Report terminal recovery and retrieval acceptance separately from deployment.
+- [ ] Pass final post-recovery semantic acceptance. Preserve the first frozen run
+  (39 ready searches and one timeout) and its single complete repeat (40
+  index-update fallbacks); both failed the all-ready gate. Stop workload reruns
+  until usable phase/lease evidence supports a reviewed correction. REST/CLI
+  method/docs reads passed; final MCP method semantic readiness remains open.
+
+## Post-recovery maintenance correction
+
+- [x] Reproduce healthy validation refusing concurrent query ownership and failing
+  to report corruption while Exclusive recovery is contended.
+- [x] Independently review and implement Shared healthy probes with unchanged
+  full validation. Dispose Shared and reread under Exclusive before mutation;
+  preserve concurrent notifications and leave Healthy on detected faults.
+- [x] Preserve owner-proven orphan recovery at Exclusive rebuild admission,
+  including refusal for running/unknown owners and transactional rollback.
+- [x] Pass 155 combined integration checks and 62 web composition checks with no
+  build warnings. Prove changed-generation reread and retained query ownership.
+- [ ] Integrate through `complete-feature.ps1 -KeepWorktree`, obtain authority for
+  the changed runtime/IIS action, and apply the reviewed incremental update.
+  No schema migration, projection reset or additional terminal recovery is needed.
+- [ ] After activation and unattended hosting verification, resume the unchanged
+  full workload and strict MCP/REST/CLI semantic/readback gates. A bounded live
+  full-mask trace now records usable phases; the old timeout remains unattributed.
+
+## Unattended IIS discovery acceptance
+
+The normal 06:11 UTC idle shutdown stopped the in-process watcher/rescan host;
+request-driven restart does not meet configure-once automatic discovery.
+
+- [x] Add the opt-in `-EnableUnattendedDiscovery` ordinary incremental path with
+  exact PlanOnly settings, installed-module prerequisite, captured-tuple persistence,
+  stopped-pool atomic commit and verified prior-tuple restoration before restart.
+  Preserve existing GPU drain, payload rollback, retained-state and hold gates.
+  Require fresh worker/time/path-bound managed-start evidence before HTTP probes.
+- [x] Verify scoped commit, exact/duplicate rollback, configuration drift refusal,
+  stopped-pool/module/path prerequisites, failed/lost commit acknowledgement and
+  hold retention with synthetic native-management ports. Refuse old/reused worker,
+  wrong-path, missing/unreadable startup evidence and probes preceding preload.
+- [ ] Review the complete focused change and fresh release/rollback evidence; use
+  mandatory `complete-feature.ps1 -KeepWorktree` integration. Obtain explicit
+  production authority and immediate independent operational review before Apply.
+- [ ] Verify native preload starts the managed host without an external request.
+  Observe automatic publication for longer than 20 minutes without HTTP probes
+  masking idle behaviour; use read-only SQL/process observation during that window.
+  Finish with exact current citations, generation/health and frozen workload checks.
+- [ ] Recheck the already recovered cohort and current publication after hosting
+  acceptance without further terminal processing. Preserve vectors and identities;
+  any new cohort requires separate explicit approval and fresh native eligibility.
 
 ## Side notes retained for later
 
@@ -318,10 +372,16 @@ still requires fresh exact-payload operational review under deployment authority
 
 The user approved implementation, deployment and live validation. Initial release
 `404a38b5` is installed with the compatible additive schema, full-source disclosure
-correction, serial scoped paging and explicit Embed recovery action. All 40 semantic
-acceptance searches passed; complete method/docs reads pass through MCP/REST/CLI.
-The current 1,068 eligible paths match Git/source bytes; 1,036 are published and
-32 historical terminal jobs await separately authorised recovery. Source configuration
-and model cache remain unchanged. Terminal processing requires separate explicit
-approval of a fresh exact cohort. Preserve the worktree, prior branch/stash and
+correction, serial scoped paging and explicit Embed recovery action. All 40 initial
+semantic acceptance searches passed before recovery, including method/docs reads
+through MCP/REST/CLI.
+All 1,068 current eligible paths match Git/source bytes and are published. The 32
+approved original jobs and checkpoints are preserved, with 329 saved vectors
+unchanged and exactly 2,188 missing positions embedded. Their exact cited reads
+passed. Final semantic acceptance remains open after two failed frozen runs;
+retain both results and investigate before further workload reruns. Source
+configuration and model cache remain unchanged. Any further terminal processing
+requires separate explicit approval of a fresh exact cohort. The scoped unattended-hosting correction is
+prepared locally; its production action and idle-window acceptance are pending.
+Preserve the worktree, prior branch/stash and
 ignored evidence until all required release/acceptance steps succeed.
