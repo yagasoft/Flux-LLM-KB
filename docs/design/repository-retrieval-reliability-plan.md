@@ -6,7 +6,8 @@ and automatic proof backfill. Live acceptance exposed scoped SQL latency, whole-
 disclosure refusal and earlier terminal Embed checkpoints. The focused corrections
 and recovery action were integrated and deployed as `4f9393ef`. Current exact
 method and documentation reads pass through MCP/REST/CLI. The subsequent serial
-page-plan correction and complete semantic live acceptance remain pending. Read the
+page-plan correction was deployed as `404a38b5`; all 40 frozen semantic searches
+passed with p95 16.2 seconds. Exact-cohort terminal recovery remains pending. Read the
 [design](repository-retrieval-reliability.md) before execution.
 Use one implementation owner. Apply focused execution guidance proportionately;
 independent review is required for the security/migration/concurrency gates and
@@ -291,16 +292,16 @@ still requires fresh exact-payload operational review under deployment authority
   GPU contradictions, stale confirmations, concurrent commits, deployment hold,
   cancellation/rollback, lost responses and old delivery callbacks. Cover REST,
   MCP and CLI through their existing native routes.
-- [ ] Obtain independent review of the complete correction, affected invariants and
+- [x] Obtain independent review of the complete correction, affected invariants and
   fresh combined evidence; integrate using `complete-feature.ps1 -KeepWorktree`.
-- [ ] Prepare/review and apply the exact incremental correction release under
+- [x] Prepare/review and apply the exact incremental correction release under
   current deployment authority. Keep the existing additive schema and compatible
   prior payload for rollback; no further migration, profile or source-policy change.
 - [ ] Reconcile fresh Git/source publication and freeze only still-current eligible
   terminal Embed jobs, binding source bytes, versions and settled checkpoints.
   Obtain independent recovery review and explicit human approval for this exact
   cohort before confirmed commit processing. Refuse drift rather than widening it.
-- [ ] Complete the already frozen 20-query, two-round/two-caller live workload,
+- [x] Complete the already frozen 20-query, two-round/two-caller live workload,
   method/docs readback, automatic freshness and health/worker continuity gates.
   Report terminal recovery and retrieval acceptance separately from deployment.
 
@@ -316,10 +317,11 @@ still requires fresh exact-payload operational review under deployment authority
 ## Handoff
 
 The user approved implementation, deployment and live validation. Initial release
-`4f9393ef` is installed with the compatible additive schema, full-source disclosure
-correction and explicit Embed recovery action. Current exact cited code/docs reads
-pass; scoped semantic acceptance still times out under the parallel page plan.
-The same managed task worktree holds its focused serial correction. Source configuration
+`404a38b5` is installed with the compatible additive schema, full-source disclosure
+correction, serial scoped paging and explicit Embed recovery action. All 40 semantic
+acceptance searches passed; complete method/docs reads pass through MCP/REST/CLI.
+The current 1,068 eligible paths match Git/source bytes; 1,036 are published and
+32 historical terminal jobs await separately authorised recovery. Source configuration
 and model cache remain unchanged. Terminal processing requires separate explicit
 approval of a fresh exact cohort. Preserve the worktree, prior branch/stash and
 ignored evidence until all required release/acceptance steps succeed.

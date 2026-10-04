@@ -7,9 +7,10 @@ automatic backfill. Live acceptance exposed scoped SQL latency, a whole-file
 disclosure false positive and 43 terminal Embed checkpoints from an earlier
 source withdrawal. Correction release `4f9393ef` completed mandatory integration
 and incremental deployment; current exact method and documentation reads pass
-through MCP/REST/CLI. Root semantic acceptance still timed out under a parallel
-page plan. The scoped-only serial correction below awaits release and complete
-live acceptance; terminal recovery remains separately gated. This design follows
+through MCP/REST/CLI. After the parallel page-plan timeout, scoped-only serial
+correction `404a38b5` was integrated and incrementally deployed. All 40 frozen
+semantic searches passed at two callers with p95 16.2 seconds, including exact
+current citations and reads. Terminal recovery remains separately gated. This design follows
 the [repository coverage design](repository-workspace-coverage.md)
 and has a separate [implementation plan](repository-retrieval-reliability-plan.md).
 

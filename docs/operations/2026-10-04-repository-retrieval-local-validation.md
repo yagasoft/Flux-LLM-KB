@@ -174,7 +174,13 @@ diagnostic preserved compared vector IDs
 and completed 34,215 root vectors in 134 pages/1.081 seconds, with nested, sparse
 and empty scopes below 0.6 seconds on the same current generation. The regression
 test reproduces excessive per-page chunk access under disposable optimiser stress.
-This serial correction requires release and the full model-backed acceptance run.
+Serial correction `404a38b5` completed mandatory integration and approved incremental
+deployment: feature/main each passed 3,014 tests with 20 existing opt-in skips,
+zero build warnings and all 273 installed payload files verified. All 40 frozen
+semantic searches passed at two callers with p95 16.2 seconds; all 400 passages
+and 40 cited reads matched current source bytes and scope. Complete method/docs
+reads passed through MCP/REST/CLI. The same worker remained healthy throughout,
+with no new recorded crash or debugger process.
 
 The explicit `embedding_retry` correction passes zero/partial/complete checkpoint
 continuation through normal publication and cited readback. Focused checks cover
@@ -184,8 +190,9 @@ cancellation and lost-response replay. The current evidence includes 42 proof
 unit checks, 99 combined disposable integration checks and 59 REST/MCP checks;
 CLI parity also passes. The first correction's final branch/operational review and
 closeout passed. The current cohort contains 32 terminal jobs with matching source
-bytes, 329 saved vectors, 2,517 chunks and 85 settled GPU attempts; a REST eligibility
-preview passed without committing recovery. Production terminal processing requires
+bytes, 329 saved vectors, 2,517 chunks and 85 settled GPU attempts; REST eligibility
+previews passed for all 32 jobs without committing recovery. Independent post-live
+review approved the bounded approach. Production terminal processing requires
 a fresh exact cohort and separate
 explicit human approval; no terminal recovery has been performed.
 
@@ -199,7 +206,8 @@ generation require in-scope, semantic-ready, exactly cited results and p95 below
 existing 25-second outer deadline remains. Verify health/worker continuity and
 report new crash/debugger or SQL failures without processing dead letters.
 
-The historical coverage gate remains 80% until this release and its supported
-live retrieval cases pass. AGENTS and dashboard manuals are unchanged; deferred
+All 1,068 eligible paths match current Git/source bytes; 1,036 are published.
+The historical coverage gate remains 80% until the 32-job terminal recovery and
+final publication verification pass. AGENTS and dashboard manuals are unchanged; deferred
 XLSX branch reconciliation, OCR, Outlook and broader lifecycle work remain side
 notes.

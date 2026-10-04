@@ -188,8 +188,8 @@ keyset pages under its generation lease and retains at most 100 candidates,
 without a total-vector cap or opening global ANN. All-corpus search still uses
 USearch. Release `a248811a` applied the additive migration and automatic proof
 backfill. Correction release `4f9393ef` deployed the whole-file disclosure and
-initial scoped query-plan changes; exact current code/docs reads pass. Complete
-semantic live acceptance remains pending after a parallel page-plan timeout.
+initial scoped query-plan changes; exact current code/docs reads pass. Serial-page
+release `404a38b5` passed all 40 frozen semantic searches with p95 16.2 seconds.
 Scoped SQL now uses constant serial ordered membership seek/loop hints without changing
 eligibility or deadlines. Full guards retain credential checks and proof spans;
 Protected refusal applies to returned text, and completed bounded code candidates
