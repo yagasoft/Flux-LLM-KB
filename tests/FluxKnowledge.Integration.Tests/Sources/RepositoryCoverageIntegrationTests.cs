@@ -43,7 +43,9 @@ public sealed class RepositoryCoverageIntegrationTests(NativeSqlServerFixture fi
         var clock = new Clock();
         await using var environment = await SqlToUsearchRebuildTests.PipelineEnvironment.CreateAsync(fixture, "Unrelated baseline", clock: clock);
         using var repository = new Repository();
-        repository.Write("Code.cs", "namespace Coverage; public class CoverageFact { public string Read() => \"code needle quartz\"; public string Use() => Read(); }");
+        const string lateMethod = "public int LateAnswer() {\nreturn 42;\n}";
+        repository.Write("Code.cs", "// 😀\r\n" + string.Concat(Enumerable.Repeat("// safe padding\r\n", 1_500)) +
+            "namespace Coverage; public class CoverageFact { public string Read() => \"code needle quartz\"; public string Use() => Read();\n" + lateMethod + "\n}");
         repository.Write("Guide.md", "Documentation needle quartz is retained with citations.");
         var formats = new Dictionary<string, string>
         {
@@ -97,6 +99,11 @@ public sealed class RepositoryCoverageIntegrationTests(NativeSqlServerFixture fi
         var matches = JsonSerializer.SerializeToElement(await codeQuery.ExecuteAsync(new("matches", "global::Coverage.CoverageFact", codeBranchId, 10, null), default));
         Assert.Contains(matches.GetProperty("items").EnumerateArray(), item => item.GetProperty("qualifiedName").GetProperty("value").GetString() == "global::Coverage.CoverageFact");
         var retrieval = new CorpusRetrievalService(new SqlCorpusRetrievalReader(environment.Factory), new EvidenceCodec(), new LocalPrivateContentDisclosure());
+        var lateHit = Assert.Single((await retrieval.SearchAsync(new CorpusSearchRequest("LateAnswer", 5, "root", rootId, null), default)).Results);
+        Assert.True(lateHit.StartOffset > 16_384);
+        var lateRead = await retrieval.ReadAsync(new CorpusReadRequest(lateHit.EvidenceRef, 4096), default);
+        Assert.Contains(lateMethod, lateRead.Text, StringComparison.Ordinal);
+        Assert.Equal(lateHit.StartOffset, lateRead.CitedStart);
         var hits = (await retrieval.SearchAsync(new CorpusSearchRequest("needle quartz", 10, "root", rootId, null), default)).Results;
         Assert.Equal(2, hits.Count);
         var original = Assert.Single(hits, hit => hit.Title == "Guide.md");

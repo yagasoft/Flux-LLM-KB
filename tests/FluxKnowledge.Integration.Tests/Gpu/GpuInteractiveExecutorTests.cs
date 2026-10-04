@@ -339,6 +339,7 @@ public sealed class GpuInteractiveExecutorTests : IAsyncLifetime
     {
         await SqlTestData.ClearPipelineAsync(fixture);
         var factory = SqlTestData.CreateFactory(fixture);
+        const int duplicateDeliveries = 6;
         // The already-uncertain dispatch requires three SQL reads before refusal;
         // keep that ownership check independent of queue expiry (tested above).
         // Other cases retain real time so their durable retry delays still run.
@@ -359,7 +360,10 @@ public sealed class GpuInteractiveExecutorTests : IAsyncLifetime
             var reservation = Assert.Single(await store.ReadStaleCapacityReservationsAsync(DateTimeOffset.UtcNow, CancellationToken.None));
             Assert.True((await store.MarkCapacityUncertainAsync(Guid.NewGuid(), reservation, CancellationToken.None)).Committed);
         }
-        var requests = new TransientRecoveryReads(store, failureMode == 7);
+        // This case mutates ownership after preflight, before acknowledgement.
+        // Synchronise its materialised SQL reads to keep that interleaving deterministic.
+        var requests = new TransientRecoveryReads(store, failureMode == 7,
+            initialReadRendezvous: failureMode == 6 ? duplicateDeliveries : 0);
         var scheduler = new TransientReservationRead(store, failureMode == 7);
         var executor = new GpuInteractiveExecutor(requests, new Lifecycle(store, failureMode == 4, failureMode == 6 ? MarkUncertain : null, failureMode == 7), scheduler, new ChannelGpuSchedulerWakeSignal(),
             clock, "synthetic-retrieval-v1", "synthetic-settings-v1", 10);
@@ -387,7 +391,7 @@ public sealed class GpuInteractiveExecutorTests : IAsyncLifetime
         Assert.Equal(GpuAdmissionDisposition.Admit, admitted.Disposition);
         var handle = Assert.Single(await store.ReadPendingDispatchesAsync(CancellationToken.None));
         if (failureMode == 5) await MarkUncertain();
-        var deliveries = Enumerable.Range(0, 6).Select(_ => executor.DeliverAsync(handle, CancellationToken.None).AsTask()).ToArray();
+        var deliveries = Enumerable.Range(0, duplicateDeliveries).Select(_ => executor.DeliverAsync(handle, CancellationToken.None).AsTask()).ToArray();
         if (failureMode is not 5 and not 6) await started.Task.WaitAsync(TimeSpan.FromSeconds(5));
         if (cancelCaller)
         {
@@ -440,12 +444,29 @@ public sealed class GpuInteractiveExecutorTests : IAsyncLifetime
             : LoseOnce(operation, store.ApplyBatchCallbackAsync(operation, request, ct));
     }
 
-    private sealed class TransientRecoveryReads(SqlGpuSchedulerStore store, bool failOnce) : IGpuInteractiveRequestStore
+    private sealed class TransientRecoveryReads(SqlGpuSchedulerStore store, bool failOnce, int initialReadRendezvous = 0) : IGpuInteractiveRequestStore
     {
+        private readonly TaskCompletionSource? _initialReads = initialReadRendezvous == 0
+            ? null : new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _initialReadCount;
         public int RecoveryReads { get; private set; }
         public ValueTask<GpuMiniTaskHandoffResult> HandoffInteractiveAsync(GpuInteractiveHandoffRequest request, CancellationToken ct) => store.HandoffInteractiveAsync(request, ct);
         public ValueTask<bool> CancelInteractiveAsync(Guid request, Guid instance, CancellationToken ct) => store.CancelInteractiveAsync(request, instance, ct);
-        public ValueTask<GpuInteractiveExecutionWork?> ReadInteractiveExecutionAsync(GpuExecutorBatchHandle handle, Guid instance, GpuExecutorDispatchState state, CancellationToken ct) => store.ReadInteractiveExecutionAsync(handle, instance, state, ct);
+        public async ValueTask<GpuInteractiveExecutionWork?> ReadInteractiveExecutionAsync(GpuExecutorBatchHandle handle, Guid instance, GpuExecutorDispatchState state, CancellationToken ct)
+        {
+            var work = await store.ReadInteractiveExecutionAsync(handle, instance, state, ct);
+            if (_initialReads is not null && state == GpuExecutorDispatchState.PendingDelivery)
+            {
+                var reader = Interlocked.Increment(ref _initialReadCount);
+                if (reader <= initialReadRendezvous)
+                {
+                    Assert.NotNull(work);
+                    if (reader == initialReadRendezvous) _initialReads.TrySetResult();
+                    await _initialReads.Task.WaitAsync(ct);
+                }
+            }
+            return work;
+        }
         public ValueTask<bool> CancelLostInteractiveReadyAsync(Guid request, GpuInteractiveOwnerIdentity owner, CancellationToken ct) => store.CancelLostInteractiveReadyAsync(request, owner, ct);
         public async ValueTask<IReadOnlyList<GpuInteractiveRecoveryWork>> ReadInteractiveRecoveryAsync(CancellationToken ct)
         {

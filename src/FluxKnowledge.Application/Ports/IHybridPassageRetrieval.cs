@@ -20,7 +20,7 @@ public interface IHybridPassageCandidateReader
 {
     ValueTask<IReadOnlyList<EligiblePassageCandidate>> ReadLexicalCandidatesAsync(
         string query, ResolvedCorpusScope scope, CancellationToken cancellationToken);
-    ValueTask<DensePassageCandidates> ReadDenseCandidatesAsync(ICorpusAnnLease lease,
+    ValueTask<DensePassageCandidates> ReadDenseCandidatesAsync(ICorpusGenerationLease lease,
         ResolvedCorpusScope scope, IReadOnlyList<float> query, CancellationToken cancellationToken);
 }
 

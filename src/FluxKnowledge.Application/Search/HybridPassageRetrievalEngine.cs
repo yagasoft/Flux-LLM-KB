@@ -117,13 +117,15 @@ public sealed class HybridPassageRetrievalEngine(ICorpusRetrievalReader reader, 
                 var sqlLease = await leases.TryAcquireAsync(_instance, owner.Current, inference.EmbeddingProfile.ModelFingerprint,
                     inference.EmbeddingProfile.Dimensions, workToken).ConfigureAwait(false);
                 if (sqlLease is null) throw new PassageRetrievalRefusalException("index-updating");
-                await using var ann = await annFactory.OpenAsync(sqlLease, workToken).ConfigureAwait(false);
-                if (!await ann.IsCurrentAsync(workToken).ConfigureAwait(false)) throw new PassageRetrievalRefusalException("index-updating");
+                await using ICorpusGenerationLease lease = scope.Kind == "all"
+                    ? await annFactory.OpenAsync(sqlLease, workToken).ConfigureAwait(false) : sqlLease;
+                if (!await lease.IsCurrentAsync(workToken).ConfigureAwait(false)) throw new PassageRetrievalRefusalException("index-updating");
                 var vector = await embedding.CreateEmbeddingAsync(query, workToken).ConfigureAwait(false);
+                workToken.ThrowIfCancellationRequested();
                 if (vector.ModelFingerprint != inference.EmbeddingProfile.ModelFingerprint || vector.Values.Count != inference.EmbeddingProfile.Dimensions ||
                     vector.Values.Any(value => !float.IsFinite(value)) || Math.Abs(vector.Values.Sum(value => (double)value * value) - 1) > 0.001)
                     throw new PassageRetrievalRefusalException("unavailable");
-                var dense = await candidates.ReadDenseCandidatesAsync(ann, scope, vector.Values, workToken).ConfigureAwait(false);
+                var dense = await candidates.ReadDenseCandidatesAsync(lease, scope, vector.Values, workToken).ConfigureAwait(false);
                 if (dense.Status != "ready") throw new PassageRetrievalRefusalException(dense.Status);
                 var lexical = await lexicalTask.ConfigureAwait(false);
                 var terms = await LexicalTermsAsync(query, lexical, workToken).ConfigureAwait(false);
@@ -151,9 +153,9 @@ public sealed class HybridPassageRetrievalEngine(ICorpusRetrievalReader reader, 
                     catch (Exception exception) when (exception is not OutOfMemoryException and not StackOverflowException)
                     { warnings.Add("rerank:unavailable"); }
                 }
-                var response = await AssembleAsync(query, scope, limit, ranked, "ready", ann.Generation.Id,
+                var response = await AssembleAsync(query, scope, limit, ranked, "ready", lease.Generation.Id,
                     warnings, candidateCount, workToken).ConfigureAwait(false);
-                if (!await ann.IsCurrentAsync(workToken).ConfigureAwait(false)) throw new PassageRetrievalRefusalException("index-updating");
+                if (!await lease.IsCurrentAsync(workToken).ConfigureAwait(false)) throw new PassageRetrievalRefusalException("index-updating");
                 return response;
             }, cancellationToken).ConfigureAwait(false);
         }
@@ -208,9 +210,9 @@ public sealed class HybridPassageRetrievalEngine(ICorpusRetrievalReader reader, 
                 passage.ChunkId, passage.ChunkHash, passage.StartOffset, passage.Length, passage.CorpusEpoch);
             var current = await reader.ReadAsync(binding, 0, cancellationToken).ConfigureAwait(false);
             if (current is null || !Safe(current.Candidate, scope) ||
-                current.Candidate with { FullTextRank = 0 } != passage with { FullTextRank = 0 } ||
+                !PassageRanking.SamePassage(current.Candidate, passage) ||
                 current.Text != passage.Content || current.StartOffset != passage.StartOffset || current.DisclosureText is null ||
-                disclosure.Evaluate(current.DisclosureText, LocalDisclosureKind.RetainedDetail).Withheld ||
+                disclosure.EvaluateCode(current.DisclosureText, LocalDisclosureKind.RetainedDetail, current.GuardProof).Withheld ||
                 !NativeV1EnvelopeProtector.CanDiscloseResult(JsonSerializer.SerializeToElement(current.DisclosureText))) continue;
             var citation = CorpusCitationMapper.Map(current.DocumentMetadataJson, passage.StartOffset, passage.Length, passage.SourceIdentity);
             var explanation = new List<string>();
@@ -244,7 +246,8 @@ public sealed class HybridPassageRetrievalEngine(ICorpusRetrievalReader reader, 
         (scope.Kind != "workspace" || scope.CanonicalCwd is { } cwd &&
             (passage.SourceIdentity.Equals(cwd, StringComparison.OrdinalIgnoreCase) ||
              passage.SourceIdentity.StartsWith(cwd.TrimEnd('\\') + '\\', StringComparison.OrdinalIgnoreCase))) &&
-        !disclosure.Evaluate(SearchText(passage), LocalDisclosureKind.RetainedDetail).Withheld &&
+        !disclosure.EvaluateCode(SearchText(passage), LocalDisclosureKind.RetainedDetail, passage.DisclosureProof,
+            passage.ContextHeader.Length == 0 ? 0 : passage.ContextHeader.Length + 1).Withheld &&
         !disclosure.Evaluate(passage.ContextHeader, LocalDisclosureKind.CorpusMetadata).Withheld &&
         !disclosure.Evaluate(passage.SourceIdentity, LocalDisclosureKind.CorpusMetadata).Withheld &&
         !disclosure.Evaluate(Path.GetFileName(passage.SourceIdentity), LocalDisclosureKind.CorpusMetadata).Withheld &&

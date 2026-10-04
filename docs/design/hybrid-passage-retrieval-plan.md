@@ -56,7 +56,10 @@ access. Focused composed/model checks passed 23/23.
 
 The shared query engine captures matching SQL/native generation ownership before
 embedding and retains it through final hydration/currentness. It uses complete
-scope membership for dense root/workspace retrieval (10,000-vector capacity),
+scope membership for dense root/workspace retrieval. The locally verified
+[repository retrieval correction](repository-retrieval-reliability-plan.md)
+replaces the former 10,000-vector capacity with bounded exact SQL paging and no
+global ANN opening for scoped requests. Candidate and ranking budgets remain
 100 candidates per channel, same-ID fusion, 50 reranking inputs and checked complete
 passages. The ten-second request budget includes scope resolution and all SQL/model/
 assembly work; late execution keeps ownership until cleanup. Reciprocal result
@@ -471,8 +474,9 @@ a bounded source quota instead of passing invalid limits to the inner search.
 
 Implement lexical 100 + dense 100, union by passage ID, RRF 60, exact-body tier,
 rerank 50, per-document diversity, span deduplication and final revalidation.
-Implement full scoped cosine up to the configured 10,000-member bound and explicit
-refusal above it. Never global-top-k/filter as the scoped algorithm. Validate
+Implement full scoped cosine with bounded exact keyset paging and no total-member
+cutoff, as specified by the repository retrieval correction. Never use global
+top-k/filter as the scoped algorithm. Validate
 ANN recall against exhaustive cosine on a bounded test corpus as well as source
 answer recall. Expose the same complete selected passages on every adapter.
 

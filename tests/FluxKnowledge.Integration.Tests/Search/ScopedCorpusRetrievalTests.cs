@@ -961,7 +961,7 @@ public sealed class ScopedCorpusRetrievalTests(NativeSqlServerFixture fixture) :
         return (inputId, branchId, recordId);
     }
 
-    private sealed class TestEvidenceCodec : ICorpusEvidenceCodec
+    internal sealed class TestEvidenceCodec : ICorpusEvidenceCodec
     {
         private readonly Dictionary<string, CorpusEvidenceBinding> _bindings = [];
         public string Encode(CorpusEvidenceBinding binding)
@@ -978,7 +978,7 @@ public sealed class ScopedCorpusRetrievalTests(NativeSqlServerFixture fixture) :
                 : throw new NotSupportedException();
     }
 
-    private static void AddPublishedText(
+    internal static void AddPublishedText(
         FluxKnowledgeDbContext context, Guid rootId, string rootPath, string fileName,
         IReadOnlyList<string> chunks, string? metadataJson = null, int originKind = 0)
     {

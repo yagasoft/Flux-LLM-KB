@@ -1,3 +1,5 @@
+using FluxKnowledge.Application.Visibility;
+
 namespace FluxKnowledge.Application.Ports;
 
 public sealed record ResolvedCorpusScope(
@@ -25,7 +27,8 @@ public sealed record EligiblePassageCandidate(
     Guid CorpusEpoch = default,
     string ContextHeader = "",
     string PassagePolicyFingerprint = "",
-    string SearchInputHash = "");
+    string SearchInputHash = "",
+    CodeDisclosureWindow? DisclosureProof = null);
 
 public sealed record EligibleContext(
     EligiblePassageCandidate Candidate,
@@ -33,7 +36,9 @@ public sealed record EligibleContext(
     string Text,
     bool ContextBounded,
     string? DocumentMetadataJson,
-    string? DisclosureText);
+    string? DisclosureText,
+    CodeDisclosureWindow? TextProof = null,
+    CodeDisclosureWindow? GuardProof = null);
 
 public interface ICorpusRetrievalReader
 {

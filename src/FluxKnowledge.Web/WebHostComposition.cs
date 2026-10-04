@@ -120,6 +120,7 @@ public static class WebHostComposition
         {
             allowedHostedServiceTypes.Add(typeof(SourceReconciliationService));
             allowedHostedServiceTypes.Add(typeof(LocalSourceRootWatchHostedService));
+            allowedHostedServiceTypes.Add(typeof(CodeDisclosureProofRecoveryService));
         }
         if (runtime.OutlookEnabled)
             allowedHostedServiceTypes.Add(typeof(OutlookCaptureRecoveryService));
@@ -236,6 +237,7 @@ public static class WebHostComposition
         services.AddFluxKnowledgeSqlServer(configuration);
         services.AddSingleton(new LocalOperatorOriginPolicy(operatorOrigin));
         services.AddSingleton<ILocalPrivateContentDisclosure, LocalPrivateContentDisclosure>();
+        services.AddSingleton<CsharpDisclosureProofBuilder>();
         services.AddHttpContextAccessor();
         if (strictProductionPaths)
         {
@@ -389,6 +391,7 @@ public static class WebHostComposition
             services.AddSingleton<SourceWatchCoordinator>();
             services.AddSingleton<IHostedService, SourceReconciliationService>();
             services.AddSingleton<IHostedService, LocalSourceRootWatchHostedService>();
+            services.AddSingleton<IHostedService, CodeDisclosureProofRecoveryService>();
         }
         services.AddScoped<ISourceRootProjectionReader, SourceRootProjectionReader>();
         services.AddScoped<SourceRootPageState>();

@@ -51,13 +51,48 @@ public sealed partial class LocalPrivateContentDisclosure : ILocalPrivateContent
         return new LocalDisclosureResult(value, false, null);
     }
 
-    private static bool ContainsSecret(string value, int encodedDepth = 0) =>
+    public LocalDisclosureResult EvaluateDecodedText(string value)
+    {
+        ArgumentNullException.ThrowIfNull(value);
+        if (value.Length > MaximumScannedCharacters) return new(null, true, WithheldReason);
+        try
+        {
+            if (ContainsCredentialPropertyToken(value, 0, value.Length, false, true) ||
+                ContainsCredentialPropertyToken(value, 0, value.Length, true, true))
+                return new(null, true, WithheldReason);
+        }
+        catch (RegexMatchTimeoutException) { return new(null, true, WithheldReason); }
+        return Evaluate(value, LocalDisclosureKind.CodeExcerpt);
+    }
+
+    public LocalDisclosureResult EvaluateCode(string value, LocalDisclosureKind kind,
+        CodeDisclosureWindow? proof, int headerLength = 0)
+    {
+        ArgumentNullException.ThrowIfNull(value);
+        if (proof is null) return Evaluate(value, kind);
+        if (value.Length > MaximumScannedCharacters || !proof.IsValid(value, headerLength) ||
+            proof.Spans.Any(span => span.Kind == CodeDisclosureSpanKind.Protected))
+            return new(null, true, WithheldReason);
+        var structural = proof.Spans.Where(span => span.Kind == CodeDisclosureSpanKind.StructuralBrace)
+            .Select(span => headerLength + span.Start - proof.Start).ToHashSet();
+        try
+        {
+            if (ContainsCredentialPropertyToken(value, 0, value.Length, false, true) ||
+                ContainsCredentialPropertyToken(value, 0, value.Length, true, true) ||
+                ContainsSecret(value, structural: structural))
+                return new(null, true, WithheldReason);
+        }
+        catch (RegexMatchTimeoutException) { return new(null, true, WithheldReason); }
+        return new(value, false, null);
+    }
+
+    private static bool ContainsSecret(string value, int encodedDepth = 0, IReadOnlySet<int>? structural = null) =>
         value.Contains("secret-content-sentinel", StringComparison.Ordinal) ||
         PrivateKeyEnvelopePattern().IsMatch(value) ||
         CredentialUriPattern().IsMatch(value) ||
         SecretAssignmentPattern().IsMatch(value) ||
         CredentialHeaderPattern().IsMatch(value) ||
-        ContainsJsonCredential(value) ||
+        ContainsJsonCredential(value, structural: structural) ||
         ContainsEncodedCredential(value, encodedDepth);
 
     private static bool ContainsEncodedCredential(string value, int encodedDepth)
@@ -82,11 +117,12 @@ public sealed partial class LocalPrivateContentDisclosure : ILocalPrivateContent
         }
     }
 
-    private static bool ContainsJsonCredential(string value, int encodedJsonStringDepth = 0)
+    private static bool ContainsJsonCredential(string value, int encodedJsonStringDepth = 0,
+        IReadOnlySet<int>? structural = null)
     {
-        if (!LooksLikeJson(value))
+        if (!LooksLikeJson(value, structural))
         {
-            return ContainsEmbeddedJsonCredential(value, encodedJsonStringDepth);
+            return ContainsEmbeddedJsonCredential(value, encodedJsonStringDepth, structural);
         }
 
         if (encodedJsonStringDepth >= MaximumEncodedJsonStringDepth)
@@ -107,7 +143,8 @@ public sealed partial class LocalPrivateContentDisclosure : ILocalPrivateContent
         }
     }
 
-    private static bool ContainsEmbeddedJsonCredential(string value, int encodedJsonStringDepth)
+    private static bool ContainsEmbeddedJsonCredential(string value, int encodedJsonStringDepth,
+        IReadOnlySet<int>? structural = null)
     {
         var candidates = 0;
         for (var start = 0; start < value.Length; start++)
@@ -116,6 +153,7 @@ public sealed partial class LocalPrivateContentDisclosure : ILocalPrivateContent
             {
                 continue;
             }
+            if (structural?.Contains(start) == true) continue;
 
             if (++candidates > MaximumEmbeddedJsonCandidates)
             {
@@ -493,7 +531,7 @@ public sealed partial class LocalPrivateContentDisclosure : ILocalPrivateContent
         _ => false
     };
 
-    private static bool LooksLikeJson(string value)
+    private static bool LooksLikeJson(string value, IReadOnlySet<int>? structural = null)
     {
         var index = 0;
         while (index < value.Length && char.IsWhiteSpace(value[index]))
@@ -501,7 +539,8 @@ public sealed partial class LocalPrivateContentDisclosure : ILocalPrivateContent
             index++;
         }
 
-        return index < value.Length && value[index] is '{' or '[' or '"';
+        return index < value.Length && value[index] is '{' or '[' or '"' &&
+            structural?.Contains(index) != true;
     }
 
     private static bool IsJsonCredentialProperty(string propertyName)

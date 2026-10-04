@@ -1,10 +1,14 @@
 # Automatic repository code and documentation implementation plan
 
-Date: 30 September 2026; updated 1 October. Status: stability correction `1b5bd5f6` is deployed and healthy. The single source remains enabled at configuration revision 11; authoritative scans discover 1,044 unique current paths without a file-list or policy edit. Initial text publication is complete; pending method-body readback, documentation freshness after integration and final acceptance remain open before cleanup.
+Date: 30 September 2026; updated 1 October. Status: stability correction `1b5bd5f6` is deployed and healthy. The single source remains enabled at configuration revision 11; authoritative scans discover 1,044 unique current paths without a file-list or policy edit. Initial text publication is complete; the 1 October post-merge documentation-freshness check passed; new retrieval-release/live acceptance remains open before cleanup.
 
 **Goal:** configure one repository source once, automatically maintain Git-tracked code/docs coverage, preserve searchable source text and C# facts, and remove the aggregate application request cap without replacing it with an arbitrary limit.
 
 **Specification:** [Automatic repository code and documentation coverage](repository-workspace-coverage.md).
+
+Next increment: use the [retrieval reliability implementation plan](repository-retrieval-reliability-plan.md),
+saved on 3 October, for the remaining retrieval work and current worktree handoff.
+The following steps record the earlier delivery.
 
 ## Handoff and boundaries
 
@@ -187,4 +191,4 @@ The [design addendum](repository-workspace-coverage.md#live-publication-recovery
 
 Rollback before recovery commit leaves the original failed state intact. After commit, use existing fenced lifecycle controls and a separately reviewed/authorised pause or compatible application rollback if needed; do not manually undo SQL state. Application rollback continues to require the Git-root quiescence/downgrade safeguards above. Implementation is authorised; production release and terminal replay retain the separate gates above.
 
-The single terminal recovery and cited readback passed independent post-recovery review on 1 October. At 16:39 UTC, all 1,044 paths were published with no unfinished records or terminal failures. Documentation and test integration uses the required closeout with `-KeepWorktree`, preserving pending acceptance and private incident evidence. No application redeployment is needed for these changes. Wider method context remains safety-withheld, repository-wide semantic capacity limits remain reported, and cleanup waits for remaining retrieval acceptance and documentation freshness after integration.
+The single terminal recovery and cited readback passed independent post-recovery review on 1 October. At 16:39 UTC, all 1,044 paths were published with no unfinished records or terminal failures. Documentation and test integration uses the required closeout with `-KeepWorktree`, preserving pending acceptance and private incident evidence. No application redeployment is needed for these changes. Wider method context remains safety-withheld, repository-wide semantic capacity limits remain reported, and the 17:05 UTC receipt verified exact current post-merge documentation search/read. Cleanup waits for the subsequent retrieval correction release and live acceptance.

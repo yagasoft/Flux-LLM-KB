@@ -208,4 +208,14 @@ if ($alternateRoot.ExitCode -eq 0 -or $alternateRoot.Output -notmatch 'canonical
     throw "The incremental IIS updater accepts a non-canonical application root."
 }
 
+foreach ($conflict in @('-ApplyMigrations', '-ApplyCorpusChunkFullTextMigration', '-ApplyHybridPassageRebuild', '-RecoverStoppedPool', '-DeferReadinessForScopedRemediation')) {
+    $rejected = Invoke-ExpectedRejection -Arguments @('-SourceRoot', $SourceRoot, '-PlanOnly', '-ApplyCodeDisclosureProofMigration', $conflict)
+    if ($rejected.ExitCode -eq 0 -or $rejected.Output -notmatch 'Code disclosure migration cannot combine') {
+        throw 'Code disclosure migration permits an incompatible path or has no explicit combination guard.'
+    }
+}
+
+& pwsh -NoProfile -File (Join-Path $SourceRoot 'tests/native/code-disclosure-migration-recovery.ps1') -SourceRoot $SourceRoot
+if ($LASTEXITCODE -ne 0) { throw 'Code disclosure migration recovery contract failed.' }
+
 Write-Output "Incremental IIS update contract passed."

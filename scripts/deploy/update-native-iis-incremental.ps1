@@ -8,6 +8,7 @@ param(
     [int]$ReadinessTimeoutSeconds = 120,
     [switch]$ApplyMigrations,
     [switch]$ApplyCorpusChunkFullTextMigration,
+    [switch]$ApplyCodeDisclosureProofMigration,
     [switch]$ApplyHybridPassageRebuild,
     [string]$ResumeHybridRebuildRelease = '',
     [string]$ReplaceHybridRebuildRelease = '',
@@ -459,6 +460,18 @@ function Invoke-GeneratedSqlScript {
     finally { $connection.Dispose() }
 }
 
+function New-CodeDisclosureMigrationScript {
+    param([string]$SourceRoot, [string]$OutputPath)
+    $contract = Get-CodeDisclosureMigrationContract
+    $project = Join-Path $SourceRoot 'src/FluxKnowledge.Infrastructure.SqlServer/FluxKnowledge.Infrastructure.SqlServer.csproj'
+    & dotnet ef migrations script $contract.Baseline $contract.Target --idempotent --configuration Release `
+        --project $project --startup-project $project --no-build --output $OutputPath | Out-Host
+    if ($LASTEXITCODE -ne 0 -or !(Test-Path -LiteralPath $OutputPath -PathType Leaf)) { throw 'Generating code disclosure migration SQL failed.' }
+    $hash = (Get-FileHash -LiteralPath $OutputPath -Algorithm SHA256).Hash
+    if ($hash -cne $contract.UpSha256) { throw 'Generated code disclosure SQL differs from the reviewed SHA-256.' }
+    return [pscustomobject]@{ From=$contract.Baseline; To=$contract.Target; Path=$OutputPath; Sha256=$hash }
+}
+
 function Assert-SourceDeletionMigrationRollbackSafe {
     $connection = [System.Data.SqlClient.SqlConnection]::new((Get-DeploymentSqlConnectionString))
     try {
@@ -680,6 +693,8 @@ function Test-IncrementalRollbackHoldRelease {
         [bool]$ApplyMigrations,
         [bool]$ApplyCorpusChunkFullTextMigration,
         [bool]$CorpusRollbackVerified,
+        [bool]$ApplyCodeDisclosureProofMigration = $false,
+        [bool]$CodeDisclosureRecoveryVerified = $false,
         [bool]$InteractiveHostMutationStarted,
         [bool]$InteractiveHostRollbackVerified,
         [bool]$RecoverStoppedPool = $false
@@ -687,6 +702,7 @@ function Test-IncrementalRollbackHoldRelease {
     return [bool](-not $RecoverStoppedPool -and $Validation.HoldCreated -and $Validation.PayloadRollbackVerified -and
         (-not $ApplyMigrations -or $Validation.RollbackVerified) -and
         (-not $ApplyCorpusChunkFullTextMigration -or $CorpusRollbackVerified) -and
+        (-not $ApplyCodeDisclosureProofMigration -or $CodeDisclosureRecoveryVerified) -and
         (-not $InteractiveHostMutationStarted -or $InteractiveHostRollbackVerified))
 }
 
@@ -1272,6 +1288,11 @@ if ($SiteName -cne "FluxKnowledge") {
 if ($PlanOnly -and $Apply) {
     throw "-PlanOnly cannot be combined with -Apply."
 }
+if ($ApplyCodeDisclosureProofMigration -and ($ApplyMigrations -or $ApplyCorpusChunkFullTextMigration -or
+    $ApplyHybridPassageRebuild -or $RecoverStoppedPool -or $DeferReadinessForScopedRemediation -or
+    $ResumeHybridRebuildRelease -or $ReplaceHybridRebuildRelease -or $PatchHybridRebuildRelease -or $ResumeHybridPatchRelease)) {
+    throw 'Code disclosure migration cannot combine with another migration, rebuild, recovery or readiness deferral.'
+}
 if ($RecoverStoppedPool -and ($ApplyMigrations -or $ApplyCorpusChunkFullTextMigration -or $ApplyHybridPassageRebuild -or
     $ResumeHybridRebuildRelease -or $ReplaceHybridRebuildRelease -or $PatchHybridRebuildRelease -or $ResumeHybridPatchRelease -or
     $DeferReadinessForScopedRemediation)) {
@@ -1300,11 +1321,12 @@ if ($PatchHybridRebuildRelease -and ($ExpectedPatchCandidateHash -cnotmatch '^[0
 }
 if (-not $PatchHybridRebuildRelease -and ($ExpectedPatchCandidateHash -or $ExpectedPatchOperatorHash)) { throw 'Reviewed patch hashes only apply to initial patch.' }
 if (($PatchHybridRebuildRelease -or $ResumeHybridPatchRelease) -and $RebuildTimeoutSeconds -gt 1800) { throw 'Hybrid patch drain timeout maximum is 1800 seconds.' }
-$applyAnyMigration = $ApplyMigrations -or $ApplyCorpusChunkFullTextMigration -or ($ApplyHybridPassageRebuild -and -not ($PatchHybridRebuildRelease -or $ResumeHybridPatchRelease))
+$applyAnyMigration = $ApplyMigrations -or $ApplyCorpusChunkFullTextMigration -or $ApplyCodeDisclosureProofMigration -or ($ApplyHybridPassageRebuild -and -not ($PatchHybridRebuildRelease -or $ResumeHybridPatchRelease))
 
 . (Join-Path $PSScriptRoot "loopback-deployment-safety.ps1")
 Import-Module (Join-Path $PSScriptRoot "incremental-iis-payload-swap.psm1") -Force -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'incremental-corpus-fulltext-migration.psm1') -Force -ErrorAction Stop
+Import-Module (Join-Path $PSScriptRoot 'incremental-code-disclosure-migration.psm1') -Force -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'incremental-hybrid-passage-rebuild.psm1') -Force -ErrorAction Stop
 $loopbackOrigin = Get-FixedLoopbackOrigin -SiteUrl $SiteUrl
 if ($loopbackOrigin.Origin -cne "http://127.0.0.1:5137") {
@@ -1399,6 +1421,25 @@ if ($PlanOnly) {
             population='asynchronous; verify full population after deployment before claiming Full-Text readiness'
         }
     }
+    if ($ApplyCodeDisclosureProofMigration) {
+        $contract = Get-CodeDisclosureMigrationContract
+        if ([string]::IsNullOrWhiteSpace($SourceRoot)) { $SourceRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot) }
+        $SourceRoot = (Resolve-Path -LiteralPath $SourceRoot).Path
+        $migrationPath = Join-Path $SourceRoot ("src/FluxKnowledge.Infrastructure.SqlServer/Persistence/Migrations/{0}.cs" -f $contract.Target)
+        if (!(Test-Path -LiteralPath $migrationPath -PathType Leaf)) { throw 'The reviewed code disclosure migration is missing from SourceRoot.' }
+        $databaseState = Get-CodeDisclosureDatabaseState -ConnectionString (Get-DeploymentSqlConnectionString)
+        Assert-CodeDisclosureMigrationBaseline $databaseState
+        if ($databaseState.History[-1] -ceq $contract.Baseline -and !$databaseState.CanAlter) { throw 'Code disclosure migration requires DATABASE ALTER permission.' }
+        $migrationPlan = [ordered]@{
+            baseline=$contract.Baseline; target=$contract.Target; current_history=@($databaseState.History)
+            generated_up_sha256=$contract.UpSha256; schema_sha256=$contract.SchemaSha256
+            migration_file_sha256=(Get-FileHash -LiteralPath $migrationPath -Algorithm SHA256).Hash
+            already_applied=($databaseState.History[-1] -ceq $contract.Target)
+            required_permission='DATABASE ALTER for missing schema'
+            backfill='automatic model-free derived proofs after validation-hold release; no Publish replay or ANN rebuild'
+            rollback='retain additive schema; restore compatible prior payload only after exact old/new schema and prior probes; uncertainty retains hold'
+        }
+    }
     [ordered]@{
         mode = "plan-only"
         site_name = "FluxKnowledge"
@@ -1459,6 +1500,7 @@ if (-not [string]::IsNullOrWhiteSpace($sourceStatus)) {
 }
 $migrationPlan = $null
 $corpusMigrationState = $null
+$codeDisclosureMigrationState = $null
 if ($ApplyMigrations) {
     $migrationPath = Join-Path $SourceRoot ("src\FluxKnowledge.Infrastructure.SqlServer\Persistence\Migrations\{0}.cs" -f $SourceDeletionMigrationTarget)
     if (-not (Test-Path -LiteralPath $migrationPath -PathType Leaf)) {
@@ -1473,6 +1515,15 @@ if ($ApplyCorpusChunkFullTextMigration) {
     Assert-CorpusFullTextMigrationBaseline $databaseState
     $corpusMigrationState = New-CorpusFullTextMigrationState -OriginalHistory $databaseState.History
     $migrationPlan = @{ Up=$null; Down=$null }
+}
+if ($ApplyCodeDisclosureProofMigration) {
+    $migrationPath = Join-Path $SourceRoot ("src/FluxKnowledge.Infrastructure.SqlServer/Persistence/Migrations/{0}.cs" -f (Get-CodeDisclosureMigrationContract).Target)
+    if (!(Test-Path -LiteralPath $migrationPath -PathType Leaf)) { throw 'The reviewed code disclosure migration is missing from SourceRoot.' }
+    $databaseState = Get-CodeDisclosureDatabaseState -ConnectionString (Get-DeploymentSqlConnectionString)
+    Assert-CodeDisclosureMigrationBaseline $databaseState
+    if ($databaseState.History[-1] -ceq (Get-CodeDisclosureMigrationContract).Baseline -and !$databaseState.CanAlter) { throw 'Code disclosure migration requires DATABASE ALTER permission.' }
+    $codeDisclosureMigrationState = New-CodeDisclosureMigrationState -DatabaseState $databaseState
+    $migrationPlan = @{ Up=$null }
 }
 $commit = (& git -C $SourceRoot rev-parse HEAD 2>&1 | Out-String).Trim()
 if ($LASTEXITCODE -ne 0 -or $commit -notmatch "^[0-9a-f]{40}$") {
@@ -1577,6 +1628,9 @@ try {
         $migrationPlan.Up = New-CorpusFullTextMigrationScript -SourceRoot $SourceRoot -Direction up -OutputPath (Join-Path $releaseRoot 'corpus-fulltext-up.sql')
         $migrationPlan.Down = New-CorpusFullTextMigrationScript -SourceRoot $SourceRoot -Direction down -OutputPath (Join-Path $releaseRoot 'corpus-fulltext-down.sql')
     }
+    if ($ApplyCodeDisclosureProofMigration) {
+        $migrationPlan.Up = New-CodeDisclosureMigrationScript -SourceRoot $SourceRoot -OutputPath (Join-Path $releaseRoot 'code-disclosure-up.sql')
+    }
 
     $manifest = [ordered]@{
         commit = $commit
@@ -1620,6 +1674,11 @@ try {
                     -ReadState { Get-CorpusFullTextDatabaseState } `
                     -RunUp { Invoke-GeneratedSqlScript -Path $migrationPlan.Up.Path }
             }
+            if ($ApplyCodeDisclosureProofMigration) {
+                Invoke-CodeDisclosureMigrationAttempt -State $codeDisclosureMigrationState `
+                    -ReadState { Get-CodeDisclosureDatabaseState -ConnectionString (Get-DeploymentSqlConnectionString) } `
+                    -RunUp { Invoke-GeneratedSqlScript -Path $migrationPlan.Up.Path }
+            }
         } `
         -StartApplication {
             Start-WebAppPool -Name $SiteName
@@ -1643,6 +1702,14 @@ try {
                     throw 'Stopped-pool recovery did not restore the exact prior application bytes.'
                 }
             }
+            elseif ($ApplyCodeDisclosureProofMigration) {
+                Confirm-CodeDisclosureMigrationRecovery -State $codeDisclosureMigrationState `
+                    -ReadState { Get-CodeDisclosureDatabaseState -ConnectionString (Get-DeploymentSqlConnectionString) } `
+                    -ValidatePriorApplication {
+                        Invoke-RequiredLoopbackProbes -Origin $loopbackOrigin.Origin -TimeoutSeconds $ReadinessTimeoutSeconds
+                        Assert-RetainedPipelineStateUnchanged -Baseline $deploymentValidation.Baseline -Current (Get-RetainedPipelineStateBaseline)
+                    }
+            }
             elseif ($ApplyCorpusChunkFullTextMigration) {
                 Confirm-CorpusFullTextMigrationRollback -State $corpusMigrationState -ValidatePriorApplication {
                     Invoke-RequiredLoopbackProbes -Origin $loopbackOrigin.Origin -TimeoutSeconds $ReadinessTimeoutSeconds
@@ -1661,6 +1728,10 @@ try {
             $deploymentValidation.PayloadRollbackVerified = $true
         } `
         -PrepareRollbackApplication {
+            if ($ApplyCodeDisclosureProofMigration) {
+                Confirm-CodeDisclosureSchemaRecovery -State $codeDisclosureMigrationState `
+                    -ReadState { Get-CodeDisclosureDatabaseState -ConnectionString (Get-DeploymentSqlConnectionString) }
+            }
             if ($ApplyCorpusChunkFullTextMigration) {
                 Undo-CorpusFullTextMigrationAttempt -State $corpusMigrationState `
                     -ReadState { Get-CorpusFullTextDatabaseState } `
@@ -1761,6 +1832,8 @@ finally {
             -ApplyMigrations ([bool]$ApplyMigrations) `
             -ApplyCorpusChunkFullTextMigration ([bool]$ApplyCorpusChunkFullTextMigration) `
             -CorpusRollbackVerified $(if ($ApplyCorpusChunkFullTextMigration) { [bool]$corpusMigrationState.RollbackVerified } else { $true }) `
+            -ApplyCodeDisclosureProofMigration ([bool]$ApplyCodeDisclosureProofMigration) `
+            -CodeDisclosureRecoveryVerified $(if ($ApplyCodeDisclosureProofMigration) { [bool]$codeDisclosureMigrationState.RollbackVerified } else { $true }) `
             -InteractiveHostMutationStarted $interactiveHostMutationStarted `
             -InteractiveHostRollbackVerified $interactiveHostRollbackVerified `
             -RecoverStoppedPool ([bool]$RecoverStoppedPool))) {

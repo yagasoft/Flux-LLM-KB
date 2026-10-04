@@ -12,6 +12,8 @@ public sealed class FluxKnowledgeDbContext(DbContextOptions<FluxKnowledgeDbConte
     public DbSet<JobAttemptEntity> JobAttempts => Set<JobAttemptEntity>();
     public DbSet<OutboxMessageEntity> OutboxMessages => Set<OutboxMessageEntity>();
     public DbSet<ArtifactEntity> Artifacts => Set<ArtifactEntity>();
+    public DbSet<CanonicalCodeDisclosureProofEntity> CanonicalCodeDisclosureProofs => Set<CanonicalCodeDisclosureProofEntity>();
+    public DbSet<CanonicalCodeDisclosureSpanEntity> CanonicalCodeDisclosureSpans => Set<CanonicalCodeDisclosureSpanEntity>();
     public DbSet<DocumentPublicationEntity> DocumentPublications => Set<DocumentPublicationEntity>();
     public DbSet<TextChunkEntity> TextChunks => Set<TextChunkEntity>();
     public DbSet<VectorEntity> Vectors => Set<VectorEntity>();

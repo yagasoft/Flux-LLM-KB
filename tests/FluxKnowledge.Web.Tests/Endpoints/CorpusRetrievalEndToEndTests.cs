@@ -33,6 +33,99 @@ namespace FluxKnowledge.Web.Tests.Endpoints;
 
 public sealed class CorpusRetrievalEndToEndTests(NativeSqlServerFixture fixture) : IClassFixture<NativeSqlServerFixture>
 {
+    [NativeSqlServerFact]
+    public async Task Scoped_HTTP_hybrid_search_above_ten_thousand_vectors_returns_exact_citations_without_ANN_and_deletion_invalidates_them()
+    {
+        const string winning = "RepositoryWinner EvidenceMarker.";
+        var text = string.Join('\n', Enumerable.Range(0, 10_001).Select(index => index == 10_000 ? winning : $"Segment {index:D5}."));
+        await using var pipeline = await SqlToUsearchRebuildTests.PipelineEnvironment.CreateAsync(fixture, "Baseline.",
+            new PassageBuilder(new WordTokenizer(), new PassagePolicy(2, 2, 128, 0, 0)));
+        var record = await pipeline.AddRetainedAndPumpAsync(text);
+        await using var db = await pipeline.Factory.CreateDbContextAsync();
+        await db.Database.ExecuteSqlRawAsync("UPDATE v SET SearchInputHash = c.SearchInputHash FROM Vectors v INNER JOIN TextChunks c ON c.Id = v.TextChunkId");
+        var root = await (from value in db.PipelineRecords join source in db.SourceRevisions on value.SourceRevisionId equals source.Id
+            where value.Id == record select source.SourceRootId).SingleAsync();
+        var reader = new SqlCorpusRetrievalReader(pipeline.Factory);
+        var codec = new CorpusEvidenceCodec(new EphemeralDataProtectionProvider());
+        var ann = new NoAnnFactory();
+        var engine = new HybridPassageRetrievalEngine(reader, reader,
+            new SqlCorpusGenerationLeaseStore(pipeline.Factory, TimeProvider.System), ann, new Models(pipeline.Embeddings),
+            new WindowsInteractiveGpuOwnerProbe(), codec, new LocalPrivateContentDisclosure(), searchTimeout: TimeSpan.FromSeconds(25));
+        var service = new CorpusRetrievalService(reader, codec, new LocalPrivateContentDisclosure(), new(true), engine);
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseTestServer();
+        builder.Services.AddSingleton<INativeV1Facade>(new CorpusOnlyFacade(service));
+        builder.Services.AddSingleton<NativeV1RequestMapper>();
+        await using var app = builder.Build();
+        app.MapFluxKnowledgeNativeV1();
+        await app.StartAsync();
+        using var client = app.GetTestClient();
+        using var search = await client.PostAsJsonAsync("/api/v1/corpus/search", new { query = "RepositoryWinner EvidenceMarker", scope = "root", root_id = root, limit = 1 });
+        Assert.Equal(HttpStatusCode.OK, search.StatusCode);
+        using var searchJson = JsonDocument.Parse(await search.Content.ReadAsStringAsync());
+        var result = searchJson.RootElement.GetProperty("result");
+        Assert.Equal("hybrid", result.GetProperty("retrievalMode").GetString());
+        Assert.Equal("ready", result.GetProperty("semanticStatus").GetString());
+        var hit = Assert.Single(result.GetProperty("results").EnumerateArray());
+        Assert.Equal(winning, hit.GetProperty("passage").GetString()!.Trim());
+        Assert.Equal(root, hit.GetProperty("rootId").GetGuid());
+        var request = new { evidence_ref = hit.GetProperty("evidenceRef").GetString(), context_characters = 0 };
+        using var read = await client.PostAsJsonAsync("/api/v1/corpus/read", request);
+        Assert.Equal(HttpStatusCode.OK, read.StatusCode);
+        using var readJson = JsonDocument.Parse(await read.Content.ReadAsStringAsync());
+        Assert.Equal(hit.GetProperty("passage").GetString(), readJson.RootElement.GetProperty("result").GetProperty("text").GetString());
+        Assert.Equal(0, ann.OpenCalls);
+        Assert.Empty(await db.CorpusQueryLeases.ToArrayAsync());
+        await db.PipelineRecords.Where(value => value.Id == record).ExecuteUpdateAsync(set => set.SetProperty(value => value.IsDeleted, true));
+        using var stale = await client.PostAsJsonAsync("/api/v1/corpus/read", request);
+        Assert.Equal(HttpStatusCode.Conflict, stale.StatusCode);
+        using var staleJson = JsonDocument.Parse(await stale.Content.ReadAsStringAsync());
+        Assert.Equal("evidence-stale", staleJson.RootElement.GetProperty("reasonCode").GetString());
+    }
+
+    [NativeSqlServerTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Canonical_code_proof_returns_the_whole_late_method_over_HTTP_and_withholds_encoded_credentials(bool privateLiteral)
+    {
+        var method = privateLiteral ? "public string LateAnswer() {\nreturn \"eyJwYXNzd29yZCI6InN5bnRoZXRpYyJ9\";\n}" :
+            "public int LateAnswer() {\nreturn 42;\n}";
+        var code = "// 😀\r\n" + string.Concat(Enumerable.Repeat("// safe padding\r\n", 1_500)) +
+            "namespace Sample { class C {\r\n" + method.Replace("\n", "\r\n", StringComparison.Ordinal) + "\r\n} }";
+        await using var pipeline = await SqlToUsearchRebuildTests.PipelineEnvironment.CreateAsync(
+            fixture, "Baseline.", new PassageBuilder(new WordTokenizer()));
+        await pipeline.AddAndPumpAtPathAsync(code, "late.cs");
+        var service = new CorpusRetrievalService(new SqlCorpusRetrievalReader(pipeline.Factory),
+            new CorpusEvidenceCodec(new EphemeralDataProtectionProvider()), new LocalPrivateContentDisclosure(), new(true));
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseTestServer();
+        builder.Services.AddSingleton<INativeV1Facade>(new CorpusOnlyFacade(service));
+        builder.Services.AddSingleton<NativeV1RequestMapper>();
+        await using var app = builder.Build();
+        app.MapFluxKnowledgeNativeV1();
+        await app.StartAsync();
+        using var client = app.GetTestClient();
+        using var search = await client.PostAsJsonAsync("/api/v1/corpus/search", new { query = "LateAnswer", scope = "all", limit = 1 });
+        Assert.Equal(HttpStatusCode.OK, search.StatusCode);
+        using var searchJson = JsonDocument.Parse(await search.Content.ReadAsStringAsync());
+        var results = searchJson.RootElement.GetProperty("result").GetProperty("results");
+        if (privateLiteral)
+        {
+            Assert.Empty(results.EnumerateArray());
+            Assert.DoesNotContain("eyJwYXNz", searchJson.RootElement.ToString(), StringComparison.Ordinal);
+            return;
+        }
+        var hit = Assert.Single(results.EnumerateArray());
+        Assert.True(hit.GetProperty("startOffset").GetInt32() > 16_384);
+        using var read = await client.PostAsJsonAsync("/api/v1/corpus/read",
+            new { evidence_ref = hit.GetProperty("evidenceRef").GetString(), context_characters = 4096 });
+        Assert.Equal(HttpStatusCode.OK, read.StatusCode);
+        using var readJson = JsonDocument.Parse(await read.Content.ReadAsStringAsync());
+        var result = readJson.RootElement.GetProperty("result");
+        Assert.Contains(method, result.GetProperty("text").GetString(), StringComparison.Ordinal);
+        Assert.Equal(hit.GetProperty("startOffset").GetInt32(), result.GetProperty("citedStart").GetInt32());
+    }
+
     [NativeSqlServerTheory]
     [InlineData(false)]
     [InlineData(true)]
@@ -222,6 +315,13 @@ public sealed class CorpusRetrievalEndToEndTests(NativeSqlServerFixture fixture)
             CancellationToken ct) => work(embedding, this, ct);
         public ValueTask<RerankResult> RerankAsync(string query, IReadOnlyList<RerankPassage> passages, CancellationToken ct) =>
             ValueTask.FromResult(new RerankResult(passages.Select((p, i) => new RerankScore(p.PassageId, -i)).ToArray(), RerankerFingerprint));
+    }
+
+    private sealed class NoAnnFactory : ICorpusAnnLeaseFactory
+    {
+        public int OpenCalls { get; private set; }
+        public ValueTask<ICorpusAnnLease> OpenAsync(ICorpusGenerationLease lease, CancellationToken cancellationToken)
+        { OpenCalls++; throw new InvalidOperationException("Scoped requests must not load ANN vectors."); }
     }
 
     private sealed class LocalFactory(DbContextOptions<FluxKnowledgeDbContext> options) : IDbContextFactory<FluxKnowledgeDbContext>

@@ -2017,6 +2017,9 @@ public sealed class SqlToUsearchRebuildTests(NativeSqlServerFixture fixture) : I
                 provider.GetRequiredService<IDbContextFactory<FluxKnowledgeDbContext>>(), artifact));
             services.AddFluxKnowledgeOutboxWorkers();
             services.AddSingleton<IEmbeddingProvider, DeterministicTokenHashEmbeddingProvider>();
+            services.AddSingleton<FluxKnowledge.Application.Visibility.ILocalPrivateContentDisclosure,
+                FluxKnowledge.Infrastructure.SqlServer.Visibility.LocalPrivateContentDisclosure>();
+            services.AddSingleton<FluxKnowledge.Application.Visibility.CsharpDisclosureProofBuilder>();
             services.AddFluxKnowledgeUsearch(new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?> { ["Usearch:RootPath"] = index }).Build());
             services.AddScoped<IStageWorker, CanonicalIndexStageWorker>();
             if (embed) services.AddScoped<IStageWorker, EmbedStageWorker>();

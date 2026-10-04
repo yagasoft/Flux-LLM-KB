@@ -54,6 +54,7 @@ public static class PassageRanking
             Math.Max(0L, Math.Min((long)prior.StartOffset + prior.Length, (long)passage.StartOffset + passage.Length) -
                 Math.Max(prior.StartOffset, passage.StartOffset)) * 5 >= (long)Math.Min(prior.Length, passage.Length) * 4);
 
-    private static bool SamePassage(EligiblePassageCandidate first, EligiblePassageCandidate second) =>
-        first with { FullTextRank = 0 } == second with { FullTextRank = 0 };
+    internal static bool SamePassage(EligiblePassageCandidate first, EligiblePassageCandidate second) =>
+        first with { FullTextRank = 0, DisclosureProof = null } ==
+            second with { FullTextRank = 0, DisclosureProof = null };
 }

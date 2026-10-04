@@ -151,10 +151,13 @@ copy per passage.
    English LCID 1033 remains. Full-Text population status is explicit.
 3. Retrieve up to 100 dense candidates with the same profile and passage IDs.
    All-corpus search uses the captured USearch handle. For a root/workspace with
-   at most 10,000 eligible vectors, calculate cosine over the entire scoped set
-   using that generation's SQL membership. Above that bound, declare semantic
-   scope-capacity refusal and use lexical retrieval. Do not post-filter a small
-   global top-k and claim it implements scoped retrieval.
+   eligible vectors, calculate exact cosine over that generation's SQL membership
+   in 256-row keyset pages and retain the best 100 candidates. There is no total
+   membership cutoff; scoped requests hold the SQL lease without opening global
+   ANN. Recheck scope/publication bindings and lease currency on every page and
+   final hydration. The [repository retrieval correction](repository-retrieval-reliability.md)
+   supersedes the former 10,000-vector refusal. Do not post-filter a small global
+   top-k and claim it implements scoped retrieval.
 4. Union by passage ID, retaining both ranks; maximum 200 candidates. Apply
    reciprocal-rank fusion with constant 60 and equal initial channel weights.
    Never substitute another window from the same document or chunk.

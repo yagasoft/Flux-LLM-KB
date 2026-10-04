@@ -1,4 +1,5 @@
 using FluxKnowledge.Application.Ports;
+using FluxKnowledge.Application.Visibility;
 using FluxKnowledge.Application.Workers;
 using FluxKnowledge.Domain.Common;
 using FluxKnowledge.Domain.Pipeline;
@@ -22,7 +23,8 @@ public sealed record IndexingStageOutput(
     IndexGenerationDescriptor? ActivateGeneration = null,
     IReadOnlyList<CanonicalVector>? ActivateMembership = null,
     CorpusPublicationStamp? ExpectedCorpusStamp = null,
-    bool UsePersistedEmbeddingDraft = false);
+    bool UsePersistedEmbeddingDraft = false,
+    CodeDisclosureProof? DisclosureProof = null);
 
 public sealed record StageTransitionRequest(
     ClaimedDispatchMessage DispatchMessage,

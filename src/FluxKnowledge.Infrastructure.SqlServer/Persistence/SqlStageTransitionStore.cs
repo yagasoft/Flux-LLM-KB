@@ -161,6 +161,14 @@ public sealed partial class SqlStageTransitionStore : IStageTransitionStore
                 CreatedAtUtc = request.Artifact.CreatedAtUtc
             });
         WriteIndexingOutput(context, request);
+        if (request.IndexingOutput?.DisclosureProof is { } proof)
+        {
+            if (request.Artifact.Stage != PipelineStage.CanonicalIndex)
+                throw new InvalidOperationException("code-disclosure-proof-stage-invalid");
+            SqlCodeDisclosureProofStore.Validate(proof, request.Artifact.Id, request.Artifact.ContentHash,
+                request.Artifact.SearchText.Length, request.Artifact.SearchText);
+            SqlCodeDisclosureProofStore.Append(context, proof);
+        }
         context.AuditEvents.Add(
             new AuditEventEntity
             {

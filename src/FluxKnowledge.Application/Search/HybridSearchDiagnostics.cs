@@ -24,6 +24,10 @@ public sealed class HybridSearchDiagnostics : EventSource
     [Event(4, Level = EventLevel.Informational)]
     public void NativeSearch(string traceId, string spanId, string batchId) => Emit(4, traceId, spanId, batchId);
 
+    [Event(5, Level = EventLevel.Informational)]
+    public void ScopedDensePage(string traceId, string spanId, int rows, int retainedCandidates, long payloadBytes) =>
+        Emit(5, traceId, spanId, rows, retainedCandidates, payloadBytes);
+
     [NonEvent]
     private void Emit(int eventId, params object[] values)
     {

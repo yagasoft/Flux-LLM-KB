@@ -13,6 +13,58 @@ namespace FluxKnowledge.Domain.Tests.Search;
 public sealed class HybridPassageRetrievalTests
 {
     [Theory]
+    [InlineData("root", false)]
+    [InlineData("workspace", false)]
+    [InlineData("all", false)]
+    [InlineData("root", true)]
+    [InlineData("workspace", true)]
+    [InlineData("all", true)]
+    public async Task Scoped_search_uses_the_SQL_lease_without_opening_ANN_and_releases_once_on_success_or_embedding_failure(
+        string kind, bool failEmbedding)
+    {
+        var reader = new Reader();
+        var leases = new Leases();
+        var models = new Models { FailEmbedding = failEmbedding };
+        var scope = new ResolvedCorpusScope(kind, kind == "all" ? [] : [Guid.NewGuid()], kind == "workspace" ? @"C:\scope" : null);
+        var response = await Engine(reader, models, leases).SearchAsync("query", scope, 1, CancellationToken.None);
+        Assert.Equal(failEmbedding ? "unavailable" : "ready", response.SemanticStatus);
+        Assert.Equal(kind == "all" ? 1 : 0, leases.OpenCalls);
+        Assert.Equal(1, leases.DisposeCalls);
+        Assert.Equal(failEmbedding ? 0 : 1, reader.DenseCalls);
+    }
+
+    [Theory]
+    [InlineData("all")]
+    [InlineData("root")]
+    public async Task ANN_open_failure_consumes_ownership_once_and_scoped_requests_bypass_that_factory(string kind)
+    {
+        var reader = new Reader();
+        var leases = new Leases { FailOpen = true };
+        var scope = new ResolvedCorpusScope(kind, kind == "all" ? [] : [Guid.NewGuid()], null);
+        var response = await Engine(reader, new Models(), leases).SearchAsync("query", scope, 1, CancellationToken.None);
+        Assert.Equal(kind == "all" ? "unavailable" : "ready", response.SemanticStatus);
+        Assert.Equal(kind == "all" ? 1 : 0, leases.OpenCalls);
+        Assert.Equal(1, leases.DisposeCalls);
+    }
+
+    [Fact]
+    public async Task Cancelled_caller_or_failed_scheduling_acquires_no_SQL_or_native_lease()
+    {
+        var leases = new Leases();
+        var reader = new Reader();
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+            await Engine(reader, new Models(), leases).SearchAsync("query", Scope, 1, cancellation.Token));
+        var response = await Engine(reader, new Models { FailScheduling = true }, leases)
+            .SearchAsync("query", Scope, 1, CancellationToken.None);
+        Assert.Equal("timeout", response.SemanticStatus);
+        Assert.Equal(0, leases.AcquireCalls);
+        Assert.Equal(0, leases.OpenCalls);
+        Assert.Equal(0, leases.DisposeCalls);
+    }
+
+    [Theory]
     [InlineData("busy")]
     [InlineData("timeout")]
     [InlineData("unavailable")]
@@ -165,17 +217,23 @@ public sealed class HybridPassageRetrievalTests
         Assert.Equal(1, reader.DenseCalls);
     }
 
-    [Fact]
-    public async Task Timeout_keeps_native_and_sql_lease_owned_until_background_callback_finishes()
+    [Theory]
+    [InlineData("all")]
+    [InlineData("root")]
+    [InlineData("workspace")]
+    public async Task Timeout_keeps_native_or_SQL_lease_owned_until_background_callback_finishes(string kind)
     {
         var reader = new Reader { Dense = [Passage(8, "Meaning")] }; var leases = new Leases();
         var models = new Models { SimulateCallerTimeout = true };
-        var response = await Engine(reader, models, leases).SearchAsync("query", Scope, 1, CancellationToken.None);
+        var scope = new ResolvedCorpusScope(kind, kind == "all" ? [] : [Guid.NewGuid()], kind == "workspace" ? @"C:\scope" : null);
+        var response = await Engine(reader, models, leases).SearchAsync("query", scope, 1, CancellationToken.None);
         Assert.Equal("timeout", response.SemanticStatus);
         Assert.False(leases.Disposed);
         models.AllowNativeCompletion.TrySetResult();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => models.DetachedWork!);
         Assert.True(leases.Disposed);
+        Assert.Equal(1, leases.DisposeCalls);
+        Assert.Equal(kind == "all" ? 1 : 0, leases.OpenCalls);
     }
 
     private static readonly ResolvedCorpusScope Scope = new("all", [], null);
@@ -212,7 +270,7 @@ public sealed class HybridPassageRetrievalTests
         public ValueTask<IReadOnlyList<EligiblePassageCandidate>> SearchAsync(string query, ResolvedCorpusScope scope, int limit, CancellationToken ct) => throw new NotSupportedException();
         public async ValueTask<IReadOnlyList<EligiblePassageCandidate>> ReadLexicalCandidatesAsync(string query, ResolvedCorpusScope scope, CancellationToken ct)
         { await BlockAsync("lexical"); return Lexical; }
-        public ValueTask<DensePassageCandidates> ReadDenseCandidatesAsync(ICorpusAnnLease lease, ResolvedCorpusScope scope, IReadOnlyList<float> query, CancellationToken ct)
+        public ValueTask<DensePassageCandidates> ReadDenseCandidatesAsync(ICorpusGenerationLease lease, ResolvedCorpusScope scope, IReadOnlyList<float> query, CancellationToken ct)
         { DenseCalls++; return ValueTask.FromResult(new DensePassageCandidates(DenseStatus, Dense)); }
         public async ValueTask<EligibleContext?> ReadAsync(CorpusEvidenceBinding binding, int context, CancellationToken ct)
         {
@@ -231,6 +289,7 @@ public sealed class HybridPassageRetrievalTests
         public bool PartialRanking { get; init; }
         public bool SimulateCallerTimeout { get; init; }
         public bool FailScheduling { get; init; }
+        public bool FailEmbedding { get; init; }
         public IReadOnlyList<RerankPassage> Inputs { get; private set; } = [];
         public TaskCompletionSource AllowNativeCompletion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public Task? DetachedWork { get; private set; }
@@ -244,6 +303,7 @@ public sealed class HybridPassageRetrievalTests
         public async ValueTask<EmbeddingResult> CreateEmbeddingAsync(string text, CancellationToken ct)
         {
             if (SimulateCallerTimeout) await AllowNativeCompletion.Task;
+            if (FailEmbedding) throw new InvalidOperationException("synthetic-embedding-failure");
             return new([1, 0], "embedding");
         }
         public ValueTask<RerankResult> RerankAsync(string query, IReadOnlyList<RerankPassage> passages, CancellationToken ct)
@@ -260,13 +320,23 @@ public sealed class HybridPassageRetrievalTests
         public static readonly Guid Epoch = Guid.NewGuid();
         public bool Current { get; init; } = true;
         public bool Disposed { get; private set; }
+        public int OpenCalls { get; private set; }
+        public int DisposeCalls { get; private set; }
+        public int AcquireCalls { get; private set; }
+        public bool FailOpen { get; init; }
         public Guid LeaseId { get; } = Guid.NewGuid();
         public IndexGenerationDescriptor Generation { get; } = new(Guid.NewGuid(), "embedding", 2, "synthetic", "checksum", 1, new(Epoch, 1));
-        public ValueTask<ICorpusGenerationLease?> TryAcquireAsync(Guid instance, GpuInteractiveOwnerIdentity owner, string fingerprint, int dimensions, CancellationToken ct) => ValueTask.FromResult<ICorpusGenerationLease?>(this);
-        public ValueTask<ICorpusAnnLease> OpenAsync(ICorpusGenerationLease lease, CancellationToken ct) => ValueTask.FromResult<ICorpusAnnLease>(this);
+        public ValueTask<ICorpusGenerationLease?> TryAcquireAsync(Guid instance, GpuInteractiveOwnerIdentity owner, string fingerprint, int dimensions, CancellationToken ct)
+        { AcquireCalls++; return ValueTask.FromResult<ICorpusGenerationLease?>(this); }
+        public async ValueTask<ICorpusAnnLease> OpenAsync(ICorpusGenerationLease lease, CancellationToken ct)
+        {
+            OpenCalls++;
+            if (FailOpen) { await lease.DisposeAsync(); throw new InvalidOperationException("synthetic-open-failure"); }
+            return this;
+        }
         public ValueTask<bool> IsCurrentAsync(CancellationToken ct) => ValueTask.FromResult(Current);
         public ValueTask<IReadOnlyList<AnnMatch>> SearchAsync(IReadOnlyList<float> query, int limit, CancellationToken ct) => throw new NotSupportedException();
-        public ValueTask DisposeAsync() { Disposed = true; return ValueTask.CompletedTask; }
+        public ValueTask DisposeAsync() { DisposeCalls++; Disposed = true; return ValueTask.CompletedTask; }
     }
     private sealed class Probe : IGpuInteractiveOwnerProbe
     {

@@ -166,12 +166,13 @@ public sealed partial class SqlCorpusRetrievalReader(IDbContextFactory<FluxKnowl
             .ToListAsync(cancellationToken)
             .ConfigureAwait(false);
 
-        return rows.Select(static row => new EligiblePassageCandidate(
+        var candidates = rows.Select(static row => new EligiblePassageCandidate(
             row.RootId, row.OwnerSourceRevisionId, row.PipelineRecordId,
             row.PipelineRecordRevision, row.ArtifactId, row.ArtifactHash,
             row.ChunkId, row.ChunkHash, row.StartOffset, row.Length,
             row.Content, row.SourceIdentity, row.FullTextRank, row.OriginKind,
             row.CorpusEpoch, row.ContextHeader, row.PassagePolicyFingerprint, row.SearchInputHash)).ToArray();
+        return await AttachProofsAsync(context, candidates, cancellationToken).ConfigureAwait(false);
     }
 
     public async ValueTask<EligibleContext?> ReadAsync(
@@ -234,7 +235,9 @@ public sealed partial class SqlCorpusRetrievalReader(IDbContextFactory<FluxKnowl
         // Slice canonical text directly: passage overlap and ordinals do not describe
         // how neighbouring bodies concatenate. Never hydrate an entire artifact.
         const int scanLimit = 16 * 1024;
-        var windowStart = Math.Max(0, binding.CitedStart - contextCharacters / 2 - scanLimit / 4);
+        // Near document end all requested context may shift before the citation.
+        // Reserve that full amount plus guard/line headroom within the same 16 Ki read.
+        var windowStart = Math.Max(0, binding.CitedStart - contextCharacters - scanLimit / 4);
         var canonical = await context.Database.SqlQuery<CanonicalWindowRow>(
                 $"""
                  SELECT CAST(DATALENGTH([SearchText]) / 2 AS int) AS [CanonicalLength],
@@ -268,14 +271,24 @@ public sealed partial class SqlCorpusRetrievalReader(IDbContextFactory<FluxKnowl
             row.PassagePolicyFingerprint, row.SearchInputHash);
         var disclosureText = BuildDisclosureWindow(joined, joinedStart, start, end,
             joinedStart == 0,
-            joinedStart + joined.Length == canonical.CanonicalLength);
+            joinedStart + joined.Length == canonical.CanonicalLength, out var guardStart);
+        var proofRequests = new List<ProofRequest>
+        {
+            new(row.ArtifactId, row.ArtifactHash, row.StartOffset, row.Length),
+            new(row.ArtifactId, row.ArtifactHash, start, end - start)
+        };
+        if (disclosureText is not null)
+            proofRequests.Add(new(row.ArtifactId, row.ArtifactHash, guardStart, disclosureText.Length));
+        var proofs = await ReadProofWindowsAsync(context, proofRequests, cancellationToken).ConfigureAwait(false);
+        candidate = candidate with { DisclosureProof = proofs[0] };
         return new EligibleContext(candidate, start, joined.Substring(start - joinedStart, end - start),
-            end - start - binding.CitedLength < contextCharacters, row.DocumentMetadataJson, disclosureText);
+            end - start - binding.CitedLength < contextCharacters, row.DocumentMetadataJson, disclosureText,
+            proofs[1], disclosureText is null ? null : proofs[2]);
     }
 
     private static string? BuildDisclosureWindow(
         string joined, int joinedStart, int start, int end,
-        bool hasDocumentStart, bool hasDocumentEnd)
+        bool hasDocumentStart, bool hasDocumentEnd, out int guardStart)
     {
         // The detector accepts at most 16 Ki UTF-16 units. A fixed halo alone
         // can start inside a long credential value, hiding its assignment label.
@@ -288,6 +301,7 @@ public sealed partial class SqlCorpusRetrievalReader(IDbContextFactory<FluxKnowl
         while (first > 0 && joined[first - 1] is not ('\r' or '\n')) first--;
         while (last < joined.Length && joined[last] is not ('\r' or '\n')) last++;
         if (last < joined.Length) last++;
+        guardStart = joinedStart + first;
         if (last - first > scanLimit ||
             first == 0 && !hasDocumentStart ||
             last == joined.Length && !hasDocumentEnd)

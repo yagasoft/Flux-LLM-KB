@@ -179,6 +179,16 @@ in the installed app and has passed the scoped English staging acceptance
 recorded below. The earlier BGE-M3 ONNX pilot evaluated different windows and
 failed its own relevance gates; it is not the delivered passage pipeline's result.
 
+The locally verified [repository retrieval corrections](design/repository-retrieval-reliability.md)
+add optional, versioned canonical C# disclosure proofs in two derived SQL tables.
+New indexing writes proofs atomically; a model-free worker backfills retained
+artifacts under the deployment hold. Credential, parser and transport protections
+remain. Root/workspace semantic search scans exact SQL membership in 256-vector
+keyset pages under its generation lease and retains at most 100 candidates,
+without a total-vector cap or opening global ANN. All-corpus search still uses
+USearch. Production activation requires the additive migration and reviewed
+incremental deployment; it is not yet live.
+
 The delivered [hybrid passage architecture](design/hybrid-passage-retrieval.md)
 and [implementation plan](design/hybrid-passage-retrieval-plan.md), dated
 25 September 2026, supersede the earlier semantic transition plan. They retain

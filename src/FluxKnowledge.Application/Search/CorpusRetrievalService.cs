@@ -94,7 +94,8 @@ public sealed class CorpusRetrievalService(
             if (coherent && (candidate.PassagePolicyFingerprint.Length != 64 ||
                 !string.Equals(Hash(searchInput), candidate.SearchInputHash, StringComparison.Ordinal))) continue;
             if (disclosure.Evaluate(candidate.ContextHeader, LocalDisclosureKind.CorpusMetadata).Withheld) continue;
-            if (coherent && (disclosure.Evaluate(searchInput, LocalDisclosureKind.RetainedDetail).Withheld ||
+            if (coherent && (disclosure.EvaluateCode(searchInput, LocalDisclosureKind.RetainedDetail,
+                candidate.DisclosureProof, candidate.ContextHeader.Length == 0 ? 0 : candidate.ContextHeader.Length + 1).Withheld ||
                 !NativeV1EnvelopeProtector.CanDiscloseResult(JsonSerializer.SerializeToElement(searchInput)))) continue;
             var match = candidate.Content.IndexOf(query, StringComparison.Ordinal);
             var lexicalAnchor = match >= 0 ? match : FindLexicalAnchor(candidate.Content, lexicalTerms);
@@ -113,7 +114,8 @@ public sealed class CorpusRetrievalService(
             var passage = candidate.Content.Substring(localStart, localLength);
             var source = disclosure.Evaluate(candidate.SourceIdentity, LocalDisclosureKind.CorpusMetadata);
             var title = disclosure.Evaluate(Path.GetFileName(candidate.SourceIdentity), LocalDisclosureKind.CorpusMetadata);
-            var text = disclosure.Evaluate(passage, LocalDisclosureKind.RetainedDetail);
+            var text = disclosure.EvaluateCode(passage, LocalDisclosureKind.RetainedDetail,
+                candidate.DisclosureProof?.Slice(candidate.StartOffset + localStart, localLength));
             if (source.Withheld || title.Withheld || text.Withheld) continue;
 
             var binding = new CorpusEvidenceBinding(
@@ -125,7 +127,7 @@ public sealed class CorpusRetrievalService(
             var current = await reader.ReadAsync(binding, 0, token).ConfigureAwait(false);
             if (current is null) continue;
             if (current.DisclosureText is null ||
-                disclosure.Evaluate(current.DisclosureText, LocalDisclosureKind.RetainedDetail).Withheld ||
+                disclosure.EvaluateCode(current.DisclosureText, LocalDisclosureKind.RetainedDetail, current.GuardProof).Withheld ||
                 !NativeV1EnvelopeProtector.CanDiscloseResult(JsonSerializer.SerializeToElement(current.DisclosureText)))
                 continue;
             var citation = CorpusCitationMapper.Map(current.DocumentMetadataJson,
@@ -209,9 +211,9 @@ public sealed class CorpusRetrievalService(
 
         var source = disclosure.Evaluate(candidate.SourceIdentity, LocalDisclosureKind.CorpusMetadata);
         var title = disclosure.Evaluate(Path.GetFileName(candidate.SourceIdentity), LocalDisclosureKind.CorpusMetadata);
-        var text = disclosure.Evaluate(context.Text, LocalDisclosureKind.RetainedDetail);
+        var text = disclosure.EvaluateCode(context.Text, LocalDisclosureKind.RetainedDetail, context.TextProof);
         var surroundingWithheld = context.DisclosureText is null ||
-            disclosure.Evaluate(context.DisclosureText, LocalDisclosureKind.RetainedDetail).Withheld ||
+            disclosure.EvaluateCode(context.DisclosureText, LocalDisclosureKind.RetainedDetail, context.GuardProof).Withheld ||
             !NativeV1EnvelopeProtector.CanDiscloseResult(JsonSerializer.SerializeToElement(context.DisclosureText));
         if (source.Withheld || title.Withheld || text.Withheld || surroundingWithheld)
             throw new NativeOperationException("content-withheld");
