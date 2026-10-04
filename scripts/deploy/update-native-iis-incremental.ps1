@@ -776,7 +776,7 @@ function Wait-IncrementalIisPreloadStartup {
             $created = $worker[0].CreationDate.ToUniversalTime()
             $eventTime = $event.TimeCreated.ToUniversalTime()
             if ($created -lt $AfterUtc -or $eventTime -lt $AfterUtc -or $eventTime -lt $created -or
-                !([string]$event.Properties[0].Value).Contains($quotedRoot, [StringComparison]::OrdinalIgnoreCase)) { continue }
+                ([string]$event.Properties[0].Value).IndexOf($quotedRoot, [StringComparison]::OrdinalIgnoreCase) -lt 0) { continue }
             return [pscustomobject]@{ WorkerId=$worker[0].ProcessId; WorkerCreatedUtc=$created.ToString('O')
                 EventRecordId=$event.RecordId; EventTimeUtc=$eventTime.ToString('O') }
         }
@@ -1973,7 +1973,7 @@ catch {
         if ($RecoverStoppedPool) {
             throw "Stopped-pool recovery failed; application rollback verified=$($deploymentValidation.PayloadRollbackVerified); companion restored=True; hold retained; recovery=$releaseRoot. Original failure: $($deploymentFailure.Exception.Message)"
         }
-        throw "Deployment failed after the interactive-host payload was mutated. The prior payload was restored and the scheduled task remains disabled for operator review."
+        throw "Deployment failed after the interactive-host payload was mutated. The prior payload was restored and the scheduled task remains disabled for operator review. Original failure: $($deploymentFailure.Exception.Message)"
     }
     if ($interactiveHostTaskWasEnabled -and -not $interactiveHostMutationStarted) {
         Enable-ScheduledTask -TaskName $InteractiveHostTaskName -ErrorAction SilentlyContinue | Out-Null

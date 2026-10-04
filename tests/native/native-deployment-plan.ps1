@@ -472,4 +472,7 @@ if ($LASTEXITCODE -ne 0) {
 $unattendedOutput = & pwsh -NoProfile -File (Join-Path $SourceRoot 'tests/native/unattended-iis-discovery.ps1') -SourceRoot $SourceRoot 2>&1 | Out-String
 if ($LASTEXITCODE -ne 0) { throw "The unattended IIS discovery contract failed: $unattendedOutput" }
 
+$unattendedWindowsOutput = & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $SourceRoot 'tests/native/unattended-iis-discovery.ps1') -SourceRoot $SourceRoot 2>&1 | Out-String
+if ($LASTEXITCODE -ne 0) { throw "The Windows PowerShell unattended IIS discovery contract failed: $unattendedWindowsOutput" }
+
 Write-Output "Native deployment plan contract passed."

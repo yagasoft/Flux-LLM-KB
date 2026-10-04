@@ -285,3 +285,16 @@ rollback, drift, prerequisites, lost acknowledgement and hold retention. Product
 Apply, autonomous startup and publication beyond the old idle window remain
 unverified and require explicit operational authority. The approved cohort recovery
 completed separately; it does not authorise this hosting activation.
+
+The authorised incremental Apply of `be3df6fc0582` on 4 October failed in the
+startup verifier: Windows PowerShell 5.1 cannot call the two-argument string
+`Contains` overload used by that verifier. IIS recorded the candidate's successful
+managed startup before the verifier failed. Automatic rollback restored the prior
+`404a38b50c92` application, interactive-host payload and original hosting tuple;
+the interactive-host task remains disabled for operator review. GPU slots are clear,
+the active generation and corpus version are unchanged, and no new production
+crash or debugger was observed. The compatibility correction uses `IndexOf` with
+the same ordinal comparison and retains the original exception in failure output.
+Native hosting checks must pass in both Windows PowerShell 5.1 and PowerShell 7
+before another Apply. The six additional terminal jobs remain untouched and
+outside the authorised original 32-job recovery cohort.
