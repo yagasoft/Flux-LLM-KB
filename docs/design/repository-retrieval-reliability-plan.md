@@ -439,18 +439,25 @@ automatic-continuation section of the design; keep one implementation owner.
   exposing later-revision enrollment and ordinary Publish recovery in both SQL-retry
   modes. Final focused lineage/integrity checks pass 33/33 and collision checks pass
   13/13. Independent implementation review is approved; the local verification gate passes.
-- [ ] After these two coherent implementation batches, reassess executable progress,
+- [x] After these two coherent implementation batches, reassess executable progress,
   run affected combined checks, fix introduced warnings and obtain independent
   final review. Update affected roadmap entries and use
   `complete-feature.ps1 -KeepWorktree`; preserve required evidence and the worktree.
   Combined verification and independent implementation review passed; mandatory
-  feature closeout remains pending.
+  recovery-feature closeout squash-merged and pushed Main `09945ae1`.
 - [ ] Prepare a separate concrete migration/deployment proposal. Review incremental
   PlanOnly support and disclose any unsupported migration gap; obtain fresh user
   authority and operational review before any production action. Preserve additive
   data on rollback and keep incompatible predecessors admission-held. Existing
   terminal recovery and live acceptance remain separate, explicitly authorised
   work. Preserve the scheduled task and hidden launcher.
-  A separate private proposal is prepared: the supported PlanOnly output confirms
-  the new migration target needs a narrowly scoped canonical-updater extension;
-  user direction and operational approval remain outstanding.
+  The separate private proposal and updater design are approved for local work.
+  `ApplyRepositoryRecoveryAuthorityMigration` and exact-release
+  `ReconcileRepositoryRecoveryRelease` are locally implemented using existing
+  mutex/receipt/hold/drain/payload/task helpers, with migration-only reconciliation
+  and read-only verification of completed duplicates. Fixed paged projections and
+  captured existing scheduler/worker authority keys preserve retained state; only
+  identified new no-work wake/admission receipts and verified no-work startup
+  telemetry are additional. Local implementation, focused disposable SQL/payload
+  and combined native checks, and independent review are complete; separate
+  production approval/live validation remain pending.

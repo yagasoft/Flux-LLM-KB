@@ -50,7 +50,12 @@ $releaseArguments = @{ Validation=$validation; ApplyMigrations=$false; ApplyCorp
 if (Test-IncrementalRollbackHoldRelease @releaseArguments -RecoverStoppedPool $true) { throw 'Recovery rollback released its hold.' }
 if (-not (Test-IncrementalRollbackHoldRelease @releaseArguments)) { throw 'Ordinary verified rollback changed.' }
 
-$swap = @($ast.FindAll({ param($node) $node -is [Management.Automation.Language.CommandAst] -and $node.GetCommandName() -ceq 'Invoke-IncrementalApplicationPayloadSwap' }, $true))
+$allSwaps = @($ast.FindAll({ param($node) $node -is [Management.Automation.Language.CommandAst] -and $node.GetCommandName() -ceq 'Invoke-IncrementalApplicationPayloadSwap' }, $true))
+$swap = @($allSwaps | Where-Object {
+    $parent = $_.Parent
+    while ($null -ne $parent -and $parent -isnot [Management.Automation.Language.FunctionDefinitionAst]) { $parent = $parent.Parent }
+    $null -eq $parent
+})
 if ($swap.Count -ne 1 -or $swap[0].Extent.Text -notmatch 'RestartPreviousApplication:\(-not \$RecoverStoppedPool\)') { throw 'Recovery is not wired to suppress predecessor startup.' }
 
 $parent = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd([IO.Path]::DirectorySeparatorChar)

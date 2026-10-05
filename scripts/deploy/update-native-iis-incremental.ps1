@@ -9,6 +9,8 @@ param(
     [switch]$ApplyMigrations,
     [switch]$ApplyCorpusChunkFullTextMigration,
     [switch]$ApplyCodeDisclosureProofMigration,
+    [switch]$ApplyRepositoryRecoveryAuthorityMigration,
+    [string]$ReconcileRepositoryRecoveryRelease = '',
     [switch]$ApplyHybridPassageRebuild,
     [string]$ResumeHybridRebuildRelease = '',
     [string]$ReplaceHybridRebuildRelease = '',
@@ -1337,6 +1339,248 @@ function Assert-StoppedPoolRecoveryBaseline {
     }
 }
 
+function Get-RepositoryRecoveryTaskObservation {
+    $task=@(Get-ScheduledTask -TaskName $InteractiveHostTaskName -TaskPath '\' -ErrorAction Stop)
+    if ($task.Count -ne 1) { throw 'repository-recovery-task-identity-ambiguous' }
+    $xml=Export-ScheduledTask -TaskName $InteractiveHostTaskName -TaskPath '\' -ErrorAction Stop
+    $document=[xml]$xml
+    $namespaces=[Xml.XmlNamespaceManager]::new($document.NameTable)
+    $namespaces.AddNamespace('t', $document.DocumentElement.NamespaceURI)
+    $enabled=$document.SelectSingleNode('/t:Task/t:Settings/t:Enabled', $namespaces)
+    if ($null -ne $enabled) { [void]$enabled.ParentNode.RemoveChild($enabled) }
+    $launcher='E:\Codex Workspaces\Scripts\Outlook\run-outlook-hidden.vbs'
+    $actions=@($document.SelectNodes('/t:Task/t:Actions/t:Exec', $namespaces))
+    if ($actions.Count -ne 1 -or $actions[0].Command -notmatch '(?i)(^|\\)wscript\.exe$' -or
+        $actions[0].Arguments -cne ('//B //NoLogo "'+$launcher+'"')) { throw 'repository-recovery-hidden-launcher-action-changed' }
+    Assert-NotReparsePoint -Path $launcher -Message 'repository-recovery-launcher-path-unsafe'
+    return [ordered]@{ Enabled=[bool]$task[0].Settings.Enabled; Xml=[string]$xml;
+        IdentityHash=(Get-RepositoryRecoveryValueHash $document.OuterXml); LauncherPath=$launcher;
+        LauncherSha256=(Get-FileHash -LiteralPath $launcher -Algorithm SHA256).Hash; State=[string]$task[0].State }
+}
+
+function Get-RepositoryRecoveryCompanionConnectionString {
+    $path=Join-Path (Split-Path -Parent $InteractiveHostRoot) 'appsettings.Production.json'
+    Assert-NotReparsePoint -Path $path -Message 'repository-recovery-companion-configuration-path-unsafe'
+    $configuration=Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+    $text=[string]$configuration.ConnectionStrings.FluxKnowledge
+    if ([string]::IsNullOrWhiteSpace($text)) { throw 'repository-recovery-companion-configuration-incomplete' }
+    return ConvertTo-DeploymentValidationConnectionString $text
+}
+
+function Assert-RepositoryRecoveryTaskIdentity($Binding, [bool]$RequireOriginalPolicy) {
+    $actual=Get-RepositoryRecoveryTaskObservation
+    if ($actual.IdentityHash -cne $Binding.OriginalTask.IdentityHash -or $actual.LauncherSha256 -cne $Binding.LauncherSha256 -or
+        ($RequireOriginalPolicy -and $actual.Enabled -ne $Binding.OriginalTask.Enabled)) { throw 'repository-recovery-task-or-launcher-drift' }
+    return $actual
+}
+
+function Assert-RepositoryRecoveryPayloadHash([string]$Path, [string]$Expected) {
+    Assert-NotReparsePoint -Path $Path -Message 'repository-recovery-payload-path-unsafe'
+    if ((Get-HybridPayloadFingerprint -Path $Path) -cne $Expected) { throw "repository-recovery-payload-drift: $Path" }
+}
+
+function Assert-RepositoryRecoveryCandidateCommit([string]$Path, [string]$Commit) {
+    $assemblies=@(Get-ChildItem -LiteralPath $Path -Filter 'FluxKnowledge*.dll' -File)
+    if ($assemblies.Count -eq 0) { throw 'repository-recovery-candidate-assemblies-missing' }
+    foreach ($assembly in $assemblies) {
+        if ([Diagnostics.FileVersionInfo]::GetVersionInfo($assembly.FullName).ProductVersion -cnotmatch ('\+'+$Commit+'$')) {
+            throw "repository-recovery-candidate-commit-mismatch: $($assembly.Name)"
+        }
+    }
+}
+
+function Assert-RepositoryRecoveryNewWorker($Row, [DateTime]$CandidateStartedUtc) {
+    if ($Row.ProcessId -le 0 -or !$Row.ProcessStartedAtUtc) { throw 'repository-recovery-new-worker-process-identity-drift' }
+    $expectedStart=([DateTimeOffset]$Row.ProcessStartedAtUtc).UtcDateTime
+    $process=Get-Process -Id $Row.ProcessId -ErrorAction Stop
+    if ($process.StartTime.ToUniversalTime() -ne $expectedStart -or
+        $process.StartTime.ToUniversalTime() -lt $CandidateStartedUtc) { throw 'repository-recovery-new-worker-process-identity-drift' }
+    $iisIds=@(Get-HybridIisWorkerIds -AppCmdPath (Join-Path $env:SystemRoot 'System32/inetsrv/appcmd.exe') -PoolName $SiteName)
+    $visited=[Collections.Generic.HashSet[int]]::new(); $id=[int]$Row.ProcessId
+    $chain=[Collections.Generic.List[object]]::new(); $childCreated=$null
+    while ($true) {
+        if (!$visited.Add($id)) { throw 'repository-recovery-new-worker-owner-unverified' }
+        $child=@(Get-CimInstance Win32_Process -Filter "ProcessId = $id" -ErrorAction Stop)
+        if ($child.Count -ne 1 -or $child[0].ProcessId -ne $id -or !$child[0].CreationDate) {
+            throw 'repository-recovery-new-worker-owner-unverified'
+        }
+        $created=$child[0].CreationDate.ToUniversalTime()
+        if ($created -lt $CandidateStartedUtc -or ($null -ne $childCreated -and $created -gt $childCreated)) {
+            throw 'repository-recovery-new-worker-owner-unverified'
+        }
+        $chain.Add(@{ProcessId=$id;Created=$created;ParentProcessId=$child[0].ParentProcessId})
+        if ($id -in $iisIds) { break }
+        if ($child[0].ParentProcessId -eq 0) { throw 'repository-recovery-new-worker-owner-unverified' }
+        $childCreated=$created
+        $id=[int]$child[0].ParentProcessId
+    }
+    # WMI CreationDate has microsecond precision. Keep the exact native start
+    # check as well, and rebind every observed hop before exempting its evidence.
+    if ($chain[0].Created -ne $expectedStart.AddTicks(-($expectedStart.Ticks % 10))) {
+        throw 'repository-recovery-new-worker-process-identity-drift'
+    }
+    foreach ($identity in $chain) {
+        $observed=@(Get-CimInstance Win32_Process -Filter "ProcessId = $($identity.ProcessId)" -ErrorAction Stop)
+        if ($observed.Count -ne 1 -or $observed[0].ProcessId -ne $identity.ProcessId -or
+            !$observed[0].CreationDate -or $observed[0].CreationDate.ToUniversalTime() -ne $identity.Created -or
+            $observed[0].ParentProcessId -ne $identity.ParentProcessId) { throw 'repository-recovery-new-worker-owner-unverified' }
+        if ($identity.ProcessId -eq $Row.ProcessId -and (!$observed[0].ExecutablePath -or
+            (Get-FileHash -LiteralPath $observed[0].ExecutablePath -Algorithm SHA256).Hash -ine $Row.ExecutableFingerprint)) {
+            throw 'repository-recovery-new-worker-executable-drift'
+        }
+    }
+    if ($id -notin @(Get-HybridIisWorkerIds -AppCmdPath (Join-Path $env:SystemRoot 'System32/inetsrv/appcmd.exe') -PoolName $SiteName)) {
+        throw 'repository-recovery-new-worker-owner-unverified'
+    }
+    if ((Get-Process -Id $Row.ProcessId -ErrorAction Stop).StartTime.ToUniversalTime() -ne $expectedStart) {
+        throw 'repository-recovery-new-worker-process-identity-drift'
+    }
+}
+
+function Invoke-RepositoryRecoveryIisUpdate {
+    param([Parameter(Mandatory)][string]$SourceRoot, [Parameter(Mandatory)][string]$Commit, [string]$ExistingRelease='')
+    if ($ExistingRelease) {
+        $releaseRoot=Join-Path $IncrementalRecoveryRoot $ExistingRelease
+        foreach ($root in @($CanonicalLiveRoot,$CanonicalRecoveryRoot,$IncrementalRecoveryRoot,$releaseRoot)) {
+            Assert-NotReparsePoint -Path $root -Message 'repository-recovery-release-root-unsafe'
+        }
+        $receiptPath=Join-Path $releaseRoot 'repository-recovery-receipt.json'
+        $saved=Read-RepositoryRecoveryReleaseReceipt $receiptPath; $binding=$saved.Binding
+        if ($binding.ReleaseId -cne $ExistingRelease -or $binding.Commit -cne $Commit) { throw 'repository-recovery-release-commit-drift' }
+    } else {
+        if (Test-Path -LiteralPath $ValidationHoldPath) { throw 'repository-recovery-existing-hold; reconcile its exact release before a new deployment.' }
+        $original=Get-RepositoryRecoveryDatabaseState -ConnectionString (Get-DeploymentSqlConnectionString)
+        Assert-RepositoryRecoveryMigrationBaseline $original -RequireOriginal
+        $releaseId=[DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ')+'-'+$Commit.Substring(0,12)+'-repositoryrecovery'
+        if (!(Test-Path -LiteralPath $IncrementalRecoveryRoot)) { [void](New-Item -ItemType Directory -Path $IncrementalRecoveryRoot) }
+        Assert-NotReparsePoint -Path $IncrementalRecoveryRoot -Message 'repository-recovery-release-parent-unsafe'
+        $releaseRoot=Join-Path $IncrementalRecoveryRoot $releaseId
+        if (Test-Path -LiteralPath $releaseRoot) { throw 'repository-recovery-release-already-exists' }
+        [void](New-Item -ItemType Directory -Path $releaseRoot)
+        $receiptPath=Join-Path $releaseRoot 'repository-recovery-receipt.json'
+    }
+    $paths=[ordered]@{ ReleaseRoot=$releaseRoot; ApplicationRoot=$CanonicalDeployRoot; CandidateRoot=(Join-Path $releaseRoot 'candidate');
+        PreviousRoot=(Join-Path $releaseRoot 'previous'); FailedRoot=(Join-Path $releaseRoot 'failed'); CompanionRoot=$InteractiveHostRoot;
+        CompanionCandidateRoot=(Join-Path $releaseRoot 'candidate-interactive-host'); CompanionPreviousRoot=(Join-Path $releaseRoot 'previous-interactive-host');
+        HoldPath=$ValidationHoldPath }
+    $configurationPath=Join-Path $CanonicalLiveRoot 'Config/appsettings.Production.json'
+    $companionConfigurationPath=Join-Path (Split-Path -Parent $InteractiveHostRoot) 'appsettings.Production.json'
+    if (!$ExistingRelease) {
+        & dotnet publish (Join-Path $SourceRoot 'src/FluxKnowledge.Web/FluxKnowledge.Web.csproj') -c Release --no-restore --nologo -o $paths.CandidateRoot
+        if ($LASTEXITCODE -ne 0) { throw 'repository-recovery-web-publish-failed' }
+        Test-ApplicationPayload $paths.CandidateRoot
+        Publish-InteractiveHostCandidate -SourceRoot $SourceRoot -CandidateRoot $paths.CompanionCandidateRoot
+        Assert-RepositoryRecoveryCandidateCommit $paths.CandidateRoot $Commit
+        Assert-RepositoryRecoveryCandidateCommit $paths.CompanionCandidateRoot $Commit
+        $contract=Get-RepositoryRecoveryMigrationContract
+        $sqlPath=Join-Path $releaseRoot 'repository-recovery-up.sql'
+        & dotnet ef migrations script $contract.Baseline $contract.Target --configuration Release --no-build `
+            --project (Join-Path $SourceRoot 'src/FluxKnowledge.Infrastructure.SqlServer/FluxKnowledge.Infrastructure.SqlServer.csproj') `
+            --startup-project (Join-Path $SourceRoot 'src/FluxKnowledge.Web/FluxKnowledge.Web.csproj') --output $sqlPath
+        if ($LASTEXITCODE -ne 0 -or (Get-FileHash -LiteralPath $sqlPath -Algorithm SHA256).Hash -cne $contract.UpSha256) { throw 'repository-recovery-generated-script-drift' }
+        $task=Get-RepositoryRecoveryTaskObservation
+        Assert-RepositoryRecoveryDatabaseMatch (Get-RepositoryRecoveryDatabaseState -ConnectionString (Get-RepositoryRecoveryCompanionConnectionString)) $original
+        $binding=[ordered]@{ ReleaseId=$releaseId; OperationId=[Guid]::NewGuid().ToString('D'); Commit=$Commit; Paths=$paths;
+            OriginalDatabase=$original; TargetDatabase=(Get-RepositoryRecoveryTargetState $original); MigrationSha256=$contract.UpSha256;
+            OriginalTask=$task; OriginalIis=(Get-IncrementalIisHostingSettings); ConfigurationSha256=(Get-FileHash -LiteralPath $configurationPath).Hash;
+            CompanionConfigurationSha256=(Get-FileHash -LiteralPath $companionConfigurationPath).Hash;
+            LauncherSha256=$task.LauncherSha256; Retained=$null;
+            Payloads=[ordered]@{ OriginalWeb=(Get-HybridPayloadFingerprint $paths.ApplicationRoot); CandidateWeb=(Get-HybridPayloadFingerprint $paths.CandidateRoot);
+                OriginalCompanion=(Get-HybridPayloadFingerprint $paths.CompanionRoot); CandidateCompanion=(Get-HybridPayloadFingerprint $paths.CompanionCandidateRoot) } }
+    }
+    if ((Get-RepositoryRecoveryValueHash $binding.Paths) -cne (Get-RepositoryRecoveryValueHash $paths)) { throw 'repository-recovery-release-path-binding-drift' }
+    $runtime=@{ StartedUtc=[DateTime]::MaxValue }
+    $assertHold={ Assert-HybridDeploymentHoldOwner -Path $ValidationHoldPath -ReleaseId $binding.ReleaseId -OperationId ([Guid]$binding.OperationId)
+        if ((Get-Content -LiteralPath $ValidationHoldPath -Raw) -cne ($binding.ReleaseId | ConvertTo-Json -Compress)) {
+            throw 'repository-recovery-hold-must-deny-all-admissions'
+        } }.GetNewClosure()
+    $assertEnvironment={
+        Assert-NotReparsePoint -Path $configurationPath -Message 'repository-recovery-configuration-path-unsafe'
+        Assert-NotReparsePoint -Path $companionConfigurationPath -Message 'repository-recovery-companion-configuration-path-unsafe'
+        if ((Get-FileHash -LiteralPath $configurationPath).Hash -cne $binding.ConfigurationSha256 -or
+            (Get-FileHash -LiteralPath $companionConfigurationPath).Hash -cne $binding.CompanionConfigurationSha256 -or
+            !(Test-IisHostingSettingsMatch (Get-IncrementalIisHostingSettings) $binding.OriginalIis)) { throw 'repository-recovery-configuration-or-hosting-drift' }
+        [void](Assert-RepositoryRecoveryTaskIdentity $binding $false)
+    }.GetNewClosure()
+    $capture={ Get-RepositoryRecoveryRetainedState -ConnectionString (Get-DeploymentSqlConnectionString) }.GetNewClosure()
+    $checkRetained={
+        $verifyWorker={ param($row) Assert-RepositoryRecoveryNewWorker $row $runtime.StartedUtc }.GetNewClosure()
+        Assert-RepositoryRecoveryRetainedState -Baseline $binding.Retained -Current (Get-RepositoryRecoveryRetainedState `
+            -ConnectionString (Get-DeploymentSqlConnectionString) -Projection $binding.Retained.Projection -VerifyNewWorker $verifyWorker)
+        if ((Get-RepositoryRecoveryDatabaseState -ConnectionString (Get-DeploymentSqlConnectionString)).Columns.Count -eq 2) {
+            Assert-RepositoryRecoveryEvidenceEmpty -ConnectionString (Get-DeploymentSqlConnectionString)
+        }
+    }.GetNewClosure()
+    $ports=@{
+        CreateHold={ & $assertEnvironment; [void](Assert-RepositoryRecoveryTaskIdentity $binding $true)
+            [void](New-DeploymentValidationHold -Path $ValidationHoldPath -ReleaseId $binding.ReleaseId) }.GetNewClosure()
+        AssertHold=$assertHold
+        DisableTask={ [void](Assert-RepositoryRecoveryTaskIdentity $binding $false)
+            Disable-ScheduledTask -TaskName $InteractiveHostTaskName -TaskPath '\' -ErrorAction Stop | Out-Null }.GetNewClosure()
+        AssertTaskDisabled={ $current=Assert-RepositoryRecoveryTaskIdentity $binding $false
+            if ($current.Enabled) { throw 'repository-recovery-task-not-disabled' }
+            Wait-InteractiveHostStopped -TaskName $InteractiveHostTaskName -TimeoutSeconds $ReadinessTimeoutSeconds }.GetNewClosure()
+        Stop={ & $assertHold; Stop-HybridIisAfterGpuDrain }.GetNewClosure()
+        CaptureRetained=$capture
+        ReadDatabase={ Get-RepositoryRecoveryDatabaseState -ConnectionString (Get-DeploymentSqlConnectionString) }.GetNewClosure()
+        ApplyMigration={ Invoke-RepositoryRecoveryMigrationAttempt -ConnectionString (Get-DeploymentSqlConnectionString) `
+            -OriginalState $binding.OriginalDatabase -SqlPath (Join-Path $releaseRoot 'repository-recovery-up.sql') }.GetNewClosure()
+        BackupCompanion={ Copy-InteractiveHostPayload -Source $paths.CompanionRoot -Destination $paths.CompanionPreviousRoot
+            Assert-RepositoryRecoveryPayloadHash $paths.CompanionPreviousRoot $binding.Payloads.OriginalCompanion }.GetNewClosure()
+        Activate={ & $assertEnvironment
+            Copy-InteractiveHostPayload -Source $paths.CompanionCandidateRoot -Destination $paths.CompanionRoot
+            Invoke-CandidatePayloadActivation -CandidateRoot $paths.CandidateRoot -ApplicationRoot $paths.ApplicationRoot }.GetNewClosure()
+        Start={ $runtime.StartedUtc=[DateTime]::UtcNow; Start-WebAppPool -Name $SiteName
+            Wait-IisAppPoolState -Name $SiteName -ExpectedState Started -TimeoutSeconds $ReadinessTimeoutSeconds }.GetNewClosure()
+        Validate={ & $assertEnvironment
+            Invoke-RequiredLoopbackProbes -Origin $loopbackOrigin.Origin -TimeoutSeconds $ReadinessTimeoutSeconds
+            [void](Wait-IncrementalIisPreloadStartup -AfterUtc $runtime.StartedUtc -TimeoutSeconds $ReadinessTimeoutSeconds)
+            Assert-RepositoryRecoveryPayloadHash $paths.ApplicationRoot $binding.Payloads.CandidateWeb
+            Assert-RepositoryRecoveryPayloadHash $paths.CompanionRoot $binding.Payloads.CandidateCompanion
+            Assert-RepositoryRecoveryPayloadHash $paths.PreviousRoot $binding.Payloads.OriginalWeb
+            Assert-RepositoryRecoveryPayloadHash $paths.CompanionPreviousRoot $binding.Payloads.OriginalCompanion
+            Assert-RepositoryRecoveryDatabaseMatch (Get-RepositoryRecoveryDatabaseState -ConnectionString (Get-DeploymentSqlConnectionString)) $binding.TargetDatabase
+            & $checkRetained }.GetNewClosure()
+        ValidateWebRollback={ if ((Get-WebAppPoolState -Name $SiteName).Value -cne 'Stopped') { throw 'repository-recovery-predecessor-not-stopped' }
+            Assert-RepositoryRecoveryPayloadHash $paths.ApplicationRoot $binding.Payloads.OriginalWeb }.GetNewClosure()
+        RestoreCompanion={ Assert-RepositoryRecoveryPayloadHash $paths.CompanionPreviousRoot $binding.Payloads.OriginalCompanion
+            Assert-NotReparsePoint -Path $paths.CompanionRoot -Message 'repository-recovery-companion-restore-path-unsafe'
+            Restore-InteractiveHostPayload -PreviousRoot $paths.CompanionPreviousRoot -LiveRoot $paths.CompanionRoot }.GetNewClosure()
+        AssertOriginals={ & $assertEnvironment
+            Assert-RepositoryRecoveryPayloadHash $paths.ApplicationRoot $binding.Payloads.OriginalWeb
+            Assert-RepositoryRecoveryPayloadHash $paths.CompanionRoot $binding.Payloads.OriginalCompanion }.GetNewClosure()
+        ReleaseHold={ Remove-DeploymentValidationHold -Path $ValidationHoldPath -ReleaseId $binding.ReleaseId }.GetNewClosure()
+        PostReleaseProbes={ Invoke-RequiredLoopbackProbes -Origin $loopbackOrigin.Origin -TimeoutSeconds $ReadinessTimeoutSeconds }.GetNewClosure()
+        RestoreTaskPolicy={ [void](Assert-RepositoryRecoveryTaskIdentity $binding $false)
+            if ($binding.OriginalTask.Enabled) { Enable-ScheduledTask -TaskName $InteractiveHostTaskName -TaskPath '\' -ErrorAction Stop | Out-Null } }.GetNewClosure()
+        AssertCompleted={ & $assertEnvironment; [void](Assert-RepositoryRecoveryTaskIdentity $binding $true)
+            if (Test-Path -LiteralPath $ValidationHoldPath) { throw 'repository-recovery-completion-hold-present' }
+            Assert-RepositoryRecoveryPayloadHash $paths.ApplicationRoot $binding.Payloads.CandidateWeb
+            Assert-RepositoryRecoveryPayloadHash $paths.CompanionRoot $binding.Payloads.CandidateCompanion }.GetNewClosure()
+        AssertMigrationLocations={ & $assertEnvironment
+            if ((Get-WebAppPoolState -Name $SiteName).Value -cne 'Stopped' -or (Test-Path -LiteralPath $paths.PreviousRoot) -or (Test-Path -LiteralPath $paths.FailedRoot)) {
+                throw 'repository-recovery-payload-location-or-pool-drift'
+            }
+            Assert-RepositoryRecoveryPayloadHash $paths.ApplicationRoot $binding.Payloads.OriginalWeb
+            Assert-RepositoryRecoveryPayloadHash $paths.CompanionRoot $binding.Payloads.OriginalCompanion
+            Assert-RepositoryRecoveryPayloadHash $paths.CandidateRoot $binding.Payloads.CandidateWeb
+            Assert-RepositoryRecoveryPayloadHash $paths.CompanionCandidateRoot $binding.Payloads.CandidateCompanion
+            if (Test-Path -LiteralPath $paths.CompanionPreviousRoot) {
+                Assert-RepositoryRecoveryPayloadHash $paths.CompanionPreviousRoot $binding.Payloads.OriginalCompanion
+            }
+            & $checkRetained }.GetNewClosure()
+    }
+    $ports.Swap={ param($activate,$start,$validate,$rollback)
+        Invoke-IncrementalApplicationPayloadSwap -ApplicationRoot $paths.ApplicationRoot -CandidateRoot $paths.CandidateRoot `
+            -PreviousRoot $paths.PreviousRoot -FailedRoot $paths.FailedRoot -RestartPreviousApplication:$false `
+            -StopApplication $ports.Stop -ActivateCandidate $activate -StartApplication $start -ValidateApplication $validate -ValidateRollbackApplication $rollback
+    }.GetNewClosure()
+    $result=if ($ExistingRelease) { Invoke-RepositoryRecoveryReceiptReconciliation -ReceiptPath $receiptPath -Ports $ports } else {
+        Invoke-RepositoryRecoveryRelease -ReceiptPath $receiptPath -Binding $binding -Ports $ports
+    }
+    $result | ConvertTo-Json -Depth 8
+}
+
 function Assert-IncrementalIisPreflight {
     $site = Get-Website -Name $SiteName -ErrorAction Stop
     Assert-CanonicalPath `
@@ -1388,6 +1632,16 @@ if ($SiteName -cne "FluxKnowledge") {
 if ($PlanOnly -and $Apply) {
     throw "-PlanOnly cannot be combined with -Apply."
 }
+if ($ApplyRepositoryRecoveryAuthorityMigration -and ($ApplyMigrations -or $ApplyCorpusChunkFullTextMigration -or
+    $ApplyCodeDisclosureProofMigration -or $ApplyHybridPassageRebuild -or $EnableUnattendedDiscovery -or
+    $RecoverStoppedPool -or $DeferReadinessForScopedRemediation -or $ResumeHybridRebuildRelease -or
+    $ReplaceHybridRebuildRelease -or $PatchHybridRebuildRelease -or $ResumeHybridPatchRelease)) {
+    throw 'Repository recovery migration cannot combine with another migration, rebuild, hosting, recovery or remediation mode.'
+}
+if ($ReconcileRepositoryRecoveryRelease -and (!$ApplyRepositoryRecoveryAuthorityMigration -or
+    $ReconcileRepositoryRecoveryRelease -cnotmatch '^\d{8}T\d{6}Z-[0-9a-f]{12}-repositoryrecovery$')) {
+    throw 'Repository recovery reconciliation requires its migration flag and exact saved release name.'
+}
 if ($EnableUnattendedDiscovery -and ($ApplyMigrations -or $ApplyCorpusChunkFullTextMigration -or
     $ApplyCodeDisclosureProofMigration -or $ApplyHybridPassageRebuild -or $RecoverStoppedPool -or
     $DeferReadinessForScopedRemediation -or $ResumeHybridRebuildRelease -or $ReplaceHybridRebuildRelease -or
@@ -1427,13 +1681,15 @@ if ($PatchHybridRebuildRelease -and ($ExpectedPatchCandidateHash -cnotmatch '^[0
 }
 if (-not $PatchHybridRebuildRelease -and ($ExpectedPatchCandidateHash -or $ExpectedPatchOperatorHash)) { throw 'Reviewed patch hashes only apply to initial patch.' }
 if (($PatchHybridRebuildRelease -or $ResumeHybridPatchRelease) -and $RebuildTimeoutSeconds -gt 1800) { throw 'Hybrid patch drain timeout maximum is 1800 seconds.' }
-$applyAnyMigration = $ApplyMigrations -or $ApplyCorpusChunkFullTextMigration -or $ApplyCodeDisclosureProofMigration -or ($ApplyHybridPassageRebuild -and -not ($PatchHybridRebuildRelease -or $ResumeHybridPatchRelease))
+$applyAnyMigration = $ApplyMigrations -or $ApplyCorpusChunkFullTextMigration -or $ApplyCodeDisclosureProofMigration -or $ApplyRepositoryRecoveryAuthorityMigration -or ($ApplyHybridPassageRebuild -and -not ($PatchHybridRebuildRelease -or $ResumeHybridPatchRelease))
 
 . (Join-Path $PSScriptRoot "loopback-deployment-safety.ps1")
 Import-Module (Join-Path $PSScriptRoot "incremental-iis-payload-swap.psm1") -Force -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'incremental-corpus-fulltext-migration.psm1') -Force -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'incremental-code-disclosure-migration.psm1') -Force -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'incremental-hybrid-passage-rebuild.psm1') -Force -ErrorAction Stop
+Import-Module (Join-Path $PSScriptRoot 'incremental-repository-recovery-migration.psm1') -Force -ErrorAction Stop
+Import-Module (Join-Path $PSScriptRoot 'incremental-repository-recovery-release.psm1') -Force -ErrorAction Stop
 $loopbackOrigin = Get-FixedLoopbackOrigin -SiteUrl $SiteUrl
 if ($loopbackOrigin.Origin -cne "http://127.0.0.1:5137") {
     throw "Incremental IIS deployment requires the fixed http://127.0.0.1:5137 origin."
@@ -1442,6 +1698,34 @@ if ($loopbackOrigin.Origin -cne "http://127.0.0.1:5137") {
 if ($PlanOnly) {
     $migrationPlan = $null
     $hostingPlan = $null
+    if ($ApplyRepositoryRecoveryAuthorityMigration) {
+        $contract=Get-RepositoryRecoveryMigrationContract
+        $database=Get-RepositoryRecoveryDatabaseState -ConnectionString (Get-DeploymentSqlConnectionString)
+        Assert-RepositoryRecoveryDatabaseMatch (Get-RepositoryRecoveryDatabaseState -ConnectionString (Get-RepositoryRecoveryCompanionConnectionString)) $database
+        Assert-RepositoryRecoveryMigrationBaseline $database -RequireOriginal:(-not $ReconcileRepositoryRecoveryRelease)
+        $task=Get-RepositoryRecoveryTaskObservation
+        $migrationPlan=[ordered]@{ baseline=$contract.Baseline; target=$contract.Target; generated_up_sha256=$contract.UpSha256;
+            database_identity=$database.Identity; current_history=$database.History; columns=$database.Columns;
+            target_columns=(Get-RepositoryRecoveryTargetState $(if ($ReconcileRepositoryRecoveryRelease) {
+                (Read-RepositoryRecoveryReleaseReceipt (Join-Path (Join-Path $IncrementalRecoveryRoot $ReconcileRepositoryRecoveryRelease) 'repository-recovery-receipt.json')).Binding.OriginalDatabase
+            } else { $database })).Columns;
+            required_permissions='DATABASE ALTER and migration-history INSERT';
+            activation='verified release hold, task exit and exact GPU/IIS drain before either live payload changes';
+            retained_validation='versioned explicit projections, saved vector bytes, prior replay/ownership evidence; two new fields remain null';
+            rollback='preserve additive schema/evidence; restore verified payloads with incompatible predecessor stopped, task disabled and hold retained';
+            task_enabled=$task.Enabled; task_identity_sha256=$task.IdentityHash; hidden_launcher_sha256=$task.LauncherSha256;
+            original_web_sha256=(Get-HybridPayloadFingerprint $CanonicalDeployRoot);
+            original_companion_sha256=(Get-HybridPayloadFingerprint $InteractiveHostRoot);
+            reconciliation='migration-only inspection of an exact saved receipt; completed duplicate verifies and returns saved result; no payload/worker/hold replay';
+            reconcile_release=$ReconcileRepositoryRecoveryRelease }
+        if ($ReconcileRepositoryRecoveryRelease) {
+            $saved=Read-RepositoryRecoveryReleaseReceipt (Join-Path (Join-Path $IncrementalRecoveryRoot $ReconcileRepositoryRecoveryRelease) 'repository-recovery-receipt.json')
+            $migrationPlan.saved_phase=$saved.Phase
+            if ((Get-RepositoryRecoveryValueHash $database.History) -ceq (Get-RepositoryRecoveryValueHash $saved.Binding.TargetDatabase.History)) {
+                Assert-RepositoryRecoveryDatabaseMatch $database $saved.Binding.TargetDatabase
+            } else { Assert-RepositoryRecoveryDatabaseMatch $database $saved.Binding.OriginalDatabase }
+        } elseif (Test-Path -LiteralPath $ValidationHoldPath) { throw 'repository-recovery-existing-hold; identify its exact release before applying.' }
+    }
     if ($EnableUnattendedDiscovery) {
         $hostingBefore = Get-IncrementalIisHostingSettings
         if (!$hostingBefore.ModuleEnabled) { throw 'Application Initialization must be enabled before unattended discovery.' }
@@ -1574,7 +1858,7 @@ if ($PlanOnly) {
         recover_stopped_pool = [bool]$RecoverStoppedPool
         unattended_discovery_hosting = $hostingPlan
         payload_acl = "inherit-from-live-root"
-        rollback = if ($RecoverStoppedPool) { 'restore-prior-payloads-with-pool-stopped-and-hold-retained' } elseif ($PatchHybridRebuildRelease -or $ResumeHybridPatchRelease) { 'forward-only after activation intent; predecessor payload/packet retained, hold denied on failure' } elseif ($ApplyHybridPassageRebuild) { 'before-schema: original payload; after-schema: held forward recovery with retained original payload/configuration' } else { "automatic-application-and-interactive-host-payload-restore" }
+        rollback = if ($ApplyRepositoryRecoveryAuthorityMigration) { 'preserve-schema-and-evidence; verified-prior-payloads-stopped-task-disabled-hold-retained' } elseif ($RecoverStoppedPool) { 'restore-prior-payloads-with-pool-stopped-and-hold-retained' } elseif ($PatchHybridRebuildRelease -or $ResumeHybridPatchRelease) { 'forward-only after activation intent; predecessor payload/packet retained, hold denied on failure' } elseif ($ApplyHybridPassageRebuild) { 'before-schema: original payload; after-schema: held forward recovery with retained original payload/configuration' } else { "automatic-application-and-interactive-host-payload-restore" }
         gpu_drain = 'deny admissions; allow active OCR page and native cleanup to finish; prove exact IIS worker exit before each payload swap stop'
         deployment_validation_hold = $true
         candidate_validation = if ($PatchHybridRebuildRelease -or $ResumeHybridPatchRelease) { 'same-operation-epoch-checkpoint-continuity-preserved-inputs-and-loopback-probes' } elseif ($ApplyHybridPassageRebuild) { 'held-exact-rebuild-finalisation-preserved-inputs-and-loopback-probes' } elseif ($DeferReadinessForScopedRemediation) {
@@ -1589,7 +1873,7 @@ if ($PlanOnly) {
         else {
             $null
         }
-    } | ConvertTo-Json -Depth 3
+    } | ConvertTo-Json -Depth $(if ($ApplyRepositoryRecoveryAuthorityMigration) { 8 } else { 3 })
     exit 0
 }
 if (-not $Apply) {
@@ -1671,12 +1955,20 @@ try {
         throw "Another incremental IIS deployment is already in progress."
     }
 
+    if ($ApplyRepositoryRecoveryAuthorityMigration -and $ReconcileRepositoryRecoveryRelease) {
+        Invoke-RepositoryRecoveryIisUpdate -SourceRoot $SourceRoot -Commit $commit -ExistingRelease $ReconcileRepositoryRecoveryRelease
+        return
+    }
     Assert-IncrementalIisPreflight
     if ($EnableUnattendedDiscovery) {
         $hostingChange.Original = Get-IncrementalIisHostingSettings
         if (!$hostingChange.Original.ModuleEnabled) { throw 'Application Initialization must be enabled before unattended discovery.' }
     }
     Ensure-CpuSearchOwnerFile
+    if ($ApplyRepositoryRecoveryAuthorityMigration) {
+        Invoke-RepositoryRecoveryIisUpdate -SourceRoot $SourceRoot -Commit $commit
+        return
+    }
     if ($ApplyHybridPassageRebuild) {
         if ($PatchHybridRebuildRelease -or $ResumeHybridPatchRelease) {
             Invoke-HybridPassageIisPatch -SourceRoot $SourceRoot -Commit $commit -PredecessorRelease $PatchHybridRebuildRelease -ResumeRelease $ResumeHybridPatchRelease `

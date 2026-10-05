@@ -400,8 +400,9 @@ scope cases pass. Keep the existing roadmap progress unchanged until then.
 ## Automatic continuation after repository withdrawal
 
 Locally implemented, 4 October 2026; independent design and implementation review
-are approved, and focused and combined verification pass. Mandatory feature closeout
-and all production/live gates remain pending. This
+are approved, and focused and combined verification pass. Mandatory recovery-feature
+closeout merged and pushed Main `09945ae1`; the separate updater's implementation,
+local checks and independent review are complete, with production/live gates pending. This
 correction covers future nonterminal repository work. Existing
 terminal jobs retain the separately authorised explicit recovery workflow above.
 It does not authorise production migration, deployment, restart or recovery.
@@ -605,15 +606,24 @@ Publish SQL-retry modes failed, while checkpointed Publish passed. Their focused
 corrections now pass within the final 33/33 focused cases, including refusal of missing original
 evidence, wrong parent/artifact/owner, changed epoch/profile and altered vector input
 or checksum. The final collision suite passes 13/13 and independent implementation
-review is approved. Local verification is complete; mandatory closeout remains open.
+review is approved. Recovery-feature verification and mandatory closeout are complete
+on Main `09945ae1`; updater checks/review are complete.
 
 Independent design and implementation review approved the focused correction.
-Integrate through the
-required feature closeout script. The additive schema requires an explicit future
-migration/deployment plan: inspect the incremental updater's PlanOnly support and
-report a migration gap rather than substituting another deployment path. Fresh
-PlanOnly confirms no supported migration flag for the new target; a separate
-proposal recommends a narrowly guarded extension of the canonical updater. Prepare
+Recovery-feature closeout used the required script and pushed Main `09945ae1`.
+The separately authorised local updater extension implements
+`ApplyRepositoryRecoveryAuthorityMigration` and exact-release
+`ReconcileRepositoryRecoveryRelease`; local checks and independent review are
+complete. Reconciliation is migration-only; a completed duplicate verifies
+its receipt read-only. The extension reuses the deployment mutex, atomic receipt
+persistence, deny-all hold, GPU/IIS drain and coordinated payload/task lifecycle.
+It binds the fixed additive SQL/hash and preserves both columns and evidence;
+failure cannot run Down, restart the predecessor or release the hold. Fixed paged
+retained projections omit only the two added columns. Captured existing keys protect
+`GpuSchedulerOperationReceipts`, `NativeWorkerInstances` and
+`NativeWorkerLifecycleEvidence`; only identified new receipts for wake/admission
+without work and verified candidate startup telemetry without work may be additional.
+Focused disposable SQL/payload and combined native checks pass; independent review approves local closeout. Prepare
 exact target, migration, verification and rollback for separate user authority.
 Retain additive data on rollback; a predecessor that cannot honour waiting markers
 must remain admission-held until compatibility is demonstrated. Do not automatically

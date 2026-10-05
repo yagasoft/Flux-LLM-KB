@@ -386,8 +386,14 @@ discovery proof gate resumption; queued waiting work consumes no processing atte
 Fresh compatible discovery, canonical/vector integrity and known completed GPU
 results with confirmed cleanup are required. Publish rechecks source authority
 inside its snapshot fence and reuses only fully validated safe immutable collision
-winners. The additive schema preserves evidence on rollback; production migration,
-deployment and live acceptance remain separately gated.
+winners. Recovery-feature closeout is integrated as Main `09945ae1`. The locally
+implemented canonical-updater extension binds the exact additive migration and
+coordinated payloads, supports migration-only reconciliation and preserves evidence,
+stopped predecessor and hold on failure. Its paged retained projections also protect
+existing scheduler/worker authority rows; only identified new no-work receipts and
+verified no-work startup telemetry may be additional. Local updater implementation,
+checks and independent review are complete; production
+migration/deployment and live acceptance remain pending.
 
 SQL vector selection resolves chunk identity before record revision predicates
 to exclude the observed pair expansion, retaining all eligibility checks. Its

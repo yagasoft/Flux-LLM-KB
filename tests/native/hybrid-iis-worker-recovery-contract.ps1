@@ -10,8 +10,20 @@ foreach($name in @('Get-HybridIisWorkerIds','Stop-HybridIisAfterGpuDrain')) {
  if($definition.Count -ne 1) { throw "Required worker proof function missing: $name" }
  . ([scriptblock]::Create($definition[0].Extent.Text))
 }
-$swapCommand=@($ast.FindAll({param($node) $node -is [Management.Automation.Language.CommandAst] -and $node.GetCommandName() -ceq 'Invoke-IncrementalApplicationPayloadSwap'},$true))
+$allSwapCommands=@($ast.FindAll({param($node) $node -is [Management.Automation.Language.CommandAst] -and $node.GetCommandName() -ceq 'Invoke-IncrementalApplicationPayloadSwap'},$true))
+function Get-EnclosingFunctionName($node) {
+ $parent=$node.Parent
+ while($null -ne $parent -and $parent -isnot [Management.Automation.Language.FunctionDefinitionAst]) { $parent=$parent.Parent }
+ if($null -ne $parent) { return $parent.Name }
+}
+$swapCommand=@($allSwapCommands | Where-Object { !(Get-EnclosingFunctionName $_) })
 if($swapCommand.Count -ne 1) { throw 'Expected one routine incremental payload swap.' }
+$recoverySwap=@($allSwapCommands | Where-Object { (Get-EnclosingFunctionName $_) -ceq 'Invoke-RepositoryRecoveryIisUpdate' })
+if($allSwapCommands.Count -ne 2 -or $recoverySwap.Count -ne 1 -or
+   $recoverySwap[0].Extent.Text -cnotmatch '-RestartPreviousApplication:\$false' -or
+   $recoverySwap[0].Extent.Text -cnotmatch '-StopApplication \$ports\.Stop') {
+ throw 'Repository recovery must use the canonical swap/drain with predecessor restart refused.'
+}
 $stopArgument=$null;$rollbackValidationArgument=$null
 for($i=0;$i -lt $swapCommand[0].CommandElements.Count-1;$i++) {
  if($swapCommand[0].CommandElements[$i] -is [Management.Automation.Language.CommandParameterAst] -and

@@ -218,4 +218,13 @@ foreach ($conflict in @('-ApplyMigrations', '-ApplyCorpusChunkFullTextMigration'
 & pwsh -NoProfile -File (Join-Path $SourceRoot 'tests/native/code-disclosure-migration-recovery.ps1') -SourceRoot $SourceRoot
 if ($LASTEXITCODE -ne 0) { throw 'Code disclosure migration recovery contract failed.' }
 
+foreach ($conflict in @('-ApplyMigrations', '-ApplyCorpusChunkFullTextMigration', '-ApplyCodeDisclosureProofMigration', '-ApplyHybridPassageRebuild', '-RecoverStoppedPool', '-DeferReadinessForScopedRemediation', '-EnableUnattendedDiscovery')) {
+    $rejected = Invoke-ExpectedRejection -Arguments @('-SourceRoot', $SourceRoot, '-PlanOnly', '-ApplyRepositoryRecoveryAuthorityMigration', $conflict)
+    if ($rejected.ExitCode -eq 0 -or $rejected.Output -notmatch 'Repository recovery migration cannot combine') {
+        throw 'Repository recovery migration permits an incompatible updater mode.'
+    }
+}
+& pwsh -NoProfile -File (Join-Path $SourceRoot 'tests/native/repository-recovery-release.ps1') -SourceRoot $SourceRoot
+if ($LASTEXITCODE -ne 0) { throw 'Repository recovery release contract failed.' }
+
 Write-Output "Incremental IIS update contract passed."
