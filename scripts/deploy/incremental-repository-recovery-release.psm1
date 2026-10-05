@@ -35,6 +35,17 @@ function Read-RepositoryRecoveryReleaseReceipt {
             throw 'repository-recovery-receipt-invalid: Prepared continuation identity'
         }
     }
+    if ($receipt.ContainsKey('ActivationContinuation') -and $null -ne $receipt.ActivationContinuation) {
+        $intent=$receipt.ActivationContinuation
+        if ($intent.operator_commit -cnotmatch '^[0-9a-f]{40}$' -or $intent.prior_revision -lt 1 -or
+            $intent.prior_receipt_sha256 -cnotmatch '^[0-9A-F]{64}$' -or
+            $intent.binding_hash -cne $receipt.BindingHash -or
+            $intent.prepared_continuation_hash -cne $receipt.PreparedContinuationHash -or
+            $intent.failure_at_phase -cne 'PayloadActivationIntent' -or [string]::IsNullOrWhiteSpace($intent.failure) -or
+            $receipt.ActivationContinuationHash -cne (Get-RepositoryRecoveryValueHash $intent)) {
+            throw 'repository-recovery-receipt-invalid: activation continuation identity'
+        }
+    }
     if ($receipt.Phase -cne 'Prepared' -and !($receipt.Phase -ceq 'FailedHeld' -and $receipt.FailureAtPhase -ceq 'Prepared') -and
         $null -eq $receipt.Binding.Retained) { throw 'repository-recovery-receipt-invalid: retained proof missing' }
     if ($receipt.Phase -ceq 'Completed' -and (!$receipt.SavedResult -or
@@ -61,12 +72,18 @@ function Save-RepositoryRecoveryReleaseReceipt {
             (Get-RepositoryRecoveryValueHash $prior.PreparedContinuation) -cne (Get-RepositoryRecoveryValueHash $Receipt.PreparedContinuation)) {
             throw 'repository-recovery-operator-continuation-drift'
         }
+        if ($prior.ContainsKey('ActivationContinuation') -and $null -ne $prior.ActivationContinuation -and
+            (Get-RepositoryRecoveryValueHash $prior.ActivationContinuation) -cne (Get-RepositoryRecoveryValueHash $Receipt.ActivationContinuation)) {
+            throw 'repository-recovery-activation-continuation-drift'
+        }
     }
     $Receipt.Revision++
     $Receipt.BindingHash=Get-RepositoryRecoveryValueHash $Receipt.Binding
     $Receipt.ResultHash=Get-RepositoryRecoveryValueHash $Receipt.SavedResult
     if (!$Receipt.Contains('PreparedContinuation')) { $Receipt.PreparedContinuation=$null }
     $Receipt.PreparedContinuationHash=Get-RepositoryRecoveryValueHash $Receipt.PreparedContinuation
+    if (!$Receipt.Contains('ActivationContinuation')) { $Receipt.ActivationContinuation=$null }
+    $Receipt.ActivationContinuationHash=Get-RepositoryRecoveryValueHash $Receipt.ActivationContinuation
     $Receipt.ObservedAtUtc=[DateTime]::UtcNow.ToString('O')
     Write-HybridRebuildJson -Path $ReceiptPath -Value $Receipt
     [void](Read-RepositoryRecoveryReleaseReceipt $ReceiptPath)
@@ -91,10 +108,37 @@ function Assert-RepositoryRecoveryPreparedReceipt($Receipt) {
     }
 }
 
+function Assert-RepositoryRecoveryActivationReceipt($Receipt) {
+    if ($Receipt.Phase -cne 'FailedHeld' -or $Receipt.FailureAtPhase -cne 'PayloadActivationIntent' -or
+        [string]::IsNullOrWhiteSpace($Receipt.Failure) -or $null -eq $Receipt.Binding.Retained -or
+        $null -ne $Receipt.SavedResult -or $null -ne $Receipt.Reconciliation -or
+        ($Receipt.Contains('ActivationContinuation') -and $null -ne $Receipt.ActivationContinuation)) {
+        throw 'repository-recovery-unsupported-activation-continuation; require failed payload intent with saved baseline and no prior continuation.'
+    }
+}
+
 function Invoke-RepositoryRecoveryRelease {
     param([Parameter(Mandatory)][string]$ReceiptPath, [Parameter(Mandatory)]$Binding,
-        [Parameter(Mandatory)][Collections.IDictionary]$Ports, [switch]$ResumePrepared, [string]$OperatorCommit='')
-    if ($ResumePrepared) {
+        [Parameter(Mandatory)][Collections.IDictionary]$Ports, [switch]$ResumePrepared, [switch]$ResumeActivation, [string]$OperatorCommit='')
+    if ($ResumePrepared -and $ResumeActivation) { throw 'repository-recovery-ambiguous-continuation' }
+    if ($ResumeActivation) {
+        $receipt=Read-RepositoryRecoveryReleaseReceipt $ReceiptPath
+        Assert-RepositoryRecoveryActivationReceipt $receipt
+        if ($OperatorCommit -cnotmatch '^[0-9a-f]{40}$' -or (Get-RepositoryRecoveryValueHash $Binding) -cne $receipt.BindingHash) {
+            throw 'repository-recovery-activation-binding-or-operator-drift'
+        }
+        $priorReceiptHash=(Get-FileHash -LiteralPath $ReceiptPath -Algorithm SHA256).Hash
+        # Refused preconditions leave the existing failure evidence untouched.
+        & $Ports.AssertHold; & $Ports.AssertTaskDisabled; & $Ports.AssertActivationLocations
+        Assert-RepositoryRecoveryDatabaseMatch (& $Ports.ReadDatabase) $Binding.TargetDatabase
+        & $Ports.Stop; & $Ports.AssertOriginals; & $Ports.AssertHold; & $Ports.AssertTaskDisabled
+        $receipt.Binding=$Binding
+        $receipt.ActivationContinuation=[ordered]@{ operator_commit=$OperatorCommit; prior_revision=$receipt.Revision;
+            prior_receipt_sha256=$priorReceiptHash; binding_hash=$receipt.BindingHash;
+            prepared_continuation_hash=$receipt.PreparedContinuationHash;
+            failure=$receipt.Failure; failure_at_phase=$receipt.FailureAtPhase }
+        $receipt.Failure=$null; $receipt.FailureAtPhase=$null
+    } elseif ($ResumePrepared) {
         $receipt=Read-RepositoryRecoveryReleaseReceipt $ReceiptPath
         Assert-RepositoryRecoveryPreparedReceipt $receipt
         if ($OperatorCommit -cnotmatch '^[0-9a-f]{40}$' -or
@@ -105,28 +149,30 @@ function Invoke-RepositoryRecoveryRelease {
     } else { $receipt=New-RepositoryRecoveryReleaseReceipt $ReceiptPath $Binding }
     $held=$false; $companionMutationStarted=$false
     try {
-        if (!$ResumePrepared) { & $Ports.CreateHold }
+        if (!$ResumePrepared -and !$ResumeActivation) { & $Ports.CreateHold }
         & $Ports.AssertHold; $held=$true
         # Original policy/XML and payload identities are already durable. No live
         # payload is touched until task exit and exact IIS/GPU drain are proven.
-        if (!$ResumePrepared -and $Binding.OriginalTask.Enabled) { & $Ports.DisableTask }
+        if (!$ResumePrepared -and !$ResumeActivation -and $Binding.OriginalTask.Enabled) { & $Ports.DisableTask }
         & $Ports.AssertTaskDisabled
-        if ($ResumePrepared) { & $Ports.AssertPreparedLocations }
-        & $Ports.Stop
-        & $Ports.AssertOriginals
-        Assert-RepositoryRecoveryDatabaseMatch (& $Ports.ReadDatabase) $Binding.OriginalDatabase
-        if ($ResumePrepared) {
-            $receipt.PreparedContinuation=[ordered]@{ operator_commit=$OperatorCommit;
-                original_binding_hash=$receipt.BindingHash }
+        if (!$ResumeActivation) {
+            if ($ResumePrepared) { & $Ports.AssertPreparedLocations }
+            & $Ports.Stop
+            & $Ports.AssertOriginals
+            Assert-RepositoryRecoveryDatabaseMatch (& $Ports.ReadDatabase) $Binding.OriginalDatabase
+            if ($ResumePrepared) {
+                $receipt.PreparedContinuation=[ordered]@{ operator_commit=$OperatorCommit;
+                    original_binding_hash=$receipt.BindingHash }
+                Save-RepositoryRecoveryReleaseReceipt $ReceiptPath $receipt
+            }
+            $Binding.Retained=& $Ports.CaptureRetained
             Save-RepositoryRecoveryReleaseReceipt $ReceiptPath $receipt
+            $receipt.Phase='MigrationIntent'; Save-RepositoryRecoveryReleaseReceipt $ReceiptPath $receipt
+            & $Ports.AssertHold; & $Ports.AssertTaskDisabled
+            $after=& $Ports.ApplyMigration
+            Assert-RepositoryRecoveryDatabaseMatch $after $Binding.TargetDatabase
+            $receipt.Phase='MigrationVerified'; Save-RepositoryRecoveryReleaseReceipt $ReceiptPath $receipt
         }
-        $Binding.Retained=& $Ports.CaptureRetained
-        Save-RepositoryRecoveryReleaseReceipt $ReceiptPath $receipt
-        $receipt.Phase='MigrationIntent'; Save-RepositoryRecoveryReleaseReceipt $ReceiptPath $receipt
-        & $Ports.AssertHold; & $Ports.AssertTaskDisabled
-        $after=& $Ports.ApplyMigration
-        Assert-RepositoryRecoveryDatabaseMatch $after $Binding.TargetDatabase
-        $receipt.Phase='MigrationVerified'; Save-RepositoryRecoveryReleaseReceipt $ReceiptPath $receipt
         & $Ports.AssertHold; & $Ports.AssertTaskDisabled
         & $Ports.BackupCompanion
         $receipt.Phase='PayloadActivationIntent'; Save-RepositoryRecoveryReleaseReceipt $ReceiptPath $receipt
@@ -208,5 +254,5 @@ function Invoke-RepositoryRecoveryReceiptReconciliation {
 }
 
 Export-ModuleMember -Function New-RepositoryRecoveryReleaseReceipt, Read-RepositoryRecoveryReleaseReceipt,
-    Save-RepositoryRecoveryReleaseReceipt, Assert-RepositoryRecoveryPreparedReceipt,
+    Save-RepositoryRecoveryReleaseReceipt, Assert-RepositoryRecoveryPreparedReceipt, Assert-RepositoryRecoveryActivationReceipt,
     Invoke-RepositoryRecoveryRelease, Invoke-RepositoryRecoveryReceiptReconciliation

@@ -396,12 +396,25 @@ append allowlists, protecting
 existing scheduler/worker authority rows; only identified new no-work receipts and
 verified no-work startup telemetry may be additional. Local updater implementation,
 checks and independent review are complete; production
-migration/deployment and live acceptance remain pending. The explicit
+deployment and live acceptance remain incomplete. The explicit
 `-ResumeRepositoryRecoveryPreparedRelease` accepts only untouched Prepared receipts
 without a baseline, failure or prior intent, preserving the original operation,
 application candidate, hold and bindings. It records the corrected operator commit
 immutably in separate `PreparedContinuation`; read-only reconciliation accepts the
 original candidate or recorded operator. It cannot implicitly retry, rebind or republish.
+The subsequent activation failure exposed an IIS configuration read while the real
+swap temporarily removes `App`: full environment checks now bracket the swap and
+candidate placement before IIS start, with gap-safe identity/location/hold/task
+checks between them. Explicit `-ResumeRepositoryRecoveryActivationRelease` is limited to
+`FailedHeld` at `PayloadActivationIntent`, exact target schema/history, the unchanged
+saved retained baseline and verified restored originals/candidates/companion backup.
+It requires no prior activation continuation, saved result or reconciliation and
+leaves the receipt unchanged on precondition refusal. Immutable `ActivationContinuation`
+preserves the original failure and binds the corrected operator/prior receipt before
+mutation, without changing `PreparedContinuation`. It runs only payload/validation/release;
+no migration or baseline recapture is allowed. Focused checks and the native
+incremental updater contract pass; final independent review and fresh production
+approval remain pending.
 
 SQL vector selection resolves chunk identity before record revision predicates
 to exclude the observed pair expansion, retaining all eligibility checks. Its

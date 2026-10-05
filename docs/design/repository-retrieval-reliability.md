@@ -644,3 +644,39 @@ Retain additive data on rollback; a predecessor that cannot honour waiting marke
 must remain admission-held until compatibility is demonstrated. Do not automatically
 process existing terminal jobs. Preserve the scheduled task/hidden launcher and
 the outstanding live retrieval acceptance gates.
+
+The authorised continuation using operator `22599f4d` subsequently reached
+`FailedHeld` revision 7 at `PayloadActivationIntent`: the predecessor application
+was restored, with the owned hold retained and scheduled task disabled. The real
+payload swap moves `App` to `Previous` before invoking activation; the activation
+environment check then reads IIS configuration requiring the temporarily absent
+`App/web.config`. The local correction checks the full environment immediately
+before the swap and again after candidate placement, before starting IIS. During
+the expected directory gap, configuration/task identity, safe locations, hold and
+candidate/previous fingerprints remain checked without reading the absent IIS
+application configuration; unrelated failures remain explicit.
+
+Explicit `-ResumeRepositoryRecoveryActivationRelease` accepts only `FailedHeld` with
+`FailureAtPhase=PayloadActivationIntent`, a saved baseline and no `SavedResult`,
+`Reconciliation` or prior `ActivationContinuation`. Before mutation, require authoritative
+target database identity/history/schema, a fresh retained-state comparison against
+the unchanged saved baseline, exact restored original and candidate payload hashes,
+the verified existing companion backup, owned deny-all hold, disabled task, stopped
+IIS and a fresh GPU drain with clean ownership/cleanup. Require the expected safe
+payload locations; ambiguous or later failure states are refused. All precondition
+refusals leave the prior receipt unchanged. Preserve the original operation, binding
+and `PreparedContinuation` operator. Before payload mutation, immutable
+`ActivationContinuation` records `operator_commit`, `prior_revision`,
+`prior_receipt_sha256`, `binding_hash`, `prepared_continuation_hash`, `failure` and
+`failure_at_phase`. The saved original failure remains there while top-level failure
+fields reset for the new attempt; neither continuation permits another attempt.
+
+Run only the coordinated payload activation, validation and release suffix. Reuse
+the verified companion backup; do not recapture or replace the retained baseline,
+call `ApplyMigration`, republish candidates or overwrite recovery evidence. Keep
+the existing held-failure and uncertain-release protections, including no schema
+downgrade, predecessor restart or hold release on failure. Focused local checks and
+the native incremental updater contract pass, following a red reproduction of the
+actual configuration-read failure. Final independent review remains pending,
+followed by new production approval;
+the earlier approval does not authorise this forward continuation.

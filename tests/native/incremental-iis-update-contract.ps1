@@ -235,5 +235,14 @@ foreach ($arguments in @(
     $rejected=Invoke-ExpectedRejection -Arguments (@('-SourceRoot',$SourceRoot,'-PlanOnly')+$arguments)
     if ($rejected.ExitCode -eq 0 -or $rejected.Output -notmatch 'Prepared resume requires') { throw 'Prepared continuation accepted an ambiguous updater mode.' }
 }
+foreach ($arguments in @(
+    @('-ResumeRepositoryRecoveryActivationRelease','20261005T000000Z-09945ae1f034-repositoryrecovery'),
+    @('-ApplyRepositoryRecoveryAuthorityMigration','-ResumeRepositoryRecoveryActivationRelease','invalid'),
+    @('-ApplyRepositoryRecoveryAuthorityMigration','-ReconcileRepositoryRecoveryRelease','20261005T000000Z-09945ae1f034-repositoryrecovery','-ResumeRepositoryRecoveryActivationRelease','20261005T000000Z-09945ae1f034-repositoryrecovery'),
+    @('-ApplyRepositoryRecoveryAuthorityMigration','-ResumeRepositoryRecoveryPreparedRelease','20261005T000000Z-09945ae1f034-repositoryrecovery','-ResumeRepositoryRecoveryActivationRelease','20261005T000000Z-09945ae1f034-repositoryrecovery')
+)) {
+    $rejected=Invoke-ExpectedRejection -Arguments (@('-SourceRoot',$SourceRoot,'-PlanOnly')+$arguments)
+    if ($rejected.ExitCode -eq 0 -or $rejected.Output -notmatch 'activation resume requires|Prepared resume requires') { throw 'Activation continuation accepted an ambiguous updater mode.' }
+}
 
 Write-Output "Incremental IIS update contract passed."

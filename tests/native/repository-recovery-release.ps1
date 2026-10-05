@@ -21,7 +21,10 @@ function New-Case([bool]$TaskEnabled) {
         CompanionPreviousRoot=(Join-Path $releaseRoot 'previous-interactive-host'); HoldPath=(Join-Path $root 'hold.json') }
     foreach ($key in @('ReleaseRoot','ApplicationRoot','CandidateRoot','CompanionRoot','CompanionCandidateRoot')) {
         [void](New-Item -ItemType Directory -Path $paths.$key -Force)
-        if ($key -ne 'ReleaseRoot') { Set-Content -LiteralPath (Join-Path $paths.$key 'payload.txt') -Value $key }
+        if ($key -ne 'ReleaseRoot') {
+            Set-Content -LiteralPath (Join-Path $paths.$key 'payload.txt') -Value $key
+            Set-Content -LiteralPath (Join-Path $paths.$key 'web.config') -Value '<configuration />'
+        }
     }
     $contract=Get-RepositoryRecoveryMigrationContract
     $ids=@('20260726215521_InitialPhase1') + @(Get-ChildItem -LiteralPath (Join-Path $SourceRoot 'src/FluxKnowledge.Infrastructure.SqlServer/Persistence/Migrations') -Filter '*.cs' -File |
@@ -53,6 +56,7 @@ function New-Case([bool]$TaskEnabled) {
             Copy-Item -LiteralPath (Join-Path $paths.CompanionCandidateRoot 'payload.txt') -Destination $paths.CompanionRoot -Force
             [void](New-Item -ItemType Directory -Path $paths.ApplicationRoot)
             Copy-Item -LiteralPath (Join-Path $paths.CandidateRoot 'payload.txt') -Destination $paths.ApplicationRoot
+            Copy-Item -LiteralPath (Join-Path $paths.CandidateRoot 'web.config') -Destination $paths.ApplicationRoot
         }.GetNewClosure()
         Start={ $box.Pool='Started'; if ((Get-Content -LiteralPath (Join-Path $paths.ApplicationRoot 'payload.txt')).Trim() -ceq 'CandidateRoot') {
                 $box.NewStarts++
@@ -258,6 +262,9 @@ try {
     function Get-FileHash { param($LiteralPath,$Algorithm='SHA256') if ($LiteralPath -like '*run-outlook-hidden.vbs') { return @{Hash=('D'*64)} }
         return Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $LiteralPath -Algorithm $Algorithm }
     function Get-IncrementalIisHostingSettings {
+        if (!(Test-Path -LiteralPath (Join-Path $wrapperCase.Binding.Paths.ApplicationRoot 'web.config'))) {
+            throw 'Cannot read configuration file: App/web.config'
+        }
         $observed=$wrapperCase.Binding.OriginalIis | ConvertTo-Json | ConvertFrom-Json -AsHashtable
         $observed.PoolState=$wrapperCase.Box.Pool
         return $observed
@@ -364,6 +371,176 @@ try {
         Assert-True ($reconciled.migration -ceq $(if ($applied) {'applied'} else {'not-applied'}) -and
             $after.PreparedContinuation.operator_commit -ceq ('f'*40) -and $case.Box.SqlCalls -eq 1 -and $case.Box.NewStarts -eq 0 -and $case.Box.ReleaseCalls -eq 0) 'Reconciliation lost continuation identity or replayed unknown work.'
         Expect-Failure { Invoke-RepositoryRecoveryIisUpdate -SourceRoot $SourceRoot -Commit ('e'*40) -ExistingRelease $case.Binding.ReleaseId } 'release-commit-drift'
+    }
+
+    function Set-FailedActivationCase($FailedCase) {
+        if (!(Test-Path -LiteralPath $FailedCase.Path)) { [void](New-RepositoryRecoveryReleaseReceipt $FailedCase.Path $FailedCase.Binding) }
+        & $FailedCase.Ports.CreateHold; & $FailedCase.Ports.Stop
+        $FailedCase.Ports.AssertPreparedLocations={}
+        $originalActivate=$FailedCase.Ports.Activate
+        $FailedCase.Ports.Activate={ throw 'injected-before-candidate-placement' }
+        Expect-Failure { Invoke-RepositoryRecoveryRelease -ReceiptPath $FailedCase.Path -Binding $FailedCase.Binding -Ports $FailedCase.Ports -ResumePrepared -OperatorCommit ('f'*40) } 'failed-held'
+        $FailedCase.Ports.Activate=$originalActivate
+        $FailedCase.Box.SavedRetained=$FailedCase.Binding.Retained
+        $FailedCase.Ports.CaptureRetained={ throw 'Failed activation must not recapture or rebase retained work.' }
+        $FailedCase.Ports.ApplyMigration={ throw 'Failed activation must not replay SQL.' }
+        $FailedCase.Ports.BackupCompanion={
+            Assert-True ((Get-HybridPayloadFingerprint $FailedCase.Binding.Paths.CompanionPreviousRoot) -ceq $FailedCase.Binding.Payloads.OriginalCompanion) 'backup-drift'
+        }.GetNewClosure()
+        $FailedCase.Ports.AssertActivationLocations={
+            Assert-True ($FailedCase.Box.Pool -ceq 'Stopped') 'activation-pool-drift'
+            Assert-True (!(Test-Path -LiteralPath $FailedCase.Binding.Paths.PreviousRoot) -and !(Test-Path -LiteralPath $FailedCase.Binding.Paths.FailedRoot)) 'activation-location-drift'
+            foreach ($item in @(
+                @($FailedCase.Binding.Paths.ApplicationRoot,$FailedCase.Binding.Payloads.OriginalWeb),
+                @($FailedCase.Binding.Paths.CompanionRoot,$FailedCase.Binding.Payloads.OriginalCompanion),
+                @($FailedCase.Binding.Paths.CandidateRoot,$FailedCase.Binding.Payloads.CandidateWeb),
+                @($FailedCase.Binding.Paths.CompanionCandidateRoot,$FailedCase.Binding.Payloads.CandidateCompanion),
+                @($FailedCase.Binding.Paths.CompanionPreviousRoot,$FailedCase.Binding.Payloads.OriginalCompanion))) {
+                Assert-True ((Get-HybridPayloadFingerprint $item[0]) -ceq $item[1]) 'activation-payload-drift'
+            }
+            Assert-RepositoryRecoveryRetainedState $FailedCase.Binding.Retained $FailedCase.Box.SavedRetained
+        }.GetNewClosure()
+    }
+    $case=New-Case $false; $cases.Add($case); Set-FailedActivationCase $case
+    $failedReceipt=Read-RepositoryRecoveryReleaseReceipt $case.Path
+    $failedFileHash=(Get-FileHash -LiteralPath $case.Path).Hash
+    $baselineHash=Get-RepositoryRecoveryValueHash $failedReceipt.Binding.Retained
+    $result=Invoke-RepositoryRecoveryRelease -ReceiptPath $case.Path -Binding $case.Binding -Ports $case.Ports -ResumeActivation -OperatorCommit ('e'*40)
+    $continued=Read-RepositoryRecoveryReleaseReceipt $case.Path
+    Assert-True ($result.ok -and $case.Box.SqlCalls -eq 1 -and $case.Box.NewStarts -eq 1 -and $case.Box.OldStarts -eq 0 -and $case.Box.ReleaseCalls -eq 1) 'Forward continuation did not run only the activation suffix.'
+    Assert-True ($continued.PreparedContinuation.operator_commit -ceq ('f'*40) -and $continued.ActivationContinuation.operator_commit -ceq ('e'*40) -and
+        $continued.ActivationContinuation.prior_receipt_sha256 -ceq $failedFileHash -and $continued.ActivationContinuation.prior_revision -eq $failedReceipt.Revision -and
+        $continued.ActivationContinuation.failure -ceq $failedReceipt.Failure -and $continued.ActivationContinuation.failure_at_phase -ceq 'PayloadActivationIntent' -and
+        (Get-RepositoryRecoveryValueHash $continued.Binding.Retained) -ceq $baselineHash) 'Forward intent lost original identity, failure or retained evidence.'
+    Expect-Failure { Invoke-RepositoryRecoveryRelease -ReceiptPath $case.Path -Binding $case.Binding -Ports $case.Ports -ResumeActivation -OperatorCommit ('e'*40) } 'unsupported-activation-continuation'
+    [void](Invoke-RepositoryRecoveryReceiptReconciliation -ReceiptPath $case.Path -Ports $case.Ports)
+    Assert-True ($case.Box.SqlCalls -eq 1 -and $case.Box.NewStarts -eq 1 -and $case.Box.ReleaseCalls -eq 1) 'Completed inspection replayed activation.'
+    $edited=Read-RepositoryRecoveryReleaseReceipt $case.Path; $edited.ActivationContinuation.operator_commit=('d'*40)
+    Expect-Failure { Save-RepositoryRecoveryReleaseReceipt $case.Path $edited } 'activation-continuation-drift'
+
+    foreach ($boundary in @('phase','failure-phase','saved-result','prior-intent','hold','task','pool','gpu','database','columns','retained','candidate','backup','location','operator')) {
+        $case=New-Case $false; $cases.Add($case); Set-FailedActivationCase $case
+        $receipt=Read-RepositoryRecoveryReleaseReceipt $case.Path
+        $reason='unsupported-activation-continuation'; $operator=('e'*40)
+        switch ($boundary) {
+            'phase' { $receipt.Phase='MigrationVerified'; Save-RepositoryRecoveryReleaseReceipt $case.Path $receipt }
+            'failure-phase' { $receipt.FailureAtPhase='ValidatedHeld'; Save-RepositoryRecoveryReleaseReceipt $case.Path $receipt }
+            'saved-result' { $receipt.SavedResult=@{ok=$true}; Save-RepositoryRecoveryReleaseReceipt $case.Path $receipt }
+            'prior-intent' { $receipt.Reconciliation=@{mode='previous-intent'}; Save-RepositoryRecoveryReleaseReceipt $case.Path $receipt }
+            'hold' { $case.Box.HoldOwner='another-release'; $reason='hold-owner-changed' }
+            'task' { $case.Box.TaskEnabled=$true; $reason='task-not-disabled' }
+            'pool' { $case.Box.Pool='Started'; $reason='activation-pool-drift' }
+            'gpu' { $case.Ports.Stop={ throw 'uncertain-gpu-cleanup' }; $reason='uncertain-gpu-cleanup' }
+            'database' { $case.Box.Db=$case.Box.Db | ConvertTo-Json -Depth 20 | ConvertFrom-Json -AsHashtable; $case.Box.Db.Identity.DatabaseGuid=[Guid]::NewGuid().ToString(); $reason='database-state-drift' }
+            'columns' { $case.Box.Db=$case.Box.Db | ConvertTo-Json -Depth 20 | ConvertFrom-Json -AsHashtable; $case.Box.Db.Columns[0].IsNullable=$false; $reason='database-state-drift' }
+            'retained' { $case.Box.SavedRetained=@{Projection=@{Version=1}; Tables=@{Vectors=@{RowCount=0; Fingerprint=('B'*64)}}}; $reason='retained-state-changed' }
+            'candidate' { Set-Content -LiteralPath (Join-Path $case.Binding.Paths.CandidateRoot 'payload.txt') -Value 'changed'; $reason='activation-payload-drift' }
+            'backup' { Set-Content -LiteralPath (Join-Path $case.Binding.Paths.CompanionPreviousRoot 'payload.txt') -Value 'changed'; $reason='activation-payload-drift' }
+            'location' { [void](New-Item -ItemType Directory -Path $case.Binding.Paths.FailedRoot); $reason='activation-location-drift' }
+            'operator' { $operator='not-a-commit'; $reason='activation-binding-or-operator-drift' }
+        }
+        $priorHash=(Get-FileHash -LiteralPath $case.Path).Hash
+        Expect-Failure { Invoke-RepositoryRecoveryRelease -ReceiptPath $case.Path -Binding $case.Binding -Ports $case.Ports -ResumeActivation -OperatorCommit $operator } $reason
+        Assert-True ((Get-FileHash -LiteralPath $case.Path).Hash -ceq $priorHash -and $case.Box.SqlCalls -eq 1 -and $case.Box.NewStarts -eq 0 -and $case.Box.ReleaseCalls -eq 0) "Unsafe activation continuation changed receipt or work: $boundary"
+    }
+
+    # The real wrapper and swap must tolerate the deliberate App directory gap.
+    # IIS configuration reads above require the same file as GetSection in IIS.
+    function Get-RepositoryRecoveryCompanionConnectionString { return 'disposable-placeholder' }
+    function Get-RepositoryRecoveryRetainedState { param($ConnectionString,$Projection,$VerifyNewWorker)
+        return @{ Projection=@{Version=1}; Tables=@{Vectors=@{RowCount=329;Fingerprint=('A'*64)}} }
+    }
+    function Stop-HybridIisAfterGpuDrain { $wrapperCase.Box.Pool='Stopped' }
+    function Copy-InteractiveHostPayload { param($Source,$Destination)
+        if ($Destination -ceq $wrapperCase.Binding.Paths.CompanionPreviousRoot -and (Test-Path -LiteralPath $Destination)) {
+            throw 'Existing companion backup must not be overwritten.'
+        }
+        if (!(Test-Path -LiteralPath $Destination)) { [void](New-Item -ItemType Directory -Path $Destination) }
+        Get-ChildItem -LiteralPath $Source -File | Copy-Item -Destination $Destination -Force
+    }
+    function Invoke-CandidatePayloadActivation { param($CandidateRoot,$ApplicationRoot)
+        [void](New-Item -ItemType Directory -Path $ApplicationRoot)
+        Get-ChildItem -LiteralPath $CandidateRoot -File | Copy-Item -Destination $ApplicationRoot
+    }
+    function Start-WebAppPool { param($Name) $wrapperCase.Box.NewStarts++; $wrapperCase.Box.Pool='Started' }
+    function Wait-IisAppPoolState { param($Name,$ExpectedState,$TimeoutSeconds)
+        Assert-True ($wrapperCase.Box.Pool -ceq $ExpectedState) 'Pool did not reach expected state.'
+    }
+    function Invoke-RequiredLoopbackProbes { param($Origin,$TimeoutSeconds) }
+    function Wait-IncrementalIisPreloadStartup { param($AfterUtc,$TimeoutSeconds) }
+    function Disable-ScheduledTask { param($TaskName,$TaskPath,$ErrorAction) $wrapperCase.Box.TaskEnabled=$false }
+    function Remove-DeploymentValidationHold { param($Path,$ReleaseId)
+        $wrapperCase.Box.ReleaseCalls++; Remove-Item -LiteralPath $Path
+    }
+    $loopbackOrigin=@{Origin='http://disposable'}
+    $case=New-Case $false; $cases.Add($case); Use-PreparedWrapperCase $case
+    function Invoke-RepositoryRecoveryMigrationAttempt { param($ConnectionString,$OriginalState,$SqlPath)
+        $wrapperCase.Box.SqlCalls++; $wrapperCase.Box.Db=$wrapperCase.Binding.TargetDatabase; return $wrapperCase.Box.Db
+    }
+    $placed=Invoke-RepositoryRecoveryIisUpdate -SourceRoot $SourceRoot -Commit ('f'*40) -ExistingRelease $case.Binding.ReleaseId -ResumePrepared | ConvertFrom-Json
+    Assert-True ($placed.ok -and $case.Box.NewStarts -eq 1 -and $case.Box.ReleaseCalls -eq 1) 'Real wrapper read IIS configuration during the payload gap.'
+
+    $case=New-Case $false; $cases.Add($case); Use-PreparedWrapperCase $case; Set-FailedActivationCase $case
+    $baselineHash=Get-RepositoryRecoveryValueHash $case.Binding.Retained
+    $backupHash=Get-HybridPayloadFingerprint $case.Binding.Paths.CompanionPreviousRoot
+    $receiptHash=(Get-FileHash -LiteralPath $case.Path).Hash
+    $inspected=Invoke-RepositoryRecoveryIisUpdate -SourceRoot $SourceRoot -Commit ('e'*40) -ExistingRelease $case.Binding.ReleaseId -ResumeActivation -InspectActivation
+    Assert-True ($inspected.failure_at_phase -ceq 'PayloadActivationIntent' -and (Get-FileHash -LiteralPath $case.Path).Hash -ceq $receiptHash -and
+        $case.Box.SqlCalls -eq 1 -and $case.Box.NewStarts -eq 0 -and $case.Box.ReleaseCalls -eq 0) 'Failed activation inspection mutated state.'
+    function Invoke-RepositoryRecoveryMigrationAttempt { throw 'Forward continuation replayed migration.' }
+    $placed=Invoke-RepositoryRecoveryIisUpdate -SourceRoot $SourceRoot -Commit ('e'*40) -ExistingRelease $case.Binding.ReleaseId -ResumeActivation | ConvertFrom-Json
+    $completed=Read-RepositoryRecoveryReleaseReceipt $case.Path
+    Assert-True ($placed.ok -and $case.Box.SqlCalls -eq 1 -and $case.Box.NewStarts -eq 1 -and $case.Box.ReleaseCalls -eq 1 -and
+        (Get-RepositoryRecoveryValueHash $completed.Binding.Retained) -ceq $baselineHash -and
+        (Get-HybridPayloadFingerprint $case.Binding.Paths.CompanionPreviousRoot) -ceq $backupHash) 'Actual forward wrapper recaptured work or overwrote the verified backup.'
+    [void](Invoke-RepositoryRecoveryIisUpdate -SourceRoot $SourceRoot -Commit ('e'*40) -ExistingRelease $case.Binding.ReleaseId)
+    Assert-True ($case.Box.NewStarts -eq 1 -and $case.Box.ReleaseCalls -eq 1) 'Recorded activation operator replayed its completed release.'
+    Expect-Failure { Invoke-RepositoryRecoveryIisUpdate -SourceRoot $SourceRoot -Commit ('d'*40) -ExistingRelease $case.Binding.ReleaseId } 'release-commit-drift'
+
+    # A hosting change after placement is caught before the first candidate start.
+    function Restore-InteractiveHostPayload { param($PreviousRoot,$LiveRoot)
+        Get-ChildItem -LiteralPath $PreviousRoot -File | Copy-Item -Destination $LiveRoot -Force
+    }
+    function Invoke-CandidatePayloadActivation { param($CandidateRoot,$ApplicationRoot)
+        [void](New-Item -ItemType Directory -Path $ApplicationRoot)
+        Get-ChildItem -LiteralPath $CandidateRoot -File | Copy-Item -Destination $ApplicationRoot
+        $wrapperCase.Box.HostingChanged=$true
+    }
+    function Get-IncrementalIisHostingSettings {
+        if (!(Test-Path -LiteralPath (Join-Path $wrapperCase.Binding.Paths.ApplicationRoot 'web.config'))) { throw 'Cannot read configuration file: App/web.config' }
+        $observed=$wrapperCase.Binding.OriginalIis | ConvertTo-Json | ConvertFrom-Json -AsHashtable
+        $observed.PoolState=$wrapperCase.Box.Pool
+        if ($wrapperCase.Box.HostingChanged -and (Get-Content -LiteralPath (Join-Path $wrapperCase.Binding.Paths.ApplicationRoot 'payload.txt')).Trim() -ceq 'CandidateRoot') {
+            $observed.StartMode='changed-after-placement'
+        }
+        return $observed
+    }
+    $case=New-Case $false; $cases.Add($case); Use-PreparedWrapperCase $case; Set-FailedActivationCase $case
+    Expect-Failure { Invoke-RepositoryRecoveryIisUpdate -SourceRoot $SourceRoot -Commit ('e'*40) -ExistingRelease $case.Binding.ReleaseId -ResumeActivation } 'configuration-or-hosting-drift'
+    $failed=Read-RepositoryRecoveryReleaseReceipt $case.Path
+    Assert-True ($case.Box.NewStarts -eq 0 -and $case.Box.SqlCalls -eq 1 -and $case.Box.ReleaseCalls -eq 0 -and
+        $case.Box.Pool -ceq 'Stopped' -and !$case.Box.TaskEnabled -and $failed.Phase -ceq 'FailedHeld' -and
+        (Get-HybridPayloadFingerprint $case.Binding.Paths.ApplicationRoot) -ceq $case.Binding.Payloads.OriginalWeb -and
+        (Get-HybridPayloadFingerprint $case.Binding.Paths.CompanionRoot) -ceq $case.Binding.Payloads.OriginalCompanion) 'Drift before Start did not retain a stopped/held rollback.'
+    Expect-Failure { Invoke-RepositoryRecoveryIisUpdate -SourceRoot $SourceRoot -Commit ('e'*40) -ExistingRelease $case.Binding.ReleaseId -ResumeActivation } 'unsupported-activation-continuation'
+
+    foreach ($failure in @('before-placement','held-probe','release-acknowledgement','after-release')) {
+        $case=New-Case $false; $cases.Add($case); Set-FailedActivationCase $case
+        switch ($failure) {
+            'before-placement' { $case.Ports.Activate={ throw 'candidate-copy-failed' } }
+            'held-probe' { $case.Box.ProbeFailure=$true }
+            'release-acknowledgement' { $case.Box.ActivationFailure=$true }
+            'after-release' { $case.Ports.PostReleaseProbes={ throw 'post-release-probe-failed' } }
+        }
+        Expect-Failure { Invoke-RepositoryRecoveryRelease -ReceiptPath $case.Path -Binding $case.Binding -Ports $case.Ports -ResumeActivation -OperatorCommit ('e'*40) } 'failed-held|activation-uncertain'
+        $failed=Read-RepositoryRecoveryReleaseReceipt $case.Path
+        Assert-True ($case.Box.SqlCalls -eq 1 -and $case.Box.OldStarts -eq 0 -and $failed.ActivationContinuation.failure -match 'injected-before-candidate-placement') 'Forward failure replayed SQL, restarted predecessor or lost original failure.'
+        if ($failure -cin @('release-acknowledgement','after-release')) {
+            Assert-True ($failed.Phase -ceq 'HoldReleaseIntent' -and $case.Box.Restores -eq 1) 'Uncertain release restored an incompatible predecessor.'
+        } else {
+            Assert-True ($failed.Phase -ceq 'FailedHeld' -and $case.Box.Pool -ceq 'Stopped' -and !$case.Box.TaskEnabled -and $case.Box.ReleaseCalls -eq 0) 'Failed activation abandoned its held rollback.'
+        }
+        Expect-Failure { Invoke-RepositoryRecoveryRelease -ReceiptPath $case.Path -Binding $case.Binding -Ports $case.Ports -ResumeActivation -OperatorCommit ('e'*40) } 'unsupported-activation-continuation'
     }
 
     $case=New-Case $false; $cases.Add($case)

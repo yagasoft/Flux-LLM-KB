@@ -473,3 +473,29 @@ automatic-continuation section of the design; keep one implementation owner.
   15,934,056 repeated memberships and 120,000 receipts; a late mutation was refused.
   Production remains stopped/held pending separately authorised continuation; no
   inactive-generation cleanup is included.
+
+- [x] Correct the observed `PayloadActivationIntent` failure: run full environment
+  checks immediately before the real payload swap and after candidate placement,
+  before IIS start; retain gap-safe location/identity/hold/task checks while `App`
+  is absent. The red reproduction and passing focused checks exercise the actual
+  swap helper with an IIS configuration read that requires `App/web.config`.
+- [x] Verify implemented `-ResumeRepositoryRecoveryActivationRelease` only admits
+  `FailedHeld` at `FailureAtPhase=PayloadActivationIntent` with a saved baseline and
+  no `SavedResult`, `Reconciliation` or prior `ActivationContinuation`, with authoritative target database,
+  unchanged saved retained baseline, exact restored originals/candidates, verified
+  reusable companion backup, owned hold, disabled task and stopped/clean GPU state.
+  Bind the corrected operator, prior receipt revision/hash, binding hash,
+  `PreparedContinuation` hash and original failure/phase immutably in
+  `ActivationContinuation` before mutation; preserve the original operation/binding
+  and `PreparedContinuation`. Reset only top-level failure fields for the new attempt.
+  Precondition refusals leave the prior receipt unchanged.
+  Exercise only the payload/validation/release suffix; prove zero baseline capture,
+  migration replay, republish or backup overwrite. Refuse drift, duplicate intent,
+  unsafe locations and later/ambiguous states; inject failures before/after placement
+  and before/after hold release to preserve held rollback and uncertain-release
+  protections.
+- [x] Pass the native incremental updater contract, including the focused release
+  ports and retained row-stream checks.
+- [ ] Complete final independent review, then obtain
+  fresh production approval before use; keep terminal recovery, hosting changes and
+  inactive-generation cleanup separate.
