@@ -455,9 +455,21 @@ automatic-continuation section of the design; keep one implementation owner.
   `ApplyRepositoryRecoveryAuthorityMigration` and exact-release
   `ReconcileRepositoryRecoveryRelease` are locally implemented using existing
   mutex/receipt/hold/drain/payload/task helpers, with migration-only reconciliation
-  and read-only verification of completed duplicates. Fixed paged projections and
-  captured existing scheduler/worker authority keys preserve retained state; only
+  and read-only verification of completed duplicates. One ordered sequential SQL row
+  stream per table and native bounded UTF-8 hashing preserve exact V1 projections,
+  hashes and checks; captured scheduler/worker authority keys and the three existing
+  append-table allowlists remain unchanged. Only
   identified new no-work wake/admission receipts and verified no-work startup
   telemetry are additional. Local implementation, focused disposable SQL/payload
   and combined native checks, and independent review are complete; separate
   production approval/live validation remain pending.
+  The focused correction adds explicit `-ResumeRepositoryRecoveryPreparedRelease`
+  only for untouched Prepared receipts without baseline/failure/prior intent,
+  preserving original operation/candidate/hold/bindings and recording the corrected
+  operator immutably in separate `PreparedContinuation`. Read-only reconciliation
+  accepts the original candidate or recorded operator; no implicit retry/rebind/republish.
+  Three full synthetic retained-scale scans took 39.02/40.67/40.32 seconds with 329 MiB
+  peak memory, preserving 50,000 1,024-dimensional vectors, 2,596 generations,
+  15,934,056 repeated memberships and 120,000 receipts; a late mutation was refused.
+  Production remains stopped/held pending separately authorised continuation; no
+  inactive-generation cleanup is included.

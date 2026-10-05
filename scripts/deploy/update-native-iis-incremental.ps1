@@ -11,6 +11,7 @@ param(
     [switch]$ApplyCodeDisclosureProofMigration,
     [switch]$ApplyRepositoryRecoveryAuthorityMigration,
     [string]$ReconcileRepositoryRecoveryRelease = '',
+    [string]$ResumeRepositoryRecoveryPreparedRelease = '',
     [switch]$ApplyHybridPassageRebuild,
     [string]$ResumeHybridRebuildRelease = '',
     [string]$ReplaceHybridRebuildRelease = '',
@@ -1438,7 +1439,8 @@ function Assert-RepositoryRecoveryNewWorker($Row, [DateTime]$CandidateStartedUtc
 }
 
 function Invoke-RepositoryRecoveryIisUpdate {
-    param([Parameter(Mandatory)][string]$SourceRoot, [Parameter(Mandatory)][string]$Commit, [string]$ExistingRelease='')
+    param([Parameter(Mandatory)][string]$SourceRoot, [Parameter(Mandatory)][string]$Commit, [string]$ExistingRelease='',
+        [switch]$ResumePrepared, [switch]$InspectPrepared)
     if ($ExistingRelease) {
         $releaseRoot=Join-Path $IncrementalRecoveryRoot $ExistingRelease
         foreach ($root in @($CanonicalLiveRoot,$CanonicalRecoveryRoot,$IncrementalRecoveryRoot,$releaseRoot)) {
@@ -1446,7 +1448,10 @@ function Invoke-RepositoryRecoveryIisUpdate {
         }
         $receiptPath=Join-Path $releaseRoot 'repository-recovery-receipt.json'
         $saved=Read-RepositoryRecoveryReleaseReceipt $receiptPath; $binding=$saved.Binding
-        if ($binding.ReleaseId -cne $ExistingRelease -or $binding.Commit -cne $Commit) { throw 'repository-recovery-release-commit-drift' }
+        $continuationOperator=if ($saved.ContainsKey('PreparedContinuation') -and $null -ne $saved.PreparedContinuation) { $saved.PreparedContinuation.operator_commit } else { '' }
+        if ($binding.ReleaseId -cne $ExistingRelease -or
+            (!$ResumePrepared -and $binding.Commit -cne $Commit -and $continuationOperator -cne $Commit)) { throw 'repository-recovery-release-commit-drift' }
+        if ($ResumePrepared) { Assert-RepositoryRecoveryPreparedReceipt $saved }
     } else {
         if (Test-Path -LiteralPath $ValidationHoldPath) { throw 'repository-recovery-existing-hold; reconcile its exact release before a new deployment.' }
         $original=Get-RepositoryRecoveryDatabaseState -ConnectionString (Get-DeploymentSqlConnectionString)
@@ -1558,7 +1563,7 @@ function Invoke-RepositoryRecoveryIisUpdate {
             Assert-RepositoryRecoveryPayloadHash $paths.ApplicationRoot $binding.Payloads.CandidateWeb
             Assert-RepositoryRecoveryPayloadHash $paths.CompanionRoot $binding.Payloads.CandidateCompanion }.GetNewClosure()
         AssertMigrationLocations={ & $assertEnvironment
-            if ((Get-WebAppPoolState -Name $SiteName).Value -cne 'Stopped' -or (Test-Path -LiteralPath $paths.PreviousRoot) -or (Test-Path -LiteralPath $paths.FailedRoot)) {
+            if ((Get-IncrementalIisHostingSettings).PoolState -cne 'Stopped' -or (Test-Path -LiteralPath $paths.PreviousRoot) -or (Test-Path -LiteralPath $paths.FailedRoot)) {
                 throw 'repository-recovery-payload-location-or-pool-drift'
             }
             Assert-RepositoryRecoveryPayloadHash $paths.ApplicationRoot $binding.Payloads.OriginalWeb
@@ -1568,14 +1573,33 @@ function Invoke-RepositoryRecoveryIisUpdate {
             if (Test-Path -LiteralPath $paths.CompanionPreviousRoot) {
                 Assert-RepositoryRecoveryPayloadHash $paths.CompanionPreviousRoot $binding.Payloads.OriginalCompanion
             }
-            & $checkRetained }.GetNewClosure()
+            if ($null -ne $binding.Retained) { & $checkRetained } }.GetNewClosure()
     }
     $ports.Swap={ param($activate,$start,$validate,$rollback)
         Invoke-IncrementalApplicationPayloadSwap -ApplicationRoot $paths.ApplicationRoot -CandidateRoot $paths.CandidateRoot `
             -PreviousRoot $paths.PreviousRoot -FailedRoot $paths.FailedRoot -RestartPreviousApplication:$false `
             -StopApplication $ports.Stop -ActivateCandidate $activate -StartApplication $start -ValidateApplication $validate -ValidateRollbackApplication $rollback
     }.GetNewClosure()
-    $result=if ($ExistingRelease) { Invoke-RepositoryRecoveryReceiptReconciliation -ReceiptPath $receiptPath -Ports $ports } else {
+    $ports.AssertPreparedLocations={
+        & $ports.AssertMigrationLocations
+        if (Test-Path -LiteralPath $paths.CompanionPreviousRoot) { throw 'repository-recovery-prepared-backup-location-drift' }
+        Assert-RepositoryRecoveryCandidateCommit $paths.CandidateRoot $binding.Commit
+        Assert-RepositoryRecoveryCandidateCommit $paths.CompanionCandidateRoot $binding.Commit
+        $sqlPath=Join-Path $releaseRoot 'repository-recovery-up.sql'
+        Assert-NotReparsePoint -Path $sqlPath -Message 'repository-recovery-prepared-sql-path-unsafe'
+        if ((Get-FileHash -LiteralPath $sqlPath).Hash -cne $binding.MigrationSha256) { throw 'repository-recovery-prepared-sql-drift' }
+    }.GetNewClosure()
+    if ($InspectPrepared) {
+        if (!$ResumePrepared) { throw 'repository-recovery-prepared-inspection-requires-resume' }
+        & $ports.AssertHold; & $ports.AssertTaskDisabled; & $ports.AssertPreparedLocations
+        Assert-RepositoryRecoveryDatabaseMatch (& $ports.ReadDatabase) $binding.OriginalDatabase
+        return [ordered]@{ release_id=$binding.ReleaseId; candidate_commit=$binding.Commit; operator_commit=$Commit;
+            receipt_phase=$saved.Phase; receipt_revision=$saved.Revision; receipt_sha256=(Get-FileHash -LiteralPath $receiptPath).Hash;
+            hold='preserve existing deny-all owner'; next_step='fresh verified GPU/IIS drain, durable operator intent, ordered retained capture, normal release flow' }
+    }
+    $result=if ($ResumePrepared) {
+        Invoke-RepositoryRecoveryRelease -ReceiptPath $receiptPath -Binding $binding -Ports $ports -ResumePrepared -OperatorCommit $Commit
+    } elseif ($ExistingRelease) { Invoke-RepositoryRecoveryReceiptReconciliation -ReceiptPath $receiptPath -Ports $ports } else {
         Invoke-RepositoryRecoveryRelease -ReceiptPath $receiptPath -Binding $binding -Ports $ports
     }
     $result | ConvertTo-Json -Depth 8
@@ -1641,6 +1665,10 @@ if ($ApplyRepositoryRecoveryAuthorityMigration -and ($ApplyMigrations -or $Apply
 if ($ReconcileRepositoryRecoveryRelease -and (!$ApplyRepositoryRecoveryAuthorityMigration -or
     $ReconcileRepositoryRecoveryRelease -cnotmatch '^\d{8}T\d{6}Z-[0-9a-f]{12}-repositoryrecovery$')) {
     throw 'Repository recovery reconciliation requires its migration flag and exact saved release name.'
+}
+if ($ResumeRepositoryRecoveryPreparedRelease -and (!$ApplyRepositoryRecoveryAuthorityMigration -or $ReconcileRepositoryRecoveryRelease -or
+    $ResumeRepositoryRecoveryPreparedRelease -cnotmatch '^\d{8}T\d{6}Z-[0-9a-f]{12}-repositoryrecovery$')) {
+    throw 'Repository recovery Prepared resume requires its migration flag and one exact saved release, without reconciliation.'
 }
 if ($EnableUnattendedDiscovery -and ($ApplyMigrations -or $ApplyCorpusChunkFullTextMigration -or
     $ApplyCodeDisclosureProofMigration -or $ApplyHybridPassageRebuild -or $RecoverStoppedPool -or
@@ -1717,13 +1745,20 @@ if ($PlanOnly) {
             original_web_sha256=(Get-HybridPayloadFingerprint $CanonicalDeployRoot);
             original_companion_sha256=(Get-HybridPayloadFingerprint $InteractiveHostRoot);
             reconciliation='migration-only inspection of an exact saved receipt; completed duplicate verifies and returns saved result; no payload/worker/hold replay';
-            reconcile_release=$ReconcileRepositoryRecoveryRelease }
+            reconcile_release=$ReconcileRepositoryRecoveryRelease; resume_prepared_release=$ResumeRepositoryRecoveryPreparedRelease }
         if ($ReconcileRepositoryRecoveryRelease) {
             $saved=Read-RepositoryRecoveryReleaseReceipt (Join-Path (Join-Path $IncrementalRecoveryRoot $ReconcileRepositoryRecoveryRelease) 'repository-recovery-receipt.json')
             $migrationPlan.saved_phase=$saved.Phase
             if ((Get-RepositoryRecoveryValueHash $database.History) -ceq (Get-RepositoryRecoveryValueHash $saved.Binding.TargetDatabase.History)) {
                 Assert-RepositoryRecoveryDatabaseMatch $database $saved.Binding.TargetDatabase
             } else { Assert-RepositoryRecoveryDatabaseMatch $database $saved.Binding.OriginalDatabase }
+        } elseif ($ResumeRepositoryRecoveryPreparedRelease) {
+            if ([string]::IsNullOrWhiteSpace($SourceRoot)) { $SourceRoot=Split-Path -Parent (Split-Path -Parent $PSScriptRoot) }
+            $SourceRoot=(Resolve-Path -LiteralPath $SourceRoot).Path
+            $operatorCommit=(& git -C $SourceRoot rev-parse HEAD 2>&1 | Out-String).Trim()
+            if ($LASTEXITCODE -ne 0 -or $operatorCommit -cnotmatch '^[0-9a-f]{40}$') { throw 'Prepared resume requires an exact operator commit.' }
+            $migrationPlan.prepared_continuation=Invoke-RepositoryRecoveryIisUpdate -SourceRoot $SourceRoot -Commit $operatorCommit `
+                -ExistingRelease $ResumeRepositoryRecoveryPreparedRelease -ResumePrepared -InspectPrepared
         } elseif (Test-Path -LiteralPath $ValidationHoldPath) { throw 'repository-recovery-existing-hold; identify its exact release before applying.' }
     }
     if ($EnableUnattendedDiscovery) {
@@ -1957,6 +1992,10 @@ try {
 
     if ($ApplyRepositoryRecoveryAuthorityMigration -and $ReconcileRepositoryRecoveryRelease) {
         Invoke-RepositoryRecoveryIisUpdate -SourceRoot $SourceRoot -Commit $commit -ExistingRelease $ReconcileRepositoryRecoveryRelease
+        return
+    }
+    if ($ApplyRepositoryRecoveryAuthorityMigration -and $ResumeRepositoryRecoveryPreparedRelease) {
+        Invoke-RepositoryRecoveryIisUpdate -SourceRoot $SourceRoot -Commit $commit -ExistingRelease $ResumeRepositoryRecoveryPreparedRelease -ResumePrepared
         return
     }
     Assert-IncrementalIisPreflight

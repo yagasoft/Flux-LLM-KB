@@ -389,11 +389,19 @@ inside its snapshot fence and reuses only fully validated safe immutable collisi
 winners. Recovery-feature closeout is integrated as Main `09945ae1`. The locally
 implemented canonical-updater extension binds the exact additive migration and
 coordinated payloads, supports migration-only reconciliation and preserves evidence,
-stopped predecessor and hold on failure. Its paged retained projections also protect
+stopped predecessor and hold on failure. Its retained scan uses one ordered sequential
+SQL row stream per table and native bounded UTF-8 hashing, preserving the exact V1
+projection/hash contract and checks. The three authority tables retain their
+append allowlists, protecting
 existing scheduler/worker authority rows; only identified new no-work receipts and
 verified no-work startup telemetry may be additional. Local updater implementation,
 checks and independent review are complete; production
-migration/deployment and live acceptance remain pending.
+migration/deployment and live acceptance remain pending. The explicit
+`-ResumeRepositoryRecoveryPreparedRelease` accepts only untouched Prepared receipts
+without a baseline, failure or prior intent, preserving the original operation,
+application candidate, hold and bindings. It records the corrected operator commit
+immutably in separate `PreparedContinuation`; read-only reconciliation accepts the
+original candidate or recorded operator. It cannot implicitly retry, rebind or republish.
 
 SQL vector selection resolves chunk identity before record revision predicates
 to exclude the observed pair expansion, retaining all eligibility checks. Its

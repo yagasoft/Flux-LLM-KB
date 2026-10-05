@@ -226,5 +226,14 @@ foreach ($conflict in @('-ApplyMigrations', '-ApplyCorpusChunkFullTextMigration'
 }
 & pwsh -NoProfile -File (Join-Path $SourceRoot 'tests/native/repository-recovery-release.ps1') -SourceRoot $SourceRoot
 if ($LASTEXITCODE -ne 0) { throw 'Repository recovery release contract failed.' }
+& pwsh -NoProfile -File (Join-Path $SourceRoot 'tests/native/repository-recovery-row-stream.ps1') -SourceRoot $SourceRoot
+if ($LASTEXITCODE -ne 0) { throw 'Repository recovery row stream failed.' }
+foreach ($arguments in @(
+    @('-ResumeRepositoryRecoveryPreparedRelease','20261005T000000Z-09945ae1f034-repositoryrecovery'),
+    @('-ApplyRepositoryRecoveryAuthorityMigration','-ReconcileRepositoryRecoveryRelease','20261005T000000Z-09945ae1f034-repositoryrecovery','-ResumeRepositoryRecoveryPreparedRelease','20261005T000000Z-09945ae1f034-repositoryrecovery')
+)) {
+    $rejected=Invoke-ExpectedRejection -Arguments (@('-SourceRoot',$SourceRoot,'-PlanOnly')+$arguments)
+    if ($rejected.ExitCode -eq 0 -or $rejected.Output -notmatch 'Prepared resume requires') { throw 'Prepared continuation accepted an ambiguous updater mode.' }
+}
 
 Write-Output "Incremental IIS update contract passed."

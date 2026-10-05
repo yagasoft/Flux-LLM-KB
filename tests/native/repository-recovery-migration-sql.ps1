@@ -28,6 +28,33 @@ $before = Get-RepositoryRecoveryDatabaseState -ConnectionString $connectionText
 Write-Output "Disposable recovery baseline: history=$($before.History.Count); last=$($before.History[-1].MigrationId); columns=$($before.Columns.Count)."
 Assert-RepositoryRecoveryMigrationBaseline $before
 $retained = Get-RepositoryRecoveryRetainedState -ConnectionString $connectionText
+# A reference V1 page implementation verifies identical persisted fingerprints,
+# including SQL's binary encoding, rowversion, dates, escaping and composite keys.
+foreach ($table in @('Artifacts','Vectors','IndexGenerationVectors','GpuSchedulerOperationReceipts')) {
+    $columns=$retained.Projection.Tables.$table
+    $select=(@($columns | ForEach-Object { '['+$_.Name.Replace(']',']]')+']' }) -join ',')
+    $order=(@($columns | Where-Object KeyOrdinal -GT 0 | Sort-Object KeyOrdinal | ForEach-Object { '['+$_.Name.Replace(']',']]')+']' }) -join ',')
+    $reference=[Security.Cryptography.IncrementalHash]::CreateHash([Security.Cryptography.HashAlgorithmName]::SHA256)
+    $referenceConnection=[Data.SqlClient.SqlConnection]::new($connectionText)
+    try {
+        $referenceConnection.Open(); [long]$offset=0
+        do {
+            $command=$referenceConnection.CreateCommand()
+            try {
+                $command.CommandText="SELECT (SELECT $select FROM [dbo].[$table] ORDER BY $order OFFSET @offset ROWS FETCH NEXT 128 ROWS ONLY FOR JSON PATH, INCLUDE_NULL_VALUES);"
+                [void]$command.Parameters.Add('@offset',[Data.SqlDbType]::BigInt); $command.Parameters['@offset'].Value=$offset
+                $document=[Text.Json.JsonDocument]::Parse([string]$command.ExecuteScalar())
+                try {
+                    $count=$document.RootElement.GetArrayLength()
+                    foreach ($entry in $document.RootElement.EnumerateArray()) { $reference.AppendData([Text.Encoding]::UTF8.GetBytes($entry.GetRawText())) }
+                    $offset+=$count
+                } finally { $document.Dispose() }
+            } finally { $command.Dispose() }
+        } while ($count -eq 128)
+        Assert-True ($offset -eq $retained.Tables.$table.RowCount -and [Convert]::ToHexString($reference.GetHashAndReset()) -ceq $retained.Tables.$table.Fingerprint) "Ordered streaming changed V1 proof in $table."
+    } finally { $referenceConnection.Dispose(); $reference.Dispose() }
+}
+Write-Output 'Streaming V1 equivalence passed: vector bytes, rowversion, composite memberships, Unicode, escaping, large values and time-zone offsets.'
 Invoke-TestSql "INSERT INTO __EFMigrationsHistory VALUES (N'20260801000000_Unreviewed',N'10.0.10');"
 Expect-Failure { Assert-RepositoryRecoveryMigrationBaseline (Get-RepositoryRecoveryDatabaseState -ConnectionString $connectionText) } 'schema-or-history'
 Invoke-TestSql "DELETE FROM __EFMigrationsHistory WHERE MigrationId=N'20260801000000_Unreviewed';"

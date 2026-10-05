@@ -83,6 +83,47 @@ function New-Case([bool]$TaskEnabled) {
 
 $cases=[Collections.Generic.List[object]]::new()
 try {
+    # Explicit continuation retains the old release/candidate bindings while
+    # recording the corrected updater's separate operator identity.
+    $case=New-Case $false; $cases.Add($case)
+    $originalBindingHash=Get-RepositoryRecoveryValueHash $case.Binding
+    [void](New-RepositoryRecoveryReleaseReceipt -ReceiptPath $case.Path -Binding $case.Binding)
+    & $case.Ports.CreateHold; & $case.Ports.Stop
+    $case.Ports.CreateHold={ throw 'Prepared resume must retain the owned hold.' }
+    $case.Ports.AssertPreparedLocations={ Assert-True ($case.Box.Pool -ceq 'Stopped') 'prepared-location-drift' }.GetNewClosure()
+    $case.Ports.CaptureRetained={
+        $intent=Read-RepositoryRecoveryReleaseReceipt $case.Path
+        Assert-True ($intent.Phase -ceq 'Prepared' -and $intent.PreparedContinuation.operator_commit -ceq ('f'*40)) 'Capture preceded durable operator evidence.'
+        return @{ Projection=@{Version=1}; Tables=@{Vectors=@{RowCount=329;Fingerprint=('A'*64)}} }
+    }.GetNewClosure()
+    $result=Invoke-RepositoryRecoveryRelease -ReceiptPath $case.Path -Binding $case.Binding -Ports $case.Ports -ResumePrepared -OperatorCommit ('f'*40)
+    $resumed=Read-RepositoryRecoveryReleaseReceipt $case.Path
+    Assert-True ($result.ok -and $case.Box.SqlCalls -eq 1 -and $resumed.Binding.Commit -ceq $case.Binding.Commit -and
+        $resumed.PreparedContinuation.operator_commit -ceq ('f'*40) -and $resumed.PreparedContinuation.original_binding_hash -ceq $originalBindingHash) 'Prepared continuation changed original identity or omitted operator evidence.'
+    Expect-Failure { Invoke-RepositoryRecoveryRelease -ReceiptPath $case.Path -Binding $case.Binding -Ports $case.Ports -ResumePrepared -OperatorCommit ('f'*40) } 'unsupported-prepared'
+
+    foreach ($boundary in @('baseline','failure','intent','later-phase','binding','hold','gpu','location','database')) {
+        $case=New-Case $false; $cases.Add($case)
+        $receipt=New-RepositoryRecoveryReleaseReceipt -ReceiptPath $case.Path -Binding $case.Binding
+        & $case.Ports.CreateHold; & $case.Ports.Stop
+        $case.Ports.AssertPreparedLocations={ Assert-True ($case.Box.Pool -ceq 'Stopped') 'prepared-location-drift' }.GetNewClosure()
+        $case.Ports.CaptureRetained={ throw 'Unsafe Prepared request reached capture.' }
+        $reason='unsupported-prepared'
+        switch ($boundary) {
+            'baseline' { $receipt.Binding.Retained=@{Projection=@{Version=1};Tables=@{}}; Save-RepositoryRecoveryReleaseReceipt $case.Path $receipt }
+            'failure' { $receipt.Failure='injected-prior-failure'; Save-RepositoryRecoveryReleaseReceipt $case.Path $receipt }
+            'intent' { $receipt.Reconciliation=@{mode='prior-continuation'}; Save-RepositoryRecoveryReleaseReceipt $case.Path $receipt }
+            'later-phase' { $receipt.Binding.Retained=@{Projection=@{Version=1};Tables=@{}}; $receipt.Phase='MigrationIntent'; Save-RepositoryRecoveryReleaseReceipt $case.Path $receipt }
+            'binding' { $case.Binding=$case.Binding | ConvertTo-Json -Depth 20 | ConvertFrom-Json -AsHashtable; $case.Binding.Commit=('e'*40); $reason='binding-or-operator-drift' }
+            'hold' { $case.Box.HoldOwner='another-release'; $reason='blocked-before-hold' }
+            'gpu' { $case.Ports.Stop={ throw 'uncertain-gpu-cleanup' }; $reason='uncertain-gpu-cleanup' }
+            'location' { $case.Box.Pool='Started'; $reason='prepared-location-drift' }
+            'database' { $case.Box.Db=$case.Box.Db | ConvertTo-Json -Depth 20 | ConvertFrom-Json -AsHashtable; $case.Box.Db.Identity.DatabaseGuid=[Guid]::NewGuid().ToString(); $reason='database-state-drift' }
+        }
+        Expect-Failure { Invoke-RepositoryRecoveryRelease -ReceiptPath $case.Path -Binding $case.Binding -Ports $case.Ports -ResumePrepared -OperatorCommit ('f'*40) } $reason
+        Assert-True ($case.Box.SqlCalls -eq 0 -and $case.Box.NewStarts -eq 0 -and $case.Box.ReleaseCalls -eq 0) "Unsafe Prepared boundary crossed activation: $boundary"
+    }
+
     foreach ($enabled in @($false,$true)) {
         $case=New-Case $enabled; $cases.Add($case)
         $result=Invoke-RepositoryRecoveryRelease -ReceiptPath $case.Path -Binding $case.Binding -Ports $case.Ports
@@ -216,7 +257,11 @@ try {
         Assert-True (((Get-Item -LiteralPath $Path).Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) $Message }
     function Get-FileHash { param($LiteralPath,$Algorithm='SHA256') if ($LiteralPath -like '*run-outlook-hidden.vbs') { return @{Hash=('D'*64)} }
         return Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $LiteralPath -Algorithm $Algorithm }
-    function Get-IncrementalIisHostingSettings { return $wrapperCase.Binding.OriginalIis }
+    function Get-IncrementalIisHostingSettings {
+        $observed=$wrapperCase.Binding.OriginalIis | ConvertTo-Json | ConvertFrom-Json -AsHashtable
+        $observed.PoolState=$wrapperCase.Box.Pool
+        return $observed
+    }
     function Get-WebAppPoolState { param($Name) return @{Value=$wrapperCase.Box.Pool} }
     function Get-DeploymentSqlConnectionString { return 'disposable-placeholder' }
     function Get-RepositoryRecoveryDatabaseState { param($ConnectionString) return $wrapperCase.Box.Db }
@@ -241,6 +286,85 @@ try {
     Set-Content -LiteralPath $companionConfigPath -Value '{"disposable":"unchanged"}'
     Set-Content -LiteralPath $configPath -Value '{"disposable":"changed"}'
     Expect-Failure { Invoke-RepositoryRecoveryIisUpdate -SourceRoot $SourceRoot -Commit $wrapperCase.Binding.Commit -ExistingRelease $wrapperCase.Binding.ReleaseId } 'configuration-or-hosting-drift'
+
+    # Real wrapper inspection of a Prepared release is read-only, accepts the
+    # separately identified updater, and still verifies the original candidates.
+    $wrapperCase=New-Case $false; $cases.Add($wrapperCase)
+    $CanonicalLiveRoot=$wrapperCase.Root; $CanonicalRecoveryRoot=$wrapperCase.Root; $CanonicalDeployRoot=$wrapperCase.Binding.Paths.ApplicationRoot
+    $IncrementalRecoveryRoot=$wrapperCase.Root; $InteractiveHostRoot=$wrapperCase.Binding.Paths.CompanionRoot
+    $ValidationHoldPath=$wrapperCase.Binding.Paths.HoldPath
+    [void](New-Item -ItemType Directory -Path (Join-Path $CanonicalLiveRoot 'Config'))
+    $configPath=Join-Path $CanonicalLiveRoot 'Config/appsettings.Production.json'
+    $companionConfigPath=Join-Path $CanonicalLiveRoot 'appsettings.Production.json'
+    Set-Content -LiteralPath $configPath -Value '{"disposable":"unchanged"}'
+    Set-Content -LiteralPath $companionConfigPath -Value '{"disposable":"unchanged"}'
+    $wrapperCase.Binding.OriginalTask=Get-RepositoryRecoveryTaskObservation
+    $wrapperCase.Binding.ConfigurationSha256=(Get-FileHash -LiteralPath $configPath).Hash
+    $wrapperCase.Binding.CompanionConfigurationSha256=(Get-FileHash -LiteralPath $companionConfigPath).Hash
+    Set-Content -LiteralPath (Join-Path $wrapperCase.Binding.Paths.ReleaseRoot 'repository-recovery-up.sql') -Value 'synthetic-reviewed-up'
+    function Get-FileHash { param($LiteralPath,$Algorithm='SHA256')
+        if ($LiteralPath -like '*run-outlook-hidden.vbs') { return @{Hash=('D'*64)} }
+        if ($LiteralPath -like '*repository-recovery-up.sql') {
+            if ((Get-Content -LiteralPath $LiteralPath).Trim() -cne 'synthetic-reviewed-up') { return @{Hash=('0'*64)} }
+            return @{Hash=(Get-RepositoryRecoveryMigrationContract).UpSha256}
+        }
+        return Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $LiteralPath -Algorithm $Algorithm
+    }
+    function Assert-RepositoryRecoveryCandidateCommit { param($Path,$Commit)
+        Assert-True ($Path -cin @($wrapperCase.Binding.Paths.CandidateRoot,$wrapperCase.Binding.Paths.CompanionCandidateRoot) -and $Commit -ceq $wrapperCase.Binding.Commit) 'Original candidate label was not checked.' }
+    [void](New-RepositoryRecoveryReleaseReceipt $wrapperCase.Path $wrapperCase.Binding)
+    & $wrapperCase.Ports.CreateHold; & $wrapperCase.Ports.Stop
+    $receiptHash=(Get-FileHash -LiteralPath $wrapperCase.Path).Hash
+    $inspected=Invoke-RepositoryRecoveryIisUpdate -SourceRoot $SourceRoot -Commit ('f'*40) -ExistingRelease $wrapperCase.Binding.ReleaseId -ResumePrepared -InspectPrepared
+    Assert-True ($inspected.candidate_commit -ceq $wrapperCase.Binding.Commit -and $inspected.operator_commit -ceq ('f'*40) -and
+        (Get-FileHash -LiteralPath $wrapperCase.Path).Hash -ceq $receiptHash -and $wrapperCase.Box.SqlCalls -eq 0 -and $wrapperCase.Box.NewStarts -eq 0 -and $wrapperCase.Box.ReleaseCalls -eq 0) 'Prepared inspection mutated state or rebound its candidate.'
+    Set-Content -LiteralPath (Join-Path $wrapperCase.Binding.Paths.CandidateRoot 'payload.txt') -Value 'changed-candidate'
+    Expect-Failure { Invoke-RepositoryRecoveryIisUpdate -SourceRoot $SourceRoot -Commit ('f'*40) -ExistingRelease $wrapperCase.Binding.ReleaseId -ResumePrepared -InspectPrepared } 'payload-drift'
+    Set-Content -LiteralPath (Join-Path $wrapperCase.Binding.Paths.CandidateRoot 'payload.txt') -Value 'CandidateRoot'
+    Set-Content -LiteralPath (Join-Path $wrapperCase.Binding.Paths.ReleaseRoot 'repository-recovery-up.sql') -Value 'changed-sql'
+    Expect-Failure { Invoke-RepositoryRecoveryIisUpdate -SourceRoot $SourceRoot -Commit ('f'*40) -ExistingRelease $wrapperCase.Binding.ReleaseId -ResumePrepared -InspectPrepared } 'prepared-sql-drift'
+
+    function Use-PreparedWrapperCase($NextCase) {
+        $script:wrapperCase=$NextCase
+        $script:CanonicalLiveRoot=$NextCase.Root; $script:CanonicalRecoveryRoot=$NextCase.Root
+        $script:CanonicalDeployRoot=$NextCase.Binding.Paths.ApplicationRoot; $script:IncrementalRecoveryRoot=$NextCase.Root
+        $script:InteractiveHostRoot=$NextCase.Binding.Paths.CompanionRoot; $script:ValidationHoldPath=$NextCase.Binding.Paths.HoldPath
+        [void](New-Item -ItemType Directory -Path (Join-Path $CanonicalLiveRoot 'Config'))
+        $script:configPath=Join-Path $CanonicalLiveRoot 'Config/appsettings.Production.json'
+        $script:companionConfigPath=Join-Path $CanonicalLiveRoot 'appsettings.Production.json'
+        Set-Content -LiteralPath $configPath -Value '{"disposable":"unchanged"}'
+        Set-Content -LiteralPath $companionConfigPath -Value '{"disposable":"unchanged"}'
+        $NextCase.Binding.OriginalTask=Get-RepositoryRecoveryTaskObservation
+        $NextCase.Binding.ConfigurationSha256=(Get-FileHash -LiteralPath $configPath).Hash
+        $NextCase.Binding.CompanionConfigurationSha256=(Get-FileHash -LiteralPath $companionConfigPath).Hash
+        Set-Content -LiteralPath (Join-Path $NextCase.Binding.Paths.ReleaseRoot 'repository-recovery-up.sql') -Value 'synthetic-reviewed-up'
+        [void](New-RepositoryRecoveryReleaseReceipt $NextCase.Path $NextCase.Binding)
+        & $NextCase.Ports.CreateHold; & $NextCase.Ports.Stop
+        $NextCase.Ports.AssertPreparedLocations={}
+    }
+    $case=New-Case $false; $cases.Add($case); Use-PreparedWrapperCase $case
+    [void](Invoke-RepositoryRecoveryRelease -ReceiptPath $case.Path -Binding $case.Binding -Ports $case.Ports -ResumePrepared -OperatorCommit ('f'*40))
+    $completed=Invoke-RepositoryRecoveryIisUpdate -SourceRoot $SourceRoot -Commit ('f'*40) -ExistingRelease $case.Binding.ReleaseId | ConvertFrom-Json
+    Assert-True ($completed.ok -and $case.Box.SqlCalls -eq 1 -and $case.Box.NewStarts -eq 1 -and $case.Box.ReleaseCalls -eq 1) 'Recorded continuation operator could not inspect completed result, or replayed it.'
+    Expect-Failure { Invoke-RepositoryRecoveryIisUpdate -SourceRoot $SourceRoot -Commit ('e'*40) -ExistingRelease $case.Binding.ReleaseId } 'release-commit-drift'
+    $edited=Read-RepositoryRecoveryReleaseReceipt $case.Path
+    $edited.PreparedContinuation.operator_commit=('e'*40)
+    Expect-Failure { Save-RepositoryRecoveryReleaseReceipt $case.Path $edited } 'operator-continuation-drift'
+
+    foreach ($applied in @($false,$true)) {
+        $case=New-Case $false; $cases.Add($case); Use-PreparedWrapperCase $case
+        $case.Ports.ApplyMigration={
+            $case.Box.SqlCalls++
+            if ($applied) { $case.Box.Db=$case.Binding.TargetDatabase }
+            throw 'lost-sql-acknowledgement'
+        }.GetNewClosure()
+        Expect-Failure { Invoke-RepositoryRecoveryRelease -ReceiptPath $case.Path -Binding $case.Binding -Ports $case.Ports -ResumePrepared -OperatorCommit ('f'*40) } 'failed-held'
+        $reconciled=Invoke-RepositoryRecoveryIisUpdate -SourceRoot $SourceRoot -Commit ('f'*40) -ExistingRelease $case.Binding.ReleaseId | ConvertFrom-Json
+        $after=Read-RepositoryRecoveryReleaseReceipt $case.Path
+        Assert-True ($reconciled.migration -ceq $(if ($applied) {'applied'} else {'not-applied'}) -and
+            $after.PreparedContinuation.operator_commit -ceq ('f'*40) -and $case.Box.SqlCalls -eq 1 -and $case.Box.NewStarts -eq 0 -and $case.Box.ReleaseCalls -eq 0) 'Reconciliation lost continuation identity or replayed unknown work.'
+        Expect-Failure { Invoke-RepositoryRecoveryIisUpdate -SourceRoot $SourceRoot -Commit ('e'*40) -ExistingRelease $case.Binding.ReleaseId } 'release-commit-drift'
+    }
 
     $case=New-Case $false; $cases.Add($case)
     $receipt=New-RepositoryRecoveryReleaseReceipt -ReceiptPath $case.Path -Binding $case.Binding

@@ -1,4 +1,7 @@
 Set-StrictMode -Version Latest
+if ($null -eq ('FluxKnowledge.Deployment.RetainedRowStream' -as [type])) {
+    Add-Type -Path (Join-Path $PSScriptRoot 'repository-recovery-row-stream.cs')
+}
 
 function Get-RepositoryRecoveryMigrationContract {
     [pscustomobject]@{
@@ -246,57 +249,53 @@ function Get-RepositoryRecoveryRetainedState {
             if ($null -ne $Projection -and $table -cin $appendTables) {
                 foreach ($key in @($Projection.PreservedKeys.$table)) { [void]$baselineKeys.Add($key); $keys.Add($key) }
             }
-            $select = (@($columns | ForEach-Object { '[' + $_.Name.Replace(']', ']]') + ']' }) -join ',')
-            $order = (@($columns | Where-Object KeyOrdinal -GT 0 | Sort-Object KeyOrdinal | ForEach-Object { '[' + $_.Name.Replace(']', ']]') + ']' }) -join ',')
+            $select = (@($columns | ForEach-Object { '[retained].[' + $_.Name.Replace(']', ']]') + ']' }) -join ',')
+            $order = (@($columns | Where-Object KeyOrdinal -GT 0 | Sort-Object KeyOrdinal | ForEach-Object { '[retained].[' + $_.Name.Replace(']', ']]') + ']' }) -join ',')
             $hasher=[Security.Cryptography.IncrementalHash]::CreateHash([Security.Cryptography.HashAlgorithmName]::SHA256)
+            $command=$connection.CreateCommand()
             try {
-                [long]$offset=0; [long]$retainedCount=0
-                do {
-                    $command=$connection.CreateCommand()
-                    try {
-                        $command.CommandTimeout=120
-                        $command.CommandText="SELECT (SELECT $select FROM [dbo].[$table] ORDER BY $order OFFSET @offset ROWS FETCH NEXT 128 ROWS ONLY FOR JSON PATH, INCLUDE_NULL_VALUES);"
-                        [void]$command.Parameters.Add('@offset', [Data.SqlDbType]::BigInt); $command.Parameters['@offset'].Value=$offset
-                        $json=[string]$command.ExecuteScalar()
-                    } finally { $command.Dispose() }
-                    if ([string]::IsNullOrEmpty($json)) { $json='[]' }
-                    $document=[Text.Json.JsonDocument]::Parse($json)
-                    try {
-                    $count=$document.RootElement.GetArrayLength()
-                    foreach ($entry in $document.RootElement.EnumerateArray()) {
-                        $rawRow=$entry.GetRawText()
+                $command.CommandTimeout=120
+                $command.CommandText="SELECT (SELECT $select FOR JSON PATH, INCLUDE_NULL_VALUES, WITHOUT_ARRAY_WRAPPER) FROM [dbo].[$table] AS [retained] ORDER BY $order;"
+                $reader=$command.ExecuteReader([Data.CommandBehavior]::SequentialAccess)
+                try {
+                    if ($table -cnotin $appendTables) {
+                        $fingerprint=[FluxKnowledge.Deployment.RetainedRowStream]::Read($reader)
+                        $tables[$table]=[ordered]@{ RowCount=$fingerprint.RowCount; Fingerprint=$fingerprint.Fingerprint }
+                        continue
+                    }
+                    [long]$retainedCount=0
+                    while ($reader.Read()) {
+                        $rawRow=$reader.GetString(0)
                         $row=$rawRow | ConvertFrom-Json -AsHashtable
-                        if ($table -cin $appendTables) {
-                            $keyName=if ($table -ceq 'NativeWorkerInstances') { 'InstanceId' } else { 'OperationId' }
-                            $key=[string]$row.$keyName
-                            if ($null -eq $Projection) { $keys.Add($key) }
-                            elseif (!$baselineKeys.Contains($key)) {
-                                switch ($table) {
-                                    'GpuSchedulerOperationReceipts' {
-                                        $wake=$row.OperationKind -cin @('wake-consumption','wake-acknowledgement') -and
-                                            $null -eq $row.BatchId -and $null -eq $row.AdmissionGeneration
-                                        $noWork=$row.OperationKind -ceq 'admission' -and !$row.Accepted -and !$row.Committed -and
-                                            $row.AdmissionDisposition -eq 1 -and $null -eq $row.DeferredUntilUtc -and $null -eq $row.AdmissionGeneration
-                                        if ((!$wake -and !$noWork) -or $null -ne $row.CapacitySlotKey -or $null -ne $row.OwnerKey) {
-                                            throw 'repository-recovery-unexpected-new-recovery-receipt'
-                                        }
-                                    }
-                                    'NativeWorkerInstances' {
-                                        if ($null -ne $row.ActiveDispatchId -or $null -ne $row.ExitedAtUtc -or $row.State -notin @(2,3,4)) {
-                                            throw 'repository-recovery-new-worker-has-work-or-uncertain-outcome'
-                                        }
-                                        & $VerifyNewWorker $row | Out-Null
-                                        [void]$verifiedNewWorkerIds.Add([string]$row.InstanceId)
-                                    }
-                                    'NativeWorkerLifecycleEvidence' {
-                                        if (!$verifiedNewWorkerIds.Contains([string]$row.InstanceId) -or
-                                            $row.LifecycleClass -notin @(0,2,3,4) -or $null -ne $row.OutcomeCode) {
-                                            throw 'repository-recovery-unexpected-new-worker-lifecycle-evidence'
-                                        }
+                        $keyName=if ($table -ceq 'NativeWorkerInstances') { 'InstanceId' } else { 'OperationId' }
+                        $key=[string]$row.$keyName
+                        if ($null -eq $Projection) { $keys.Add($key) }
+                        elseif (!$baselineKeys.Contains($key)) {
+                            switch ($table) {
+                                'GpuSchedulerOperationReceipts' {
+                                    $wake=$row.OperationKind -cin @('wake-consumption','wake-acknowledgement') -and
+                                        $null -eq $row.BatchId -and $null -eq $row.AdmissionGeneration
+                                    $noWork=$row.OperationKind -ceq 'admission' -and !$row.Accepted -and !$row.Committed -and
+                                        $row.AdmissionDisposition -eq 1 -and $null -eq $row.DeferredUntilUtc -and $null -eq $row.AdmissionGeneration
+                                    if ((!$wake -and !$noWork) -or $null -ne $row.CapacitySlotKey -or $null -ne $row.OwnerKey) {
+                                        throw 'repository-recovery-unexpected-new-recovery-receipt'
                                     }
                                 }
-                                continue
+                                'NativeWorkerInstances' {
+                                    if ($null -ne $row.ActiveDispatchId -or $null -ne $row.ExitedAtUtc -or $row.State -notin @(2,3,4)) {
+                                        throw 'repository-recovery-new-worker-has-work-or-uncertain-outcome'
+                                    }
+                                    & $VerifyNewWorker $row | Out-Null
+                                    [void]$verifiedNewWorkerIds.Add([string]$row.InstanceId)
+                                }
+                                'NativeWorkerLifecycleEvidence' {
+                                    if (!$verifiedNewWorkerIds.Contains([string]$row.InstanceId) -or
+                                        $row.LifecycleClass -notin @(0,2,3,4) -or $null -ne $row.OutcomeCode) {
+                                        throw 'repository-recovery-unexpected-new-worker-lifecycle-evidence'
+                                    }
+                                }
                             }
+                            continue
                         }
                         # Hash rows individually so allowed startup additions cannot
                         # change page boundaries of the preserved authority rows.
@@ -305,11 +304,9 @@ function Get-RepositoryRecoveryRetainedState {
                         $hasher.AppendData([Text.Encoding]::UTF8.GetBytes($rawRow))
                         $retainedCount++
                     }
-                    } finally { $document.Dispose() }
-                    $offset+=$count
-                } while ($count -eq 128)
-                $tables[$table]=[ordered]@{ RowCount=$retainedCount; Fingerprint=[Convert]::ToHexString($hasher.GetHashAndReset()) }
-            } finally { $hasher.Dispose() }
+                    $tables[$table]=[ordered]@{ RowCount=$retainedCount; Fingerprint=[Convert]::ToHexString($hasher.GetHashAndReset()) }
+                } finally { $reader.Dispose() }
+            } finally { $command.Dispose(); $hasher.Dispose() }
             if ($table -cin $appendTables) { $preservedKeys[$table]=@($keys) }
         }
         return [ordered]@{ Projection=[ordered]@{ Version=1; Tables=$columnsByTable; PreservedKeys=$preservedKeys }; Tables=$tables }

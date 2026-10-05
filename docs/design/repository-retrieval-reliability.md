@@ -618,11 +618,26 @@ complete. Reconciliation is migration-only; a completed duplicate verifies
 its receipt read-only. The extension reuses the deployment mutex, atomic receipt
 persistence, deny-all hold, GPU/IIS drain and coordinated payload/task lifecycle.
 It binds the fixed additive SQL/hash and preserves both columns and evidence;
-failure cannot run Down, restart the predecessor or release the hold. Fixed paged
-retained projections omit only the two added columns. Captured existing keys protect
+failure cannot run Down, restart the predecessor or release the hold. One ordered
+sequential SQL row stream per table replaces repeated OFFSET scans; native bounded
+UTF-8 hashing preserves the exact V1 projection/hash contract and checks, omitting
+only the two added columns. Captured existing keys protect
 `GpuSchedulerOperationReceipts`, `NativeWorkerInstances` and
 `NativeWorkerLifecycleEvidence`; only identified new receipts for wake/admission
 without work and verified candidate startup telemetry without work may be additional.
+The three append-table allowlists remain unchanged. Explicit
+`-ResumeRepositoryRecoveryPreparedRelease` accepts only an untouched Prepared receipt
+without a retained baseline, failure or prior continuation intent. It preserves the
+original operation, application candidate, hold and bindings, recording the corrected
+operator commit immutably in separate `PreparedContinuation`. Read-only reconciliation
+accepts the original candidate or that recorded operator; there is no implicit retry,
+rebinding or republishing. The interrupted deployment remains stopped and held;
+production continuation requires separate current authority.
+Scale evidence uses 50,000 synthetic 1,024-dimensional vectors, 2,596 generations,
+15,934,056 repeated memberships and 120,000 receipt rows. Three complete scans took
+39.02, 40.67 and 40.32 seconds with 329 MiB peak memory; a late membership mutation
+was refused. No periodic inactive-generation pruning was found; retention is separate
+work and this correction performs no cleanup.
 Focused disposable SQL/payload and combined native checks pass; independent review approves local closeout. Prepare
 exact target, migration, verification and rollback for separate user authority.
 Retain additive data on rollback; a predecessor that cannot honour waiting markers

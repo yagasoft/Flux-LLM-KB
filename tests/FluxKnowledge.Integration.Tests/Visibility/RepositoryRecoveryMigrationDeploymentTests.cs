@@ -12,6 +12,36 @@ namespace FluxKnowledge.Integration.Tests.Visibility;
 
 public sealed class RepositoryRecoveryMigrationDeploymentTests(NativeSqlServerFixture fixture) : IClassFixture<NativeSqlServerFixture>
 {
+    [RecoveryScaleFact]
+    public async Task Retained_stream_verifies_production_cardinality_with_bounded_memory()
+    {
+        var work = await SqlTestData.SeedWorkItemAsync(fixture, DateTimeOffset.UnixEpoch, PublicJobState.WorkerQueued, null);
+        var source = new DirectoryInfo(AppContext.BaseDirectory);
+        const string relative = "tests/native/repository-recovery-retained-scale.ps1";
+        while (source is not null && !File.Exists(Path.Combine(source.FullName, relative))) source = source.Parent;
+        Assert.NotNull(source);
+        var start = new ProcessStartInfo("pwsh") { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false, CreateNoWindow = true };
+        foreach (var argument in new[] { "-NoProfile", "-File", Path.Combine(source.FullName, relative), "-SourceRoot", source.FullName, "-PipelineRecordId", work.PipelineRecordId.Value.ToString() })
+            start.ArgumentList.Add(argument);
+        start.Environment["FLUXKNOWLEDGE_RECOVERY_DISPOSABLE_SQL"] = fixture.ConnectionString;
+        using var process = Process.Start(start)!;
+        var output = process.StandardOutput.ReadToEndAsync();
+        var error = process.StandardError.ReadToEndAsync();
+        using var deadline = new CancellationTokenSource(TimeSpan.FromMinutes(12));
+        try { await process.WaitForExitAsync(deadline.Token); }
+        catch { process.Kill(entireProcessTree: true); await process.WaitForExitAsync(); throw; }
+        Assert.True(process.ExitCode == 0, await output + await error);
+    }
+
+    public sealed class RecoveryScaleFactAttribute : FactAttribute
+    {
+        public RecoveryScaleFactAttribute()
+        {
+            if (Environment.GetEnvironmentVariable("FLUXKNOWLEDGE_RECOVERY_SCALE") != "1")
+                Skip = "Opt-in production-scale retained-state benchmark; focused evidence is retained separately.";
+        }
+    }
+
     [NativeSqlServerFact]
     public async Task Incremental_recovery_migration_is_atomic_reconciles_exactly_and_preserves_retained_bytes()
     {
@@ -40,7 +70,9 @@ public sealed class RepositoryRecoveryMigrationDeploymentTests(NativeSqlServerFi
         db.Artifacts.Add(new ArtifactEntity
         {
             Id = artifactId, PipelineRecordId = work.PipelineRecordId.Value, SourceRevision = 1, Stage = 3,
-            ContentHash = new string('a', 64), ContentType = "text/plain", SearchText = "saved", CreatedAtUtc = DateTimeOffset.UnixEpoch
+            ContentHash = new string('a', 64), ContentType = "text/plain",
+            SearchText = new string('a', 8191) + "\U0001f642\"\\\r\n" + new string('b', 32771),
+            CreatedAtUtc = DateTimeOffset.Parse("2026-10-05T01:02:03.4567890+03:00")
         });
         db.IndexGenerations.Add(new IndexGenerationEntity
         {

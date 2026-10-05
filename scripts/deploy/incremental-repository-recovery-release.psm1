@@ -26,6 +26,15 @@ function Read-RepositoryRecoveryReleaseReceipt {
         throw 'repository-recovery-receipt-invalid; preserve the receipt and inspect its version/binding.'
     }
     Assert-RepositoryRecoveryDatabaseMatch $receipt.Binding.TargetDatabase (Get-RepositoryRecoveryTargetState $receipt.Binding.OriginalDatabase)
+    if ($receipt.ContainsKey('PreparedContinuation') -and $null -ne $receipt.PreparedContinuation) {
+        $original=[ordered]@{}
+        foreach ($key in $receipt.Binding.Keys) { $original[$key]=if ($key -ceq 'Retained') { $null } else { $receipt.Binding.$key } }
+        if ($receipt.PreparedContinuation.operator_commit -cnotmatch '^[0-9a-f]{40}$' -or
+            $receipt.PreparedContinuation.original_binding_hash -cne (Get-RepositoryRecoveryValueHash $original) -or
+            $receipt.PreparedContinuationHash -cne (Get-RepositoryRecoveryValueHash $receipt.PreparedContinuation)) {
+            throw 'repository-recovery-receipt-invalid: Prepared continuation identity'
+        }
+    }
     if ($receipt.Phase -cne 'Prepared' -and !($receipt.Phase -ceq 'FailedHeld' -and $receipt.FailureAtPhase -ceq 'Prepared') -and
         $null -eq $receipt.Binding.Retained) { throw 'repository-recovery-receipt-invalid: retained proof missing' }
     if ($receipt.Phase -ceq 'Completed' -and (!$receipt.SavedResult -or
@@ -48,10 +57,16 @@ function Save-RepositoryRecoveryReleaseReceipt {
             ($prior.Phase -cne 'Prepared' -and (Get-RepositoryRecoveryValueHash $prior.Binding.Retained) -cne (Get-RepositoryRecoveryValueHash $Receipt.Binding.Retained))) {
             throw 'repository-recovery-receipt-binding-changed'
         }
+        if ($prior.ContainsKey('PreparedContinuation') -and $null -ne $prior.PreparedContinuation -and
+            (Get-RepositoryRecoveryValueHash $prior.PreparedContinuation) -cne (Get-RepositoryRecoveryValueHash $Receipt.PreparedContinuation)) {
+            throw 'repository-recovery-operator-continuation-drift'
+        }
     }
     $Receipt.Revision++
     $Receipt.BindingHash=Get-RepositoryRecoveryValueHash $Receipt.Binding
     $Receipt.ResultHash=Get-RepositoryRecoveryValueHash $Receipt.SavedResult
+    if (!$Receipt.Contains('PreparedContinuation')) { $Receipt.PreparedContinuation=$null }
+    $Receipt.PreparedContinuationHash=Get-RepositoryRecoveryValueHash $Receipt.PreparedContinuation
     $Receipt.ObservedAtUtc=[DateTime]::UtcNow.ToString('O')
     Write-HybridRebuildJson -Path $ReceiptPath -Value $Receipt
     [void](Read-RepositoryRecoveryReleaseReceipt $ReceiptPath)
@@ -61,26 +76,50 @@ function New-RepositoryRecoveryReleaseReceipt {
     param([Parameter(Mandatory)][string]$ReceiptPath, [Parameter(Mandatory)]$Binding)
     if (Test-Path -LiteralPath $ReceiptPath) { throw 'repository-recovery-receipt-already-exists' }
     $receipt=[ordered]@{ Version=1; Revision=0; Phase='Prepared'; Binding=$Binding; BindingHash=$null;
-        SavedResult=$null; ResultHash=$null; Failure=$null; FailureAtPhase=$null; Reconciliation=$null; ObservedAtUtc=$null }
+        SavedResult=$null; ResultHash=$null; Failure=$null; FailureAtPhase=$null; Reconciliation=$null;
+        PreparedContinuation=$null; PreparedContinuationHash=$null; ObservedAtUtc=$null }
     Save-RepositoryRecoveryReleaseReceipt $ReceiptPath $receipt
     return $receipt
 }
 
+function Assert-RepositoryRecoveryPreparedReceipt($Receipt) {
+    if ($Receipt.Phase -cne 'Prepared' -or $null -ne $Receipt.Binding.Retained -or
+        $null -ne $Receipt.Failure -or $null -ne $Receipt.FailureAtPhase -or
+        $null -ne $Receipt.SavedResult -or $null -ne $Receipt.Reconciliation -or
+        ($Receipt.Contains('PreparedContinuation') -and $null -ne $Receipt.PreparedContinuation)) {
+        throw 'repository-recovery-unsupported-prepared-continuation; require untouched Prepared receipt without baseline, failure or prior continuation intent.'
+    }
+}
+
 function Invoke-RepositoryRecoveryRelease {
     param([Parameter(Mandatory)][string]$ReceiptPath, [Parameter(Mandatory)]$Binding,
-        [Parameter(Mandatory)][Collections.IDictionary]$Ports)
-    $receipt=New-RepositoryRecoveryReleaseReceipt $ReceiptPath $Binding
+        [Parameter(Mandatory)][Collections.IDictionary]$Ports, [switch]$ResumePrepared, [string]$OperatorCommit='')
+    if ($ResumePrepared) {
+        $receipt=Read-RepositoryRecoveryReleaseReceipt $ReceiptPath
+        Assert-RepositoryRecoveryPreparedReceipt $receipt
+        if ($OperatorCommit -cnotmatch '^[0-9a-f]{40}$' -or
+            (Get-RepositoryRecoveryValueHash $Binding) -cne $receipt.BindingHash) {
+            throw 'repository-recovery-prepared-binding-or-operator-drift'
+        }
+        $receipt.Binding=$Binding
+    } else { $receipt=New-RepositoryRecoveryReleaseReceipt $ReceiptPath $Binding }
     $held=$false; $companionMutationStarted=$false
     try {
-        & $Ports.CreateHold
+        if (!$ResumePrepared) { & $Ports.CreateHold }
         & $Ports.AssertHold; $held=$true
         # Original policy/XML and payload identities are already durable. No live
         # payload is touched until task exit and exact IIS/GPU drain are proven.
-        if ($Binding.OriginalTask.Enabled) { & $Ports.DisableTask }
+        if (!$ResumePrepared -and $Binding.OriginalTask.Enabled) { & $Ports.DisableTask }
         & $Ports.AssertTaskDisabled
+        if ($ResumePrepared) { & $Ports.AssertPreparedLocations }
         & $Ports.Stop
         & $Ports.AssertOriginals
         Assert-RepositoryRecoveryDatabaseMatch (& $Ports.ReadDatabase) $Binding.OriginalDatabase
+        if ($ResumePrepared) {
+            $receipt.PreparedContinuation=[ordered]@{ operator_commit=$OperatorCommit;
+                original_binding_hash=$receipt.BindingHash }
+            Save-RepositoryRecoveryReleaseReceipt $ReceiptPath $receipt
+        }
         $Binding.Retained=& $Ports.CaptureRetained
         Save-RepositoryRecoveryReleaseReceipt $ReceiptPath $receipt
         $receipt.Phase='MigrationIntent'; Save-RepositoryRecoveryReleaseReceipt $ReceiptPath $receipt
@@ -169,4 +208,5 @@ function Invoke-RepositoryRecoveryReceiptReconciliation {
 }
 
 Export-ModuleMember -Function New-RepositoryRecoveryReleaseReceipt, Read-RepositoryRecoveryReleaseReceipt,
-    Save-RepositoryRecoveryReleaseReceipt, Invoke-RepositoryRecoveryRelease, Invoke-RepositoryRecoveryReceiptReconciliation
+    Save-RepositoryRecoveryReleaseReceipt, Assert-RepositoryRecoveryPreparedReceipt,
+    Invoke-RepositoryRecoveryRelease, Invoke-RepositoryRecoveryReceiptReconciliation
