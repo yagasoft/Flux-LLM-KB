@@ -225,9 +225,72 @@ ORDER BY c.column_id FOR JSON PATH, INCLUDE_NULL_VALUES);
     return ,$columns
 }
 
+function Assert-RepositoryRecoveryCancelledQueryTaskProof($Proof) {
+    try {
+        if ($Proof -isnot [Collections.IDictionary] -or
+            $Proof.TaskId -cnotmatch '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' -or
+            [Guid]$Proof.TaskId -eq [Guid]::Empty -or $Proof.RowSha256 -cnotmatch '^[0-9A-F]{64}$' -or
+            $Proof.ExecutorInstanceId -cnotmatch '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' -or
+            [Guid]$Proof.ExecutorInstanceId -eq [Guid]::Empty -or [int]$Proof.OwnerProcessId -le 0) { throw 'Invalid identity.' }
+        $ownerStarted=[long]$Proof.OwnerStartedAtUtcTicks; $created=[long]$Proof.CreatedAtUtcTicks
+        if ($ownerStarted -le 0 -or $created -lt $ownerStarted -or $created -gt [DateTimeOffset]::MaxValue.UtcTicks) {
+            throw 'Invalid creation identity.'
+        }
+    } catch { throw 'repository-recovery-cancelled-query-proof-invalid' }
+}
+
+function Get-RepositoryRecoveryCancelledQueryTaskProof {
+    param([Parameter(Mandatory)][string]$ConnectionString, [Parameter(Mandatory)]$Projection,
+        [Parameter(Mandatory)][Guid]$TaskId, [string]$ExpectedSha256='')
+    if ($TaskId -eq [Guid]::Empty -or $Projection.Version -ne 1 -or
+        ($ExpectedSha256 -and $ExpectedSha256 -cnotmatch '^[0-9A-F]{64}$')) { throw 'repository-recovery-cancelled-query-proof-invalid' }
+    $connection=[Data.SqlClient.SqlConnection]::new($ConnectionString)
+    try {
+        $connection.Open()
+        $columns=Read-RepositoryRecoveryProjection $connection 'GpuMiniTasks'
+        if ((Get-RepositoryRecoveryValueHash $columns) -cne (Get-RepositoryRecoveryValueHash $Projection.Tables.GpuMiniTasks)) {
+            throw 'repository-recovery-projection-schema-drift: GpuMiniTasks'
+        }
+        $select=(@($columns | ForEach-Object { '[retained].['+$_.Name.Replace(']',']]')+']' }) -join ',')
+        $command=$connection.CreateCommand()
+        try {
+            $command.CommandTimeout=30
+            $command.CommandText="SELECT (SELECT $select FOR JSON PATH, INCLUDE_NULL_VALUES, WITHOUT_ARRAY_WRAPPER) FROM dbo.GpuMiniTasks AS [retained] WHERE [retained].[Id]=@task;"
+            [void]$command.Parameters.Add('@task',[Data.SqlDbType]::UniqueIdentifier); $command.Parameters['@task'].Value=$TaskId
+            $raw=$command.ExecuteScalar()
+            if ($null -eq $raw -or $raw -is [DBNull]) { throw 'repository-recovery-cancelled-query-task-missing' }
+            $hash=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes([string]$raw)))
+            if ($ExpectedSha256 -and $hash -cne $ExpectedSha256) { throw 'repository-recovery-cancelled-query-task-changed' }
+            $row=[string]$raw | ConvertFrom-Json -AsHashtable
+            if ($row.State -ne 4 -or !$row.InteractiveCancellationRequested -or $row.SourceRevision -ne 0 -or
+                $null -ne $row.ParentJobId -or $null -ne $row.BatchId -or $row.AdmissionGeneration -ne 0 -or
+                $row.ReservationAttemptCount -ne 0 -or $null -ne $row.HandoffLeaseOwner -or
+                $row.PriorityLane -ne 0 -or [string]::IsNullOrWhiteSpace($row.RequiredExecutorKey) -or
+                $null -eq $row.QueueDeadlineUtc -or $null -eq $row.ExecutionDeadlineUtc) {
+                throw 'repository-recovery-cancelled-query-task-not-unreserved'
+            }
+            $proof=[ordered]@{TaskId=$TaskId.ToString('D');RowSha256=$hash;OwnerProcessId=$row.InteractiveOwnerProcessId;
+                OwnerStartedAtUtcTicks=([DateTimeOffset]$row.InteractiveOwnerStartedAtUtc).UtcTicks;
+                ExecutorInstanceId=([Guid]$row.InteractiveExecutorInstanceId).ToString('D');
+                CreatedAtUtcTicks=([DateTimeOffset]$row.CreatedAtUtc).UtcTicks}
+            Assert-RepositoryRecoveryCancelledQueryTaskProof $proof
+            return $proof
+        } finally { $command.Dispose() }
+    } finally { $connection.Dispose() }
+}
+
 function Get-RepositoryRecoveryRetainedState {
     param([Parameter(Mandatory)][string]$ConnectionString, $Projection = $null,
-        [scriptblock]$VerifyNewWorker = { param($row) throw 'repository-recovery-new-worker-ownership-unverified' })
+        [scriptblock]$VerifyNewWorker = { param($row) throw 'repository-recovery-new-worker-ownership-unverified' },
+        $AcknowledgedCancelledQueryTask=$null)
+    if ($null -ne $AcknowledgedCancelledQueryTask) {
+        if ($null -eq $Projection) { throw 'repository-recovery-cancelled-query-requires-saved-projection' }
+        Assert-RepositoryRecoveryCancelledQueryTaskProof $AcknowledgedCancelledQueryTask
+        $actual=Get-RepositoryRecoveryCancelledQueryTaskProof -ConnectionString $ConnectionString -Projection $Projection -TaskId $AcknowledgedCancelledQueryTask.TaskId -ExpectedSha256 $AcknowledgedCancelledQueryTask.RowSha256
+        if ((Get-RepositoryRecoveryValueHash $actual) -cne (Get-RepositoryRecoveryValueHash $AcknowledgedCancelledQueryTask)) {
+            throw 'repository-recovery-cancelled-query-task-changed'
+        }
+    }
     $tableNames = @(Get-RepositoryRecoveryRetainedTables)
     if ($null -ne $Projection -and ($Projection.Version -ne 1 -or
         (Get-RepositoryRecoveryValueHash @($Projection.Tables.Keys | Sort-Object)) -cne (Get-RepositoryRecoveryValueHash @($tableNames | Sort-Object)))) {
@@ -255,7 +318,13 @@ function Get-RepositoryRecoveryRetainedState {
             $command=$connection.CreateCommand()
             try {
                 $command.CommandTimeout=120
-                $command.CommandText="SELECT (SELECT $select FOR JSON PATH, INCLUDE_NULL_VALUES, WITHOUT_ARRAY_WRAPPER) FROM [dbo].[$table] AS [retained] ORDER BY $order;"
+                $filter=''
+                if ($table -ceq 'GpuMiniTasks' -and $null -ne $AcknowledgedCancelledQueryTask) {
+                    $filter=' WHERE [retained].[Id]<>@acknowledgedQuery'
+                    [void]$command.Parameters.Add('@acknowledgedQuery',[Data.SqlDbType]::UniqueIdentifier)
+                    $command.Parameters['@acknowledgedQuery'].Value=[Guid]$AcknowledgedCancelledQueryTask.TaskId
+                }
+                $command.CommandText="SELECT (SELECT $select FOR JSON PATH, INCLUDE_NULL_VALUES, WITHOUT_ARRAY_WRAPPER) FROM [dbo].[$table] AS [retained]$filter ORDER BY $order;"
                 $reader=$command.ExecuteReader([Data.CommandBehavior]::SequentialAccess)
                 try {
                     if ($table -cnotin $appendTables) {
@@ -309,6 +378,12 @@ function Get-RepositoryRecoveryRetainedState {
             } finally { $command.Dispose(); $hasher.Dispose() }
             if ($table -cin $appendTables) { $preservedKeys[$table]=@($keys) }
         }
+        if ($null -ne $AcknowledgedCancelledQueryTask) {
+            $actual=Get-RepositoryRecoveryCancelledQueryTaskProof -ConnectionString $ConnectionString -Projection $Projection -TaskId $AcknowledgedCancelledQueryTask.TaskId -ExpectedSha256 $AcknowledgedCancelledQueryTask.RowSha256
+            if ((Get-RepositoryRecoveryValueHash $actual) -cne (Get-RepositoryRecoveryValueHash $AcknowledgedCancelledQueryTask)) {
+                throw 'repository-recovery-cancelled-query-task-changed'
+            }
+        }
         return [ordered]@{ Projection=[ordered]@{ Version=1; Tables=$columnsByTable; PreservedKeys=$preservedKeys }; Tables=$tables }
     } finally { $connection.Dispose() }
 }
@@ -333,4 +408,5 @@ SELECT CASE WHEN EXISTS (SELECT 1 FROM SourceRevisions WHERE CurrentDiscoveryEvi
 Export-ModuleMember -Function Get-RepositoryRecoveryMigrationContract, Get-RepositoryRecoveryValueHash,
     Get-RepositoryRecoveryDatabaseState, Assert-RepositoryRecoveryMigrationBaseline, Get-RepositoryRecoveryTargetState,
     Assert-RepositoryRecoveryDatabaseMatch, Invoke-RepositoryRecoveryMigrationAttempt,
-    Get-RepositoryRecoveryRetainedState, Assert-RepositoryRecoveryRetainedState, Assert-RepositoryRecoveryEvidenceEmpty
+    Get-RepositoryRecoveryRetainedState, Assert-RepositoryRecoveryRetainedState, Assert-RepositoryRecoveryEvidenceEmpty,
+    Assert-RepositoryRecoveryCancelledQueryTaskProof, Get-RepositoryRecoveryCancelledQueryTaskProof

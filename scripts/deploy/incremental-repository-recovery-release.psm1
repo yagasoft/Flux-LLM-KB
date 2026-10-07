@@ -45,6 +45,7 @@ function Read-RepositoryRecoveryReleaseReceipt {
             $receipt.ActivationContinuationHash -cne (Get-RepositoryRecoveryValueHash $intent)) {
             throw 'repository-recovery-receipt-invalid: activation continuation identity'
         }
+        if ($intent.ContainsKey('cancelled_query_task')) { Assert-RepositoryRecoveryCancelledQueryTaskProof $intent.cancelled_query_task }
     }
     if ($receipt.Phase -cne 'Prepared' -and !($receipt.Phase -ceq 'FailedHeld' -and $receipt.FailureAtPhase -ceq 'Prepared') -and
         $null -eq $receipt.Binding.Retained) { throw 'repository-recovery-receipt-invalid: retained proof missing' }
@@ -119,8 +120,13 @@ function Assert-RepositoryRecoveryActivationReceipt($Receipt) {
 
 function Invoke-RepositoryRecoveryRelease {
     param([Parameter(Mandatory)][string]$ReceiptPath, [Parameter(Mandatory)]$Binding,
-        [Parameter(Mandatory)][Collections.IDictionary]$Ports, [switch]$ResumePrepared, [switch]$ResumeActivation, [string]$OperatorCommit='')
+        [Parameter(Mandatory)][Collections.IDictionary]$Ports, [switch]$ResumePrepared, [switch]$ResumeActivation, [string]$OperatorCommit='',
+        $AcknowledgedCancelledQueryTask=$null)
     if ($ResumePrepared -and $ResumeActivation) { throw 'repository-recovery-ambiguous-continuation' }
+    if ($null -ne $AcknowledgedCancelledQueryTask) {
+        if (!$ResumeActivation) { throw 'repository-recovery-cancelled-query-requires-activation-continuation' }
+        Assert-RepositoryRecoveryCancelledQueryTaskProof $AcknowledgedCancelledQueryTask
+    }
     if ($ResumeActivation) {
         $receipt=Read-RepositoryRecoveryReleaseReceipt $ReceiptPath
         Assert-RepositoryRecoveryActivationReceipt $receipt
@@ -129,14 +135,19 @@ function Invoke-RepositoryRecoveryRelease {
         }
         $priorReceiptHash=(Get-FileHash -LiteralPath $ReceiptPath -Algorithm SHA256).Hash
         # Refused preconditions leave the existing failure evidence untouched.
-        & $Ports.AssertHold; & $Ports.AssertTaskDisabled; & $Ports.AssertActivationLocations
+        & $Ports.AssertHold; & $Ports.AssertTaskDisabled; & $Ports.AssertActivationLocations $true
         Assert-RepositoryRecoveryDatabaseMatch (& $Ports.ReadDatabase) $Binding.TargetDatabase
         & $Ports.Stop; & $Ports.AssertOriginals; & $Ports.AssertHold; & $Ports.AssertTaskDisabled
+        if ($null -ne $AcknowledgedCancelledQueryTask) { & $Ports.AssertActivationLocations $false }
         $receipt.Binding=$Binding
         $receipt.ActivationContinuation=[ordered]@{ operator_commit=$OperatorCommit; prior_revision=$receipt.Revision;
             prior_receipt_sha256=$priorReceiptHash; binding_hash=$receipt.BindingHash;
             prepared_continuation_hash=$receipt.PreparedContinuationHash;
             failure=$receipt.Failure; failure_at_phase=$receipt.FailureAtPhase }
+        if ($null -ne $AcknowledgedCancelledQueryTask) {
+            $receipt.ActivationContinuation.cancelled_query_task=[ordered]@{}
+            foreach ($key in $AcknowledgedCancelledQueryTask.Keys) { $receipt.ActivationContinuation.cancelled_query_task[$key]=$AcknowledgedCancelledQueryTask[$key] }
+        }
         $receipt.Failure=$null; $receipt.FailureAtPhase=$null
     } elseif ($ResumePrepared) {
         $receipt=Read-RepositoryRecoveryReleaseReceipt $ReceiptPath

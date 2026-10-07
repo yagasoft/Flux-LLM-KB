@@ -111,6 +111,57 @@ $insertLate={ param($row)
 Expect-Failure { Get-RepositoryRecoveryRetainedState -ConnectionString $connectionText -Projection $retained.Projection -VerifyNewWorker $insertLate } 'unexpected-new-worker-lifecycle-evidence'
 Invoke-TestSql "DELETE FROM NativeWorkerLifecycleEvidence WHERE InstanceId IN ('$firstWorker','$lateWorker'); DELETE FROM NativeWorkerInstances WHERE InstanceId IN ('$firstWorker','$lateWorker');"
 
+# An explicitly acknowledged cancelled query is preserved beside the original
+# baseline; it is never permission to ignore another row or alter saved work.
+function Add-CancelledQueryFixture([Guid]$TaskId) {
+    Invoke-TestSql @"
+INSERT INTO GpuMiniTasks (Id,ParentJobId,SourceRevision,PriorityLane,ModelRuntimeKey,SettingsFingerprint,
+ EstimatedBytes,AdmissionGeneration,IdempotencyKey,State,CreatedAtUtc,
+ InteractiveExecutorInstanceId,InteractiveOwnerProcessId,InteractiveOwnerStartedAtUtc,
+ InteractiveOwnerMachineFingerprint,RequiredExecutorKey,QueueDeadlineUtc,ExecutionDeadlineUtc,
+ InteractiveCancellationRequested,ReservationAttemptCount)
+VALUES ('$TaskId',NULL,0,0,N'synthetic-query',N'synthetic-settings',1,0,N'query-$TaskId',4,SYSDATETIMEOFFSET(),
+ NEWID(),12345,'1970-01-01',REPLICATE(N'a',64),N'synthetic-executor',
+ DATEADD(second,2,SYSDATETIMEOFFSET()),DATEADD(second,20,SYSDATETIMEOFFSET()),1,0);
+"@
+}
+$originalQuery=[Guid]::NewGuid(); $acknowledgedQuery=[Guid]::NewGuid(); $otherQuery=[Guid]::NewGuid()
+Add-CancelledQueryFixture $originalQuery
+$queryBaseline=Get-RepositoryRecoveryRetainedState -ConnectionString $connectionText -Projection $retained.Projection
+Add-CancelledQueryFixture $acknowledgedQuery
+$proof=Get-RepositoryRecoveryCancelledQueryTaskProof -ConnectionString $connectionText -Projection $queryBaseline.Projection -TaskId $acknowledgedQuery
+Assert-True ($proof.TaskId -ceq $acknowledgedQuery.ToString('D') -and $proof.RowSha256 -cmatch '^[0-9A-F]{64}$') 'Cancelled-query proof lacks canonical identity/hash.'
+Expect-Failure { Get-RepositoryRecoveryCancelledQueryTaskProof -ConnectionString $connectionText -Projection $queryBaseline.Projection -TaskId $acknowledgedQuery -ExpectedSha256 ('0'*64) } 'cancelled-query-task-changed'
+Expect-Failure { Assert-RepositoryRecoveryRetainedState $queryBaseline (Get-RepositoryRecoveryRetainedState -ConnectionString $connectionText -Projection $queryBaseline.Projection) } 'retained-state-changed'
+Assert-RepositoryRecoveryRetainedState $queryBaseline (Get-RepositoryRecoveryRetainedState -ConnectionString $connectionText -Projection $queryBaseline.Projection -AcknowledgedCancelledQueryTask $proof)
+Assert-True ($queryBaseline.Tables.Vectors.Fingerprint -ceq $retained.Tables.Vectors.Fingerprint) 'Query acknowledgement changed saved vector proof.'
+Add-CancelledQueryFixture $otherQuery
+Expect-Failure { Assert-RepositoryRecoveryRetainedState $queryBaseline (Get-RepositoryRecoveryRetainedState -ConnectionString $connectionText -Projection $queryBaseline.Projection -AcknowledgedCancelledQueryTask $proof) } 'retained-state-changed'
+Invoke-TestSql "DELETE FROM GpuMiniTasks WHERE Id='$otherQuery';"
+$queryRaceWorker=[Guid]::NewGuid().ToString()
+Invoke-TestSql "INSERT INTO NativeWorkerInstances (InstanceId,ExecutorKey,ExecutableFingerprint,ProtocolVersion,State,LaunchedAtUtc) VALUES ('$queryRaceWorker',N'synthetic',REPLICATE(N'd',64),N'synthetic',2,SYSDATETIMEOFFSET());"
+$changeAcknowledgedAfterScan={param($row) Invoke-TestSql "UPDATE GpuMiniTasks SET InteractiveOwnerProcessId=54321 WHERE Id='$acknowledgedQuery';"}.GetNewClosure()
+Expect-Failure { Get-RepositoryRecoveryRetainedState -ConnectionString $connectionText -Projection $queryBaseline.Projection -AcknowledgedCancelledQueryTask $proof -VerifyNewWorker $changeAcknowledgedAfterScan } 'cancelled-query-task-changed'
+Invoke-TestSql "DELETE FROM NativeWorkerInstances WHERE InstanceId='$queryRaceWorker'; UPDATE GpuMiniTasks SET InteractiveOwnerProcessId=12345 WHERE Id='$acknowledgedQuery';"
+$proof=Get-RepositoryRecoveryCancelledQueryTaskProof -ConnectionString $connectionText -Projection $queryBaseline.Projection -TaskId $acknowledgedQuery
+foreach ($change in @('State=0','State=1','AdmissionGeneration=1','ReservationAttemptCount=1','InteractiveCancellationRequested=0')) {
+    Invoke-TestSql "UPDATE GpuMiniTasks SET $change WHERE Id='$acknowledgedQuery';"
+    Expect-Failure { Get-RepositoryRecoveryRetainedState -ConnectionString $connectionText -Projection $queryBaseline.Projection -AcknowledgedCancelledQueryTask $proof } 'cancelled-query-task-changed|cancelled-query-task-not-unreserved'
+    Expect-Failure { Get-RepositoryRecoveryCancelledQueryTaskProof -ConnectionString $connectionText -Projection $queryBaseline.Projection -TaskId $acknowledgedQuery } 'cancelled-query-task-not-unreserved'
+    Invoke-TestSql "UPDATE GpuMiniTasks SET State=4,AdmissionGeneration=0,ReservationAttemptCount=0,InteractiveCancellationRequested=1 WHERE Id='$acknowledgedQuery';"
+    $proof=Get-RepositoryRecoveryCancelledQueryTaskProof -ConnectionString $connectionText -Projection $queryBaseline.Projection -TaskId $acknowledgedQuery
+}
+$oldProof=$proof
+Invoke-TestSql "UPDATE GpuMiniTasks SET InteractiveOwnerProcessId=54321 WHERE Id='$acknowledgedQuery';"
+Expect-Failure { Get-RepositoryRecoveryRetainedState -ConnectionString $connectionText -Projection $queryBaseline.Projection -AcknowledgedCancelledQueryTask $oldProof } 'cancelled-query-task-changed'
+$proof=Get-RepositoryRecoveryCancelledQueryTaskProof -ConnectionString $connectionText -Projection $queryBaseline.Projection -TaskId $acknowledgedQuery
+Invoke-TestSql "UPDATE GpuMiniTasks SET ReservationAttemptCount=1 WHERE Id='$originalQuery';"
+Expect-Failure { Assert-RepositoryRecoveryRetainedState $queryBaseline (Get-RepositoryRecoveryRetainedState -ConnectionString $connectionText -Projection $queryBaseline.Projection -AcknowledgedCancelledQueryTask $proof) } 'retained-state-changed'
+Invoke-TestSql "DELETE FROM GpuMiniTasks WHERE Id IN ('$originalQuery','$acknowledgedQuery');"
+Expect-Failure { Get-RepositoryRecoveryRetainedState -ConnectionString $connectionText -Projection $queryBaseline.Projection -AcknowledgedCancelledQueryTask $proof } 'cancelled-query-task-missing'
+Assert-RepositoryRecoveryRetainedState $retained (Get-RepositoryRecoveryRetainedState -ConnectionString $connectionText -Projection $retained.Projection)
+Write-Output 'Cancelled query acknowledgement passed: exact original rows, strict default, one explicit preserved append, changed/active/reserved/other/deleted task refusal.'
+
 # Real vector bytes, source identity and job state must change the proof, even if hashes/row counts do not.
 foreach ($mutation in @('UPDATE Vectors SET [Values] = 0x02 + SUBSTRING([Values], 2, DATALENGTH([Values]));',
     "UPDATE SourceIdentities SET StableKey = StableKey + N'-changed';", 'UPDATE Jobs SET AttemptCount = AttemptCount + 1;',

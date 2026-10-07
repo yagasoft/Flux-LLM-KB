@@ -680,3 +680,48 @@ the native incremental updater contract pass, following a red reproduction of th
 actual configuration-read failure. Final independent review remains pending,
 followed by new production approval;
 the earlier approval does not authorise this forward continuation.
+
+### Explicit acknowledgement of one cancelled interactive append
+
+The default activation continuation remains strict. A narrowly scoped correction
+may acknowledge one explicitly supplied interactive mini-task ID and its full
+canonical projected-row SHA-256 when fresh read-only evidence proves that it was
+appended after the saved baseline and cancelled before reservation. This is a
+local correction to the existing updater, receipt, hold and drain flow; it adds no
+database columns or general allowlist mechanism. Production use requires a concrete
+amended packet and current authority for the changed preconditions.
+
+Require `ExecutionState=Cancelled`, `InteractiveCancellationRequested=true`,
+`SourceRevision=0`, no parent job, no batch, `AdmissionGeneration=0`,
+`ReservationAttemptCount=0` and no handoff lease owner. Bind the exact executor,
+owner process/start identity and creation identity as well as the full row hash.
+Freeze this acknowledgement in the existing immutable `ActivationContinuation`
+metadata with the corrected operator and prior receipt revision/hash. Keep the
+original operation, `Binding`, `PreparedContinuation` and saved retained baseline
+unchanged; preserve the acknowledged row itself.
+
+Every retained validation must require that exact row to exist unchanged and still
+meet the cancellation-before-reservation conditions. Compare the original
+`GpuMiniTasks` rows, excluding only the acknowledged ID, against the saved count
+and canonical ordered-row fingerprint. Preserve all other retained checks and the
+three existing startup-evidence allowances. Refuse a missing or changed acknowledged
+row, any other mini-task append, any change to an original retained row, or any
+other difference outside the existing contract. A matching count, terminal state
+or general category of cancelled tasks cannot substitute for the exact proof.
+
+Only this explicit acknowledgement path may accept a currently Started original
+FluxKnowledge pool during preflight. First verify the exact receipt, known pool
+owner, original/candidate payloads, safe locations, configuration, task/launcher,
+owned hold, target database and clean GPU ownership/cleanup. PlanOnly remains
+read-only and reports the required drain. Apply then uses the existing canonical
+GPU/IIS drain and stop, proves stopped ownership, and repeats retained and location
+checks before recording activation intent or placing a payload. Unknown owners or
+GPU cleanup fail closed. Keep the normal stopped-owner guard and all later
+activation/held-validation gates; this is no permission to bypass them.
+
+Do not replace or recapture the baseline, delete or process the cancelled task,
+replay migration, regenerate embeddings, recover terminal jobs, or add retention
+or unattended-hosting work. Existing failure evidence, rollback payloads, disabled
+task policy, hidden launcher and hold protections remain in force. Focused tests
+must prove the exact acknowledgement, refusal cases, immutable metadata and
+drain-before-activation order before independent review of the complete change.

@@ -416,6 +416,15 @@ no migration or baseline recapture is allowed. Focused checks and the native
 incremental updater contract pass; final independent review and fresh production
 approval remain pending.
 
+An explicit single-task acknowledgement freezes the cancelled, unreserved
+interactive row's identity and full canonical SHA-256 in `ActivationContinuation`,
+preserves that row, and compares the original retained baseline excluding only
+that exact unchanged row. Only this path may accept a known Started original-payload
+pool at preflight, then use the canonical GPU/IIS drain and repeat stopped-owner,
+retained and location checks before activation intent or placement. Default
+continuation remains strict; production use awaits independent review and current
+authority for the concrete amended packet.
+
 SQL vector selection resolves chunk identity before record revision predicates
 to exclude the observed pair expansion, retaining all eligibility checks. Its
 LOOP join fixes join order and trades additional point lookups on mostly

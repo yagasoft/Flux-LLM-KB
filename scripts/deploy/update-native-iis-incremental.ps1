@@ -13,6 +13,8 @@ param(
     [string]$ReconcileRepositoryRecoveryRelease = '',
     [string]$ResumeRepositoryRecoveryPreparedRelease = '',
     [string]$ResumeRepositoryRecoveryActivationRelease = '',
+    [string]$AcknowledgeCancelledQueryTaskId = '',
+    [string]$ExpectedCancelledQueryTaskSha256 = '',
     [switch]$ApplyHybridPassageRebuild,
     [string]$ResumeHybridRebuildRelease = '',
     [string]$ReplaceHybridRebuildRelease = '',
@@ -1441,9 +1443,17 @@ function Assert-RepositoryRecoveryNewWorker($Row, [DateTime]$CandidateStartedUtc
 
 function Invoke-RepositoryRecoveryIisUpdate {
     param([Parameter(Mandatory)][string]$SourceRoot, [Parameter(Mandatory)][string]$Commit, [string]$ExistingRelease='',
-        [switch]$ResumePrepared, [switch]$InspectPrepared, [switch]$ResumeActivation, [switch]$InspectActivation)
+        [switch]$ResumePrepared, [switch]$InspectPrepared, [switch]$ResumeActivation, [switch]$InspectActivation,
+        [string]$CancelledQueryTaskId='', [string]$ExpectedCancelledQueryTaskSha256='')
     if ($ResumePrepared -and $ResumeActivation) { throw 'repository-recovery-ambiguous-continuation' }
     if (($ResumePrepared -or $ResumeActivation) -and !$ExistingRelease) { throw 'repository-recovery-continuation-requires-exact-release' }
+    if ($CancelledQueryTaskId -or $ExpectedCancelledQueryTaskSha256) {
+        $queryId=[Guid]::Empty
+        if (!$ResumeActivation -or ![Guid]::TryParseExact($CancelledQueryTaskId,'D',[ref]$queryId) -or
+            $queryId -eq [Guid]::Empty -or $ExpectedCancelledQueryTaskSha256 -cnotmatch '^[0-9A-F]{64}$') {
+            throw 'repository-recovery-cancelled-query-requires-exact-activation-identity-and-hash'
+        }
+    }
     if ($ExistingRelease) {
         $releaseRoot=Join-Path $IncrementalRecoveryRoot $ExistingRelease
         foreach ($root in @($CanonicalLiveRoot,$CanonicalRecoveryRoot,$IncrementalRecoveryRoot,$releaseRoot)) {
@@ -1499,6 +1509,12 @@ function Invoke-RepositoryRecoveryIisUpdate {
                 OriginalCompanion=(Get-HybridPayloadFingerprint $paths.CompanionRoot); CandidateCompanion=(Get-HybridPayloadFingerprint $paths.CompanionCandidateRoot) } }
     }
     if ((Get-RepositoryRecoveryValueHash $binding.Paths) -cne (Get-RepositoryRecoveryValueHash $paths)) { throw 'repository-recovery-release-path-binding-drift' }
+    $acknowledgedQuery=$null
+    if ($CancelledQueryTaskId) {
+        $acknowledgedQuery=Get-RepositoryRecoveryCancelledQueryTaskProof -ConnectionString (Get-DeploymentSqlConnectionString) -Projection $binding.Retained.Projection -TaskId ([Guid]$CancelledQueryTaskId) -ExpectedSha256 $ExpectedCancelledQueryTaskSha256
+    } elseif ($ExistingRelease -and $saved.ContainsKey('ActivationContinuation') -and $null -ne $saved.ActivationContinuation -and $saved.ActivationContinuation.ContainsKey('cancelled_query_task')) {
+        $acknowledgedQuery=$saved.ActivationContinuation.cancelled_query_task
+    }
     $runtime=@{ StartedUtc=[DateTime]::MaxValue }
     $assertHold={ Assert-HybridDeploymentHoldOwner -Path $ValidationHoldPath -ReleaseId $binding.ReleaseId -OperationId ([Guid]$binding.OperationId)
         if ((Get-Content -LiteralPath $ValidationHoldPath -Raw) -cne ($binding.ReleaseId | ConvertTo-Json -Compress)) {
@@ -1520,9 +1536,25 @@ function Invoke-RepositoryRecoveryIisUpdate {
     $checkRetained={
         $verifyWorker={ param($row) Assert-RepositoryRecoveryNewWorker $row $runtime.StartedUtc }.GetNewClosure()
         Assert-RepositoryRecoveryRetainedState -Baseline $binding.Retained -Current (Get-RepositoryRecoveryRetainedState `
-            -ConnectionString (Get-DeploymentSqlConnectionString) -Projection $binding.Retained.Projection -VerifyNewWorker $verifyWorker)
+            -ConnectionString (Get-DeploymentSqlConnectionString) -Projection $binding.Retained.Projection -VerifyNewWorker $verifyWorker -AcknowledgedCancelledQueryTask $acknowledgedQuery)
         if ((Get-RepositoryRecoveryDatabaseState -ConnectionString (Get-DeploymentSqlConnectionString)).Columns.Count -eq 2) {
             Assert-RepositoryRecoveryEvidenceEmpty -ConnectionString (Get-DeploymentSqlConnectionString)
+        }
+    }.GetNewClosure()
+    $assertKnownOriginalPoolOwners={
+        $appcmd=Join-Path $env:SystemRoot 'System32/inetsrv/appcmd.exe'
+        $ids=@(Get-HybridIisWorkerIds -AppCmdPath $appcmd -PoolName $SiteName)
+        foreach ($id in $ids) {
+            $owner=@(Get-CimInstance Win32_Process -Filter "ProcessId = $id" -ErrorAction Stop)
+            if ($owner.Count -ne 1 -or $owner[0].Name -cne 'w3wp.exe' -or !$owner[0].CreationDate) { throw 'repository-recovery-cancelled-query-owner-unverified' }
+            $started=(Get-Process -Id $id -ErrorAction Stop).StartTime.ToUniversalTime()
+            if ($owner[0].CreationDate.ToUniversalTime() -ne $started.AddTicks(-($started.Ticks % 10))) { throw 'repository-recovery-cancelled-query-owner-unverified' }
+            $again=@(Get-CimInstance Win32_Process -Filter "ProcessId = $id" -ErrorAction Stop)
+            if ($again.Count -ne 1 -or $again[0].CreationDate -ne $owner[0].CreationDate) { throw 'repository-recovery-cancelled-query-owner-unverified' }
+        }
+        if ((Get-RepositoryRecoveryValueHash @($ids | Sort-Object)) -cne
+            (Get-RepositoryRecoveryValueHash @(Get-HybridIisWorkerIds -AppCmdPath $appcmd -PoolName $SiteName | Sort-Object))) {
+            throw 'repository-recovery-cancelled-query-owner-unverified'
         }
     }.GetNewClosure()
     $ports=@{
@@ -1579,8 +1611,15 @@ function Invoke-RepositoryRecoveryIisUpdate {
             if (Test-Path -LiteralPath $ValidationHoldPath) { throw 'repository-recovery-completion-hold-present' }
             Assert-RepositoryRecoveryPayloadHash $paths.ApplicationRoot $binding.Payloads.CandidateWeb
             Assert-RepositoryRecoveryPayloadHash $paths.CompanionRoot $binding.Payloads.CandidateCompanion }.GetNewClosure()
-        AssertMigrationLocations={ & $assertEnvironment
-            if ((Get-IncrementalIisHostingSettings).PoolState -cne 'Stopped' -or (Test-Path -LiteralPath $paths.PreviousRoot) -or (Test-Path -LiteralPath $paths.FailedRoot)) {
+        AssertMigrationLocations={ param([bool]$BeforeDrain=$false)
+            & $assertEnvironment
+            $poolState=(Get-IncrementalIisHostingSettings).PoolState
+            $allowRunning=$BeforeDrain -and $ResumeActivation -and $null -ne $acknowledgedQuery -and $poolState -ceq 'Started'
+            if (($poolState -cne 'Stopped' -and !$allowRunning) -or (Test-Path -LiteralPath $paths.PreviousRoot) -or (Test-Path -LiteralPath $paths.FailedRoot)) {
+                throw 'repository-recovery-payload-location-or-pool-drift'
+            }
+            if ($allowRunning) { & $assertKnownOriginalPoolOwners }
+            if ($null -ne $acknowledgedQuery -and !$allowRunning -and @(Get-HybridIisWorkerIds -AppCmdPath (Join-Path $env:SystemRoot 'System32/inetsrv/appcmd.exe') -PoolName $SiteName).Count -ne 0) {
                 throw 'repository-recovery-payload-location-or-pool-drift'
             }
             Assert-RepositoryRecoveryPayloadHash $paths.ApplicationRoot $binding.Payloads.OriginalWeb
@@ -1590,7 +1629,8 @@ function Invoke-RepositoryRecoveryIisUpdate {
             if (Test-Path -LiteralPath $paths.CompanionPreviousRoot) {
                 Assert-RepositoryRecoveryPayloadHash $paths.CompanionPreviousRoot $binding.Payloads.OriginalCompanion
             }
-            if ($null -ne $binding.Retained) { & $checkRetained } }.GetNewClosure()
+            if ($null -ne $binding.Retained) { & $checkRetained }
+            if ($allowRunning) { & $assertKnownOriginalPoolOwners } }.GetNewClosure()
     }
     $ports.Swap={ param($activate,$start,$validate,$rollback)
         # GetWebConfiguration needs App/web.config; never call it in the
@@ -1609,8 +1649,8 @@ function Invoke-RepositoryRecoveryIisUpdate {
         Assert-NotReparsePoint -Path $sqlPath -Message 'repository-recovery-prepared-sql-path-unsafe'
         if ((Get-FileHash -LiteralPath $sqlPath).Hash -cne $binding.MigrationSha256) { throw 'repository-recovery-prepared-sql-drift' }
     }.GetNewClosure()
-    $ports.AssertActivationLocations={
-        & $ports.AssertMigrationLocations
+    $ports.AssertActivationLocations={ param([bool]$BeforeDrain=$false)
+        & $ports.AssertMigrationLocations $BeforeDrain
         if (!(Test-Path -LiteralPath $paths.CompanionPreviousRoot -PathType Container)) { throw 'repository-recovery-activation-backup-missing' }
         Assert-RepositoryRecoveryPayloadHash $paths.CompanionPreviousRoot $binding.Payloads.OriginalCompanion
         Assert-RepositoryRecoveryCandidateCommit $paths.CandidateRoot $binding.Commit
@@ -1619,12 +1659,13 @@ function Invoke-RepositoryRecoveryIisUpdate {
     }.GetNewClosure()
     if ($InspectActivation) {
         if (!$ResumeActivation) { throw 'repository-recovery-activation-inspection-requires-resume' }
-        & $ports.AssertHold; & $ports.AssertTaskDisabled; & $ports.AssertActivationLocations
+        & $ports.AssertHold; & $ports.AssertTaskDisabled; & $ports.AssertActivationLocations $true
         Assert-RepositoryRecoveryDatabaseMatch (& $ports.ReadDatabase) $binding.TargetDatabase
         return [ordered]@{ release_id=$binding.ReleaseId; candidate_commit=$binding.Commit; operator_commit=$Commit;
             receipt_phase=$saved.Phase; failure_at_phase=$saved.FailureAtPhase; receipt_revision=$saved.Revision;
             receipt_sha256=(Get-FileHash -LiteralPath $receiptPath).Hash; hold='preserve existing deny-all owner';
-            next_step='verified GPU/IIS drain, durable activation operator intent, corrected payload/validation/release suffix; no migration or baseline replay' }
+            cancelled_query_task=$acknowledgedQuery; observed_pool_state=(Get-IncrementalIisHostingSettings).PoolState;
+            next_step='verified GPU/IIS drain, stopped-owner and retained recheck, durable activation operator intent, corrected payload/validation/release suffix; no migration or baseline replay' }
     }
     if ($InspectPrepared) {
         if (!$ResumePrepared) { throw 'repository-recovery-prepared-inspection-requires-resume' }
@@ -1635,7 +1676,7 @@ function Invoke-RepositoryRecoveryIisUpdate {
             hold='preserve existing deny-all owner'; next_step='fresh verified GPU/IIS drain, durable operator intent, ordered retained capture, normal release flow' }
     }
     $result=if ($ResumeActivation) {
-        Invoke-RepositoryRecoveryRelease -ReceiptPath $receiptPath -Binding $binding -Ports $ports -ResumeActivation -OperatorCommit $Commit
+        Invoke-RepositoryRecoveryRelease -ReceiptPath $receiptPath -Binding $binding -Ports $ports -ResumeActivation -OperatorCommit $Commit -AcknowledgedCancelledQueryTask $acknowledgedQuery
     } elseif ($ResumePrepared) {
         Invoke-RepositoryRecoveryRelease -ReceiptPath $receiptPath -Binding $binding -Ports $ports -ResumePrepared -OperatorCommit $Commit
     } elseif ($ExistingRelease) { Invoke-RepositoryRecoveryReceiptReconciliation -ReceiptPath $receiptPath -Ports $ports } else {
@@ -1712,6 +1753,13 @@ if ($ResumeRepositoryRecoveryPreparedRelease -and (!$ApplyRepositoryRecoveryAuth
 if ($ResumeRepositoryRecoveryActivationRelease -and (!$ApplyRepositoryRecoveryAuthorityMigration -or $ReconcileRepositoryRecoveryRelease -or $ResumeRepositoryRecoveryPreparedRelease -or
     $ResumeRepositoryRecoveryActivationRelease -cnotmatch '^\d{8}T\d{6}Z-[0-9a-f]{12}-repositoryrecovery$')) {
     throw 'Repository recovery activation resume requires its migration flag and one exact failed activation release, without another continuation mode.'
+}
+if ($AcknowledgeCancelledQueryTaskId -or $ExpectedCancelledQueryTaskSha256) {
+    $queryId=[Guid]::Empty
+    if (!$ResumeRepositoryRecoveryActivationRelease -or ![Guid]::TryParseExact($AcknowledgeCancelledQueryTaskId,'D',[ref]$queryId) -or
+        $queryId -eq [Guid]::Empty -or $ExpectedCancelledQueryTaskSha256 -cnotmatch '^[0-9A-F]{64}$') {
+        throw 'Cancelled query acknowledgement requires one exact activation release, task ID and canonical row SHA-256.'
+    }
 }
 if ($EnableUnattendedDiscovery -and ($ApplyMigrations -or $ApplyCorpusChunkFullTextMigration -or
     $ApplyCodeDisclosureProofMigration -or $ApplyHybridPassageRebuild -or $RecoverStoppedPool -or
@@ -1803,7 +1851,7 @@ if ($PlanOnly) {
             $operatorCommit=(& git -C $SourceRoot rev-parse HEAD 2>&1 | Out-String).Trim()
             if ($LASTEXITCODE -ne 0 -or $operatorCommit -cnotmatch '^[0-9a-f]{40}$') { throw 'Activation resume requires an exact operator commit.' }
             $migrationPlan.activation_continuation=Invoke-RepositoryRecoveryIisUpdate -SourceRoot $SourceRoot -Commit $operatorCommit `
-                -ExistingRelease $ResumeRepositoryRecoveryActivationRelease -ResumeActivation -InspectActivation
+                -ExistingRelease $ResumeRepositoryRecoveryActivationRelease -ResumeActivation -InspectActivation -CancelledQueryTaskId $AcknowledgeCancelledQueryTaskId -ExpectedCancelledQueryTaskSha256 $ExpectedCancelledQueryTaskSha256
         } elseif ($ResumeRepositoryRecoveryPreparedRelease) {
             if ([string]::IsNullOrWhiteSpace($SourceRoot)) { $SourceRoot=Split-Path -Parent (Split-Path -Parent $PSScriptRoot) }
             $SourceRoot=(Resolve-Path -LiteralPath $SourceRoot).Path
@@ -2051,7 +2099,7 @@ try {
         return
     }
     if ($ApplyRepositoryRecoveryAuthorityMigration -and $ResumeRepositoryRecoveryActivationRelease) {
-        Invoke-RepositoryRecoveryIisUpdate -SourceRoot $SourceRoot -Commit $commit -ExistingRelease $ResumeRepositoryRecoveryActivationRelease -ResumeActivation
+        Invoke-RepositoryRecoveryIisUpdate -SourceRoot $SourceRoot -Commit $commit -ExistingRelease $ResumeRepositoryRecoveryActivationRelease -ResumeActivation -CancelledQueryTaskId $AcknowledgeCancelledQueryTaskId -ExpectedCancelledQueryTaskSha256 $ExpectedCancelledQueryTaskSha256
         return
     }
     Assert-IncrementalIisPreflight

@@ -245,4 +245,20 @@ foreach ($arguments in @(
     if ($rejected.ExitCode -eq 0 -or $rejected.Output -notmatch 'activation resume requires|Prepared resume requires') { throw 'Activation continuation accepted an ambiguous updater mode.' }
 }
 
+$queryTestId='11111111-1111-1111-1111-111111111111'
+$activationArguments=@('-ApplyRepositoryRecoveryAuthorityMigration','-ResumeRepositoryRecoveryActivationRelease','20261005T000000Z-09945ae1f034-repositoryrecovery')
+foreach ($arguments in @(
+    @('-AcknowledgeCancelledQueryTaskId',$queryTestId,'-ExpectedCancelledQueryTaskSha256',('A'*64)),
+    ($activationArguments+@('-AcknowledgeCancelledQueryTaskId',$queryTestId)),
+    ($activationArguments+@('-ExpectedCancelledQueryTaskSha256',('A'*64))),
+    ($activationArguments+@('-AcknowledgeCancelledQueryTaskId','invalid','-ExpectedCancelledQueryTaskSha256',('A'*64))),
+    ($activationArguments+@('-AcknowledgeCancelledQueryTaskId',[Guid]::Empty.ToString('D'),'-ExpectedCancelledQueryTaskSha256',('A'*64))),
+    ($activationArguments+@('-AcknowledgeCancelledQueryTaskId',$queryTestId,'-ExpectedCancelledQueryTaskSha256','invalid'))
+)) {
+    $rejected=Invoke-ExpectedRejection -Arguments (@('-SourceRoot',$SourceRoot,'-PlanOnly')+$arguments)
+    if ($rejected.ExitCode -eq 0 -or $rejected.Output -notmatch 'Cancelled query acknowledgement requires') {
+        throw 'Cancelled query acknowledgement accepted an incomplete identity or an unrelated updater mode.'
+    }
+}
+
 Write-Output "Incremental IIS update contract passed."

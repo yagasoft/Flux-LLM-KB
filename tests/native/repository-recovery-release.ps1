@@ -497,6 +497,85 @@ try {
     Assert-True ($case.Box.NewStarts -eq 1 -and $case.Box.ReleaseCalls -eq 1) 'Recorded activation operator replayed its completed release.'
     Expect-Failure { Invoke-RepositoryRecoveryIisUpdate -SourceRoot $SourceRoot -Commit ('d'*40) -ExistingRelease $case.Binding.ReleaseId } 'release-commit-drift'
 
+    # A known cancelled interactive query may be preserved beside the original
+    # baseline only through an explicit identity/hash acknowledgement.
+    function Use-QueryAppendWrapperCase($NextCase) {
+        Use-PreparedWrapperCase $NextCase; Set-FailedActivationCase $NextCase
+        $NextCase.Box.Pool='Started'
+        $NextCase.Box.QueryProof=@{TaskId=[Guid]::NewGuid().ToString('D');RowSha256=('B'*64);
+            OwnerProcessId=100;OwnerStartedAtUtcTicks=$ownerStarted.AddSeconds(1).Ticks;
+            ExecutorInstanceId=[Guid]::NewGuid().ToString('D');CreatedAtUtcTicks=([DateTimeOffset]'2026-10-06T00:00:00Z').UtcTicks}
+        $NextCase.Box.QueryOwnerDrift=$false; $NextCase.Box.QueryExtraRows=$false
+        $NextCase.Box.QueryCleanupFailure=$false; $NextCase.Box.QueryChangedAfterDrain=$false
+        $NextCase.Box.QueryStillRunning=$false; $NextCase.Box.QueryDrainCalls=0
+    }
+    function Get-RepositoryRecoveryCancelledQueryTaskProof {
+        param($ConnectionString,$Projection,[Guid]$TaskId,[string]$ExpectedSha256='')
+        if ($TaskId.ToString('D') -cne $wrapperCase.Box.QueryProof.TaskId -or
+            ($ExpectedSha256 -and $ExpectedSha256 -cne $wrapperCase.Box.QueryProof.RowSha256)) { throw 'cancelled-query-task-changed' }
+        return $wrapperCase.Box.QueryProof | ConvertTo-Json | ConvertFrom-Json -AsHashtable
+    }
+    function Get-RepositoryRecoveryRetainedState {
+        param($ConnectionString,$Projection,$VerifyNewWorker,$AcknowledgedCancelledQueryTask)
+        if ($wrapperCase.Box.ContainsKey('QueryProof')) {
+            if (!$AcknowledgedCancelledQueryTask -or $wrapperCase.Box.QueryExtraRows) { throw 'retained-state-changed' }
+            $actual=Get-RepositoryRecoveryCancelledQueryTaskProof -TaskId $AcknowledgedCancelledQueryTask.TaskId -ExpectedSha256 $AcknowledgedCancelledQueryTask.RowSha256
+            if ((Get-RepositoryRecoveryValueHash $actual) -cne (Get-RepositoryRecoveryValueHash $AcknowledgedCancelledQueryTask)) { throw 'cancelled-query-task-changed' }
+        }
+        return @{Projection=@{Version=1};Tables=@{Vectors=@{RowCount=329;Fingerprint=('A'*64)}}}
+    }
+    function Get-HybridIisWorkerIds { param($AppCmdPath,$PoolName)
+        if ($wrapperCase.Box.Pool -ceq 'Started') { return @(100) }; return @()
+    }
+    function Get-CimInstance { param($ClassName,$Filter,$ErrorAction)
+        $created=[DateTime]::new([long]$wrapperCase.Box.QueryProof.OwnerStartedAtUtcTicks,[DateTimeKind]::Utc)
+        if ($wrapperCase.Box.QueryOwnerDrift) { $created=$created.AddSeconds(1) }
+        return [pscustomobject]@{ProcessId=100;Name='w3wp.exe';CreationDate=$created}
+    }
+    function Get-Process { param($Id,$ErrorAction)
+        $created=[DateTime]::new([long]$wrapperCase.Box.QueryProof.OwnerStartedAtUtcTicks,[DateTimeKind]::Utc)
+        return @{StartTime=$created}
+    }
+    function Stop-HybridIisAfterGpuDrain {
+        if ($wrapperCase.Box.ContainsKey('QueryProof')) {
+            $wrapperCase.Box.QueryDrainCalls++
+            if ($wrapperCase.Box.QueryCleanupFailure) { throw 'uncertain-gpu-cleanup' }
+            if ($wrapperCase.Box.QueryChangedAfterDrain) { $wrapperCase.Box.QueryProof.RowSha256=('C'*64) }
+            if ($wrapperCase.Box.QueryStillRunning) { return }
+        }
+        $wrapperCase.Box.Pool='Stopped'
+    }
+    $case=New-Case $false; $cases.Add($case); Use-QueryAppendWrapperCase $case
+    $priorHash=(Get-FileHash -LiteralPath $case.Path).Hash
+    Expect-Failure { Invoke-RepositoryRecoveryIisUpdate -SourceRoot $SourceRoot -Commit ('e'*40) -ExistingRelease $case.Binding.ReleaseId -ResumeActivation } 'payload-location-or-pool-drift'
+    $proof=$case.Box.QueryProof | ConvertTo-Json | ConvertFrom-Json -AsHashtable
+    $inspected=Invoke-RepositoryRecoveryIisUpdate -SourceRoot $SourceRoot -Commit ('e'*40) -ExistingRelease $case.Binding.ReleaseId -ResumeActivation -InspectActivation -CancelledQueryTaskId $proof.TaskId -ExpectedCancelledQueryTaskSha256 $proof.RowSha256
+    Assert-True ($case.Box.Pool -ceq 'Started' -and $case.Box.QueryDrainCalls -eq 0 -and (Get-FileHash -LiteralPath $case.Path).Hash -ceq $priorHash) 'Acknowledged query inspection mutated production state.'
+    $baselineHash=Get-RepositoryRecoveryValueHash $case.Binding.Retained
+    $placed=Invoke-RepositoryRecoveryIisUpdate -SourceRoot $SourceRoot -Commit ('e'*40) -ExistingRelease $case.Binding.ReleaseId -ResumeActivation -CancelledQueryTaskId $proof.TaskId -ExpectedCancelledQueryTaskSha256 $proof.RowSha256 | ConvertFrom-Json
+    $completed=Read-RepositoryRecoveryReleaseReceipt $case.Path
+    Assert-True ($placed.ok -and $case.Box.QueryDrainCalls -ge 1 -and $case.Box.SqlCalls -eq 1 -and $case.Box.NewStarts -eq 1 -and $case.Box.OldStarts -eq 0 -and
+        (Get-RepositoryRecoveryValueHash $completed.Binding.Retained) -ceq $baselineHash -and
+        (Get-RepositoryRecoveryValueHash $completed.ActivationContinuation.cancelled_query_task) -ceq (Get-RepositoryRecoveryValueHash $proof)) 'Acknowledged query lost baseline/intent or bypassed canonical drain.'
+    $edited=Read-RepositoryRecoveryReleaseReceipt $case.Path; $edited.ActivationContinuation.cancelled_query_task.RowSha256=('D'*64)
+    Expect-Failure { Save-RepositoryRecoveryReleaseReceipt $case.Path $edited } 'activation-continuation-drift'
+    foreach ($failure in @('hash','owner','gpu','retained','after-drain','still-running')) {
+        $case=New-Case $false; $cases.Add($case); Use-QueryAppendWrapperCase $case
+        $proof=$case.Box.QueryProof | ConvertTo-Json | ConvertFrom-Json -AsHashtable
+        $reason='cancelled-query-task-changed'
+        switch ($failure) {
+            'hash' { $proof.RowSha256=('0'*64) }
+            'owner' { $case.Box.QueryOwnerDrift=$true; $reason='cancelled-query-owner-unverified' }
+            'gpu' { $case.Box.QueryCleanupFailure=$true; $reason='uncertain-gpu-cleanup' }
+            'retained' { $case.Box.QueryExtraRows=$true; $reason='retained-state-changed' }
+            'after-drain' { $case.Box.QueryChangedAfterDrain=$true }
+            'still-running' { $case.Box.QueryStillRunning=$true; $reason='payload-location-or-pool-drift' }
+        }
+        $priorHash=(Get-FileHash -LiteralPath $case.Path).Hash
+        Expect-Failure { Invoke-RepositoryRecoveryIisUpdate -SourceRoot $SourceRoot -Commit ('e'*40) -ExistingRelease $case.Binding.ReleaseId -ResumeActivation -CancelledQueryTaskId $proof.TaskId -ExpectedCancelledQueryTaskSha256 $proof.RowSha256 } $reason
+        Assert-True ((Get-FileHash -LiteralPath $case.Path).Hash -ceq $priorHash -and $case.Box.NewStarts -eq 0 -and $case.Box.SqlCalls -eq 1 -and $case.Box.ReleaseCalls -eq 0) "Unsafe acknowledged query crossed the activation boundary: $failure"
+    }
+
     # A hosting change after placement is caught before the first candidate start.
     function Restore-InteractiveHostPayload { param($PreviousRoot,$LiveRoot)
         Get-ChildItem -LiteralPath $PreviousRoot -File | Copy-Item -Destination $LiveRoot -Force

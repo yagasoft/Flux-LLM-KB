@@ -499,3 +499,40 @@ automatic-continuation section of the design; keep one implementation owner.
 - [ ] Complete final independent review, then obtain
   fresh production approval before use; keep terminal recovery, hosting changes and
   inactive-generation cleanup separate.
+
+### Single cancelled interactive append correction
+
+Implement only the design's explicit acknowledgement within the existing
+activation-continuation flow. The unchanged continuation remains strict; production
+actions await a concrete amended packet and current approval.
+
+- [x] Accept one explicit task ID and full canonical projected-row SHA-256 only
+  for the supported failed activation boundary. Verify cancelled/requested state,
+  source revision zero, no parent job/batch/handoff lease, zero admission generation
+  and reservation attempts, and exact executor/owner/start/creation identity.
+  Freeze the acknowledgement in immutable `ActivationContinuation` metadata;
+  preserve the original operation, binding, `PreparedContinuation`, failure evidence,
+  saved baseline and acknowledged row.
+- [x] At every retained check, verify the acknowledged row unchanged and compare
+  original mini-task rows excluding only that ID against the saved count/hash.
+  Preserve all other retained checks and existing startup-evidence allowances.
+  Prove acceptance of the exact append and refusal of missing/changed/active tasks,
+  wrong identity/hash, another append and mutation of any original retained row.
+- [x] For this explicit path only, verify the known Started original-payload pool
+  and existing payload/configuration/task/hold/database/GPU preconditions, then use
+  the existing canonical drain/stop. Prove stopped ownership and repeat retained
+  and location checks before intent and placement. Test order and refusal of
+  unknown owners or GPU cleanup; keep PlanOnly read-only and default continuation
+  strict.
+- [x] Prove immutable acknowledgement/receipt metadata, refusal of duplicate or
+  contradictory intent, and zero baseline capture, migration replay, row deletion,
+  candidate republish or backup overwrite. Run focused retained-state, release-flow
+  and updater-contract checks; reuse unaffected valid evidence.
+  Focused disposable SQL integration and the full native updater contract pass.
+  A read-only 51-table production scan completed in 49.75 seconds, preserving the
+  acknowledged row and matching all original retained rows; no activation,
+  migration or baseline replacement was performed.
+- [ ] Obtain independent review of the complete correction and prepare its exact
+  amended operational packet before requesting production authority. Preserve
+  existing hold/rollback protections; add no terminal recovery, embedding
+  regeneration, retention cleanup, new database columns or generic allowlist.
