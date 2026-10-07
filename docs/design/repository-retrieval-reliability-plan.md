@@ -462,7 +462,7 @@ automatic-continuation section of the design; keep one implementation owner.
   identified new no-work wake/admission receipts and verified no-work startup
   telemetry are additional. Local implementation, focused disposable SQL/payload
   and combined native checks, and independent review are complete; separate
-  production approval/live validation remain pending.
+  production approval and bounded live validation subsequently completed below.
   The focused correction adds explicit `-ResumeRepositoryRecoveryPreparedRelease`
   only for untouched Prepared receipts without baseline/failure/prior intent,
   preserving original operation/candidate/hold/bindings and recording the corrected
@@ -471,7 +471,7 @@ automatic-continuation section of the design; keep one implementation owner.
   Three full synthetic retained-scale scans took 39.02/40.67/40.32 seconds with 329 MiB
   peak memory, preserving 50,000 1,024-dimensional vectors, 2,596 generations,
   15,934,056 repeated memberships and 120,000 receipts; a late mutation was refused.
-  Production remains stopped/held pending separately authorised continuation; no
+  Production remained stopped/held pending separately authorised continuation; no
   inactive-generation cleanup is included.
 
 - [x] Correct the observed `PayloadActivationIntent` failure: run full environment
@@ -496,15 +496,15 @@ automatic-continuation section of the design; keep one implementation owner.
   protections.
 - [x] Pass the native incremental updater contract, including the focused release
   ports and retained row-stream checks.
-- [ ] Complete final independent review, then obtain
+- [x] Complete final independent implementation/operational review, then obtain
   fresh production approval before use; keep terminal recovery, hosting changes and
   inactive-generation cleanup separate.
 
 ### Single cancelled interactive append correction
 
 Implement only the design's explicit acknowledgement within the existing
-activation-continuation flow. The unchanged continuation remains strict; production
-actions await a concrete amended packet and current approval.
+activation-continuation flow. The unchanged continuation remains strict; the exact
+amended packet received current production approval and was applied below.
 
 - [x] Accept one explicit task ID and full canonical projected-row SHA-256 only
   for the supported failed activation boundary. Verify cancelled/requested state,
@@ -532,7 +532,20 @@ actions await a concrete amended packet and current approval.
   A read-only 51-table production scan completed in 49.75 seconds, preserving the
   acknowledged row and matching all original retained rows; no activation,
   migration or baseline replacement was performed.
-- [ ] Obtain independent review of the complete correction and prepare its exact
+- [x] Obtain independent review of the complete correction and prepare its exact
   amended operational packet before requesting production authority. Preserve
   existing hold/rollback protections; add no terminal recovery, embedding
   regeneration, retention cleanup, new database columns or generic allowlist.
+  Authorised canonical Apply completed at receipt revision 11 with candidate
+  `e1d18352` and operator `dc58eb91`; the hold was released, retained baseline and
+  receipt/rollback evidence preserved, task Disabled and hidden launcher unchanged.
+  Six bounded MCP/REST/operator-CLI code/document cases passed with hybrid-ready
+  results and exact cited readbacks, including the full method on all surfaces.
+  Preserve the initial MCP index-updating fallback and CLI document timeout:
+  only the failed CLI case was repeated once after reviewed committed cleanup and
+  settled publication, passing in 9,914.51 ms on a later generation than the other
+  five cases. Each current binding/source was verified; this was not a common-
+  generation or full frozen run. Post-retry GPU ownership/cleanup was clear, with
+  the same worker and no new crash, debugger or terminal-job evidence. Final
+  independent closeout review passed for this bounded deployment and live-validation
+  scope; frozen semantic and unattended-hosting acceptance remain open.

@@ -631,8 +631,8 @@ without a retained baseline, failure or prior continuation intent. It preserves 
 original operation, application candidate, hold and bindings, recording the corrected
 operator commit immutably in separate `PreparedContinuation`. Read-only reconciliation
 accepts the original candidate or that recorded operator; there is no implicit retry,
-rebinding or republishing. The interrupted deployment remains stopped and held;
-production continuation requires separate current authority.
+rebinding or republishing. At that preparation point, the interrupted deployment
+remained stopped and held pending separate current authority.
 Scale evidence uses 50,000 synthetic 1,024-dimensional vectors, 2,596 generations,
 15,934,056 repeated memberships and 120,000 receipt rows. Three complete scans took
 39.02, 40.67 and 40.32 seconds with 329 MiB peak memory; a late membership mutation
@@ -677,9 +677,8 @@ call `ApplyMigration`, republish candidates or overwrite recovery evidence. Keep
 the existing held-failure and uncertain-release protections, including no schema
 downgrade, predecessor restart or hold release on failure. Focused local checks and
 the native incremental updater contract pass, following a red reproduction of the
-actual configuration-read failure. Final independent review remains pending,
-followed by new production approval;
-the earlier approval does not authorise this forward continuation.
+actual configuration-read failure. Independent implementation and operational review
+subsequently passed; the exact amended packet received new production approval.
 
 ### Explicit acknowledgement of one cancelled interactive append
 
@@ -725,3 +724,24 @@ or unattended-hosting work. Existing failure evidence, rollback payloads, disabl
 task policy, hidden launcher and hold protections remain in force. Focused tests
 must prove the exact acknowledgement, refusal cases, immutable metadata and
 drain-before-activation order before independent review of the complete change.
+
+The authorised canonical continuation completed on 7 October 2026 at receipt
+revision 11, activating candidate `e1d18352` with operator `dc58eb91`. The hold was
+released; the original retained baseline, receipt history and rollback payloads
+were preserved, with the task Disabled and hidden launcher unchanged.
+Bounded current-content validation passed six code/document cases across MCP,
+REST and the existing deployed operator CLI, with hybrid-ready results and exact
+cited readbacks, including the full code method on all three surfaces. The first
+MCP request reported index updating; the first CLI document request timed out.
+Only the failed CLI document case was repeated once, after independently reviewed
+committed cleanup and settled publication, succeeding in 9,914.51 ms. It used a
+later generation than the other five cases; each binding and source was verified,
+without claiming a common-generation run or full frozen acceptance.
+The post-retry observation found available GPU capacity without an owner, no
+unsettled work, unchanged historical capacity uncertainty and the same healthy
+worker without new crashes, debugger processes or terminal jobs. Two new cancelled
+interactive outcomes had exact accepted, committed release callbacks; this does
+not establish successful inference for those outcomes. Final independent closeout
+review passed for this bounded deployment and live-validation scope. Frozen semantic and unattended-hosting acceptance remain
+open; no terminal recovery, model acquisition, retention cleanup, task activation
+or hosting-policy change was performed.

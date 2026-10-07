@@ -395,8 +395,8 @@ projection/hash contract and checks. The three authority tables retain their
 append allowlists, protecting
 existing scheduler/worker authority rows; only identified new no-work receipts and
 verified no-work startup telemetry may be additional. Local updater implementation,
-checks and independent review are complete; production
-deployment and live acceptance remain incomplete. The explicit
+checks and independent review are complete; the authorised continuation and bounded
+live validation subsequently completed as recorded below. The explicit
 `-ResumeRepositoryRecoveryPreparedRelease` accepts only untouched Prepared receipts
 without a baseline, failure or prior intent, preserving the original operation,
 application candidate, hold and bindings. It records the corrected operator commit
@@ -413,8 +413,8 @@ leaves the receipt unchanged on precondition refusal. Immutable `ActivationConti
 preserves the original failure and binds the corrected operator/prior receipt before
 mutation, without changing `PreparedContinuation`. It runs only payload/validation/release;
 no migration or baseline recapture is allowed. Focused checks and the native
-incremental updater contract pass; final independent review and fresh production
-approval remain pending.
+incremental updater contract pass; independent implementation/operational review
+and fresh approval for the exact amended production packet subsequently completed.
 
 An explicit single-task acknowledgement freezes the cancelled, unreserved
 interactive row's identity and full canonical SHA-256 in `ActivationContinuation`,
@@ -422,8 +422,19 @@ preserves that row, and compares the original retained baseline excluding only
 that exact unchanged row. Only this path may accept a known Started original-payload
 pool at preflight, then use the canonical GPU/IIS drain and repeat stopped-owner,
 retained and location checks before activation intent or placement. Default
-continuation remains strict; production use awaits independent review and current
-authority for the concrete amended packet.
+continuation remains strict; each production use requires independent review and
+current authority for its concrete amended packet.
+
+The authorised continuation completed at receipt revision 11 with candidate
+`e1d18352` and operator `dc58eb91`, releasing the hold while preserving the original
+baseline, receipt/rollback evidence, Disabled task and hidden launcher. Six bounded
+MCP/REST/operator-CLI code/document cases passed hybrid-ready cited readback;
+the initial MCP index-updating fallback and CLI document timeout remain recorded,
+with only the failed CLI case repeated once after reviewed cleanup and settled
+publication, on a later generation. This verifies each current binding/source,
+not a common-generation or full frozen run. Final independent closeout review
+passed for this bounded deployment and live-validation scope; frozen semantic and
+unattended-hosting acceptance remain open.
 
 SQL vector selection resolves chunk identity before record revision predicates
 to exclude the observed pair expansion, retaining all eligibility checks. Its
