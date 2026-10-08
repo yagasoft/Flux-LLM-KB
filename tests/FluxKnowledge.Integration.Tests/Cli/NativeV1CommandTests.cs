@@ -10,6 +10,24 @@ namespace FluxKnowledge.Integration.Tests.Cli;
 public sealed class NativeV1CommandTests
 {
     [Theory]
+    [InlineData("preview", "index_retention")]
+    [InlineData("commit", "index_retention")]
+    [InlineData("preview", "index_retention_restore")]
+    [InlineData("commit", "index_retention_restore")]
+    public async Task Retention_forwards_the_exact_manifest_generation_and_optional_restore_receipt(string mode, string action)
+    {
+        var handler = new RecordingHandler("{\"ok\":true,\"result\":{},\"reasonCode\":null,\"message\":null,\"retryable\":false}");
+        var payload = new { manifestId = Guid.NewGuid(), manifestHash = new string('a', 64), generationId = Guid.NewGuid(),
+            deletionReceiptId = action == "index_retention_restore" ? (Guid?)Guid.NewGuid() : null };
+        var result = await ExecuteAsync(["corpus", "write", "--" + mode, "--confirmation-id", "retention-confirmation", "--idempotency-key", "retention-key"],
+            JsonSerializer.Serialize(new { action, payload }), handler);
+        Assert.Equal(0, result.ExitCode);
+        Assert.Equal("/api/v1/corpus/actions/" + mode, handler.Request!.RequestUri!.AbsolutePath);
+        using var body = JsonDocument.Parse(handler.Body!);
+        Assert.Equal(action, body.RootElement.GetProperty("action").GetString());
+        Assert.Equal(JsonSerializer.SerializeToElement(payload).GetRawText(), body.RootElement.GetProperty("payload").GetRawText());
+    }
+    [Theory]
     [InlineData("preview", "publication_retry")]
     [InlineData("commit", "publication_retry")]
     [InlineData("preview", "embedding_retry")]

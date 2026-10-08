@@ -436,6 +436,14 @@ not a common-generation or full frozen run. Final independent closeout review
 passed for this bounded deployment and live-validation scope; frozen semantic and
 unattended-hosting acceptance remain open.
 
+The [operational-readiness design](design/repository-operational-readiness.md)
+and [plan](design/repository-operational-readiness-plan.md) scope the remaining
+unattended, semantic, terminal-recovery, companion-host and historical-retention
+work. Local checkpoint-probe batching, phase diagnostics, strict frozen-workload
+verification, explicit task restoration and manifest-bound retention are implemented
+and independently reviewed. Production activation and the five live outcomes remain
+pending; local checks add no live-acceptance credit.
+
 SQL vector selection resolves chunk identity before record revision predicates
 to exclude the observed pair expansion, retaining all eligibility checks. Its
 LOOP join fixes join order and trades additional point lookups on mostly

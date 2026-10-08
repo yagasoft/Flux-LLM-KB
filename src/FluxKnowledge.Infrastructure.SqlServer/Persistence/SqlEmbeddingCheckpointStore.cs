@@ -241,18 +241,23 @@ public sealed class SqlEmbeddingCheckpointStore(
             if (page.Length == 0) break;
             foreach (var vector in page)
             {
-                if (vector.ModelFingerprint != draft.ModelFingerprint || vector.Dimensions != draft.Dimensions ||
-                    vector.Values.Length != draft.Dimensions * sizeof(float) || Convert.ToHexStringLower(SHA256.HashData(vector.Values)) != vector.PayloadChecksum ||
-                    ToCanonical(vector.TextChunk).SearchInputHash != vector.SearchInputHash || vector.TextChunk.SearchInputHash != vector.SearchInputHash)
-                    throw new InvalidOperationException("embedding-checkpoint-stored-payload-invalid");
-                var values = new float[draft.Dimensions];
-                Buffer.BlockCopy(vector.Values, 0, values, 0, vector.Values.Length);
-                _ = ValidateResult(new(values, draft.ModelFingerprint), new(draft.ModelFingerprint, draft.Dimensions));
+                ValidateStoredPayload(vector, vector.TextChunk, draft);
                 hash.AppendData(vector.Values);
             }
             lastOrdinal = page[^1].TextChunk.Ordinal;
             lastChunkId = page[^1].TextChunkId;
         }
         return Convert.ToHexStringLower(hash.GetHashAndReset());
+    }
+
+    internal static void ValidateStoredPayload(VectorEntity vector, TextChunkEntity chunk, IndexGenerationEntity draft)
+    {
+        if (vector.ModelFingerprint != draft.ModelFingerprint || vector.Dimensions != draft.Dimensions ||
+            vector.Values.Length != draft.Dimensions * sizeof(float) || Convert.ToHexStringLower(SHA256.HashData(vector.Values)) != vector.PayloadChecksum ||
+            ToCanonical(chunk).SearchInputHash != vector.SearchInputHash || chunk.SearchInputHash != vector.SearchInputHash)
+            throw new InvalidOperationException("embedding-checkpoint-stored-payload-invalid");
+        var values = new float[draft.Dimensions];
+        Buffer.BlockCopy(vector.Values, 0, values, 0, vector.Values.Length);
+        _ = ValidateResult(new(values, draft.ModelFingerprint), new(draft.ModelFingerprint, draft.Dimensions));
     }
 }

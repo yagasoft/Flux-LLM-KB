@@ -102,6 +102,27 @@ changes require its separate reviewed migration opt-in and compatible rollback
 conditions. Updating code in Git does not authorise deployment, restart or
 migration. Model caches and source originals are outside the update payload.
 
+The opt-in `scripts/deploy/restore-outlook-scheduled-host.ps1` prints a read-only
+observation by default. Approved restoration requires its reviewed `-BindingPath`,
+an existing release's `-ReceiptPath` and `-Apply`; `-StartOnce` is a separate explicit
+launch option. Operational Plan bindings and Apply must use the same PowerShell 7
+runtime as the canonical updater. Windows PowerShell 5.1 observations can produce
+different identity and payload fingerprints despite unchanged inputs and cannot
+authorise Apply. Task identity, hidden launcher and interactive session checks remain
+mandatory; enabling the task does not establish companion processing or mail capture.
+
+Historical cleanup is a separately approved exact operation. `FluxKnowledge.Cli
+index-retention plan --manifest-id <guid> --targets <private.json> --output
+<private-directory>` writes a read-only manifest and ordered member-ID artifacts;
+`index-retention stage --manifest <private.json> --manifest-hash <sha256>
+--plan-directory <private-directory>` copies verified recovery snapshots without
+deleting originals. Destructive `index_retention` and selective
+`index_retention_restore` use the existing `corpus write` preview/commit surfaces,
+binding `manifestId`, `manifestHash`, `generationId` and, for restoration,
+`deletionReceiptId`. Each generation has its own idempotent receipt. Active or
+referenced generations, uncertain owners, changed vectors/files and conflicting
+restoration targets are refused; verified recovery snapshots are retained.
+
 For an already stopped FluxKnowledge pool, inspect `-PlanOnly -RecoverStoppedPool`
 and obtain explicit approval for that recovery mode before using `-Apply`.
 It requires no remaining Flux worker, retains GPU drain checks and starts only

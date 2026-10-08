@@ -1,5 +1,10 @@
 # Repository retrieval reliability
 
+The remaining work is now scoped by the 8 October [operational-readiness
+design](repository-operational-readiness.md) and [plan](repository-operational-readiness-plan.md).
+They preserve the completed evidence below; implementation and operational actions
+remain gated as stated there.
+
 Date: 3 October 2026. Baseline: main `687f1707`; installed stability release
 `1b5bd5f6`. Updated 4 October 2026: release `a248811a` was integrated through the
 required closeout script and deployed with the additive proof migration and

@@ -1,5 +1,9 @@
 # Repository retrieval reliability implementation plan
 
+For the remaining work, use the 8 October [operational-readiness
+plan](repository-operational-readiness-plan.md) and its [design](repository-operational-readiness.md).
+This earlier plan retains implementation history and reusable acceptance evidence.
+
 Date: 3 October 2026. Updated 4 October 2026: release `a248811a` completed mandatory
 integration and authorised incremental deployment, including the additive migration
 and automatic proof backfill. Live acceptance exposed scoped SQL latency, whole-file

@@ -70,6 +70,17 @@ public sealed class HybridPassageRetrievalIntegrationTests(NativeSqlServerFixtur
         Assert.Equal(selected["spanId"], completed["spanId"]);
         Assert.Equal(selected["shortlistIds"], completed["resultIds"]);
         Assert.True((double)completed["elapsedMs"]! >= 0);
+        var phases = trace.Events.Where(entry => entry.Id == 6 && Equals(entry["searchId"], selected["searchId"])).ToArray();
+        Assert.Contains(phases, entry => Equals(entry["phase"], "inference-admission") && Equals(entry["outcome"], "begin"));
+        Assert.Contains(phases, entry => Equals(entry["phase"], "generation-lease") && Equals(entry["outcome"], "completed"));
+        Assert.Contains(phases, entry => Equals(entry["phase"], "dense-selection") && Equals(entry["outcome"], "completed"));
+        Assert.Contains(phases, entry => Equals(entry["phase"], "rerank") && Equals(entry["outcome"], "completed"));
+        Assert.All(phases, entry =>
+        {
+            Assert.Equal(activity.TraceId.ToString(), entry["traceId"]);
+            Assert.Equal(activity.SpanId.ToString(), entry["spanId"]);
+            Assert.InRange((double)entry["elapsedMs"]!, 0, (double)completed["elapsedMs"]!);
+        });
         var serialized = System.Text.Json.JsonSerializer.Serialize(trace.Events);
         Assert.DoesNotContain(body, serialized);
         Assert.DoesNotContain("holiday entitlement", serialized);

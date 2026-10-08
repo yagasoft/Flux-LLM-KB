@@ -28,6 +28,18 @@ public sealed class HybridSearchDiagnostics : EventSource
     public void ScopedDensePage(string traceId, string spanId, int rows, int retainedCandidates, long payloadBytes) =>
         Emit(5, traceId, spanId, rows, retainedCandidates, payloadBytes);
 
+    [Event(6, Level = EventLevel.Informational)]
+    public void Phase(string traceId, string spanId, string searchId, string phase, string outcome, double elapsedMs) =>
+        Emit(6, traceId, spanId, searchId, phase, outcome, elapsedMs);
+
+    [Event(7, Level = EventLevel.Informational)]
+    public void LeasePhase(string traceId, string spanId, string leaseAttemptId, string phase, string outcome, double elapsedMs) =>
+        Emit(7, traceId, spanId, leaseAttemptId, phase, outcome, elapsedMs);
+
+    [Event(8, Level = EventLevel.Informational)]
+    public void CheckpointRead(string probeId, int draftCount, long rows, double elapsedMs, string outcome) =>
+        Emit(8, probeId, draftCount, rows, elapsedMs, outcome);
+
     [NonEvent]
     private void Emit(int eventId, params object[] values)
     {

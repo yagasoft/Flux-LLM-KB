@@ -77,6 +77,8 @@ public sealed class EmbeddingCheckpointTests(NativeSqlServerFixture fixture) : I
         var expected = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(rows.SelectMany(value => value.Values).ToArray()));
         Assert.Equal(expected, completed.CompletedChecksum);
         Assert.Equal(await context.TextChunks.CountAsync(), rows.Length);
+        var recovery = await new SqlDerivedIndexRecoveryStore(environment.Factory, TimeProvider.System).ReadActiveAsync(CancellationToken.None);
+        Assert.Contains(completed.GenerationId, recovery.ReferencedGenerationIds);
     }
 
     [NativeSqlServerTheory]

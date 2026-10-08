@@ -18,6 +18,22 @@ namespace FluxKnowledge.Web.Tests.Mcp;
 public sealed class NativeV1McpToolsTests
 {
     [Theory]
+    [InlineData("preview", "index_retention")]
+    [InlineData("commit", "index_retention")]
+    [InlineData("preview", "index_retention_restore")]
+    [InlineData("commit", "index_retention_restore")]
+    public async Task Retention_maps_exact_manifest_and_generation_bindings(string mode, string action)
+    {
+        var facade = new RecordingFacade();
+        var payload = JsonSerializer.SerializeToElement(new { manifestId = Guid.NewGuid(), manifestHash = new string('a', 64), generationId = Guid.NewGuid(),
+            deletionReceiptId = action == "index_retention_restore" ? (Guid?)Guid.NewGuid() : null });
+        var result = await CreateTools(facade).CorpusWrite(mode, action, payload, "retention-confirmation", "retention-key", CancellationToken.None);
+        Assert.True(Read(result).GetProperty("ok").GetBoolean());
+        var command = Assert.IsType<NativeCorpusMutation>(facade.LastCommand);
+        Assert.Equal(action, command.Action);
+        Assert.Equal(payload.GetRawText(), command.Payload.GetRawText());
+    }
+    [Theory]
     [InlineData("preview", "publication_retry")]
     [InlineData("commit", "publication_retry")]
     [InlineData("preview", "embedding_retry")]

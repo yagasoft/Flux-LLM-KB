@@ -7,4 +7,5 @@ public interface INativeCorpusActionStore
 {
     ValueTask<IReadOnlyList<NativeTargetVersion>> ResolveTargetsAsync(string action, string canonicalPayload, CancellationToken cancellationToken);
     ValueTask<NativeActionCommitOperation> CreateCommitOperationAsync(string action, string canonicalPayload, IReadOnlyList<NativeTargetVersion> targets, CancellationToken cancellationToken);
+    ValueTask<NativeActionReceipt> FinalizeCommitAsync(string action, string canonicalPayload, NativeActionReceipt receipt, CancellationToken cancellationToken) => ValueTask.FromResult(receipt);
 }

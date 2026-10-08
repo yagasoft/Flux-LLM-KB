@@ -25,7 +25,8 @@ public sealed class SqlNativeOperationStore(
     TimeProvider timeProvider,
     Action? afterCommitFailureInjector = null,
     Action? beforeCommitInjector = null,
-    Action? afterSaveBeforeCommitInjector = null, EmbeddingGpuRuntime? embeddingRuntime = null) : INativeOperationStore
+    Action? afterSaveBeforeCommitInjector = null, EmbeddingGpuRuntime? embeddingRuntime = null,
+    SqlIndexRetentionOperations? indexRetention = null) : INativeOperationStore
 {
     private static readonly TimeSpan ConfirmationLifetime = TimeSpan.FromMinutes(5);
     private readonly IDbContextFactory<FluxKnowledgeDbContext> _contextFactory = contextFactory ?? throw new ArgumentNullException(nameof(contextFactory));
@@ -90,6 +91,13 @@ public sealed class SqlNativeOperationStore(
     {
         cancellationToken.ThrowIfCancellationRequested();
         var prepared = PrepareCommit(request);
+        using var retentionBudget = prepared.Action is "index_retention" or "index_retention_restore"
+            ? CancellationTokenSource.CreateLinkedTokenSource(cancellationToken) : null;
+        if (retentionBudget is not null)
+        {
+            retentionBudget.CancelAfter(TimeSpan.FromSeconds(20));
+            cancellationToken = retentionBudget.Token;
+        }
         var confirmationHash = NativeOperationCanonicalization.CreateConfirmationHash(request.ConfirmationId);
         await using var strategyContext = await _contextFactory.CreateDbContextAsync(cancellationToken);
         var strategy = strategyContext.Database.CreateExecutionStrategy();
@@ -108,6 +116,9 @@ public sealed class SqlNativeOperationStore(
         CancellationToken cancellationToken)
     {
         await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
+        if (prepared.Operation is NativeCorpusMutationCommitOperation { Action: "index_retention" or "index_retention_restore" })
+            await (indexRetention ?? throw new NativeOperationException("index-retention-unavailable"))
+                .AcquireOwnershipAsync(context, cancellationToken).ConfigureAwait(false);
         if (prepared.Operation is NativeCorpusMutationCommitOperation)
             await SqlPublishedPassageSelection.AcquireFenceAsync(context, cancellationToken).ConfigureAwait(false);
         await AcquireApplicationLockAsync(
@@ -194,7 +205,7 @@ public sealed class SqlNativeOperationStore(
             ActorSurface = prepared.ActorSurface,
             IdempotencyKey = prepared.IdempotencyKey,
             RequestFingerprint = prepared.RequestFingerprint,
-            Outcome = "completed",
+            Outcome = prepared.Action is "index_retention" or "index_retention_restore" ? "sql-completed-files-pending" : "completed",
             CompletedAtUtc = _timeProvider.GetUtcNow()
         };
         intent.ConsumedAtUtc = receipt.CompletedAtUtc;
@@ -381,6 +392,12 @@ public sealed class SqlNativeOperationStore(
 
         if (prepared.Operation is NativeCorpusMutationCommitOperation corpus)
         {
+            if (corpus.Action is "index_retention" or "index_retention_restore")
+            {
+                await (indexRetention ?? throw new NativeOperationException("index-retention-unavailable"))
+                    .ApplySqlAsync(context, corpus.Action, corpus.CanonicalPayload, prepared.Targets, cancellationToken).ConfigureAwait(false);
+                return;
+            }
             if (corpus.Action == "embedding_retry")
             {
                 using var payload = JsonDocument.Parse(corpus.CanonicalPayload);
@@ -1008,7 +1025,8 @@ public sealed class SqlNativeOperationStore(
         try
         {
             using var document = JsonDocument.Parse(operation.CanonicalPayload);
-            var property = operation.Action is "job_retry" or "publication_retry" or "embedding_retry" ? "jobId" : "rootId";
+            var property = operation.Action is "index_retention" or "index_retention_restore" ? "generationId" :
+                operation.Action is "job_retry" or "publication_retry" or "embedding_retry" ? "jobId" : "rootId";
             if (!document.RootElement.TryGetProperty(property, out var value) || !Guid.TryParse(value.GetString(), out var id))
             {
                 throw new NativeOperationException("invalid-commit-operation");
@@ -1018,6 +1036,7 @@ public sealed class SqlNativeOperationStore(
                 "job_retry" => $"corpus-job:{id:D}",
                 "publication_retry" => $"publication-job:{id:D}",
                 "embedding_retry" => $"embedding-job:{id:D}",
+                "index_retention" or "index_retention_restore" => $"index-retention:{id:D}",
                 _ => $"corpus-root:{id:D}"
             }, cancellationToken);
         }

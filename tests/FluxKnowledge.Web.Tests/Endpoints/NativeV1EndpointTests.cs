@@ -21,6 +21,25 @@ namespace FluxKnowledge.Web.Tests.Endpoints;
 public sealed class NativeV1EndpointTests
 {
     [Theory]
+    [InlineData("preview", "index_retention")]
+    [InlineData("commit", "index_retention")]
+    [InlineData("preview", "index_retention_restore")]
+    [InlineData("commit", "index_retention_restore")]
+    public async Task Retention_routes_preserve_the_exact_manifest_and_generation_binding(string mode, string action)
+    {
+        await using var host = await StartAsync();
+        var payload = new { manifestId = Guid.NewGuid(), manifestHash = new string('a', 64), generationId = Guid.NewGuid(),
+            deletionReceiptId = action == "index_retention_restore" ? (Guid?)Guid.NewGuid() : null };
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/api/v1/corpus/actions/" + mode)
+        { Content = JsonContent.Create(new { action, payload, confirmation_id = "retention-confirmation" }) };
+        request.Headers.Add("Idempotency-Key", "retention-key");
+        using var response = await host.Client.SendAsync(request);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var command = Assert.IsType<NativeCorpusMutation>(host.Facade.LastCommand);
+        Assert.Equal(action, command.Action);
+        Assert.Equal(JsonSerializer.SerializeToElement(payload).GetRawText(), command.Payload.GetRawText());
+    }
+    [Theory]
     [InlineData("preview", "publication_retry")]
     [InlineData("commit", "publication_retry")]
     [InlineData("preview", "embedding_retry")]

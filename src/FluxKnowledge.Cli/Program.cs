@@ -9,6 +9,7 @@ internal static class CliProgram
         return args.FirstOrDefault() switch
         {
             "corpus-rebuild" => await CorpusRebuildCommand.ExecuteFromEnvironmentAsync(args.Skip(1).ToArray(), Console.Out, Console.Error),
+            "index-retention" => await IndexRetentionCommand.ExecuteFromEnvironmentAsync(args.Skip(1).ToArray(), Console.Out, Console.Error),
             "csharp-code" => await LocalRetainedCsharpCodeCommand.ExecuteFromEnvironmentAsync(
                 args.Skip(1).ToArray(),
                 Console.Out,
@@ -39,7 +40,7 @@ internal static class CliProgram
 
     private static int WriteUsage()
     {
-        Console.Error.WriteLine("Usage: FluxKnowledge.Cli <knowledge|code|corpus|operations|codex|csharp-code|validate-sql|models|documents|corpus-rebuild>");
+        Console.Error.WriteLine("Usage: FluxKnowledge.Cli <knowledge|code|corpus|operations|codex|csharp-code|validate-sql|models|documents|corpus-rebuild|index-retention>");
         return 2;
     }
 }

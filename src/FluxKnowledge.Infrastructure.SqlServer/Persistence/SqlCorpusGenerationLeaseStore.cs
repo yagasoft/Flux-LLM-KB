@@ -1,6 +1,8 @@
 using System.Data;
+using System.Diagnostics;
 using FluxKnowledge.Application.Gpu;
 using FluxKnowledge.Application.Ports;
+using FluxKnowledge.Application.Search;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
 using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
@@ -46,9 +48,20 @@ public sealed class SqlCorpusGenerationLeaseStore(
         // Never return a connection with uncertain session locks to a shared pool.
         var connection = new SqlConnection(new SqlConnectionStringBuilder(connectionString) { Pooling = false }.ConnectionString);
         SqlLease? lease = null;
+        var timer = Stopwatch.StartNew();
+        var trace = Activity.Current?.TraceId.ToString() ?? string.Empty;
+        var span = Activity.Current?.SpanId.ToString() ?? string.Empty;
+        var attempt = Guid.NewGuid().ToString("N");
+        void Phase(string phase, string outcome)
+        {
+            if (HybridSearchDiagnostics.Log.IsEnabled())
+                HybridSearchDiagnostics.Log.LeasePhase(trace, span, attempt, phase, outcome, timer.Elapsed.TotalMilliseconds);
+        }
         try
         {
+            Phase("connection", "begin");
             await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+            Phase("connection", "completed");
             await using var command = new SqlCommand("""
                 DECLARE @result int;
                 EXEC @result = sp_getapplock @Resource = @resource, @LockMode = 'Shared',
@@ -56,23 +69,29 @@ public sealed class SqlCorpusGenerationLeaseStore(
                 SELECT @result;
                 """, connection);
             command.Parameters.Add("@resource", SqlDbType.NVarChar, 255).Value = SqlDerivedIndexRecoveryStore.LockResource;
+            Phase("recovery-ownership", "begin");
             var result = (int)(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) ?? -999);
-            if (result == -1) return null;
+            if (result == -1) { Phase("recovery-ownership", "refused"); return null; }
             if (result == -2 && cancellationToken.IsCancellationRequested) throw new OperationCanceledException(cancellationToken);
             if (result < 0) throw new InvalidOperationException($"corpus-query-lock-failed:{result}");
+            Phase("recovery-ownership", "completed");
             await using var context = new FluxKnowledgeDbContext(new DbContextOptionsBuilder<FluxKnowledgeDbContext>()
                 .UseSqlServer(connection).Options);
             await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken).ConfigureAwait(false);
+            Phase("publication-fence", "begin");
             await SqlPublishedPassageSelection.AcquireFenceAsync(context, cancellationToken).ConfigureAwait(false);
+            Phase("publication-fence", "completed");
+            Phase("generation-validation", "begin");
             var state = await context.IndexState.AsNoTracking().SingleAsync(value => value.Id == 1, cancellationToken).ConfigureAwait(false);
-            if (state.CorpusRebuildOperationId is not null) return null;
+            if (state.CorpusRebuildOperationId is not null) { Phase("generation-validation", "rebuild-active"); return null; }
             var generation = await context.IndexGenerations.AsNoTracking().SingleOrDefaultAsync(value =>
                 value.Id == state.ActiveIndexGenerationId && value.RetiredAtUtc == null && value.IndexPath != string.Empty &&
                 EF.Functions.Collate(value.ModelFingerprint, "Latin1_General_100_BIN2") == modelFingerprint && value.Dimensions == dimensions &&
                 value.CorpusEpoch == state.CorpusEpoch && value.CorpusVersion == state.CorpusVersion, cancellationToken).ConfigureAwait(false);
             if (generation is null || generation.VectorCount <= 0 || generation.ValidatedAtUtc is null ||
                 await context.IndexGenerationVectors.LongCountAsync(value => value.GenerationId == generation.Id, cancellationToken).ConfigureAwait(false) != generation.VectorCount)
-                return null;
+            { Phase("generation-validation", generation is null ? "generation-unavailable" : "membership-invalid"); return null; }
+            Phase("generation-validation", "completed");
             await using var sessionCommand = new SqlCommand("SELECT @@SPID", connection, (SqlTransaction)transaction.GetDbTransaction());
             var sessionId = Convert.ToInt32(await sessionCommand.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false));
             var id = Guid.NewGuid();
@@ -85,6 +104,7 @@ public sealed class SqlCorpusGenerationLeaseStore(
             });
             await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            Phase("lease-persisted", "completed");
             lease = new SqlLease(connection, id, ownerInstanceId, owner, sessionId,
                 new SqlConnectionStringBuilder(connectionString) { Pooling = false }.ConnectionString,
                 new IndexGenerationDescriptor(generation.Id, generation.ModelFingerprint,
@@ -95,6 +115,7 @@ public sealed class SqlCorpusGenerationLeaseStore(
         finally
         {
             if (lease is null) await connection.DisposeAsync().ConfigureAwait(false);
+            Phase("acquisition", lease is null ? "not-acquired" : "completed");
         }
     }
 

@@ -17,7 +17,7 @@ using Microsoft.EntityFrameworkCore;
 
 namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
 
-public sealed class SqlDerivedIndexRecoveryStore(
+public sealed partial class SqlDerivedIndexRecoveryStore(
     IDbContextFactory<FluxKnowledgeDbContext> contextFactory,
     TimeProvider timeProvider, IGpuInteractiveOwnerProbe? queryOwnerProbe = null,
     IDeploymentValidationHold? deploymentHold = null) : IDerivedIndexRecoveryStore
@@ -174,6 +174,13 @@ public sealed class SqlDerivedIndexRecoveryStore(
             return ImmutableHashSet<Guid>.Empty;
         }
 
+        var recognised = ImmutableHashSet.CreateBuilder<Guid>();
+        var checkpoints = drafts.Where(draft => draft.EmbeddingJobId is not null).ToArray();
+        await ValidateCheckpointDraftsAsync(context, checkpoints, activeGenerationId, cancellationToken).ConfigureAwait(false);
+        recognised.UnionWith(checkpoints.Select(draft => draft.Id));
+        drafts = drafts.Where(draft => draft.EmbeddingJobId is null).ToArray();
+        if (drafts.Count == 0) return recognised.ToImmutable();
+
         var candidateIds = drafts.Select(draft => draft.Id).ToArray();
         var candidateSearchTexts = drafts.Select(draft => draft.Id.ToString("D")).ToArray();
         var membershipIds = new HashSet<Guid>();
@@ -267,15 +274,8 @@ public sealed class SqlDerivedIndexRecoveryStore(
                 .ConfigureAwait(false));
         }
 
-        var recognised = ImmutableHashSet.CreateBuilder<Guid>();
         foreach (var draft in drafts)
         {
-            if (draft.EmbeddingJobId is not null)
-            {
-                await ValidateCheckpointDraftAsync(context, draft, activeGenerationId, membershipIds, cancellationToken).ConfigureAwait(false);
-                recognised.Add(draft.Id);
-                continue;
-            }
             if (!IsRecognisedUnplacedDraft(
                     draft,
                     activeGenerationId,
@@ -294,53 +294,6 @@ public sealed class SqlDerivedIndexRecoveryStore(
         }
 
         return recognised.ToImmutable();
-    }
-
-    private static async Task ValidateCheckpointDraftAsync(FluxKnowledgeDbContext context, GenerationRow row,
-        Guid? activeGenerationId, ISet<Guid> membershipIds, CancellationToken ct)
-    {
-        var draft = await context.IndexGenerations.AsNoTracking().SingleAsync(value => value.Id == row.Id, ct).ConfigureAwait(false);
-        var job = await context.Jobs.AsNoTracking().SingleAsync(value => value.Id == draft.EmbeddingJobId, ct).ConfigureAwait(false);
-        var record = await context.PipelineRecords.AsNoTracking().SingleAsync(value => value.Id == job.PipelineRecordId, ct).ConfigureAwait(false);
-        var dispatch = await context.OutboxMessages.AsNoTracking().SingleAsync(value => value.JobId == job.Id && value.PipelineRecordId == job.PipelineRecordId &&
-            value.SourceRevision == job.SourceRevision && value.Stage == (int)PipelineStage.Embed && value.Operation == PipelineOperations.Embed, ct).ConfigureAwait(false);
-        var completed = job.PublicState == (int)PublicJobState.Completed;
-        var gpuPending = job.PublicState is (int)PublicJobState.GpuQueued or (int)PublicJobState.GpuProcessing;
-        if (job.Stage != (int)PipelineStage.Embed || job.Operation != PipelineOperations.Embed ||
-            record.IsDeleted || record.Revision != job.SourceRevision ||
-            record.CurrentStage != (completed ? (int)PipelineStage.Publish : (int)PipelineStage.Embed) ||
-            (!completed && !gpuPending && job.PublicState is not ((int)PublicJobState.WorkerQueued) and not ((int)PublicJobState.WorkerProcessing) and not ((int)PublicJobState.Failed)) ||
-            (gpuPending && !await HasEmbeddingGpuProvenanceAsync(context, draft, job, ct).ConfigureAwait(false)) ||
-            activeGenerationId == draft.Id || membershipIds.Contains(draft.Id) ||
-            (completed && dispatch.DispatchedAtUtc is null))
-            throw new InvalidOperationException("embedding-checkpoint-recovery-provenance-invalid");
-        var work = new StageWorkItem(new(new(dispatch.Id), new(record.Id), record.Revision, PipelineStage.Embed, PipelineOperations.Embed,
-                dispatch.DispatchGeneration, dispatch.IdempotencyKey, dispatch.DueAtUtc, dispatch.LeaseOwner ?? string.Empty,
-                dispatch.LeaseExpiresAtUtc ?? DateTimeOffset.UnixEpoch, dispatch.LeaseGeneration),
-            new(new(job.Id), new(record.Id), record.Revision, PipelineStage.Embed, PipelineOperations.Embed, (PublicJobState)job.PublicState,
-                job.DueAtUtc, job.AttemptCount, job.LeaseOwner ?? string.Empty, job.LeaseExpiresAtUtc ?? DateTimeOffset.UnixEpoch, job.LeaseGeneration));
-        var epoch = (await SqlPublishedPassageSelection.ReadStampAsync(context, ct).ConfigureAwait(false)).CorpusEpoch;
-        SqlEmbeddingCheckpointStore.ValidateDraft(draft, work, new(draft.ModelFingerprint, draft.Dimensions), epoch);
-        var checksum = await SqlEmbeddingCheckpointStore.ReadCheckpointChecksumAsync(context, draft, work, completed, ct).ConfigureAwait(false);
-        if (completed)
-        {
-            var artifact = await context.Artifacts.AsNoTracking().SingleOrDefaultAsync(value => value.PipelineRecordId == record.Id &&
-                value.SourceRevision == record.Revision && value.Stage == (int)PipelineStage.Embed, ct).ConfigureAwait(false);
-            if (artifact is null || artifact.SearchText != draft.Id.ToString("D") || artifact.ContentHash != checksum ||
-                artifact.ContentType != EmbedDraftDefaults.ArtifactContentType ||
-                !await (from next in context.OutboxMessages
-                    join nextJob in context.Jobs on next.JobId equals nextJob.Id
-                    where next.PipelineRecordId == record.Id && next.SourceRevision == record.Revision &&
-                        next.Stage == (int)PipelineStage.Publish && next.Operation == PipelineOperations.Publish &&
-                        next.DispatchGeneration == dispatch.DispatchGeneration + 1 &&
-                        nextJob.PipelineRecordId == record.Id && nextJob.SourceRevision == record.Revision &&
-                        nextJob.Stage == (int)PipelineStage.Publish && nextJob.Operation == PipelineOperations.Publish
-                    select next.Id).AnyAsync(ct).ConfigureAwait(false))
-                throw new InvalidOperationException("embedding-checkpoint-recovery-seal-invalid");
-        }
-        else if (await context.Artifacts.AnyAsync(value => value.PipelineRecordId == record.Id && value.SourceRevision == record.Revision &&
-            value.Stage == (int)PipelineStage.Embed, ct).ConfigureAwait(false))
-            throw new InvalidOperationException("embedding-checkpoint-recovery-premature-seal");
     }
 
     private static async Task<bool> HasEmbeddingGpuProvenanceAsync(FluxKnowledgeDbContext context,

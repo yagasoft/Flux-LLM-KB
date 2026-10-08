@@ -345,6 +345,15 @@ public static class WebHostComposition
             configuration.GetValue<bool?>("Codex:PromptContextEnabled") ?? true));
         services.AddScoped<ICodexPromptContextService, CodexPromptContextService>();
         services.AddScoped<SqlNativeOperationStore>();
+        services.AddScoped(provider =>
+        {
+            var files = provider.GetRequiredService<DerivedIndexFileSystem>();
+            return new SqlIndexRetentionOperations(provider.GetRequiredService<IDbContextFactory<FluxKnowledgeDbContext>>(),
+                new(indexRoot, liveRoot.RecoveryRoot,
+                    path => files.TryCanonicalIntendedGenerationPath(path, out var canonical) ? canonical : null,
+                    files.IsValidDirectory, productionStorageSafety is null ? null : productionStorageSafety.ValidateBeforeIo),
+                provider.GetService<IGpuInteractiveOwnerProbe>());
+        });
         services.AddScoped<INativeOperationStore>(provider => provider.GetRequiredService<SqlNativeOperationStore>());
         services.AddScoped<SqlKnowledgeStore>();
         services.AddScoped<IKnowledgeStore>(provider => provider.GetRequiredService<SqlKnowledgeStore>());

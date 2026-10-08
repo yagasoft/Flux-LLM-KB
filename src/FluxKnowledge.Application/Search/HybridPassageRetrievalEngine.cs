@@ -60,15 +60,23 @@ public sealed class HybridPassageRetrievalEngine(ICorpusRetrievalReader reader, 
         var spanId = Activity.Current?.SpanId.ToString() ?? string.Empty;
         var searchId = Guid.NewGuid().ToString("N");
         var timer = Stopwatch.StartNew();
+        var currentPhase = "scope";
+        void ReportPhase(string phase, string outcome)
+        {
+            if (outcome == "begin") Volatile.Write(ref currentPhase, phase);
+            if (HybridSearchDiagnostics.Log.IsEnabled())
+                HybridSearchDiagnostics.Log.Phase(traceId, spanId, searchId, phase, outcome, timer.Elapsed.TotalMilliseconds);
+        }
         CorpusSearchResponse? returned = null;
         var deadline = new CancellationTokenSource(_searchTimeout, _clock);
         var budget = CancellationTokenSource.CreateLinkedTokenSource(callerToken, deadline.Token);
         ResolvedCorpusScope? resolved = null;
-        var work = SearchCoreAsync(query, limit, resolveScope, scope => resolved = scope, traceId, spanId, searchId, budget.Token).AsTask();
+        var work = SearchCoreAsync(query, limit, resolveScope, scope => resolved = scope, traceId, spanId, searchId, ReportPhase, budget.Token).AsTask();
         try { return returned = await work.WaitAsync(_searchTimeout, _clock, callerToken).ConfigureAwait(false); }
         catch (Exception exception) when (!callerToken.IsCancellationRequested &&
             (exception is TimeoutException || exception is OperationCanceledException && deadline.IsCancellationRequested))
         {
+            ReportPhase(Volatile.Read(ref currentPhase), "deadline");
             var response = new CorpusSearchResponse([], new(resolved?.Kind ?? scopeKind, resolved?.RootIds ?? [], resolved?.CanonicalCwd ?? cwd),
                 "lexical", "timeout", null, ["semantic:timeout", "search-deadline-exceeded"]);
             if (!NativeV1EnvelopeProtector.CanDiscloseResult(JsonSerializer.SerializeToElement(response)))
@@ -95,43 +103,69 @@ public sealed class HybridPassageRetrievalEngine(ICorpusRetrievalReader reader, 
 
     private async ValueTask<CorpusSearchResponse> SearchCoreAsync(string query, int limit,
         Func<CancellationToken, ValueTask<ResolvedCorpusScope?>> resolveScope, Action<ResolvedCorpusScope> scopeResolved,
-        string traceId, string spanId, string searchId,
+        string traceId, string spanId, string searchId, Action<string, string> reportPhase,
         CancellationToken cancellationToken)
     {
+        reportPhase("scope", "begin");
         var scope = await resolveScope(cancellationToken).ConfigureAwait(false) ?? throw new NativeOperationException("scope-unavailable");
         scopeResolved(scope);
+        reportPhase("scope", "completed");
         cancellationToken.ThrowIfCancellationRequested();
+        reportPhase("lexical-readiness", "begin");
         var readiness = await reader.GetLexicalReadinessAsync(cancellationToken).ConfigureAwait(false);
         cancellationToken.ThrowIfCancellationRequested();
         if (!readiness.IndexPresent) throw new NativeOperationException("lexical-unavailable");
+        reportPhase("lexical-readiness", "completed");
         var lexicalTask = candidates.ReadLexicalCandidatesAsync(query, scope, cancellationToken).AsTask();
         _ = ObserveLateLexicalAsync(lexicalTask);
         var status = "unavailable";
         try
         {
+            reportPhase("inference-admission", "begin");
             return await inference.ExecuteAsync(async (embedding, reranker, workToken) =>
             {
+                reportPhase("inference-admission", "completed");
                 workToken.ThrowIfCancellationRequested();
                 // Acquiring inside the callback keeps the lease alive if the caller times out
                 // while native work continues. The callback alone owns its final release.
+                reportPhase("generation-lease", "begin");
                 var sqlLease = await leases.TryAcquireAsync(_instance, owner.Current, inference.EmbeddingProfile.ModelFingerprint,
                     inference.EmbeddingProfile.Dimensions, workToken).ConfigureAwait(false);
-                if (sqlLease is null) throw new PassageRetrievalRefusalException("index-updating");
+                if (sqlLease is null)
+                {
+                    reportPhase("generation-lease", "refused");
+                    throw new PassageRetrievalRefusalException("index-updating");
+                }
                 await using ICorpusGenerationLease lease = scope.Kind == "all"
                     ? await annFactory.OpenAsync(sqlLease, workToken).ConfigureAwait(false) : sqlLease;
-                if (!await lease.IsCurrentAsync(workToken).ConfigureAwait(false)) throw new PassageRetrievalRefusalException("index-updating");
+                if (!await lease.IsCurrentAsync(workToken).ConfigureAwait(false))
+                {
+                    reportPhase("generation-current-before-embedding", "refused");
+                    throw new PassageRetrievalRefusalException("index-updating");
+                }
+                reportPhase("generation-lease", "completed");
+                reportPhase("query-embedding", "begin");
                 var vector = await embedding.CreateEmbeddingAsync(query, workToken).ConfigureAwait(false);
                 workToken.ThrowIfCancellationRequested();
                 if (vector.ModelFingerprint != inference.EmbeddingProfile.ModelFingerprint || vector.Values.Count != inference.EmbeddingProfile.Dimensions ||
                     vector.Values.Any(value => !float.IsFinite(value)) || Math.Abs(vector.Values.Sum(value => (double)value * value) - 1) > 0.001)
                     throw new PassageRetrievalRefusalException("unavailable");
+                reportPhase("query-embedding", "completed");
+                reportPhase("dense-selection", "begin");
                 var dense = await candidates.ReadDenseCandidatesAsync(lease, scope, vector.Values, workToken).ConfigureAwait(false);
-                if (dense.Status != "ready") throw new PassageRetrievalRefusalException(dense.Status);
+                if (dense.Status != "ready")
+                {
+                    reportPhase("dense-selection", "refused");
+                    throw new PassageRetrievalRefusalException(dense.Status);
+                }
+                reportPhase("dense-selection", "completed");
+                reportPhase("lexical-selection", "begin");
                 var lexical = await lexicalTask.ConfigureAwait(false);
                 var terms = await LexicalTermsAsync(query, lexical, workToken).ConfigureAwait(false);
                 var lexicalEligible = lexical.Where(value => Safe(value, scope) && LexicalMatch(value, query, terms)).ToArray();
                 var denseEligible = dense.Candidates.Where(value => Safe(value, scope)).ToArray();
                 var shortlist = PassageRanking.Fuse(query, lexicalEligible, denseEligible);
+                reportPhase("lexical-selection", "completed");
                 if (HybridSearchDiagnostics.Log.IsEnabled())
                     HybridSearchDiagnostics.Log.Candidates(traceId, spanId, searchId,
                         string.Join(',', lexicalEligible.Select(value => value.ChunkId)),
@@ -142,6 +176,7 @@ public sealed class HybridPassageRetrievalEngine(ICorpusRetrievalReader reader, 
                 IReadOnlyList<RankedPassage> ranked = shortlist;
                 if (shortlist.Count > 0)
                 {
+                    reportPhase("rerank", "begin");
                     try
                     {
                         var result = await reranker.RerankAsync(query, shortlist.Select(value =>
@@ -152,10 +187,17 @@ public sealed class HybridPassageRetrievalEngine(ICorpusRetrievalReader reader, 
                     catch (OperationCanceledException) { throw; }
                     catch (Exception exception) when (exception is not OutOfMemoryException and not StackOverflowException)
                     { warnings.Add("rerank:unavailable"); }
+                    reportPhase("rerank", "completed");
                 }
+                reportPhase("cited-readback", "begin");
                 var response = await AssembleAsync(query, scope, limit, ranked, "ready", lease.Generation.Id,
                     warnings, candidateCount, workToken).ConfigureAwait(false);
-                if (!await lease.IsCurrentAsync(workToken).ConfigureAwait(false)) throw new PassageRetrievalRefusalException("index-updating");
+                if (!await lease.IsCurrentAsync(workToken).ConfigureAwait(false))
+                {
+                    reportPhase("generation-current-before-return", "refused");
+                    throw new PassageRetrievalRefusalException("index-updating");
+                }
+                reportPhase("cited-readback", "completed");
                 return response;
             }, cancellationToken).ConfigureAwait(false);
         }
@@ -175,6 +217,7 @@ public sealed class HybridPassageRetrievalEngine(ICorpusRetrievalReader reader, 
                 _ => "unavailable"
             };
         }
+        reportPhase("lexical-fallback", "begin");
         var fallback = await lexicalTask.ConfigureAwait(false);
         var fallbackTerms = await LexicalTermsAsync(query, fallback, cancellationToken).ConfigureAwait(false);
         var fallbackEligible = fallback.Where(value => Safe(value, scope) && LexicalMatch(value, query, fallbackTerms)).ToArray();

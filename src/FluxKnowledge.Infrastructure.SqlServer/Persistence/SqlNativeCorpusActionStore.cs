@@ -15,11 +15,15 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
 public sealed class SqlNativeCorpusActionStore(
     IDbContextFactory<FluxKnowledgeDbContext> contextFactory,
     ISourceRootPathPolicy sourceRootPathPolicy,
-    ILocalPrivateContentDisclosure disclosure, EmbeddingGpuRuntime? embeddingRuntime = null) : INativeCorpusActionStore
+    ILocalPrivateContentDisclosure disclosure, EmbeddingGpuRuntime? embeddingRuntime = null,
+    SqlIndexRetentionOperations? indexRetention = null) : INativeCorpusActionStore
 {
     public async ValueTask<IReadOnlyList<NativeTargetVersion>> ResolveTargetsAsync(string action, string canonicalPayload, CancellationToken cancellationToken)
     {
         ValidatePayload(action, canonicalPayload);
+        if (action is "index_retention" or "index_retention_restore")
+            return await (indexRetention ?? throw new NativeOperationException("index-retention-unavailable"))
+                .ResolveTargetsAsync(action, canonicalPayload, cancellationToken).ConfigureAwait(false);
         if (action == "root_create")
         {
             var admission = RootAdmission(canonicalPayload);
@@ -63,6 +67,11 @@ public sealed class SqlNativeCorpusActionStore(
         ValidatePayload(action, canonicalPayload);
         return ValueTask.FromResult<NativeActionCommitOperation>(new NativeCorpusMutationCommitOperation(action, canonicalPayload, action == "root_create" ? RootAdmission(canonicalPayload) : null));
     }
+
+    public ValueTask<NativeActionReceipt> FinalizeCommitAsync(string action, string canonicalPayload, NativeActionReceipt receipt, CancellationToken cancellationToken) =>
+        action is "index_retention" or "index_retention_restore"
+            ? (indexRetention ?? throw new NativeOperationException("index-retention-unavailable")).FinalizeAsync(action, canonicalPayload, receipt, cancellationToken)
+            : ValueTask.FromResult(receipt);
 
     private SourceRootPathValidation RootAdmission(string payload)
     {
@@ -162,6 +171,7 @@ public sealed class SqlNativeCorpusActionStore(
                 "root_disable" or "root_pause" or "root_resume" or "root_delete" or "source_sync" => new[] { "rootId" },
                 "watcher_set" => new[] { "rootId", "enabled" },
                 "job_retry" or "publication_retry" or "embedding_retry" => new[] { "jobId" },
+                "index_retention" or "index_retention_restore" => new[] { "manifestId", "manifestHash", "generationId", "deletionReceiptId" },
                 _ => throw new NativeOperationException("action-not-allowed")
             };
             if (root.EnumerateObject().Any(property => !allowed.Contains(property.Name, StringComparer.Ordinal))) throw new NativeOperationException("invalid-payload");
@@ -177,6 +187,7 @@ public sealed class SqlNativeCorpusActionStore(
                 case "root_disable": case "root_pause": case "root_resume": case "root_delete": case "source_sync": _ = RequiredGuid(root, "rootId"); break;
                 case "watcher_set": _ = RequiredGuid(root, "rootId"); if (!root.TryGetProperty("enabled", out var enabled) || enabled.ValueKind is not (JsonValueKind.True or JsonValueKind.False)) throw new NativeOperationException("invalid-payload"); break;
                 case "job_retry": case "publication_retry": case "embedding_retry": _ = RequiredGuid(root, "jobId"); break;
+                case "index_retention": case "index_retention_restore": SqlIndexRetentionOperations.ParsePayload(payload, action == "index_retention_restore"); break;
             }
         }
         catch (JsonException) { throw new NativeOperationException("invalid-payload"); }

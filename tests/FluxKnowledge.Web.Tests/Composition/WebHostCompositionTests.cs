@@ -61,6 +61,7 @@ public sealed class WebHostCompositionTests : IDisposable
         WebHostComposition.AddProductionFluxKnowledgeServicesForTests(services, configuration);
         using var provider = services.BuildServiceProvider(new ServiceProviderOptions { ValidateScopes = true, ValidateOnBuild = true });
         using var scope = provider.CreateScope();
+        Assert.IsType<SqlIndexRetentionOperations>(scope.ServiceProvider.GetRequiredService<SqlIndexRetentionOperations>());
         Assert.IsType<SharedGpuAdmissionGate>(provider.GetRequiredService<IGpuAdmissionGate>());
         Assert.Equal(2, provider.GetRequiredService<GpuSchedulerOptions>().WorkloadPolicy!.Profiles.Count);
         Assert.Contains(provider.GetServices<IGpuExecutorAdapter>(), value => value is GpuInteractiveExecutor && value is IGpuExecutorRecoveryAdapter);

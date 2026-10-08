@@ -163,7 +163,9 @@ function Get-HybridPayloadFingerprint {
         }
     }
     if ($observations.Count -eq 0) { throw 'hybrid-payload-empty' }
-    return [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes(($observations -join "`n"))))
+    $hasher=[Security.Cryptography.SHA256]::Create()
+    try { return [BitConverter]::ToString($hasher.ComputeHash([Text.Encoding]::UTF8.GetBytes(($observations -join "`n")))).Replace('-','') }
+    finally { $hasher.Dispose() }
 }
 
 function Get-HybridReplacementSqlReceipt {

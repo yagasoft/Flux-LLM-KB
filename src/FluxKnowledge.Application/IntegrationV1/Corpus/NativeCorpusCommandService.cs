@@ -23,9 +23,12 @@ public sealed class NativeCorpusCommandService
         ["watcher_set"] = "Set persisted watcher state.",
         ["job_retry"] = "Queue a supported job retry.",
         ["publication_retry"] = "Requeue exactly the selected terminal Publish job and its completed delivery.",
-        ["embedding_retry"] = "Requeue exactly the selected terminal Embed job while preserving its compatible checkpoint and settled GPU work."
+        ["embedding_retry"] = "Requeue exactly the selected terminal Embed job while preserving its compatible checkpoint and settled GPU work.",
+        ["index_retention"] = "Remove one manifest-bound unreferenced historical generation and its exact membership, retaining a verified recovery snapshot.",
+        ["index_retention_restore"] = "Selectively restore one retention receipt's missing generation, membership and files without overwriting newer state."
     };
     private readonly NativeOperationService _operations;
+    private readonly INativeCorpusActionStore _actionStore;
     private readonly IOutboxWakeSignal? _outboxWakeSignal;
     private readonly ISourceScanWakeSignal? _sourceScanWakeSignal;
     private readonly IDeploymentValidationHold? _deploymentValidationHold;
@@ -49,6 +52,7 @@ public sealed class NativeCorpusCommandService
     {
         ArgumentNullException.ThrowIfNull(operationStore);
         ArgumentNullException.ThrowIfNull(actionStore);
+        _actionStore = actionStore;
         _outboxWakeSignal = outboxWakeSignal;
         _sourceScanWakeSignal = sourceScanWakeSignal;
         _deploymentValidationHold = deploymentValidationHold;
@@ -71,6 +75,7 @@ public sealed class NativeCorpusCommandService
         var receipt = await _operations.CommitAsync(
             new NativeActionCommitRequest(action, Payload(command), confirmationId, idempotencyKey, surface),
             cancellationToken).ConfigureAwait(false);
+        receipt = await _actionStore.FinalizeCommitAsync(action, Payload(command), receipt, cancellationToken).ConfigureAwait(false);
         if (action is "publication_retry" or "embedding_retry") _outboxWakeSignal?.Notify();
         if (action is "root_create" or "root_resume" or "root_delete")
         {

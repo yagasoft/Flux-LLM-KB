@@ -27,7 +27,9 @@ function ConvertTo-RepositoryRecoveryCanonicalValue($Value) {
 
 function Get-RepositoryRecoveryValueHash($Value) {
     $json = ConvertTo-RepositoryRecoveryCanonicalValue $Value | ConvertTo-Json -Depth 60 -Compress
-    return [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($json)))
+    $hasher=[Security.Cryptography.SHA256]::Create()
+    try { return [BitConverter]::ToString($hasher.ComputeHash([Text.Encoding]::UTF8.GetBytes($json))).Replace('-','') }
+    finally { $hasher.Dispose() }
 }
 
 function Invoke-RepositoryRecoveryScalar($Connection, $Transaction, [string]$Sql) {
