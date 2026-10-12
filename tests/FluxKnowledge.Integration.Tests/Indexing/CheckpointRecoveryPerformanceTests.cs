@@ -4,14 +4,18 @@ using System.Diagnostics.Tracing;
 using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using FluxKnowledge.Application.Gpu;
+using FluxKnowledge.Application.Contracts;
 using FluxKnowledge.Application.Indexing;
 using FluxKnowledge.Application.Pipeline;
 using FluxKnowledge.Application.Ports;
+using FluxKnowledge.Application.Sources;
 using FluxKnowledge.Application.Workers;
 using FluxKnowledge.Domain.Jobs;
 using FluxKnowledge.Domain.Pipeline;
+using FluxKnowledge.Domain.Sources;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
+using FluxKnowledge.Infrastructure.SqlServer.Search;
 using FluxKnowledge.Integration.Tests.Support;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
@@ -241,6 +245,89 @@ public sealed class CheckpointRecoveryPerformanceTests(NativeSqlServerFixture fi
         Assert.Single(await verification.CorpusQueryLeases.ToArrayAsync());
     }
 
+    [NativeSqlServerFact]
+    public async Task An_acquired_query_reads_while_checkpoint_validation_holds_the_fence_and_source_convergence_waits()
+    {
+        await using var environment = await SqlToUsearchRebuildTests.PipelineEnvironment.CreateAsync(fixture, "Published concurrency control.");
+        var retainedRecord = await environment.AddRetainedAndPumpAsync("Current synthetic evidence.");
+        await SeedEmptyCheckpointsAsync(environment.Factory, 2);
+        Guid searchableRoot;
+        var sourceRoot = SourceRootConfiguration.Restore(SourceRootId.New(), @"C:\synthetic-source-concurrency", "concurrency",
+            true, false, 1024, [], [], [], TimeSpan.FromMinutes(15), SourceRootState.Enabled, 1);
+        await using (var setup = await environment.Factory.CreateDbContextAsync())
+        {
+            searchableRoot = await (from record in setup.PipelineRecords join retainedSource in setup.SourceRevisions
+                on record.SourceRevisionId equals retainedSource.Id where record.Id == retainedRecord select retainedSource.SourceRootId).SingleAsync();
+            setup.SourceRootConfigurations.Add(new SourceRootConfigurationEntity
+            {
+                Id = sourceRoot.Id.Value, CanonicalPath = sourceRoot.CanonicalPath, DisplayName = sourceRoot.DisplayName,
+                State = (int)sourceRoot.State, Recursive = true, IncludePatternsJson = "[]", ExcludePatternsJson = "[]",
+                AllowedClassificationsJson = "[]", MaximumFileBytes = 1024, ReconciliationCadenceSeconds = 900,
+                ConfigurationRevision = 1, CreatedAtUtc = DateTimeOffset.UtcNow, UpdatedAtUtc = DateTimeOffset.UtcNow
+            });
+            await setup.SaveChangesAsync();
+            // This legacy deterministic pipeline fixture needs the same binding
+            // used by ScopedDensePagingIntegrationTests before dense retrieval.
+            await setup.Database.ExecuteSqlRawAsync(
+                "UPDATE v SET SearchInputHash = c.SearchInputHash FROM Vectors v INNER JOIN TextChunks c ON c.Id = v.TextChunkId");
+        }
+        var bytes = "Synthetic unchanged source."u8.ToArray();
+        var hash = Convert.ToHexStringLower(SHA256.HashData(bytes));
+        var file = new SourceDiscoveredFile(sourceRoot.CanonicalPath + @"\entry.txt", "entry.txt", "synthetic:entry",
+            bytes, true, hash, bytes.Length, DateTimeOffset.UtcNow,
+            new SourceClassificationResult(SourceClassification.AcceptedUtf8Text, "text", null));
+        var receipt = new SourceArtifactReceipt(SourceArtifactId.New(), hash, $"sha256\\{hash[..2]}\\{hash}.bin", bytes.Length, false);
+        var original = await new SqlSourceScanStore(environment.Factory, TimeProvider.System)
+            .ConvergeRevisionAndArtifactAsync(sourceRoot, file, receipt, CancellationToken.None);
+        var active = await environment.ActiveGenerationAsync();
+        await using var lease = await new SqlCorpusGenerationLeaseStore(environment.Factory, TimeProvider.System)
+            .TryAcquireAsync(Guid.NewGuid(), new(Environment.ProcessId, DateTimeOffset.UtcNow, new string('a', 64)),
+                active.ModelFingerprint, active.Dimensions, CancellationToken.None);
+        Assert.NotNull(lease);
+        var query = await environment.Embeddings.CreateEmbeddingAsync("Current synthetic evidence.", CancellationToken.None);
+        var reader = new SqlCorpusRetrievalReader(environment.Factory);
+        var scope = new ResolvedCorpusScope("root", [searchableRoot], null);
+        var baselineTimer = Stopwatch.StartNew();
+        var baseline = await reader.ReadDenseCandidatesAsync(lease, scope, query.Values, CancellationToken.None);
+        baselineTimer.Stop();
+        Assert.Equal("ready", baseline.Status);
+        Assert.NotEmpty(baseline.Candidates);
+        var probeObserver = new ReadObserver(blockJobs: true);
+        var sourceObserver = new ReadObserver(observeFence: true);
+        using var budget = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        var probe = new SqlDerivedIndexRecoveryStore(new ObservedFactory(fixture.ConnectionString, probeObserver), TimeProvider.System)
+            .ReadActiveAsync(budget.Token).AsTask();
+        Task<SourceRevisionId>? source = null;
+        try
+        {
+            await probeObserver.Entered.Task.WaitAsync(budget.Token);
+            source = new SqlSourceScanStore(new ObservedFactory(fixture.ConnectionString, sourceObserver), TimeProvider.System)
+                .ConvergeRevisionAndArtifactAsync(sourceRoot, file, receipt, budget.Token).AsTask();
+            await sourceObserver.FenceEntered.Task.WaitAsync(budget.Token);
+            Assert.False(source.IsCompleted);
+            using var readBudget = CancellationTokenSource.CreateLinkedTokenSource(budget.Token);
+            readBudget.CancelAfter(TimeSpan.FromSeconds(5));
+            var timer = Stopwatch.StartNew();
+            var concurrent = await reader.ReadDenseCandidatesAsync(lease, scope, query.Values, readBudget.Token);
+            timer.Stop();
+            Assert.Equal("ready", concurrent.Status);
+            Assert.Equal(baseline.Candidates.Select(value => value.ChunkId), concurrent.Candidates.Select(value => value.ChunkId));
+            Assert.False(probe.IsCompleted);
+            Assert.False(source.IsCompleted);
+            output.WriteLine($"baseline_ms={baselineTimer.Elapsed.TotalMilliseconds:F2} concurrent_ms={timer.Elapsed.TotalMilliseconds:F2} checkpoint_probe_paused=true source_convergence_waiting=true");
+        }
+        finally
+        {
+            probeObserver.Release.TrySetResult();
+            await ((Task)probe).ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
+            if (source is not null) await ((Task)source).ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
+        }
+        await probe;
+        Assert.NotNull(source);
+        Assert.Equal(original, await source);
+        Assert.True(await lease.IsCurrentAsync(CancellationToken.None));
+    }
+
     internal static async Task<Guid[]> SeedEmptyCheckpointsAsync(IDbContextFactory<FluxKnowledgeDbContext> factory, int count)
     {
         await using var context = await factory.CreateDbContextAsync();
@@ -288,15 +375,18 @@ public sealed class CheckpointRecoveryPerformanceTests(NativeSqlServerFixture fi
             .UseSqlServer(connectionString).AddInterceptors(observer).Options);
     }
 
-    private sealed class ReadObserver(bool blockJobs = false) : DbCommandInterceptor
+    private sealed class ReadObserver(bool blockJobs = false, bool observeFence = false) : DbCommandInterceptor
     {
         public int Commands { get; private set; }
         public TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource FenceEntered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public override async ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(DbCommand command,
             CommandEventData eventData, InterceptionResult<DbDataReader> result, CancellationToken cancellationToken = default)
         {
             Commands++;
+            if (observeFence && command.CommandText.Contains("[IndexState]", StringComparison.Ordinal) &&
+                command.CommandText.Contains("UPDLOCK", StringComparison.Ordinal)) FenceEntered.TrySetResult();
             if (blockJobs && command.CommandText.Contains("FROM [Jobs]", StringComparison.Ordinal) && Entered.TrySetResult())
                 await Release.Task.WaitAsync(cancellationToken);
             return result;

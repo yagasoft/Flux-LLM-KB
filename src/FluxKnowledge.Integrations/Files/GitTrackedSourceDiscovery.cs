@@ -111,8 +111,10 @@ public sealed class GitTrackedSourceDiscovery(Func<long>? availableMemory = null
         }
     }
 
-    public static bool IsEligible(string relative) => !relative.Split('/').Any(ExcludedDirectories.Contains) &&
-        !string.Equals(relative.Split('/')[0], "models", StringComparison.OrdinalIgnoreCase) &&
+    internal static bool IsExcludedTree(string relative) => relative.Split('/').Any(ExcludedDirectories.Contains) ||
+        string.Equals(relative.Split('/')[0], "models", StringComparison.OrdinalIgnoreCase);
+
+    public static bool IsEligible(string relative) => !IsExcludedTree(relative) &&
         !string.Equals(Path.GetFileName(relative), "appsettings.Local.json", StringComparison.OrdinalIgnoreCase) && EligibleExtensions.Contains(Path.GetExtension(relative));
 
     private static void EnsureRegularFile(string path)

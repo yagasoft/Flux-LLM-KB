@@ -196,11 +196,14 @@ Protected refusal applies to returned text, and completed bounded code candidate
 are not enlarged by unrelated trailing guard text.
 
 Automatic repository discovery also requires the IIS Web process to stay available
-without user requests. A normal idle shutdown exposed the current OnDemand/20-minute/
-preload-disabled gap. The prepared incremental `-EnableUnattendedDiscovery` path
+without user requests. A normal idle shutdown exposed the OnDemand/20-minute/
+preload-disabled gap. The incremental `-EnableUnattendedDiscovery` path
 scopes AlwaysRunning, zero idle timeout and preload to FluxKnowledge, with atomic
-settings, exact rollback and existing admission/drain controls. Production activation
-and unattended startup/idle-window publication remain pending.
+settings, exact rollback and existing admission/drain controls. Release `29b420ba`
+activated this correction. On 12 October the same worker survived 1,833.76 seconds
+of idle time and converged tracked additions, edits, renames and deletions during a
+2,313.30-second window with no HTTP requests, including the log-flush interval.
+Current citations, stale-citation refusal and fixture withdrawal passed.
 
 The delivered [hybrid passage architecture](design/hybrid-passage-retrieval.md)
 and [implementation plan](design/hybrid-passage-retrieval-plan.md), dated
@@ -441,8 +444,36 @@ and [plan](design/repository-operational-readiness-plan.md) scope the remaining
 unattended, semantic, terminal-recovery, companion-host and historical-retention
 work. Local checkpoint-probe batching, phase diagnostics, strict frozen-workload
 verification, explicit task restoration and manifest-bound retention are implemented
-and independently reviewed. Production activation and the five live outcomes remain
-pending; local checks add no live-acceptance credit.
+and independently reviewed. Release `29b420ba` passed unattended publication and
+normal scheduled-task activation with actual hidden companion processing. The five
+approved terminal jobs published with their original checkpoints and 86 saved
+vectors preserved; only 449 missing positions were generated, and every recovered
+source passed current cited readback. All 1,098 eligible current repository paths
+were published at the 12 October observation. Frozen semantic acceptance then
+stopped with two ready searches, one timeout and 37 unstarted cases. The timed-out
+task has a durable uncertain outcome despite committed native-capacity release;
+the separately authorised two-request diagnostic then completed hybrid-ready in
+19.55 and 13.58 seconds, with a known GPU result, confirmed cleanup and no new
+uncertainty. Its root dense phase took 7.74 seconds and model loads totalled
+6.43 seconds; the original timeout was not reproduced. A disposable 50,000-vector
+comparison did not justify a streaming rewrite. Further inference remains paused
+for focused diagnosis. A second authorised diagnostic pair returned ready in
+13.96 and 17.64 seconds with confirmed native cleanup. Its runtime trace lost no
+events, but final SQL metadata handling rejected a valid plan handle, leaving the
+capture incomplete. The private observer correction passed focused checks;
+no matching cached plan remained. A disposable test confirmed that an acquired
+query can read while checkpoint validation holds the fence and source convergence
+waits. Neither result establishes the original timeout's cause. Full interface
+acceptance remains open, and the approved
+historical-retention set has not been staged or deleted. Existing evidence and
+failed runs are preserved.
+
+A local watcher correction suppresses Git repository hints wholly inside the
+existing excluded trees, including diagnostic and build output. Git control
+paths, uncertain hints and either relevant rename endpoint still signal;
+directory notifications cover ancestor moves. Disposable watcher tests prove
+these transitions while periodic discovery remains authoritative. This removes
+avoidable rescan load; deployment and final semantic acceptance remain pending.
 
 SQL vector selection resolves chunk identity before record revision predicates
 to exclude the observed pair expansion, retaining all eligibility checks. Its

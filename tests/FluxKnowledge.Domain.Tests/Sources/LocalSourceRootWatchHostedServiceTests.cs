@@ -9,6 +9,76 @@ namespace FluxKnowledge.Domain.Tests.Sources;
 
 public sealed class LocalSourceRootWatchHostedServiceTests
 {
+    [Theory]
+    [InlineData(".agents/receipt.json", false)]
+    [InlineData("docs/.AgEnTs/receipt.json", false)]
+    [InlineData("artifacts/output.md", false)]
+    [InlineData("src/obj/generated.cs", false)]
+    [InlineData("private", false)]
+    [InlineData("models/config.json", false)]
+    [InlineData("src/Models/Record.cs", true)]
+    [InlineData("docs", true)]
+    [InlineData("docs/manual.md", true)]
+    [InlineData("appsettings.Local.json", true)]
+    [InlineData("unsupported.exe", true)]
+    [InlineData(".git/index", true)]
+    [InlineData(".git/worktrees/linked/index", true)]
+    [InlineData("../common/.git/index", true)]
+    [InlineData(".", true)]
+    public void Git_file_hints_suppress_only_provably_excluded_trees(string relative, bool expected)
+    {
+        var root = SourceRootConfiguration.Create(Path.GetFullPath(Path.Combine(Path.GetTempPath(), "FluxWatchPolicy")),
+            "Synthetic Git watcher policy", true, false, 1024, discoveryMode: SourceDiscoveryMode.GitTracked);
+        foreach (var kind in new[] { WatcherChangeTypes.Created, WatcherChangeTypes.Changed, WatcherChangeTypes.Deleted })
+            Assert.Equal(expected, LocalSourceRootWatchHostedService.ShouldSignal(root, new FileSystemEventArgs(kind, root.CanonicalPath, relative)));
+    }
+
+    [Theory]
+    [InlineData(".agents/old.md", ".agents/new.md", false)]
+    [InlineData("private/docs", "artifacts/docs", false)]
+    [InlineData("docs/fact.md", ".agents/fact.md", true)]
+    [InlineData(".agents/fact.md", "docs/fact.md", true)]
+    [InlineData("docs", "private/docs", true)]
+    [InlineData("private/docs", "docs", true)]
+    [InlineData("docs", "renamed", true)]
+    [InlineData(".git/index.lock", ".git/index", true)]
+    public void Git_rename_hints_consider_both_endpoints_and_eligible_descendants(string oldPath, string newPath, bool expected)
+    {
+        var root = SourceRootConfiguration.Create(Path.GetFullPath(Path.Combine(Path.GetTempPath(), "FluxWatchPolicy")),
+            "Synthetic Git watcher policy", true, false, 1024, discoveryMode: SourceDiscoveryMode.GitTracked);
+        Assert.Equal(expected, LocalSourceRootWatchHostedService.ShouldSignal(root,
+            new RenamedEventArgs(WatcherChangeTypes.Renamed, root.CanonicalPath, newPath, oldPath)));
+    }
+
+    [Fact]
+    public void Uncertain_paths_and_ordinary_filesystem_roots_keep_their_hints()
+    {
+        var path = Path.GetFullPath(Path.Combine(Path.GetTempPath(), "FluxWatchPolicy"));
+        var git = SourceRootConfiguration.Create(path, "Git watcher", true, false, 1024, discoveryMode: SourceDiscoveryMode.GitTracked);
+        Assert.True(LocalSourceRootWatchHostedService.ShouldSignal(git, new FileSystemEventArgs(WatcherChangeTypes.Deleted, "relative", ".agents/file.md")));
+        Assert.True(LocalSourceRootWatchHostedService.ShouldSignal(git, new FileSystemEventArgs(WatcherChangeTypes.Deleted, path, "invalid\0/.agents/file.md")));
+        var filesystem = SourceRootConfiguration.Create(path, "Ordinary watcher", true, false, 1024);
+        Assert.True(LocalSourceRootWatchHostedService.ShouldSignal(filesystem, new FileSystemEventArgs(WatcherChangeTypes.Changed, path, ".agents/file.md")));
+        Assert.True(LocalSourceRootWatchHostedService.ShouldSignal(filesystem, new RenamedEventArgs(WatcherChangeTypes.Renamed, path, "private/new.md", "private/old.md")));
+    }
+
+    [Theory]
+    [InlineData("private/git-control/worktrees/linked/index", true)]
+    [InlineData("private/git-control/objects/object", true)]
+    [InlineData("private/git-control", true)]
+    [InlineData("private", true)]
+    [InlineData("private/unrelated.md", false)]
+    [InlineData("private/git-control-other/index", false)]
+    public void Validated_Git_control_trees_and_their_ancestors_remain_hints(string relative, bool expected)
+    {
+        var path = Path.GetFullPath(Path.Combine(Path.GetTempPath(), "FluxWatchPolicy"));
+        var root = SourceRootConfiguration.Create(path, "Git control watcher", true, false, 1024, discoveryMode: SourceDiscoveryMode.GitTracked);
+        var control = Path.Combine(path, "private", "git-control");
+        var repository = new GitTrackedSourceDiscovery.Repository(Path.Combine(control, "worktrees", "linked"), control, "synthetic");
+        Assert.Equal(expected, LocalSourceRootWatchHostedService.ShouldSignal(root,
+            new FileSystemEventArgs(WatcherChangeTypes.Deleted, path, relative), repository));
+    }
+
     [Fact]
     public async Task Overflow_and_changes_during_persistence_survive_as_one_follow_up_rescan_hint()
     {

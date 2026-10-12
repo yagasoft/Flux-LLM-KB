@@ -4,6 +4,10 @@ using FluxKnowledge.Integrations.Files;
 using Xunit;
 using System.Security.AccessControl;
 using System.Security.Principal;
+using System.Threading.Channels;
+using FluxKnowledge.Application.Ports;
+using FluxKnowledge.Application.Sources;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace FluxKnowledge.Domain.Tests.Sources;
 
@@ -61,6 +65,159 @@ public sealed class GitTrackedSourceTests : IDisposable
         Git("add", "second.md");
         Git("rm", "--cached", "second.md");
         Assert.Empty(await DiscoverAsync());
+    }
+
+    [Fact]
+    public async Task Excluded_diagnostic_file_activity_does_not_queue_repository_rescans()
+    {
+        var tracked = Path.Combine(directory, "safe.md");
+        var excluded = Path.Combine(directory, ".agents");
+        File.WriteAllText(tracked, "Tracked fact");
+        Directory.CreateDirectory(excluded);
+        Git("add", "safe.md");
+        var root = SourceRootConfiguration.Create(directory, "Disposable Git watcher", true, false, 1024,
+            discoveryMode: SourceDiscoveryMode.GitTracked);
+        var store = new WatchStore(root);
+        using var service = new LocalSourceRootWatchHostedService(store, new SourceWatchCoordinator(store),
+            TimeProvider.System, NullLogger<LocalSourceRootWatchHostedService>.Instance);
+        try
+        {
+            await service.StartAsync(CancellationToken.None);
+            await PrimeWatcherAsync(store, tracked);
+
+            for (var index = 0; index < 50; index++)
+            {
+                var path = Path.Combine(excluded, $"diagnostic{index}.json");
+                File.WriteAllText(path, "Synthetic diagnostic receipt");
+                File.AppendAllText(path, " updated");
+                var renamed = path + ".renamed";
+                File.Move(path, renamed);
+                File.Delete(renamed);
+            }
+            await Task.Delay(3000);
+            Assert.False(store.Signals.Reader.TryRead(out _), "Excluded diagnostic writes queued a full repository rescan.");
+
+            File.AppendAllText(tracked, " current");
+            using var trackedDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            Assert.Equal(root.Id, (await store.Signals.Reader.ReadAsync(trackedDeadline.Token)).RootId);
+        }
+        finally
+        {
+            using var stopDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            await service.StopAsync(stopDeadline.Token);
+        }
+    }
+
+    [Theory]
+    [InlineData("docs", "private/docs")]
+    [InlineData("private/docs", "docs")]
+    [InlineData("docs", "renamed")]
+    public async Task Directory_moves_with_eligible_descendants_queue_authoritative_rescans(string oldPath, string newPath)
+    {
+        var tracked = Path.Combine(directory, "ready.md");
+        File.WriteAllText(tracked, "Tracked readiness fact");
+        var original = Path.Combine(directory, oldPath);
+        var target = Path.Combine(directory, newPath);
+        Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+        Directory.CreateDirectory(original);
+        File.WriteAllText(Path.Combine(original, "fact.md"), "Tracked directory fact");
+        Git("add", ".");
+        var root = SourceRootConfiguration.Create(directory, "Disposable Git directory watcher", true, false, 1024,
+            discoveryMode: SourceDiscoveryMode.GitTracked);
+        var store = new WatchStore(root);
+        using var service = new LocalSourceRootWatchHostedService(store, new SourceWatchCoordinator(store),
+            TimeProvider.System, NullLogger<LocalSourceRootWatchHostedService>.Instance);
+        try
+        {
+            await service.StartAsync(CancellationToken.None);
+            await PrimeWatcherAsync(store, tracked);
+            Directory.Move(original, target);
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            Assert.Equal(root.Id, (await store.Signals.Reader.ReadAsync(deadline.Token)).RootId);
+        }
+        finally
+        {
+            using var stopDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            await service.StopAsync(stopDeadline.Token);
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public Task Ordinary_and_linked_Git_index_changes_queue_authoritative_rescans(bool linked) =>
+        VerifyGitIndexWakeAsync(linked, controlInsideExcludedTree: false);
+
+    [Fact]
+    public Task Git_control_directory_under_excluded_tree_still_queues_index_rescans() =>
+        VerifyGitIndexWakeAsync(linked: true, controlInsideExcludedTree: true);
+
+    private async Task VerifyGitIndexWakeAsync(bool linked, bool controlInsideExcludedTree)
+    {
+        File.WriteAllText(Path.Combine(directory, "safe.md"), "Tracked fact");
+        Git("add", ".");
+        Git("-c", "user.name=Disposable test", "-c", "user.email=test@example.invalid", "commit", "--quiet", "-m", "Disposable watcher fixture");
+        var watched = directory;
+        if (linked)
+        {
+            watched = Path.Combine(Path.GetTempPath(), $"FluxGitWatchLinked_{Guid.NewGuid():N}");
+            Git("worktree", "add", "--detach", watched, "HEAD");
+        }
+        var originalControl = Path.Combine(directory, ".git");
+        var relocatedControl = Path.Combine(watched, "private", "git-control");
+        string? originalPointer = null;
+        var controlRelocated = false;
+        LocalSourceRootWatchHostedService? service = null;
+        try
+        {
+            if (controlInsideExcludedTree)
+            {
+                var originalRepository = GitTrackedSourceDiscovery.ResolveRepository(watched);
+                var relativeGitDirectory = Path.GetRelativePath(originalControl, originalRepository.GitDirectory);
+                originalPointer = File.ReadAllText(Path.Combine(watched, ".git"));
+                Directory.CreateDirectory(Path.GetDirectoryName(relocatedControl)!);
+                Directory.Move(originalControl, relocatedControl);
+                controlRelocated = true;
+                WriteGitPointer(Path.Combine(watched, ".git"), $"gitdir: {Path.Combine(relocatedControl, relativeGitDirectory)}\n");
+                Assert.Equal(relocatedControl, GitTrackedSourceDiscovery.ResolveRepository(watched).CommonDirectory);
+                Assert.Equal(new[] { watched }, LocalSourceRootWatchHostedService.GetWatchPaths(
+                    SourceRootConfiguration.Create(watched, "In-root control", true, false, 1024, discoveryMode: SourceDiscoveryMode.GitTracked)));
+                Assert.Equal("safe.md", Assert.Single((await new GitTrackedSourceDiscovery().ReadAsync(watched, CancellationToken.None)).Paths));
+            }
+            var root = SourceRootConfiguration.Create(watched, "Disposable Git index watcher", true, false, 1024,
+                discoveryMode: SourceDiscoveryMode.GitTracked);
+            var store = new WatchStore(root);
+            service = new LocalSourceRootWatchHostedService(store, new SourceWatchCoordinator(store),
+                TimeProvider.System, NullLogger<LocalSourceRootWatchHostedService>.Instance);
+            await service.StartAsync(CancellationToken.None);
+            var tracked = Path.Combine(watched, "safe.md");
+            await PrimeWatcherAsync(store, tracked);
+            GitAt(watched, "rm", "--cached", "safe.md");
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            Assert.Equal(root.Id, (await store.Signals.Reader.ReadAsync(deadline.Token)).RootId);
+            Assert.True(File.Exists(tracked));
+            Assert.Empty((await new GitTrackedSourceDiscovery().ReadAsync(watched, deadline.Token)).Paths);
+        }
+        finally
+        {
+            if (service is not null)
+            {
+                using var stopDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+                await service.StopAsync(stopDeadline.Token);
+                service.Dispose();
+            }
+            if (controlRelocated)
+            {
+                Directory.Move(relocatedControl, originalControl);
+                WriteGitPointer(Path.Combine(watched, ".git"), originalPointer!);
+            }
+            if (linked && Directory.Exists(watched))
+            {
+                File.WriteAllText(Path.Combine(watched, "safe.md"), "Tracked fact");
+                GitAt(watched, "add", "safe.md");
+                Git("worktree", "remove", watched);
+            }
+        }
     }
 
     private async Task<List<FluxKnowledge.Application.Ports.SourceDiscoveredFile>> DiscoverAsync()
@@ -171,14 +328,50 @@ public sealed class GitTrackedSourceTests : IDisposable
         finally { if (Directory.Exists(linked)) Git("worktree", "remove", linked); }
     }
 
-    private void Git(params string[] arguments)
+    private void Git(params string[] arguments) => GitAt(directory, arguments);
+
+    private static void WriteGitPointer(string path, string text)
     {
-        var start = new ProcessStartInfo(@"C:\Program Files\Git\cmd\git.exe") { WorkingDirectory = directory, UseShellExecute = false, CreateNoWindow = true, RedirectStandardError = true, RedirectStandardOutput = true };
+        // Open the existing hidden Git pointer without replacing its file attributes.
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Write, FileShare.None);
+        stream.SetLength(0);
+        using var writer = new StreamWriter(stream);
+        writer.Write(text);
+    }
+
+    private static void GitAt(string workingDirectory, params string[] arguments)
+    {
+        var start = new ProcessStartInfo(@"C:\Program Files\Git\cmd\git.exe") { WorkingDirectory = workingDirectory, UseShellExecute = false, CreateNoWindow = true, RedirectStandardError = true, RedirectStandardOutput = true };
         foreach (var argument in arguments) start.ArgumentList.Add(argument);
         using var process = Process.Start(start)!;
         var error = process.StandardError.ReadToEnd();
         process.WaitForExit();
         Assert.True(process.ExitCode == 0, error);
+    }
+
+    private sealed class WatchStore(SourceRootConfiguration root) : ISourceRootWatchStore
+    {
+        public Channel<SourceWatchSignal> Signals { get; } = Channel.CreateUnbounded<SourceWatchSignal>();
+        public ValueTask<IReadOnlyList<SourceRootConfiguration>> ReadEnabledRootsAsync(CancellationToken ct) =>
+            ValueTask.FromResult<IReadOnlyList<SourceRootConfiguration>>([root]);
+        public ValueTask RecordSignalAsync(SourceWatchSignal signal, CancellationToken ct) =>
+            Signals.Writer.WriteAsync(signal, ct);
+        public ValueTask<ClaimedSourceWatchBatch?> ClaimDueBatchAsync(DateTimeOffset now, string owner, TimeSpan duration, CancellationToken ct) => throw new NotSupportedException();
+        public ValueTask ReleaseScanAsync(ClaimedSourceWatchBatch batch, CancellationToken ct) => throw new NotSupportedException();
+    }
+
+    private static async Task PrimeWatcherAsync(WatchStore store, string tracked)
+    {
+        // A real tracked event proves that the asynchronous watcher has opened.
+        for (var attempt = 0; attempt < 50 && !store.Signals.Reader.TryPeek(out _); attempt++)
+        {
+            File.AppendAllText(tracked, " change");
+            await Task.Delay(100);
+        }
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        Assert.NotEqual(SourceWatchSignalKind.Overflow, (await store.Signals.Reader.ReadAsync(deadline.Token)).Kind);
+        await Task.Delay(2500);
+        while (store.Signals.Reader.TryRead(out _)) { }
     }
 
     public void Dispose()
