@@ -1,7 +1,6 @@
 using FluxKnowledge.Application.Gpu;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Search;
-using System.Diagnostics;
 
 namespace FluxKnowledge.Infrastructure.Inference.Search;
 
@@ -18,12 +17,12 @@ public sealed class BgeScheduledPassageInference(GpuInteractiveExecutor executor
     private ValueTask<T> ExecuteCoreAsync<T>(Func<IEmbeddingProvider, IPassageReranker, CancellationToken, ValueTask<T>> work,
         CancellationToken cancellationToken, bool declineWhenGpuBusy)
     {
-        var traceId = Activity.Current?.TraceId.ToString() ?? string.Empty;
-        var spanId = Activity.Current?.SpanId.ToString() ?? string.Empty;
-        return executor.ExecuteWithOwnershipAsync(owner =>
+        var (traceId, spanId) = HybridSearchDiagnostics.CurrentCorrelation;
+        return executor.ExecuteWithOwnershipAsync(owner => HybridSearchDiagnostics.WithRequestCorrelationAsync(traceId, spanId, async () =>
         {
+            // Immutable IDs outlive the request Activity without changing scheduler context.
             HybridSearchDiagnostics.Log.NativeSearch(traceId, spanId, owner.Handle.BatchId.ToString("N"));
-            return models.ExecuteSearchAsync(owner, work);
-        }, cancellationToken, declineWhenGpuBusy);
+            return await models.ExecuteSearchAsync(owner, work).ConfigureAwait(false);
+        }), cancellationToken, declineWhenGpuBusy);
     }
 }

@@ -1,7 +1,6 @@
 using System.Security.Cryptography;
 using System.Runtime.InteropServices;
 using System.Runtime.CompilerServices;
-using System.Diagnostics;
 using System.Text.Json;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Search;
@@ -120,9 +119,11 @@ public sealed partial class SqlCorpusRetrievalReader
                 }
             }
             if (kind != "all" && HybridSearchDiagnostics.Log.IsEnabled())
-                HybridSearchDiagnostics.Log.ScopedDensePage(Activity.Current?.TraceId.ToString() ?? string.Empty,
-                    Activity.Current?.SpanId.ToString() ?? string.Empty, vectors.Length, top.Count,
+            {
+                var (trace, span) = HybridSearchDiagnostics.CurrentCorrelation;
+                HybridSearchDiagnostics.Log.ScopedDensePage(trace, span, vectors.Length, top.Count,
                     vectors.Sum(value => (long)(value.Values?.Length ?? 0)));
+            }
             if (kind == "all" || vectors.Length < budget) break;
         }
         if (!await lease.IsCurrentAsync(cancellationToken).ConfigureAwait(false)) return new("index-updating", []);

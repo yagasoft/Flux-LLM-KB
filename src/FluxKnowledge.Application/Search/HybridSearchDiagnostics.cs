@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Diagnostics.Tracing;
 
 namespace FluxKnowledge.Application.Search;
@@ -7,7 +8,21 @@ namespace FluxKnowledge.Application.Search;
 public sealed class HybridSearchDiagnostics : EventSource
 {
     public static readonly HybridSearchDiagnostics Log = new();
+    private static readonly AsyncLocal<(string TraceId, string SpanId)?> RequestCorrelation = new();
     private HybridSearchDiagnostics() { }
+
+    // Null inherits ambient attribution; an empty pair suppresses an unrelated scheduler trace.
+    public static (string TraceId, string SpanId) CurrentCorrelation => RequestCorrelation.Value ??
+        (Activity.Current?.TraceId.ToString() ?? string.Empty, Activity.Current?.SpanId.ToString() ?? string.Empty);
+
+    [NonEvent]
+    public static async ValueTask<T> WithRequestCorrelationAsync<T>(string traceId, string spanId, Func<ValueTask<T>> work)
+    {
+        var previous = RequestCorrelation.Value;
+        RequestCorrelation.Value = (traceId, spanId);
+        try { return await work().ConfigureAwait(false); }
+        finally { RequestCorrelation.Value = previous; }
+    }
 
     [Event(1, Level = EventLevel.Informational)]
     public void Candidates(string traceId, string spanId, string searchId, string lexicalIds, string denseIds, string shortlistIds) =>

@@ -49,8 +49,7 @@ public sealed class SqlCorpusGenerationLeaseStore(
         var connection = new SqlConnection(new SqlConnectionStringBuilder(connectionString) { Pooling = false }.ConnectionString);
         SqlLease? lease = null;
         var timer = Stopwatch.StartNew();
-        var trace = Activity.Current?.TraceId.ToString() ?? string.Empty;
-        var span = Activity.Current?.SpanId.ToString() ?? string.Empty;
+        var (trace, span) = HybridSearchDiagnostics.CurrentCorrelation;
         var attempt = Guid.NewGuid().ToString("N");
         void Phase(string phase, string outcome)
         {
