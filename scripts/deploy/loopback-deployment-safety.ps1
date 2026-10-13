@@ -67,7 +67,8 @@ function Invoke-FixedLoopbackProbe {
         [Parameter(Mandatory)]
         [string]$Uri,
         [ValidateRange(1, 300)]
-        [int]$TimeoutSeconds = 30
+        [int]$TimeoutSeconds = 30,
+        [System.Threading.CancellationToken]$CancellationToken = [System.Threading.CancellationToken]::None
     )
 
     try {
@@ -88,7 +89,7 @@ function Invoke-FixedLoopbackProbe {
     $probe = New-FixedLoopbackProbeClient -TimeoutSeconds $TimeoutSeconds
 
     try {
-        $response = $probe.Client.GetAsync($probeUri).GetAwaiter().GetResult()
+        $response = $probe.Client.GetAsync($probeUri, $CancellationToken).GetAwaiter().GetResult()
         if ([int]$response.StatusCode -ne 200) {
             $statusCode = [int]$response.StatusCode
             $response.Dispose()

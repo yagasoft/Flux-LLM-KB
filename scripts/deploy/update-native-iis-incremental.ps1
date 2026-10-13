@@ -212,6 +212,34 @@ function Invoke-RequiredLoopbackProbes {
     )
 
     foreach ($path in @("/health/live", "/health/ready", "/api/index-health")) {
+        if ($path -eq '/health/ready') {
+            # SQL/index startup validation runs asynchronously. Wait for readiness,
+            # but never accept 503 or restart the original deadline per request.
+            $deadline = [Threading.CancellationTokenSource]::new([TimeSpan]::FromSeconds($TimeoutSeconds))
+            try {
+                while ($true) {
+                    $deadline.Token.ThrowIfCancellationRequested()
+                    $response = $null
+                    try {
+                        $response = Invoke-FixedLoopbackProbe -Uri "$Origin$path" -TimeoutSeconds $TimeoutSeconds `
+                            -CancellationToken $deadline.Token
+                        $deadline.Token.ThrowIfCancellationRequested()
+                        break
+                    }
+                    catch {
+                        if ($_.Exception.Message -cne 'The fixed-loopback endpoint returned HTTP 503; exact HTTP 200 is required.') {
+                            throw
+                        }
+                    }
+                    finally {
+                        if ($null -ne $response) { $response.Dispose() }
+                    }
+                    [void]$deadline.Token.WaitHandle.WaitOne(500)
+                }
+            }
+            finally { $deadline.Dispose() }
+            continue
+        }
         $response = Invoke-FixedLoopbackProbe -Uri "$Origin$path" -TimeoutSeconds $TimeoutSeconds
         $response.Dispose()
     }

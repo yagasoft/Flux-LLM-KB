@@ -579,6 +579,44 @@ $okProbe = Invoke-SyntheticFixedLoopbackProbe -StatusCode 200 -ReasonPhrase "OK"
 if ($okProbe.HadErrors -or (@($okProbe.Output) -join "").Trim() -ne "200") {
     throw "The shared fixed-loopback probe did not preserve an exact loopback 200 response."
 }
+
+# A shared readiness deadline must cancel an in-flight request, not merely stop
+# the delay between requests. This disposable listener deliberately sends no response.
+$listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
+$listener.Start()
+$probeShell = [PowerShell]::Create()
+$cancellation = [Threading.CancellationTokenSource]::new()
+$pendingClient = $null
+try {
+    $port = ([Net.IPEndPoint]$listener.LocalEndpoint).Port
+    [void]$probeShell.AddScript(@'
+param($Helper, $Uri, $Deadline)
+$ErrorActionPreference = 'Stop'
+. $Helper
+$response = Invoke-FixedLoopbackProbe -Uri $Uri -TimeoutSeconds 5 -CancellationToken $Deadline.Token
+$response.Dispose()
+'@).AddArgument($loopbackSafetyScript).AddArgument("http://127.0.0.1:$port/probe").AddArgument($cancellation)
+    $pendingProbe = $probeShell.BeginInvoke()
+    $accepted = $listener.AcceptTcpClientAsync()
+    if (-not $accepted.Wait(5000)) { throw 'The cancellable loopback probe did not connect.' }
+    $pendingClient = $accepted.GetAwaiter().GetResult()
+    $cancellation.Cancel()
+    if (-not $pendingProbe.AsyncWaitHandle.WaitOne(2000)) {
+        throw 'The shared deadline did not cancel the in-flight loopback request.'
+    }
+    $cancelled = $false
+    try { [void]$probeShell.EndInvoke($pendingProbe) }
+    catch { $cancelled = $true }
+    if (-not $cancelled -and -not $probeShell.HadErrors) {
+        throw 'The cancelled loopback request was incorrectly accepted.'
+    }
+}
+finally {
+    if ($null -ne $pendingClient) { $pendingClient.Dispose() }
+    $probeShell.Dispose()
+    $cancellation.Dispose()
+    $listener.Stop()
+}
 $redirectProbe = Invoke-SyntheticFixedLoopbackProbe -StatusCode 302 -ReasonPhrase "Found"
 if (-not $redirectProbe.HadErrors -or (@($redirectProbe.Errors) -join " ") -notmatch "HTTP 302") {
     throw "The shared fixed-loopback probe did not reject a redirect as a non-200 response."

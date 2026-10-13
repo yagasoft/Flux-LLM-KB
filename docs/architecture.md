@@ -257,7 +257,9 @@ database before background database work begins. Only classified availability
 failures retry with backoff; worker operations and transactions are not replayed
 by this gate. The listener can start while readiness remains 503. Initial index
 validation runs in the existing recovery service and must still succeed before
-readiness becomes healthy. Capacity bootstrap preserves existing reservations
+readiness becomes healthy. The incremental updater waits for readiness HTTP 200
+within its existing deadline, retrying only readiness HTTP 503 during startup.
+Capacity bootstrap preserves existing reservations
 and accepts a concurrent insert only after a fresh read proves the exact slot;
 scheduler admission retains its transactional capacity and ownership checks.
 The desktop companion returns a failed exit code for classified SQL unavailability
