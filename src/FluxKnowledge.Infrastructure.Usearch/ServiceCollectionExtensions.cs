@@ -58,7 +58,7 @@ public static class ServiceCollectionExtensions
             services,
             storageSafety,
             directoryCreator ?? FileSystemUsearchDirectoryCreator.Instance,
-            registerRecoveryBackgroundService: false);
+            registerRecoveryBackgroundService: true);
     }
 
     private static IServiceCollection AddFluxKnowledgeUsearchCore(

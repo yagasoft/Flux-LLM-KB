@@ -1,4 +1,5 @@
 using FluxKnowledge.Application.Gpu;
+using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Domain.Gpu;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -18,7 +19,8 @@ public sealed class GpuSchedulerService(
     IGpuSchedulerWakeSignal wakeSignal,
     TimeProvider timeProvider,
     GpuSchedulerOptions options,
-    ILogger<GpuSchedulerService>? logger = null) : BackgroundService
+    ILogger<GpuSchedulerService>? logger = null,
+    IDatabaseStartupReadiness? databaseStartupReadiness = null) : BackgroundService
 {
     private readonly ILogger<GpuSchedulerService> _logger = logger ?? NullLogger<GpuSchedulerService>.Instance;
     private long? _observedWakeGeneration;
@@ -29,6 +31,7 @@ public sealed class GpuSchedulerService(
     {
         try
         {
+            await (databaseStartupReadiness?.WaitAsync(stoppingToken) ?? ValueTask.CompletedTask).ConfigureAwait(false);
             var startup = true;
             var pendingAdmissionReason = (GpuSchedulerWakeReason)0;
             Guid? pendingAdmissionOperationId = null;

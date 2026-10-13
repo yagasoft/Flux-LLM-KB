@@ -9,12 +9,14 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Workers;
 /// <summary>Builds optional disclosure evidence without replaying publication or model work.</summary>
 public sealed class CodeDisclosureProofRecoveryService(
     ICodeDisclosureProofStore store, CsharpDisclosureProofBuilder builder,
-    IDeploymentValidationHold hold, ILogger<CodeDisclosureProofRecoveryService> logger) : BackgroundService
+    IDeploymentValidationHold hold, ILogger<CodeDisclosureProofRecoveryService> logger,
+    IDatabaseStartupReadiness? databaseStartupReadiness = null) : BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         try
         {
+            await (databaseStartupReadiness?.WaitAsync(stoppingToken) ?? ValueTask.CompletedTask).ConfigureAwait(false);
             while (!stoppingToken.IsCancellationRequested)
             {
                 await hold.WaitUntilReleasedAsync(stoppingToken).ConfigureAwait(false);

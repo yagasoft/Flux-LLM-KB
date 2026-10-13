@@ -46,6 +46,78 @@ namespace FluxKnowledge.Web.Tests.Composition;
 
 public sealed class WebHostCompositionTests : IDisposable
 {
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task SQL_unavailable_host_starts_unready_without_background_database_work(bool hybrid)
+    {
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseTestServer();
+        var configuration = new ConfigurationBuilder().AddConfiguration(CreateProductionConfiguration())
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Runtime:Model:Enabled"] = "true", ["Runtime:Gpu:Enabled"] = "true",
+                ["Runtime:Ocr:Enabled"] = "true", ["Search:HybridPassagesEnabled"] = hybrid.ToString(),
+                ["Worker:Enabled"] = "true", ["OutlookCapture:Enabled"] = "true"
+            }).Build();
+        WebHostComposition.AddProductionFluxKnowledgeServicesForTests(builder.Services, configuration);
+        var database = new ForbiddenStartupContextFactory();
+        builder.Services.AddSingleton<IDbContextFactory<FluxKnowledgeDbContext>>(database);
+        var readiness = new ControlledStartupReadiness();
+        builder.Services.AddSingleton<IDatabaseStartupReadiness>(readiness);
+        builder.Services.AddSingleton<IDerivedIndexRecoveryStore>(new ValidatedEmptyCatalogueRecoveryStore());
+        builder.Services.AddSingleton<ISqlServerReadinessValidator>(new ReadyReadinessValidator());
+        // This test never loads a real model; all SQL-dependent hosted services remain registered.
+        var cpu = builder.Services.SingleOrDefault(descriptor => descriptor.ImplementationType == typeof(BgeCpuWarmupService));
+        if (cpu is not null) builder.Services.Remove(cpu);
+        await using var application = builder.Build();
+        application.MapFluxKnowledgeHealth();
+        var background = application.Services.GetServices<IHostedService>().OfType<BackgroundService>().ToArray();
+        Assert.Contains(background, service => service is SourceReconciliationService);
+        Assert.Contains(background, service => service is GpuSchedulerService);
+        readiness.ExpectedWaiters = background.Length;
+
+        await application.StartAsync().WaitAsync(TimeSpan.FromSeconds(5));
+        try
+        {
+            await readiness.AllWaiting.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Equal(HttpStatusCode.OK, (await application.GetTestClient().GetAsync("/health/live")).StatusCode);
+            Assert.Equal(HttpStatusCode.ServiceUnavailable, (await application.GetTestClient().GetAsync("/health/ready")).StatusCode);
+            Assert.Equal(DerivedIndexRecoveryState.Starting,
+                application.Services.GetRequiredService<IDerivedIndexRecoveryStatus>().Snapshot.State);
+            Assert.Equal(0, database.Attempts);
+        }
+        finally { await application.StopAsync().WaitAsync(TimeSpan.FromSeconds(5)); }
+    }
+
+    private sealed class ControlledStartupReadiness : IDatabaseStartupReadiness
+    {
+        private readonly TaskCompletionSource _ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _waiters;
+        public int ExpectedWaiters { get; set; }
+        public TaskCompletionSource AllWaiting { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public bool IsReady => _ready.Task.IsCompletedSuccessfully;
+        public void Release() => _ready.TrySetResult();
+        public ValueTask WaitAsync(CancellationToken ct)
+        {
+            if (Interlocked.Increment(ref _waiters) == ExpectedWaiters) AllWaiting.TrySetResult();
+            return new(_ready.Task.WaitAsync(ct));
+        }
+    }
+
+    private sealed class ForbiddenStartupContextFactory : IDbContextFactory<FluxKnowledgeDbContext>
+    {
+        private int _attempts;
+        public int Attempts => Volatile.Read(ref _attempts);
+        public FluxKnowledgeDbContext CreateDbContext()
+        {
+            Interlocked.Increment(ref _attempts);
+            throw new InvalidOperationException("Database work occurred before startup readiness; no SQL connection was opened.");
+        }
+        public Task<FluxKnowledgeDbContext> CreateDbContextAsync(CancellationToken ct = default) =>
+            Task.FromResult(CreateDbContext());
+    }
+
     [Fact]
     public void Hybrid_runtime_composes_shared_slot_exact_profiles_and_both_executors_without_loading_models()
     {
@@ -271,7 +343,7 @@ public sealed class WebHostCompositionTests : IDisposable
 
         WebHostComposition.AddProductionFluxKnowledgeServicesForTests(services, configuration);
 
-        Assert.Equal(2, services.Count(descriptor => descriptor.ServiceType == typeof(IHostedService)));
+        Assert.Equal(3, services.Count(descriptor => descriptor.ServiceType == typeof(IHostedService)));
         WebHostComposition.ValidateNativeGoLiveComposition(services, configuration);
     }
 
@@ -290,7 +362,7 @@ public sealed class WebHostCompositionTests : IDisposable
 
         WebHostComposition.AddProductionFluxKnowledgeServicesForTests(services, configuration);
 
-        Assert.Equal(6, services.Count(descriptor => descriptor.ServiceType == typeof(IHostedService)));
+        Assert.Equal(7, services.Count(descriptor => descriptor.ServiceType == typeof(IHostedService)));
         WebHostComposition.ValidateNativeGoLiveComposition(services, configuration);
     }
 
@@ -342,18 +414,20 @@ public sealed class WebHostCompositionTests : IDisposable
             CreateProductionConfiguration());
         builder.Services.AddSingleton<IDerivedIndexRecoveryStore>(new ValidatedEmptyCatalogueRecoveryStore());
         builder.Services.AddSingleton<ISqlServerReadinessValidator>(new ReadyReadinessValidator());
+        var readiness = new ControlledStartupReadiness();
+        builder.Services.AddSingleton<IDatabaseStartupReadiness>(readiness);
         builder.Services.RemoveAll<IHostedService>();
-        Assert.DoesNotContain(builder.Services, descriptor => descriptor.ServiceType == typeof(IHostedService));
+        builder.Services.AddHostedService<DerivedIndexRecoveryService>();
         await using var application = builder.Build();
         application.MapFluxKnowledgeHealth();
 
-        await WebHostComposition.InitialiseStrictProductionRecoveryAsync(
-            application.Services,
-            CancellationToken.None);
         await application.StartAsync();
+        Assert.Equal(HttpStatusCode.ServiceUnavailable,
+            (await application.GetTestClient().GetAsync("/health/ready")).StatusCode);
+        readiness.Release();
 
         Assert.Equal(DerivedIndexRecoveryState.Healthy,
-            application.Services.GetRequiredService<IDerivedIndexRecoveryStatus>().Snapshot.State);
+            (await WaitForRecoveryStateAsync(application.Services)).State);
         Assert.Equal(HttpStatusCode.OK,
             (await application.GetTestClient().GetAsync("/health/ready")).StatusCode);
     }

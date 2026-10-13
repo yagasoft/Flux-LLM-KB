@@ -1,6 +1,7 @@
 using System.Data.Common;
 using System.Reflection;
 using FluxKnowledge.Application.Contracts;
+using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Domain.Outlook;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
 using Xunit;
@@ -9,6 +10,45 @@ namespace FluxKnowledge.OutlookHost.Tests;
 
 public sealed class OutlookHostLoopTests
 {
+    [Fact]
+    public async Task Known_read_only_database_startup_failure_exits_unsuccessfully_without_replaying_the_host()
+    {
+        var application = new FaultingHostApplication(new DatabaseStartupUnavailableException(2));
+        var factory = new FakeHostApplicationFactory(application);
+
+        var exitCode = await Program.RunAsync(["--run-once"], factory, CancellationToken.None);
+
+        Assert.Equal(1, exitCode);
+        Assert.Equal(1, factory.CreateCount);
+        Assert.Equal(1, application.RunCount);
+        Assert.Equal(1, application.DisposeCount);
+    }
+
+    [Fact]
+    public async Task Unclassified_host_failure_is_not_misreported_as_database_startup_unavailability()
+    {
+        var failure = new InvalidOperationException("synthetic-integrity-failure");
+        var application = new FaultingHostApplication(failure);
+        var factory = new FakeHostApplicationFactory(application);
+
+        Assert.Same(failure, await Assert.ThrowsAsync<InvalidOperationException>(
+            () => Program.RunAsync(["--run-once"], factory, CancellationToken.None)));
+        Assert.Equal(1, application.RunCount);
+        Assert.Equal(1, application.DisposeCount);
+    }
+
+    private sealed class FaultingHostApplication(Exception failure) : IOutlookHostApplication
+    {
+        public int RunCount { get; private set; }
+        public int DisposeCount { get; private set; }
+        public ValueTask<OutlookHostRunResult> RunOnceAsync(CancellationToken ct)
+        {
+            RunCount++;
+            return ValueTask.FromException<OutlookHostRunResult>(failure);
+        }
+        public ValueTask DisposeAsync() { DisposeCount++; return ValueTask.CompletedTask; }
+    }
+
     private static readonly DateTimeOffset CursorUtc = new(2026, 8, 11, 8, 0, 0, TimeSpan.Zero);
 
     [Fact]

@@ -14,7 +14,8 @@ public sealed class OutboxPumpService(
     ChannelOutboxWakeSignal wakeSignal,
     TimeProvider timeProvider,
     ILogger<OutboxPumpService>? logger = null,
-    IDeploymentValidationHold? deploymentValidationHold = null) : BackgroundService, IOutboxPump
+    IDeploymentValidationHold? deploymentValidationHold = null,
+    IDatabaseStartupReadiness? databaseStartupReadiness = null) : BackgroundService, IOutboxPump
 {
     private static readonly TimeSpan LeaseDuration = TimeSpan.FromMinutes(2);
     private static readonly TimeSpan FallbackInterval = TimeSpan.FromSeconds(60);
@@ -119,6 +120,7 @@ public sealed class OutboxPumpService(
     {
         try
         {
+            await (databaseStartupReadiness?.WaitAsync(stoppingToken) ?? ValueTask.CompletedTask).ConfigureAwait(false);
             await (deploymentValidationHold ?? DeploymentValidationHold.None)
                 .WaitUntilPipelineAllowedAsync(stoppingToken).ConfigureAwait(false);
             while (!stoppingToken.IsCancellationRequested)

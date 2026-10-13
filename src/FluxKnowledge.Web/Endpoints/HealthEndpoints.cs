@@ -1,6 +1,7 @@
 using FluxKnowledge.Infrastructure.SqlServer.Configuration;
 using FluxKnowledge.Infrastructure.SqlServer.Provisioning;
 using FluxKnowledge.Application.Indexing;
+using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Integrations.Windows.NativeGoLive;
 
 namespace FluxKnowledge.Web.Endpoints;
@@ -24,10 +25,13 @@ public static class HealthEndpoints
         HttpResponse response,
         ISqlServerReadinessValidator readinessValidator,
         IDerivedIndexRecoveryStatus recoveryStatus,
+        IServiceProvider services,
         SqlServerOptions options,
         CancellationToken cancellationToken)
     {
         AddNativeProofMarker(response);
+        if (services.GetService<IDatabaseStartupReadiness>() is { IsReady: false })
+            return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
         SqlServerReadinessResult result;
         try
         {

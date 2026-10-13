@@ -1,4 +1,5 @@
 using FluxKnowledge.Application.Gpu;
+using FluxKnowledge.Application.Ports;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -17,7 +18,8 @@ public sealed class GpuExecutorDispatchRecoveryService(
     TimeProvider timeProvider,
     GpuSchedulerOptions options,
     IEnumerable<IGpuExecutorAdapter> adapters,
-    ILogger<GpuExecutorDispatchRecoveryService>? logger = null) : BackgroundService
+    ILogger<GpuExecutorDispatchRecoveryService>? logger = null,
+    IDatabaseStartupReadiness? databaseStartupReadiness = null) : BackgroundService
 {
     private readonly ILogger<GpuExecutorDispatchRecoveryService> _logger =
         logger ?? NullLogger<GpuExecutorDispatchRecoveryService>.Instance;
@@ -27,6 +29,7 @@ public sealed class GpuExecutorDispatchRecoveryService(
     {
         try
         {
+            await (databaseStartupReadiness?.WaitAsync(stoppingToken) ?? ValueTask.CompletedTask).ConfigureAwait(false);
             while (!stoppingToken.IsCancellationRequested)
             {
                 await RecoverAdapterContinuationsAsync(stoppingToken).ConfigureAwait(false);

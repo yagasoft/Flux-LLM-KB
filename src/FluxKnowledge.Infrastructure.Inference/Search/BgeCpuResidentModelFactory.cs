@@ -31,20 +31,25 @@ public static class BgeCpuResidentModelFactory
         }
         catch (Exception failure)
         {
-            if (failure is CpuNativeReleaseUnconfirmedException)
-            {
-                CpuResidentPassageLoad.RetainUncertainOwner(owner);
-                foreach (var lane in lanes)
-                {
-                    try { lane.Dispose(); }
-                    catch { /* The owner remains pinned until process exit. */ }
-                }
-                throw;
-            }
-            try { new CpuResidentPassageLoad(lanes, owner).Dispose(); }
-            catch (Exception cleanup) { throw new AggregateException(failure, cleanup); }
+            DisposeFailedLoad(failure, lanes, owner);
             throw;
         }
+    }
+
+    internal static void DisposeFailedLoad(Exception failure, IReadOnlyList<CpuPassageInferenceLane> lanes, IDisposable owner)
+    {
+        if (failure is CpuNativeReleaseUnconfirmedException)
+        {
+            CpuResidentPassageLoad.RetainUncertainOwner(owner);
+            foreach (var lane in lanes)
+            {
+                try { lane.Dispose(); }
+                catch { /* The owner remains pinned until process exit. */ }
+            }
+            return;
+        }
+        try { new CpuResidentPassageLoad(lanes, owner).Dispose(); }
+        catch (Exception cleanup) { throw new CpuNativeReleaseUnconfirmedException(failure, cleanup); }
     }
 
     private static async Task<CpuPassageInferenceLane> OpenLaneAsync(BgeGpuModelStores stores, CancellationToken ct)
@@ -112,6 +117,4 @@ public static class BgeCpuResidentModelFactory
             ? (long)status.AvailablePhysical : null;
     }
 
-    private sealed class CpuNativeReleaseUnconfirmedException(Exception failure, Exception cleanup)
-        : AggregateException("cpu-search-native-release-unconfirmed", failure, cleanup);
 }

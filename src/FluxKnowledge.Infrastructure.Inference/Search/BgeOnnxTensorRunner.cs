@@ -59,18 +59,26 @@ internal sealed class BgeOnnxTensorRunner : IBgeTensorRunner
                 throw new BgeInferenceException("bge-model-tensor-contract-mismatch");
             return new(lease, session, output, ownership, allocation);
         }
-        catch
+        catch (Exception failure)
         {
-            try
-            {
-                if (session is not null)
-                {
-                    session.Dispose();
-                    allocation?.ConfirmReleased();
-                }
-            }
-            finally { lease.Dispose(); }
+            DisposeFailedOpen(failure, session, lease, ownership is null, allocation);
             throw;
+        }
+    }
+
+    internal static void DisposeFailedOpen(Exception failure, IDisposable? session,
+        VerifiedLocalModelLease lease, bool cpu, GpuOwnedWorkContext.NativeAllocation? allocation = null)
+    {
+        if (session is null)
+        {
+            lease.Dispose();
+            return;
+        }
+        try { DisposeSession(session, lease, cpu, allocation); }
+        catch (CpuNativeReleaseUnconfirmedException cleanup)
+        {
+            // Preserve both the opening failure and the unconfirmed close outcome.
+            throw new CpuNativeReleaseUnconfirmedException(failure, cleanup);
         }
     }
 
@@ -108,8 +116,21 @@ internal sealed class BgeOnnxTensorRunner : IBgeTensorRunner
         {
             if (_disposed) return;
             _disposed = true;
-            try { _session.Dispose(); _allocation?.ConfirmReleased(); }
-            finally { _lease.Dispose(); }
+            DisposeSession(_session, _lease, _ownership is null, _allocation);
         }
+    }
+
+    internal static void DisposeSession(IDisposable session, VerifiedLocalModelLease lease,
+        bool cpu, GpuOwnedWorkContext.NativeAllocation? allocation = null)
+    {
+        var retained = false;
+        try { session.Dispose(); allocation?.ConfirmReleased(); }
+        catch (Exception failure) when (cpu)
+        {
+            retained = true;
+            CpuResidentPassageLoad.RetainUncertainOwner(lease);
+            throw new CpuNativeReleaseUnconfirmedException(failure);
+        }
+        finally { if (!retained) lease.Dispose(); }
     }
 }

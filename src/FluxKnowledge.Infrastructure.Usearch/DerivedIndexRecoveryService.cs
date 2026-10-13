@@ -1,4 +1,5 @@
 using FluxKnowledge.Application.Indexing;
+using FluxKnowledge.Application.Ports;
 using Microsoft.Extensions.Hosting;
 
 namespace FluxKnowledge.Infrastructure.Usearch;
@@ -9,23 +10,27 @@ public sealed class DerivedIndexRecoveryService : BackgroundService
     private readonly DerivedIndexRecoveryOptions _options;
     private readonly TimeProvider _timeProvider;
     private readonly Func<TimeSpan, CancellationToken, Task>? _deterministicWait;
+    private readonly IDatabaseStartupReadiness? _databaseStartupReadiness;
 
     public DerivedIndexRecoveryService(
         DerivedIndexRecoveryCoordinator coordinator,
         DerivedIndexRecoveryOptions options,
         TimeProvider timeProvider,
-        Func<TimeSpan, CancellationToken, Task>? deterministicWait = null)
+        Func<TimeSpan, CancellationToken, Task>? deterministicWait = null,
+        IDatabaseStartupReadiness? databaseStartupReadiness = null)
     {
         _coordinator = coordinator;
         _options = options;
         _timeProvider = timeProvider;
         _deterministicWait = deterministicWait;
+        _databaseStartupReadiness = databaseStartupReadiness;
     }
 
     public Task RunForTestingAsync(CancellationToken cancellationToken) => ExecuteAsync(cancellationToken);
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        await (_databaseStartupReadiness?.WaitAsync(stoppingToken) ?? ValueTask.CompletedTask).ConfigureAwait(false);
         await _coordinator.RunOnceAsync(stoppingToken);
         while (!stoppingToken.IsCancellationRequested)
         {

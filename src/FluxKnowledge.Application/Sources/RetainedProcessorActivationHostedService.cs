@@ -11,7 +11,8 @@ public sealed class RetainedProcessorActivationHostedService(
     IDeploymentValidationHold? deploymentValidationHold = null,
     IRetainedProcessorFailureClassifier? failureClassifier = null,
     ILogger<RetainedProcessorActivationHostedService>? logger = null,
-    TimeProvider? timeProvider = null) : BackgroundService
+    TimeProvider? timeProvider = null,
+    IDatabaseStartupReadiness? databaseStartupReadiness = null) : BackgroundService
 {
     // The policy is optional for application-only compositions; without it failures retain StopHost behaviour.
     private readonly IRetainedProcessorFailureClassifier? _failureClassifier = failureClassifier;
@@ -21,6 +22,7 @@ public sealed class RetainedProcessorActivationHostedService(
     {
         try
         {
+            await (databaseStartupReadiness?.WaitAsync(stoppingToken) ?? ValueTask.CompletedTask).ConfigureAwait(false);
             while (!stoppingToken.IsCancellationRequested)
             {
                 await (deploymentValidationHold ?? DeploymentValidationHold.None)

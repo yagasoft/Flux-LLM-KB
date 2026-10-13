@@ -1,9 +1,11 @@
 using FluxKnowledge.Application.Documents;
 using FluxKnowledge.Application.Gpu;
+using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Domain.Gpu;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -44,13 +46,17 @@ public sealed class PaddleOcrVlmAdmissionGate : IGpuAdmissionGate
 public sealed class PaddleOcrVlmCapacityBootstrapService(
     IServiceScopeFactory scopeFactory,
     TimeProvider timeProvider,
-    ILogger<PaddleOcrVlmCapacityBootstrapService>? logger = null) : IHostedService
+    ILogger<PaddleOcrVlmCapacityBootstrapService>? logger = null,
+    IDatabaseStartupReadiness? databaseStartupReadiness = null) : BackgroundService
 {
     private readonly ILogger<PaddleOcrVlmCapacityBootstrapService> _logger =
         logger ?? NullLogger<PaddleOcrVlmCapacityBootstrapService>.Instance;
 
-    public async Task StartAsync(CancellationToken cancellationToken)
+    protected override Task ExecuteAsync(CancellationToken stoppingToken) => PrepareCapacityAsync(stoppingToken);
+
+    internal async Task PrepareCapacityAsync(CancellationToken cancellationToken)
     {
+        await (databaseStartupReadiness?.WaitAsync(cancellationToken) ?? ValueTask.CompletedTask).ConfigureAwait(false);
         try
         {
             await using var scope = scopeFactory.CreateAsyncScope();
@@ -71,10 +77,17 @@ public sealed class PaddleOcrVlmCapacityBootstrapService(
             });
             await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
         }
-        catch (DbUpdateException)
+        catch (DbUpdateException failure) when (failure.InnerException is SqlException sql &&
+            sql.Errors.Count > 0 && sql.Errors.Cast<SqlError>().All(error => error.Number is 2601 or 2627))
         {
             // A concurrent app start may have inserted the same durable slot. The unique slot
-            // key is the authority; never replace its state.
+            // key and a fresh authoritative read are required; never replace its state.
+            await using var scope = scopeFactory.CreateAsyncScope();
+            var factory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<FluxKnowledgeDbContext>>();
+            await using var context = await factory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+            if (!await context.GpuCapacitySlots.AsNoTracking().AnyAsync(
+                    slot => slot.SlotKey == PaddleOcrVlmRuntimeContract.CapacitySlotKey, cancellationToken).ConfigureAwait(false))
+                throw;
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -87,14 +100,14 @@ public sealed class PaddleOcrVlmCapacityBootstrapService(
         }
     }
 
-    public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
 }
 
 /// <summary>Resumes only stored local OCR completions after a process interruption.</summary>
 public sealed class PaddleOcrVlmCompletionRecoveryService(
     PaddleOcrVlmCompletionCoordinator completionCoordinator,
     TimeProvider timeProvider,
-    ILogger<PaddleOcrVlmCompletionRecoveryService>? logger = null) : BackgroundService
+    ILogger<PaddleOcrVlmCompletionRecoveryService>? logger = null,
+    IDatabaseStartupReadiness? databaseStartupReadiness = null) : BackgroundService
 {
     private static readonly TimeSpan Cadence = TimeSpan.FromMinutes(1);
     private readonly ILogger<PaddleOcrVlmCompletionRecoveryService> _logger =
@@ -102,6 +115,7 @@ public sealed class PaddleOcrVlmCompletionRecoveryService(
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        await (databaseStartupReadiness?.WaitAsync(stoppingToken) ?? ValueTask.CompletedTask).ConfigureAwait(false);
         while (!stoppingToken.IsCancellationRequested)
         {
             try

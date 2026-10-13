@@ -36,10 +36,14 @@ public sealed class CpuResidentPassageLoad(IReadOnlyList<CpuPassageInferenceLane
         {
             // A failed native disposal cannot prove that capacity is gone. Retain the OS lock until process exit.
             RetainUncertainOwner(owner);
-            throw new AggregateException("cpu-search-native-release-unconfirmed", errors);
+            throw new CpuNativeReleaseUnconfirmedException(errors.ToArray());
         }
         try { owner.Dispose(); }
-        catch { RetainUncertainOwner(owner); throw; }
+        catch (Exception failure)
+        {
+            RetainUncertainOwner(owner);
+            throw new CpuNativeReleaseUnconfirmedException(failure);
+        }
     }
 }
 
@@ -67,6 +71,7 @@ public sealed class ResidentCpuPassageInference : IScheduledPassageInference, IA
 
     public EmbeddingProfile EmbeddingProfile { get; }
     public string RerankerFingerprint { get; }
+    public int ActiveSearchCount { get { lock (_sync) return _active; } }
 
     public Task WarmAsync(CancellationToken cancellationToken)
     {
@@ -154,21 +159,32 @@ public sealed class ResidentCpuPassageInference : IScheduledPassageInference, IA
             warm = _warm;
             idle = _idle.Task;
         }
-        _shutdown.Cancel();
-        if (warm is not null)
+        try
         {
-            try { await warm.ConfigureAwait(false); }
-            catch (Exception exception) when (exception is not OutOfMemoryException and not StackOverflowException) { }
+            var failures = new List<Exception>();
+            try { _shutdown.Cancel(); }
+            catch (AggregateException failure) { failures.Add(failure); }
+            if (warm is not null)
+            {
+                try { await warm.ConfigureAwait(false); }
+                catch (CpuNativeReleaseUnconfirmedException failure) { failures.Add(failure); }
+                catch (Exception exception) when (exception is not OutOfMemoryException and not StackOverflowException) { }
+            }
+            await idle.ConfigureAwait(false);
+            CpuResidentPassageLoad? loaded;
+            lock (_sync)
+            {
+                if (_disposed) return;
+                _disposed = true;
+                loaded = _loaded;
+            }
+            try { loaded?.Dispose(); }
+            catch (CpuNativeReleaseUnconfirmedException failure) { failures.Add(failure); }
+            if (failures.Any(failure => failure is CpuNativeReleaseUnconfirmedException))
+                throw new CpuNativeReleaseUnconfirmedException(failures.ToArray());
+            if (failures.Count > 0)
+                throw new AggregateException("cpu-search-shutdown-callback-failed", failures);
         }
-        await idle.ConfigureAwait(false);
-        CpuResidentPassageLoad? loaded;
-        lock (_sync)
-        {
-            if (_disposed) return;
-            _disposed = true;
-            loaded = _loaded;
-        }
-        try { loaded?.Dispose(); }
         finally { _shutdown.Dispose(); }
     }
 

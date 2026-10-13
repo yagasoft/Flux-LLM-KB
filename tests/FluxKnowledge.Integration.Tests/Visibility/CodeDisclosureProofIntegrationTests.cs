@@ -67,7 +67,9 @@ public sealed class CodeDisclosureProofIntegrationTests(NativeSqlServerFixture f
             new ScopedCorpusRetrievalTests.TestEvidenceCodec(), disclosure);
         var declarations = await service.SearchAsync(new("private static async Task<bool> OwnsRootScanAsync", 5, "root", root, null), CancellationToken.None);
         Assert.Contains(declarations.Results, hit => hit.Passage.Contains("OwnsRootScanAsync", StringComparison.Ordinal));
-        var body = Assert.Single((await service.SearchAsync(new("var lease = ownership.Lease;", 5, "root", root, null), CancellationToken.None)).Results);
+        // Full-Text population can add other safe token matches; this proof requires the exact method-body anchor.
+        var body = Assert.Single((await service.SearchAsync(new("var lease = ownership.Lease;", 5, "root", root, null), CancellationToken.None)).Results,
+            hit => hit.Passage.Contains("var lease = ownership.Lease;", StringComparison.Ordinal));
         var read = await service.ReadAsync(new(body.EvidenceRef, 2048), CancellationToken.None);
         Assert.Contains(method, read.Text, StringComparison.Ordinal);
         Assert.Equal(text.Substring(read.StartOffset, read.Text.Length), read.Text);

@@ -49,7 +49,8 @@ public sealed class OutlookCaptureRecoveryService(
     TimeProvider timeProvider,
     OutlookCaptureRecoveryOptions options,
     ILogger<OutlookCaptureRecoveryService>? logger = null,
-    IDeploymentValidationHold? deploymentValidationHold = null) : BackgroundService
+    IDeploymentValidationHold? deploymentValidationHold = null,
+    IDatabaseStartupReadiness? databaseStartupReadiness = null) : BackgroundService
 {
     private readonly ILogger<OutlookCaptureRecoveryService> _logger =
         logger ?? NullLogger<OutlookCaptureRecoveryService>.Instance;
@@ -122,6 +123,7 @@ public sealed class OutlookCaptureRecoveryService(
             return;
         }
 
+        await (databaseStartupReadiness?.WaitAsync(stoppingToken) ?? ValueTask.CompletedTask).ConfigureAwait(false);
         await (deploymentValidationHold ?? DeploymentValidationHold.None)
             .WaitUntilReleasedAsync(stoppingToken).ConfigureAwait(false);
         while (!stoppingToken.IsCancellationRequested)

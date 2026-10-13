@@ -10,6 +10,75 @@ namespace FluxKnowledge.Web.Tests.Composition;
 public sealed class BgeCpuWarmupServiceTests
 {
     [Fact]
+    public async Task Throwing_shutdown_callback_does_not_skip_draining_or_native_cleanup()
+    {
+        var modelsDisposed = 0;
+        var ownerDisposed = 0;
+        var pool = Pool(() => Interlocked.Increment(ref modelsDisposed),
+            () => Interlocked.Increment(ref ownerDisposed));
+        await pool.WarmAsync(CancellationToken.None);
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var notified = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var work = pool.ExecuteAsync(async (_, _, token) =>
+        {
+            using var registration = token.Register(() =>
+            {
+                notified.TrySetResult();
+                throw new IOException("synthetic-cancellation-callback");
+            });
+            entered.TrySetResult();
+            await release.Task;
+            return 1;
+        }, CancellationToken.None).AsTask();
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var disposal = pool.DisposeAsync().AsTask();
+        await notified.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Exception? whileOwned;
+        try
+        {
+            whileOwned = await Record.ExceptionAsync(() => disposal.WaitAsync(TimeSpan.FromMilliseconds(100)));
+            Assert.Equal(0, modelsDisposed);
+            Assert.Equal(0, ownerDisposed);
+        }
+        finally
+        {
+            release.TrySetResult();
+            await work;
+        }
+        await Assert.ThrowsAnyAsync<AggregateException>(() => disposal);
+
+        Assert.IsType<TimeoutException>(whileOwned);
+        Assert.Equal(1, modelsDisposed);
+        Assert.Equal(1, ownerDisposed);
+    }
+
+    [Fact]
+    public async Task Late_warmup_cleanup_failure_cannot_be_reported_as_successful_native_cleanup()
+    {
+        var loading = new TaskCompletionSource<CpuResidentPassageLoad>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var ownerDisposed = 0;
+        var logger = new RecordingLogger();
+        var pool = new ResidentCpuPassageInference(_ => loading.Task,
+            new EmbeddingProfile("test-embedding", 1024), "test-reranker");
+        var service = new BgeCpuWarmupService(pool, logger);
+        await service.StartAsync(CancellationToken.None);
+        using var deadline = new CancellationTokenSource();
+        var stop = service.StopAsync(deadline.Token);
+        deadline.Cancel();
+        await stop.WaitAsync(TimeSpan.FromSeconds(5));
+
+        loading.SetResult(Load(() => throw new IOException("synthetic-native-close"),
+            () => Interlocked.Increment(ref ownerDisposed)));
+
+        await Assert.ThrowsAnyAsync<AggregateException>(() => pool.DisposeAsync().AsTask());
+        await Assert.ThrowsAnyAsync<AggregateException>(() => service.StopAsync(CancellationToken.None));
+        Assert.Equal(0, ownerDisposed);
+        Assert.DoesNotContain(logger.Entries,
+            entry => entry.Message.StartsWith("Resident CPU passage native cleanup completed.", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task Shutdown_deadline_returns_without_releasing_models_or_owner_while_native_work_continues()
     {
         var modelsDisposed = 0;
@@ -59,8 +128,8 @@ public sealed class BgeCpuWarmupServiceTests
         deadline.Cancel();
         try { await stop.WaitAsync(TimeSpan.FromSeconds(5)); }
         finally { loading.TrySetResult(Load(() => throw new IOException("synthetic-native-close"), () => { })); }
-        await pool.DisposeAsync();
-        await service.StopAsync(CancellationToken.None);
+        await Assert.ThrowsAnyAsync<AggregateException>(() => pool.DisposeAsync().AsTask());
+        await Assert.ThrowsAnyAsync<AggregateException>(() => service.StopAsync(CancellationToken.None));
         Assert.Contains(logger.Entries, entry => entry.Exception is AggregateException);
     }
 
@@ -74,7 +143,7 @@ public sealed class BgeCpuWarmupServiceTests
         var service = new BgeCpuWarmupService(pool, logger);
         await service.StartAsync(CancellationToken.None);
         await pool.WarmAsync(CancellationToken.None);
-        await Assert.ThrowsAsync<AggregateException>(() => service.StopAsync(CancellationToken.None));
+        await Assert.ThrowsAnyAsync<AggregateException>(() => service.StopAsync(CancellationToken.None));
         Assert.Equal(0, ownerDisposed);
     }
 

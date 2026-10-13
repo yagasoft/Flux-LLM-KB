@@ -158,7 +158,7 @@ public sealed class ResidentCpuPassageInferenceTests
             new CpuPassageInferenceLane(new Embedding(), new Reranker(_ =>
                 Task.FromResult<IEnumerable<RerankScore>>([])), () => Interlocked.Increment(ref laterDisposed))
         ], new CountingOwner(() => Interlocked.Increment(ref ownerDisposed)));
-        Assert.Throws<AggregateException>(() => load.Dispose());
+        Assert.ThrowsAny<AggregateException>(() => load.Dispose());
         Assert.Equal(1, laterDisposed);
         Assert.Equal(0, ownerDisposed);
     }

@@ -7,15 +7,20 @@ internal sealed class BgeCpuWarmupService(ResidentCpuPassageInference pool, ILog
 {
     private Task? _observation;
     private Task? _disposalObservation;
+    private readonly Guid _warmupId = Guid.NewGuid();
 
     public Task StartAsync(CancellationToken cancellationToken)
     {
+        logger.LogInformation("Resident CPU passage warmup starting. Process {ProcessId}, warmup {WarmupId}.",
+            Environment.ProcessId, _warmupId);
         _observation = ObserveAsync(pool.WarmAsync(CancellationToken.None));
         return Task.CompletedTask;
     }
 
     public async Task StopAsync(CancellationToken cancellationToken)
     {
+        logger.LogInformation("Resident CPU passage shutdown starting with {ActiveSearchCount} active searches. Process {ProcessId}, warmup {WarmupId}.",
+            pool.ActiveSearchCount, Environment.ProcessId, _warmupId);
         var disposal = pool.DisposeAsync().AsTask();
         _disposalObservation ??= ObserveDisposalAsync(disposal);
         try
@@ -27,7 +32,8 @@ internal sealed class BgeCpuWarmupService(ResidentCpuPassageInference pool, ILog
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             // Cancelling the host's wait cannot release sessions still executing native work.
-            logger.LogWarning("Resident CPU passage shutdown deadline expired; native cleanup remains owned and observed until it settles.");
+            logger.LogWarning("Resident CPU passage shutdown deadline expired; native cleanup remains owned and observed until it settles. Process {ProcessId}, warmup {WarmupId}, active searches {ActiveSearchCount}.",
+                Environment.ProcessId, _warmupId, pool.ActiveSearchCount);
         }
     }
 
@@ -36,11 +42,13 @@ internal sealed class BgeCpuWarmupService(ResidentCpuPassageInference pool, ILog
         try
         {
             await disposal.ConfigureAwait(false);
-            logger.LogInformation("Resident CPU passage native cleanup completed.");
+            logger.LogInformation("Resident CPU passage native cleanup completed. Process {ProcessId}, warmup {WarmupId}.",
+                Environment.ProcessId, _warmupId);
         }
         catch (Exception exception)
         {
-            logger.LogError(exception, "Resident CPU passage native cleanup failed; uncertain native ownership remains retained.");
+            logger.LogError(exception, "Resident CPU passage shutdown failed; native cleanup outcome requires review. Process {ProcessId}, warmup {WarmupId}.",
+                Environment.ProcessId, _warmupId);
         }
     }
 
@@ -49,15 +57,18 @@ internal sealed class BgeCpuWarmupService(ResidentCpuPassageInference pool, ILog
         try
         {
             await warm.ConfigureAwait(false);
-            logger.LogInformation("Resident CPU passage search is ready with two lanes and four reranking shards per lane.");
+            logger.LogInformation("Resident CPU passage search is ready with two lanes and four reranking shards per lane. Process {ProcessId}, warmup {WarmupId}.",
+                Environment.ProcessId, _warmupId);
         }
         catch (OperationCanceledException)
         {
-            logger.LogInformation("Resident CPU passage search warmup stopped.");
+            logger.LogInformation("Resident CPU passage search warmup stopped. Process {ProcessId}, warmup {WarmupId}.",
+                Environment.ProcessId, _warmupId);
         }
         catch (Exception exception)
         {
-            logger.LogError(exception, "Resident CPU passage search is unavailable; GPU search remains available.");
+            logger.LogError(exception, "Resident CPU passage search is unavailable. Process {ProcessId}, warmup {WarmupId}.",
+                Environment.ProcessId, _warmupId);
         }
     }
 }

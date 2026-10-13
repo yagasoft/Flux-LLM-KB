@@ -11,6 +11,8 @@ using FluxKnowledge.Infrastructure.SqlServer.Persistence;
 using FluxKnowledge.Infrastructure.SqlServer.Workers;
 using FluxKnowledge.Integrations.Documents;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
+using Microsoft.Data.SqlClient;
 
 namespace FluxKnowledge.OutlookHost;
 
@@ -35,10 +37,18 @@ internal static class Program
         }
 
         await using var application = factory.Create(options);
-        var result = await application.RunOnceAsync(cancellationToken).ConfigureAwait(false);
-        return result.Reason is OutlookHostExitReason.Disabled or
-            OutlookHostExitReason.NoDurableWork or
-            OutlookHostExitReason.Completed ? 0 : 1;
+        try
+        {
+            var result = await application.RunOnceAsync(cancellationToken).ConfigureAwait(false);
+            return result.Reason is OutlookHostExitReason.Disabled or
+                OutlookHostExitReason.NoDurableWork or
+                OutlookHostExitReason.Completed ? 0 : 1;
+        }
+        catch (DatabaseStartupUnavailableException failure)
+        {
+            Console.Error.WriteLine($"Desktop host deferred before durable work: database-startup-unavailable, SQL {failure.SqlErrorNumber}, process {Environment.ProcessId}.");
+            return 1;
+        }
     }
 
     private static bool TryParseOptions(string[] args, out OutlookHostOptions options)
@@ -196,7 +206,18 @@ internal sealed class PendingVisioDocumentRunner(
 {
     public async ValueTask<bool> RunOneAsync(CancellationToken cancellationToken)
     {
-        var request = await VisioDocumentPipelineRunner.ReadNextRequestAsync(contextFactory, cancellationToken).ConfigureAwait(false);
+        DocumentReprocessRequest? request;
+        try
+        {
+            request = await VisioDocumentPipelineRunner.ReadNextRequestAsync(contextFactory, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception failure) when (!cancellationToken.IsCancellationRequested &&
+            StartupAvailabilityFailure(failure) is { } sql)
+        {
+            // Candidate discovery is read-only and precedes the COM lease and durable execution.
+            // Do not classify or retry any failure after that boundary.
+            throw new DatabaseStartupUnavailableException(sql.Number, failure);
+        }
         if (request is null)
         {
             return false;
@@ -218,6 +239,17 @@ internal sealed class PendingVisioDocumentRunner(
             TextWriter.Null,
             cancellationToken,
             retainedRoot).ConfigureAwait(false) == 0;
+    }
+
+    private static SqlException? StartupAvailabilityFailure(Exception failure)
+    {
+        var sql = failure switch
+        {
+            SqlException direct => direct,
+            RetryLimitExceededException { InnerException: SqlException exhausted } => exhausted,
+            _ => null
+        };
+        return sql is not null && SqlDatabaseStartupReadiness.IsAvailabilityFailure(sql) ? sql : null;
     }
 }
 

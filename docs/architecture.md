@@ -252,6 +252,25 @@ p95, with 49 GPU tasks and 47 CPU fallbacks. An OCR page arriving during a
 GPU search waited for that active batch, then ran without interruption before
 new search admissions.
 
+Strict IIS startup shares one cancellable, read-only probe of the configured SQL
+database before background database work begins. Only classified availability
+failures retry with backoff; worker operations and transactions are not replayed
+by this gate. The listener can start while readiness remains 503. Initial index
+validation runs in the existing recovery service and must still succeed before
+readiness becomes healthy. Capacity bootstrap preserves existing reservations
+and accepts a concurrent insert only after a fresh read proves the exact slot;
+scheduler admission retains its transactional capacity and ownership checks.
+The desktop companion returns a failed exit code for classified SQL unavailability
+at its read-only Visio discovery boundary, before COM or durable work, leaving
+the existing scheduled task responsible for its next activation.
+
+CPU shutdown observes native cleanup after the host's waiting deadline. A failed
+close during warmup or partial session construction retains ownership and verified
+file leases, and cannot be reported as completed cleanup. Cancellation callback
+failures do not bypass draining. Process and warmup identifiers distinguish
+overlapping workers in these logs. These safeguards do not establish the origin
+or prevention of the separately observed native IIS heap failure.
+
 The final English holdout covered 24 sources, with strict top-five answer
 support for 80/84 answerable questions and exact reads for all 480 cited
 passages. Acceptance used a full REST p95 target of at most 20 seconds under

@@ -86,12 +86,8 @@ builder.Services
     .WithTools<NativeV1McpTools>();
 var app = builder.Build();
 app.UseNativeRequestResources();
-if (!WebHostComposition.IsIsolatedTestComposition)
-{
-    await WebHostComposition.InitialiseStrictProductionRecoveryAsync(
-        app.Services,
-        app.Lifetime.ApplicationStopping);
-}
+// The registered recovery service performs strict initial validation after the read-only
+// SQL startup gate. Readiness stays Starting/unready while IIS starts its listener.
 
 app.UseLocalOperatorLoopbackGate();
 app.UseAntiforgery();

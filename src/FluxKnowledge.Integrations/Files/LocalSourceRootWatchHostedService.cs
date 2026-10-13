@@ -12,7 +12,8 @@ public sealed class LocalSourceRootWatchHostedService(
     SourceWatchCoordinator coordinator,
     TimeProvider timeProvider,
     ILogger<LocalSourceRootWatchHostedService> logger,
-    IDeploymentValidationHold? deploymentValidationHold = null) : BackgroundService
+    IDeploymentValidationHold? deploymentValidationHold = null,
+    IDatabaseStartupReadiness? databaseStartupReadiness = null) : BackgroundService
 {
     private static readonly TimeSpan RebuildCadence = TimeSpan.FromMinutes(15);
     private static readonly TimeSpan PersistenceCadence = TimeSpan.FromSeconds(2);
@@ -21,6 +22,7 @@ public sealed class LocalSourceRootWatchHostedService(
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        await (databaseStartupReadiness?.WaitAsync(stoppingToken) ?? ValueTask.CompletedTask).ConfigureAwait(false);
         await (deploymentValidationHold ?? DeploymentValidationHold.None)
             .WaitUntilReleasedAsync(stoppingToken).ConfigureAwait(false);
         using var persistenceCancellation = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);

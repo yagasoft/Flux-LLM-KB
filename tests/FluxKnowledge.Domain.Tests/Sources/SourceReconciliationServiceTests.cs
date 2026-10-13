@@ -10,6 +10,55 @@ namespace FluxKnowledge.Domain.Tests.Sources;
 public sealed class SourceReconciliationServiceTests
 {
     [Fact]
+    public async Task Startup_wait_preserves_a_queued_wake_and_scans_once_after_database_readiness()
+    {
+        var claim = Claim();
+        var control = new WakeControlStore(claim);
+        var scanner = new CompletingScanner(new SourceScanResult(claim.SourceRoot.Id, claim.ScanRequest.Id, 1, 0, 0, 0));
+        var wake = new ChannelSourceScanWakeSignal();
+        var readiness = new ControlledStartupReadiness();
+        var services = new ServiceCollection();
+        services.AddSingleton<ISourceScanControlStore>(control);
+        services.AddSingleton<ISourceScanner>(scanner);
+        await using var provider = services.BuildServiceProvider();
+        using var service = new SourceReconciliationService(provider.GetRequiredService<IServiceScopeFactory>(),
+            wake, TimeProvider.System, databaseStartupReadiness: readiness);
+
+        try
+        {
+            await service.StartAsync(CancellationToken.None);
+            await readiness.Waiting.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            wake.Notify();
+            wake.Notify();
+            Assert.Equal(0, control.ClaimAttempts);
+            Assert.Equal(0, scanner.Scans);
+
+            readiness.Release();
+            await scanner.Scanned.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            await WaitUntilAsync(() => control.ClaimAttempts == 3, TimeSpan.FromSeconds(2));
+        }
+        finally { await service.StopAsync(CancellationToken.None); }
+
+        Assert.Equal(1, scanner.Scans);
+        Assert.Equal(1, readiness.Waits);
+    }
+
+    private sealed class ControlledStartupReadiness : IDatabaseStartupReadiness
+    {
+        private readonly TaskCompletionSource _ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource Waiting { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public int Waits { get; private set; }
+        public bool IsReady => _ready.Task.IsCompletedSuccessfully;
+        public void Release() => _ready.TrySetResult();
+        public ValueTask WaitAsync(CancellationToken ct)
+        {
+            Waits++;
+            Waiting.TrySetResult();
+            return new(_ready.Task.WaitAsync(ct));
+        }
+    }
+
+    [Fact]
     public async Task RunAvailableAsync_uses_a_stable_opaque_lease_owner_for_the_service_lifetime()
     {
         var claim = Claim();
@@ -316,12 +365,14 @@ public sealed class SourceReconciliationServiceTests
     private sealed class CompletingScanner(SourceScanResult result) : ISourceScanner
     {
         public TaskCompletionSource Scanned { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public int Scans { get; private set; }
 
         public ValueTask<SourceScanResult> ScanAsync(
             SourceRootConfiguration sourceRoot,
             SourceScanRequest scanRequest,
             CancellationToken cancellationToken)
         {
+            Scans++;
             Scanned.TrySetResult();
             return ValueTask.FromResult(result);
         }

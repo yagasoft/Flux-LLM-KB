@@ -111,9 +111,9 @@ public static class WebHostComposition
         var allowedHostedServiceTypes = new HashSet<Type>();
         allowedHostedServiceTypes.Add(typeof(OutboxPumpService));
         allowedHostedServiceTypes.Add(typeof(RetainedProcessorActivationHostedService));
+        allowedHostedServiceTypes.Add(typeof(DerivedIndexRecoveryService));
         if (bool.TryParse(configuration["Search:HybridPassagesEnabled"], out var hybridEnabled) && hybridEnabled)
         {
-            allowedHostedServiceTypes.Add(typeof(DerivedIndexRecoveryService));
             allowedHostedServiceTypes.Add(typeof(BgeCpuWarmupService));
         }
         if (runtime.WorkerEnabled)
@@ -144,15 +144,6 @@ public static class WebHostComposition
         if (services.Any(descriptor => prohibited.Contains(descriptor.ServiceType) ||
                                        descriptor.ImplementationType is not null && prohibited.Contains(descriptor.ImplementationType)))
             throw new InvalidOperationException("native-go-live-prohibited-service-registered");
-    }
-
-    internal static ValueTask InitialiseStrictProductionRecoveryAsync(
-        IServiceProvider services,
-        CancellationToken cancellationToken)
-    {
-        ArgumentNullException.ThrowIfNull(services);
-        return services.GetRequiredService<DerivedIndexRecoveryCoordinator>()
-            .RunOnceAsync(cancellationToken);
     }
 
     private static IServiceCollection AddFluxKnowledgeServicesCore(
@@ -235,6 +226,8 @@ public static class WebHostComposition
         services.AddSingleton(persistedOutlookSpoolPolicy);
         services.AddSingleton<IDeploymentValidationHold, FileDeploymentValidationHold>();
         services.AddFluxKnowledgeSqlServer(configuration);
+        if (strictProductionPaths)
+            services.AddSingleton<IDatabaseStartupReadiness, SqlDatabaseStartupReadiness>();
         services.AddSingleton(new LocalOperatorOriginPolicy(operatorOrigin));
         services.AddSingleton<ILocalPrivateContentDisclosure, LocalPrivateContentDisclosure>();
         services.AddSingleton<CsharpDisclosureProofBuilder>();
@@ -527,8 +520,8 @@ public static class WebHostComposition
         services.AddSingleton<PaddleOcrVlmExecutorAdapter>();
         services.AddSingleton<IGpuExecutorAdapter>(provider =>
             provider.GetRequiredService<PaddleOcrVlmExecutorAdapter>());
-        // Register before the generic scheduler hosted service so the durable slot exists before
-        // its first admission round. The bootstrap never overwrites a reserved/uncertain slot.
+        // Bootstrap waits asynchronously for SQL. Every scheduler admission still proves the
+        // exact slot transactionally; missing, reserved or uncertain capacity cannot admit work.
         services.AddSingleton<IHostedService, PaddleOcrVlmCapacityBootstrapService>();
     }
 
