@@ -94,3 +94,37 @@ The user then separately approved the single failed-job replay. Fresh verificati
 Current recovered-file citations matched source owner, record, chunk/hash and exact text through REST, CLI and MCP. All 74 retained chunks matched current source bytes/hash; the unchanged safety checks allowed 24 chunk windows and withheld others. A nested GPU-test workspace search returned hybrid results with bounded-candidate warnings; wider workspace queries retained their reported capacity fallback. At 16:39 UTC, all 1,044 current paths were text-published with no unfinished records or terminal failures. All retained paths matched Git membership and current bytes; 892 C# branches completed, with one existing parser-protection outcome retained. Independent post-recovery review found no blocker in the single-job recovery. The retained 17:05 UTC post-merge receipt subsequently verified documentation search/read with exact current binding. Wider method-body/scoped-semantic live acceptance and cleanup remain open for the subsequent retrieval correction. These documentation and test changes require no application redeployment or further replay.
 
 Documentation closeout exposed a deterministic-test gap: the diagnostics test rejected any `-2` substring, including one inside its random publication ID. A fixed ID containing that substring reproduced the failure; the correction verifies the structured nullable SQL-error field for direct, wrapped and non-SQL failures while retaining provider-text and exception suppression checks. The focused test passed with no warnings. Runtime diagnostics and SQL behaviour are unchanged; full mandatory closeout remains required.
+
+## 13 October personal-app MVP
+
+Incremental release `351c2864` deployed the reviewed managed startup and native
+ownership corrections with an updater that waits for asynchronous readiness
+within its existing deadline. Required feature/Main checks each passed 3,210
+tests with 23 unchanged opt-in skips, and Release builds had zero warnings or
+errors. The earlier interrupted migration receipt remains completed; this
+ordinary update did not replay it or change the schema.
+
+At the bounded closeout observation, all 1,106 eligible current Git-tracked
+paths were published and matched current bytes. The three extensionless/control
+files outside format policy remain explicit exclusions; one older blocked C#
+symbol branch does not prevent its source-text publication. Complete current
+method and documentation reads passed across MCP, REST and CLI. Two sequential
+semantic checks returned hybrid-ready results in 10.0 and 7.7 seconds, with
+20/20 exact current passages, successful cited reads and confirmed native
+cleanup. These two checks are not the frozen 40-query acceptance.
+
+The existing Outlook task completed a normal scheduled activation successfully;
+its identity, session requirements and hidden launcher were preserved. IIS
+AlwaysRunning, zero idle timeout and preload remain configured. The earlier
+1,833.76-second idle-window convergence and zero-HTTP observation are reused
+because the watcher/rescan design and hosting settings are unchanged; no new
+idle-window replay is claimed for this release.
+
+The usable personal-app workflow is verified for this scope. The original
+concurrency timeout, full frozen-workload acceptance and native heap-crash
+origin/prevention remain unresolved. The exact 17-generation retention set has
+not been staged or deleted. Existing terminal-recovery evidence remains valid;
+no additional terminal jobs were replayed during this release. The
+[post-MVP releases](../roadmap.md#releases-after-the-personal-app-mvp) pair these
+remaining reliability tasks with visible workspace, retrieval and document/mail
+improvements; they do not mark the broader operational-readiness plan complete.
