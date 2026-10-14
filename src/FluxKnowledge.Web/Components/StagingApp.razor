@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <base href="/" />
+    <link rel="stylesheet" href="css/app.css" />
+    <HeadOutlet @rendermode="InteractiveServer" />
+</head>
+<body>
+    <aside role="status" style="padding: 0.75rem 1rem; background: #fff4cc; color: #382900; border-bottom: 1px solid #c19b39;">
+        Isolated staging · Functional checks · Semantic models, GPU, OCR and mail are off.
+    </aside>
+    <Routes @rendermode="InteractiveServer" />
+    <script src="_framework/blazor.web.js"></script>
+    <script src="outlook-target-input.js"></script>
+    <script src="repository-source-input.js"></script>
+</body>
+</html>

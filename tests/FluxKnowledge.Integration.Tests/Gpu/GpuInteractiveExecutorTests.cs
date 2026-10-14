@@ -11,6 +11,7 @@ using Xunit;
 
 namespace FluxKnowledge.Integration.Tests.Gpu;
 
+[Collection("sql-hosted-recovery")]
 public sealed class GpuInteractiveExecutorTests : IAsyncLifetime
 {
     // Cancellation may finish after the caller returns; never share that database with the next test.
@@ -365,8 +366,9 @@ public sealed class GpuInteractiveExecutorTests : IAsyncLifetime
         var requests = new TransientRecoveryReads(store, failureMode == 7,
             initialReadRendezvous: failureMode == 6 ? duplicateDeliveries : 0);
         var scheduler = new TransientReservationRead(store, failureMode == 7);
+        using var stopping = new CancellationTokenSource();
         var executor = new GpuInteractiveExecutor(requests, new Lifecycle(store, failureMode == 4, failureMode == 6 ? MarkUncertain : null, failureMode == 7), scheduler, new ChannelGpuSchedulerWakeSignal(),
-            clock, "synthetic-retrieval-v1", "synthetic-settings-v1", 10);
+            clock, "synthetic-retrieval-v1", "synthetic-settings-v1", 10, stoppingToken: stopping.Token);
         var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var cleaned = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var nativeCalls = 0;
@@ -379,47 +381,73 @@ public sealed class GpuInteractiveExecutorTests : IAsyncLifetime
             if (failureMode == 2) throw new InvalidOperationException("synthetic-native-failure");
             return new(42, failureMode != 1, token.IsCancellationRequested ? "request-cancelled" : null);
         }, caller.Token).AsTask();
-        Assert.False(result.IsCompleted);
-        await using (var waiting = await factory.CreateDbContextAsync())
+        Task[] deliveries = [];
+        Exception? testFailure = null;
+        string TaskStates() => $"result={result.Status}; started={started.Task.Status}; cleanup={cleaned.Task.Status}; " +
+            $"deliveries={string.Join(',', deliveries.Select(task => task.Status))}; recovery-reads={requests.RecoveryReads}; reservation-reads={scheduler.ReservationReads}";
+        try
         {
-            for (var attempt = 0; await waiting.GpuMiniTasks.CountAsync() == 0 && attempt < 50; attempt++) await Task.Delay(10);
-            Assert.Equal(1, await waiting.GpuMiniTasks.CountAsync());
+            Assert.False(result.IsCompleted);
+            await using (var waiting = await factory.CreateDbContextAsync())
+            {
+                for (var attempt = 0; await waiting.GpuMiniTasks.CountAsync() == 0 && attempt < 50; attempt++) await Task.Delay(10);
+                Assert.Equal(1, await waiting.GpuMiniTasks.CountAsync());
+            }
+            var options = new GpuSchedulerOptions(4, 1024, TimeSpan.FromMinutes(1), TimeSpan.FromSeconds(1), TimeSpan.FromMinutes(1));
+            var admitted = await store.RunAdmissionRoundAsync(Guid.NewGuid(), GpuSchedulerWakeReason.WorkReady, options,
+                (candidate, _) => ValueTask.FromResult(new GpuAdmissionDecision(GpuAdmissionDisposition.Admit, "gpu-0", "owner", null, candidate.RequiredExecutorKey)), CancellationToken.None);
+            Assert.Equal(GpuAdmissionDisposition.Admit, admitted.Disposition);
+            var handle = Assert.Single(await store.ReadPendingDispatchesAsync(CancellationToken.None));
+            if (failureMode == 5) await MarkUncertain();
+            deliveries = Enumerable.Range(0, duplicateDeliveries).Select(_ => executor.DeliverAsync(handle, CancellationToken.None).AsTask()).ToArray();
+            if (failureMode is not 5 and not 6) await started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            if (cancelCaller)
+            {
+                caller.Cancel();
+                await Assert.ThrowsAnyAsync<OperationCanceledException>(() => result);
+            }
+            if (failureMode is not 5 and not 6) await using (var before = await factory.CreateDbContextAsync())
+            {
+                Assert.Equal((int)GpuCapacitySlotState.Reserved, (await before.GpuCapacitySlots.SingleAsync()).State);
+                Assert.Empty(await before.GpuExecutorResultReceipts.ToArrayAsync());
+            }
+            if (failureMode == 3) await MarkUncertain();
+            cleaned.SetResult();
+            try { await Task.WhenAll(deliveries).WaitAsync(TimeSpan.FromSeconds(8)); }
+            catch (TimeoutException exception) { throw new TimeoutException($"Synthetic delivery watchdog: {TaskStates()}", exception); }
+            if (!cancelCaller && failureMode is 0 or 4) Assert.Equal(42, await result);
+            if (!cancelCaller && failureMode is 1 or 2 or 3 or 5 or 6 or 7) await Assert.ThrowsAsync<InvalidOperationException>(() => result);
+            await executor.DeliverAsync(handle, CancellationToken.None);
+            Assert.Equal(failureMode is 5 or 6 ? 0 : 1, nativeCalls);
+            if (failureMode == 7)
+            {
+                Assert.True(uncertaintyResponses >= 2);
+                Assert.True(scheduler.ReservationReads >= 2);
+                Assert.True(requests.RecoveryReads >= 2);
+            }
+            await using var verify = await factory.CreateDbContextAsync();
+            Assert.Equal(failureMode is 1 or 2 ? (int)GpuCapacitySlotState.Uncertain : (int)GpuCapacitySlotState.Available, (await verify.GpuCapacitySlots.SingleAsync()).State);
+            Assert.Equal(failureMode is 1 or 2 ? (int)GpuMiniTaskExecutionState.Active : cancelCaller || failureMode is 3 or 5 or 6 or 7 ? (int)GpuMiniTaskExecutionState.OutcomeUncertain : (int)GpuMiniTaskExecutionState.Completed,
+                (await verify.GpuMiniTasks.SingleAsync()).ExecutionState);
         }
-        var options = new GpuSchedulerOptions(4, 1024, TimeSpan.FromMinutes(1), TimeSpan.FromSeconds(1), TimeSpan.FromMinutes(1));
-        var admitted = await store.RunAdmissionRoundAsync(Guid.NewGuid(), GpuSchedulerWakeReason.WorkReady, options,
-            (candidate, _) => ValueTask.FromResult(new GpuAdmissionDecision(GpuAdmissionDisposition.Admit, "gpu-0", "owner", null, candidate.RequiredExecutorKey)), CancellationToken.None);
-        Assert.Equal(GpuAdmissionDisposition.Admit, admitted.Disposition);
-        var handle = Assert.Single(await store.ReadPendingDispatchesAsync(CancellationToken.None));
-        if (failureMode == 5) await MarkUncertain();
-        var deliveries = Enumerable.Range(0, duplicateDeliveries).Select(_ => executor.DeliverAsync(handle, CancellationToken.None).AsTask()).ToArray();
-        if (failureMode is not 5 and not 6) await started.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        if (cancelCaller)
+        catch (Exception exception) { testFailure = exception; throw; }
+        finally
         {
-            caller.Cancel();
-            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => result);
+            cleaned.TrySetResult();
+            await stopping.CancelAsync();
+            var settled = Task.WhenAll(deliveries.Append(result).Select(async task =>
+            {
+                try { await task; }
+                catch (Exception exception) when (exception is not OutOfMemoryException and not StackOverflowException) { }
+            }));
+            try { await settled.WaitAsync(TimeSpan.FromSeconds(8)); }
+            catch (TimeoutException exception)
+            {
+                var cleanupFailure = new TimeoutException($"Synthetic test tasks did not settle: {TaskStates()}", exception);
+                if (testFailure is not null) throw new AggregateException(testFailure, cleanupFailure);
+                throw cleanupFailure;
+            }
         }
-        if (failureMode is not 5 and not 6) await using (var before = await factory.CreateDbContextAsync())
-        {
-            Assert.Equal((int)GpuCapacitySlotState.Reserved, (await before.GpuCapacitySlots.SingleAsync()).State);
-            Assert.Empty(await before.GpuExecutorResultReceipts.ToArrayAsync());
-        }
-        if (failureMode == 3) await MarkUncertain();
-        cleaned.SetResult();
-        await Task.WhenAll(deliveries).WaitAsync(TimeSpan.FromSeconds(8));
-        if (!cancelCaller && failureMode is 0 or 4) Assert.Equal(42, await result);
-        if (!cancelCaller && failureMode is 1 or 2 or 3 or 5 or 6 or 7) await Assert.ThrowsAsync<InvalidOperationException>(() => result);
-        await executor.DeliverAsync(handle, CancellationToken.None);
-        Assert.Equal(failureMode is 5 or 6 ? 0 : 1, nativeCalls);
-        if (failureMode == 7)
-        {
-            Assert.True(uncertaintyResponses >= 2);
-            Assert.True(scheduler.ReservationReads >= 2);
-            Assert.True(requests.RecoveryReads >= 2);
-        }
-        await using var verify = await factory.CreateDbContextAsync();
-        Assert.Equal(failureMode is 1 or 2 ? (int)GpuCapacitySlotState.Uncertain : (int)GpuCapacitySlotState.Available, (await verify.GpuCapacitySlots.SingleAsync()).State);
-        Assert.Equal(failureMode is 1 or 2 ? (int)GpuMiniTaskExecutionState.Active : cancelCaller || failureMode is 3 or 5 or 6 or 7 ? (int)GpuMiniTaskExecutionState.OutcomeUncertain : (int)GpuMiniTaskExecutionState.Completed,
-            (await verify.GpuMiniTasks.SingleAsync()).ExecutionState);
     }
 
     private sealed class Lifecycle(SqlGpuSchedulerStore store, bool loseCommittedResponses = false, Func<ValueTask>? beforeAcknowledgement = null, bool refuseCallback = false) : IGpuExecutorLifecycleSink

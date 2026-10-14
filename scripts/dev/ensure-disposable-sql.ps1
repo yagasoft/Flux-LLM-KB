@@ -128,7 +128,8 @@ function Assert-SelectedServerIsReachable {
 }
 
 if ([string]::IsNullOrWhiteSpace($ServerConnectionString)) {
-    $ServerConnectionString = 'Server=localhost;Integrated Security=True;Encrypt=True;TrustServerCertificate=True'
+    $ServerConnectionString = [Environment]::GetEnvironmentVariable('FLUXKNOWLEDGE_TEST_SQL_CONNECTION')
+    if ([string]::IsNullOrWhiteSpace($ServerConnectionString)) { throw 'Explicit restricted staging test credentials are required; no Windows/admin fallback is permitted.' }
 }
 
 $ServerConnectionString = Test-LoopbackSqlConnectionString -ConnectionString $ServerConnectionString

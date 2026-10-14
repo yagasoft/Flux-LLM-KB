@@ -27,6 +27,21 @@ public static class ServiceCollectionExtensions
             SqlServerOptions.ProductionLogFilePath);
         SqlServerOptionsValidator.ThrowIfInvalid(options);
 
+        return AddSqlServerCore(services, options);
+    }
+
+    internal static IServiceCollection AddStagingFluxKnowledgeSqlServer(
+        this IServiceCollection services, StagingSqlBinding binding)
+    {
+        AddSqlServerCore(services, binding.Options);
+        services.RemoveAll<IGpuInteractiveOwnerProbe>();
+        services.AddSingleton<ISqlServerReadinessValidator>(new StagingSqlServerReadinessValidator(binding));
+        return services;
+    }
+
+    private static IServiceCollection AddSqlServerCore(IServiceCollection services, SqlServerOptions options)
+    {
+
         services.AddSingleton(options);
         services.AddSingleton<SqlServerReadinessValidator>();
         services.AddSingleton<ISqlServerReadinessValidator>(

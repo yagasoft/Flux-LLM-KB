@@ -1,5 +1,6 @@
 using System.Reflection;
 using FluxKnowledge.Integration.Tests.Indexing;
+using FluxKnowledge.Integration.Tests.Gpu;
 using FluxKnowledge.Integration.Tests.Workers;
 using Xunit;
 
@@ -25,6 +26,7 @@ public sealed class NativeResourceIsolationCollectionContractTests
     public void Sql_hosted_recovery_tests_are_serialised_in_a_nonparallel_collection()
     {
         Assert.Equal("sql-hosted-recovery", CollectionName(typeof(SqlGpuExecutorDispatchRecoveryServiceTests)));
+        Assert.Equal("sql-hosted-recovery", CollectionName(typeof(GpuInteractiveExecutorTests)));
         AssertNonparallelCollection(typeof(SqlGpuExecutorDispatchRecoveryServiceTests).Assembly, "sql-hosted-recovery");
     }
 

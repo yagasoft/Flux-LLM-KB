@@ -26,13 +26,27 @@ public static class NativeV1Command
         return await ExecuteAsync(args, input, client, output, error, cancellationToken).ConfigureAwait(false);
     }
 
-    public static async Task<int> ExecuteAsync(
+    public static Task<int> ExecuteAsync(
         string[] args,
         TextReader input,
         HttpClient client,
         TextWriter output,
         TextWriter error,
         CancellationToken cancellationToken = default)
+        => ExecuteCoreAsync(args, input, client, LoopbackBaseAddress, output, error, cancellationToken);
+
+    internal static Task<int> ExecuteStagingAsync(string[] args, TextReader input, HttpClient client,
+        Uri stagingOrigin, TextWriter output, TextWriter error, CancellationToken cancellationToken = default)
+    {
+        if (stagingOrigin.Scheme != "http" || stagingOrigin.Host != "127.0.0.1" ||
+            stagingOrigin.Port < 1024 || stagingOrigin.Port == 5137 || stagingOrigin.AbsolutePath != "/" ||
+            stagingOrigin.UserInfo.Length != 0 || stagingOrigin.Query.Length != 0 || stagingOrigin.Fragment.Length != 0)
+            throw new ArgumentException("Staging CLI requires its separately validated loopback origin.", nameof(stagingOrigin));
+        return ExecuteCoreAsync(args, input, client, stagingOrigin, output, error, cancellationToken);
+    }
+
+    private static async Task<int> ExecuteCoreAsync(string[] args, TextReader input, HttpClient client,
+        Uri requiredOrigin, TextWriter output, TextWriter error, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(args);
         ArgumentNullException.ThrowIfNull(input);
@@ -40,7 +54,7 @@ public static class NativeV1Command
         ArgumentNullException.ThrowIfNull(output);
         ArgumentNullException.ThrowIfNull(error);
 
-        if (!IsLoopbackClient(client)) return await WriteFailureAsync(output, "loopback-required").ConfigureAwait(false);
+        if (!IsLoopbackClient(client, requiredOrigin)) return await WriteFailureAsync(output, "loopback-required").ConfigureAwait(false);
 
         var command = ParseCommand(args);
         if (command is null) return await WriteFailureAsync(output, "invalid-command").ConfigureAwait(false);
@@ -173,11 +187,12 @@ public static class NativeV1Command
         return index >= 0 && index + 1 < args.Length ? args[index + 1] : null;
     }
 
-    private static bool IsLoopbackClient(HttpClient client) => client.BaseAddress is { } baseAddress
+    private static bool IsLoopbackClient(HttpClient client, Uri requiredOrigin) => client.BaseAddress is { } baseAddress
         && string.Equals(baseAddress.Scheme, Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase)
         && string.Equals(baseAddress.Host, IPAddress.Loopback.ToString(), StringComparison.Ordinal)
-        && baseAddress.Port == 5137
-        && baseAddress.AbsolutePath == "/";
+        && baseAddress.Port == requiredOrigin.Port
+        && baseAddress.AbsolutePath == "/"
+        && baseAddress.UserInfo.Length == 0 && baseAddress.Query.Length == 0 && baseAddress.Fragment.Length == 0;
 
     internal static SocketsHttpHandler CreateLoopbackTransport() => new()
     {

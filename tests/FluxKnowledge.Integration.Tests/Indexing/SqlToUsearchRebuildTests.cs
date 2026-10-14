@@ -468,14 +468,9 @@ public sealed class SqlToUsearchRebuildTests(NativeSqlServerFixture fixture) : I
             new GpuInteractiveOwnerIdentity(Environment.ProcessId, DateTimeOffset.UtcNow, new string('a', 64)),
             active.ModelFingerprint, active.Dimensions, CancellationToken.None);
         Assert.NotNull(lease);
-        var native = await new UsearchCorpusAnnLeaseFactory(environment.Store, new UsearchGenerationValidator()).OpenAsync(lease, CancellationToken.None);
-        await using (var context = await environment.Factory.CreateDbContextAsync())
-        {
-            var registration = await context.CorpusQueryLeases.SingleAsync(value => value.Id == lease.LeaseId);
-            // Fixture guarantees a generated disposable catalogue on the loopback server.
-            // Kill only the exact query-owned session, never the server or another process.
-            await context.Database.ExecuteSqlRawAsync(FormattableString.Invariant($"KILL {registration.SqlSessionId}"));
-        }
+        await using var native = await new UsearchCorpusAnnLeaseFactory(environment.Store, new UsearchGenerationValidator()).OpenAsync(lease, CancellationToken.None);
+        // Interrupt all sessions only in this exclusive, verified disposable fixture.
+        await _fixture.InterruptDatabaseSessionsAsync();
         Assert.False(await lease.IsCurrentAsync(CancellationToken.None));
         var recovery = new SqlDerivedIndexRecoveryStore(environment.Factory, TimeProvider.System);
         Assert.Null(await recovery.TryAcquireExclusiveLeaseAsync(TimeSpan.Zero, CancellationToken.None));
