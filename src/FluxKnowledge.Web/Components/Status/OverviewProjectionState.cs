@@ -3,7 +3,7 @@ using System.Data.Common;
 
 namespace FluxKnowledge.Web.Components.Status;
 
-public sealed class OverviewProjectionState(IProjectionReader reader)
+public sealed class OverviewProjectionState(IProjectionReader reader, ILogger<OverviewProjectionState>? logger = null)
 {
     private readonly SemaphoreSlim _reloadGate = new(1, 1);
     public bool HasSnapshot { get; private set; }
@@ -45,6 +45,7 @@ public sealed class OverviewProjectionState(IProjectionReader reader)
         }
         catch (Exception exception) when (exception is DbException or InvalidOperationException or TimeoutException)
         {
+            logger?.LogWarning(exception, "Overview status refresh failed.");
             IsStale = true;
             RefreshIssue = "Status refresh failed.";
         }

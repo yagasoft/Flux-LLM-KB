@@ -98,6 +98,43 @@ public sealed class PipelineActivityViewTests
     }
 
     [Fact]
+    public void Paused_intake_without_outstanding_work_is_idle()
+    {
+        var view = PipelineActivityView.From(Snapshot(Source(0) with { Lifecycle = "Paused" }));
+        Assert.Equal("Idle", view.State);
+        Assert.Equal("Paused", Assert.Single(view.Sources).Lifecycle);
+    }
+
+    [Theory]
+    [InlineData(1, 0, "Queued")]
+    [InlineData(0, 1, "Waiting")]
+    [InlineData(0, 0, "Idle")]
+    public void Source_scan_work_is_separate_from_pipeline_jobs_and_undiscovered_files(int queued, int waiting, string state)
+    {
+        var view = PipelineActivityView.From(Snapshot(Source(0) with
+            { KnownFiles = 0, PublishedFiles = 0, QueuedScans = queued, WaitingScans = waiting }));
+        Assert.Equal(state, view.State);
+        Assert.Equal(0, view.KnownFiles);
+        Assert.Equal(0, view.PendingFiles);
+        Assert.Equal(0, view.QueuedJobs);
+        Assert.Equal(0, view.WaitingJobs);
+    }
+
+    [Fact]
+    public void Unconfirmed_source_control_ownership_is_attributed_to_the_matching_source()
+    {
+        var other = Guid.NewGuid();
+        var summary = Snapshot(Source(0)) with
+        {
+            Sources = [Source(0) with { UnconfirmedControls = 1 }, Source(0) with { Id = other }],
+            UnconfirmedControls = 1
+        };
+        Assert.Equal("Needs attention", PipelineActivityView.From(summary).State);
+        Assert.Equal("Needs attention", PipelineActivityView.From(summary, Root).State);
+        Assert.Equal("Idle", PipelineActivityView.From(summary, other).State);
+    }
+
+    [Fact]
     public void Source_selection_does_not_attribute_interactive_gpu_work_to_that_source()
     {
         var summary = Snapshot(Source(0), [], [new(null, "Interactive search", "Active", 1)]);

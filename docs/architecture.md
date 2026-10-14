@@ -657,6 +657,11 @@ GPU task/batch/slot/dispatch fences establish activity; processing labels and ag
 alone do not. Current source revisions, selected logical branches, record bindings,
 root lifecycle and rebuild admission establish applicability. A live claim on a
 previous revision remains visible as running historical work.
+Source scans are counted separately from pipeline jobs and files. Due released
+scans follow root, lease, same-root Git and full deployment-hold admission.
+Held initial scans and recorded retries are waiting; a future ordinary periodic
+check alone is not backlog. Paused intake without outstanding work may be idle.
+Unconfirmed scan/processor leases remain attributed to their source.
 
 File counts use distinct current file owners, including retained archive members;
 logical text/metadata children roll up to their original file. Successful publication

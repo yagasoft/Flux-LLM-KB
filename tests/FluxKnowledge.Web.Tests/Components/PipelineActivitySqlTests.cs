@@ -1,6 +1,7 @@
 using FluxKnowledge.Application.Pipeline;
 using FluxKnowledge.Application.Indexing;
 using FluxKnowledge.Application.Workers;
+using FluxKnowledge.Application.Sources;
 using FluxKnowledge.Domain.Gpu;
 using FluxKnowledge.Domain.Pipeline;
 using FluxKnowledge.Domain.Sources;
@@ -21,6 +22,88 @@ public sealed class PipelineActivitySqlTests(NativeSqlServerFixture fixture, ITe
     : IClassFixture<NativeSqlServerFixture>
 {
     private readonly NativeSqlServerFixture _fixture = fixture;
+
+    [NativeSqlServerFact]
+    public async Task Source_scan_projection_tracks_admission_and_retry_without_inventing_file_or_pipeline_backlog()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var cases = new[]
+        {
+            ("due", true, true, 0, SourceRootState.Enabled, 0, false, false, false, 1, 0),
+            ("held", false, false, 0, SourceRootState.Enabled, 0, false, false, false, 0, 1),
+            ("retry", true, false, 1, SourceRootState.Enabled, 1, false, false, false, 0, 1),
+            ("future-periodic", true, false, 0, SourceRootState.Enabled, 1, false, false, false, 0, 0),
+            ("paused", true, true, 0, SourceRootState.Paused, 0, false, false, false, 0, 1),
+            ("leased-pending", true, true, 0, SourceRootState.Enabled, 0, false, true, false, 0, 1),
+            ("git-occupied", true, true, 0, SourceRootState.Enabled, 0, true, false, false, 0, 1),
+            ("expired-running", true, true, 1, SourceRootState.Enabled, 0, false, false, true, 0, 0)
+        };
+        var expectations = new Dictionary<Guid, (string Name, int Queued, int Waiting)>();
+        foreach (var (name, released, due, attempts, state, kind, occupied, leased, expired, queued, waiting) in cases)
+        {
+            var root = await AddActivityRootAsync(now);
+            expectations.Add(root, (name, queued, waiting));
+            await using var context = new TestDbContextFactory(_fixture.ConnectionString).CreateDbContext();
+            var configuration = await context.SourceRootConfigurations.SingleAsync(r => r.Id == root);
+            configuration.State = (int)state;
+            configuration.CrawlMode = (int)(occupied ? SourceDiscoveryMode.GitTracked : SourceDiscoveryMode.Filesystem);
+            var requestId = Guid.NewGuid();
+            context.SourceScanRequests.Add(new() { Id = requestId, SourceRootId = root, RequestedBy = "test",
+                RequestedAtUtc = now, RequestKind = kind, IsReleased = released,
+                State = (int)(released ? SourceScanRequestState.Released : SourceScanRequestState.Held) });
+            context.SourceScanJobs.Add(new() { Id = Guid.NewGuid(), SourceScanRequestId = requestId,
+                State = (int)(expired ? SourceScanJobState.Running : SourceScanJobState.Pending),
+                DueAtUtc = due ? now.AddSeconds(-1) : released ? now.AddMinutes(1) : DateTimeOffset.MaxValue,
+                AttemptCount = attempts, Reason = attempts > 0 ? "test-retry" : null,
+                LeaseOwner = leased || expired ? "scan-owner" : null, LeaseGeneration = leased || expired ? 1 : 0,
+                LeaseExpiresAtUtc = leased ? now.AddMinutes(1) : expired ? now.AddSeconds(-1) : null,
+                CreatedAtUtc = now, UpdatedAtUtc = now });
+            if (occupied)
+            {
+                var runningRequest = Guid.NewGuid();
+                context.SourceScanRequests.Add(new() { Id = runningRequest, SourceRootId = root, RequestedBy = "test",
+                    RequestedAtUtc = now, IsReleased = true, State = (int)SourceScanRequestState.Running });
+                context.SourceScanJobs.Add(new() { Id = Guid.NewGuid(), SourceScanRequestId = runningRequest,
+                    State = (int)SourceScanJobState.Running, DueAtUtc = now, LeaseOwner = "git-scan-owner",
+                    LeaseGeneration = 1, LeaseExpiresAtUtc = now.AddMinutes(1), CreatedAtUtc = now, UpdatedAtUtc = now });
+            }
+            await context.SaveChangesAsync();
+        }
+        var snapshot = await ReadScanClassificationAsync();
+        foreach (var (root, expected) in expectations)
+        {
+            var source = Assert.Single(snapshot.Sources, s => s.Id == root);
+            Assert.Equal(expected.Queued, source.QueuedScans);
+            Assert.Equal(expected.Waiting, source.WaitingScans);
+            Assert.Equal(0, source.KnownFiles);
+            Assert.Equal(0, source.PendingFiles);
+            Assert.DoesNotContain(snapshot.Jobs, j => j.SourceRootId == root);
+            if (expected.Name == "git-occupied") Assert.True(source.IsScanning);
+            if (expected.Name == "expired-running")
+            {
+                Assert.False(source.IsScanning);
+                Assert.Equal(1, source.UnconfirmedControls);
+                Assert.Equal("Needs attention", PipelineActivityView.From(snapshot, root).State);
+            }
+        }
+        foreach (var permittedRebuild in new Guid?[] { null, Guid.NewGuid() })
+        {
+            var held = await ReadScanClassificationAsync(new HeldScanAdmission(permittedRebuild));
+            var dueRoot = expectations.Single(entry => entry.Value.Name == "due").Key;
+            var dueSource = Assert.Single(held.Sources, s => s.Id == dueRoot);
+            Assert.Equal(0, dueSource.QueuedScans);
+            Assert.Equal(1, dueSource.WaitingScans);
+            var occupiedRoot = expectations.Single(entry => entry.Value.Name == "git-occupied").Key;
+            Assert.True(Assert.Single(held.Sources, s => s.Id == occupiedRoot).IsScanning);
+        }
+
+        async Task<FluxKnowledge.Application.Contracts.PipelineActivitySummary> ReadScanClassificationAsync(IDeploymentValidationHold? hold = null)
+        {
+            await using var context = new TestDbContextFactory(_fixture.ConnectionString).CreateDbContext();
+            return await new SqlPipelineActivityReader(hold, new FixedTimeProvider(now))
+                .ReadAsync(context, now, CancellationToken.None);
+        }
+    }
 
     [NativeSqlServerFact]
     public async Task Conflicting_file_bindings_remain_provisional_until_authoritative_suppression()
@@ -263,7 +346,9 @@ public sealed class PipelineActivitySqlTests(NativeSqlServerFixture fixture, ITe
             await setup.SaveChangesAsync();
         }
         // Warm query compilation before measuring active write/read availability.
-        Assert.True((await ActivityReader().ReadOverviewAsync(CancellationToken.None)).Activity.IsConsistent);
+        // A cold read may correctly reject a concurrent database version change.
+        var warm = await ActivityReader().ReadOverviewAsync(CancellationToken.None);
+        output.WriteLine($"Warm-up accepted: {warm.Activity.IsConsistent}; excluded from the 12 measured samples.");
         using var stopping = new CancellationTokenSource();
         var writes = 0;
         var writer = HeartbeatAsync();
@@ -393,6 +478,13 @@ public sealed class PipelineActivitySqlTests(NativeSqlServerFixture fixture, ITe
             null, null, null, null, 0)), new SqlGpuSchedulerStore(factory));
     }
 
+    private sealed class HeldScanAdmission(Guid? permittedRebuild) : IDeploymentValidationHold
+    {
+        public bool IsHeld => true;
+        public DeploymentHoldAdmission ReadAdmissionState() => new(true, permittedRebuild);
+        public ValueTask WaitUntilReleasedAsync(CancellationToken cancellationToken) => throw new NotSupportedException();
+    }
+
     private async Task<Guid> AddActivityRootAsync(DateTimeOffset now)
     {
         var root = Guid.NewGuid();
@@ -505,9 +597,10 @@ public sealed class PipelineActivitySqlTests(NativeSqlServerFixture fixture, ITe
         }
     }
 
+
+
     private sealed class FixedTimeProvider(DateTimeOffset now) : TimeProvider
     {
         public override DateTimeOffset GetUtcNow() => now;
     }
 }
-

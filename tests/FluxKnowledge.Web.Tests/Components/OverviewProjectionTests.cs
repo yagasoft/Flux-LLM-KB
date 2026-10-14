@@ -65,6 +65,24 @@ public sealed class OverviewProjectionTests
     }
 
     [Fact]
+    public async Task An_initial_scan_shows_queued_source_work_without_guessing_file_or_job_totals()
+    {
+        var now = DateTimeOffset.Parse("2026-10-14T10:00:00Z");
+        var root = Guid.NewGuid();
+        var activity = new PipelineActivitySummary(now, now,
+            [new(root, "Initial source", "C:\\workspace", "Enabled", 0, 0, 0, 0, 0, 0, 0, 0,
+                null, null, null, false, null, QueuedScans: 1)], [], [], 0, 0, 0);
+        using var factory = new OverviewApplicationFactory(CreateOverview(0, 0) with { Activity = activity });
+        using var client = factory.CreateClient();
+        var html = await client.GetStringAsync("/");
+        Assert.Contains("Queued", html, StringComparison.Ordinal);
+        Assert.Contains("1 queued source scans", html, StringComparison.Ordinal);
+        Assert.Contains("file discovery has not completed", html, StringComparison.Ordinal);
+        Assert.Contains("Changes not yet discovered by a scan are not counted", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("No current processing backlog", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Overview_diagnostic_summary_maps_actual_recovering_state_to_recovering()
     {
         var summary = OverviewDiagnosticSummary.From(

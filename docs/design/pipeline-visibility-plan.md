@@ -1,7 +1,7 @@
 # Pipeline visibility implementation plan
 
-Date: 14 October 2026. Status: implementation and focused SQL/browser checks pass;
-active-write availability, canonical closeout and production gates remain open.
+Date: 14 October 2026. Status: implementation, focused SQL/browser checks and
+active-write availability pass; canonical closeout and production gates remain open.
 
 The user explicitly requested a pause before implementation for a model switch.
 Resume this scoped plan without another general planning round.
@@ -24,14 +24,14 @@ only after the final integration base is known.
 
 ## Evidence behind the design
 
-The current overview counts every row of `Jobs` by `PublicState`, independently
+The reviewed overview counted every row of `Jobs` by `PublicState`, independently
 of current source revisions, rebuild supersession, leases or GPU child outcomes.
 Its source summary is less complete than the source page: it omits retained-branch
 and logical-publication classifications. `StatusCount` renders `999+` above 999.
 The overview refreshes for pipeline, index, scheduler and reconnect events, but
 not source events, and exposes no successful-read time or refresh failure state.
 
-The captured desktop page gives approximately 30 metrics equal visual weight.
+The captured desktop page gave approximately 30 metrics equal visual weight.
 At 390 px, the scheduler's actual active count and uncertain outcomes are below
 many rows of pipeline and unused Outlook counters. The source page and native
 `details` disclosures provide useful existing patterns. This justifies a modest
@@ -138,9 +138,9 @@ make disclosures and links usable at 390 px and 200% zoom.
   `Components/Sources/SourceRootProjectionReader.cs`; extract only the shared
   query/classification needed to prevent the observed disagreement. Coordinate
   edits to that reader with the source-deletion chat.
-- Add focused SQL cases to
-  `tests/FluxKnowledge.Web.Tests/Components/SqlProjectionReaderIntegrationTests.cs`
-  and pure classifier cases to a focused activity-projection test class.
+- Add focused SQL cases in a separate `PipelineActivitySqlTests` fixture/catalog,
+  with source-reader regression cases alongside existing source projection tests,
+  and pure classifier cases in a focused activity-projection test class.
 - First executable acceptance: seeded isolated SQL -> actual projection ->
   rendered Blazor overview shows active current work and historical attention
   together, with exact counts and no production access.
@@ -183,14 +183,13 @@ blocking issue before adding more infrastructure.
 
 ### 3. Review, integrate, deploy and validate
 
-- Release 1 is preparing isolated staging. Reuse its verified separate SQL,
-  configuration, runtime, storage and endpoints when available. The current
-  `NativeSqlServerFixture` defaults to production localhost SQL. Do not run it,
-  the full suite or closeout without an explicitly isolated
-  `FLUXKNOWLEDGE_TEST_SQL_CONNECTION`. An environment-name override alone cannot
-  isolate the published app: `Program.cs` loads canonical production config.
-  Existing test composition can support pure UI checks but is not proof of a
-  complete isolated deployment. Do not duplicate staging/provisioning work.
+- Reuse Release 1's verified separate SQL, configuration, runtime, storage and
+  functional host on port 5140. Its restricted disposable fixture fails closed
+  without the configured isolated `FLUXKNOWLEDGE_TEST_SQL_CONNECTION`; the full
+  suite and closeout use that same explicit test target. An environment-name
+  override alone cannot isolate the normal published app: `Program.cs` loads
+  canonical production configuration. Use the separate functional StagingHost,
+  and preserve its existing source/data/configuration. Do not duplicate provisioning.
 - Obtain independent higher-model review of the complete classification/query
   change, tests and rendered states. Astra has approved isolated staging validation
   and the bounded-read correction; retain the separate final production gate.

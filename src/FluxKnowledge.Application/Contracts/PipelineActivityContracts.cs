@@ -23,7 +23,7 @@ public sealed record SourcePipelineProgress(
     DateTimeOffset? LastScanCompletedAtUtc, DateTimeOffset? LastDiscoveryAtUtc,
     DateTimeOffset? LastProgressAtUtc, bool IsScanning, string? LifecycleReason,
     int ActiveProcessors = 0, int ScanErrors = 0, int ActiveSourceOperations = 0, string? LifecyclePhase = null,
-    int ProvisionalFiles = 0);
+    int ProvisionalFiles = 0, int QueuedScans = 0, int WaitingScans = 0, int UnconfirmedControls = 0);
 
 public enum PipelineWorkState { Running, Queued, Waiting, Attention, Historical }
 

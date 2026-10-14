@@ -57,11 +57,24 @@ internal sealed class SqlPipelineActivityReader(IDeploymentValidationHold? hold,
             group.Key.IsInteractive ? "Interactive search" : SourceName(group.Key.SourceRootId, names),
             group.Key.State, group.Count)).ToArray();
 
+        var busyScanRoots = (from job in context.SourceScanJobs.AsNoTracking()
+                join request in context.SourceScanRequests.AsNoTracking() on job.SourceScanRequestId equals request.Id
+                where job.State == (int)SourceScanJobState.Running && job.LeaseExpiresAtUtc > now
+                select new { SourceRootId = (Guid?)request.SourceRootId }).Distinct();
         var scans = await (from job in context.SourceScanJobs.AsNoTracking()
                 join request in context.SourceScanRequests.AsNoTracking() on job.SourceScanRequestId equals request.Id
-                where job.State == (int)SourceScanJobState.Running
-                select new { request.SourceRootId, Confirmed = job.LeaseOwner != null && job.LeaseGeneration > 0 && job.LeaseExpiresAtUtc > now })
-            .GroupBy(row => new { row.SourceRootId, row.Confirmed })
+                join configuration in context.SourceRootConfigurations.AsNoTracking() on request.SourceRootId equals configuration.Id
+                join busyRoot in busyScanRoots on (Guid?)request.SourceRootId equals busyRoot.SourceRootId into busyRoots
+                from busyRoot in busyRoots.DefaultIfEmpty()
+                where job.State == (int)SourceScanJobState.Running || job.State == (int)SourceScanJobState.Pending &&
+                    (job.DueAtUtc <= now || request.RequestKind != 1 || !request.IsReleased || job.AttemptCount > 0 || job.Reason != null)
+                select new { request.SourceRootId, job.State,
+                    Confirmed = job.State == (int)SourceScanJobState.Running && job.LeaseOwner != null && job.LeaseGeneration > 0 && job.LeaseExpiresAtUtc > now,
+                    Admitted = !admission.IsHeld && request.IsReleased && configuration.State == (int)SourceRootState.Enabled &&
+                        (job.LeaseExpiresAtUtc == null || job.LeaseExpiresAtUtc <= now) &&
+                        (configuration.CrawlMode != (int)SourceDiscoveryMode.GitTracked || busyRoot.SourceRootId == null),
+                    IsDue = job.DueAtUtc <= now })
+            .GroupBy(row => new { row.SourceRootId, row.State, row.Confirmed, row.Admitted, row.IsDue })
             .Select(group => new { group.Key, Count = group.Count() }).ToArrayAsync(cancellationToken).ConfigureAwait(false);
         var processors = await (from branch in context.SourceProcessorBranches.AsNoTracking()
                 join revision in context.SourceRevisions.AsNoTracking() on branch.SourceRevisionId equals revision.Id
@@ -81,11 +94,15 @@ internal sealed class SqlPipelineActivityReader(IDeploymentValidationHold? hold,
                 scans.Any(s => s.Key.SourceRootId == root.Id && s.Key.Confirmed), deletions.GetValueOrDefault(root.Id)?.ReasonCode,
                 processors.Where(p => p.Key.SourceRootId == root.Id && p.Key.Confirmed).Sum(p => p.Count), root.ScanErrors,
                 deletions.TryGetValue(root.Id, out var deletion) && deletion.LeaseId != null && deletion.LeaseExpiresAtUtc > now ? 1 : 0,
-                deletions.GetValueOrDefault(root.Id)?.Phase, counts.Provisional);
+                deletions.GetValueOrDefault(root.Id)?.Phase, counts.Provisional,
+                scans.Where(s => s.Key.SourceRootId == root.Id && s.Key.State == (int)SourceScanJobState.Pending && s.Key.Admitted && s.Key.IsDue).Sum(s => s.Count),
+                scans.Where(s => s.Key.SourceRootId == root.Id && s.Key.State == (int)SourceScanJobState.Pending && !(s.Key.Admitted && s.Key.IsDue)).Sum(s => s.Count),
+                scans.Where(s => s.Key.SourceRootId == root.Id && s.Key.State == (int)SourceScanJobState.Running && !s.Key.Confirmed).Sum(s => s.Count) +
+                    processors.Where(p => p.Key.SourceRootId == root.Id && !p.Key.Confirmed).Sum(p => p.Count));
         }).ToArray();
         return new(startedAt, clock.GetUtcNow(), sources, jobs, gpu,
             scans.Where(s => s.Key.Confirmed).Sum(s => s.Count), processors.Where(p => p.Key.Confirmed).Sum(p => p.Count),
-            scans.Where(s => !s.Key.Confirmed).Sum(s => s.Count) + processors.Where(p => !p.Key.Confirmed).Sum(p => p.Count))
+            scans.Where(s => s.Key.State == (int)SourceScanJobState.Running && !s.Key.Confirmed).Sum(s => s.Count) + processors.Where(p => !p.Key.Confirmed).Sum(p => p.Count))
         {
             UncertainCapacitySlots = await context.GpuCapacitySlots.AsNoTracking().CountAsync(slot => slot.State == 2 ||
                 slot.State == 1 && !context.GpuBatches.Any(batch => batch.Id == slot.ActiveBatchId &&

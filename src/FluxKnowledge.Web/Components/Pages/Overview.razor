@@ -62,10 +62,11 @@
             {
                 <p class="status-freshness">Across the app: @global.ActiveGpuTasks active GPU tasks and @global.UncertainGpuTasks GPU tasks with uncertain outcomes. Interactive search and local ingress are included only in the all-sources view.</p>
             }
-            @foreach (var source in view.Sources.Where(s => s.IsScanning || s.ActiveProcessors > 0 || s.ActiveSourceOperations > 0))
+            @foreach (var source in view.Sources.Where(s => s.IsScanning || s.ActiveProcessors > 0 || s.ActiveSourceOperations > 0 || s.QueuedScans > 0 || s.WaitingScans > 0))
             {
                 <p><strong>@source.Name</strong>: @(source.IsScanning ? "checking source changes; " : "")
-                    @source.ActiveProcessors active retained processors; @source.ActiveSourceOperations active source operations @source.LifecyclePhase.</p>
+                    @source.ActiveProcessors active retained processors; @source.ActiveSourceOperations active source operations @source.LifecyclePhase;
+                    @source.QueuedScans queued source scans; @source.WaitingScans waiting source scans.</p>
             }
             @if (view.Jobs.Any(j => j.State is PipelineWorkState.Running or PipelineWorkState.Queued or PipelineWorkState.Waiting))
             {
@@ -110,6 +111,10 @@
                     {
                         <p class="pipeline-warning">The latest scan reported @source.ScanErrors problems. Its inventory may be incomplete. <a href="@($"/sources/{source.Id}")">View source details</a></p>
                     }
+                    @if (source.UnconfirmedControls > 0)
+                    {
+                        <p class="pipeline-warning">@source.UnconfirmedControls source scan or processor claims have unconfirmed leases. <a href="@($"/sources/{source.Id}")">View source status</a></p>
+                    }
                     @if (source.DeferredFiles + source.MetadataOnlyFiles + source.CompletedWithoutTextFiles > 0)
                     {
                         <details><summary>Other file outcomes</summary><p>@source.DeferredFiles deferred files; @source.MetadataOnlyFiles metadata-only files; @source.CompletedWithoutTextFiles files processed without extractable text. These are not counted as published full-text files.</p></details>
@@ -139,7 +144,7 @@
                 <button type="button" @onclick='() => LoadAttentionAsync("gpu", 0)'>View GPU task records</button> <a href="/operator-actions">Operator actions</a></p>
             @if (activity.UnconfirmedControls > 0)
             {
-                <p class="pipeline-warning">@activity.UnconfirmedControls source scan or processor claims have unconfirmed leases.</p>
+                <p class="pipeline-warning">Across the app: @activity.UnconfirmedControls source scan or processor claims have unconfirmed leases.</p>
             }
             @if (activity.UncertainCapacitySlots > 0)
             {

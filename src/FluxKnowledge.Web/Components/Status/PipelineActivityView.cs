@@ -44,11 +44,11 @@ public sealed class PipelineActivityView
                 j.State == PipelineWorkState.Running && !j.IsHistorical)));
         var blocked = sources.Any(s => s.BlockedFiles > 0 || s.FailedFiles > 0 || s.ProvisionalFiles > 0 || s.LifecycleReason is not null || s.ScanErrors > 0) ||
             jobs.Any(j => j.State == PipelineWorkState.Attention);
-        var waiting = pending > 0 || waitingGpu > 0 || sources.Any(s => s.DeferredFiles > 0 || s.Lifecycle != "Enabled") ||
+        var waiting = pending > 0 || waitingGpu > 0 || sources.Any(s => s.DeferredFiles > 0 || s.WaitingScans > 0 || s.Lifecycle == "Deleting") ||
             jobs.Any(j => j.State == PipelineWorkState.Waiting);
-        var queued = jobs.Any(j => j.State == PipelineWorkState.Queued) || gpu.Any(g => g.State == "Ready");
+        var queued = sources.Any(s => s.QueuedScans > 0) || jobs.Any(j => j.State == PipelineWorkState.Queued) || gpu.Any(g => g.State == "Ready");
         var state = running ? catchingUp ? "Catching up" : "Running"
-            : unconfirmedGpu > 0 || summary.UncertainCapacitySlots > 0 || sourceRootId is null && summary.UnconfirmedControls > 0 ? "Needs attention"
+            : unconfirmedGpu > 0 || sources.Any(s => s.UnconfirmedControls > 0) || summary.UncertainCapacitySlots > 0 || sourceRootId is null && summary.UnconfirmedControls > 0 ? "Needs attention"
             : blocked ? "Blocked" : queued ? "Queued" : waiting ? "Waiting" : "Idle";
         var message = state switch
         {
@@ -56,7 +56,9 @@ public sealed class PipelineActivityView
             "Running" => "Execution ownership is confirmed for the work shown below.",
             "Needs attention" => "Some execution ownership cannot be confirmed. Review the attention details.",
             "Blocked" => "No work is confirmed running. Current source work needs attention.",
+            "Queued" when sources.Any(s => s.QueuedScans > 0) => "Source scans are ready to check for changes; file discovery has not completed. No execution is confirmed running.",
             "Queued" => "Work is ready for processing; no execution is confirmed running.",
+            "Waiting" when sources.Any(s => s.WaitingScans > 0) => "Source scans await release, retry or source admission. File discovery may be incomplete; no execution is confirmed running.",
             "Waiting" => "No work is confirmed running. Known work is pending, deferred or held by admission or source state.",
             _ => "No current processing backlog or running work was found in this status read. Historical outcomes remain below."
         };
