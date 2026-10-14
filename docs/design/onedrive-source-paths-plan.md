@@ -75,4 +75,39 @@ The user's continuation superseded the requested model-switch pause. Source-only
 
 `CloudSourcePipelineTests` passes Preview, native registration, scan, retained publication and scoped cited readback using the existing synthetic-embedding pipeline and the reviewed restricted SQL test fixture. Its available document is published; its unavailable sibling remains excluded. The test exposed Windows provider metadata refusal `0x801F0005`, which now reports local-read unavailability with the native cause preserved and no less restricted fallback or download attempt. Independent review approved that correction. The shared SQL isolation dependency was incorporated from Release 1's reviewed checkpoint.
 
-Canonical closeout, incremental deployment and bounded real-workspace acceptance remain pending the coordinated shared window and applicable operational gates. The disconnected Cloud Files fixture proves exclusive-open denial during a read lease, not successful provider dehydration after release or universal provider immutability. No production deployment or source ingestion has been started by this correction.
+The disconnected Cloud Files fixture proves exclusive-open denial during a read lease, not successful provider dehydration after release or universal provider immutability.
+
+## Verified release outcome — 14 October 2026
+
+The canonical `complete-feature.ps1` closeout completed all 21 steps and pushed Main
+`94c0e290383364e827e2fcf03282aa933412de01`. Both feature and Main suites passed
+3,285 tests with 24 opt-in skips; both Release builds had zero warnings and errors.
+Independent code and immediate operational reviews approved the correction and
+the ordinary incremental deployment. Release `20261014T155758Z-94c0e2903833`
+was applied without migrations or configuration changes, retaining prior application
+and companion payloads. Final readiness returned HTTP 200 and index health was healthy.
+
+The requested OneDrive workspace passed an unsaved, read-only live Add folder
+Preview. Its bounded sample reported 10 matched files, six inaccessible or
+unsupported paths and zero locally unavailable files; these are not workspace totals.
+Only two preselected, locally available files (505,418 bytes combined) were then
+registered from a small child folder, with exact include rules and recursion disabled.
+Both reached retained storage. The DOCX completed publication and two supported
+citation reads verified its source revision and chunk hashes. The XLSX reached the
+existing parser and was blocked as `office-document-container-invalid`; its underlying
+incompatibility was not diagnosed, and it did not pass publication or readback.
+
+The sample finished with two discovered, one indexed, one blocked and zero scan
+errors, and was paused at configuration revision 2. Independent outcome review
+accepted the correction with that explicit parser limitation. No whole-workspace
+ingestion, source edits, OneDrive configuration changes, model acquisition or
+uncertain-task replay was performed. Private receipts and screenshots remain in
+the task's operational evidence directory, outside Git. Manuals remain untouched.
+The coordinated quiet window was released after the bounded live checks.
+
+Cloud-only bytes remain unavailable until made local independently. Preview is a
+bounded sample with a cooperative deadline, not a complete inventory or a hard
+native-I/O timeout. Source access preserves physical identity and scope checks;
+it cannot promise universal provider/kernel immutability or zero metadata traffic.
+Automatic payload rollback covers failures before validation-hold release; later
+recovery requires a separately reviewed action after the sample is quiesced.
