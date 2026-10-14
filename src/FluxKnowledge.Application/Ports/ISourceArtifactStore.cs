@@ -16,3 +16,5 @@ public interface ISourceArtifactStore
 }
 
 public sealed class SourceSnapshotChangedException(string message) : IOException(message);
+
+public sealed class SourceContentUnavailableException(string message, Exception? innerException = null) : IOException(message, innerException);

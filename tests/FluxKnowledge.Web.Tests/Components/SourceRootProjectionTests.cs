@@ -107,6 +107,36 @@ public sealed class SourceRootProjectionTests
     }
 
     [Fact]
+    public async Task Real_preview_is_read_only_and_explains_unavailable_content_without_opening_SQL()
+    {
+        var directory = Directory.CreateTempSubdirectory("FluxKnowledgePreviewWeb_").FullName;
+        var offline = Path.Combine(directory, "offline.txt");
+        try
+        {
+            await System.IO.File.WriteAllTextAsync(Path.Combine(directory, "available.txt"), "Available text");
+            await System.IO.File.WriteAllTextAsync(offline, "Unavailable text");
+            System.IO.File.SetAttributes(offline, FileAttributes.Offline);
+            var reader = new SourceRootProjectionReader(new ThrowingContextFactory(),
+                new FluxKnowledge.Integrations.Files.SourceRootPathPolicy(new([directory])),
+                new FluxKnowledge.Integrations.Files.LocalSourceEnumerator(), new LocalSourceCapabilityHandlerRegistry([]));
+
+            var preview = await reader.PreviewAsync(new(directory, "Local sample", false, [], [], 1024, "test"), CancellationToken.None);
+
+            Assert.True(preview.IsPartial);
+            Assert.Equal(1, preview.UnavailableFileCount);
+            Assert.Equal(1, preview.PlannedInProcessCount);
+            Assert.Contains(preview.Reasons, reason =>
+                reason.Contains("could not be read locally", StringComparison.Ordinal) &&
+                reason.Contains("No download was requested", StringComparison.Ordinal));
+        }
+        finally
+        {
+            System.IO.File.SetAttributes(offline, FileAttributes.Normal);
+            Directory.Delete(directory, true);
+        }
+    }
+
+    [Fact]
     public async Task Source_root_state_rejects_saving_a_draft_that_differs_from_its_preview()
     {
         var preview = new SourceRootPreview("E:\\Corpus", 0, 0, 0, 0, 0, ["*.md"], [], []);
@@ -267,9 +297,15 @@ public sealed class SourceRootProjectionTests
                 new SourceRootPermissionEvidence(true, new string('b', 64), "{}"));
     }
 
-    private sealed class FixedEnumerator(IReadOnlyList<SourceDiscoveredFile> files) : ISourceFileEnumerator
+    private sealed class FixedEnumerator(IReadOnlyList<SourceDiscoveredFile> files) : IBoundedSourceFileEnumerator
     {
         public IReadOnlyList<SourceEnumerationEvidence> LastEvidence { get; } = [];
+
+        public IAsyncEnumerable<SourceDiscoveredFile> PreviewAsync(SourceRootConfiguration sourceRoot, SourcePreviewLimits limits, CancellationToken cancellationToken)
+        {
+            Assert.Equal(SourcePreviewLimits.Default, limits);
+            return EnumerateAsync(sourceRoot, cancellationToken);
+        }
 
         public async IAsyncEnumerable<SourceDiscoveredFile> EnumerateAsync(
             SourceRootConfiguration sourceRoot,

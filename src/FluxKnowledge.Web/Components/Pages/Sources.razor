@@ -64,6 +64,11 @@
             {
                 <section aria-labelledby="source-preview-heading">
                     <h3 id="source-preview-heading">Read-only preview</h3>
+                    <p>Local sample: up to 256 entries, 16 files and 16 MiB, with a five-second sampling deadline. Cloud-only content is not downloaded.</p>
+                    @if (preview.IsPartial)
+                    {
+                        <p role="status">This preview is incomplete. The counts below describe the inspected sample.</p>
+                    }
                     <dl class="status-grid">
                         <div><dt>Canonical path</dt><dd class="diagnostic-value">@preview.CanonicalPath</dd></div>
                         <div><dt>Matched files</dt><dd>@preview.MatchedFileCount</dd></div>
@@ -71,6 +76,7 @@
                         <div><dt>Deferred</dt><dd>@preview.DeferredCount</dd></div>
                         <div><dt>Blocked</dt><dd>@preview.BlockedCount</dd></div>
                         <div><dt>Permission errors</dt><dd>@preview.PermissionErrorCount</dd></div>
+                        <div><dt>Unavailable locally</dt><dd>@preview.UnavailableFileCount</dd></div>
                     </dl>
                     <p>Effective include rules: @(preview.EffectiveIncludePatterns.Count == 0 ? "All files" : string.Join(", ", preview.EffectiveIncludePatterns))</p>
                     <p>Effective exclude rules: @(preview.EffectiveExcludePatterns.Count == 0 ? "None" : string.Join(", ", preview.EffectiveExcludePatterns))</p>

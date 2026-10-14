@@ -15,7 +15,21 @@ public sealed record SourceDiscoveredFile(
     DateTimeOffset LastWriteAtUtc,
     SourceClassificationResult Classification,
     GitInventoryEvidence? GitInventory = null,
-    SourceScanOwnership? ScanOwnership = null);
+    SourceScanOwnership? ScanOwnership = null,
+    SourcePathBinding? SourcePath = null);
+
+/// <summary>Admission identity carried in memory from discovery to retention.</summary>
+public sealed record SourcePathBinding(string RootPath, string RootIdentityFingerprint);
+
+public sealed record SourcePreviewLimits(int MaximumEntries, int MaximumFiles, long MaximumReadBytes, TimeSpan MaximumDuration)
+{
+    public static SourcePreviewLimits Default { get; } = new(256, 16, 16L * 1024 * 1024, TimeSpan.FromSeconds(5));
+}
+
+public interface IBoundedSourceFileEnumerator : ISourceFileEnumerator
+{
+    IAsyncEnumerable<SourceDiscoveredFile> PreviewAsync(SourceRootConfiguration sourceRoot, SourcePreviewLimits limits, CancellationToken cancellationToken);
+}
 
 public sealed record SourceScanOwnership(SourceScanRequestId RequestId, SourceScanLease Lease);
 

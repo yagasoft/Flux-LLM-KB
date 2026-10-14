@@ -31,6 +31,7 @@ public sealed class SourceScanWorker(
         var indexed = 0;
         var deferred = 0;
         var blocked = 0;
+        var retentionEvidence = new List<SourceEnumerationEvidence>();
         await foreach (var discoveredFile in enumerator.EnumerateAsync(sourceRoot, cancellationToken).ConfigureAwait(false))
         {
             var file = sourceRoot.DiscoveryMode == SourceDiscoveryMode.GitTracked && scanRequest.Lease is { } lease
@@ -62,6 +63,9 @@ public sealed class SourceScanWorker(
             catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidDataException)
             {
                 var reason = ArtifactFailureReason(exception);
+                // A source can become unavailable after discovery; this scan is not a complete inventory.
+                retentionEvidence.Add(new(exception is SourceContentUnavailableException ? "unavailable" : "retention",
+                    file.RelativePath, reason));
                 var retention = await scanStore.ConvergeBlockedRevisionAsync(sourceRoot, file, reason, cancellationToken).ConfigureAwait(false);
                 revisionId = retention.SourceRevisionId;
                 convergedRevisionIds.Add(revisionId);
@@ -152,7 +156,7 @@ public sealed class SourceScanWorker(
             }
         }
 
-        var evidence = enumerator.LastEvidence;
+        IReadOnlyList<SourceEnumerationEvidence> evidence = [.. enumerator.LastEvidence, .. retentionEvidence];
         await scanStore.RecordEnumerationEvidenceAsync(scanRequest.Id, evidence, cancellationToken).ConfigureAwait(false);
         if (evidence.Count == 0)
         {
@@ -169,6 +173,7 @@ public sealed class SourceScanWorker(
 
     private static string ArtifactFailureReason(Exception exception) => exception switch
     {
+        SourceContentUnavailableException => "source-content-not-available-locally",
         SourceSnapshotChangedException => "source-snapshot-changed",
         UnauthorizedAccessException => "artifact-access-denied",
         InvalidDataException => "artifact-integrity-failed",
