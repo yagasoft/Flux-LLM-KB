@@ -150,6 +150,31 @@ public sealed class Utf8FileSourceReaderTests : IDisposable
         }
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Legacy_aliases_with_authorised_physical_targets_remain_readable(bool directoryAlias)
+    {
+        var targetDirectory = Path.Combine(_testRoot, "actual");
+        Directory.CreateDirectory(targetDirectory);
+        var targetFile = Path.Combine(targetDirectory, "content.txt");
+        await File.WriteAllTextAsync(targetFile, "authorised content");
+        var alias = Path.Combine(_testRoot, directoryAlias ? "alias" : "alias.txt");
+        if (directoryAlias) Directory.CreateSymbolicLink(alias, targetDirectory);
+        else File.CreateSymbolicLink(alias, targetFile);
+        try
+        {
+            var reader = new Utf8FileSourceReader(new LocalIngressOptions([_testRoot]));
+            var result = await reader.ReadAsync(directoryAlias ? Path.Combine(alias, "content.txt") : alias, CancellationToken.None);
+            Assert.Equal(targetFile, result.CanonicalPath);
+            Assert.Equal("authorised content", result.Text);
+        }
+        finally
+        {
+            if (directoryAlias) Directory.Delete(alias); else File.Delete(alias);
+        }
+    }
+
     public void Dispose()
     {
         Directory.Delete(_testRoot, recursive: true);

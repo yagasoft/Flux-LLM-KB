@@ -32,7 +32,11 @@ public sealed record SourceRootPreview(
     int PermissionErrorCount,
     IReadOnlyList<string> EffectiveIncludePatterns,
     IReadOnlyList<string> EffectiveExcludePatterns,
-    IReadOnlyList<string> Reasons);
+    IReadOnlyList<string> Reasons)
+{
+    public bool IsPartial { get; init; }
+    public int UnavailableFileCount { get; init; }
+}
 
 public sealed record SourceRootListProjection(
     Guid Id,

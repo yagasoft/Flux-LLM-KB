@@ -90,6 +90,23 @@ Registration uses preview/commit fencing and maintains stable revision identity.
 Watcher-driven refresh is reconciled against retained state and configured
 include/exclude rules.
 
+Filesystem sources admit the Windows Cloud Files reparse-tag family alongside
+ordinary local folders. Parent-relative, no-follow/no-recall handles preserve the
+root identity and physical scope through discovery and retention. Symbolic links,
+junctions and unknown reparse types remain rejected for source-root scans; retained
+storage and Git control paths retain their stricter policies. Direct UTF-8 ingress
+still permits aliases whose resolved physical targets remain authorised.
+
+Discovery requests only materialised directory entries. Offline, recall-required
+or partial content is reported unavailable without requesting hydration; an
+incomplete cloud namespace or a retention failure prevents unseen-source
+suppression. Read-only Preview samples at most 256 entries, 16 candidate files and
+16 MiB of content, with a five-second cooperative deadline. Counts describe that
+sample when a limit, unavailable item or incomplete namespace is reported. These
+controls do not promise zero provider metadata/network activity or a hard deadline
+for Windows filesystem calls. Source originals and sync-client settings are not
+modified.
+
 Pause prevents new admission and publication without discarding completed work.
 Resume makes eligible work available again. Delete is a durable operation with
 visible progress: admission stops, in-flight work drains, retained projections

@@ -268,7 +268,8 @@ public sealed class SourceRootProjectionReader(
         ArgumentNullException.ThrowIfNull(draft);
         var request = ToCreateRequest(draft);
         var validation = pathPolicy.ValidateAndCanonicalise(request);
-        var sourceRoot = SourceRootConfiguration.Create(
+        var sourceRoot = SourceRootConfiguration.Restore(
+            SourceRootId.New(),
             validation.CanonicalPath,
             request.DisplayName,
             request.Recursive,
@@ -277,13 +278,19 @@ public sealed class SourceRootProjectionReader(
             request.IncludePatterns,
             request.ExcludePatterns,
             request.AllowedClassifications,
-            TimeSpan.FromMinutes(15), request.DiscoveryMode, validation.GitRepositoryIdentityFingerprint);
+            TimeSpan.FromMinutes(15), SourceRootState.Enabled, 1,
+            physicalIdentityFingerprint: validation.PhysicalIdentity.IdentityFingerprint,
+            requiresPhysicalIdentityValidation: true,
+            discoveryMode: request.DiscoveryMode,
+            repositoryIdentityFingerprint: validation.GitRepositoryIdentityFingerprint);
         var matched = 0;
         var planned = 0;
         var deferred = 0;
         var blocked = 0;
         var reasons = new List<string>();
-        await foreach (var file in enumerator.EnumerateAsync(sourceRoot, cancellationToken).ConfigureAwait(false))
+        if (enumerator is not IBoundedSourceFileEnumerator bounded)
+            throw new InvalidOperationException("Read-only Preview requires bounded source discovery.");
+        await foreach (var file in bounded.PreviewAsync(sourceRoot, SourcePreviewLimits.Default, cancellationToken).ConfigureAwait(false))
         {
             matched++;
             if (file.Classification.IsAccepted)
@@ -306,7 +313,16 @@ public sealed class SourceRootProjectionReader(
         }
 
         var evidence = enumerator.LastEvidence;
-        reasons.AddRange(evidence.Select(item => item.Detail));
+        reasons.AddRange(evidence.Select(item => item.Detail switch
+        {
+            "SourceContentNotAvailableLocally" => "Some content could not be read locally. No download was requested; check its local availability and the sync provider before rescanning.",
+            "CloudDirectoryNamespaceIncomplete" => "A cloud folder has an incomplete local listing. Only materialised entries were inspected; the counts exclude other cloud items.",
+            "PreviewByteLimit" => "The Preview read limit was reached, or a file was too large for the remaining sample budget.",
+            "PreviewEntryLimit" or "PreviewFileLimit" => "Preview reached its sample limit. These counts are not workspace totals.",
+            "PreviewTimeLimit" => "Preview reached its time limit. These counts are not workspace totals.",
+            "SourceDirectoryDenied" or "SourcePathDenied" => "A source path was inaccessible or uses unsupported redirection; it was not traversed.",
+            _ => item.Detail
+        }));
         return new SourceRootPreview(
             validation.CanonicalPath,
             matched,
@@ -316,7 +332,11 @@ public sealed class SourceRootProjectionReader(
             evidence.Count(item => string.Equals(item.Kind, "permission", StringComparison.OrdinalIgnoreCase)),
             request.IncludePatterns.ToArray(),
             request.ExcludePatterns.ToArray(),
-            reasons.Distinct(StringComparer.Ordinal).Take(20).ToArray());
+            reasons.Distinct(StringComparer.Ordinal).Take(20).ToArray())
+        {
+            IsPartial = evidence.Count != 0,
+            UnavailableFileCount = evidence.Count(item => item.Kind == "unavailable")
+        };
     }
 
     private static SourceRootListProjection ToListProjection(

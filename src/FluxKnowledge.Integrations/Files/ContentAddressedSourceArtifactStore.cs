@@ -276,14 +276,17 @@ public sealed class ContentAddressedSourceArtifactStore : ISourceArtifactStore, 
 
     private static void EnsureSnapshotCurrent(SourceDiscoveredFile snapshot)
     {
-        var info = new FileInfo(snapshot.CanonicalPath);
-        info.Refresh();
-        if (!info.Exists || info.Length != snapshot.ByteLength || info.LastWriteTimeUtc != snapshot.LastWriteAtUtc ||
-            !string.Equals(PhysicalFileIdentity.Get(snapshot.CanonicalPath), snapshot.StableSourceIdentity, StringComparison.Ordinal))
+        using var source = OpenSource(snapshot);
+        if (RandomAccess.GetLength(source.Handle) != snapshot.ByteLength ||
+            File.GetLastWriteTimeUtc(source.Handle) != snapshot.LastWriteAtUtc)
         {
             throw new SourceSnapshotChangedException("The source changed after discovery.");
         }
     }
+
+    private static WindowsSourcePathAccess.SourceReadLease OpenSource(SourceDiscoveredFile snapshot) =>
+        WindowsSourcePathAccess.OpenRead(snapshot.SourcePath?.RootPath ?? Path.GetDirectoryName(snapshot.CanonicalPath)!,
+            snapshot.CanonicalPath, snapshot.SourcePath?.RootIdentityFingerprint, snapshot.StableSourceIdentity);
 
     private void EnsureRootCurrent()
     {
@@ -368,9 +371,9 @@ public sealed class ContentAddressedSourceArtifactStore : ISourceArtifactStore, 
         var buffer = new byte[128 * 1024];
         var length = 0L;
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-        await using var input = new FileStream(snapshot.CanonicalPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete,
-            buffer.Length, FileOptions.Asynchronous | FileOptions.SequentialScan);
-        if (!string.Equals(PhysicalFileIdentity.Get(input.SafeFileHandle), snapshot.StableSourceIdentity, StringComparison.Ordinal))
+        using var source = OpenSource(snapshot);
+        await using var input = new FileStream(source.Handle, FileAccess.Read, buffer.Length, isAsync: true);
+        if (input.Length != snapshot.ByteLength || File.GetLastWriteTimeUtc(source.Handle) != snapshot.LastWriteAtUtc)
         {
             throw new SourceSnapshotChangedException("The source identity changed after discovery.");
         }
@@ -384,9 +387,10 @@ public sealed class ContentAddressedSourceArtifactStore : ISourceArtifactStore, 
             ? null
             : new FileStream(temporaryPath, FileMode.CreateNew, FileAccess.Write, FileShare.None,
                 buffer.Length, FileOptions.Asynchronous | FileOptions.WriteThrough);
-        int read;
-        while ((read = await input.ReadAsync(buffer, cancellationToken).ConfigureAwait(false)) != 0)
+        while (length < snapshot.ByteLength)
         {
+            var read = await input.ReadAsync(buffer.AsMemory(0, (int)Math.Min(buffer.Length, snapshot.ByteLength - length)), cancellationToken).ConfigureAwait(false);
+            if (read == 0) throw new SourceSnapshotChangedException("The source was truncated while being retained.");
             hash.AppendData(buffer, 0, read);
             if (output is not null)
             {
@@ -394,6 +398,9 @@ public sealed class ContentAddressedSourceArtifactStore : ISourceArtifactStore, 
             }
             length += read;
         }
+        WindowsSourcePathAccess.EnsureContentAvailable(WindowsSourcePathAccess.ReadMetadata(source.Handle));
+        if (input.Length != snapshot.ByteLength || File.GetLastWriteTimeUtc(source.Handle) != snapshot.LastWriteAtUtc)
+            throw new SourceSnapshotChangedException("The source changed while being retained.");
         if (output is not null)
         {
             await output.FlushAsync(cancellationToken).ConfigureAwait(false);

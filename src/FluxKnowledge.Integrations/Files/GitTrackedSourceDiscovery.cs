@@ -15,7 +15,10 @@ public sealed class GitTrackedSourceDiscovery(Func<long>? availableMemory = null
     { ".txt", ".md", ".markdown", ".log", ".csv", ".tsv", ".json", ".xml", ".yaml", ".yml", ".cs", ".ps1", ".psm1", ".py", ".js", ".sql", ".razor", ".css", ".csproj", ".props", ".slnx" };
 
     public sealed record Repository(string GitDirectory, string CommonDirectory, string Identity);
-    public sealed record Inventory(Repository Repository, string Generation, IReadOnlyList<string> Paths, int TrackedCount, int ExcludedCount);
+    public sealed record Inventory(Repository Repository, string Generation, IReadOnlyList<string> Paths, int TrackedCount, int ExcludedCount)
+    {
+        public bool IsComplete { get; init; } = true;
+    }
 
     public static Repository ResolveRepository(string root)
     {
@@ -44,7 +47,7 @@ public sealed class GitTrackedSourceDiscovery(Func<long>? availableMemory = null
         return new Repository(gitDirectory, common, Convert.ToHexStringLower(SHA256.HashData(StrictUtf8.GetBytes(framed))));
     }
 
-    public async ValueTask<Inventory> ReadAsync(string root, CancellationToken cancellationToken)
+    public async ValueTask<Inventory> ReadAsync(string root, CancellationToken cancellationToken, int? maximumEntries = null)
     {
         var repository = ResolveRepository(root);
         var executable = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Git", "cmd", "git.exe");
@@ -91,6 +94,8 @@ public sealed class GitTrackedSourceDiscovery(Func<long>? availableMemory = null
                     if (fields.Length != 3 || fields[2] != "0" || fields[1].Length is not (40 or 64) || !fields[1].All(char.IsAsciiHexDigit))
                         throw new InvalidDataException("git-index-conflicted-or-malformed");
                     var relative = value[(tab + 1)..];
+                    if (maximumEntries is { } limit && tracked >= limit)
+                        return new Inventory(repository, Convert.ToHexStringLower(hash.GetHashAndReset()), paths, tracked, excluded) { IsComplete = false };
                     ValidatePath(root, relative);
                     if (!unique.Add(relative)) throw new InvalidDataException("git-path-ambiguous");
                     tracked++;

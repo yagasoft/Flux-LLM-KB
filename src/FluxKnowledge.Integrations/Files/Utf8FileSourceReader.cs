@@ -19,7 +19,7 @@ public sealed class Utf8FileSourceReader : IUtf8FileSourceReader
         throwOnInvalidBytes: true);
 
     private readonly IReadOnlyList<AllowedRoot> _allowedRoots;
-    private readonly IUtf8FileHandleOpener _handleOpener;
+    private readonly IUtf8FileHandleOpener? _handleOpener;
 
     public Utf8FileSourceReader(
         LocalIngressOptions options,
@@ -27,12 +27,14 @@ public sealed class Utf8FileSourceReader : IUtf8FileSourceReader
     {
         _allowedRoots = LocalIngressOptionsValidator
             .ValidateAndCanonicalise(options)
-            .Select(
-                root => new AllowedRoot(
-                    root,
-                    ResolvePhysicalExistingPath(root, finalComponentIsDirectory: true)))
+            .Select(root =>
+            {
+                var physical = ResolvePhysicalExistingPath(root, finalComponentIsDirectory: true);
+                using var lease = WindowsSourcePathAccess.OpenDirectoryPath(physical);
+                return new AllowedRoot(root, lease.Identity.CanonicalPath, lease.Identity.IdentityFingerprint);
+            })
             .ToArray();
-        _handleOpener = handleOpener ?? WindowsUtf8FileHandleOpener.Instance;
+        _handleOpener = handleOpener;
     }
 
     public async ValueTask<Utf8FileSource> ReadAsync(
@@ -53,7 +55,18 @@ public sealed class Utf8FileSourceReader : IUtf8FileSourceReader
                 $"The source path is outside the configured local ingress roots: {canonicalPath}");
         }
 
-        using var handle = _handleOpener.OpenRead(canonicalPath);
+        var allowedRoot = candidateRoots.OrderByDescending(root => root.PhysicalPath.Length).First();
+        var physicalCandidate = IsWithinRoot(allowedRoot.PhysicalPath, canonicalPath) ? canonicalPath :
+            Path.GetFullPath(Path.GetRelativePath(allowedRoot.ConfiguredPath, canonicalPath), allowedRoot.PhysicalPath);
+        // Legacy ingress permits aliases whose resolved target stays inside an authorised root.
+        // Resolve metadata first, then read only the validated physical path through the held chain.
+        var resolvedPath = ResolvePhysicalExistingPath(physicalCandidate, finalComponentIsDirectory: false);
+        var targetRoot = candidateRoots.FirstOrDefault(root => IsWithinRoot(root.PhysicalPath, resolvedPath))
+            ?? throw new UnauthorizedAccessException("The source path physical target is outside the configured local ingress roots.");
+        using var source = OpenSource(targetRoot, resolvedPath);
+        using var suppliedHandle = _handleOpener?.OpenRead(canonicalPath);
+        var handle = suppliedHandle ?? source.Handle;
+        WindowsSourcePathAccess.EnsureContentAvailable(WindowsSourcePathAccess.ReadMetadata(handle));
         var physicalPath = GetNormalisedFinalPath(handle);
         if (!candidateRoots.Any(root => IsWithinRoot(root.PhysicalPath, physicalPath)))
         {
@@ -88,6 +101,15 @@ public sealed class Utf8FileSourceReader : IUtf8FileSourceReader
             bytes,
             text,
             Convert.ToHexStringLower(SHA256.HashData(bytes)));
+    }
+
+    private static WindowsSourcePathAccess.SourceReadLease OpenSource(AllowedRoot root, string path)
+    {
+        try { return WindowsSourcePathAccess.OpenRead(root.PhysicalPath, path, root.IdentityFingerprint); }
+        catch (UnauthorizedAccessException exception)
+        {
+            throw new UnauthorizedAccessException("The source path physical target is not permitted by the configured local ingress root.", exception);
+        }
     }
 
     private static string GetNormalisedFinalPath(SafeFileHandle handle)
@@ -209,7 +231,7 @@ public sealed class Utf8FileSourceReader : IUtf8FileSourceReader
                         candidate);
             }
 
-            if ((info.Attributes & FileAttributes.ReparsePoint) != 0)
+            if ((info.Attributes & FileAttributes.ReparsePoint) != 0 && info.LinkTarget is not null)
             {
                 var target = info.ResolveLinkTarget(returnFinalTarget: true);
                 if (target is null)
@@ -222,6 +244,7 @@ public sealed class Utf8FileSourceReader : IUtf8FileSourceReader
             }
             else
             {
+                // Cloud/unsupported tags are classified by the subsequent physical handle walk.
                 current = Path.GetFullPath(candidate);
             }
         }
@@ -229,24 +252,7 @@ public sealed class Utf8FileSourceReader : IUtf8FileSourceReader
         return current;
     }
 
-    private sealed record AllowedRoot(string ConfiguredPath, string PhysicalPath);
-
-    private sealed class WindowsUtf8FileHandleOpener : IUtf8FileHandleOpener
-    {
-        public static readonly WindowsUtf8FileHandleOpener Instance = new();
-
-        private WindowsUtf8FileHandleOpener()
-        {
-        }
-
-        public SafeFileHandle OpenRead(string canonicalPath) =>
-            File.OpenHandle(
-                canonicalPath,
-                FileMode.Open,
-                FileAccess.Read,
-                FileShare.Read | FileShare.Delete,
-                FileOptions.Asynchronous | FileOptions.SequentialScan);
-    }
+    private sealed record AllowedRoot(string ConfiguredPath, string PhysicalPath, string IdentityFingerprint);
 
     private static class NativeMethods
     {

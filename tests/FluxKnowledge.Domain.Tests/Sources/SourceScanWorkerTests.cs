@@ -317,6 +317,27 @@ public sealed class SourceScanWorkerTests
     public void Admission_identity_parser_fails_closed_for_missing_malformed_or_non_string_evidence(string? evidence) =>
         Assert.Null(SqlSourceScanStore.ParseAdmissionIdentityFingerprint(evidence));
 
+    [Fact]
+    public async Task Content_becoming_unavailable_during_retention_prevents_unseen_suppression()
+    {
+        var root = SourceRootConfiguration.Create(Path.GetFullPath(Path.GetTempPath()), "test", false, false, 1024);
+        var request = SourceScanRequest.CreateHeld(root.Id, "test").Release(DateTimeOffset.UtcNow);
+        var file = new SourceDiscoveredFile(Path.Combine(root.CanonicalPath, "cloud.txt"), "cloud.txt", "test:cloud",
+            "text"u8.ToArray(), true, new string('a', 64), 4, DateTimeOffset.UtcNow,
+            new SourceClassificationResult(SourceClassification.AcceptedUtf8Text, "text", null));
+        var revisions = new RecordingScanStore();
+        var activities = new RecordingActivityStore();
+        var worker = new SourceScanWorker(new ReturningEnumerator(file), revisions,
+            new ThrowingArtifactStore(new SourceContentUnavailableException("provider unavailable")), activities);
+
+        await worker.ScanAsync(root, request, CancellationToken.None);
+
+        Assert.Equal(0, revisions.SuppressionCalls);
+        Assert.Equal("source-content-not-available-locally", revisions.ArtifactFailureReason);
+        Assert.Equal("unavailable", Assert.Single(revisions.Evidence).Kind);
+        Assert.DoesNotContain(activities.Drafts, draft => draft.ActivityKind == SourceActivityKind.TextExtraction);
+    }
+
     private sealed class ReturningEnumerator(params SourceDiscoveredFile[] files) : ISourceFileEnumerator
     {
         public IReadOnlyList<SourceEnumerationEvidence> Evidence { get; init; } = [];
@@ -340,6 +361,7 @@ public sealed class SourceScanWorkerTests
     {
         public int SuppressionCalls { get; private set; }
         public int EvidenceCalls { get; private set; }
+        public IReadOnlyList<SourceEnumerationEvidence> Evidence { get; private set; } = [];
         public string? ArtifactFailureReason { get; private set; }
         public bool IsRetentionBlocked { get; init; } = true;
 
@@ -365,6 +387,7 @@ public sealed class SourceScanWorkerTests
         public ValueTask RecordEnumerationEvidenceAsync(SourceScanRequestId sourceScanRequestId, IReadOnlyList<SourceEnumerationEvidence> evidence, CancellationToken cancellationToken)
         {
             EvidenceCalls++;
+            Evidence = evidence;
             return ValueTask.CompletedTask;
         }
     }

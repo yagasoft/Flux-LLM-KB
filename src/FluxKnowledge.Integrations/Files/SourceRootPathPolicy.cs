@@ -1,11 +1,8 @@
-using System.ComponentModel;
-using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using FluxKnowledge.Application.Contracts;
 using FluxKnowledge.Domain.Sources;
-using Microsoft.Win32.SafeHandles;
 
 namespace FluxKnowledge.Integrations.Files;
 
@@ -45,8 +42,8 @@ public sealed class SourceRootPathPolicy : ISourceRootPathPolicy
 
         RejectUnc(request.FullPath);
         var canonicalPath = CanonicalExistingDirectory(request.FullPath);
-        EnsureNoReparsePointTraversal(canonicalPath);
-        var physical = ResolvePhysicalDirectory(canonicalPath);
+        using var sourceLease = WindowsSourcePathAccess.OpenDirectoryPath(canonicalPath, enumerate: true);
+        var physical = sourceLease.Identity;
 
         if (_protectedRoots.Any(root =>
                 Overlaps(root, canonicalPath) ||
@@ -68,7 +65,7 @@ public sealed class SourceRootPathPolicy : ISourceRootPathPolicy
             throw new UnauthorizedAccessException("The source root must be on a fixed NTFS volume.");
         }
 
-        EnsureCanEnumerate(physical.CanonicalPath);
+        using (var entries = sourceLease.Entries(CancellationToken.None).GetEnumerator()) _ = entries.MoveNext();
         GitTrackedSourceDiscovery.Repository? repository = null;
         if (request.DiscoveryMode == SourceDiscoveryMode.GitTracked)
         {
@@ -77,8 +74,7 @@ public sealed class SourceRootPathPolicy : ISourceRootPathPolicy
                 throw new UnauthorizedAccessException("Git control metadata overlaps a protected location.");
         }
         var fingerprint = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(physical.CanonicalPath)));
-        var identityFingerprint = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(
-            $"{physical.VolumeSerialNumber:X8}:{physical.FileIndexHigh:X8}{physical.FileIndexLow:X8}")));
+        var identityFingerprint = physical.IdentityFingerprint;
         var evidenceJson = JsonSerializer.Serialize(new
         {
             canEnumerate = true,
@@ -138,43 +134,6 @@ public sealed class SourceRootPathPolicy : ISourceRootPathPolicy
         }
     }
 
-    private static void EnsureNoReparsePointTraversal(string canonicalPath)
-    {
-        var root = Path.GetPathRoot(canonicalPath)!;
-        var relative = Path.GetRelativePath(root, canonicalPath);
-        var current = root;
-        if (string.Equals(relative, ".", StringComparison.Ordinal))
-        {
-            return;
-        }
-
-        foreach (var component in relative.Split(
-                     [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
-                     StringSplitOptions.RemoveEmptyEntries))
-        {
-            current = Path.Combine(current, component);
-            var directory = new DirectoryInfo(current);
-            directory.Refresh();
-            if ((directory.Attributes & FileAttributes.ReparsePoint) != 0)
-            {
-                throw new UnauthorizedAccessException("Source root reparse-point traversal is not allowed.");
-            }
-        }
-    }
-
-    private static void EnsureCanEnumerate(string canonicalPath)
-    {
-        try
-        {
-            using var enumerator = Directory.EnumerateFileSystemEntries(canonicalPath).GetEnumerator();
-            _ = enumerator.MoveNext();
-        }
-        catch (UnauthorizedAccessException exception)
-        {
-            throw new UnauthorizedAccessException("The source root cannot be enumerated by the application identity.", exception);
-        }
-    }
-
     private static bool IsWithinRoot(string root, string path)
     {
         if (string.Equals(root, path, StringComparison.OrdinalIgnoreCase))
@@ -191,132 +150,4 @@ public sealed class SourceRootPathPolicy : ISourceRootPathPolicy
     private static bool Overlaps(string first, string second) =>
         IsWithinRoot(first, second) || IsWithinRoot(second, first);
 
-    private static PhysicalDirectory ResolvePhysicalDirectory(string canonicalPath)
-    {
-        using var handle = NativeMethods.OpenDirectory(canonicalPath);
-        return new PhysicalDirectory(
-            GetNormalisedFinalPath(handle),
-            NativeMethods.GetIdentity(handle));
-    }
-
-    private static string GetNormalisedFinalPath(SafeFileHandle handle)
-    {
-        var capacity = 512;
-        while (true)
-        {
-            var buffer = new StringBuilder(capacity);
-            var length = NativeMethods.GetFinalPathNameByHandle(handle, buffer, (uint)buffer.Capacity, 0);
-            if (length == 0)
-            {
-                throw new IOException("The final path of the source root cannot be obtained.", new Win32Exception(Marshal.GetLastPInvokeError()));
-            }
-
-            if (length < buffer.Capacity)
-            {
-                const string extendedPrefix = @"\\?\";
-                var finalPath = buffer.ToString();
-                if (finalPath.StartsWith(@"\\?\UNC\", StringComparison.OrdinalIgnoreCase))
-                {
-                    throw new UnauthorizedAccessException("UNC source roots are not allowed.");
-                }
-
-                if (finalPath.StartsWith(extendedPrefix, StringComparison.OrdinalIgnoreCase))
-                {
-                    finalPath = finalPath[extendedPrefix.Length..];
-                }
-
-                return Path.TrimEndingDirectorySeparator(Path.GetFullPath(finalPath));
-            }
-
-            capacity = checked((int)length + 1);
-        }
-    }
-
-    private sealed record PhysicalDirectory(string CanonicalPath, NativeMethods.FileIdentity Identity)
-    {
-        public uint VolumeSerialNumber => Identity.VolumeSerialNumber;
-        public uint FileIndexHigh => Identity.FileIndexHigh;
-        public uint FileIndexLow => Identity.FileIndexLow;
-    }
-
-    private static class NativeMethods
-    {
-        private const uint FileShareRead = 0x00000001;
-        private const uint FileShareWrite = 0x00000002;
-        private const uint FileShareDelete = 0x00000004;
-        private const uint FileReadAttributes = 0x00000080;
-        private const uint OpenExisting = 3;
-        private const uint FileFlagBackupSemantics = 0x02000000;
-
-#pragma warning disable SYSLIB1054
-        [DllImport("kernel32.dll", EntryPoint = "CreateFileW", CharSet = CharSet.Unicode, SetLastError = true)]
-        private static extern SafeFileHandle CreateFile(
-            string fileName,
-            uint desiredAccess,
-            uint shareMode,
-            IntPtr securityAttributes,
-            uint creationDisposition,
-            uint flagsAndAttributes,
-            IntPtr templateFile);
-
-        [DllImport("kernel32.dll", EntryPoint = "GetFinalPathNameByHandleW", CharSet = CharSet.Unicode, SetLastError = true)]
-        internal static extern uint GetFinalPathNameByHandle(
-            SafeFileHandle file,
-            StringBuilder path,
-            uint pathLength,
-            uint flags);
-
-        [DllImport("kernel32.dll", SetLastError = true)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool GetFileInformationByHandle(
-            SafeFileHandle file,
-            out ByHandleFileInformation information);
-#pragma warning restore SYSLIB1054
-
-        internal static SafeFileHandle OpenDirectory(string path)
-        {
-            var handle = CreateFile(
-                path,
-                desiredAccess: FileReadAttributes,
-                FileShareRead | FileShareWrite | FileShareDelete,
-                IntPtr.Zero,
-                OpenExisting,
-                FileFlagBackupSemantics,
-                IntPtr.Zero);
-            if (handle.IsInvalid)
-            {
-                handle.Dispose();
-                throw new UnauthorizedAccessException("The source root cannot be opened by the application identity.", new Win32Exception(Marshal.GetLastPInvokeError()));
-            }
-
-            return handle;
-        }
-
-        internal static FileIdentity GetIdentity(SafeFileHandle handle)
-        {
-            if (!GetFileInformationByHandle(handle, out var information))
-            {
-                throw new IOException("The source root physical identity cannot be obtained.", new Win32Exception(Marshal.GetLastPInvokeError()));
-            }
-
-            return new FileIdentity(information.VolumeSerialNumber, information.FileIndexHigh, information.FileIndexLow);
-        }
-
-        internal readonly record struct FileIdentity(uint VolumeSerialNumber, uint FileIndexHigh, uint FileIndexLow);
-
-        [StructLayout(LayoutKind.Sequential)]
-        private struct ByHandleFileInformation
-        {
-            public uint FileAttributes;
-            public System.Runtime.InteropServices.ComTypes.FILETIME CreationTime;
-            public System.Runtime.InteropServices.ComTypes.FILETIME LastAccessTime;
-            public System.Runtime.InteropServices.ComTypes.FILETIME LastWriteTime;
-            public uint VolumeSerialNumber;
-            public uint FileSizeHigh;
-            public uint FileSizeLow;
-            public uint NumberOfLinks;
-            public uint FileIndexHigh;
-            public uint FileIndexLow;
-        }
-    }
 }

@@ -445,7 +445,7 @@ public sealed class LocalSourceFileTests : IDisposable
     }
 
     [Fact]
-    public async Task Artifact_store_cleans_the_partial_file_when_the_open_source_mutates_during_streaming()
+    public async Task Artifact_store_denies_a_concurrent_source_write_and_cleans_the_failed_copy()
     {
         var source = Path.Combine(_root, "streamed.txt");
         await File.WriteAllTextAsync(source, "before");
@@ -460,11 +460,13 @@ public sealed class LocalSourceFileTests : IDisposable
                 File.SetLastWriteTimeUtc(source, snapshot.LastWriteAtUtc.UtcDateTime);
             });
 
-        await Assert.ThrowsAsync<SourceSnapshotChangedException>(() => store.PutFileAsync(
+        var exception = await Assert.ThrowsAsync<IOException>(() => store.PutFileAsync(
             snapshot,
             new SourceArtifactMetadata(snapshot.ContentSha256, "text/plain", snapshot.ByteLength),
             CancellationToken.None).AsTask());
 
+        Assert.Equal(32, exception.HResult & 0xffff);
+        Assert.Equal("before", await File.ReadAllTextAsync(source));
         Assert.Empty(Directory.EnumerateFiles(storeRoot, "*.tmp", SearchOption.AllDirectories));
     }
 
