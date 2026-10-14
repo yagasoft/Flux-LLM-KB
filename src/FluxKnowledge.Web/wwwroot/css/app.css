@@ -3,7 +3,7 @@ body { margin: 0; }
 .app-shell { max-width: 72rem; margin: auto; padding: 1rem; }
 .site-header { display: flex; gap: 2rem; align-items: center; flex-wrap: wrap; border-bottom: 1px solid currentColor; }
 .brand { font-weight: 700; text-decoration: none; }
-.nav-list { display: flex; gap: 1rem; margin: 0; padding: 0; list-style: none; }
+.nav-list { display: flex; gap: 1rem; margin: 0; padding: 0; list-style: none; flex-wrap: wrap; }
 main { padding-block: 1.5rem; }
 :focus-visible { outline: 3px solid #ffbf47; outline-offset: 3px; }
 .status-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr)); gap: 1rem; }
@@ -15,3 +15,33 @@ main { padding-block: 1.5rem; }
 .diagnostic-details { margin-top: 1rem; } .diagnostic-details label { display: grid; gap: .25rem; margin-top: .75rem; } .diagnostic-value { max-width: 100%; overflow-wrap: anywhere; word-break: break-word; }
 .filter-drawer { margin-block: 1rem; } .filter-controls { display: flex; gap: .75rem; align-items: end; flex-wrap: wrap; margin-block: .75rem; } .filter-controls label { display: grid; gap: .25rem; } .folder-browser { border: 1px solid currentColor; border-radius: .25rem; padding: .75rem; margin-block: 1rem; } .folder-browser ul { padding-left: 1.25rem; } .indexed-preview { max-height: 24rem; overflow: auto; white-space: pre-wrap; border: 1px solid currentColor; padding: .75rem; }
 @media (max-width: 40rem) { .app-shell { padding: .75rem; } .site-header { align-items: flex-start; flex-direction: column; gap: .75rem; } .nav-list { flex-wrap: wrap; } .status-grid { grid-template-columns: 1fr; } .status-grid dd { font-size: 1.2rem; } }
+.pipeline-overview section { margin-block: 1.75rem; }
+.overview-header, .activity-heading, .source-progress-card header { display: flex; align-items: start; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
+.overview-header h1, .activity-heading h2, .source-progress-card h3 { margin-top: 0; }
+.overview-header button { flex-shrink: 0; }
+.activity-banner { border: 1px solid currentColor; border-radius: .25rem; padding: 1.25rem; }
+.activity-state { font-size: 1.5rem; font-weight: 700; margin-block: .5rem; }
+.activity-counts { grid-template-columns: repeat(4, minmax(0, 1fr)); margin-top: 1rem; }
+.activity-counts div { border: 0; padding: .5rem 0; }
+.source-scope { display: grid; gap: .4rem; max-width: 32rem; }
+.source-scope select { font: inherit; padding: .5rem; min-width: 0; max-width: 100%; }
+.source-progress-list { display: grid; gap: 1rem; }
+.source-progress-card { border: 1px solid currentColor; border-radius: .25rem; padding: 1rem; min-width: 0; }
+.source-progress-card h3 { margin-bottom: .35rem; }
+.source-path { overflow-wrap: anywhere; margin-top: 0; }
+.source-file-counts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1rem; }
+.source-file-counts dt { font-size: .9rem; }
+.source-file-counts dd { font-size: 1.3rem; font-weight: 700; margin: .25rem 0 0; }
+.status-freshness { font-size: .9rem; }
+.pipeline-warning { border-inline-start: .3rem solid currentColor; padding: .5rem .75rem; }
+.activity-list, .attention-counts { padding-inline-start: 1.25rem; }
+.activity-list li, .attention-counts li { margin-block: .5rem; }
+.scheduler-details > summary { font-weight: 600; cursor: pointer; }
+.pipeline-overview details > summary { cursor: pointer; }
+.pipeline-overview code { overflow-wrap: anywhere; }
+@media (max-width: 40rem) {
+  .activity-banner { padding: .85rem; }
+  .activity-counts, .source-file-counts { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .75rem; }
+  .overview-header { gap: .5rem; }
+  .source-progress-card { padding: .85rem; }
+}

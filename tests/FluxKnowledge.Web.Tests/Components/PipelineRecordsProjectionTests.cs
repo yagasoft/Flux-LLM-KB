@@ -8,8 +8,9 @@ public sealed class PipelineRecordsProjectionTests
 {
     [Theory]
     [InlineData(999, "999")]
-    [InlineData(1000, "999+")]
-    public void Status_count_formats_the_visible_upper_bound(int jobs, string expected)
+    [InlineData(1000, "1,000")]
+    [InlineData(15327, "15,327")]
+    public void Status_count_preserves_the_exact_total(int jobs, string expected)
     {
         Assert.Equal(expected, StatusCount.Format(jobs));
     }

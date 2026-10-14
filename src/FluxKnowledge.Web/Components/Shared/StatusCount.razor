@@ -1,8 +1,8 @@
-<span aria-label="@Value">@Format(Value)</span>
+<span aria-label="@Format(Value)">@Format(Value)</span>
 
 @code {
     [Parameter]
     public int Value { get; set; }
 
-    public static string Format(int value) => value >= 1000 ? "999+" : value.ToString(System.Globalization.CultureInfo.InvariantCulture);
+    public static string Format(int value) => value.ToString("N0", System.Globalization.CultureInfo.InvariantCulture);
 }

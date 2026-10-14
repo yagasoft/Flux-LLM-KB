@@ -2,9 +2,11 @@ using FluxKnowledge.Application.Contracts;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Sources;
 using FluxKnowledge.Domain.Jobs;
+using FluxKnowledge.Domain.Pipeline;
 using FluxKnowledge.Domain.Sources;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence.Configurations;
+using FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
 using Microsoft.EntityFrameworkCore;
 
 namespace FluxKnowledge.Web.Components.Sources;
@@ -78,14 +80,17 @@ public sealed class SourceRootProjectionReader(
         var deletion = await context.SourceDeletionOperations.AsNoTracking()
             .SingleOrDefaultAsync(operation => operation.SourceRootId == rootId, cancellationToken)
             .ConfigureAwait(false);
-        var revisions = await context.SourceRevisions.AsNoTracking()
-            .Where(revision => revision.SourceRootId == rootId && revision.SuppressedAtUtc == null)
+        var revisions = await CurrentFileRevisions(context)
+            .Where(revision => revision.SourceRootId == rootId)
             .Select(revision => new SourceRevisionRow(
                 revision.Id,
                 revision.CanonicalPath,
                 revision.Classification,
                 revision.Extension,
-                revision.OriginKind))
+                revision.OriginKind,
+                revision.SourceRootId,
+                revision.StableSourceIdentity,
+                revision.DiscoveredAtUtc))
             .ToArrayAsync(cancellationToken)
             .ConfigureAwait(false);
         var publications = await (
@@ -93,7 +98,9 @@ public sealed class SourceRootProjectionReader(
                 join owner in context.SourceRevisions.AsNoTracking() on publication.OwnerSourceRevisionId equals owner.Id
                 join input in context.SourceRevisions.AsNoTracking() on publication.DocumentInputSourceRevisionId equals input.Id
                 join branch in context.SourceProcessorBranches.AsNoTracking() on publication.SourceProcessorBranchId equals branch.Id
+                join record in context.PipelineRecords.AsNoTracking() on publication.PipelineRecordId equals record.Id
                 where owner.SourceRootId == rootId && owner.SuppressedAtUtc == null
+                    && record.Revision == publication.PipelineRecordRevision && record.CompletionCriteriaMet && !record.IsDeleted
                 select new DocumentPublicationRow(
                     publication.OwnerSourceRevisionId,
                     publication.PipelineRecordId,
@@ -128,7 +135,10 @@ public sealed class SourceRootProjectionReader(
                     revision.ByteLength,
                     artifact == null ? null : artifact.ContentSha256,
                     artifact == null ? null : artifact.ByteLength,
-                    artifact == null ? null : artifact.StoreRelativePath))
+                    artifact == null ? null : artifact.StoreRelativePath,
+                    context.PipelineRecords.Any(record => record.Id == activity.ResultingPipelineRecordId &&
+                        record.SourceRevisionId == revision.Id && record.CompletionCriteriaMet && !record.IsDeleted &&
+                        (activity.ResultingPipelineRecordRevision == null || record.Revision == activity.ResultingPipelineRecordRevision))))
                 .ToListAsync(cancellationToken).ConfigureAwait(false);
         var terminalBlockedBranches = await (
                 from branch in context.SourceProcessorBranches.AsNoTracking()
@@ -324,7 +334,7 @@ public sealed class SourceRootProjectionReader(
             summary.Blocked,
             summary.Error + (request?.ErrorFileCount ?? 0));
 
-    private static async ValueTask<IReadOnlyDictionary<Guid, SourceStateSummary>> ReadStateSummariesAsync(
+    internal static async ValueTask<IReadOnlyDictionary<Guid, SourceStateSummary>> ReadStateSummariesAsync(
         FluxKnowledgeDbContext context,
         IReadOnlyCollection<Guid> rootIds,
         CancellationToken cancellationToken)
@@ -334,25 +344,43 @@ public sealed class SourceRootProjectionReader(
             return new Dictionary<Guid, SourceStateSummary>();
         }
 
+        var currentFiles = CurrentFileRevisions(context).Where(revision => rootIds.Contains(revision.SourceRootId));
         var rows = await (
             from activity in context.SourceActivities.AsNoTracking()
-            join revision in context.SourceRevisions.AsNoTracking() on activity.SourceRevisionId equals revision.Id
-            where rootIds.Contains(revision.SourceRootId) && revision.SuppressedAtUtc == null && revision.OriginKind != 2 && revision.OriginKind != 3
+            join revision in currentFiles on activity.SourceRevisionId equals revision.Id
             join branch in context.SourceProcessorBranches.AsNoTracking() on activity.Id equals branch.SourceActivityId into branches
             from branch in branches.DefaultIfEmpty()
             join publicationValue in context.DocumentPublications.AsNoTracking() on revision.Id equals publicationValue.OwnerSourceRevisionId into publicationValues
             from publication in publicationValues.DefaultIfEmpty()
+            join recordValue in context.PipelineRecords.AsNoTracking() on activity.ResultingPipelineRecordId equals recordValue.Id into recordValues
+            from record in recordValues.DefaultIfEmpty()
             select new SourceStateRow(
                 revision.SourceRootId,
                 activity.SourceRevisionId,
                 activity.State,
-                activity.ResultingPipelineRecordId,
+                record != null && record.CompletionCriteriaMet && !record.IsDeleted &&
+                    record.SourceRevisionId == revision.Id &&
+                    (activity.ResultingPipelineRecordRevision == null || record.Revision == activity.ResultingPipelineRecordRevision)
+                    ? activity.ResultingPipelineRecordId : null,
                 branch == null ? null : branch.State,
-                publication == null ? null : publication.PipelineRecordId,
+                publication == null || !context.PipelineRecords.Any(published =>
+                    published.Id == publication.PipelineRecordId && published.Revision == publication.PipelineRecordRevision &&
+                    published.CompletionCriteriaMet && !published.IsDeleted) ? null : publication.PipelineRecordId,
                 publication == null ? null : context.SourceRevisions
                     .Where(input => input.Id == publication.DocumentInputSourceRevisionId)
                     .Select(input => (int?)input.OriginKind).Single(),
-                false))
+                false,
+                publication == null ? null : publication.SourceProcessorBranchId,
+                null,
+                publication != null && context.PipelineRecords.Any(published =>
+                    published.Id == publication.PipelineRecordId && published.Revision == publication.PipelineRecordRevision &&
+                    published.CompletionCriteriaMet && !published.IsDeleted)
+                    ? publication.PublishedAtUtc
+                    : record != null && record.CompletionCriteriaMet && !record.IsDeleted && record.SourceRevisionId == revision.Id &&
+                        (activity.ResultingPipelineRecordRevision == null || record.Revision == activity.ResultingPipelineRecordRevision)
+                        ? context.Artifacts.Where(artifact => artifact.PipelineRecordId == record.Id &&
+                            artifact.SourceRevision == record.Revision && artifact.Stage == (int)PipelineStage.Publish)
+                            .Max(artifact => (DateTimeOffset?)artifact.CreatedAtUtc) : null))
             .ToListAsync(cancellationToken).ConfigureAwait(false);
         var logicalStates = await ReadLogicalOwnerStatesAsync(context, rootIds, cancellationToken).ConfigureAwait(false);
         foreach (var state in logicalStates.Values)
@@ -367,20 +395,48 @@ public sealed class SourceRootProjectionReader(
                 null,
                 null,
                 null,
-                true));
+                true,
+                state.BranchId,
+                state.Status == "Completed" ? "No extractable text" : null));
         }
+        var knownFiles = await currentFiles
+            .Select(revision => new SourceRevisionRow(revision.Id, revision.CanonicalPath, revision.Classification,
+                revision.Extension, revision.OriginKind, revision.SourceRootId, revision.StableSourceIdentity, revision.DiscoveredAtUtc))
+            .ToArrayAsync(cancellationToken).ConfigureAwait(false);
+        var unconfirmed = UnconfirmedRevisionIds(knownFiles);
+        var represented = rows.Select(row => row.SourceRevisionId).ToHashSet();
+        rows.AddRange(knownFiles.Where(file => !represented.Contains(file.Id)).Select(file =>
+            new SourceStateRow(file.SourceRootId, file.Id, (int)SourceActivityState.Pending,
+                null, null, null, null, false)));
         return rows.GroupBy(row => row.SourceRootId).ToDictionary(
             group => group.Key,
             group =>
             {
                 var revisions = group.GroupBy(row => row.SourceRevisionId)
-                    .Select(revision => ClassifyRevision(revision.ToArray()))
+                    .Where(revision => !unconfirmed.Contains(revision.Key))
+                    .Select(revision => new { State = ClassifyRevision(revision.ToArray()), ProgressAt = revision.Max(row => row.PublishedAtUtc) })
                     .ToArray();
+                var selectedBranches = group.GroupBy(row => row.SourceRevisionId)
+                    .Select(owner => logicalStates.TryGetValue(owner.Key, out var logical)
+                        ? logical.BranchId : owner.Select(row => row.PublicationBranchId).FirstOrDefault(id => id != null))
+                    .Where(id => id != null).Select(id => id!.Value).Distinct().ToArray();
                 return new SourceStateSummary(
-                    revisions.Count(state => state == SourceRevisionProjectionState.Indexed),
-                    revisions.Count(state => state == SourceRevisionProjectionState.Deferred),
-                    revisions.Count(state => state == SourceRevisionProjectionState.Blocked),
-                    revisions.Count(state => state == SourceRevisionProjectionState.Error));
+                    revisions.Count(revision => revision.State == SourceRevisionProjectionState.Indexed),
+                    revisions.Count(revision => revision.State == SourceRevisionProjectionState.Deferred),
+                    revisions.Count(revision => revision.State == SourceRevisionProjectionState.Blocked),
+                    revisions.Count(revision => revision.State == SourceRevisionProjectionState.Error))
+                {
+                    Known = knownFiles.Where(file => file.SourceRootId == group.Key).GroupBy(FileBindingKey).Count(),
+                    Provisional = knownFiles.Where(file => file.SourceRootId == group.Key).GroupBy(FileBindingKey)
+                        .Count(files => files.Any(file => unconfirmed.Contains(file.Id))),
+                    Pending = revisions.Count(revision => revision.State == SourceRevisionProjectionState.Unresolved),
+                    MetadataOnly = revisions.Count(revision => revision.State == SourceRevisionProjectionState.MetadataOnly),
+                    WithoutText = revisions.Count(revision => revision.State == SourceRevisionProjectionState.WithoutText),
+                    LastDiscoveryAtUtc = knownFiles.Where(file => file.SourceRootId == group.Key).Max(file => (DateTimeOffset?)file.DiscoveredAtUtc),
+                    LastProgressAtUtc = revisions.Where(revision => revision.State is SourceRevisionProjectionState.Indexed or SourceRevisionProjectionState.MetadataOnly)
+                        .Max(revision => revision.ProgressAt),
+                    SelectedBranches = selectedBranches
+                };
             });
     }
 
@@ -392,6 +448,10 @@ public sealed class SourceRootProjectionReader(
             return SourceRevisionProjectionState.Blocked;
         if (rows.Any(row => row.OverridesPublication && row.State == (int)SourceActivityState.DeferredUnsupported))
             return SourceRevisionProjectionState.Deferred;
+        if (rows.Any(row => row.OverridesPublication && row.State == (int)SourceActivityState.Pending))
+            return SourceRevisionProjectionState.Unresolved;
+        if (rows.Any(row => row.OverridesPublication && row.TerminalOutcome == "No extractable text"))
+            return SourceRevisionProjectionState.WithoutText;
         if (rows.Any(row => row.PublishedPipelineRecordId is not null && row.PublishedOriginKind == 2))
             return SourceRevisionProjectionState.Indexed;
         if (rows.Any(row => row.State == (int)SourceActivityState.FailedTerminal)) return SourceRevisionProjectionState.Error;
@@ -399,10 +459,28 @@ public sealed class SourceRootProjectionReader(
                             row.State == (int)SourceActivityState.DeferredPolicy)) return SourceRevisionProjectionState.Blocked;
         if (rows.Any(row => row.State == (int)SourceActivityState.DeferredUnsupported && row.ResultingPipelineRecordId is null))
             return SourceRevisionProjectionState.Deferred;
+        if (rows.Any(row => row.TerminalOutcome == "No extractable text")) return SourceRevisionProjectionState.WithoutText;
+        if (rows.Any(row => row.PublishedPipelineRecordId != null && row.PublishedOriginKind == 3)) return SourceRevisionProjectionState.MetadataOnly;
         if (rows.Any(row => row.State == (int)SourceActivityState.Completed && row.ResultingPipelineRecordId is not null))
             return SourceRevisionProjectionState.Indexed;
         return SourceRevisionProjectionState.Unresolved;
     }
+
+    // Suppression is authoritative. Multiple unsuppressed bindings remain provisional:
+    // a higher revision number does not prove the winner when content reverts during a scan.
+    private static IQueryable<SourceRevisionEntity> CurrentFileRevisions(FluxKnowledgeDbContext context) =>
+        context.SourceRevisions.AsNoTracking().Where(revision => revision.SuppressedAtUtc == null &&
+            revision.OriginKind != 2 && revision.OriginKind != 3 &&
+            (revision.OriginKind == 0 || !context.SourceRevisions.Any(owner =>
+                owner.Id == revision.ParentSourceRevisionId && owner.SuppressedAtUtc != null)));
+
+    private static (Guid Root, string Path) FileBindingKey(SourceRevisionRow revision) =>
+        (revision.SourceRootId, revision.OriginKind == 0 ? revision.CanonicalPath.ToUpperInvariant() : revision.CanonicalPath);
+
+    private static HashSet<Guid> UnconfirmedRevisionIds(IReadOnlyList<SourceRevisionRow> revisions) =>
+        revisions.GroupBy(FileBindingKey).Where(group => group.Count() > 1).SelectMany(group => group.Select(file => file.Id))
+            .Concat(revisions.GroupBy(file => (file.SourceRootId, file.StableSourceIdentity)).Where(group => group.Count() > 1)
+                .SelectMany(group => group.Select(file => file.Id))).ToHashSet();
 
     private static SourceRootCreateRequest ToCreateRequest(SourceRootDraft draft) =>
         new(
@@ -424,9 +502,18 @@ public sealed class SourceRootProjectionReader(
         IReadOnlyList<TerminalProcessorBranchRow> terminalBlockedBranches,
         IReadOnlyList<SourceProcessorAttemptRow> terminalAttempts,
         IReadOnlyDictionary<Guid, DocumentPublicationRow> publications,
-        IReadOnlyDictionary<Guid, LogicalOwnerStateRow> logicalStates) =>
-        revisions.Where(revision => revision.OriginKind is not (2 or 3)).Select(revision =>
+        IReadOnlyDictionary<Guid, LogicalOwnerStateRow> logicalStates)
+    {
+        var unconfirmed = UnconfirmedRevisionIds(revisions);
+        return revisions.Where(revision => revision.OriginKind is not (2 or 3)).GroupBy(FileBindingKey).Select(bindings =>
         {
+            var revision = bindings.First();
+            if (unconfirmed.Contains(revision.Id))
+            {
+                var path = RelativePath(rootCanonicalPath, revision.CanonicalPath);
+                return new SourceFileProjection(Path.GetFileName(path), path, revision.Classification, "Unconfirmed",
+                    "source-revision-binding-unconfirmed", null);
+            }
             logicalStates.TryGetValue(revision.Id, out var logicalState);
             if (publications.TryGetValue(revision.Id, out var publication))
             {
@@ -479,6 +566,7 @@ public sealed class SourceRootProjectionReader(
         })
         .OrderBy(file => file.RelativePath, StringComparer.OrdinalIgnoreCase)
         .ToArray();
+    }
 
     private static async ValueTask<IReadOnlyDictionary<Guid, LogicalOwnerStateRow>> ReadLogicalOwnerStatesAsync(
         FluxKnowledgeDbContext context,
@@ -490,9 +578,10 @@ public sealed class SourceRootProjectionReader(
             return new Dictionary<Guid, LogicalOwnerStateRow>();
         }
 
+        var currentOwners = CurrentFileRevisions(context).Where(owner => rootIds.Contains(owner.SourceRootId));
         var noContent = await (
                 from branch in context.SourceProcessorBranches.AsNoTracking()
-                join owner in context.SourceRevisions.AsNoTracking() on branch.SourceRevisionId equals owner.Id
+                join owner in currentOwners on branch.SourceRevisionId equals owner.Id
                 join ownerActivity in context.SourceActivities.AsNoTracking() on branch.SourceActivityId equals ownerActivity.Id
                 join member in context.SourceProcessorBranchMembers.AsNoTracking() on branch.Id equals member.BranchId
                 where rootIds.Contains(owner.SourceRootId) && owner.SuppressedAtUtc == null &&
@@ -515,7 +604,7 @@ public sealed class SourceRootProjectionReader(
 
         var childJobs = await (
                 from branch in context.SourceProcessorBranches.AsNoTracking()
-                join owner in context.SourceRevisions.AsNoTracking() on branch.SourceRevisionId equals owner.Id
+                join owner in currentOwners on branch.SourceRevisionId equals owner.Id
                 join member in context.SourceProcessorBranchMembers.AsNoTracking() on branch.Id equals member.BranchId
                 join child in context.SourceRevisions.AsNoTracking() on member.ChildSourceRevisionId equals child.Id
                 join childActivity in context.SourceActivities.AsNoTracking() on member.ChildSourceActivityId equals childActivity.Id
@@ -536,7 +625,7 @@ public sealed class SourceRootProjectionReader(
 
         var incompleteBranches = await (
                 from branch in context.SourceProcessorBranches.AsNoTracking()
-                join owner in context.SourceRevisions.AsNoTracking() on branch.SourceRevisionId equals owner.Id
+                join owner in currentOwners on branch.SourceRevisionId equals owner.Id
                 join ownerActivity in context.SourceActivities.AsNoTracking() on branch.SourceActivityId equals ownerActivity.Id
                 where rootIds.Contains(owner.SourceRootId) && owner.SuppressedAtUtc == null &&
                       branch.State != (int)RetainedProcessorBranchState.Completed &&
@@ -660,7 +749,7 @@ public sealed class SourceRootProjectionReader(
             Guid.Empty,
             activity.SourceRevisionId,
             activity.State,
-            activity.ResultingPipelineRecordId,
+            activity.PipelineCompleted ? activity.ResultingPipelineRecordId : null,
             hasBlockedProcessorBranch ? (int)RetainedProcessorBranchState.Blocked : null,
             null,
             null,
@@ -758,9 +847,11 @@ public sealed class SourceRootProjectionReader(
         long ByteLength,
         string? ArtifactContentSha256,
         long? ArtifactByteLength,
-        string? ArtifactStoreRelativePath);
+        string? ArtifactStoreRelativePath,
+        bool PipelineCompleted);
 
-    private sealed record SourceRevisionRow(Guid Id, string CanonicalPath, string Classification, string Extension, int OriginKind);
+    private sealed record SourceRevisionRow(Guid Id, string CanonicalPath, string Classification, string Extension, int OriginKind,
+        Guid SourceRootId, string StableSourceIdentity, DateTimeOffset DiscoveredAtUtc);
 
     private sealed record DocumentPublicationRow(
         Guid OwnerSourceRevisionId,
@@ -827,7 +918,10 @@ public sealed class SourceRootProjectionReader(
         int? ProcessorBranchState,
         Guid? PublishedPipelineRecordId,
         int? PublishedOriginKind,
-        bool OverridesPublication);
+        bool OverridesPublication,
+        Guid? PublicationBranchId = null,
+        string? TerminalOutcome = null,
+        DateTimeOffset? PublishedAtUtc = null);
 
     private enum SourceRevisionProjectionState
     {
@@ -835,11 +929,21 @@ public sealed class SourceRootProjectionReader(
         Indexed,
         Deferred,
         Blocked,
-        Error
+        Error,
+        MetadataOnly,
+        WithoutText
     }
 
-    private sealed record SourceStateSummary(int Indexed, int Deferred, int Blocked, int Error)
+    internal sealed record SourceStateSummary(int Indexed, int Deferred, int Blocked, int Error)
     {
+        public int Known { get; init; }
+        public int Pending { get; init; }
+        public int Provisional { get; init; }
+        public int MetadataOnly { get; init; }
+        public int WithoutText { get; init; }
+        public DateTimeOffset? LastDiscoveryAtUtc { get; init; }
+        public DateTimeOffset? LastProgressAtUtc { get; init; }
+        public IReadOnlyList<Guid> SelectedBranches { get; init; } = [];
         public static SourceStateSummary Empty { get; } = new(0, 0, 0, 0);
     }
 }

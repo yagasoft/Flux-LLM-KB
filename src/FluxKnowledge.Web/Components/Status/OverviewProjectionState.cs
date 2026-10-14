@@ -1,9 +1,16 @@
 using FluxKnowledge.Application.Contracts;
+using System.Data.Common;
 
 namespace FluxKnowledge.Web.Components.Status;
 
 public sealed class OverviewProjectionState(IProjectionReader reader)
 {
+    private readonly SemaphoreSlim _reloadGate = new(1, 1);
+    public bool HasSnapshot { get; private set; }
+    public bool IsStale { get; private set; }
+    public DateTimeOffset? LastSuccessfulReadAtUtc { get; private set; }
+    public string? RefreshIssue { get; private set; }
+
     public OverviewProjection Current { get; private set; } = new(
         0,
         0,
@@ -18,8 +25,31 @@ public sealed class OverviewProjectionState(IProjectionReader reader)
         GpuSchedulerStatus = GpuSchedulerStatusProjection.Empty
     };
 
-    public async ValueTask ReloadAsync(CancellationToken cancellationToken) =>
-        Current = await reader.ReadOverviewAsync(cancellationToken).ConfigureAwait(false);
+    public async ValueTask ReloadAsync(CancellationToken cancellationToken)
+    {
+        if (!await _reloadGate.WaitAsync(0, cancellationToken).ConfigureAwait(false)) return;
+        try
+        {
+            var next = await reader.ReadOverviewAsync(cancellationToken).ConfigureAwait(false);
+            if (!next.Activity.IsConsistent)
+            {
+                IsStale = true;
+                RefreshIssue = "Status changed during the read. Waiting for a consistent sample.";
+                return;
+            }
+            Current = next;
+            HasSnapshot = true;
+            IsStale = false;
+            RefreshIssue = null;
+            LastSuccessfulReadAtUtc = next.Activity.IsAvailable ? next.Activity.ObservedAtUtc : DateTimeOffset.UtcNow;
+        }
+        catch (Exception exception) when (exception is DbException or InvalidOperationException or TimeoutException)
+        {
+            IsStale = true;
+            RefreshIssue = "Status refresh failed.";
+        }
+        finally { _reloadGate.Release(); }
+    }
 
     public async ValueTask<StatusEventSubscription> SubscribeAndReloadAsync(
         StatusEventFeed statusEvents,
@@ -43,11 +73,11 @@ public sealed class OverviewProjectionState(IProjectionReader reader)
     public ValueTask HandleStatusChangedAsync(StatusChanged statusChanged, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(statusChanged);
-        return string.Equals(statusChanged.Projection, "pipeline", StringComparison.OrdinalIgnoreCase) ||
-               string.Equals(statusChanged.Projection, "index-recovery", StringComparison.OrdinalIgnoreCase) ||
-               string.Equals(statusChanged.Projection, "gpu-scheduler", StringComparison.OrdinalIgnoreCase) ||
-               string.Equals(statusChanged.Projection, "reconnect", StringComparison.OrdinalIgnoreCase)
+        return AffectsOverview(statusChanged.Projection)
             ? ReloadAsync(cancellationToken)
             : ValueTask.CompletedTask;
     }
+
+    public static bool AffectsOverview(string projection) => projection.ToLowerInvariant() is
+        "pipeline" or "sources" or "index-recovery" or "gpu-scheduler" or "reconnect";
 }

@@ -24,6 +24,8 @@ public sealed record OverviewProjection(
     public SourceIndexingSummary SourceIndexing { get; init; } = SourceIndexingSummary.Empty;
 
     public OutlookCaptureSummary OutlookCapture { get; init; } = OutlookCaptureSummary.Empty;
+
+    public PipelineActivitySummary Activity { get; init; } = PipelineActivitySummary.Unknown;
 }
 
 public sealed record OutlookCaptureSummary(

@@ -20,6 +20,101 @@ public sealed class SourceRootProjectionReaderIntegrationTests(NativeSqlServerFi
     private readonly NativeSqlServerFixture _fixture = fixture;
 
     [NativeSqlServerFact]
+    public async Task Pending_selected_replacement_overrides_a_valid_older_publication_in_both_file_and_summary_views()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var root = Guid.NewGuid();
+        var owner = Guid.NewGuid();
+        var factory = new TestDbContextFactory(_fixture.ConnectionString);
+        await using (var setup = factory.CreateDbContext())
+        {
+            setup.SourceRootConfigurations.Add(new SourceRootConfigurationEntity
+            {
+                Id = root, CanonicalPath = $"E:\\pending-logical-tests\\{root:N}", DisplayName = "Pending replacement",
+                State = (int)SourceRootState.Enabled, Recursive = true, IncludePatternsJson = "[]", ExcludePatternsJson = "[]",
+                AllowedClassificationsJson = "[]", MaximumFileBytes = 10000, ReconciliationCadenceSeconds = 900,
+                ConfigurationRevision = 1, CreatedAtUtc = now, UpdatedAtUtc = now
+            });
+            setup.SourceRevisions.Add(Revision(owner, root, "replacement.pdf", now.AddHours(-1), false));
+            AddPublishedChild(setup, owner, 2, PdfDocumentProcessor.Capability, now.AddMinutes(-10), "published");
+            var pending = AddChild(setup, owner, 2, ImageDocumentInputProcessor.Capability, now.AddMinutes(-1), "pending");
+            setup.Jobs.Add(new JobEntity
+            {
+                Id = Guid.NewGuid(), PipelineRecordId = pending.RecordId, SourceRevision = 1,
+                Stage = (int)PipelineStage.Publish, Operation = "publish", PublicState = (int)PublicJobState.WorkerQueued,
+                DueAtUtc = now
+            });
+            await setup.SaveChangesAsync();
+        }
+        await using (var context = factory.CreateDbContext())
+        {
+            var summary = (await SourceRootProjectionReader.ReadStateSummariesAsync(context, [root], CancellationToken.None))[root];
+            Assert.Equal(1, summary.Known);
+            Assert.Equal(1, summary.Pending);
+            Assert.Equal(0, summary.Indexed);
+            Assert.Null(summary.LastProgressAtUtc);
+        }
+        var reader = new SourceRootProjectionReader(factory, new NoPathPolicy(), new NoEnumeration(), new LocalSourceCapabilityHandlerRegistry([]));
+        var detail = await reader.ReadRootAsync(root, CancellationToken.None);
+        Assert.NotNull(detail);
+        Assert.Equal("Pending", Assert.Single(detail.Files).Status);
+        Assert.Equal(0, detail.IndexedCount);
+    }
+
+    [NativeSqlServerFact]
+    public async Task Read_fence_covers_member_completion_and_graph_deletion_when_the_versioned_parent_commits_atomically()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var root = Guid.NewGuid();
+        var owner = Guid.NewGuid();
+        var factory = new TestDbContextFactory(_fixture.ConnectionString);
+        Guid branchId;
+        await using (var setup = factory.CreateDbContext())
+        {
+            setup.SourceRootConfigurations.Add(new SourceRootConfigurationEntity
+            {
+                Id = root, CanonicalPath = $"E:\\read-fence-tests\\{root:N}", DisplayName = "Read fence",
+                State = (int)SourceRootState.Enabled, Recursive = true, IncludePatternsJson = "[]", ExcludePatternsJson = "[]",
+                AllowedClassificationsJson = "[]", MaximumFileBytes = 10000, ReconciliationCadenceSeconds = 900,
+                ConfigurationRevision = 1, CreatedAtUtc = now, UpdatedAtUtc = now
+            });
+            setup.SourceRevisions.Add(Revision(owner, root, "document.pdf", now, false));
+            branchId = AddChild(setup, owner, 2, PdfDocumentProcessor.Capability, now, "fence").BranchId;
+            setup.SourceDeletionOperations.Add(new SourceDeletionOperationEntity { Id = Guid.NewGuid(), SourceRootId = root,
+                Phase = "draining", CreatedAtUtc = now, UpdatedAtUtc = now });
+            await setup.SaveChangesAsync();
+        }
+        await using var reader = factory.CreateDbContext();
+        await using var writer = factory.CreateDbContext();
+        var beforeMembers = await SqlPipelineActivityQuery.ReadFenceAsync(reader, CancellationToken.None);
+        await using (var transaction = await writer.Database.BeginTransactionAsync())
+        {
+            writer.SourceProcessorBranchMembers.Add(new SourceProcessorBranchMemberEntity { Id = Guid.NewGuid(), BranchId = branchId,
+                MemberFingerprint = new string('d', 64), Disposition = "skipped", ReasonCode = "test", CreatedAtUtc = now });
+            var branch = await writer.SourceProcessorBranches.SingleAsync(b => b.Id == branchId);
+            branch.CompletedMemberCount++;
+            branch.UpdatedAtUtc = now.AddSeconds(1);
+            await writer.SaveChangesAsync();
+            Assert.False((await SqlPipelineActivityQuery.ReadFenceAsync(reader, CancellationToken.None)).IsStable);
+            await transaction.CommitAsync();
+        }
+        Assert.False(beforeMembers.Accepts(await SqlPipelineActivityQuery.ReadFenceAsync(reader, CancellationToken.None)));
+        var beforeDeletion = await SqlPipelineActivityQuery.ReadFenceAsync(reader, CancellationToken.None);
+        await using (var transaction = await writer.Database.BeginTransactionAsync())
+        {
+            await writer.SourceProcessorBranchMembers.Where(member => member.BranchId == branchId).ExecuteDeleteAsync();
+            var operation = await writer.SourceDeletionOperations.SingleAsync(d => d.SourceRootId == root);
+            operation.Phase = "cleanup-files";
+            operation.UpdatedAtUtc = now.AddSeconds(2);
+            await writer.SaveChangesAsync();
+            Assert.False((await SqlPipelineActivityQuery.ReadFenceAsync(reader, CancellationToken.None)).IsStable);
+            await transaction.CommitAsync();
+        }
+        Assert.False(beforeDeletion.Accepts(await SqlPipelineActivityQuery.ReadFenceAsync(reader, CancellationToken.None)));
+        Assert.Empty(await reader.SourceProcessorBranchMembers.Where(member => member.BranchId == branchId).ToArrayAsync());
+    }
+
+    [NativeSqlServerFact]
     public async Task Published_Visio_owner_projects_only_the_current_document_result()
     {
         var now = DateTimeOffset.Parse("2026-09-21T00:00:00+00:00");
@@ -773,6 +868,7 @@ public sealed class SourceRootProjectionReaderIntegrationTests(NativeSqlServerFi
         string name)
     {
         var child = AddChild(setup, ownerId, OriginKind, capability, createdAtUtc, name);
+        setup.PipelineRecords.Local.Single(record => record.Id == child.RecordId).CompletionCriteriaMet = true;
         setup.DocumentPublications.Add(new DocumentPublicationEntity
         {
             OwnerSourceRevisionId = ownerId, DocumentInputSourceRevisionId = child.ChildId,
