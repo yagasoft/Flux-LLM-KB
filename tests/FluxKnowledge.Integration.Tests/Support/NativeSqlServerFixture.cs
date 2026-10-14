@@ -14,9 +14,11 @@ namespace FluxKnowledge.Integration.Tests.Support;
 public sealed class NativeSqlServerFixture : IAsyncLifetime
 {
     public const string ConnectionEnvironmentVariable = "FLUXKNOWLEDGE_TEST_SQL_CONNECTION";
+    public const string FileRootEnvironmentVariable = "FLUXKNOWLEDGE_TEST_SQL_ROOT";
     private const string TestCatalogPrefix = "FluxKnowledge_Phase1Tests_";
 
     private string? _serverConnectionString;
+    private string? _fileRoot;
     private bool _databaseCreateAttempted;
 
     public string DatabaseName { get; } = $"{TestCatalogPrefix}{Guid.NewGuid():N}";
@@ -44,6 +46,8 @@ public sealed class NativeSqlServerFixture : IAsyncLifetime
     public async Task InitializeAsync()
     {
         _serverConnectionString = await ResolveDisposableServerConnectionStringAsync().ConfigureAwait(false);
+        _fileRoot = ValidateTestFileRoot(Environment.GetEnvironmentVariable(FileRootEnvironmentVariable));
+        if (!Directory.Exists(_fileRoot)) throw new InvalidOperationException("The owned disposable SQL file root is not provisioned.");
 
         ValidateServerConnectionString(_serverConnectionString);
         ValidateGeneratedCatalog(DatabaseName);
@@ -55,11 +59,9 @@ public sealed class NativeSqlServerFixture : IAsyncLifetime
         await RunCreateSequenceAsync(
             async () =>
             {
-                _databaseCreateAttempted = true;
-                await using var create = new SqlCommand(
-                    $"CREATE DATABASE [{DatabaseName}];",
-                    serverConnection);
+                await using var create = new SqlCommand(BuildCreateDatabaseSql(DatabaseName, _fileRoot), serverConnection);
                 await create.ExecuteNonQueryAsync().ConfigureAwait(false);
+                _databaseCreateAttempted = true;
             },
             () => VerifyCreatedDatabaseFilesAsync(serverConnection),
             async () =>
@@ -76,6 +78,70 @@ public sealed class NativeSqlServerFixture : IAsyncLifetime
     public async Task DisposeAsync()
     {
         await DropDatabaseAsync().ConfigureAwait(false);
+    }
+
+    // Interrupts every connection in this test's catalogue, never another catalogue.
+    // The restricted test principal deliberately has no server-wide KILL permission.
+    internal async Task InterruptDatabaseSessionsAsync()
+    {
+        var sql = await CreateSessionInterruptionSqlAsync().ConfigureAwait(false);
+        try
+        {
+            await ExecuteServerSqlAsync(sql).ConfigureAwait(false);
+        }
+        finally
+        {
+            // Use a fresh master connection even if the first batch lost its session.
+            // A failed restoration is surfaced; never silently leave a fixture restricted.
+            await ExecuteServerSqlAsync(BuildRestoreDatabaseSessionsSql(DatabaseName, _fileRoot!))
+                .ConfigureAwait(false);
+        }
+    }
+
+    internal async Task<string> CreateSessionInterruptionSqlAsync()
+    {
+        if (!_databaseCreateAttempted || _serverConnectionString is null || _fileRoot is null)
+            throw new InvalidOperationException("Session interruption requires this fixture's acknowledged database.");
+        await VerifyOwnedDatabaseAsync(_serverConnectionString, DatabaseName, _fileRoot).ConfigureAwait(false);
+        return BuildSessionInterruptionSql(DatabaseName, _fileRoot);
+    }
+
+    internal string RestoreDatabaseSessionsSql => BuildRestoreDatabaseSessionsSql(DatabaseName, _fileRoot!);
+
+    private async Task ExecuteServerSqlAsync(string sql)
+    {
+        await using var connection = new SqlConnection(new SqlConnectionStringBuilder(_serverConnectionString)
+        { InitialCatalog = "master", Pooling = false, ConnectTimeout = 5 }.ConnectionString);
+        await connection.OpenAsync().ConfigureAwait(false);
+        await using var command = new SqlCommand(sql, connection) { CommandTimeout = 5 };
+        await command.ExecuteNonQueryAsync().ConfigureAwait(false);
+    }
+
+    internal static string BuildSessionInterruptionSql(string name, string root) =>
+        BuildSessionControlGuardSql(name, root) + $"""
+
+        ALTER DATABASE [{name}] SET SINGLE_USER WITH ROLLBACK IMMEDIATE;
+        ALTER DATABASE [{name}] SET MULTI_USER WITH ROLLBACK IMMEDIATE;
+        """;
+
+    private static string BuildRestoreDatabaseSessionsSql(string name, string root) =>
+        BuildSessionControlGuardSql(name, root) + $"""
+
+        ALTER DATABASE [{name}] SET MULTI_USER WITH ROLLBACK IMMEDIATE;
+        """;
+
+    private static string BuildSessionControlGuardSql(string name, string root)
+    {
+        ValidateGeneratedCatalog(name);
+        root = ValidateTestFileRoot(root);
+        return $"""
+            IF DB_NAME() <> N'master'
+                OR NOT EXISTS (SELECT 1 FROM sys.databases WHERE [name]=N'{name}' AND owner_sid=SUSER_SID())
+                OR (SELECT COUNT(*) FROM sys.master_files WHERE database_id=DB_ID(N'{name}')) <> 2
+                OR NOT EXISTS (SELECT 1 FROM sys.master_files WHERE database_id=DB_ID(N'{name}') AND [type]=0 AND physical_name=N'{Path.Combine(root, name + ".mdf")}')
+                OR NOT EXISTS (SELECT 1 FROM sys.master_files WHERE database_id=DB_ID(N'{name}') AND [type]=1 AND physical_name=N'{Path.Combine(root, name + "_log.ldf")}')
+                THROW 51000, 'Disposable session-control ownership or exact file manifest is unverified.', 1;
+            """;
     }
 
     internal async Task<PreviousMigrationDatabase> CreatePreviousMigrationDatabaseAsync()
@@ -123,7 +189,7 @@ public sealed class NativeSqlServerFixture : IAsyncLifetime
         var database = new PreviousMigrationDatabase(
             _serverConnectionString,
             $"{TestCatalogPrefix}{Guid.NewGuid():N}",
-            targetMigration);
+            targetMigration, _fileRoot!);
         await database.InitializeAsync().ConfigureAwait(false);
         return database;
     }
@@ -241,56 +307,49 @@ public sealed class NativeSqlServerFixture : IAsyncLifetime
         }
     }
 
-    private static async Task<string> ResolveDisposableServerConnectionStringAsync()
+    private static Task<string> ResolveDisposableServerConnectionStringAsync()
     {
         var configured = Environment.GetEnvironmentVariable(ConnectionEnvironmentVariable);
-        var repositoryRoot = FindRepositoryRoot();
-        var script = Path.Combine(repositoryRoot, "scripts", "dev", "ensure-disposable-sql.ps1");
-        var start = new ProcessStartInfo("pwsh")
-        {
-            UseShellExecute = false,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            CreateNoWindow = true
-        };
-        start.ArgumentList.Add("-NoLogo");
-        start.ArgumentList.Add("-NoProfile");
-        start.ArgumentList.Add("-NonInteractive");
-        start.ArgumentList.Add("-ExecutionPolicy");
-        start.ArgumentList.Add("Bypass");
-        start.ArgumentList.Add("-File");
-        start.ArgumentList.Add(script);
-        if (!string.IsNullOrWhiteSpace(configured))
-        {
-            start.ArgumentList.Add("-ServerConnectionString");
-            start.ArgumentList.Add(configured);
-        }
-
-        using var process = Process.Start(start) ?? throw new InvalidOperationException("Could not start the disposable SQL prerequisite helper.");
-        var output = await process.StandardOutput.ReadToEndAsync().ConfigureAwait(false);
-        var error = await process.StandardError.ReadToEndAsync().ConfigureAwait(false);
-        await process.WaitForExitAsync().ConfigureAwait(false);
-        if (process.ExitCode != 0)
-        {
-            throw new InvalidOperationException($"Disposable SQL prerequisite helper failed: {error.Trim()}");
-        }
-
-        var connectionString = output.Trim();
-        ValidateServerConnectionString(connectionString);
-        return connectionString;
+        return Task.FromResult(ValidateRestrictedTestConnection(configured));
     }
 
-    private static string FindRepositoryRoot()
+    internal static string ValidateRestrictedTestConnection(string? configured)
     {
-        for (var directory = new DirectoryInfo(AppContext.BaseDirectory); directory is not null; directory = directory.Parent)
-        {
-            if (File.Exists(Path.Combine(directory.FullName, "FluxKnowledge.slnx")))
-            {
-                return directory.FullName;
-            }
-        }
+        if (string.IsNullOrWhiteSpace(configured))
+            throw new InvalidOperationException($"Explicit restricted staging test credentials are required in {ConnectionEnvironmentVariable}; no Windows/admin fallback is permitted.");
+        ValidateServerConnectionString(configured);
+        var parsed = new SqlConnectionStringBuilder(configured);
+        if (parsed.IntegratedSecurity || string.IsNullOrWhiteSpace(parsed.UserID) || string.IsNullOrWhiteSpace(parsed.Password) ||
+            !string.IsNullOrEmpty(parsed.FailoverPartner) || parsed.MultiSubnetFailover || parsed.ApplicationIntent != ApplicationIntent.ReadWrite)
+            throw new InvalidOperationException("Disposable SQL requires a restricted SQL test principal without alternate routing.");
+        parsed.ConnectRetryCount = 0;
+        parsed.ConnectTimeout = 5;
+        return parsed.ConnectionString;
+    }
 
-        throw new InvalidOperationException("Could not locate the repository root for the disposable SQL prerequisite helper.");
+    internal static string ValidateTestFileRoot(string? root)
+    {
+        const string stageBase = @"E:\Codex Workspaces\Staging\FluxKnowledge";
+        if (string.IsNullOrWhiteSpace(root) || !Path.IsPathFullyQualified(root))
+            throw new InvalidOperationException($"{FileRootEnvironmentVariable} must name the provisioned disposable SQL file root.");
+        var canonical = Path.TrimEndingDirectorySeparator(Path.GetFullPath(root));
+        var deployment = Path.GetDirectoryName(Path.GetDirectoryName(Path.GetDirectoryName(canonical)))!;
+        if (!string.Equals(root, canonical, StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(Path.GetDirectoryName(deployment), stageBase, StringComparison.OrdinalIgnoreCase) ||
+            !System.Text.RegularExpressions.Regex.IsMatch(Path.GetFileName(deployment), @"\ASqlTests-[A-Za-z0-9_-]{1,48}\z") ||
+            !string.Equals(canonical, Path.Combine(deployment, "Data", "Sql", "Disposable"), StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("Disposable SQL files must stay within an explicit owned SqlTests staging deployment.");
+        for (var path = canonical; path is not null; path = Path.GetDirectoryName(path))
+            if (Directory.Exists(path) && (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
+                throw new InvalidOperationException("Disposable SQL storage cannot traverse reparse points.");
+        return canonical;
+    }
+
+    internal static string BuildCreateDatabaseSql(string name, string root)
+    {
+        ValidateGeneratedCatalog(name);
+        root = ValidateTestFileRoot(root);
+        return $"CREATE DATABASE [{name}] ON PRIMARY (NAME=N'{name}', FILENAME=N'{Path.Combine(root, name + ".mdf")}') LOG ON (NAME=N'{name}_log', FILENAME=N'{Path.Combine(root, name + "_log.ldf")}');";
     }
 
     internal static async Task RunCreateSequenceAsync(
@@ -338,51 +397,63 @@ public sealed class NativeSqlServerFixture : IAsyncLifetime
     {
         const string sql =
             """
-            SELECT
-                CONVERT(nvarchar(4000), SERVERPROPERTY('InstanceDefaultDataPath')),
-                CONVERT(nvarchar(4000), SERVERPROPERTY('InstanceDefaultLogPath')),
-                CONVERT(int, SERVERPROPERTY('IsFullTextInstalled'));
+            SELECT CONVERT(int, SERVERPROPERTY('IsFullTextInstalled')),
+                IS_SRVROLEMEMBER('sysadmin'), IS_SRVROLEMEMBER('dbcreator'),
+                HAS_PERMS_BY_NAME(NULL,NULL,'CONTROL SERVER'),
+                HAS_PERMS_BY_NAME(NULL,NULL,'ALTER ANY DATABASE'), HAS_DBACCESS('FluxKnowledge'),
+                HAS_PERMS_BY_NAME(NULL,NULL,'CREATE ANY DATABASE');
             """;
         await using var command = new SqlCommand(sql, connection);
         await using var reader = await command.ExecuteReaderAsync().ConfigureAwait(false);
         if (!await reader.ReadAsync().ConfigureAwait(false) ||
-            reader.IsDBNull(0) ||
-            reader.IsDBNull(1) ||
-            reader.IsDBNull(2))
+            reader.IsDBNull(0) || reader.GetInt32(0) != 1 ||
+            Enumerable.Range(1, 5).Any(index => reader.IsDBNull(index) || reader.GetInt32(index) != 0) ||
+            reader.IsDBNull(6) || reader.GetInt32(6) != 1)
         {
             throw new InvalidOperationException(
-                "Native SQL tests could not verify server file defaults and Full-Text state.");
-        }
-
-        ValidateCreatedDatabaseFiles([reader.GetString(0), reader.GetString(1)]);
-
-        if (reader.GetInt32(2) != 1)
-        {
-            throw new InvalidOperationException(
-                "Native SQL migration tests require SQL Server Full-Text.");
+                "Native SQL tests require Full-Text and an explicit create-only test principal without production access or server administration.");
         }
     }
 
     private async Task VerifyCreatedDatabaseFilesAsync(SqlConnection connection)
+        => await VerifyOwnedDatabaseAsync(_serverConnectionString!, DatabaseName, _fileRoot!).ConfigureAwait(false);
+
+    private static async Task VerifyOwnedDatabaseAsync(string serverConnectionString, string name, string root)
     {
-        ValidateGeneratedCatalog(DatabaseName);
+        ValidateGeneratedCatalog(name);
+        root = ValidateTestFileRoot(root);
+        await using var connection = new SqlConnection(new SqlConnectionStringBuilder(serverConnectionString) { InitialCatalog = name }.ConnectionString);
+        await connection.OpenAsync().ConfigureAwait(false);
         const string sql =
             """
+            SELECT DB_NAME(), CONVERT(bit, CASE WHEN owner_sid=SUSER_SID() THEN 1 ELSE 0 END)
+            FROM sys.databases WHERE database_id=DB_ID();
             SELECT [physical_name]
-            FROM sys.master_files
-            WHERE [database_id] = DB_ID(@databaseName)
+            FROM sys.database_files
             ORDER BY [file_id];
             """;
         await using var command = new SqlCommand(sql, connection);
-        command.Parameters.AddWithValue("@databaseName", DatabaseName);
         await using var reader = await command.ExecuteReaderAsync().ConfigureAwait(false);
+        if (!await reader.ReadAsync().ConfigureAwait(false) || reader.GetString(0) != name || !reader.GetBoolean(1))
+            throw new InvalidOperationException("Disposable database ownership is unverified; preserve it.");
+        if (!await reader.NextResultAsync().ConfigureAwait(false)) throw new InvalidOperationException("Disposable database files are unverified.");
         var filePaths = new List<string?>();
         while (await reader.ReadAsync().ConfigureAwait(false))
         {
             filePaths.Add(reader.IsDBNull(0) ? null : reader.GetString(0));
         }
 
-        ValidateCreatedDatabaseFiles(filePaths);
+        ValidateOwnedDatabaseFiles(name, root, filePaths);
+    }
+
+    internal static void ValidateOwnedDatabaseFiles(string name, string root, IReadOnlyList<string?> paths)
+    {
+        ValidateGeneratedCatalog(name);
+        root = ValidateTestFileRoot(root);
+        ValidateCreatedDatabaseFiles(paths);
+        var expected = new[] { Path.Combine(root, name + ".mdf"), Path.Combine(root, name + "_log.ldf") };
+        if (paths.Count != 2 || !paths.Order(StringComparer.OrdinalIgnoreCase).SequenceEqual(expected.Order(StringComparer.OrdinalIgnoreCase), StringComparer.OrdinalIgnoreCase))
+            throw new InvalidOperationException("Disposable database files do not match this run's exact owned manifest.");
     }
 
     private async Task DropDatabaseAsync()
@@ -396,6 +467,7 @@ public sealed class NativeSqlServerFixture : IAsyncLifetime
         SqlConnection.ClearAllPools();
         await using var serverConnection = new SqlConnection(_serverConnectionString);
         await serverConnection.OpenAsync().ConfigureAwait(false);
+        await VerifyOwnedDatabaseAsync(_serverConnectionString, DatabaseName, _fileRoot!).ConfigureAwait(false);
         await using var drop = new SqlCommand(
             $"""
              IF DB_ID(N'{DatabaseName}') IS NOT NULL
@@ -452,18 +524,21 @@ public sealed class NativeSqlServerFixture : IAsyncLifetime
         private readonly string _serverConnectionString;
         private readonly string _databaseName;
         private readonly string _targetMigration;
+        private readonly string _fileRoot;
         private bool _created;
+        internal string DatabaseName => _databaseName;
 
         internal PreviousMigrationDatabase(
             string serverConnectionString,
             string databaseName,
-            string targetMigration)
+            string targetMigration, string fileRoot)
         {
             ValidateServerConnectionString(serverConnectionString);
             ValidateGeneratedCatalog(databaseName);
             _serverConnectionString = serverConnectionString;
             _databaseName = databaseName;
             _targetMigration = targetMigration;
+            _fileRoot = ValidateTestFileRoot(fileRoot);
         }
 
         internal string ConnectionString => new SqlConnectionStringBuilder(_serverConnectionString)
@@ -485,12 +560,12 @@ public sealed class NativeSqlServerFixture : IAsyncLifetime
             await EnsureSafeServerDefaultsAsync(serverConnection).ConfigureAwait(false);
             try
             {
-                _created = true;
                 await using (var create = new SqlCommand(
-                                 $"CREATE DATABASE [{_databaseName}];",
+                                 BuildCreateDatabaseSql(_databaseName, _fileRoot),
                                  serverConnection))
                 {
                     await create.ExecuteNonQueryAsync().ConfigureAwait(false);
+                    _created = true;
                 }
 
                 await VerifyCreatedDatabaseFilesAsync(serverConnection).ConfigureAwait(false);
@@ -517,6 +592,7 @@ public sealed class NativeSqlServerFixture : IAsyncLifetime
             SqlConnection.ClearAllPools();
             await using var serverConnection = new SqlConnection(_serverConnectionString);
             await serverConnection.OpenAsync().ConfigureAwait(false);
+            await VerifyOwnedDatabaseAsync(_serverConnectionString, _databaseName, _fileRoot).ConfigureAwait(false);
             await using var drop = new SqlCommand(
                 $"""
                  IF DB_ID(N'{_databaseName}') IS NOT NULL
@@ -531,25 +607,6 @@ public sealed class NativeSqlServerFixture : IAsyncLifetime
         }
 
         private async Task VerifyCreatedDatabaseFilesAsync(SqlConnection connection)
-        {
-            ValidateGeneratedCatalog(_databaseName);
-            const string sql =
-                """
-                SELECT [physical_name]
-                FROM sys.master_files
-                WHERE [database_id] = DB_ID(@databaseName)
-                ORDER BY [file_id];
-                """;
-            await using var command = new SqlCommand(sql, connection);
-            command.Parameters.AddWithValue("@databaseName", _databaseName);
-            await using var reader = await command.ExecuteReaderAsync().ConfigureAwait(false);
-            var filePaths = new List<string?>();
-            while (await reader.ReadAsync().ConfigureAwait(false))
-            {
-                filePaths.Add(reader.IsDBNull(0) ? null : reader.GetString(0));
-            }
-
-            ValidateCreatedDatabaseFiles(filePaths);
-        }
+            => await VerifyOwnedDatabaseAsync(_serverConnectionString, _databaseName, _fileRoot).ConfigureAwait(false);
     }
 }

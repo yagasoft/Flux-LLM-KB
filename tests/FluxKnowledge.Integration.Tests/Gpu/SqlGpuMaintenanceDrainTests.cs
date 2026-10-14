@@ -6,7 +6,6 @@ using FluxKnowledge.Infrastructure.Usearch;
 using FluxKnowledge.Domain.Gpu;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
 using FluxKnowledge.Integration.Tests.Support;
-using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 using Xunit;
 
@@ -100,10 +99,7 @@ public sealed class SqlGpuMaintenanceDrainTests(NativeSqlServerFixture fixture) 
         var factory = await new SqlGpuAdmissionTests(fixture).CreateEnvironmentAsync();
         await using var drain = await SqlGpuMaintenanceDrainLease.AcquireAsync(factory, CancellationToken.None);
         Assert.True(await drain.IsDrainedAsync("slot-a", CancellationToken.None));
-        await using var killer = new SqlConnection(fixture.ConnectionString);
-        await killer.OpenAsync();
-        await using var kill = new SqlCommand($"KILL {drain.SessionId}", killer);
-        await kill.ExecuteNonQueryAsync();
+        await fixture.InterruptDatabaseSessionsAsync();
         await Assert.ThrowsAnyAsync<Exception>(() => drain.IsDrainedAsync("slot-a", CancellationToken.None).AsTask());
     }
 }

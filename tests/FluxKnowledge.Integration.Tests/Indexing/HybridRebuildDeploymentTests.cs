@@ -61,6 +61,11 @@ public sealed class HybridRebuildDeploymentTests(NativeSqlServerFixture fixture)
         foreach (var value in new[] { "-NoProfile", "-File", Path.Combine(root.FullName,"tests","native",script), "-SourceRoot", root.FullName, "-Mode", mode }) start.ArgumentList.Add(value);
         if (migrationScript is not null) { start.ArgumentList.Add("-MigrationScript"); start.ArgumentList.Add(migrationScript); }
         start.Environment["FLUXKNOWLEDGE_HYBRID_DISPOSABLE_SQL"] = fixture.ConnectionString;
+        if (mode == "drain")
+        {
+            start.Environment["FLUXKNOWLEDGE_HYBRID_INTERRUPT_SQL"] = await fixture.CreateSessionInterruptionSqlAsync();
+            start.Environment["FLUXKNOWLEDGE_HYBRID_RESTORE_SQL"] = fixture.RestoreDatabaseSessionsSql;
+        }
         using var process = Process.Start(start)!;
         var output=process.StandardOutput.ReadToEndAsync();
         var errors=process.StandardError.ReadToEndAsync();

@@ -17,6 +17,21 @@ function Invoke-TestSql {
     }
     finally { $connection.Dispose() }
 }
+function Invoke-FixtureSessionControl {
+    param([string]$Sql)
+    if ([string]::IsNullOrWhiteSpace($Sql)) { throw 'Exact fixture-generated session control is required.' }
+    $serverBuilder = [System.Data.SqlClient.SqlConnectionStringBuilder]::new($connectionString)
+    $serverBuilder['Initial Catalog'] = 'master'
+    $serverBuilder['Pooling'] = $false
+    $serverBuilder['Connect Timeout'] = 5
+    $connection = [System.Data.SqlClient.SqlConnection]::new($serverBuilder.ConnectionString)
+    try {
+        $connection.Open(); $command = $connection.CreateCommand()
+        try { $command.CommandText = $Sql; $command.CommandTimeout = 5; [void]$command.ExecuteNonQuery() }
+        finally { $command.Dispose() }
+    }
+    finally { $connection.Dispose() }
+}
 if ($Mode -eq 'drain') {
     $evidence = @{ Called=$false; Killed=$false }
     Invoke-WithHybridGpuDrain -ConnectionString $connectionString -TimeoutSeconds 2 -StopApplication {
@@ -32,7 +47,9 @@ SELECT @result;
     try {
         Invoke-WithHybridGpuDrain -ConnectionString $connectionString -TimeoutSeconds 2 -StopApplication {
             param($sessionId)
-            [void](Invoke-TestSql "KILL $sessionId")
+            # All sessions in this verified fixture are interrupted; no global KILL grant.
+            try { Invoke-FixtureSessionControl $env:FLUXKNOWLEDGE_HYBRID_INTERRUPT_SQL }
+            finally { Invoke-FixtureSessionControl $env:FLUXKNOWLEDGE_HYBRID_RESTORE_SQL }
             $evidence.Killed = $true
         }
         throw 'A killed owning session silently confirmed the stop.'
