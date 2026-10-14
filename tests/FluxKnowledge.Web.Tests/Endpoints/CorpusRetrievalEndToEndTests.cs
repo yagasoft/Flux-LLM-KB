@@ -106,7 +106,8 @@ public sealed class CorpusRetrievalEndToEndTests(NativeSqlServerFixture fixture)
         await app.StartAsync();
         using var client = app.GetTestClient();
         using var search = await client.PostAsJsonAsync("/api/v1/corpus/search", new { query = "LateAnswer", scope = "all", limit = 1 });
-        Assert.Equal(HttpStatusCode.OK, search.StatusCode);
+        Assert.True(search.StatusCode == HttpStatusCode.OK,
+            $"Expected HTTP 200, received {(int)search.StatusCode}: {await search.Content.ReadAsStringAsync()}");
         using var searchJson = JsonDocument.Parse(await search.Content.ReadAsStringAsync());
         var results = searchJson.RootElement.GetProperty("result").GetProperty("results");
         if (privateLiteral)

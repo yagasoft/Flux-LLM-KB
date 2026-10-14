@@ -1,8 +1,10 @@
+using System.Collections.Concurrent;
 using FluxKnowledge.Application.Contracts;
 using FluxKnowledge.Web.Components.Status;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using Microsoft.Playwright;
 using Xunit;
 
@@ -11,6 +13,69 @@ namespace FluxKnowledge.Web.Tests.Browser;
 [Trait("Category", "Browser")]
 public sealed class PipelineOverviewBrowserTests
 {
+    [BrowserFact]
+    public async Task Attention_failures_log_the_requested_scope_without_exposing_errors_or_replacing_a_new_scope()
+    {
+        var reader = new ControlledOverviewReader();
+        using var logs = new AttentionLogCapture();
+        var root = BrowserTestRoots.Create($"FluxPipelineAttention_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            await using var host = await PhaseOneVerticalSliceBrowserTests.BrowserHost.StartAsync(
+                "Server=unreachable.invalid;Database=unreachable;Integrated Security=true;Encrypt=true;TrustServerCertificate=true",
+                root, Path.Combine(root, "indexes"), services =>
+                {
+                    services.RemoveAll<IHostedService>();
+                    services.RemoveAll<IProjectionReader>();
+                    services.AddSingleton<IProjectionReader>(reader);
+                    services.AddLogging(logging => logging.AddProvider(logs));
+                });
+            using var playwright = await Playwright.CreateAsync();
+            await using var browser = await playwright.Chromium.LaunchAsync(BrowserLaunchOptions.Create());
+            var page = await browser.NewPageAsync();
+            await page.GotoAsync(host.BaseAddress.AbsoluteUri, new() { WaitUntil = WaitUntilState.NetworkIdle });
+            await page.GetByLabel("Source scope").SelectOptionAsync(ControlledOverviewReader.FirstRoot.ToString());
+            await page.GetByRole(AriaRole.Button, new() { Name = "View pipeline job records" }).ClickAsync();
+            await Assertions.Expect(page.Locator("#pipeline-attention tbody tr")).ToHaveCountAsync(25);
+
+            var failure = new InvalidOperationException("Synthetic private provider diagnostic");
+            reader.AttentionFailure = failure;
+            await page.GetByRole(AriaRole.Button, new() { Name = "View GPU task records" }).ClickAsync();
+            await Assertions.Expect(page.GetByRole(AriaRole.Alert)).ToContainTextAsync("Attention records could not be refreshed");
+            await Assertions.Expect(page.Locator("#pipeline-attention caption")).ToContainTextAsync("pipeline job records");
+            await Assertions.Expect(page.Locator("#pipeline-attention tbody tr")).ToHaveCountAsync(25);
+            await Assertions.Expect(page.GetByText(failure.Message)).ToHaveCountAsync(0);
+            var first = Assert.Single(logs.Failures);
+            Assert.Same(failure, first.Exception);
+            Assert.Equal("gpu", first.Fields["Unit"]);
+            Assert.Equal(ControlledOverviewReader.FirstRoot, first.Fields["SourceRootId"]);
+            Assert.Equal(1, first.Fields["Page"]);
+            Assert.NotEqual(Guid.Empty, Assert.IsType<Guid>(first.Fields["RequestId"]));
+
+            reader.AttentionFailure = null;
+            var delayed = reader.DelayNextAttention();
+            await page.GetByRole(AriaRole.Button, new() { Name = "View GPU task records" }).ClickAsync();
+            await reader.AttentionStarted.WaitAsync(TimeSpan.FromSeconds(5));
+            await page.GetByLabel("Source scope").SelectOptionAsync(ControlledOverviewReader.SecondRoot.ToString());
+            var lateFailure = new TimeoutException("Synthetic late provider diagnostic");
+            delayed.SetException(lateFailure);
+            var second = await logs.SecondFailure.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Same(lateFailure, second.Exception);
+            Assert.Equal("gpu", second.Fields["Unit"]);
+            Assert.Equal(ControlledOverviewReader.FirstRoot, second.Fields["SourceRootId"]);
+            Assert.NotEqual(first.Fields["RequestId"], second.Fields["RequestId"]);
+            await Assertions.Expect(page.GetByRole(AriaRole.Alert)).ToHaveCountAsync(0);
+            await Assertions.Expect(page.Locator(".source-progress-card")).ToHaveCountAsync(1);
+            await Assertions.Expect(page.Locator(".source-progress-card")).ToContainTextAsync("Acceptance source");
+            await Assertions.Expect(page.Locator("#pipeline-attention tbody tr")).ToHaveCountAsync(0);
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
     [BrowserFact]
     public async Task Source_scope_attention_paging_and_failed_refresh_remain_usable_at_desktop_and_narrow_widths()
     {
@@ -116,6 +181,7 @@ public sealed class PipelineOverviewBrowserTests
         public static readonly Guid FirstRoot = Guid.Parse("11111111-1111-1111-1111-111111111111");
         public static readonly Guid SecondRoot = Guid.Parse("22222222-2222-2222-2222-222222222222");
         public bool FailReads { get; set; }
+        public Exception? AttentionFailure { get; set; }
         public bool RemoveFirstRoot { get; set; }
         private TaskCompletionSource<PipelineAttentionPage>? _delayedAttention;
         private TaskCompletionSource _attentionStarted = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -149,6 +215,7 @@ public sealed class PipelineOverviewBrowserTests
         }
         public ValueTask<PipelineAttentionPage> ReadPipelineAttentionAsync(string unit, Guid? sourceRootId, int page, CancellationToken ct)
         {
+            if (AttentionFailure is { } failure) throw failure;
             if (_delayedAttention is { } delayed)
             {
                 _delayedAttention = null;
@@ -163,4 +230,31 @@ public sealed class PipelineOverviewBrowserTests
         public ValueTask<IReadOnlyList<PipelineRecordProjection>> ReadPipelineRecordsAsync(CancellationToken ct) => ValueTask.FromResult<IReadOnlyList<PipelineRecordProjection>>([]);
         public ValueTask<PipelineRecordProjection?> ReadPipelineRecordAsync(Guid id, CancellationToken ct) => ValueTask.FromResult<PipelineRecordProjection?>(null);
     }
+
+    private sealed class AttentionLogCapture : ILoggerProvider
+    {
+        public ConcurrentQueue<AttentionFailureLog> Failures { get; } = new();
+        public TaskCompletionSource<AttentionFailureLog> SecondFailure { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public ILogger CreateLogger(string categoryName) => new CaptureLogger(this);
+        public void Dispose() { }
+
+        private sealed class CaptureLogger(AttentionLogCapture capture) : ILogger
+        {
+            public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+            public bool IsEnabled(LogLevel logLevel) => logLevel >= LogLevel.Warning;
+            public void Log<TState>(LogLevel level, EventId eventId, TState state, Exception? exception,
+                Func<TState, Exception?, string> formatter)
+            {
+                if (level != LogLevel.Warning || exception is null ||
+                    !formatter(state, exception).StartsWith("Pipeline attention read ", StringComparison.Ordinal)) return;
+                var fields = Assert.IsAssignableFrom<IEnumerable<KeyValuePair<string, object?>>>(state)
+                    .ToDictionary(item => item.Key, item => item.Value);
+                var entry = new AttentionFailureLog(exception, fields);
+                capture.Failures.Enqueue(entry);
+                if (capture.Failures.Count == 2) capture.SecondFailure.TrySetResult(entry);
+            }
+        }
+    }
+
+    private sealed record AttentionFailureLog(Exception Exception, IReadOnlyDictionary<string, object?> Fields);
 }

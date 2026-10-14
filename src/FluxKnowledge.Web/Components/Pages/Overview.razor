@@ -3,9 +3,11 @@
 @using System.Globalization
 @using FluxKnowledge.Application.Contracts
 @using FluxKnowledge.Web.Components.Status
+@using Microsoft.Extensions.Logging
 @inject OverviewProjectionState ProjectionState
 @inject IProjectionReader ProjectionReader
 @inject StatusEventFeed StatusEvents
+@inject ILogger<Overview> AttentionLogger
 
 <PageTitle>Overview | Flux Knowledge</PageTitle>
 @{
@@ -257,6 +259,7 @@
     {
         var request = ++_attentionRequest;
         var root = SelectedRoot;
+        var requestId = Guid.NewGuid();
         try
         {
             var result = await ProjectionReader.ReadPipelineAttentionAsync(unit, root, page, _stopping.Token);
@@ -268,6 +271,9 @@
         }
         catch (Exception exception) when (exception is System.Data.Common.DbException or InvalidOperationException or TimeoutException)
         {
+            AttentionLogger.LogWarning(exception,
+                "Pipeline attention read {RequestId} failed for {Unit}, source {SourceRootId}, page {Page}.",
+                requestId, unit, root, page + 1);
             if (request != _attentionRequest || root != SelectedRoot) return;
             _attentionError = "Attention records could not be refreshed. The summary and any previously loaded records may be out of date.";
         }
