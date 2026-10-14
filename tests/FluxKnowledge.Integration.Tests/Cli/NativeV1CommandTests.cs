@@ -9,6 +9,34 @@ namespace FluxKnowledge.Integration.Tests.Cli;
 
 public sealed class NativeV1CommandTests
 {
+    [Fact]
+    public async Task Staging_client_is_pinned_separately_and_production_client_keeps_its_fixed_port()
+    {
+        var handler = new RecordingHandler("{\"ok\":true,\"result\":{\"safe\":true},\"reasonCode\":null,\"message\":null,\"retryable\":false}");
+        using var client = new HttpClient(handler) { BaseAddress = new("http://127.0.0.1:5140/") };
+        using var output = new StringWriter();
+        using var error = new StringWriter();
+        var code = await NativeV1Command.ExecuteAsync(["corpus", "search"], new StringReader("{\"query\":\"needle\"}"), client, output, error);
+        Assert.NotEqual(0, code);
+        Assert.Null(handler.Request);
+        code = await NativeV1Command.ExecuteStagingAsync(["corpus", "search"], new StringReader("{\"query\":\"needle\"}"), client, client.BaseAddress, output, error);
+        Assert.Equal(0, code);
+        Assert.Equal(5140, handler.Request!.RequestUri!.Port);
+    }
+
+    [Theory]
+    [InlineData("http://127.0.0.1:5137/")]
+    [InlineData("http://192.0.2.10:5140/")]
+    [InlineData("http://127.0.0.1:5140/other")]
+    public async Task Staging_client_refuses_production_or_foreign_origins_before_sending(string origin)
+    {
+        var handler = new RecordingHandler("{}");
+        using var client = new HttpClient(handler) { BaseAddress = new(origin) };
+        await Assert.ThrowsAsync<ArgumentException>(() => NativeV1Command.ExecuteStagingAsync(
+            ["corpus", "search"], new StringReader("{}"), client, new Uri(origin), new StringWriter(), new StringWriter()));
+        Assert.Null(handler.Request);
+    }
+
     [Theory]
     [InlineData("preview", "index_retention")]
     [InlineData("commit", "index_retention")]

@@ -83,3 +83,12 @@ exact 17 historical generations. Nothing in this increment stages or deletes tha
 set. Release 3 retains document fidelity/OCR retry and selected mail capture. Models,
 source content, canonical embeddings, checkpoints, scheduled task/hidden launcher
 and recovery evidence remain protected. Dashboard manuals are outside this increment.
+
+Isolated staging now has its own database, restricted runtime login, private
+filesystem, process and loopback endpoint. One synthetic workspace passed folder
+preview, durable scan/publication, browser search and exact current REST/CLI/MCP
+citation/readback after the documented text normalisation. This initial host has
+real semantic models, GPU, OCR and mail disabled. It is a functional baseline;
+the frozen hybrid workload and production risk disposition remain open. See the
+[staging procedure](2026-10-14-isolated-staging.md) for its explicit bindings and
+the separate restricted disposable-SQL test path.

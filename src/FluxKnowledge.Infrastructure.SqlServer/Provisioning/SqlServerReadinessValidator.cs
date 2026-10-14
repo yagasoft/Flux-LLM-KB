@@ -114,8 +114,17 @@ public sealed class SqlServerReadinessValidator : ISqlServerReadinessValidator
     public async Task<SqlServerReadinessResult> ValidateAsync(
         SqlServerOptions options,
         CancellationToken cancellationToken = default)
+        => await ValidateCoreAsync(options, SqlServerOptions.CatalogName,
+            SqlServerOptionsValidator.Validate(options), cancellationToken).ConfigureAwait(false);
+
+    internal Task<SqlServerReadinessResult> ValidateStagingAsync(
+        SqlServerOptions options, StagingSqlBinding binding, CancellationToken cancellationToken) =>
+        ValidateCoreAsync(options, binding.CatalogName, binding.Validate(options), cancellationToken);
+
+    private async Task<SqlServerReadinessResult> ValidateCoreAsync(
+        SqlServerOptions options, string expectedCatalog,
+        SqlServerOptionsValidationResult optionValidation, CancellationToken cancellationToken)
     {
-        var optionValidation = SqlServerOptionsValidator.Validate(options);
         if (!optionValidation.IsValid)
         {
             return new SqlServerReadinessResult(false, optionValidation.Failures);
@@ -165,7 +174,7 @@ public sealed class SqlServerReadinessValidator : ISqlServerReadinessValidator
             await context.Database.GetAppliedMigrationsAsync(cancellationToken).ConfigureAwait(false))
             .ToArray();
 
-        return Evaluate(
+        return EvaluateCore(
             options,
             new SqlServerReadinessSnapshot(
                 catalogName,
@@ -174,23 +183,29 @@ public sealed class SqlServerReadinessValidator : ISqlServerReadinessValidator
                 hasValidatedActiveIndex,
                 databaseFiles,
                 expectedMigrations,
-                appliedMigrations));
+                appliedMigrations), expectedCatalog, optionValidation);
     }
 
     public static SqlServerReadinessResult Evaluate(
         SqlServerOptions options,
         SqlServerReadinessSnapshot snapshot)
+        => EvaluateCore(options, snapshot, SqlServerOptions.CatalogName,
+            SqlServerOptionsValidator.Validate(options));
+
+    internal static SqlServerReadinessResult EvaluateCore(
+        SqlServerOptions options, SqlServerReadinessSnapshot snapshot, string expectedCatalog,
+        SqlServerOptionsValidationResult optionValidation)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(snapshot);
 
         var failures = new List<string>();
-        failures.AddRange(SqlServerOptionsValidator.Validate(options).Failures);
+        failures.AddRange(optionValidation.Failures);
 
-        if (!string.Equals(snapshot.CatalogName, SqlServerOptions.CatalogName, StringComparison.Ordinal))
+        if (!string.Equals(snapshot.CatalogName, expectedCatalog, StringComparison.Ordinal))
         {
             failures.Add(
-                $"Connected catalog is {snapshot.CatalogName}, not {SqlServerOptions.CatalogName}.");
+                $"Connected catalog is {snapshot.CatalogName}, not {expectedCatalog}.");
         }
 
         if (!snapshot.IsFullTextInstalled)

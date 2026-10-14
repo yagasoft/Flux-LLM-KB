@@ -1,0 +1,6 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <ItemGroup>
+    <ProjectReference Include="../../src/FluxKnowledge.Web/FluxKnowledge.Web.csproj" />
+    <ProjectReference Include="../../src/FluxKnowledge.Cli/FluxKnowledge.Cli.csproj" />
+  </ItemGroup>
+</Project>

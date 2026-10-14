@@ -36,6 +36,7 @@ using Microsoft.Extensions.DependencyInjection.Extensions;
 using FluxKnowledge.Web.Components.OperatorActions;
 using FluxKnowledge.Web.Configuration;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.AspNetCore.DataProtection;
 
 namespace FluxKnowledge.Web;
 
@@ -96,6 +97,24 @@ public static class WebHostComposition
 
     internal static bool IsIsolatedTestComposition => _isolatedTestLayout is not null;
 
+    internal static IServiceCollection AddStagingFluxKnowledgeServices(IServiceCollection services, StagingHostSettings settings)
+    {
+        AddFluxKnowledgeServicesCore(services, settings.Configuration, settings.Layout,
+            strictProductionPaths: false, productionStorageBindings: null, stagingSql: settings.Sql);
+        services.AddDataProtection().SetApplicationName("FluxKnowledge.Staging." + settings.CatalogName)
+            .PersistKeysToFileSystem(new DirectoryInfo(Path.Combine(settings.Layout.ConfigRoot, "browser-data-protection")));
+        // Dashboard projections need the SQL status reader, but no scheduler, executor,
+        // owner probe or native worker is registered or started in functional staging.
+        services.AddScoped<IGpuSchedulerStore>(provider => new SqlGpuSchedulerStore(
+            provider.GetRequiredService<IDbContextFactory<FluxKnowledgeDbContext>>(),
+            timeProvider: provider.GetRequiredService<TimeProvider>()));
+        services.AddSingleton<FluxKnowledge.Application.Contracts.ISourceRootPathPolicy>(provider =>
+            new StagingSourceRootPathPolicy(new SourceRootPathPolicy(
+                new LocalIngressOptions([settings.SourcesRoot]),
+                new SourceRootPathPolicyOptions(settings.Layout.AppOwnedLocations.Append(@"I:\FluxKnowledge").Append(@"J:\Models").ToArray())), settings.SourcesRoot));
+        return services;
+    }
+
     /// <summary>
     /// Runs before the published Web host is built. It permits only the provisioned source-worker,
     /// Outlook-capture, and explicit fixed local OCR hosted services.
@@ -151,7 +170,8 @@ public static class WebHostComposition
         IConfiguration configuration,
         LiveRootLayout liveRoot,
         bool strictProductionPaths,
-        ProductionStorageTestBindings? productionStorageBindings)
+        ProductionStorageTestBindings? productionStorageBindings,
+        StagingSqlBinding? stagingSql = null)
     {
         ArgumentNullException.ThrowIfNull(services);
         ArgumentNullException.ThrowIfNull(configuration);
@@ -225,8 +245,9 @@ public static class WebHostComposition
         services.AddSingleton(liveRoot);
         services.AddSingleton(persistedOutlookSpoolPolicy);
         services.AddSingleton<IDeploymentValidationHold, FileDeploymentValidationHold>();
-        services.AddFluxKnowledgeSqlServer(configuration);
-        if (strictProductionPaths)
+        if (stagingSql is null) services.AddFluxKnowledgeSqlServer(configuration);
+        else services.AddStagingFluxKnowledgeSqlServer(stagingSql);
+        if (strictProductionPaths || stagingSql is not null)
             services.AddSingleton<IDatabaseStartupReadiness, SqlDatabaseStartupReadiness>();
         services.AddSingleton(new LocalOperatorOriginPolicy(operatorOrigin));
         services.AddSingleton<ILocalPrivateContentDisclosure, LocalPrivateContentDisclosure>();
@@ -243,8 +264,8 @@ public static class WebHostComposition
         {
             services.AddFluxKnowledgeUsearch(configuration, liveRoot.IndexRoot);
         }
-        var sqlDataRoot = Path.GetDirectoryName(SqlServerOptions.ProductionDataFilePath)!;
-        var sqlLogRoot = Path.GetDirectoryName(SqlServerOptions.ProductionLogFilePath)!;
+        var sqlDataRoot = liveRoot.SqlDataRoot;
+        var sqlLogRoot = liveRoot.SqlLogRoot;
         var ussearchRoot = indexRoot;
         var configuredSafetyRoots = ReadConfiguredSafetyRoots(configuration);
         var protectedRoots = new[]
@@ -435,7 +456,7 @@ public static class WebHostComposition
         {
             AddFixedLocalOcrServices(services);
         }
-        services.AddFluxKnowledgeGpuScheduler();
+        if (stagingSql is null) services.AddFluxKnowledgeGpuScheduler();
         var hybridSetting = configuration["Search:HybridPassagesEnabled"];
         if (hybridSetting is not null && !bool.TryParse(hybridSetting, out _))
             throw new InvalidOperationException("hybrid-search-setting-invalid");
