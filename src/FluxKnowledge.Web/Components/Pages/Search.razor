@@ -2,7 +2,9 @@
 @using System.ComponentModel.DataAnnotations
 @using FluxKnowledge.Application.Contracts
 @using FluxKnowledge.Application.Ports
+@using FluxKnowledge.Application.Search
 @inject ISearchService SearchService
+@inject ILogger<Search> Logger
 
 <PageTitle>Search | Flux Knowledge</PageTitle>
 
@@ -12,9 +14,9 @@
         <DataAnnotationsValidator />
         <div class="search-form">
             <label for="search-query">Search terms</label>
-            <InputText id="search-query" @bind-Value="Query" autocomplete="off" />
+            <InputText id="search-query" @bind-Value="Query" autocomplete="off" disabled="@_searching" />
             <ValidationMessage For="@(() => Query)" />
-            <button type="submit">Search</button>
+            <button type="submit" disabled="@_searching">Search</button>
         </div>
     </EditForm>
     <p role="status" aria-live="polite">@_statusMessage</p>
@@ -27,14 +29,48 @@
 
     private SearchResponse? _response;
     private bool _searched;
+    private bool _searching;
     private string _statusMessage = "";
 
     private async Task SearchAsync()
     {
-        _response = await SearchService.SearchAsync(
-            new SearchRequest(Query, 10, "local_first", null, null, null),
-            CancellationToken.None);
-        _searched = true;
-        _statusMessage = $"Found {_response.Results.Count} result(s).";
+        if (_searching) return;
+        _searching = true;
+        _response = null;
+        _searched = false;
+        _statusMessage = "Searching your indexed content…";
+        try
+        {
+            _response = await SearchService.SearchAsync(
+                new SearchRequest(Query, 10, "local_first", null, null, null), CancellationToken.None);
+            _searched = true;
+            _statusMessage = _response.DegradedStatus is { } status
+                ? $"{AvailabilityMessage(status)} Showing available results ({_response.Results.Count})."
+                : $"Found {_response.Results.Count} result(s).";
+        }
+        catch (PassageRetrievalRefusalException refusal)
+        {
+            _statusMessage = $"{AvailabilityMessage(refusal.Status)} Try again shortly.";
+        }
+        catch (SearchQueryValidationException)
+        {
+            _statusMessage = "Check the search terms and try again.";
+        }
+        catch (Exception failure) when (failure is not OutOfMemoryException and not StackOverflowException)
+        {
+            Logger.LogWarning("Search page could not complete after {FailureType}.", failure.GetType().Name);
+            _statusMessage = "Search is unavailable. Try again shortly.";
+        }
+        finally { _searching = false; }
     }
+
+    private static string AvailabilityMessage(string status) => status switch
+    {
+        "index-updating" or "rebuilding" => "The search index is updating.",
+        "busy" => "Semantic search is busy.",
+        "timeout" => "Semantic search reached its time limit.",
+        "query-too-long" => "This query is too long for semantic search.",
+        "scope-capacity-exceeded" => "Semantic search cannot cover this scope yet.",
+        _ => "Semantic search is unavailable."
+    };
 }

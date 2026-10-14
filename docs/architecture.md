@@ -611,6 +611,13 @@ metadata, so degraded source retrieval produces the same explicit refusal instea
 of an apparently complete notes/source union. Healthy notes/claims interleaving is
 unchanged; its source shortlist remains bounded at 50 even for a knowledge limit of 100.
 
+The search page shows a waiting state and prevents duplicate submissions while a
+request is running. It explains index updates, busy admission, deadlines and
+unavailable semantic retrieval when showing available results. Refused searches
+clear previous results and leave the form usable; they do not display a successful
+empty search. These messages use the existing retrieval status and do not change
+inference routing, deadlines or citation checks.
+
 Automatic Codex `UserPromptSubmit` context bypasses that general knowledge
 union. It calls the same corpus service through an explicit lexical-only
 interface, resolves only the supplied registered `cwd` subtree and validates

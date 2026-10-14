@@ -1,5 +1,7 @@
 using System.Reflection;
 using System.Threading.Channels;
+using System.Security.Cryptography;
+using FluxKnowledge.Application.Pipeline;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Sources;
 using FluxKnowledge.Domain.Sources;
@@ -15,6 +17,55 @@ namespace FluxKnowledge.Domain.Tests.Sources;
 
 public sealed class RetainedProcessorActivationHostedServiceTests
 {
+    [Fact]
+    public async Task Prelogin_failure_during_inspection_defers_without_claiming_and_revalidates_in_a_fresh_scope()
+    {
+        var clock = new ManualClock();
+        var scopesDisposed = 0;
+        var bytes = new byte[] { 0x50, 0x4b, 0x03, 0x04 };
+        var candidate = new RetainedProcessorPromotionCandidate(Guid.NewGuid(), new(Guid.NewGuid()),
+            Convert.ToHexStringLower(SHA256.HashData(bytes)), ".zip");
+        var branches = new InspectionBranches(candidate);
+        var reader = new InspectionReader(candidate, bytes);
+        var services = new ServiceCollection();
+        services.AddScoped(_ => new ScopeOwner(() => Interlocked.Increment(ref scopesDisposed)));
+        services.AddScoped(provider =>
+        {
+            _ = provider.GetRequiredService<ScopeOwner>();
+            var zip = new ZipArchiveRetainedProcessor(null!);
+            return new RetainedProcessorActivationService(new SourceCapabilityService(new Capabilities(),
+                new LocalSourceCapabilityHandlerRegistry([zip])), branches, reader, zip,
+                new RetainedProcessorOptions { ArchiveZipExpandEnabled = true, CsharpCodeEnabled = false }, clock);
+        });
+        using var provider = services.BuildServiceProvider();
+        var logger = new RecordingLogger();
+        using var service = new RetainedProcessorActivationHostedService(provider.GetRequiredService<IServiceScopeFactory>(),
+            failureClassifier: new SqlRetainedProcessorFailureClassifier(), logger: logger, timeProvider: clock);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        await service.StartAsync(timeout.Token);
+        try
+        {
+            var deferred = clock.WaitForTimerAsync(timeout.Token);
+            await Task.WhenAny(deferred, service.ExecuteTask!).WaitAsync(timeout.Token);
+            Assert.False(service.ExecuteTask!.IsCompleted, "The inspection availability failure must defer rather than stop the host.");
+            await deferred;
+            Assert.Equal(1, scopesDisposed);
+            Assert.Equal(0, branches.Promotions);
+            Assert.Equal(0, branches.Claims);
+            Assert.Equal(0, reader.ByteReads);
+            clock.Fire();
+            await clock.WaitForTimerAsync(timeout.Token);
+            Assert.Equal(2, scopesDisposed);
+            Assert.Equal(2, reader.Inspections);
+            Assert.Equal(1, reader.ByteReads);
+            Assert.Equal(1, branches.Promotions);
+            Assert.Equal(1, branches.Claims);
+            Assert.Contains("SQL error -2146893055", Assert.Single(logger.Messages));
+        }
+        finally { await service.StopAsync(timeout.Token); }
+        Assert.True(service.ExecuteTask!.IsCompletedSuccessfully);
+    }
+
     [Fact]
     public async Task Observed_SQL_failures_delay_then_resume_with_a_fresh_disposed_scope_and_stop_cleanly()
     {
@@ -71,6 +122,7 @@ public sealed class RetainedProcessorActivationHostedServiceTests
     {
         var classifier = new SqlRetainedProcessorFailureClassifier();
         Assert.False(classifier.TryClassify(SqlFailure(-2, 2627), out _));
+        Assert.False(classifier.TryClassify(SqlFailure(-2146893055, 18456), out _));
         Assert.False(classifier.TryClassify(new InvalidOperationException("wrapper", SqlFailure(-2)), out _));
         Assert.True(classifier.TryClassify(new DbUpdateException("synthetic wrapper", SqlFailure(1205)), out var number));
         Assert.Equal(1205, number);
@@ -112,6 +164,43 @@ public sealed class RetainedProcessorActivationHostedServiceTests
     }
 
     private sealed class ScopeOwner(Action dispose) : IDisposable { public void Dispose() => dispose(); }
+    private sealed class Capabilities : ISourceCapabilityStore
+    {
+        public ValueTask<RegisteredSourceCapability> RegisterAsync(RegisteredSourceCapability value, CancellationToken ct) => ValueTask.FromResult(value);
+        public ValueTask<RegisteredSourceCapability?> FindAsync(Guid id, CancellationToken ct) => ValueTask.FromResult<RegisteredSourceCapability?>(null);
+    }
+    private sealed class InspectionReader(RetainedProcessorPromotionCandidate candidate, byte[] bytes) : IRetainedSourceReader
+    {
+        public int Inspections { get; private set; }
+        public int ByteReads { get; private set; }
+        public ValueTask<RetainedArtifactInspection> InspectAsync(SourceRevisionId id, CancellationToken ct)
+        {
+            Assert.Equal(candidate.SourceRevisionId, id);
+            return ++Inspections == 1 ? ValueTask.FromException<RetainedArtifactInspection>(SqlFailure(-2146893055)) :
+                ValueTask.FromResult(new RetainedArtifactInspection(id, candidate.InputSha256, bytes.Length));
+        }
+        public ValueTask<RetainedSourceBytes> ReadBytesAsync(SourceRevisionId id, CancellationToken ct)
+        {
+            ByteReads++;
+            return ValueTask.FromResult(new RetainedSourceBytes(id, bytes, candidate.InputSha256, bytes.Length));
+        }
+        public ValueTask<Utf8FileSource> ReadUtf8Async(SourceRevisionId id, CancellationToken ct) => throw new NotSupportedException();
+    }
+    private sealed class InspectionBranches(RetainedProcessorPromotionCandidate candidate) : IRetainedProcessorBranchStore
+    {
+        public int Promotions { get; private set; }
+        public int Claims { get; private set; }
+        public ValueTask<IReadOnlyList<RetainedProcessorPromotionCandidate>> ReadPromotionCandidatesAsync(int count, CancellationToken ct) =>
+            ValueTask.FromResult<IReadOnlyList<RetainedProcessorPromotionCandidate>>([candidate]);
+        public ValueTask<bool> PromoteAsync(RetainedProcessorPromotionCandidate value, SourceCapabilityDescriptor capability, CancellationToken ct)
+        { Assert.Equal(candidate, value); Promotions++; return ValueTask.FromResult(false); }
+        public ValueTask<IReadOnlyList<RetainedProcessorClaim>> ClaimAsync(string owner, int count, CancellationToken ct)
+        { Claims++; return ValueTask.FromResult<IReadOnlyList<RetainedProcessorClaim>>([]); }
+        public ValueTask<bool> BlockPromotionAsync(RetainedProcessorPromotionCandidate value, string outcome, CancellationToken ct) => throw new NotSupportedException();
+        public ValueTask<bool> CommitAsync(RetainedProcessorClaim claim, RetainedProcessorCompletion completion, CancellationToken ct) => throw new NotSupportedException();
+        public ValueTask<bool> RetryAsync(RetainedProcessorClaim claim, string outcome, CancellationToken ct) => throw new NotSupportedException();
+        public ValueTask<bool> FailAsync(RetainedProcessorClaim claim, RetainedProcessorFailure failure, CancellationToken ct) => throw new NotSupportedException();
+    }
     private sealed class RecordingLogger : ILogger<RetainedProcessorActivationHostedService>
     {
         public List<string> Messages { get; } = [];
