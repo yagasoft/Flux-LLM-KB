@@ -116,9 +116,9 @@ parents and revisions, concurrent replay of existing children, separate suppress
 lease fences, and both named-index failures rolling back before a blocked item
 and healthy continuation. The affected processor/hosted-service suite passes
 76 tests and the Release build has zero warnings. Independent review approved
-canonical closeout without deployment. The feature suite passed 3,351 tests with
-25 skips; closeout stopped on wording in this record. That wording is corrected;
-the required rerun and Main verification remain pending.
+the correction. Canonical closeout without deployment completed all 21 steps,
+with 3,351 tests passing in each checkout, 25 opt-in skips and zero build
+warnings. The correction is squash merged and pushed as Main `fc49fe7d`.
 Production repair, investigation and validation still require fresh explicit
 approval for the specific action and target. Native and frozen-trial holds
 remain in place.
