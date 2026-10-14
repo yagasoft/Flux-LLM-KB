@@ -1871,6 +1871,8 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
 
     public async ValueTask<bool> CommitAsync(RetainedProcessorClaim claim, RetainedProcessorCompletion completion, CancellationToken cancellationToken)
     {
+        try
+        {
         return await ExecuteWithRetryAsync(async () =>
         {
         await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
@@ -1956,7 +1958,7 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
                 child = new SourceRevisionEntity
                 {
                     Id = Guid.NewGuid(), SourceRootId = parent.SourceRootId, StableSourceIdentity = member.StableSourceIdentity,
-                    Revision = 1, ContentSha256 = member.ContentSha256,
+                    Revision = member.OriginKind == 1 ? parent.Revision : 1, ContentSha256 = member.ContentSha256,
                     CanonicalPath = member.SyntheticLocator,
                     ParentSourceRevisionId = parent.Id, Classification = member.Classification, Extension = member.Extension, OriginKind = member.OriginKind,
                     ByteLength = member.ByteLength, DiscoveredAtUtc = now, DiscoveryEvidenceJson = "{}"
@@ -2075,6 +2077,29 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
         return true;
         }, cancellationToken).ConfigureAwait(false);
+        }
+        catch (DbUpdateException exception) when (IsArchiveChildIdentityConflict(exception))
+        {
+            // The transaction/context have been disposed before the activation service records
+            // a fenced item failure. A duplicate must never leave a partial child publication.
+            throw new RetainedProcessorException("retained-child-identity-conflict", innerException: exception);
+        }
+    }
+
+    private static bool IsArchiveChildIdentityConflict(DbUpdateException exception)
+    {
+        if (exception.InnerException is not SqlException sqlException ||
+            !exception.Entries.Any(entry => entry.State == EntityState.Added &&
+                entry.Entity is SourceRevisionEntity { OriginKind: 1, ParentSourceRevisionId: not null }))
+        {
+            return false;
+        }
+
+        static bool IsIdentityDuplicate(SqlError error) => error.Number is 2601 or 2627 &&
+            (error.Message.Contains("'IX_SourceRevisions_SourceRootId_CanonicalPathFingerprint_ContentSha256'", StringComparison.Ordinal) ||
+             error.Message.Contains("'IX_SourceRevisions_SourceRootId_StableSourceIdentity_Revision'", StringComparison.Ordinal));
+        var errors = sqlException.Errors.Cast<SqlError>().ToArray();
+        return errors.Any(IsIdentityDuplicate) && errors.All(error => error.Number == 3621 || IsIdentityDuplicate(error));
     }
 
     public async ValueTask<bool> FailAsync(RetainedProcessorClaim claim, RetainedProcessorFailure failure, CancellationToken cancellationToken)
@@ -2085,8 +2110,21 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
         await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken).ConfigureAwait(false);
         var now = await DatabaseUtcNowAsync(context, cancellationToken).ConfigureAwait(false);
         var forceRequest = await LockClaimedForceRequestAsync(context, claim, cancellationToken).ConfigureAwait(false);
-        var processorFingerprint = await context.SourceProcessorBranches.AsNoTracking().Where(value => value.Id == claim.BranchId)
-            .Select(value => value.ProcessorFingerprint).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+        var branch = await context.SourceProcessorBranches.FromSqlInterpolated($"""
+            SELECT * FROM [SourceProcessorBranches] WITH (UPDLOCK, HOLDLOCK)
+            WHERE [Id] = {claim.BranchId}
+              AND [LeaseOwner] = {claim.LeaseOwner}
+              AND [LeaseGeneration] = {claim.LeaseGeneration}
+              AND [LeaseExpiresAtUtc] > TODATETIMEOFFSET(SYSUTCDATETIME(), '+00:00')
+              AND [State] = {(int)RetainedProcessorBranchState.Running}
+            """).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+        if (branch is null) return false;
+        var parent = await context.SourceRevisions.FromSqlInterpolated($"""
+            SELECT * FROM [SourceRevisions] WITH (UPDLOCK, HOLDLOCK)
+            WHERE [Id] = {branch.SourceRevisionId} AND [SuppressedAtUtc] IS NULL
+            """).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+        if (parent is null) return false;
+        var processorFingerprint = branch.ProcessorFingerprint;
         if (await context.Database.ExecuteSqlInterpolatedAsync($"""
                 UPDATE [SourceProcessorBranches] WITH (UPDLOCK, HOLDLOCK)
                 SET [State] = {(int)RetainedProcessorBranchState.Blocked},

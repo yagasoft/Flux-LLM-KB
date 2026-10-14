@@ -92,3 +92,33 @@ real semantic models, GPU, OCR and mail disabled. It is a functional baseline;
 the frozen hybrid workload and production risk disposition remain open. See the
 [staging procedure](2026-10-14-isolated-staging.md) for its explicit bindings and
 the separate restricted disposable-SQL test path.
+
+Saved evidence from recurring IIS crashes on 14 October shows a duplicate
+archive-child insert escaping item handling and stopping the host, followed by
+a native CPU cleanup deadline and an IIS access violation. The locator factory
+uses only the member-path fingerprint, allowing equal member paths and bytes in
+different archives under one root to collide in the source-revision identity
+index. This access violation differs from the earlier
+heap-corruption signature; a shared native cause or prevention is not proved.
+The recurring managed failure predates a separate CPU staging trial from an
+unmerged branch. That trial overlapped a later cleanup/crash sequence, so a
+shared-resource timing contribution remains possible despite its own confirmed
+cleanup.
+
+Further real-model and frozen-workload trials are paused. The bounded managed
+correction qualifies new ZIP/TAR child locators by immutable parent revision,
+uses the parent revision number for new archive children, and preserves existing
+child bindings and receipt fingerprints. Exact named archive-child
+identity collisions are translated after transaction rollback into the existing
+fenced blocked-item path. Other SQL failures retain their existing handling.
+All 46 focused SQL checks pass, including nine new cases covering distinct
+parents and revisions, concurrent replay of existing children, separate suppression and
+lease fences, and both named-index failures rolling back before a blocked item
+and healthy continuation. The affected processor/hosted-service suite passes
+76 tests and the Release build has zero warnings. Independent review approved
+canonical closeout without deployment. The feature suite passed 3,351 tests with
+25 skips; closeout stopped on wording in this record. That wording is corrected;
+the required rerun and Main verification remain pending.
+Production repair, investigation and validation still require fresh explicit
+approval for the specific action and target. Native and frozen-trial holds
+remain in place.
