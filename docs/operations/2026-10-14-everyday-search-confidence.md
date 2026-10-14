@@ -122,3 +122,13 @@ warnings. The correction is squash merged and pushed as Main `fc49fe7d`.
 Production repair, investigation and validation still require fresh explicit
 approval for the specific action and target. Native and frozen-trial holds
 remain in place.
+
+The incident deployment review identified a separate updater failure path: an
+initial stop callback could fail its worker-exit proof and still restart and
+probe the predecessor. The payload swap now preserves both unchanged payloads
+and propagates that initial failure without activation, restart, rollback
+preparation or probes. A later failure after a proved stop retains the existing
+verified rollback path; a failed rollback stop cannot move payloads or restart
+the worker. Production activation remains gated on the corrected operator's
+verification and independent review. This supporting change does not establish
+native crash prevention or complete frozen-workload acceptance.

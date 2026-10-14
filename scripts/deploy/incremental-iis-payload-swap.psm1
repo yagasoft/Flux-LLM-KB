@@ -68,6 +68,11 @@ function Invoke-IncrementalApplicationPayloadSwap {
     }
     catch {
         $updateFailure = $_
+        if (-not $poolStopped -and -not $previousMoved) {
+            # An unproved initial stop must preserve the payload and observed worker
+            # state. Restarting or probing it could activate work before cleanup.
+            throw
+        }
         try {
             if (-not $stopRequested -or $candidateActivationStarted) {
                 $stopRequested = $true

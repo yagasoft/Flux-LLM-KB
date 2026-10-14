@@ -271,41 +271,70 @@ try {
         throw "A pre-swap move failure did not restart and validate the still-active original payload."
     }
 
-    $stopFailureState = [ordered]@{ Stops = 0; Starts = 0; Validations = 0 }
-    $stopFailureSeen = $false
-    try {
-        Invoke-IncrementalApplicationPayloadSwap `
-            -ApplicationRoot $activeRoot `
-            -CandidateRoot $candidateRoot `
-            -PreviousRoot $previousRoot `
-            -FailedRoot $failedRoot `
-            -ActivateCandidate { Copy-Item -LiteralPath $candidateRoot -Destination $activeRoot -Recurse -Force } `
-            -StopApplication {
-                $stopFailureState.Stops++
-                throw "stop status confirmation failed"
-            } `
-            -StartApplication { $stopFailureState.Starts++ } `
-            -ValidateApplication {
-                $stopFailureState.Validations++
-                if ((Read-TestPayloadMarker -Path $activeRoot) -ne "previous") {
-                    throw "The stop-failure recovery did not leave the original payload active."
-                }
-            }
-    }
-    catch {
-        if ($_.Exception.Message -match "prior application payload was restored") {
-            $stopFailureSeen = $true
+    foreach ($restartPrevious in @($true, $false)) {
+        $stopFailureState = [ordered]@{ Stops = 0; Starts = 0; Validations = 0; Activations = 0; Preparations = 0 }
+        $stopFailureMessage = $null
+        try {
+            Invoke-IncrementalApplicationPayloadSwap `
+                -ApplicationRoot $activeRoot `
+                -CandidateRoot $candidateRoot `
+                -PreviousRoot $previousRoot `
+                -FailedRoot $failedRoot `
+                -ActivateCandidate { $stopFailureState.Activations++ } `
+                -StopApplication {
+                    $stopFailureState.Stops++
+                    throw "stop status confirmation failed"
+                } `
+                -StartApplication { $stopFailureState.Starts++ } `
+                -ValidateApplication { $stopFailureState.Validations++ } `
+                -ValidateRollbackApplication { $stopFailureState.Validations++ } `
+                -PrepareRollbackApplication { $stopFailureState.Preparations++ } `
+                -RestartPreviousApplication $restartPrevious
         }
-        else {
-            throw
+        catch {
+            $stopFailureMessage = $_.Exception.Message
+        }
+        if ($stopFailureMessage -cne "stop status confirmation failed" -or
+            (Read-TestPayloadMarker -Path $activeRoot) -cne "previous" -or
+            (Read-TestPayloadMarker -Path $candidateRoot) -cne "candidate" -or
+            (Test-Path -LiteralPath $previousRoot) -or (Test-Path -LiteralPath $failedRoot) -or
+            $stopFailureState.Stops -ne 1 -or $stopFailureState.Starts -ne 0 -or
+            $stopFailureState.Validations -ne 0 -or $stopFailureState.Activations -ne 0 -or
+            $stopFailureState.Preparations -ne 0) {
+            throw "An unproved initial stop restarted or probed the application, changed payloads or replaced the original failure."
         }
     }
 
-    if (-not $stopFailureSeen -or
-        (Read-TestPayloadMarker -Path $activeRoot) -ne "previous" -or
-        (Read-TestPayloadMarker -Path $candidateRoot) -ne "candidate" -or
-        $stopFailureState.Stops -ne 1 -or $stopFailureState.Starts -ne 1 -or $stopFailureState.Validations -ne 1) {
-        throw "A stop-confirmation failure did not restart and validate the original payload without a second stop."
+    $rollbackStopRoot = Join-Path $temporaryRoot "rollback-stop-failure"
+    $rollbackActive = Join-Path $rollbackStopRoot "active"
+    $rollbackCandidate = Join-Path $rollbackStopRoot "candidate"
+    $rollbackPrevious = Join-Path $rollbackStopRoot "previous"
+    $rollbackFailed = Join-Path $rollbackStopRoot "failed"
+    New-TestPayload -Path $rollbackActive -Marker "previous"
+    New-TestPayload -Path $rollbackCandidate -Marker "candidate"
+    $rollbackStopState = [ordered]@{ Stops = 0; Starts = 0; Validations = 0; Preparations = 0 }
+    Assert-ActionFails -Action {
+        Invoke-IncrementalApplicationPayloadSwap `
+            -ApplicationRoot $rollbackActive -CandidateRoot $rollbackCandidate `
+            -PreviousRoot $rollbackPrevious -FailedRoot $rollbackFailed `
+            -ActivateCandidate { Copy-Item -LiteralPath $rollbackCandidate -Destination $rollbackActive -Recurse -Force } `
+            -StopApplication {
+                $rollbackStopState.Stops++
+                if ($rollbackStopState.Stops -eq 2) { throw "rollback stop proof failed" }
+            } `
+            -StartApplication { $rollbackStopState.Starts++ } `
+            -ValidateApplication { $rollbackStopState.Validations++; throw "candidate validation failed" } `
+            -ValidateRollbackApplication { $rollbackStopState.Validations++ } `
+            -PrepareRollbackApplication { $rollbackStopState.Preparations++ }
+    } -ExpectedMessage "rollback was unsuccessful.*rollback stop proof failed" `
+      -AssertionMessage "A failed rollback stop proof was accepted."
+    if ((Read-TestPayloadMarker -Path $rollbackActive) -cne "candidate" -or
+        (Read-TestPayloadMarker -Path $rollbackPrevious) -cne "previous" -or
+        (Read-TestPayloadMarker -Path $rollbackCandidate) -cne "candidate" -or
+        (Test-Path -LiteralPath $rollbackFailed) -or
+        $rollbackStopState.Stops -ne 2 -or $rollbackStopState.Starts -ne 1 -or
+        $rollbackStopState.Validations -ne 1 -or $rollbackStopState.Preparations -ne 0) {
+        throw "A failed rollback stop proof moved payloads, restarted or probed an unproved worker."
     }
 }
 finally {
