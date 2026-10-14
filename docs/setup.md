@@ -179,6 +179,11 @@ The native marketplace belongs under `I:\FluxKnowledge\CodexPlugin`. Normal
 startup and CLI diagnostics do not install, repair or alter plugin registrations.
 Hook trust remains a user action in Codex.
 
+If an installed cache lacks the adapter referenced by its hook definitions, use
+the bounded [native hook cache repair](operations/2026-10-14-native-codex-hook-cache-repair.md)
+after obtaining the required production repair approval. The command plans first,
+requires explicit roots and a reviewed source hash, and preserves existing files.
+
 ## Personal workspace brief skill
 
 The installed FluxKnowledge plugin supplies the native tools. To add the
