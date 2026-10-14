@@ -11,7 +11,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Unable to enumerate repository files.' }
 $paths = @($paths | Sort-Object -Unique | Where-Object {
     Test-Path -LiteralPath (Join-Path $SourceRoot $_) -PathType Leaf
 })
-$allowedRoots = @('.config', '.github', 'docs', 'probes', 'scripts', 'src', 'tests',
+$allowedRoots = @('.config', '.github', 'docs', 'probes', 'scripts', 'src', 'tests', 'tools',
     '.gitattributes', '.gitignore', 'AGENTS.md', 'Directory.Build.props',
     'Directory.Packages.props', 'FluxKnowledge.slnx', 'global.json', 'LICENSE', 'README.md')
 foreach ($path in $paths) {
@@ -23,6 +23,9 @@ foreach ($path in $paths) {
     }
     if ($path.StartsWith('tests/') -and $path -notmatch '^tests/(FluxKnowledge\.[^/]+|native)/') {
         throw "Test is outside the native verification suite: $path"
+    }
+    if ($path.StartsWith('tools/') -and $path -notmatch '^tools/FluxKnowledge\.StagingHost/') {
+        throw "Tool is outside the isolated staging host: $path"
     }
 }
 
