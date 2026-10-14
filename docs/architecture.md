@@ -651,8 +651,45 @@ and operational boundary.
 
 The operator UI projects committed source, job, scheduler, corpus and audit
 state. Live events trigger refresh; they do not replace durable evidence.
-The [operator guide](user-guide/dashboard-user-manual.md) describes the current
-pages and [safety policy](safety.md) defines disclosure and storage limits.
+The overview separates confirmed execution from current queued/waiting work,
+unresolved historical jobs and uncertain GPU outcomes. Worker leases and compatible
+GPU task/batch/slot/dispatch fences establish activity; processing labels and age
+alone do not. Current source revisions, selected logical branches, record bindings,
+root lifecycle and rebuild admission establish applicability. A live claim on a
+previous revision remains visible as running historical work.
+Source scans are counted separately from pipeline jobs and files. Due released
+scans follow root, lease, same-root Git and full deployment-hold admission.
+Held initial scans and recorded retries are waiting; a future ordinary periodic
+check alone is not backlog. Paused intake without outstanding work may be idle.
+Unconfirmed scan/processor leases remain attributed to their source.
+
+File counts use distinct current file owners, including retained archive members;
+logical text/metadata children roll up to their original file. Successful publication
+is distinct from extraction registration, metadata-only and no-text outcomes.
+Conflicting unsuppressed bindings count once per retained file path as provisional
+inventory. They are excluded from published/pending/progress totals until authoritative
+reconciliation resolves them; neither discovery time nor the highest revision number
+selects a winner. Their jobs remain visible under the existing execution evidence.
+`Catching up` requires pending files and successful current publication receipts
+after discovery in the same actively processing source. The UI reports no inferred
+percentage, completion time or undiscovered remaining total. Search-index health
+describes the rebuildable projection separately from pipeline health.
+
+The read-only projection records its read window and uses a conservative database
+rowversion fence: intervening versioned writes or pending versioned transactions
+reject the sample. Immutable evidence and graph deletion rely on the existing
+atomic versioned record/branch/lifecycle/index companion writes. This is not snapshot
+isolation for arbitrary direct SQL. Rejected/failed refreshes retain the last good
+sample with an explicit stale warning; initial failure remains unknown. Source
+events and a non-overlapping ten-second timer refresh the overview. Attention detail
+is read-only and paged in batches of 25, with its own loaded time and source scope.
+An initially pending transaction rejects before reading potentially locked rows.
+Only an end-fence mismatch permits one complete fresh attention read; names,
+scope bindings, time, totals and rows are recalculated together. A second mismatch
+fails visibly, and other exceptions are not retried.
+
+The [operator guide](user-guide/dashboard-user-manual.md) records the broader operator
+workflow; the [safety policy](safety.md) defines disclosure and storage limits.
 
 Routine IIS changes use the incremental updater with an inspected plan, explicit
 approval, retained-state validation and payload rollback.

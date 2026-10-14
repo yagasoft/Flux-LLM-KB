@@ -1,5 +1,6 @@
 using FluxKnowledge.Application.Contracts;
 using FluxKnowledge.Application.Indexing;
+using FluxKnowledge.Application.Sources;
 using FluxKnowledge.Domain.Gpu;
 using FluxKnowledge.Domain.Jobs;
 using FluxKnowledge.Domain.Outlook;
@@ -26,16 +27,42 @@ public interface IProjectionReader
     ValueTask<GpuSchedulerStatusProjection> ReadGpuSchedulerStatusAsync(CancellationToken cancellationToken);
     ValueTask<IReadOnlyList<PipelineRecordProjection>> ReadPipelineRecordsAsync(CancellationToken cancellationToken);
     ValueTask<PipelineRecordProjection?> ReadPipelineRecordAsync(Guid id, CancellationToken cancellationToken);
+    ValueTask<PipelineAttentionPage> ReadPipelineAttentionAsync(string unit, Guid? sourceRootId, int page,
+        CancellationToken cancellationToken) => ValueTask.FromResult(PipelineAttentionPage.Empty);
 }
 
 public sealed class SqlProjectionReader(
     IDbContextFactory<FluxKnowledgeDbContext> contextFactory,
     IDerivedIndexRecoveryStatus recoveryStatus,
-    GpuSchedulerStore schedulerStore) : IProjectionReader
+    GpuSchedulerStore schedulerStore,
+    IDeploymentValidationHold? validationHold = null,
+    TimeProvider? timeProvider = null) : IProjectionReader
 {
+    private readonly TimeProvider _clock = timeProvider ?? TimeProvider.System;
+    private readonly SqlPipelineActivityReader _activityReader = new(validationHold, timeProvider ?? TimeProvider.System);
+
+    public async ValueTask<PipelineAttentionPage> ReadPipelineAttentionAsync(string unit, Guid? sourceRootId, int page,
+        CancellationToken cancellationToken)
+    {
+        for (var attempt = 0; attempt < 2; attempt++)
+        {
+            await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+            var result = await _activityReader.ReadAttentionAsync(context, unit, sourceRootId, page, cancellationToken).ConfigureAwait(false);
+            if (result is not null) return result;
+        }
+        throw new InvalidOperationException("Status changed during both attention reads.");
+    }
+
     public async ValueTask<OverviewProjection> ReadOverviewAsync(CancellationToken cancellationToken)
     {
         await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        var startedAt = _clock.GetUtcNow();
+        var before = await SqlPipelineActivityQuery.ReadFenceAsync(context, cancellationToken).ConfigureAwait(false);
+        if (!before.IsStable)
+            return new(0, 0, 0, 0, 0, 0, 0, "none", new("Unknown", null, null, null, null, 0))
+            {
+                Activity = PipelineActivitySummary.Unknown with { ReadStartedAtUtc = startedAt, IsConsistent = false }
+            };
         var jobCounts = await context.Jobs.AsNoTracking()
             .GroupBy(job => job.PublicState)
             .Select(group => new { State = group.Key, Count = group.Count() })
@@ -44,37 +71,6 @@ public sealed class SqlProjectionReader(
         var indexed = await context.PipelineRecords.AsNoTracking()
             .CountAsync(record => record.CompletionCriteriaMet && !record.IsDeleted, cancellationToken)
             .ConfigureAwait(false);
-        var sourceRoots = await context.SourceRootConfigurations.AsNoTracking()
-            .Select(root => root.Id)
-            .ToListAsync(cancellationToken)
-            .ConfigureAwait(false);
-        var sourceRequests = sourceRoots.Count == 0
-            ? []
-            : await context.SourceScanRequests.AsNoTracking()
-                .Where(request => sourceRoots.Contains(request.SourceRootId))
-                .OrderByDescending(request => request.RequestedAtUtc).ThenByDescending(request => request.Id)
-                .ToListAsync(cancellationToken)
-                .ConfigureAwait(false);
-        var latestSourceRequests = sourceRequests
-            .GroupBy(request => request.SourceRootId)
-            .Select(group => group.First())
-            .ToArray();
-        var sourceActivityRows = sourceRoots.Count == 0
-            ? []
-            : await (
-                from activity in context.SourceActivities.AsNoTracking()
-                join revision in context.SourceRevisions.AsNoTracking() on activity.SourceRevisionId equals revision.Id
-                where sourceRoots.Contains(revision.SourceRootId) && revision.SuppressedAtUtc == null
-                select new { revision.SourceRootId, activity.SourceRevisionId, activity.State, activity.ResultingPipelineRecordId })
-                .ToListAsync(cancellationToken).ConfigureAwait(false);
-        var sourceActivitySummaries = sourceActivityRows
-            .GroupBy(row => new { row.SourceRootId, row.SourceRevisionId })
-            .Select(group => group.ToArray())
-            .ToArray();
-        var sourceIndexed = sourceActivitySummaries.Count(revision => revision.Any(row => row.State == (int)FluxKnowledge.Domain.Sources.SourceActivityState.Completed && row.ResultingPipelineRecordId != null));
-        var sourceDeferred = sourceActivitySummaries.Count(revision => revision.Any(row => row.State == (int)FluxKnowledge.Domain.Sources.SourceActivityState.DeferredUnsupported && row.ResultingPipelineRecordId == null));
-        var sourceBlocked = sourceActivitySummaries.Count(revision => revision.Any(row => row.State == (int)FluxKnowledge.Domain.Sources.SourceActivityState.DeferredPolicy));
-        var sourceFailed = sourceActivitySummaries.Count(revision => revision.Any(row => row.State == (int)FluxKnowledge.Domain.Sources.SourceActivityState.FailedTerminal));
         var activeGeneration = await (
                 from state in context.IndexState.AsNoTracking()
                 join generation in context.IndexGenerations.AsNoTracking()
@@ -99,6 +95,9 @@ public sealed class SqlProjectionReader(
         var recovery = recoveryStatus.Snapshot;
         var gpuSchedulerStatus = await ReadGpuSchedulerStatusAsync(cancellationToken)
             .ConfigureAwait(false);
+        var activity = await _activityReader.ReadAsync(context, startedAt, cancellationToken).ConfigureAwait(false);
+        var after = await SqlPipelineActivityQuery.ReadFenceAsync(context, cancellationToken).ConfigureAwait(false);
+        activity = activity with { ObservedAtUtc = _clock.GetUtcNow(), IsConsistent = before.Accepts(after) };
         return new OverviewProjection(
             GetCount(PublicJobState.WorkerQueued),
             GetCount(PublicJobState.WorkerProcessing),
@@ -117,12 +116,13 @@ public sealed class SqlProjectionReader(
                 recovery.CleanedCandidateCount))
         {
             GpuSchedulerStatus = gpuSchedulerStatus,
+            Activity = activity,
             SourceIndexing = new SourceIndexingSummary(
-                sourceRoots.Count,
-                sourceIndexed,
-                sourceDeferred,
-                sourceBlocked,
-                sourceFailed + latestSourceRequests.Sum(request => request.ErrorFileCount)),
+                activity.Sources.Count,
+                activity.Sources.Sum(source => source.PublishedFiles),
+                activity.Sources.Sum(source => source.DeferredFiles),
+                activity.Sources.Sum(source => source.BlockedFiles),
+                activity.Sources.Sum(source => source.FailedFiles + source.ScanErrors)),
             OutlookCapture = new OutlookCaptureSummary(
                 outlookProfileCount,
                 outlookEnabledProfileCount,
