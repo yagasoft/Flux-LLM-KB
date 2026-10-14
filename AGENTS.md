@@ -1,5 +1,33 @@
 # AGENTS.md
 
+## Production boundary and delivery
+
+- FluxKnowledge is in production. From 14 October 2026, production deployment,
+  redeployment, restart, repair, migration, recovery, retention, investigation and
+  live validation require fresh, explicit user approval for the specific action
+  and production target. The 13 October standing app/database approvals do not
+  authorise further production work. Independent technical review remains required
+  at consequential and production gates and does not replace user approval.
+- Run all further testing, trials and diagnostics in a separate test/staging
+  deployment with its own database, configuration, runtime, storage and endpoints.
+  Do not reuse production bindings, scheduled tasks or mutable data. Preserve
+  production payloads, models, rollback and recovery evidence.
+- The current app database was classified as non-critical on 13 October. That
+  classification does not waive the production boundary above. Preserve technical
+  eligibility, ownership, idempotency and native-cleanup checks; database edits
+  alone cannot prove GPU cleanup. The historical authority receipts remain under
+  `E:\Codex Workspaces\Operational Evidence\FluxKnowledge\startup-shutdown-stability-20261013`.
+- Deliver a usable, reliably running personal app for indexing real workspaces.
+  Keep effort proportional; optional hardening and investigation must not become
+  an indefinite delivery barrier. Subsequent releases must pair necessary
+  supporting work with tangible user improvements. Preserve these priorities
+  through compaction and handoffs; the delivery record is
+  `E:\Codex Workspaces\Operational Evidence\FluxKnowledge\startup-shutdown-stability-20261013\delivery-priorities-and-post-mvp-roadmap.md`.
+- For feature closeout on `codex/...`, use `scripts/dev/complete-feature.ps1`;
+  do not manually substitute its sequence. On failure, report JSON `failed_step`
+  and `log_path`, fix the failure within authorised scope and rerun. Script use
+  does not authorise production actions.
+
 ## Hard rule: central model cache and download prohibition
 
 **The sole canonical model store for this application is `J:\Models`. Read and

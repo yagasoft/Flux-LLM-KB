@@ -1,7 +1,8 @@
 # Everyday search confidence
 
-Status: focused local verification passed; canonical feature closeout, deployment
-and final frozen-workload acceptance remain pending.
+Status: the increment is deployed as `60b9dc0a`; frozen-workload acceptance failed
+and remains open. Further testing and diagnostics must use an isolated staging
+deployment. Production actions require fresh, explicit user approval.
 
 This Release 1 increment adds visible waiting and indexing/fallback status to the
 search page. Pending searches prevent duplicate submissions. Refusals remove old
@@ -24,6 +25,18 @@ the failed inspection, scope disposal, later reconciliation and cancellation. A 
 browser regression also failed before the UI correction and passed afterwards,
 covering waiting, duplicate submission, indexing/busy/timeout/unavailable fallback,
 refusal and a subsequent successful search.
+
+Canonical feature closeout passed all 21 steps. Each checkout passed 3,211 tests
+with zero failures, 24 default opt-in skips and zero build warnings. The new browser
+case passed separately. Independent review approved the change and exact incremental
+deployment. Installed application bytes matched the reviewed candidate. The first
+companion comparison omitted the updater's existing runner; the sole additional
+file matched the repository and preserved predecessor, and independent review
+cleared the corrected comparison. No deployed bytes were changed for that correction.
+
+After deployment, six exact current full method/documentation reads passed across
+MCP, REST and CLI. All 1,108 eligible tracked files were published with matching
+current bytes. These observations preceded the later production approval boundary.
 
 Restore exposed advisories published on 13 October for transitive
 `System.Security.Cryptography.Pkcs` and the test SignalR client. The central package
@@ -54,6 +67,16 @@ The unchanged acceptance contract remains 20 frozen queries twice at two callers
 bindings, p95 strictly below 20 seconds and the existing 25-second outer deadline.
 Current full method and documentation reads must also pass through MCP, REST and
 CLI. Preserve first-pass failures; do not repeat an unchanged failed workload.
+
+The single subsequent frozen run stopped after three searches: two hybrid-ready
+responses in 14.7 and 13.8 seconds, and a semantic timeout with lexical fallback in
+20.9 seconds. The other 37 observations remained unstarted. This does not meet
+the 40/40 or p95 acceptance gates. During the bounded observer, the user required
+all further trials and diagnostics to move to a separate staging deployment.
+Only the agent-owned runner and collector were terminated. No later production
+probes or native accounting were performed, so post-run native cleanup remains
+unverified. Retain the failed observations and incomplete trace; do not claim
+timeout causation, native cleanup or crash prevention from this run.
 
 Release 2 retains workspace lifecycle acceptance and refreshed eligibility for the
 exact 17 historical generations. Nothing in this increment stages or deletes that
