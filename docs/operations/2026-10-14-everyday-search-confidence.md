@@ -1,8 +1,9 @@
 # Everyday search confidence
 
-Status: the increment is deployed as `60b9dc0a`; frozen-workload acceptance failed
-and remains open. Further testing and diagnostics must use an isolated staging
-deployment. Production actions require fresh, explicit user approval.
+Status: the managed archive failure and initial-stop recovery guard are deployed
+as `c36c2c4f`. Bounded live checks and independent runtime assessment passed.
+Frozen-workload acceptance remains open. Further trials must use isolated staging.
+Future production actions require fresh, explicit user approval.
 
 This Release 1 increment adds visible waiting and indexing/fallback status to the
 search page. Pending searches prevent duplicate submissions. Refusals remove old
@@ -92,3 +93,87 @@ real semantic models, GPU, OCR and mail disabled. It is a functional baseline;
 the frozen hybrid workload and production risk disposition remain open. See the
 [staging procedure](2026-10-14-isolated-staging.md) for its explicit bindings and
 the separate restricted disposable-SQL test path.
+
+Saved evidence from recurring IIS crashes on 14 October shows a duplicate
+archive-child insert escaping item handling and stopping the host, followed by
+a native CPU cleanup deadline and an IIS access violation. The locator factory
+uses only the member-path fingerprint, allowing equal member paths and bytes in
+different archives under one root to collide in the source-revision identity
+index. This access violation differs from the earlier
+heap-corruption signature; a shared native cause or prevention is not proved.
+The recurring managed failure predates a separate CPU staging trial from an
+unmerged branch. That trial overlapped a later cleanup/crash sequence, so a
+shared-resource timing contribution remains possible despite its own confirmed
+cleanup.
+
+Further real-model and frozen-workload trials are paused. The bounded managed
+correction qualifies new ZIP/TAR child locators by immutable parent revision,
+uses the parent revision number for new archive children, and preserves existing
+child bindings and receipt fingerprints. Exact named archive-child
+identity collisions are translated after transaction rollback into the existing
+fenced blocked-item path. Other SQL failures retain their existing handling.
+All 46 focused SQL checks pass, including nine new cases covering distinct
+parents and revisions, concurrent replay of existing children, separate suppression and
+lease fences, and both named-index failures rolling back before a blocked item
+and healthy continuation. The affected processor/hosted-service suite passes
+76 tests and the Release build has zero warnings. Independent review approved
+the correction. Canonical closeout without deployment completed all 21 steps,
+with 3,351 tests passing in each checkout, 25 opt-in skips and zero build
+warnings. The correction is squash merged and pushed as Main `fc49fe7d`.
+Production repair, investigation and validation still require fresh explicit
+approval for the specific action and target. Native and frozen-trial holds
+remain in place.
+
+The incident deployment review identified a separate updater failure path: an
+initial stop callback could fail its worker-exit proof and still restart and
+probe the predecessor. The payload swap now preserves both unchanged payloads
+and propagates that initial failure without activation, restart, rollback
+preparation or probes. A later failure after a proved stop retains the existing
+verified rollback path; a failed rollback stop cannot move payloads or restart
+the worker. Production activation used the corrected operator's verification
+and independent review. This supporting change does not establish
+native crash prevention or complete frozen-workload acceptance.
+
+## Authorised incident deployment and bounded live acceptance
+
+The independently reviewed initial-stop guard completed all 21 canonical closeout
+steps and is merged and pushed as Main `c36c2c4f`. Both checkouts passed 3,351 tests
+with 25 opt-in skips and zero build warnings. Six focused native deployment and
+recovery contracts passed, including preservation of both payloads and zero
+restart/probe callbacks when initial worker exit cannot be proved.
+
+With explicit user authority and a fresh independent exact-target review, one
+ordinary incremental IIS Apply succeeded at 20:26:55 UTC on 14 October. All 149
+application and 124 companion files match the reviewed candidate. The existing
+configuration, scheduled task and hidden launcher are preserved, the validation
+hold is released, and both predecessor payloads remain in the updater's recovery
+directory. No migration, stopped-pool recovery or alternate deployment path ran.
+
+From 20:29:14 to 20:39:36 UTC, 21 observations over 621.5 seconds retained the same
+worker and returned HTTP 200 for live and readiness health. There was no candidate
+crash, host stop, worker replacement or cleanup deadline. The deployment interval
+before the observer was checked separately. All five previously running archive
+branches completed with the same parents and released leases. Their 56 new children
+have qualified locators, matching parent revisions and roots, and retained artifacts.
+The seven previously blocked branches remain blocked; no reset or terminal replay
+was used to improve counts.
+
+One existing current code citation returned HTTP 200 with all 485 cited characters
+and the same owner, record and chunk. No new search or inference was requested.
+An older OneDrive reference correctly returned `evidence-stale`: its owner, record
+and chunk are absent from the current catalogue. Both outcomes are retained.
+The exact 215 historical uncertain task identities are unchanged. Ordinary OCR
+continued with a fresh live owner and completed 116 more tasks during the window;
+this is progressing work, not proof that the remaining backlog is complete.
+
+Two existing startup limitations recurred: the optional resident CPU loader refused
+insufficient memory, and one source watcher refused reparse-point traversal while
+periodic reconciliation remained authoritative. Both have matching predecessor
+events. Loaded CPU native shutdown was not exercised by this window. Native IIS
+causation and prevention remain unproved, and full frozen semantic acceptance
+remains open. No model was downloaded and no terminal work or model cache was changed.
+
+Independent Astra assessment approved this bounded runtime evidence. The separate
+rendered pipeline UI gate is owned and recorded by the [pipeline visibility task](2026-10-14-pipeline-visibility.md).
+Retain the original dumps, stale-reference refusal, existing warning events and
+rollback payloads. This release does not authorise later recovery or production work.

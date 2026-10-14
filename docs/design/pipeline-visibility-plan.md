@@ -1,10 +1,11 @@
 # Pipeline visibility implementation plan
 
-Date: 14 October 2026. Status: implementation, focused SQL/browser checks and
-active-write availability pass; canonical closeout and production gates remain open.
+Date: 14 October 2026. Status: implementation, focused SQL/browser checks,
+active-write availability and canonical closeout pass. Production deployment and
+live validation are held at independent review; see the
+[acceptance and gate record](../operations/2026-10-14-pipeline-visibility.md).
 
-The user explicitly requested a pause before implementation for a model switch.
-Resume this scoped plan without another general planning round.
+Implementation resumed from the saved scoped plan after the requested pause.
 
 ## Outcome and boundaries
 

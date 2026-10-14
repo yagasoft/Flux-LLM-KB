@@ -21,6 +21,38 @@ public sealed class ZipArchiveRetainedProcessorTests
         Assert.StartsWith("retained-archive-member:", identity.SyntheticLocator, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Equal_members_in_distinct_parent_revisions_have_distinct_locators_and_stable_replay_receipts(bool sameStableParent)
+    {
+        var archive = CreateZip("docs/readme.txt", "shared member text");
+        var hash = Convert.ToHexStringLower(SHA256.HashData(archive));
+        var firstClaim = new RetainedProcessorClaim(Guid.NewGuid(), SourceRevisionId.New(), "first-parent", hash,
+            "owner", 1, DateTimeOffset.UtcNow.AddMinutes(5));
+        var secondClaim = firstClaim with
+        {
+            BranchId = Guid.NewGuid(), SourceRevisionId = SourceRevisionId.New(),
+            ParentStableIdentity = sameStableParent ? firstClaim.ParentStableIdentity : "second-parent"
+        };
+        async Task<RetainedProcessorCompletion> Process(RetainedProcessorClaim claim) => await new ZipArchiveRetainedProcessor(new RecordingStreamWriter()).ProcessAsync(
+            claim, new RetainedSourceBytes(claim.SourceRevisionId, archive, hash, archive.Length),
+            new RetainedProcessorOptions(), CancellationToken.None);
+
+        var first = await Process(firstClaim);
+        var second = await Process(secondClaim);
+        var replay = await Process(firstClaim);
+        var firstMember = Assert.Single(first.Members);
+        var secondMember = Assert.Single(second.Members);
+        Assert.NotEqual(firstMember.SyntheticLocator, secondMember.SyntheticLocator);
+        Assert.Equal(firstMember.SyntheticLocator, Assert.Single(replay.Members).SyntheticLocator);
+        Assert.Equal(firstMember.MemberFingerprint, secondMember.MemberFingerprint);
+        Assert.Equal(firstMember.ContentSha256, secondMember.ContentSha256);
+        Assert.Equal(first.ReceiptFingerprint, second.ReceiptFingerprint);
+        Assert.Equal(first.ReceiptFingerprint, replay.ReceiptFingerprint);
+        if (sameStableParent) Assert.Equal(firstMember.StableSourceIdentity, secondMember.StableSourceIdentity);
+    }
+
     [Fact]
     public void Archive_zip_handler_exposes_the_approved_runnable_descriptor()
     {

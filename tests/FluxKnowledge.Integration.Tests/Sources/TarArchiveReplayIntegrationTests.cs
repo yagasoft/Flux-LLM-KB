@@ -46,7 +46,7 @@ public sealed class TarArchiveReplayIntegrationTests(NativeSqlServerFixture fixt
             Assert.Equal(seeded.SourceRevisionId, child.ParentSourceRevisionId);
             Assert.Equal("superseded-by-archive-tar-expand", legacy.Reason);
             Assert.Equal("superseded-by-archive-tar-expand", relation.ReasonCode);
-            Assert.Equal("C:\\retained-archive-members\\" + member.MemberFingerprint, child.CanonicalPath);
+            Assert.Equal($"C:\\retained-archive-members\\{seeded.SourceRevisionId:N}\\{member.MemberFingerprint}", child.CanonicalPath);
             var audit = await verification.AuditEvents.SingleAsync(value => value.SourceRevisionId == seeded.SourceRevisionId && value.EventType == "retained_processor.completed");
             var publicJson = JsonSerializer.Serialize(new { child, member, audit });
             Assert.DoesNotContain("confidential-member-sentinel", publicJson, StringComparison.OrdinalIgnoreCase);

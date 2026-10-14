@@ -183,12 +183,13 @@ public record RetainedProcessorDerivedChild(
     public ArchiveMemberIdentity Identity => new(MemberFingerprint, SyntheticLocator, StableSourceIdentity);
 
     public static RetainedProcessorDerivedChild ArchiveMember(
+        SourceRevisionId parentSourceRevisionId,
         ArchiveMemberIdentity identity,
         string contentSha256,
         string storeRelativePath,
         long byteLength,
         string classification,
-        ISourceArtifactPublicationLease? publicationLease = null) => new(identity.MemberFingerprint, $"C:\\retained-archive-members\\{identity.MemberFingerprint}", identity.StableSourceIdentity,
+        ISourceArtifactPublicationLease? publicationLease = null) => new(identity.MemberFingerprint, $"C:\\retained-archive-members\\{parentSourceRevisionId.Value:N}\\{identity.MemberFingerprint}", identity.StableSourceIdentity,
             contentSha256, storeRelativePath, byteLength, classification, OriginKind: 1, Extension: ".txt", PublicationLease: publicationLease);
 }
 

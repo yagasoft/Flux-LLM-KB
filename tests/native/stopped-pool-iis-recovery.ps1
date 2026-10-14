@@ -86,6 +86,16 @@ try {
             $result = Invoke-IncrementalApplicationPayloadSwap @parameters
             if ($result.RolledBack -or $state.Stopped -or $state.Starts.Count -ne 1 -or $state.Starts[0] -cne 'candidate') { throw 'Healthy recovery did not start only the candidate.' }
         }
+        elseif ($case -eq 'stop-failure') {
+            Expect-Failure { Invoke-IncrementalApplicationPayloadSwap @parameters } 'synthetic stop proof failed'
+            if (-not $state.Stopped -or $state.Starts.Count -ne 0 -or $state.Restored -or
+                -not (Test-Path -LiteralPath $hold) -or (Test-Path -LiteralPath $previous) -or
+                (Test-Path -LiteralPath $failed) -or
+                [IO.File]::ReadAllText((Join-Path $active 'marker.txt')) -cne 'previous' -or
+                [IO.File]::ReadAllText((Join-Path $candidate 'marker.txt')) -cne 'candidate') {
+                throw 'An unproved stopped-pool recovery changed bytes, started or validated a worker.'
+            }
+        }
         else {
             Expect-Failure { Invoke-IncrementalApplicationPayloadSwap @parameters } 'Incremental IIS deployment failed'
             if (-not $state.Stopped -or $state.Starts.Contains('previous') -or -not (Test-Path -LiteralPath $hold)) { throw "Recovery failure did not retain stopped state/hold: $case" }

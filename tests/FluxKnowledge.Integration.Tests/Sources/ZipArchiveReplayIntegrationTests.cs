@@ -25,6 +25,242 @@ public sealed class ZipArchiveReplayIntegrationTests(NativeSqlServerFixture fixt
 {
     private readonly NativeSqlServerFixture _fixture = fixture;
 
+    [NativeSqlServerTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Equal_archive_members_under_one_root_publish_separately_for_each_parent_revision(bool sameStableParent)
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"flux-zip-parent-identity-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            var zip = CreateZip("docs/readme.txt", "shared archive member");
+            var hash = Convert.ToHexStringLower(SHA256.HashData(zip));
+            var relativePath = Path.Combine("sha256", hash[..2], $"{hash}.bin");
+            Directory.CreateDirectory(Path.Combine(root, "sha256", hash[..2]));
+            await File.WriteAllBytesAsync(Path.Combine(root, relativePath), zip);
+            var first = await SeedDeferredZipAsync(hash, zip.Length, relativePath);
+            using var secondBuffer = new MemoryStream();
+            await secondBuffer.WriteAsync(zip);
+            if (sameStableParent)
+            {
+                using var updatedArchive = new ZipArchive(secondBuffer, ZipArchiveMode.Update, leaveOpen: true);
+                updatedArchive.GetEntry("docs/readme.txt")!.LastWriteTime = new DateTimeOffset(2000, 1, 1, 0, 0, 0, TimeSpan.Zero);
+            }
+            var secondZip = secondBuffer.ToArray();
+            var secondHash = Convert.ToHexStringLower(SHA256.HashData(secondZip));
+            var secondRelativePath = Path.Combine("sha256", secondHash[..2], $"{secondHash}.bin");
+            Directory.CreateDirectory(Path.Combine(root, "sha256", secondHash[..2]));
+            await File.WriteAllBytesAsync(Path.Combine(root, secondRelativePath), secondZip);
+            var second = await SeedDeferredZipAsync(secondHash, secondZip.Length, secondRelativePath, sourceRootId: first.RootId,
+                stableSourceIdentity: sameStableParent ? $"zip-parent:{first.SourceRevisionId:N}" : null,
+                revision: sameStableParent ? 2 : 1,
+                canonicalPath: sameStableParent ? "C:\\missing-source-original-sentinel.zip" : null);
+            if (sameStableParent) Assert.NotEqual(hash, secondHash);
+
+            var result = await CreateActivation(root).RunOnceAsync(CancellationToken.None);
+
+            Assert.Equal(2, result.CompletedBranches);
+            Assert.Equal(0, result.FailedBranches);
+            await using var verification = CreateContext();
+            var children = await verification.SourceRevisions.Where(value => value.SourceRootId == first.RootId && value.ParentSourceRevisionId != null)
+                .ToArrayAsync();
+            Assert.Equal(2, children.Length);
+            var firstChild = Assert.Single(children, value => value.ParentSourceRevisionId == first.SourceRevisionId);
+            var secondChild = Assert.Single(children, value => value.ParentSourceRevisionId == second.SourceRevisionId);
+            Assert.NotEqual(firstChild.CanonicalPath, secondChild.CanonicalPath);
+            Assert.Equal(firstChild.ContentSha256, secondChild.ContentSha256);
+            Assert.Equal(sameStableParent ? 2 : 1, secondChild.Revision);
+            Assert.Equal(2, await verification.SourceArtifacts.CountAsync(value => children.Select(child => child.Id).Contains(value.SourceRevisionId)));
+            Assert.Equal(2, await verification.SourceActivities.CountAsync(value => children.Select(child => child.Id).Contains(value.SourceRevisionId)));
+            var branches = await verification.SourceProcessorBranches.Where(value => value.SourceRevisionId == first.SourceRevisionId || value.SourceRevisionId == second.SourceRevisionId).ToArrayAsync();
+            Assert.All(branches, branch => Assert.Equal((int)RetainedProcessorBranchState.Completed, branch.State));
+            Assert.Equal(branches[0].CompletionReceiptFingerprint, branches[1].CompletionReceiptFingerprint);
+            Assert.Equal(0, (await CreateActivation(root).RunOnceAsync(CancellationToken.None)).ClaimedBranches);
+            await DeferFixtureTextActivitiesAsync(first.RootId);
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [NativeSqlServerFact]
+    public async Task Concurrent_archive_completion_reuses_the_exact_legacy_child_without_rewriting_its_binding()
+    {
+        var parentHash = new string('a', 64);
+        var seeded = await SeedDeferredZipAsync(parentHash, 4, $"sha256\\aa\\{parentHash}.bin", revision: 2);
+        var factory = new ContextFactory(_fixture.ConnectionString);
+        var store = new SqlRetainedProcessorBranchStore(factory, TimeProvider.System);
+        var identity = ArchiveMemberIdentity.Create($"zip-parent:{seeded.SourceRevisionId:N}", "member.txt");
+        var childHash = new string('b', 64);
+        var childId = Guid.NewGuid();
+        var artifactId = Guid.NewGuid();
+        var activityId = Guid.NewGuid();
+        var legacyPath = $"C:\\retained-archive-members\\{identity.MemberFingerprint}";
+        var now = DateTimeOffset.UtcNow;
+        await using (var setup = CreateContext())
+        {
+            setup.SourceRevisions.Add(new SourceRevisionEntity
+            {
+                Id = childId, SourceRootId = seeded.RootId, ParentSourceRevisionId = seeded.SourceRevisionId,
+                StableSourceIdentity = identity.StableSourceIdentity, Revision = 1, CanonicalPath = legacyPath,
+                ContentSha256 = childHash, ByteLength = 4, OriginKind = 1, Classification = "AcceptedUtf8Text", Extension = ".txt",
+                DiscoveredAtUtc = now, DiscoveryEvidenceJson = "{}"
+            });
+            setup.SourceArtifacts.Add(new SourceArtifactEntity
+            {
+                Id = artifactId, SourceRevisionId = childId, ContentSha256 = childHash, ByteLength = 4,
+                StoreRelativePath = $"sha256\\bb\\{childHash}.bin", ChecksumVerifiedAtUtc = now, ReferenceCount = 1
+            });
+            setup.SourceActivities.Add(new SourceActivityEntity
+            {
+                Id = activityId, SourceRevisionId = childId, ActivityKind = (int)SourceActivityKind.TextExtraction,
+                ExecutionClass = (int)ExecutionClass.InProcess, ProcessorVersion = "phase-3a-v1",
+                DescriptorFingerprint = SourceActivityEntity.LegacyDescriptorFingerprint, InputFingerprint = childHash,
+                State = (int)SourceActivityState.Pending, CreatedAtUtc = now, UpdatedAtUtc = now
+            });
+            await setup.SaveChangesAsync();
+        }
+        Assert.True(await store.PromoteAsync(new RetainedProcessorPromotionCandidate(seeded.LegacyActivityId,
+            new SourceRevisionId(seeded.SourceRevisionId), parentHash), ZipArchiveRetainedProcessor.Capability, CancellationToken.None));
+        var claim = Assert.Single(await store.ClaimAsync("legacy-replay", 1, CancellationToken.None));
+        var completion = new RetainedProcessorCompletion([RetainedProcessorDerivedChild.ArchiveMember(claim.SourceRevisionId,
+            identity, childHash, $"sha256\\bb\\{childHash}.bin", 4, "AcceptedUtf8Text")], new string('c', 64));
+
+        var results = await Task.WhenAll(store.CommitAsync(claim, completion, CancellationToken.None).AsTask(),
+            store.CommitAsync(claim, completion, CancellationToken.None).AsTask());
+
+        Assert.Single(results, value => value);
+        Assert.False(await store.CommitAsync(claim, completion, CancellationToken.None));
+        await using var verification = CreateContext();
+        var child = Assert.Single(await verification.SourceRevisions.Where(value => value.ParentSourceRevisionId == seeded.SourceRevisionId).ToArrayAsync());
+        Assert.Equal(childId, child.Id);
+        Assert.Equal(legacyPath, child.CanonicalPath);
+        Assert.Equal(1, child.Revision);
+        Assert.Equal(artifactId, (await verification.SourceArtifacts.SingleAsync(value => value.SourceRevisionId == childId)).Id);
+        Assert.Equal(activityId, (await verification.SourceActivities.SingleAsync(value => value.SourceRevisionId == childId)).Id);
+        var member = await verification.SourceProcessorBranchMembers.SingleAsync(value => value.BranchId == claim.BranchId);
+        Assert.Equal(childId, member.ChildSourceRevisionId);
+        Assert.Equal(activityId, member.ChildSourceActivityId);
+        Assert.Equal(completion.ReceiptFingerprint, (await verification.SourceProcessorBranches.SingleAsync(value => value.Id == claim.BranchId)).CompletionReceiptFingerprint);
+        Assert.Equal("completed", (await verification.SourceProcessorAttempts.SingleAsync(value => value.BranchId == claim.BranchId)).OutcomeCode);
+        await DeferFixtureTextActivitiesAsync(seeded.RootId);
+    }
+
+    [NativeSqlServerTheory]
+    [InlineData("owner")]
+    [InlineData("generation")]
+    [InlineData("expiry")]
+    [InlineData("suppression")]
+    public async Task Archive_completion_and_failure_reject_each_stale_parent_or_lease_fence(string fence)
+    {
+        var hash = new string('a', 64);
+        var seeded = await SeedDeferredZipAsync(hash, 4, $"sha256\\aa\\{hash}.bin");
+        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System);
+        Assert.True(await store.PromoteAsync(new RetainedProcessorPromotionCandidate(seeded.LegacyActivityId,
+            new SourceRevisionId(seeded.SourceRevisionId), hash), ZipArchiveRetainedProcessor.Capability, CancellationToken.None));
+        var claim = Assert.Single(await store.ClaimAsync("fenced-archive", 1, CancellationToken.None));
+        var stale = fence switch
+        {
+            "owner" => claim with { LeaseOwner = "different-owner" },
+            "generation" => claim with { LeaseGeneration = claim.LeaseGeneration + 1 },
+            _ => claim
+        };
+        await using (var setup = CreateContext())
+        {
+            if (fence == "expiry")
+                (await setup.SourceProcessorBranches.SingleAsync(value => value.Id == claim.BranchId)).LeaseExpiresAtUtc = DateTimeOffset.UtcNow.AddMinutes(-1);
+            if (fence == "suppression")
+                (await setup.SourceRevisions.SingleAsync(value => value.Id == seeded.SourceRevisionId)).SuppressedAtUtc = DateTimeOffset.UtcNow;
+            await setup.SaveChangesAsync();
+        }
+        var identity = ArchiveMemberIdentity.Create(claim.ParentStableIdentity, "member.txt");
+        var completion = new RetainedProcessorCompletion([RetainedProcessorDerivedChild.ArchiveMember(claim.SourceRevisionId,
+            identity, new string('b', 64), "sha256\\bb\\child.bin", 4, "AcceptedUtf8Text")], new string('c', 64));
+
+        Assert.False(await store.CommitAsync(stale, completion, CancellationToken.None));
+        Assert.False(await store.FailAsync(stale, new RetainedProcessorFailure("retained-child-identity-conflict", []), CancellationToken.None));
+
+        await using var verification = CreateContext();
+        Assert.Empty(await verification.SourceRevisions.Where(value => value.ParentSourceRevisionId == seeded.SourceRevisionId).ToArrayAsync());
+        Assert.Empty(await verification.SourceProcessorBranchMembers.Where(value => value.BranchId == claim.BranchId).ToArrayAsync());
+        var branch = await verification.SourceProcessorBranches.SingleAsync(value => value.Id == claim.BranchId);
+        Assert.Equal((int)RetainedProcessorBranchState.Running, branch.State);
+        Assert.Null(branch.CompletionReceiptFingerprint);
+        var attempt = await verification.SourceProcessorAttempts.SingleAsync(value => value.BranchId == claim.BranchId);
+        Assert.Null(attempt.FinishedAtUtc);
+        Assert.Null(attempt.OutcomeCode);
+        Assert.Empty(await verification.AuditEvents.Where(value => value.SourceRevisionId == seeded.SourceRevisionId &&
+            (value.EventType == "retained_processor.completed" || value.EventType == "retained_processor.blocked")).ToArrayAsync());
+        branch.State = (int)RetainedProcessorBranchState.Blocked;
+        await verification.SaveChangesAsync();
+    }
+
+    [NativeSqlServerTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Exact_archive_child_identity_collision_rolls_back_blocks_only_its_item_and_allows_healthy_work(bool stableIdentityCollision)
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"flux-zip-collision-containment-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            async Task<(Guid LegacyActivityId, Guid SourceRevisionId, Guid RootId)> Seed(byte[] zip, Guid? rootId = null)
+            {
+                var hash = Convert.ToHexStringLower(SHA256.HashData(zip));
+                var relativePath = Path.Combine("sha256", hash[..2], $"{hash}.bin");
+                Directory.CreateDirectory(Path.Combine(root, "sha256", hash[..2]));
+                await File.WriteAllBytesAsync(Path.Combine(root, relativePath), zip);
+                return await SeedDeferredZipAsync(hash, zip.Length, relativePath, sourceRootId: rootId);
+            }
+            var failed = await Seed(CreateZip([("safe.txt", "safe member"), ("collision.txt", "collision member")]));
+            var healthy = await Seed(CreateZip("healthy.txt", "healthy member"), failed.RootId);
+            var identity = ArchiveMemberIdentity.Create($"zip-parent:{failed.SourceRevisionId:N}", "collision.txt");
+            var collisionHash = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes("collision member")));
+            var sentinelId = Guid.NewGuid();
+            var now = DateTimeOffset.UtcNow;
+            await using (var setup = CreateContext())
+            {
+                setup.SourceRevisions.Add(new SourceRevisionEntity
+                {
+                    Id = sentinelId, SourceRootId = failed.RootId, ParentSourceRevisionId = healthy.SourceRevisionId,
+                    StableSourceIdentity = stableIdentityCollision ? identity.StableSourceIdentity : $"sentinel:{sentinelId:N}",
+                    CanonicalPath = stableIdentityCollision ? $"C:\\other-archive-member\\{sentinelId:N}" :
+                        $"C:\\retained-archive-members\\{failed.SourceRevisionId:N}\\{identity.MemberFingerprint}",
+                    Revision = 1, ContentSha256 = collisionHash, ByteLength = 16, OriginKind = 1,
+                    Classification = "AcceptedUtf8Text", Extension = ".txt", DiscoveredAtUtc = now, DiscoveryEvidenceJson = "{}"
+                });
+                await setup.SaveChangesAsync();
+            }
+
+            var result = await CreateActivation(root).RunOnceAsync(CancellationToken.None);
+
+            Assert.Equal(1, result.FailedBranches);
+            Assert.Equal(1, result.CompletedBranches);
+            await using var verification = CreateContext();
+            var failedBranch = await verification.SourceProcessorBranches.SingleAsync(value => value.SourceRevisionId == failed.SourceRevisionId);
+            Assert.Equal((int)RetainedProcessorBranchState.Blocked, failedBranch.State);
+            Assert.Null(failedBranch.CompletionReceiptFingerprint);
+            Assert.Empty(await verification.SourceRevisions.Where(value => value.ParentSourceRevisionId == failed.SourceRevisionId).ToArrayAsync());
+            Assert.Empty(await verification.SourceProcessorBranchMembers.Where(value => value.BranchId == failedBranch.Id).ToArrayAsync());
+            Assert.Equal("retained-child-identity-conflict", (await verification.SourceProcessorAttempts.SingleAsync(value => value.BranchId == failedBranch.Id)).OutcomeCode);
+            var blockedEvent = await verification.AuditEvents.SingleAsync(value => value.SourceRevisionId == failed.SourceRevisionId && value.EventType == "retained_processor.blocked");
+            var publicJson = JsonSerializer.Serialize(blockedEvent);
+            Assert.Contains("retained-child-identity-conflict", publicJson, StringComparison.Ordinal);
+            Assert.DoesNotContain("collision.txt", publicJson, StringComparison.Ordinal);
+            Assert.Equal((int)RetainedProcessorBranchState.Completed,
+                (await verification.SourceProcessorBranches.SingleAsync(value => value.SourceRevisionId == healthy.SourceRevisionId)).State);
+            Assert.Equal(3, await verification.SourceArtifacts.CountAsync(value => verification.SourceRevisions.Where(source => source.SourceRootId == failed.RootId).Select(source => source.Id).Contains(value.SourceRevisionId)));
+            Assert.Equal(collisionHash, (await verification.SourceRevisions.SingleAsync(value => value.Id == sentinelId)).ContentSha256);
+            await DeferFixtureTextActivitiesAsync(failed.RootId);
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
     [NativeSqlServerFact]
     public async Task Safe_zip_with_a_non_utf8_member_completes_and_offers_only_utf8_text_to_the_pipeline()
     {
@@ -1079,15 +1315,22 @@ public sealed class ZipArchiveReplayIntegrationTests(NativeSqlServerFixture fixt
         int byteLength,
         string relativePath,
         string? outlookSpoolRoot = null,
-        string extension = ".zip")
+        string extension = ".zip",
+        Guid? sourceRootId = null,
+        string? stableSourceIdentity = null,
+        int revision = 1,
+        string? canonicalPath = null)
     {
-        var rootId = Guid.NewGuid(); var revisionId = Guid.NewGuid(); var activityId = Guid.NewGuid(); var now = DateTimeOffset.UtcNow;
+        var rootId = sourceRootId ?? Guid.NewGuid(); var revisionId = Guid.NewGuid(); var activityId = Guid.NewGuid(); var now = DateTimeOffset.UtcNow;
         await using var context = CreateContext();
+        if (sourceRootId is null)
+        {
         context.SourceRootConfigurations.Add(new SourceRootConfigurationEntity { Id = rootId, CanonicalPath = $"C:\\zip-retained-tests\\{rootId:N}", DisplayName = "Test", State = 0,
             Recursive = true, IncludePatternsJson = "[]", ExcludePatternsJson = "[]", FollowLinks = false, MaximumFileBytes = 64L * 1024 * 1024,
             AllowedClassificationsJson = "[]", CrawlMode = 0, ReconciliationCadenceSeconds = 900, ConfigurationRevision = 1, CreatedAtUtc = now, UpdatedAtUtc = now });
-        context.SourceRevisions.Add(new SourceRevisionEntity { Id = revisionId, SourceRootId = rootId, StableSourceIdentity = $"zip-parent:{revisionId:N}", Revision = 1,
-            ContentSha256 = hash, CanonicalPath = $"C:\\missing-source-original-sentinel{extension}", Classification = "DeferredCapability", Extension = extension, ByteLength = byteLength, DiscoveredAtUtc = now, DiscoveryEvidenceJson = "{}" });
+        }
+        context.SourceRevisions.Add(new SourceRevisionEntity { Id = revisionId, SourceRootId = rootId, StableSourceIdentity = stableSourceIdentity ?? $"zip-parent:{revisionId:N}", Revision = revision,
+            ContentSha256 = hash, CanonicalPath = canonicalPath ?? $"C:\\missing-source-original-sentinel{(sourceRootId is null ? "" : $"-{revisionId:N}")}{extension}", Classification = "DeferredCapability", Extension = extension, ByteLength = byteLength, DiscoveredAtUtc = now, DiscoveryEvidenceJson = "{}" });
         context.SourceArtifacts.Add(new SourceArtifactEntity { Id = Guid.NewGuid(), SourceRevisionId = revisionId, ContentSha256 = hash, StoreRelativePath = relativePath, ByteLength = byteLength, ChecksumVerifiedAtUtc = now, ReferenceCount = 1 });
         context.SourceActivities.Add(new SourceActivityEntity { Id = activityId, SourceRevisionId = revisionId, ActivityKind = (int)SourceActivityKind.DocumentParsing,
             ExecutionClass = (int)ExecutionClass.DeferredCapability, ProcessorVersion = "phase-3a-v1", InputFingerprint = hash, RequiredCapability = "local-source-capability",
@@ -1100,6 +1343,16 @@ public sealed class ZipArchiveReplayIntegrationTests(NativeSqlServerFixture fixt
                 CadenceTicks = TimeSpan.FromMinutes(5).Ticks, MaximumOverlapTicks = TimeSpan.FromMinutes(1).Ticks, CreatedAtUtc = now, UpdatedAtUtc = now });
         }
         await context.SaveChangesAsync(); return (activityId, revisionId, rootId);
+    }
+
+    private async Task DeferFixtureTextActivitiesAsync(Guid rootId)
+    {
+        await using var context = CreateContext();
+        var childIds = context.SourceRevisions.Where(value => value.SourceRootId == rootId && value.OriginKind == 1)
+            .Select(value => value.Id);
+        await context.SourceActivities.Where(value => childIds.Contains(value.SourceRevisionId) &&
+                value.ActivityKind == (int)SourceActivityKind.TextExtraction && value.State == (int)SourceActivityState.Pending)
+            .ExecuteUpdateAsync(update => update.SetProperty(value => value.State, (int)SourceActivityState.DeferredPolicy));
     }
 
     private static byte[] CreateZip(string entryName, string text)
