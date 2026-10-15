@@ -29,6 +29,28 @@ public sealed class MediaMetadataRetainedProcessorTests
     }
 
     [Fact]
+    public async Task Media_children_have_distinct_locators_for_each_parent_revision_and_preserve_replay_identity()
+    {
+        var bytes = Png();
+        var firstClaim = Claim(bytes);
+        var secondClaim = firstClaim with { SourceRevisionId = SourceRevisionId.New() };
+        var processor = new MediaMetadataRetainedProcessor(new RecordingWriter(), new AllowingDisclosure());
+        var first = await processor.ProcessAsync(firstClaim, Retained(bytes), CancellationToken.None);
+        var retained = new RetainedSourceBytes(secondClaim.SourceRevisionId, bytes, Hash(bytes), bytes.Length);
+        var second = await processor.ProcessAsync(secondClaim, retained, CancellationToken.None);
+        var replay = await processor.ProcessAsync(secondClaim, retained, CancellationToken.None);
+
+        var firstChild = Assert.Single(first.Members);
+        var secondChild = Assert.Single(second.Members);
+        Assert.NotEqual(firstChild.SyntheticLocator, secondChild.SyntheticLocator);
+        Assert.Equal(firstChild.StableSourceIdentity, secondChild.StableSourceIdentity);
+        Assert.Equal(firstChild.MemberFingerprint, secondChild.MemberFingerprint);
+        Assert.Equal(secondChild, Assert.Single(replay.Members));
+        Assert.Equal(first.ReceiptFingerprint, second.ReceiptFingerprint);
+        Assert.Equal(second.ReceiptFingerprint, replay.ReceiptFingerprint);
+    }
+
+    [Fact]
     public async Task Process_uses_typed_jpeg_dimensions_when_the_parser_description_contains_units()
     {
         var bytes = Jpeg(width: 43, height: 42);

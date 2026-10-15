@@ -154,7 +154,7 @@ public sealed class MediaMetadataRetainedProcessor(
 
         var child = new RetainedProcessorDerivedChild(
             fingerprint,
-            $"retained-media-metadata:{fingerprint}",
+            $"retained-media-metadata:{claim.SourceRevisionId.Value:N}:{fingerprint}",
             identity,
             receipt.ContentSha256,
             receipt.StoreRelativePath,

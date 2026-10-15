@@ -113,7 +113,8 @@ public sealed class NativeSqlServerFixture : IAsyncLifetime
         await using var connection = new SqlConnection(new SqlConnectionStringBuilder(_serverConnectionString)
         { InitialCatalog = "master", Pooling = false, ConnectTimeout = 5 }.ConnectionString);
         await connection.OpenAsync().ConfigureAwait(false);
-        await using var command = new SqlCommand(sql, connection) { CommandTimeout = 5 };
+        // Catalogue administration has a separate budget from the recovery assertions.
+        await using var command = new SqlCommand(sql, connection) { CommandTimeout = 30 };
         await command.ExecuteNonQueryAsync().ConfigureAwait(false);
     }
 

@@ -134,7 +134,7 @@ public static class DocumentProcessingInput
             $"document-input-identity:{claim.ParentStableIdentity.Length}:{claim.ParentStableIdentity}:{memberFingerprint}")));
         return new RetainedProcessorDerivedChild(
             memberFingerprint,
-            $"retained-document-input:{memberFingerprint}",
+            $"retained-document-input:{claim.SourceRevisionId.Value:N}:{memberFingerprint}",
             identity,
             retained.ContentSha256,
             string.Empty,

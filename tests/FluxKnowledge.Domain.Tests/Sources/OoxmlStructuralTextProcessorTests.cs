@@ -54,6 +54,36 @@ public sealed class OoxmlStructuralTextProcessorTests
         Assert.DoesNotContain(expectedText, child.SyntheticLocator, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("Same text")]
+    [InlineData("Changed text")]
+    public async Task Ooxml_children_have_distinct_locators_for_each_parent_revision_and_preserve_replay_identity(string secondText)
+    {
+        var processor = new OoxmlStructuralTextProcessor(new RecordingWriter());
+        async Task<RetainedProcessorCompletion> Process(SourceRevisionId revisionId, string text, string metadata)
+        {
+            var bytes = CreateZip("word/document.xml", $"<w:document xmlns:w='w'><!--{metadata}--><w:t>{text}</w:t></w:document>");
+            var hash = Convert.ToHexStringLower(SHA256.HashData(bytes));
+            var claim = new RetainedProcessorClaim(Guid.NewGuid(), revisionId, "same-parent", hash, "owner", 1, DateTimeOffset.UtcNow.AddMinutes(5));
+            return await processor.ProcessAsync(claim, new RetainedSourceBytes(revisionId, bytes, hash, bytes.Length),
+                new RetainedProcessorOptions(), CancellationToken.None);
+        }
+
+        var firstId = SourceRevisionId.New();
+        var secondId = SourceRevisionId.New();
+        var first = await Process(firstId, "Same text", "first container");
+        var second = await Process(secondId, secondText, "second container");
+        var replay = await Process(secondId, secondText, "second container");
+        var firstChild = Assert.Single(first.Members);
+        var secondChild = Assert.Single(second.Members);
+        Assert.NotEqual(firstChild.SyntheticLocator, secondChild.SyntheticLocator);
+        Assert.Equal(firstChild.StableSourceIdentity, secondChild.StableSourceIdentity);
+        Assert.Equal(firstChild.MemberFingerprint, secondChild.MemberFingerprint);
+        Assert.Equal(secondChild, Assert.Single(replay.Members));
+        Assert.Equal(second.ReceiptFingerprint, replay.ReceiptFingerprint);
+        if (secondText == "Same text") Assert.Equal(first.ReceiptFingerprint, second.ReceiptFingerprint);
+    }
+
     [Fact]
     public async Task Vsdx_validates_semantic_parts_and_creates_one_internal_document_input_when_an_inert_member_is_not_utf8()
     {

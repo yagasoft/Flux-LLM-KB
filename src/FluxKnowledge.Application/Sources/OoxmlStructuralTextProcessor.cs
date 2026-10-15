@@ -1595,7 +1595,7 @@ public sealed class OoxmlStructuralTextProcessor : ILocalSourceCapabilityHandler
             throw new RetainedProcessorException("office-document-part-unsupported");
         var child = new RetainedProcessorDerivedChild(
             childFingerprint,
-            $"retained-office-structural-text:{childFingerprint}",
+            $"retained-office-structural-text:{claim.SourceRevisionId.Value:N}:{childFingerprint}",
             identity,
             receipt.ContentSha256,
             receipt.StoreRelativePath,
