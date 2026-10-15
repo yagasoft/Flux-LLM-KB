@@ -30,8 +30,8 @@ The migration test preserves a pre-migration attention row and its cleanup targe
 Domain coordinator/reconciliation checks pass 14/14; rendered deletion status
 checks pass 4/4. Related GPU/checkpoint and query-release phase adaptations pass.
 Independent Astra final review approved the source change and staging evidence
-with no blocking code correction. Final combined repository verification remains
-a gate.
+with no blocking code correction. Canonical closeout passed all 21 steps as
+`31c04404ad82ef10006d01588b331e7981ef5f7a`; production-dependent gates remain open.
 
 The separate model-free functional deployment is
 `E:\Codex Workspaces\Staging\FluxKnowledge\SourceDeletion-20261014`, catalogue
@@ -161,8 +161,8 @@ host/process/listeners were then observed stopped. Raw result and verification
 files are under `Recovery\acceptance\7416960401da4365a7199601dc9ac5ad`.
 Independent Astra final review approved the complete branch against `ff9f14c4`,
 including the concurrency proof and all six runtime/harness hashes bound to this
-successful run. Canonical closeout remains pending; this review grants no
-production authority.
+successful run. At that review gate canonical closeout remained pending; the
+review granted no production authority. The later canonical result is below.
 
 The first prescribed closeout passed 3,402 feature tests (26 opt-in skips), all
 native contracts and zero-warning builds in both checkouts. Main then passed
@@ -212,6 +212,18 @@ rejection remain required. The revised cold read completed in 1.47 seconds;
 the fresh Web build has zero warnings/errors and all 441 tests pass, with 21
 browser opt-in skips. Earlier failed runs remain retained and canonical closeout
 is still a gate. Astra approved the exact final fixture correction and its trace.
+
+The fourth prescribed closeout passed all 21 steps and pushed Main
+`31c04404ad82ef10006d01588b331e7981ef5f7a`, from feature commit
+`bc82fcebb10a1061ba0ccd9a173e34b23cd9bcb2`. Both full solution runs passed 3,402
+tests, with zero failures and 26 opt-in skips each (21 browser and five
+model/performance checks). Required source SQL checks were not skipped. Both
+Release builds had zero warnings/errors; all native contracts passed, including
+the 28 one-shot admission checks. The tested feature and committed Main trees
+matched exactly, both checkouts were clean, and fresh remote readback matched
+Main. `-KeepWorktree` retained the dedicated checkout; `-GoLive` was omitted.
+No production action or queued retention cleanup ran. Final receipt updates
+change documentation only; earlier failed runs remain failed evidence.
 
 Coordinate SQL/Main windows with the parallel release tasks. Fixed acceptance:
 completion under ten minutes, scalar batch p95 under one second; overview usable
