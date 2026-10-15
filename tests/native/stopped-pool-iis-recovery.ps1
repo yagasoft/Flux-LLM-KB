@@ -18,7 +18,11 @@ function Expect-Failure([scriptblock]$Action, [string]$Message) {
     throw "Expected failure: $Message"
 }
 
-$planOutput = & pwsh -NoProfile -File $updater -SourceRoot $SourceRoot -PlanOnly -RecoverStoppedPool 2>&1 | Out-String
+# Plan shape is independent of a current deployment's schema. Use a candidate
+# without the new cleanup migration so this contract never observes production SQL.
+# Current-candidate eligibility is covered against disposable SQL separately.
+$legacyPlanRoot=Join-Path $SourceRoot 'tests'
+$planOutput = & pwsh -NoProfile -File $updater -SourceRoot $legacyPlanRoot -PlanOnly -RecoverStoppedPool 2>&1 | Out-String
 if ($LASTEXITCODE -ne 0) { throw "Stopped-pool plan failed: $planOutput" }
 $plan = $planOutput | ConvertFrom-Json
 if (-not $plan.recover_stopped_pool -or $plan.migrations -or
@@ -56,7 +60,21 @@ $swap = @($allSwaps | Where-Object {
     while ($null -ne $parent -and $parent -isnot [Management.Automation.Language.FunctionDefinitionAst]) { $parent = $parent.Parent }
     $null -eq $parent
 })
-if ($swap.Count -ne 1 -or $swap[0].Extent.Text -notmatch 'RestartPreviousApplication:\(-not \$RecoverStoppedPool\)') { throw 'Recovery is not wired to suppress predecessor startup.' }
+if ($swap.Count -ne 1) { throw 'Expected one ordinary payload swap.' }
+$restartParameter=@($swap[0].CommandElements | Where-Object {
+    $_ -is [Management.Automation.Language.CommandParameterAst] -and $_.ParameterName -ceq 'RestartPreviousApplication'
+})
+if ($restartParameter.Count -ne 1 -or $null -eq $restartParameter[0].Argument) { throw 'Predecessor startup boundary is missing.' }
+foreach ($case in @(
+    @{ Recovery=$false; CleanupMigration=$false; Expected=$true },
+    @{ Recovery=$true; CleanupMigration=$false; Expected=$false },
+    @{ Recovery=$false; CleanupMigration=$true; Expected=$false },
+    @{ Recovery=$true; CleanupMigration=$true; Expected=$false }
+)) {
+    $RecoverStoppedPool=$case.Recovery; $ApplyResumableSourceDeletionCleanupMigration=$case.CleanupMigration
+    if ((Invoke-Expression $restartParameter[0].Argument.Extent.Text) -ne $case.Expected) { throw 'Recovery or cleanup migration can restart the predecessor.' }
+}
+$RecoverStoppedPool=$true; $ApplyResumableSourceDeletionCleanupMigration=$false
 
 $parent = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd([IO.Path]::DirectorySeparatorChar)
 $testRoot = [IO.Path]::GetFullPath((Join-Path $parent ('FluxStoppedRecovery_' + [guid]::NewGuid().ToString('N'))))
@@ -136,10 +154,10 @@ try {
     Expect-Failure { & $rollbackCallback } 'retained state changed'
     if ($deploymentValidation.PayloadRollbackVerified) { throw 'Changed retained state was reported verified.' }
 
-    $outerCatches = @($ast.FindAll({ param($node) $node -is [Management.Automation.Language.CatchClauseAst] -and
-        $node.Body.Extent.Text.Contains('if ($holdReleased)') }, $true))
-    if ($outerCatches.Count -ne 1) { throw 'Outer recovery failure handler missing.' }
-    $outerCatch = [scriptblock]::Create(($outerCatches[0].Body.Statements.Extent.Text -join "`n"))
+    $outerTry=$swap[0].Parent
+    while ($null -ne $outerTry -and $outerTry -isnot [Management.Automation.Language.TryStatementAst]) { $outerTry=$outerTry.Parent }
+    if ($null -eq $outerTry -or $outerTry.CatchClauses.Count -ne 1) { throw 'Outer recovery failure handler missing.' }
+    $outerCatch = [scriptblock]::Create(($outerTry.CatchClauses[0].Body.Statements.Extent.Text -join "`n"))
     $holdReleased=$false; $interactiveHostMutationStarted=$true
     $interactiveHostPreviousRoot=Join-Path $testRoot 'previous-companion'
     $InteractiveHostRoot=Join-Path $testRoot 'active-companion'

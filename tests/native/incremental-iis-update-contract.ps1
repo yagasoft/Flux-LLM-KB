@@ -28,7 +28,10 @@ function Invoke-ExpectedRejection {
     }
 }
 
-$planOutput = & pwsh -NoProfile -File $deploymentScript -SourceRoot $SourceRoot -PlanOnly 2>&1 | Out-String
+# These plan-shape checks use a candidate without the new migration. The latest
+# candidate's fail-closed schema eligibility is tested against disposable SQL.
+$legacyPlanRoot=Join-Path $SourceRoot 'tests'
+$planOutput = & pwsh -NoProfile -File $deploymentScript -SourceRoot $legacyPlanRoot -PlanOnly 2>&1 | Out-String
 if ($LASTEXITCODE -ne 0) {
     throw "The incremental IIS deployment plan failed: $planOutput"
 }
@@ -54,7 +57,7 @@ if ($plan.mode -ne "plan-only" -or
     throw "The incremental IIS plan is not restricted to the existing application payload and loopback site."
 }
 
-$remediationPlanOutput = & pwsh -NoProfile -File $deploymentScript -SourceRoot $SourceRoot -PlanOnly -DeferReadinessForScopedRemediation 2>&1 | Out-String
+$remediationPlanOutput = & pwsh -NoProfile -File $deploymentScript -SourceRoot $legacyPlanRoot -PlanOnly -DeferReadinessForScopedRemediation 2>&1 | Out-String
 if ($LASTEXITCODE -ne 0) {
     throw "The scoped readiness-remediation deployment plan failed: $remediationPlanOutput"
 }
@@ -259,6 +262,36 @@ foreach ($arguments in @(
     if ($rejected.ExitCode -eq 0 -or $rejected.Output -notmatch 'Cancelled query acknowledgement requires') {
         throw 'Cancelled query acknowledgement accepted an incomplete identity or an unrelated updater mode.'
     }
+}
+
+foreach ($conflict in @('-ApplyMigrations','-ApplyCorpusChunkFullTextMigration','-ApplyCodeDisclosureProofMigration',
+    '-ApplyRepositoryRecoveryAuthorityMigration','-ApplyHybridPassageRebuild','-RecoverStoppedPool','-DeferReadinessForScopedRemediation','-EnableUnattendedDiscovery')) {
+    $rejected=Invoke-ExpectedRejection -Arguments @('-SourceRoot',$SourceRoot,'-PlanOnly','-ApplyResumableSourceDeletionCleanupMigration',$conflict)
+    if ($rejected.ExitCode -eq 0 -or $rejected.Output -notmatch 'Resumable source deletion migration cannot combine') {
+        throw 'Source deletion cleanup migration permits an incompatible updater mode.'
+    }
+}
+& pwsh -NoProfile -File (Join-Path $SourceRoot 'tests/native/source-deletion-cleanup-migration-recovery.ps1') -SourceRoot $SourceRoot
+if ($LASTEXITCODE -ne 0) { throw 'Source deletion cleanup migration recovery contract failed.' }
+& pwsh -NoProfile -File (Join-Path $SourceRoot 'tests/native/source-deletion-acceptance-maintenance.ps1') -SourceRoot $SourceRoot
+if ($LASTEXITCODE -ne 0) { throw 'Source deletion acceptance maintenance contract failed.' }
+foreach ($arguments in @(
+    @('-EnterSourceDeletionAcceptanceMaintenance'),
+    @('-EnterSourceDeletionAcceptanceMaintenance','-ApplyResumableSourceDeletionCleanupMigration'),
+    @('-EnterSourceDeletionAcceptanceMaintenance','-RecoverStoppedPool'),
+    @('-SourceDeletionAcceptanceMaintenanceReceipt','unused.json'),
+    @('-ApplyResumableSourceDeletionCleanupMigration','-SourceDeletionAcceptanceMaintenanceReceipt','unused.json',
+        '-ExpectedSourceDeletionAcceptanceMaintenanceReceiptSha256','invalid'),
+    @('-ExpectedMaintenanceImplementationSha256',('A'*64))
+)) {
+    $rejected=Invoke-ExpectedRejection -Arguments (@('-SourceRoot',$legacyPlanRoot,'-PlanOnly')+$arguments)
+    if ($rejected.ExitCode -eq 0 -or $rejected.Output -notmatch '(?i)maintenance') { throw 'Maintenance arguments admitted an unrelated mode or incomplete binding.' }
+}
+$rejected=Invoke-ExpectedRejection -Arguments @('-Apply','-EnterSourceDeletionAcceptanceMaintenance',
+    '-SourceDeletionAcceptanceMaintenanceReceipt',(Join-Path ([IO.Path]::GetTempPath()) 'unused-maintenance-receipt.json'),
+    '-ExpectedMaintenanceImplementationSha256',('A'*64))
+if ($rejected.ExitCode -eq 0 -or $rejected.Output -notmatch 'Maintenance implementation differs from the reviewed SHA-256') {
+    throw 'Changed maintenance implementation did not refuse before importing dependencies or observing production.'
 }
 
 Write-Output "Incremental IIS update contract passed."

@@ -7,6 +7,11 @@ param(
     [ValidateRange(10, 300)]
     [int]$ReadinessTimeoutSeconds = 120,
     [switch]$ApplyMigrations,
+    [switch]$ApplyResumableSourceDeletionCleanupMigration,
+    [switch]$EnterSourceDeletionAcceptanceMaintenance,
+    [string]$SourceDeletionAcceptanceMaintenanceReceipt = '',
+    [string]$ExpectedSourceDeletionAcceptanceMaintenanceReceiptSha256 = '',
+    [string]$ExpectedMaintenanceImplementationSha256 = '',
     [switch]$ApplyCorpusChunkFullTextMigration,
     [switch]$ApplyCodeDisclosureProofMigration,
     [switch]$ApplyRepositoryRecoveryAuthorityMigration,
@@ -418,6 +423,196 @@ function New-SourceDeletionMigrationScript {
     return [pscustomobject]@{ From = $from; To = $to; Path = $OutputPath; Sha256 = $hash }
 }
 
+function New-SourceDeletionCleanupMigrationScript {
+    param([Parameter(Mandatory)][string]$SourceRoot,[Parameter(Mandatory)][string]$OutputPath)
+    $contract=Get-SourceDeletionCleanupMigrationContract
+    & dotnet ef migrations script $contract.Baseline $contract.Target --configuration Release `
+        --project (Join-Path $SourceRoot 'src/FluxKnowledge.Infrastructure.SqlServer/FluxKnowledge.Infrastructure.SqlServer.csproj') `
+        --startup-project (Join-Path $SourceRoot 'src/FluxKnowledge.Web/FluxKnowledge.Web.csproj') --idempotent --no-build --output $OutputPath
+    if ($LASTEXITCODE -ne 0 -or !(Test-Path -LiteralPath $OutputPath -PathType Leaf)) { throw 'Generating source deletion cleanup migration SQL failed.' }
+    $hash=(Get-FileHash -LiteralPath $OutputPath -Algorithm SHA256).Hash
+    if ($hash -cne $contract.UpSha256) { throw 'Generated source deletion cleanup SQL differs from the reviewed SHA-256.' }
+    [pscustomobject]@{ From=$contract.Baseline; To=$contract.Target; Path=$OutputPath; Sha256=$hash }
+}
+
+function Assert-SourceDeletionCleanupReleaseBinding {
+    param([Parameter(Mandatory)][hashtable]$State)
+    Assert-HybridDeploymentHoldOwner -Path $ValidationHoldPath -ReleaseId $State.Binding.ReleaseId
+    $task=Get-RepositoryRecoveryTaskObservation
+    if ($task.Enabled -or $task.State -ceq 'Running' -or $task.IdentityHash -cne $State.Binding.Task.IdentityHash -or
+        $task.LauncherSha256 -cne $State.Binding.Task.LauncherSha256 -or
+        (Get-FileHash -LiteralPath (Join-Path $CanonicalLiveRoot 'Config/appsettings.Production.json') -Algorithm SHA256).Hash -cne $State.Binding.ConfigurationSha256 -or
+        (Get-FileHash -LiteralPath (Join-Path (Split-Path -Parent $InteractiveHostRoot) 'appsettings.Production.json') -Algorithm SHA256).Hash -cne $State.Binding.CompanionConfigurationSha256) {
+        throw 'Source deletion deployment hold, task, launcher or configuration binding changed; hold retained.'
+    }
+}
+
+function Assert-SourceDeletionCleanupCompanionDatabase {
+    param([Parameter(Mandatory)]$Expected)
+    $companion=Get-SourceDeletionCleanupDatabaseState -ConnectionString (Get-RepositoryRecoveryCompanionConnectionString)
+    if ($companion.Identity -cne $Expected.Identity) { throw 'Source deletion deployment web and companion must target the same migrated database.' }
+}
+
+function Get-SourceDeletionCleanupCandidateDatabase {
+    param([string]$Root,[bool]$MigrationMode,[scriptblock]$ReadState)
+    $path=Join-Path $Root ("src/FluxKnowledge.Infrastructure.SqlServer/Persistence/Migrations/{0}.cs" -f (Get-SourceDeletionCleanupMigrationContract).Target)
+    if (!(Test-Path -LiteralPath $path -PathType Leaf)) {
+        if ($MigrationMode) { throw 'The reviewed source deletion cleanup migration is missing from SourceRoot.' }
+        return $null
+    }
+    $database=& $ReadState
+    if ($MigrationMode) { Assert-SourceDeletionCleanupMigrationBaseline $database }
+    else { Assert-SourceDeletionCleanupApplicationSchema $database }
+    $database
+}
+
+function Write-SourceDeletionAcceptanceReceipt {
+    param([Parameter(Mandatory)][string]$Path,[Parameter(Mandatory)]$Value)
+    if (![IO.Path]::IsPathFullyQualified($Path)) { throw 'Maintenance receipts require an absolute path.' }
+    $parent=Split-Path -Parent $Path
+    while ($parent) {
+        Assert-NotReparsePoint -Path $parent -Message 'Maintenance receipt ancestor is unsafe.'
+        $parent=Split-Path -Parent $parent
+    }
+    $bytes=[Text.UTF8Encoding]::new($false).GetBytes(($Value | ConvertTo-Json -Depth 20))
+    $stream=[IO.FileStream]::new($Path,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::Read)
+    try { $stream.Write($bytes,0,$bytes.Length); $stream.Flush($true) } finally { $stream.Dispose() }
+}
+
+function Read-SourceDeletionAcceptanceReceipt {
+    param([Parameter(Mandatory)][string]$Path,[Parameter(Mandatory)][string]$ExpectedSha256)
+    if ($ExpectedSha256 -cnotmatch '^[A-Fa-f0-9]{64}$') { throw 'Maintenance receipt requires its reviewed SHA-256.' }
+    $candidate=$Path
+    while ($candidate) {
+        Assert-NotReparsePoint -Path $candidate -Message 'Maintenance receipt or ancestor is unsafe.'
+        $candidate=Split-Path -Parent $candidate
+    }
+    Assert-NotReparsePoint -Path ($Path+'.prepared.json') -Message 'Maintenance preparation is unsafe.'
+    $stream=[IO.FileStream]::new($Path,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
+    try {
+        $copy=[IO.MemoryStream]::new()
+        try {
+            $stream.CopyTo($copy); $bytes=$copy.ToArray()
+            $hash=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes))
+            if ($hash -ine $ExpectedSha256) { throw 'Maintenance receipt SHA-256 changed.' }
+            $receipt=[Text.Encoding]::UTF8.GetString($bytes) | ConvertFrom-Json
+        } finally { $copy.Dispose() }
+    } finally { $stream.Dispose() }
+    if ($receipt.Version -ne 1 -or $receipt.Purpose -cne 'source-deletion-coordinated-acceptance' -or
+        $receipt.Phase -cne 'Stopped' -or !$receipt.ExitProof.VerifiedAtUtc -or
+        $null -eq $receipt.ExitProof.ExitedIdentities -or $null -eq $receipt.Original.Task.Enabled -or
+        (Get-FileHash -LiteralPath ($Path+'.prepared.json') -Algorithm SHA256).Hash -cne $receipt.PreparedSha256) {
+        throw 'Maintenance stopped receipt is incomplete or its preparation changed.'
+    }
+    $receipt
+}
+
+function Get-SourceDeletionAcceptanceIisHash {
+    $manager=New-IncrementalIisServerManager
+    try {
+        $site=$manager.Sites[$SiteName]; $pool=$manager.ApplicationPools[$SiteName]
+        if ($null -eq $site -or $null -eq $pool -or [string]$site.State -cne 'Started') { throw 'Maintenance requires the canonical started site.' }
+        $apps=@(foreach ($candidateSite in $manager.Sites) {
+            foreach ($app in $candidateSite.Applications) {
+                if ($app.ApplicationPoolName -ieq $SiteName) { [ordered]@{ Site=$candidateSite.Name; Path=$app.Path; Root=$app.VirtualDirectories['/'].PhysicalPath } }
+            }
+        })
+        if ($apps.Count -ne 1 -or $apps[0].Site -cne $SiteName -or $apps[0].Path -cne '/') { throw 'Maintenance refuses a shared or changed application pool.' }
+        Assert-CanonicalPath -RequestedPath $apps[0].Root -ExpectedPath $CanonicalDeployRoot -Message 'Maintenance application path changed.'
+        $bindings=@($site.Bindings | ForEach-Object { $_.Protocol+'|'+$_.BindingInformation } | Sort-Object -CaseSensitive)
+        if (@($bindings | Where-Object { $_ -ceq 'http|127.0.0.1:5137:' }).Count -ne 1) { throw 'Maintenance loopback binding changed.' }
+        $settings=Get-IncrementalIisHostingSettings -Manager $manager
+        $value=[ordered]@{ Site=$site.Name; SiteId=$site.Id; Applications=$apps; Bindings=$bindings;
+            StartMode=$settings.StartMode; IdleTimeout=$settings.IdleTimeout; PreloadEnabled=$settings.PreloadEnabled; ModuleEnabled=$settings.ModuleEnabled }
+        [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes(($value | ConvertTo-Json -Depth 8 -Compress))))
+    } finally { $manager.Dispose() }
+}
+
+function Get-SourceDeletionAcceptanceBinding {
+    $database=Get-SourceDeletionCleanupDatabaseState -ConnectionString (Get-DeploymentSqlConnectionString)
+    Assert-SourceDeletionCleanupMigrationBaseline $database
+    Assert-SourceDeletionCleanupCompanionDatabase -Expected $database
+    [ordered]@{ IisSha256=(Get-SourceDeletionAcceptanceIisHash);
+        WebPayloadSha256=(Get-HybridPayloadFingerprint $CanonicalDeployRoot);
+        CompanionPayloadSha256=(Get-HybridPayloadFingerprint $InteractiveHostRoot);
+        ConfigurationSha256=(Get-FileHash -LiteralPath (Join-Path $CanonicalLiveRoot 'Config/appsettings.Production.json') -Algorithm SHA256).Hash;
+        CompanionConfigurationSha256=(Get-FileHash -LiteralPath (Join-Path (Split-Path -Parent $InteractiveHostRoot) 'appsettings.Production.json') -Algorithm SHA256).Hash;
+        Task=(Get-RepositoryRecoveryTaskObservation); Database=$database }
+}
+
+function Assert-SourceDeletionAcceptanceCpuOwnerFree {
+    Assert-NotReparsePoint -Path (Split-Path -Parent $CpuSearchOwnerPath) -Message 'Maintenance CPU owner directory is unsafe.'
+    Assert-NotReparsePoint -Path $CpuSearchOwnerPath -Message 'Maintenance CPU owner path is missing or unsafe.'
+    $owner=[IO.FileStream]::new($CpuSearchOwnerPath,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::None)
+    $owner.Dispose()
+}
+
+function Assert-SourceDeletionAcceptanceBinding {
+    param([Parameter(Mandatory)]$Original,[switch]$RequireStopped)
+    if (Test-Path -LiteralPath $ValidationHoldPath) { throw 'Maintenance refuses an existing deployment hold.' }
+    $current=Get-SourceDeletionAcceptanceBinding
+    foreach ($field in @('IisSha256','WebPayloadSha256','CompanionPayloadSha256','ConfigurationSha256','CompanionConfigurationSha256')) {
+        if ($current.$field -cne $Original.$field) { throw "Maintenance binding changed: $field" }
+    }
+    Assert-SourceDeletionCleanupMigrationBaseline $current.Database
+    if ($current.Task.IdentityHash -cne $Original.Task.IdentityHash -or $current.Task.LauncherSha256 -cne $Original.Task.LauncherSha256 -or
+        $current.Database.Identity -cne $Original.Database.Identity -or $current.Database.LegacySha256 -cne $Original.Database.LegacySha256 -or
+        ![string]::Equals(($current.Database.History -join "`n"),($Original.Database.History -join "`n"),[StringComparison]::Ordinal)) { throw 'Maintenance task, launcher, database or deletion state changed.' }
+    if ($RequireStopped) {
+        Assert-StoppedPoolRecoveryBaseline
+        if ($current.Task.Enabled -or $current.Task.State -ceq 'Running') { throw 'Maintenance companion execution fence changed.' }
+        Wait-InteractiveHostStopped -TaskName $InteractiveHostTaskName -TimeoutSeconds $ReadinessTimeoutSeconds
+        Assert-SourceDeletionAcceptanceCpuOwnerFree
+    }
+    elseif ($current.Task.Enabled -ne $Original.Task.Enabled) { throw 'Maintenance original task policy changed before entry.' }
+}
+
+function Assert-SourceDeletionAcceptanceMaintenance {
+    param([Parameter(Mandatory)][string]$ReceiptPath,[Parameter(Mandatory)][string]$ExpectedSha256)
+    $receipt=Read-SourceDeletionAcceptanceReceipt -Path $ReceiptPath -ExpectedSha256 $ExpectedSha256
+    Assert-SourceDeletionAcceptanceBinding -Original $receipt.Original -RequireStopped
+    $receipt
+}
+
+function Get-SourceDeletionCleanupOriginalTask {
+    param($Maintenance=$null)
+    if ($null -ne $Maintenance) { return $Maintenance.Original.Task }
+    Get-RepositoryRecoveryTaskObservation
+}
+
+function Enter-SourceDeletionAcceptanceMaintenance {
+    param([Parameter(Mandatory)][string]$ReceiptPath,[Parameter(Mandatory)]$Original,
+        [Parameter(Mandatory)][string]$ImplementationSha256)
+    if (Test-Path -LiteralPath $ReceiptPath) { throw 'Maintenance stopped receipt already exists; do not repeat entry.' }
+    Assert-SourceDeletionAcceptanceBinding -Original $Original
+    Write-SourceDeletionAcceptanceReceipt -Path ($ReceiptPath+'.prepared.json') -Value ([ordered]@{
+        Version=1; Purpose='source-deletion-coordinated-acceptance'; Phase='Prepared'; RecordedAtUtc=[DateTime]::UtcNow.ToString('O');
+        ImplementationSha256=$ImplementationSha256; Original=$Original })
+    # No schema/payload/configuration change or persistent hold at this boundary.
+    # Failure preserves the original policy receipt and never restarts automatically.
+    if ($Original.Task.Enabled) { Disable-ScheduledTask -TaskName $InteractiveHostTaskName -TaskPath '\' -ErrorAction Stop | Out-Null }
+    Wait-InteractiveHostStopped -TaskName $InteractiveHostTaskName -TimeoutSeconds $ReadinessTimeoutSeconds
+    $exitProof=Stop-HybridIisAfterGpuDrain -PassThru
+    Assert-SourceDeletionAcceptanceBinding -Original $Original -RequireStopped
+    Write-SourceDeletionAcceptanceReceipt -Path $ReceiptPath -Value ([ordered]@{
+        Version=1; Purpose='source-deletion-coordinated-acceptance'; Phase='Stopped'; RecordedAtUtc=[DateTime]::UtcNow.ToString('O');
+        ImplementationSha256=$ImplementationSha256; Original=$Original; ExitProof=$exitProof;
+        PreparedSha256=(Get-FileHash -LiteralPath ($ReceiptPath+'.prepared.json') -Algorithm SHA256).Hash })
+    [ordered]@{ ok=$true; mode='acceptance-maintenance'; pool='Stopped'; task='Disabled'; receipt=$ReceiptPath;
+        Sha256=(Get-FileHash -LiteralPath $ReceiptPath -Algorithm SHA256).Hash; schema_changed=$false; payloads_changed=$false;
+        failure_recovery='remain stopped; specific reviewed recovery approval required' }
+}
+
+function Get-SourceDeletionMaintenanceImplementationHash {
+    param([string]$Root=$PSScriptRoot)
+    $files=@('update-native-iis-incremental.ps1','loopback-deployment-safety.ps1','incremental-iis-payload-swap.psm1',
+        'incremental-corpus-fulltext-migration.psm1','incremental-code-disclosure-migration.psm1','incremental-source-deletion-cleanup-migration.psm1',
+        'source-deletion-cleanup-schema-contract.sql','incremental-hybrid-passage-rebuild.psm1',
+        'incremental-repository-recovery-migration.psm1','repository-recovery-row-stream.cs','incremental-repository-recovery-release.psm1')
+    $identity=@(foreach ($file in $files) { $file+'|'+(Get-FileHash -LiteralPath (Join-Path $Root $file) -Algorithm SHA256).Hash }) -join "`n"
+    [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($identity)))
+}
+
 function Get-CorpusFullTextDatabaseState {
     $history = @(Get-AppliedMigrationIds)
     $connection = [System.Data.SqlClient.SqlConnection]::new((Get-DeploymentSqlConnectionString))
@@ -686,7 +881,8 @@ function Get-HybridIisWorkerIds {
 }
 
 function Stop-HybridIisAfterGpuDrain {
-    param([scriptblock]$OnStopRequested)
+    param([scriptblock]$OnStopRequested, [switch]$PassThru)
+    $stopProof=@{ Identities=@() }
     Invoke-WithHybridGpuDrain -ConnectionString (Get-DeploymentSqlConnectionString) -TimeoutSeconds $RebuildTimeoutSeconds -StopApplication {
         param($sessionId)
         $appcmd = Join-Path $env:SystemRoot 'System32/inetsrv/appcmd.exe'
@@ -702,6 +898,7 @@ function Stop-HybridIisAfterGpuDrain {
             $identities.Add(@{ ProcessId=$id; Created=$process[0].CreationDate })
             foreach ($child in @($processes | Where-Object ParentProcessId -eq $id)) { $pending.Enqueue([int]$child.ProcessId) }
         }
+        $stopProof.Identities=$identities.ToArray()
         if ((Get-WebAppPoolState -Name $SiteName).Value -ne 'Stopped') {
             if ($OnStopRequested) { & $OnStopRequested }
             Stop-WebAppPool -Name $SiteName
@@ -720,6 +917,7 @@ function Stop-HybridIisAfterGpuDrain {
             Start-Sleep -Milliseconds 250
         }
     }
+    if ($PassThru) { [pscustomobject]@{ ExitedIdentities=$stopProof.Identities; VerifiedAtUtc=[DateTime]::UtcNow.ToString('O') } }
 }
 
 function New-IncrementalIisServerManager {
@@ -828,12 +1026,13 @@ function Test-IncrementalRollbackHoldRelease {
         [bool]$CorpusRollbackVerified,
         [bool]$ApplyCodeDisclosureProofMigration = $false,
         [bool]$CodeDisclosureRecoveryVerified = $false,
+        [bool]$ApplyResumableSourceDeletionCleanupMigration = $false,
         [bool]$InteractiveHostMutationStarted,
         [bool]$InteractiveHostRollbackVerified,
         [bool]$RecoverStoppedPool = $false,
         [bool]$HostingRollbackVerified = $true
     )
-    return [bool](-not $RecoverStoppedPool -and $Validation.HoldCreated -and $Validation.PayloadRollbackVerified -and
+    return [bool](-not $RecoverStoppedPool -and -not $ApplyResumableSourceDeletionCleanupMigration -and $Validation.HoldCreated -and $Validation.PayloadRollbackVerified -and
         (-not $ApplyMigrations -or $Validation.RollbackVerified) -and
         (-not $ApplyCorpusChunkFullTextMigration -or $CorpusRollbackVerified) -and
         (-not $ApplyCodeDisclosureProofMigration -or $CodeDisclosureRecoveryVerified) -and
@@ -1725,7 +1924,11 @@ function Assert-IncrementalIisPreflight {
     if ($site.State -ne "Started") {
         throw "The fixed FluxKnowledge IIS site must be started before an incremental update."
     }
-    if ($RecoverStoppedPool) {
+    if ($ApplyResumableSourceDeletionCleanupMigration -and $SourceDeletionAcceptanceMaintenanceReceipt) {
+        [void](Assert-SourceDeletionAcceptanceMaintenance -ReceiptPath $SourceDeletionAcceptanceMaintenanceReceipt `
+            -ExpectedSha256 $ExpectedSourceDeletionAcceptanceMaintenanceReceiptSha256)
+    }
+    elseif ($RecoverStoppedPool) {
         Assert-StoppedPoolRecoveryBaseline
     }
     elseif ((Get-WebAppPoolState -Name $SiteName).Value -ne "Started" -and [string]::IsNullOrWhiteSpace($ResumeHybridRebuildRelease) -and
@@ -1763,6 +1966,32 @@ if ($SiteName -cne "FluxKnowledge") {
 }
 if ($PlanOnly -and $Apply) {
     throw "-PlanOnly cannot be combined with -Apply."
+}
+if ($EnterSourceDeletionAcceptanceMaintenance -and ($ApplyResumableSourceDeletionCleanupMigration -or $ApplyMigrations -or
+    $ApplyCorpusChunkFullTextMigration -or $ApplyCodeDisclosureProofMigration -or $ApplyRepositoryRecoveryAuthorityMigration -or
+    $ApplyHybridPassageRebuild -or $EnableUnattendedDiscovery -or $RecoverStoppedPool -or $DeferReadinessForScopedRemediation -or
+    $ResumeHybridRebuildRelease -or $ReplaceHybridRebuildRelease -or $PatchHybridRebuildRelease -or $ResumeHybridPatchRelease -or
+    $ReconcileRepositoryRecoveryRelease -or $ResumeRepositoryRecoveryPreparedRelease -or $ResumeRepositoryRecoveryActivationRelease -or
+    $AcknowledgeCancelledQueryTaskId -or $ExpectedCancelledQueryTaskSha256 -or $RebuildTimeoutSeconds -gt 1800)) {
+    throw 'Source deletion acceptance maintenance is a separate stop-only action; it cannot combine with deployment or recovery modes.'
+}
+if ($EnterSourceDeletionAcceptanceMaintenance -and (!$SourceDeletionAcceptanceMaintenanceReceipt -or
+    $ExpectedSourceDeletionAcceptanceMaintenanceReceiptSha256 -or
+    ($Apply -and $ExpectedMaintenanceImplementationSha256 -cnotmatch '^[A-Fa-f0-9]{64}$'))) {
+    throw 'Maintenance entry requires a new receipt path and, for Apply, the reviewed implementation SHA-256.'
+}
+if (!$EnterSourceDeletionAcceptanceMaintenance -and ($SourceDeletionAcceptanceMaintenanceReceipt -or $ExpectedSourceDeletionAcceptanceMaintenanceReceiptSha256) -and
+    (!$ApplyResumableSourceDeletionCleanupMigration -or !$SourceDeletionAcceptanceMaintenanceReceipt -or
+    $ExpectedSourceDeletionAcceptanceMaintenanceReceiptSha256 -cnotmatch '^[A-Fa-f0-9]{64}$')) {
+    throw 'A stopped maintenance receipt and its SHA-256 apply only to the source deletion cleanup migration.'
+}
+if ($ExpectedMaintenanceImplementationSha256 -and !$EnterSourceDeletionAcceptanceMaintenance) { throw 'Maintenance implementation SHA-256 applies only to maintenance entry.' }
+if ($ApplyResumableSourceDeletionCleanupMigration -and ($ApplyMigrations -or $ApplyCorpusChunkFullTextMigration -or
+    $ApplyCodeDisclosureProofMigration -or $ApplyRepositoryRecoveryAuthorityMigration -or $ApplyHybridPassageRebuild -or
+    $EnableUnattendedDiscovery -or $RecoverStoppedPool -or $DeferReadinessForScopedRemediation -or
+    $ResumeHybridRebuildRelease -or $ReplaceHybridRebuildRelease -or $PatchHybridRebuildRelease -or $ResumeHybridPatchRelease -or
+    $ReconcileRepositoryRecoveryRelease -or $ResumeRepositoryRecoveryPreparedRelease -or $ResumeRepositoryRecoveryActivationRelease)) {
+    throw 'Resumable source deletion migration cannot combine with another migration, rebuild, hosting, recovery or remediation mode.'
 }
 if ($ApplyRepositoryRecoveryAuthorityMigration -and ($ApplyMigrations -or $ApplyCorpusChunkFullTextMigration -or
     $ApplyCodeDisclosureProofMigration -or $ApplyHybridPassageRebuild -or $EnableUnattendedDiscovery -or
@@ -1828,12 +2057,17 @@ if ($PatchHybridRebuildRelease -and ($ExpectedPatchCandidateHash -cnotmatch '^[0
 }
 if (-not $PatchHybridRebuildRelease -and ($ExpectedPatchCandidateHash -or $ExpectedPatchOperatorHash)) { throw 'Reviewed patch hashes only apply to initial patch.' }
 if (($PatchHybridRebuildRelease -or $ResumeHybridPatchRelease) -and $RebuildTimeoutSeconds -gt 1800) { throw 'Hybrid patch drain timeout maximum is 1800 seconds.' }
-$applyAnyMigration = $ApplyMigrations -or $ApplyCorpusChunkFullTextMigration -or $ApplyCodeDisclosureProofMigration -or $ApplyRepositoryRecoveryAuthorityMigration -or ($ApplyHybridPassageRebuild -and -not ($PatchHybridRebuildRelease -or $ResumeHybridPatchRelease))
+$applyAnyMigration = $ApplyMigrations -or $ApplyResumableSourceDeletionCleanupMigration -or $ApplyCorpusChunkFullTextMigration -or $ApplyCodeDisclosureProofMigration -or $ApplyRepositoryRecoveryAuthorityMigration -or ($ApplyHybridPassageRebuild -and -not ($PatchHybridRebuildRelease -or $ResumeHybridPatchRelease))
 
+if ($EnterSourceDeletionAcceptanceMaintenance) {
+    $maintenanceImplementationHash=Get-SourceDeletionMaintenanceImplementationHash
+    if ($Apply -and $maintenanceImplementationHash -ine $ExpectedMaintenanceImplementationSha256) { throw 'Maintenance implementation differs from the reviewed SHA-256.' }
+}
 . (Join-Path $PSScriptRoot "loopback-deployment-safety.ps1")
 Import-Module (Join-Path $PSScriptRoot "incremental-iis-payload-swap.psm1") -Force -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'incremental-corpus-fulltext-migration.psm1') -Force -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'incremental-code-disclosure-migration.psm1') -Force -ErrorAction Stop
+Import-Module (Join-Path $PSScriptRoot 'incremental-source-deletion-cleanup-migration.psm1') -Force -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'incremental-hybrid-passage-rebuild.psm1') -Force -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'incremental-repository-recovery-migration.psm1') -Force -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'incremental-repository-recovery-release.psm1') -Force -ErrorAction Stop
@@ -1842,9 +2076,67 @@ if ($loopbackOrigin.Origin -cne "http://127.0.0.1:5137") {
     throw "Incremental IIS deployment requires the fixed http://127.0.0.1:5137 origin."
 }
 
+if ($EnterSourceDeletionAcceptanceMaintenance) {
+    if (!$PlanOnly -and !$Apply) { throw 'Maintenance entry requires PlanOnly or explicit Apply after review.' }
+    $implementationHash=Get-SourceDeletionMaintenanceImplementationHash
+    if ($implementationHash -cne $maintenanceImplementationHash) { throw 'Maintenance implementation changed while loading dependencies.' }
+    Import-Module WebAdministration -ErrorAction Stop
+    $maintenanceMutex=[Threading.Mutex]::new($false,'Global\FluxKnowledge.IncrementalIisUpdate.v1')
+    $maintenanceLease=$false
+    try {
+        try { $maintenanceLease=$maintenanceMutex.WaitOne([TimeSpan]::FromMinutes(1)) }
+        catch [Threading.AbandonedMutexException] { $maintenanceLease=$true }
+        if (!$maintenanceLease) { throw 'Another incremental IIS operation is already in progress.' }
+        Assert-IncrementalIisPreflight
+        if (Test-Path -LiteralPath $ValidationHoldPath) { throw 'Maintenance refuses an existing deployment hold.' }
+        $original=Get-SourceDeletionAcceptanceBinding
+        if ($PlanOnly) {
+            [ordered]@{ mode='acceptance-maintenance-plan'; site=$SiteName; origin=$loopbackOrigin.Origin; application_root=$CanonicalDeployRoot;
+                implementation_sha256=$implementationHash; receipt=$SourceDeletionAcceptanceMaintenanceReceipt;
+                task_enabled=$original.Task.Enabled; task_identity_sha256=$original.Task.IdentityHash;
+                database_identity=$original.Database.Identity; runnable_deletions=$original.Database.RunnableCount;
+                actions=@('flush original policy and binding receipt','disable and await companion exit','GPU admission/drain and exact IIS worker/child exit',
+                    'verify native owner clear and unchanged bindings','flush stopped receipt; leave pool stopped and task disabled');
+                excluded=@('schema, payload or configuration changes','model acquisition','automatic restart or forced process termination');
+                failure_recovery='remain stopped or partially quiesced; specific reviewed recovery approval required' } | ConvertTo-Json -Depth 4
+        } else {
+            # This action installs no application bytes. Pin all reviewed updater inputs
+            # so a blocked code-closeout does not force deployment from a dirty tree.
+            if ((Get-SourceDeletionMaintenanceImplementationHash) -cne $implementationHash) { throw 'Maintenance implementation changed during preparation.' }
+            Enter-SourceDeletionAcceptanceMaintenance -ReceiptPath $SourceDeletionAcceptanceMaintenanceReceipt -Original $original `
+                -ImplementationSha256 $implementationHash | ConvertTo-Json -Depth 4
+        }
+    } finally {
+        if ($maintenanceLease) { $maintenanceMutex.ReleaseMutex() }
+        $maintenanceMutex.Dispose()
+    }
+    exit 0
+}
+
 if ($PlanOnly) {
     $migrationPlan = $null
     $hostingPlan = $null
+    $planSourceRoot=if ($SourceRoot) { (Resolve-Path -LiteralPath $SourceRoot).Path } else { Split-Path -Parent (Split-Path -Parent $PSScriptRoot) }
+    $sourceDeletionCleanupPlanDatabase=Get-SourceDeletionCleanupCandidateDatabase -Root $planSourceRoot -MigrationMode ([bool]$ApplyResumableSourceDeletionCleanupMigration) `
+        -ReadState { Get-SourceDeletionCleanupDatabaseState -ConnectionString (Get-DeploymentSqlConnectionString) }
+    if ($ApplyResumableSourceDeletionCleanupMigration) {
+        $contract=Get-SourceDeletionCleanupMigrationContract
+        $database=$sourceDeletionCleanupPlanDatabase
+        Assert-SourceDeletionCleanupCompanionDatabase -Expected $database
+        $migrationPlan=[ordered]@{ baseline=$contract.Baseline; target=$contract.Target; database_identity=$database.Identity;
+            current_history=$database.History; generated_up_sha256=$contract.UpSha256; schema_sha256=$contract.SchemaSha256;
+            runnable_deletions=$database.RunnableCount; legacy_operations_sha256=$database.LegacySha256;
+            activation='durable attempt receipt; exact history/schema and unchanged operations; zero queued/leased deletions before SQL and candidate start';
+            rollback='no Down or SQL replay; verified prior payloads stopped, task disabled, hold retained; separately reviewed forward recovery';
+            retry='no deletion retry during deployment; separately authorised public retry after successful release' }
+        if ($SourceDeletionAcceptanceMaintenanceReceipt) {
+            Import-Module WebAdministration -ErrorAction Stop
+            $maintenance=Assert-SourceDeletionAcceptanceMaintenance -ReceiptPath $SourceDeletionAcceptanceMaintenanceReceipt `
+                -ExpectedSha256 $ExpectedSourceDeletionAcceptanceMaintenanceReceiptSha256
+            $migrationPlan.maintenance_receipt_sha256=$ExpectedSourceDeletionAcceptanceMaintenanceReceiptSha256
+            $migrationPlan.original_task_enabled=$maintenance.Original.Task.Enabled
+        }
+    }
     if ($ApplyRepositoryRecoveryAuthorityMigration) {
         $contract=Get-RepositoryRecoveryMigrationContract
         $database=Get-RepositoryRecoveryDatabaseState -ConnectionString (Get-DeploymentSqlConnectionString)
@@ -2021,7 +2313,7 @@ if ($PlanOnly) {
         recover_stopped_pool = [bool]$RecoverStoppedPool
         unattended_discovery_hosting = $hostingPlan
         payload_acl = "inherit-from-live-root"
-        rollback = if ($ApplyRepositoryRecoveryAuthorityMigration) { 'preserve-schema-and-evidence; verified-prior-payloads-stopped-task-disabled-hold-retained' } elseif ($RecoverStoppedPool) { 'restore-prior-payloads-with-pool-stopped-and-hold-retained' } elseif ($PatchHybridRebuildRelease -or $ResumeHybridPatchRelease) { 'forward-only after activation intent; predecessor payload/packet retained, hold denied on failure' } elseif ($ApplyHybridPassageRebuild) { 'before-schema: original payload; after-schema: held forward recovery with retained original payload/configuration' } else { "automatic-application-and-interactive-host-payload-restore" }
+        rollback = if ($ApplyResumableSourceDeletionCleanupMigration -or $ApplyRepositoryRecoveryAuthorityMigration) { 'preserve-schema-and-evidence; verified-prior-payloads-stopped-task-disabled-hold-retained' } elseif ($RecoverStoppedPool) { 'restore-prior-payloads-with-pool-stopped-and-hold-retained' } elseif ($PatchHybridRebuildRelease -or $ResumeHybridPatchRelease) { 'forward-only after activation intent; predecessor payload/packet retained, hold denied on failure' } elseif ($ApplyHybridPassageRebuild) { 'before-schema: original payload; after-schema: held forward recovery with retained original payload/configuration' } else { "automatic-application-and-interactive-host-payload-restore" }
         gpu_drain = 'deny admissions; allow active OCR page and native cleanup to finish; prove exact IIS worker exit before each payload swap stop'
         deployment_validation_hold = $true
         candidate_validation = if ($PatchHybridRebuildRelease -or $ResumeHybridPatchRelease) { 'same-operation-epoch-checkpoint-continuity-preserved-inputs-and-loopback-probes' } elseif ($ApplyHybridPassageRebuild) { 'held-exact-rebuild-finalisation-preserved-inputs-and-loopback-probes' } elseif ($DeferReadinessForScopedRemediation) {
@@ -2066,6 +2358,11 @@ if (-not [string]::IsNullOrWhiteSpace($sourceStatus)) {
 $migrationPlan = $null
 $corpusMigrationState = $null
 $codeDisclosureMigrationState = $null
+$sourceDeletionCleanupState = $null
+$sourceDeletionMaintenance = $null
+$sourceDeletionCleanupDatabase=Get-SourceDeletionCleanupCandidateDatabase -Root $SourceRoot -MigrationMode ([bool]$ApplyResumableSourceDeletionCleanupMigration) `
+    -ReadState { Get-SourceDeletionCleanupDatabaseState -ConnectionString (Get-DeploymentSqlConnectionString) }
+if ($ApplyResumableSourceDeletionCleanupMigration) { $migrationPlan=@{ Up=$null } }
 if ($ApplyMigrations) {
     $migrationPath = Join-Path $SourceRoot ("src\FluxKnowledge.Infrastructure.SqlServer\Persistence\Migrations\{0}.cs" -f $SourceDeletionMigrationTarget)
     if (-not (Test-Path -LiteralPath $migrationPath -PathType Leaf)) {
@@ -2187,6 +2484,26 @@ try {
     }
     Assert-NotReparsePoint -Path $InteractiveHostRoot -Message "The installed interactive-host payload root cannot be a reparse point."
     Test-InteractiveHostPayload -Path $InteractiveHostRoot
+    if ($ApplyResumableSourceDeletionCleanupMigration) {
+        # Generate and verify before disabling the task or changing either live payload.
+        $migrationPlan.Up=New-SourceDeletionCleanupMigrationScript -SourceRoot $SourceRoot -OutputPath (Join-Path $releaseRoot 'source-deletion-cleanup-up.sql')
+        Assert-SourceDeletionCleanupCompanionDatabase -Expected $sourceDeletionCleanupDatabase
+        if ($SourceDeletionAcceptanceMaintenanceReceipt) {
+            $sourceDeletionMaintenance=Assert-SourceDeletionAcceptanceMaintenance -ReceiptPath $SourceDeletionAcceptanceMaintenanceReceipt `
+                -ExpectedSha256 $ExpectedSourceDeletionAcceptanceMaintenanceReceiptSha256
+        }
+        $sourceDeletionCleanupState=New-SourceDeletionCleanupMigrationState -DatabaseState $sourceDeletionCleanupDatabase -ReceiptDirectory $releaseRoot `
+            -Binding @{ ReleaseId=$releaseId; Commit=$commit; SqlSha256=$migrationPlan.Up.Sha256;
+                WebPayloadSha256=(Get-HybridPayloadFingerprint $candidateRoot);
+                CompanionPayloadSha256=(Get-HybridPayloadFingerprint $interactiveHostCandidateRoot);
+                OriginalWebSha256=(Get-HybridPayloadFingerprint $CanonicalDeployRoot);
+                OriginalCompanionSha256=(Get-HybridPayloadFingerprint $InteractiveHostRoot);
+                ConfigurationSha256=(Get-FileHash -LiteralPath (Join-Path $CanonicalLiveRoot 'Config/appsettings.Production.json') -Algorithm SHA256).Hash;
+                CompanionConfigurationSha256=(Get-FileHash -LiteralPath (Join-Path (Split-Path -Parent $InteractiveHostRoot) 'appsettings.Production.json') -Algorithm SHA256).Hash;
+                Task=(Get-SourceDeletionCleanupOriginalTask -Maintenance $sourceDeletionMaintenance);
+                MaintenanceReceipt=$SourceDeletionAcceptanceMaintenanceReceipt;
+                MaintenanceReceiptSha256=$ExpectedSourceDeletionAcceptanceMaintenanceReceiptSha256 }
+    }
     if ($RecoverStoppedPool) {
         # Recovery never starts the failed predecessor just to admit deployment.
         # Deny work and capture exact rollback bytes before either payload changes.
@@ -2202,12 +2519,16 @@ try {
             ConvertTo-Json | Set-Content -LiteralPath (Join-Path $releaseRoot 'stopped-pool-recovery-baseline.json') -Encoding utf8
     }
     $interactiveHostTask = Get-ScheduledTask -TaskName $InteractiveHostTaskName -ErrorAction Stop
-    $interactiveHostTaskWasEnabled = [bool]$interactiveHostTask.Settings.Enabled
-    if ($interactiveHostTaskWasEnabled) {
+    $interactiveHostTaskWasEnabled = if ($null -ne $sourceDeletionMaintenance) { [bool]$sourceDeletionMaintenance.Original.Task.Enabled } else { [bool]$interactiveHostTask.Settings.Enabled }
+    if ($interactiveHostTask.Settings.Enabled) {
         Disable-ScheduledTask -TaskName $InteractiveHostTaskName -ErrorAction Stop | Out-Null
     }
     Wait-InteractiveHostStopped -TaskName $InteractiveHostTaskName -TimeoutSeconds $ReadinessTimeoutSeconds
     Copy-InteractiveHostPayload -Source $InteractiveHostRoot -Destination $interactiveHostPreviousRoot
+    if ($null -ne $sourceDeletionMaintenance) {
+        [void](Assert-SourceDeletionAcceptanceMaintenance -ReceiptPath $SourceDeletionAcceptanceMaintenanceReceipt `
+            -ExpectedSha256 $ExpectedSourceDeletionAcceptanceMaintenanceReceiptSha256)
+    }
     $interactiveHostMutationStarted = $true
     $interactiveHostRollbackVerified = $false
     Copy-InteractiveHostPayload -Source $interactiveHostCandidateRoot -Destination $InteractiveHostRoot
@@ -2237,7 +2558,7 @@ try {
         -CandidateRoot $candidateRoot `
         -PreviousRoot $previousRoot `
         -FailedRoot $failedRoot `
-        -RestartPreviousApplication:(-not $RecoverStoppedPool) `
+        -RestartPreviousApplication:(-not ($RecoverStoppedPool -or $ApplyResumableSourceDeletionCleanupMigration)) `
         -ActivateCandidate {
             Invoke-CandidatePayloadActivation -CandidateRoot $candidateRoot -ApplicationRoot $CanonicalDeployRoot
             if ($EnableUnattendedDiscovery) {
@@ -2247,6 +2568,17 @@ try {
             }
         } `
         -StopApplication {
+            if ($ApplyResumableSourceDeletionCleanupMigration -and $sourceDeletionCleanupState.ForwardRecoveryRequired) {
+                throw 'Source deletion hold release was attempted; outcome requires reconciliation. Predecessor rollback is forbidden.'
+            }
+            if ($ApplyResumableSourceDeletionCleanupMigration -and $SourceDeletionAcceptanceMaintenanceReceipt -and !$sourceDeletionCleanupState.Attempted) {
+                Assert-StoppedPoolRecoveryBaseline
+                if ((Test-Path -LiteralPath $ValidationHoldPath) -or
+                    (Get-SourceDeletionAcceptanceIisHash) -cne $sourceDeletionMaintenance.Original.IisSha256) {
+                    throw 'Maintenance pool/binding or absent-hold fence changed before migration; reconciliation required.'
+                }
+                Assert-SourceDeletionAcceptanceCpuOwnerFree
+            }
             Stop-HybridIisAfterGpuDrain
             [void](New-DeploymentValidationHold -Path $ValidationHoldPath -ReleaseId $releaseId)
             if (-not $deploymentValidation.HoldCreated) {
@@ -2254,6 +2586,15 @@ try {
             }
             if ($null -eq $deploymentValidation.Baseline) {
                 $deploymentValidation.Baseline = Get-RetainedPipelineStateBaseline
+            }
+            if ($ApplyResumableSourceDeletionCleanupMigration -and !$sourceDeletionCleanupState.Attempted) {
+                Assert-SourceDeletionCleanupReleaseBinding -State $sourceDeletionCleanupState
+                Invoke-SourceDeletionCleanupMigrationAttempt -State $sourceDeletionCleanupState `
+                    -ReadState { Get-SourceDeletionCleanupDatabaseState -ConnectionString (Get-DeploymentSqlConnectionString) } `
+                    -RunUp {
+                        if ((Get-FileHash -LiteralPath $migrationPlan.Up.Path -Algorithm SHA256).Hash -cne $sourceDeletionCleanupState.Binding.SqlSha256) { throw 'Source deletion migration SQL changed after preparation.' }
+                        Invoke-GeneratedSqlScript -Path $migrationPlan.Up.Path
+                    }
             }
             if ($ApplyMigrations -and -not $deploymentValidation.MigrationsApplied) {
                 Assert-SourceDeletionMigrationBaseline -AppliedMigrationIds (Get-AppliedMigrationIds)
@@ -2277,6 +2618,13 @@ try {
             }
         } `
         -StartApplication {
+            if ($ApplyResumableSourceDeletionCleanupMigration) {
+                Assert-SourceDeletionCleanupReleaseBinding -State $sourceDeletionCleanupState
+                Assert-SourceDeletionCleanupActivation -State $sourceDeletionCleanupState `
+                    -ReadState { Get-SourceDeletionCleanupDatabaseState -ConnectionString (Get-DeploymentSqlConnectionString) }
+                if ((Get-HybridPayloadFingerprint $CanonicalDeployRoot) -cne $sourceDeletionCleanupState.Binding.WebPayloadSha256 -or
+                    (Get-HybridPayloadFingerprint $InteractiveHostRoot) -cne $sourceDeletionCleanupState.Binding.CompanionPayloadSha256) { throw 'Source deletion candidate payload differs from its durable binding.' }
+            }
             $startAttemptUtc = [DateTime]::UtcNow
             Start-WebAppPool -Name $SiteName
             Wait-IisAppPoolState -Name $SiteName -ExpectedState "Started" -TimeoutSeconds $ReadinessTimeoutSeconds
@@ -2301,13 +2649,26 @@ try {
             Assert-RetainedPipelineStateUnchanged `
                 -Baseline $deploymentValidation.Baseline `
                 -Current (Get-RetainedPipelineStateBaseline)
+            if ($ApplyResumableSourceDeletionCleanupMigration) {
+                Assert-SourceDeletionCleanupReleaseBinding -State $sourceDeletionCleanupState
+                Assert-SourceDeletionCleanupActivation -State $sourceDeletionCleanupState `
+                    -ReadState { Get-SourceDeletionCleanupDatabaseState -ConnectionString (Get-DeploymentSqlConnectionString) }
+                Invoke-SourceDeletionCleanupHoldRelease -State $sourceDeletionCleanupState `
+                    -ReleaseHold { Remove-DeploymentValidationHold -Path $ValidationHoldPath -ReleaseId $releaseId }
+            }
         } `
         -ValidateRollbackApplication {
             if ($hostingChange.Attempted -and
                 !(Test-IisHostingSettingsMatch (Get-IncrementalIisHostingSettings) $hostingChange.Original)) {
                 throw 'The prior IIS hosting settings were not restored; hold retained.'
             }
-            if ($RecoverStoppedPool) {
+            if ($ApplyResumableSourceDeletionCleanupMigration) {
+                Assert-StoppedPoolRecoveryBaseline
+                if ((Get-HybridPayloadFingerprint $CanonicalDeployRoot) -cne $sourceDeletionCleanupState.Binding.OriginalWebSha256) {
+                    throw 'Source deletion migration did not restore the exact prior application bytes; hold retained.'
+                }
+            }
+            elseif ($RecoverStoppedPool) {
                 Assert-StoppedPoolRecoveryBaseline
                 if ((Get-HybridPayloadFingerprint -Path $CanonicalDeployRoot) -cne $recoveryOriginalPayloadHash) {
                     throw 'Stopped-pool recovery did not restore the exact prior application bytes.'
@@ -2361,7 +2722,9 @@ try {
             }
         }
 
-    Remove-DeploymentValidationHold -Path $ValidationHoldPath -ReleaseId $releaseId
+    if (!$ApplyResumableSourceDeletionCleanupMigration) {
+        Remove-DeploymentValidationHold -Path $ValidationHoldPath -ReleaseId $releaseId
+    }
     $deploymentValidation.HoldCreated = $false
     # Commit boundary: workers may now write. No automatic schema or mixed-payload rollback after this point.
     $holdReleased = $true
@@ -2408,11 +2771,18 @@ try {
 }
 catch {
     $deploymentFailure = $_
-    if ($holdReleased) {
-        throw "Deployment activated and the validation hold was released, but a post-activation check failed. Current application and schema are retained; do not replay the one-time migration. Inspect recovery release $releaseRoot. Failure: $($_.Exception.Message)"
+    if ($holdReleased -or ($ApplyResumableSourceDeletionCleanupMigration -and $null -ne $sourceDeletionCleanupState -and $sourceDeletionCleanupState.ForwardRecoveryRequired)) {
+        throw "Deployment hold release was attempted; outcome requires reconciliation after a failure. Current matching payloads and schema are retained; do not replay migration or predecessor rollback. Inspect recovery release $releaseRoot. Failure: $($_.Exception.Message)"
     }
     if ($interactiveHostMutationStarted) {
         try {
+            if ($ApplyResumableSourceDeletionCleanupMigration) {
+                Disable-ScheduledTask -TaskName $InteractiveHostTaskName -ErrorAction Stop | Out-Null
+                Wait-InteractiveHostStopped -TaskName $InteractiveHostTaskName -TimeoutSeconds $ReadinessTimeoutSeconds
+                if ((Get-HybridPayloadFingerprint $CanonicalDeployRoot) -cne $sourceDeletionCleanupState.Binding.OriginalWebSha256) {
+                    throw 'Source deletion predecessor web restoration is unverified; companion bytes and recovery evidence retained, task disabled, hold retained. Inspect pool and payload state before separately reviewed recovery.'
+                }
+            }
             if ($null -eq $interactiveHostPreviousRoot -or
                 -not (Test-Path -LiteralPath $interactiveHostPreviousRoot -PathType Container)) {
                 throw "Deployment failed after the interactive-host payload was mutated, and no rollback payload is available. The scheduled task remains disabled."
@@ -2421,6 +2791,10 @@ catch {
             Test-InteractiveHostPayload -Path $interactiveHostPreviousRoot
             Restore-InteractiveHostPayload -PreviousRoot $interactiveHostPreviousRoot -LiveRoot $InteractiveHostRoot
             Test-InteractiveHostPayload -Path $InteractiveHostRoot
+            if ($ApplyResumableSourceDeletionCleanupMigration -and
+                (Get-HybridPayloadFingerprint $InteractiveHostRoot) -cne $sourceDeletionCleanupState.Binding.OriginalCompanionSha256) {
+                throw 'Source deletion migration did not restore the exact prior interactive-host bytes; task disabled and hold retained.'
+            }
             if ($RecoverStoppedPool -and
                 (Get-HybridPayloadFingerprint -Path $InteractiveHostRoot) -cne $recoveryOriginalInteractiveHostHash) {
                 throw 'Stopped-pool recovery did not restore the exact prior interactive-host bytes.'
@@ -2438,7 +2812,7 @@ catch {
         }
         throw "Deployment failed after the interactive-host payload was mutated. The prior payload was restored and the scheduled task remains disabled for operator review. Original failure: $($deploymentFailure.Exception.Message)"
     }
-    if ($interactiveHostTaskWasEnabled -and -not $interactiveHostMutationStarted) {
+    if ($interactiveHostTaskWasEnabled -and -not $interactiveHostMutationStarted -and -not $ApplyResumableSourceDeletionCleanupMigration) {
         Enable-ScheduledTask -TaskName $InteractiveHostTaskName -ErrorAction SilentlyContinue | Out-Null
     }
     throw
@@ -2451,6 +2825,7 @@ finally {
             -CorpusRollbackVerified $(if ($ApplyCorpusChunkFullTextMigration) { [bool]$corpusMigrationState.RollbackVerified } else { $true }) `
             -ApplyCodeDisclosureProofMigration ([bool]$ApplyCodeDisclosureProofMigration) `
             -CodeDisclosureRecoveryVerified $(if ($ApplyCodeDisclosureProofMigration) { [bool]$codeDisclosureMigrationState.RollbackVerified } else { $true }) `
+            -ApplyResumableSourceDeletionCleanupMigration ([bool]$ApplyResumableSourceDeletionCleanupMigration) `
             -InteractiveHostMutationStarted $interactiveHostMutationStarted `
             -InteractiveHostRollbackVerified $interactiveHostRollbackVerified `
             -RecoverStoppedPool ([bool]$RecoverStoppedPool) `

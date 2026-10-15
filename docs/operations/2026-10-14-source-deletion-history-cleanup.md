@@ -235,39 +235,64 @@ consistency refusals remain unavailable samples. A deliberate restart barrier is
 recorded separately and excluded only from the availability-gap clock. One
 measured correction/rerun is allowed before reassessing.
 
-## Production proposal awaiting specific approval
+## Coordinated rollout on 15 October
 
-No production connection, retry, repair, deployment, restart, migration, retention
-or cleanup was performed. Do not execute the queued historical retention action.
-After integration, Main contains the additive migration and code that reads its
-new columns. A later Main payload is schema-dependent and must not be treated as
-an app-only release. The ordinary updater plan does not establish eligibility for
-these new columns. Preserve the prior production/candidate pins across parallel
-tasks until the specific migration and activation gates below pass.
+The initial source-fix closeout performed no production action. The subsequent
+user request authorises coordinated squash integration, incremental deployment,
+live validation, completed-task cleanup and retry of the named production source
+through its existing public interface. The queued 17-generation retention action
+remains excluded. A bounded read-only production preflight found the exact prior
+migration, none of the five new columns, the named operation still in attention
+without a lease or cleanup targets, and zero queued/leased deletion operations.
+Those observations are time-sensitive; they do not establish later eligibility.
+Deployment, migration and the named retry have not yet run. The initial combined
+proposal included Release 1's full frozen search acceptance. The later scope split
+below supersedes that combined proposal and its Release 1 deployment gate.
 
-1. Approve read-only preflight for the named production deployment and database,
-   including incremental updater `-PlanOnly`. Verify current schema history,
-   source/operation ownership, leases, native ownership, target storage and the
-   predecessor payload/recovery packet. Identify every runnable deletion before
-   activation: startup can resume pending/running operations without a new API
-   request. Keep activation held if that would exceed the approved scope. Prior
-   incident findings are not current preflight evidence.
-2. Prepare and independently review a new opt-in migration contract in
-   `update-native-iis-incremental.ps1`. Its existing `-ApplyMigrations` flag is
-   pinned to an older source-deletion migration and must not be reused. The code
-   baseline is `20261004175522_AddRepositoryRecoveryAuthority`; the additive target
-   is `20261014134909_AddResumableSourceDeletionCleanup`. Generated up-SQL SHA-256:
-   `3693A03A9EBD2A195E88B5ECB36CC175B029C673F140C504B54B0C535EF70861`.
-   Current production eligibility is unknown until the approved preflight. No
-   alternative production deployment path is authorised.
-3. With the exact payload, migration contract, hold/stop sequence, probes and
-   rollback packet reviewed, obtain approval for that incremental release and
-   additive migration. Then seek separate approval to resume only the source and
-   deletion operation identified by the user through existing preview/commit.
-4. Observe durable phase/count progression, useful reason codes, bounded batches,
-   normal reads and independent physical cleanup. Stop admission and retain the
-   fence on attention, ownership uncertainty, non-progress or read degradation.
-   Never reset a lease or infer native cleanup from SQL alone.
+The incremental updater now provides
+`-ApplyResumableSourceDeletionCleanupMigration`; its older `-ApplyMigrations`
+switch must not be reused. Both plan and apply reject schema-ineligible app-only
+candidates. The opt-in mode requires the exact captured prior history and wholly
+absent additive schema. Its baseline is
+`20261004175522_AddRepositoryRecoveryAuthority`, and its target is
+`20261014134909_AddResumableSourceDeletionCleanup`.
+
+Use EF's idempotent generated script, SHA-256
+`644D3847B61C49EA57081E44E3C781DFFB226FA52619EB0CA2A75D7D3B3E273F`.
+The earlier non-idempotent preparation artifact remains failed evidence: its
+single batch could not compile checks against newly added columns. The corrected
+script generates those checks through `EXEC`, retaining one transaction. The
+verified schema fingerprint is
+`00FA188A700D3F97ABD746CEEF4FB7A9641917608AB4FC1AB8DAFDDFF97C439F`;
+it covers types, lengths, precision, nullability, default, binary collation and
+enabled/trusted checks. Disposable SQL tests execute the actual updater runner,
+prove rollback on an interrupted transaction, preserve existing attention data and
+reject schema/operation drift. Script idempotence does not permit automatic retry
+of an attempted migration.
+
+1. Finish standalone canonical closeout and independent review. Review
+   fresh `-PlanOnly -ApplyResumableSourceDeletionCleanupMigration` output for the
+   immutable source-deletion commit and fixed deployment target. Obtain specific
+   authority for this revised production action before Apply.
+2. Apply that same mode through the incremental updater. Before SQL and startup,
+   verify the owned hold, disabled/exited companion task, configuration bindings,
+   script hash, captured database/history and zero queued/leased deletions.
+   Preserve the task XML, hidden launcher, model store and both prior payloads.
+3. The updater flushes a database/release/payload/SQL-bound attempt receipt before
+   sending SQL. It never replays SQL from the rollback callback or runs Down. It
+   validates unchanged existing operations/targets and initial new progress fields.
+   Candidate checks and durable hold-release intent run inside payload recovery's
+   scope; ambiguous release enters forward recovery and preserves the matching
+   candidate pair. On a pre-intent failure, recovery attempts to restore and verify
+   predecessor payloads stopped, with the task disabled and the hold retained.
+   Unproved web restoration preserves companion bytes and recovery evidence;
+   persistent ownership drift or restoration failure requires separate recovery.
+4. After successful deployment and live checks, use public preview/commit to retry
+   only the authorised source and operation. Observe durable phase/count progress,
+   useful reasons, normal reads and independent physical cleanup. On attention,
+   ownership uncertainty, non-progress or read degradation, retain the source
+   fence and prepare the specific recovery action for review and approval. Never
+   reset a lease or infer native cleanup from SQL alone.
 
 Rollback retains the additive schema, cursor/count, receipts and exact targets.
 Keep verified predecessor payload/configuration and recovery evidence. Before an
@@ -280,5 +305,116 @@ replay the old monolithic delete as rollback.
 
 An uncommitted abandoned claim may wait the existing 15-minute lease duration.
 Cancellation is restartable, not an automatic native-cleanup acknowledgement.
-Production-dependent migration/updater and old-binary operational gates remain
-pending approval; local/staging verification does not waive them.
+Independent review approves the updater code for canonical closeout. Final
+production execution review and standalone/live acceptance remain pending.
+Local/staging success does not establish production completion or approve a
+subsequent repair.
+
+The first coordinated prescribed closeout stopped at `dotnet-test-native`,
+before feature commit or Main integration: 3,249 tests passed, 168 failed and 26
+were skipped. The Release build had zero warnings/errors. Failures include
+`resource-pressure`, `git-inventory-resource-pressure` and an Overview read-budget
+expiration. The resource owner and the timeout's cause are not established; no
+blocking claim follows from these results. Main remained clean at `62bfd6be`.
+The new migration's focused disposable SQL/callback checks and all 32 focused
+staging Web checks passed separately. Preserve the failed full-suite log and
+unchanged safeguards; do not retry the same full run without addressing its
+environment or a demonstrated defect. The subsequently approved one-shot memory
+snapshot identified the IIS worker as the dominant consumer. It does not establish
+which allocations it retains or prove a model leak. SQL was within its configured
+cap; no shared SQL memory change is justified by this evidence. The rollout, named retry and completed-task archival
+remain unexecuted. All 11 R1 ignored evidence logs and the 158-file stopped I:
+staging predecessor now have verified external/recovery copies.
+
+The updater provides a stop-only maintenance action requiring separate approval,
+`-EnterSourceDeletionAcceptanceMaintenance`, to make acceptance possible without
+changing model/runtime policies or weakening memory admission. Its Apply path pins
+the reviewed updater and all loaded dependencies before importing them. It flushes
+the original task XML/policy and payload/configuration/database/IIS bindings before
+disabling the companion, then uses the existing GPU admission/drain and exact IIS
+worker/descendant-exit proof. A completed receipt requires a stopped exclusive
+pool, no workers or companion process, a free CPU owner lock, unchanged existing
+deletion state and no deployment hold. It changes no schema, payload or
+configuration and never forces process termination or restarts automatically.
+
+Only the source cleanup migration may consume the completed receipt through
+`-SourceDeletionAcceptanceMaintenanceReceipt` and
+`-ExpectedSourceDeletionAcceptanceMaintenanceReceiptSha256`. Fresh checks reject
+an incomplete/changed receipt, restarted worker, ownership or binding drift and
+foreign hold. The updater creates its own release hold before SQL and carries the
+receipt's original enabled policy through successful activation. It does not
+silently preserve the temporary disabled policy. Native tests cover exact
+descendant proof, lost drain proof, original policy restoration, interruption,
+repeat refusal and drift. All 19 actual updater callback cases and the native
+incremental/repository contracts passed. At that point, the full canonical and R1
+frozen gates remained open; the later scope split separates those gates.
+
+Maintenance requires fresh explicit approval of the outage before execution.
+Successful entry leaves the verified pool stopped and task disabled during the
+combined checks; failed entry may leave partial quiescence. Failed acceptance
+keeps the verified stopped state with original schema/payloads intact, pending a
+specific reviewed recovery action. No persistent maintenance hold or hold-transfer
+framework is needed at this unchanged pre-schema boundary. Normal migration and
+release rollback retain the stronger held recovery rules above.
+
+The user approved that maintenance window on 15 October. A fresh plan and Astra
+execution review passed, and stop-only Apply completed with both the exact IIS
+worker and its child proved absent. Native ownership cleared; available physical
+memory was 53.79 GiB afterwards. The original enabled task policy, configuration,
+payloads and production schema remain preserved. All 143 focused checks covering
+the prior resource refusals and Overview concurrency passed without safeguard
+changes. This does not prove the earlier Overview timeout's cause.
+
+The isolated CPU stage reverified all nine cached model files, migrated only its
+own catalogue and registered the public repository through preview/commit. Its
+1,145 tracked files yield 1,142 eligible records; `.gitattributes`, `.gitignore`
+and `LICENSE` are outside the unchanged eligible extension set. Canonical passage
+preparation completed; embedding/publication and frozen acceptance remain open.
+The initial combined proposal allowed canonical checks during that isolated
+preparation, with production deployment gated on R1 acceptance. The scope split
+below supersedes that coupling. No production payload/schema change or named
+deletion retry has run.
+
+The post-maintenance full test run passed 3,417 tests with zero failures and the
+26 unchanged opt-in skips; its Release build had zero warnings/errors. Prescribed
+closeout then stopped at `native-deployment-contract`, before commit or merge.
+The stopped-pool test still used the current candidate against the unmigrated
+production schema and matched superseded expression text. Its corrected plan
+fixture uses a candidate without the new migration, while disposable SQL retains
+the current-candidate eligibility checks. Actual restart-expression cases and the
+containing recovery handler replace brittle text matching; existing held-rollback
+and six disposable swap outcomes remain required. The focused stopped-pool and
+complete native deployment contracts passed. Prescribed closeout must be rerun.
+
+## Production and staging scope split
+
+The user subsequently separated Release 1 staging and performance work from the
+production release. Production coordination now covers source deletion, pipeline
+visibility and incident follow-up. Release 1's unvalidated additions are excluded
+from the production candidate, so its frozen acceptance remains required for its
+own delivery without delaying this release. No R1 behaviour is shipped by waiving
+that acceptance.
+
+The dedicated source-deletion checkout now uses a standalone branch from Main
+`62bfd6be`. The original combined branch, all twelve pending source-release files,
+their hash-verified snapshot and a retained stash preserve the earlier work.
+Release 1's own branch and checkout remain intact. The in-progress combined
+closeout rerun was cancelled before commit or merge; it is not successful closeout
+evidence. Run the prescribed closeout for the standalone branch.
+
+Release 1's isolated runtime and observation sessions are stopped, and ownership
+of its configuration, data and tuning returned to its original task. Exact
+process/child absence, no listener, a free CPU owner lock and recovered memory
+prove physical CPU resource release. No graceful application-cleanup
+acknowledgement was observed, so interrupted staging work and graceful shutdown
+remain unconfirmed. No database acknowledgement or repair was used to manufacture
+that proof. Independent Astra review accepted the physical isolation for
+production preparation. Keep real-model staging, bulk indexing and search
+measurement stopped during production recovery; a separately reviewed resource
+plan is required before restarting that workload.
+
+Production remains at the approved stop-only boundary with its original payloads
+and schema preserved. The revised standalone release requires its own concrete
+target, canonical results, fresh plan and independent execution review before the
+specific production action is approved. The named source retry follows successful
+deployment and bounded live checks; the 17-generation cleanup remains excluded.
