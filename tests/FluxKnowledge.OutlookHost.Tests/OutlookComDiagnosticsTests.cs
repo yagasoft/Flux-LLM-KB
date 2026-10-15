@@ -6,6 +6,7 @@ using Xunit;
 
 namespace FluxKnowledge.OutlookHost.Tests;
 
+[Collection("Process console")]
 public sealed class OutlookComDiagnosticsTests
 {
     [Fact]
@@ -326,3 +327,6 @@ public sealed class OutlookComDiagnosticsTests
         new DirectoryInfo(path).SetAccessControl(security);
     }
 }
+
+[CollectionDefinition("Process console", DisableParallelization = true)]
+public sealed class ProcessConsoleCollection;

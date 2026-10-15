@@ -56,7 +56,9 @@ public sealed class SourceRootProjectionReader(
             return ToListProjection(root, latestByRoot.GetValueOrDefault(root.Id), summaries.GetValueOrDefault(root.Id) ?? SourceStateSummary.Empty) with
             {
                 DeletionPhase = operation?.Phase,
-                DeletionReason = operation?.ReasonCode
+                DeletionReason = operation?.ReasonCode,
+                DeletionProgress = operation is null ? null : new SourceDeletionProgressProjection(
+                    operation.Id, operation.State, operation.ResumePhase, operation.MembershipRowsDeleted, operation.LastProgressAtUtc)
             };
         }).ToArray();
     }
@@ -259,7 +261,9 @@ public sealed class SourceRootProjectionReader(
         {
             Files = files,
             DeletionPhase = deletion?.Phase,
-            DeletionReason = deletion?.ReasonCode
+            DeletionReason = deletion?.ReasonCode,
+            DeletionProgress = deletion is null ? null : new SourceDeletionProgressProjection(
+                deletion.Id, deletion.State, deletion.ResumePhase, deletion.MembershipRowsDeleted, deletion.LastProgressAtUtc)
         };
     }
 

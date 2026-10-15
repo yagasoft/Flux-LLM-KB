@@ -24,8 +24,8 @@ foreach ($path in $paths) {
     if ($path.StartsWith('tests/') -and $path -notmatch '^tests/(FluxKnowledge\.[^/]+|native)/') {
         throw "Test is outside the native verification suite: $path"
     }
-    if ($path.StartsWith('tools/') -and $path -notmatch '^tools/FluxKnowledge\.StagingHost/') {
-        throw "Tool is outside the isolated staging host: $path"
+    if ($path.StartsWith('tools/') -and $path -notmatch '^tools/FluxKnowledge\.(StagingHost|SourceDeletionAcceptance)/') {
+        throw "Tool is outside the approved isolated staging tools: $path"
     }
 }
 

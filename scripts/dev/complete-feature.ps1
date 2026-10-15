@@ -1186,7 +1186,9 @@ try {
     Invoke-FeatureStep -Name "dotnet-tool-restore" -Cwd $FeatureWorktree -Command 'dotnet tool restore'
     Invoke-FeatureStep -Name "dotnet-restore-locked" -Cwd $FeatureWorktree -Command 'dotnet restore FluxKnowledge.slnx --locked-mode'
     Invoke-FeatureStep -Name "dotnet-build-release" -Cwd $FeatureWorktree -Command 'dotnet build FluxKnowledge.slnx -c Release --no-restore -warnaserror'
-    Invoke-FeatureStep -Name "dotnet-test-native" -Cwd $FeatureWorktree -Command 'dotnet test FluxKnowledge.slnx -c Release --no-build --logger "console;verbosity=minimal"' -TimeoutSeconds $TestStepTimeoutSeconds
+    # Isolate project processes so SQL/capacity fixtures retain their real budgets.
+    # Deliberate concurrency inside each test project remains enabled.
+    Invoke-FeatureStep -Name "dotnet-test-native" -Cwd $FeatureWorktree -Command 'dotnet test FluxKnowledge.slnx -m:1 -c Release --no-build --logger "console;verbosity=minimal"' -TimeoutSeconds $TestStepTimeoutSeconds
     Invoke-FeatureStep -Name "native-repository-contract" -Cwd $FeatureWorktree -Command 'pwsh -NoProfile -File .\tests\native\repository-contract.ps1 -SourceRoot .'
     Invoke-FeatureStep -Name "native-closeout-contract" -Cwd $FeatureWorktree -Command 'pwsh -NoProfile -File .\tests\native\complete-feature-dryrun.ps1 -SourceRoot .'
     Invoke-FeatureStep -Name "native-go-live-bootstrap-nondryrun-contract" -Cwd $FeatureWorktree -Command 'pwsh -NoProfile -File .\tests\native\complete-feature-bootstrap-nondryrun.ps1 -SourceRoot .'
@@ -1200,7 +1202,7 @@ try {
     Invoke-FeatureStep -Name "dotnet-tool-restore-main" -Cwd $MainRoot -Command 'dotnet tool restore'
     Invoke-FeatureStep -Name "dotnet-restore-locked-main" -Cwd $MainRoot -Command 'dotnet restore FluxKnowledge.slnx --locked-mode'
     Invoke-FeatureStep -Name "dotnet-build-release-main" -Cwd $MainRoot -Command 'dotnet build FluxKnowledge.slnx -c Release --no-restore -warnaserror'
-    Invoke-FeatureStep -Name "dotnet-test-native-main" -Cwd $MainRoot -Command 'dotnet test FluxKnowledge.slnx -c Release --no-build --logger "console;verbosity=minimal"' -TimeoutSeconds $TestStepTimeoutSeconds
+    Invoke-FeatureStep -Name "dotnet-test-native-main" -Cwd $MainRoot -Command 'dotnet test FluxKnowledge.slnx -m:1 -c Release --no-build --logger "console;verbosity=minimal"' -TimeoutSeconds $TestStepTimeoutSeconds
     Invoke-FeatureStep -Name "main-commit" -Cwd $MainRoot -Command "if ((git status --porcelain) -ne `$null) { git commit -m '$safeCommitMessage' } else { 'No staged changes to commit.' }"
 
     $headSha = (git -C $MainRoot rev-parse HEAD).Trim()

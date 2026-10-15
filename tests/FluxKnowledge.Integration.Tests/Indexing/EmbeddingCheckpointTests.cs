@@ -133,7 +133,15 @@ public sealed class EmbeddingCheckpointTests(NativeSqlServerFixture fixture) : I
         Assert.Contains(other.GenerationId, betweenPhases.ReferencedGenerationIds);
         var second = await deletion.ClaimNextAsync(CancellationToken.None);
         Assert.NotNull(second);
-        Assert.Equal("cleanup-files", (await deletion.PurgeAsync(second, null, CancellationToken.None)).Phase);
+        Assert.Equal("cleanup-memberships", (await deletion.PurgeAsync(second, null, CancellationToken.None)).Phase);
+        for (var unit = 0; unit < 16; unit++)
+        {
+            var work = Assert.IsType<SourceDeletionWorkItem>(await deletion.ClaimNextAsync(CancellationToken.None));
+            var result = await deletion.PurgeAsync(work, null, CancellationToken.None);
+            if (result.Phase == "cleanup-files") break;
+            Assert.True(result.ContinueImmediately, result.ReasonCode);
+            Assert.True(unit < 15, "The small checkpoint fixture must reach file cleanup.");
+        }
         await using var check = await environment.Factory.CreateDbContextAsync();
         Assert.False(await check.Jobs.AnyAsync(value => value.Id == deletingClaim.Job.JobId.Value));
         var retired = await check.IndexGenerations.SingleAsync(value => value.Id == deleting.GenerationId);

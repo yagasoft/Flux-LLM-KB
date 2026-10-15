@@ -706,6 +706,20 @@ public sealed class SqlNativeOperationStore(
             {
                 var hasFailedFileCleanup = await context.SourceDeletionCleanupItems.AnyAsync(item =>
                     item.SourceDeletionOperationId == existingDeletion.Id && item.State == 2, cancellationToken);
+                var resumePhase = existingDeletion.ResumePhase;
+                if (resumePhase is not null && resumePhase is not
+                    ("accepted" or "draining" or "rebuild-index" or "cleanup-memberships" or "purge-records" or "cleanup-files"))
+                    throw new NativeOperationException("source-delete-resume-phase-invalid");
+                if (resumePhase is null)
+                {
+                    // Older receipts did not retain their phase. A generic file-store
+                    // exception can leave pending (not failed) targets after SQL purge.
+                    var capturedFiles = await context.SourceDeletionCleanupItems.AnyAsync(item =>
+                        item.SourceDeletionOperationId == existingDeletion.Id, cancellationToken);
+                    var hasOwnedRevisions = await context.SourceRevisions.AnyAsync(revision =>
+                        revision.SourceRootId == rootIdValue, cancellationToken);
+                    resumePhase = hasFailedFileCleanup || capturedFiles && !hasOwnedRevisions ? "cleanup-files" : "accepted";
+                }
                 if (hasFailedFileCleanup)
                 {
                     await context.SourceDeletionCleanupItems
@@ -716,7 +730,10 @@ public sealed class SqlNativeOperationStore(
                             .SetProperty(item => item.UpdatedAtUtc, now), cancellationToken);
                 }
                 existingDeletion.State = 0;
-                existingDeletion.Phase = hasFailedFileCleanup ? "cleanup-files" : "accepted";
+                existingDeletion.Phase = resumePhase;
+                existingDeletion.ResumePhase = null;
+                existingDeletion.LeaseId = null;
+                existingDeletion.LeaseExpiresAtUtc = null;
                 existingDeletion.ReasonCode = null;
                 existingDeletion.UpdatedAtUtc = now;
             }

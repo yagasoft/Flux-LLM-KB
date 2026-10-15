@@ -12,6 +12,49 @@ namespace FluxKnowledge.Integration.Tests.Sources;
 public sealed class WindowsSourceDeletionFileStoreTests
 {
     [Fact]
+    public async Task Generation_cleanup_resumes_after_partial_contents_and_replays_after_absence()
+    {
+        await using var fixture = new DeletionFileFixture();
+        var generationId = Guid.NewGuid();
+        var generationPath = Path.Combine(fixture.IndexRoot, "generations", generationId.ToString("N"));
+        Directory.CreateDirectory(Path.Combine(generationPath, "empty-after-interruption"));
+        await File.WriteAllTextAsync(Path.Combine(generationPath, "index.usearch"), "remaining owned fixture");
+        var original = Path.Combine(fixture.Root, "original.txt");
+        await File.WriteAllTextAsync(original, "original workspace bytes");
+        var target = new SourceDeletionFileTarget(Guid.NewGuid(), 2, generationId.ToString("N"), null, null);
+        var store = new WindowsSourceDeletionFileStore(fixture.ArtifactRoot, fixture.IndexRoot);
+
+        var resumed = await store.DeleteAsync(target, default);
+        var replay = await store.DeleteAsync(target, default);
+
+        Assert.True(resumed.Completed, resumed.ReasonCode);
+        Assert.True(replay.Completed, replay.ReasonCode);
+        Assert.False(Directory.Exists(generationPath));
+        Assert.Equal("original workspace bytes", await File.ReadAllTextAsync(original));
+    }
+
+    [Fact]
+    public async Task Cancellation_before_native_deletion_preserves_the_target_for_resume()
+    {
+        await using var fixture = new DeletionFileFixture();
+        var generationId = Guid.NewGuid();
+        var generationPath = Path.Combine(fixture.IndexRoot, "generations", generationId.ToString("N"));
+        Directory.CreateDirectory(generationPath);
+        var indexPath = Path.Combine(generationPath, "index.usearch");
+        await File.WriteAllTextAsync(indexPath, "owned fixture bytes");
+        var target = new SourceDeletionFileTarget(Guid.NewGuid(), 2, generationId.ToString("N"), null, null);
+        var store = new WindowsSourceDeletionFileStore(fixture.ArtifactRoot, fixture.IndexRoot);
+        using var cancelled = new CancellationTokenSource();
+        cancelled.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => store.DeleteAsync(target, cancelled.Token).AsTask());
+        Assert.Equal("owned fixture bytes", await File.ReadAllTextAsync(indexPath));
+        Assert.True((await store.DeleteAsync(target, default)).Completed);
+        Assert.False(Directory.Exists(generationPath));
+    }
+
+    [Fact]
     public async Task Deletes_only_a_verified_content_addressed_artifact_and_generation_directory()
     {
         await using var fixture = new DeletionFileFixture();

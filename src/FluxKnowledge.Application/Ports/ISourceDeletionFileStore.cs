@@ -13,6 +13,9 @@ public sealed record SourceDeletionFileTarget(
     int StorageKind,
     string RelativePath,
     string? ContentSha256,
-    long? ByteLength);
+    long? ByteLength)
+{
+    public bool SharedReferenceExists { get; init; }
+}
 
 public sealed record SourceDeletionFileResult(bool Completed, string? ReasonCode = null);

@@ -1,13 +1,32 @@
 @using System.Text.Json
 @using FluxKnowledge.Application.IntegrationV1
 @using FluxKnowledge.Application.IntegrationV1.Corpus
+@using FluxKnowledge.Application.Contracts
 @inject NativeCorpusCommandService CorpusCommands
 
 <div class="source-lifecycle-controls">
     @if (IsDeleting)
     {
-        <span role="status">Deletion is in progress (@(DeletionPhase ?? "pending")). New source work is fenced.@if (DeletionReason is { } reason) { <text> Reason: @reason.</text> }</span>
-        <button type="button" @onclick="RetryDeleteAsync" disabled="@_submitting">Retry cleanup</button>
+        <span role="status" aria-live="polite">
+            @DeletionStatus (@(NeedsDeletionAttention ? DeletionProgress?.ResumePhase ?? "attention" : DeletionPhase ?? "pending")). New source work is fenced.
+            @if (DeletionProgress is { } progress)
+            {
+                <text>Committed historical memberships removed: @progress.MembershipRowsDeleted.ToString("N0", System.Globalization.CultureInfo.InvariantCulture).</text>
+                @if (progress.LastProgressAtUtc is { } lastProgress)
+                {
+                    <text> Last progress: @lastProgress.UtcDateTime.ToString("yyyy-MM-dd HH:mm:ss 'UTC'", System.Globalization.CultureInfo.InvariantCulture).</text>
+                }
+                @if (NeedsDeletionAttention)
+                {
+                    <text> Diagnostic reference: @progress.OperationId.ToString("D").</text>
+                }
+            }
+            @if (DeletionReason is { } reason) { <text> Reason: @reason.</text> }
+        </span>
+        @if (NeedsDeletionAttention)
+        {
+            <button type="button" @onclick="RetryDeleteAsync" disabled="@_submitting">Retry cleanup</button>
+        }
     }
     else
     {
@@ -47,6 +66,8 @@
 
     [Parameter] public string? DeletionReason { get; set; }
 
+    [Parameter] public SourceDeletionProgressProjection? DeletionProgress { get; set; }
+
     [Parameter] public EventCallback OnCommitted { get; set; }
 
     private bool _submitting;
@@ -58,6 +79,14 @@
     private bool IsPaused => string.Equals(State, "Paused", StringComparison.Ordinal);
 
     private bool IsDeleting => string.Equals(State, "Deleting", StringComparison.Ordinal);
+
+    private bool NeedsDeletionAttention => DeletionProgress?.State == 4 || DeletionPhase == "attention";
+
+    private string DeletionStatus => NeedsDeletionAttention ? "Deletion needs attention"
+        : DeletionPhase == "completed" ? "Deletion completed"
+        : DeletionPhase == "draining" || DeletionReason is "source-delete-search-queries-active" or "source-delete-artifact-publication-active"
+            or "source-delete-native-cleanup-pending" or "source-delete-work-active"
+            ? "Deletion is waiting" : "Deletion is in progress";
 
     private string Action => IsPaused ? "root_resume" : "root_pause";
 

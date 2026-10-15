@@ -603,7 +603,15 @@ public sealed class EmbeddingGpuRequestTests(NativeSqlServerFixture fixture) : I
         Assert.True((await deletion.PurgeAsync(first, null, CancellationToken.None)).RequiresIndexBuild);
         var second = await deletion.ClaimNextAsync(CancellationToken.None);
         Assert.NotNull(second);
-        Assert.Equal("cleanup-files", (await deletion.PurgeAsync(second, null, CancellationToken.None)).Phase);
+        Assert.Equal("cleanup-memberships", (await deletion.PurgeAsync(second, null, CancellationToken.None)).Phase);
+        for (var unit = 0; unit < 16; unit++)
+        {
+            var work = Assert.IsType<SourceDeletionWorkItem>(await deletion.ClaimNextAsync(CancellationToken.None));
+            var result = await deletion.PurgeAsync(work, null, CancellationToken.None);
+            if (result.Phase == "cleanup-files") break;
+            Assert.True(result.ContinueImmediately, result.ReasonCode);
+            Assert.True(unit < 15, "The small ownership fixture must reach file cleanup.");
+        }
         Assert.Empty(await context.EmbeddingGpuRequests.AsNoTracking().ToListAsync());
         Assert.Empty(await context.GpuMiniTasks.AsNoTracking().ToListAsync());
         Assert.Empty(await context.GpuBatches.AsNoTracking().ToListAsync());

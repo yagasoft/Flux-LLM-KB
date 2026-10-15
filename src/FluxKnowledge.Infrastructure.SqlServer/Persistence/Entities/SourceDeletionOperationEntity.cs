@@ -8,6 +8,11 @@ public sealed class SourceDeletionOperationEntity
     public int State { get; set; }
     public string Phase { get; set; } = string.Empty;
     public string? ReasonCode { get; set; }
+    public string? ResumePhase { get; set; }
+    public long? MembershipVectorCursor { get; set; }
+    public long MembershipRowsDeleted { get; set; }
+    public Guid? LastCommittedLeaseId { get; set; }
+    public DateTimeOffset? LastProgressAtUtc { get; set; }
     public Guid? LeaseId { get; set; }
     public DateTimeOffset? LeaseExpiresAtUtc { get; set; }
     public int PipelineRecordCount { get; set; }

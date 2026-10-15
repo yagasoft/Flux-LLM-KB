@@ -35,7 +35,7 @@
                             <td>@root.DisplayName</td><td class="diagnostic-value">@root.CanonicalPath</td><td>@root.State</td>
                             <td>@(root.LastScanCompletedAtUtc?.LocalDateTime.ToString() ?? "Not scanned")</td>
                             <td>@root.IndexedCount</td><td>@root.DeferredCount</td><td>@root.BlockedCount</td><td>@root.ErrorCount</td>
-                            <td><SourceLifecycleControls RootId="root.Id" State="@root.State" DisplayName="@root.DisplayName" CanonicalPath="@root.CanonicalPath" OwnedItemEstimate="@root.IndexedCount" DeletionPhase="@root.DeletionPhase" DeletionReason="@root.DeletionReason" OnCommitted="ReloadAsync" /></td>
+                            <td><SourceLifecycleControls RootId="root.Id" State="@root.State" DisplayName="@root.DisplayName" CanonicalPath="@root.CanonicalPath" OwnedItemEstimate="@root.IndexedCount" DeletionPhase="@root.DeletionPhase" DeletionReason="@root.DeletionReason" DeletionProgress="@root.DeletionProgress" OnCommitted="ReloadAsync" /></td>
                             <td><a href="@($"/sources/{root.Id}")">View</a></td>
                         </tr>
                     }

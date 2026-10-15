@@ -21,6 +21,8 @@ public interface ISourceDeletionStore
         CancellationToken cancellationToken);
 
     ValueTask FailAsync(SourceDeletionWorkItem workItem, string reasonCode, CancellationToken cancellationToken);
+
+    ValueTask DeferAsync(SourceDeletionWorkItem workItem, string reasonCode, CancellationToken cancellationToken);
 }
 
 public sealed record SourceDeletionWorkItem(Guid OperationId, Guid SourceRootId, Guid LeaseId, string Phase);

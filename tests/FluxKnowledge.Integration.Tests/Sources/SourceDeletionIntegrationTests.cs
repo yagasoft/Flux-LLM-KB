@@ -18,15 +18,177 @@ using FluxKnowledge.Infrastructure.SqlServer.Workers;
 using FluxKnowledge.Integration.Tests.Support;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Data.SqlClient;
+using Microsoft.EntityFrameworkCore.Diagnostics;
+using Microsoft.EntityFrameworkCore.Storage;
+using System.Data.Common;
 using Xunit;
 
 namespace FluxKnowledge.Integration.Tests.Sources;
 
 /// <summary>Source deletion is scoped to one root; a second root is the control for every purge assertion.</summary>
-public sealed class SourceDeletionIntegrationTests(NativeSqlServerFixture fixture)
+public sealed partial class SourceDeletionIntegrationTests(NativeSqlServerFixture fixture)
     : IClassFixture<NativeSqlServerFixture>, IAsyncLifetime
 {
     private readonly NativeSqlServerFixture _fixture = fixture;
+
+    [NativeSqlServerFact]
+    public async Task A_lost_claim_acknowledgement_recovers_the_same_operation_without_claiming_another()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var first = await SeedRootAsync("first-claim", SourceRootState.Deleting, now);
+        var second = await SeedRootAsync("second-claim", SourceRootState.Deleting, now);
+        var firstOperation = await AddDeletionAsync(first, now);
+        await AddDeletionAsync(second, now.AddSeconds(1));
+        var store = new SqlSourceDeletionStore(new CommitLossContextFactory(_fixture.ConnectionString), TimeProvider.System);
+
+        var claim = Assert.IsType<SourceDeletionWorkItem>(await store.ClaimNextAsync(default));
+
+        Assert.Equal(firstOperation, claim.OperationId);
+        await using var check = CreateContext();
+        Assert.Equal(1, await check.SourceDeletionOperations.CountAsync(row => row.State == 1));
+        Assert.Equal(0, await check.SourceDeletionOperations.Where(row => row.SourceRootId == second.RootId)
+            .Select(row => row.State).SingleAsync());
+    }
+
+    [NativeSqlServerFact]
+    public async Task A_lost_unit_acknowledgement_returns_committed_progress_without_attention()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var source = await SeedRootAsync("lost-unit-ack", SourceRootState.Deleting, now);
+        var operationId = await AddDeletionAsync(source, now);
+        var ordinary = new SqlSourceDeletionStore(SqlTestData.CreateFactory(_fixture), TimeProvider.System);
+        var claim = Assert.IsType<SourceDeletionWorkItem>(await ordinary.ClaimNextAsync(default));
+        var store = new SqlSourceDeletionStore(new CommitLossContextFactory(_fixture.ConnectionString), TimeProvider.System);
+
+        var outcome = await store.PurgeAsync(claim, null, default);
+
+        Assert.Equal("rebuild-index", outcome.Phase);
+        Assert.True(outcome.ContinueImmediately);
+        await using var check = CreateContext();
+        var operation = await check.SourceDeletionOperations.SingleAsync(row => row.Id == operationId);
+        Assert.Equal(0, operation.State);
+        Assert.Null(operation.LeaseId);
+        Assert.Null(operation.ReasonCode);
+        Assert.True(await check.PipelineRecords.Where(row => row.Id == source.RecordId)
+            .Select(row => row.IsDeleted).SingleAsync());
+    }
+
+    [NativeSqlServerFact]
+    public async Task Historical_memberships_drain_in_bounded_commits_and_same_claim_replay_does_not_drain_twice()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var source = await SeedRootAsync("fan-out", SourceRootState.Deleting, now);
+        var operationId = await AddDeletionAsync(source, now);
+        var generations = Enumerable.Range(0, 2501).Select(_ => new IndexGenerationEntity
+        {
+            Id = Guid.NewGuid(), ModelFingerprint = "source-deletion-test:1", Dimensions = 1,
+            IndexPath = "historical-fan-out", MetadataChecksum = new string('a', 64), VectorCount = 1,
+            CreatedAtUtc = now, ValidatedAtUtc = now
+        }).ToArray();
+        await using (var setup = CreateContext())
+        {
+            setup.IndexGenerations.AddRange(generations);
+            await setup.SaveChangesAsync();
+        }
+        var vector = await AddVectorAsync(source, generations[0].Id, "owned fan-out", now);
+        await using (var setup = CreateContext())
+        {
+            setup.IndexGenerationVectors.AddRange(generations.Select(generation => new IndexGenerationVectorEntity
+                { GenerationId = generation.Id, VectorId = vector.VectorId }));
+            await setup.SaveChangesAsync();
+        }
+        var store = new SqlSourceDeletionStore(SqlTestData.CreateFactory(_fixture), TimeProvider.System);
+        var accepted = Assert.IsType<SourceDeletionWorkItem>(await store.ClaimNextAsync(default));
+        await store.PurgeAsync(accepted, null, default);
+        var rebuilding = Assert.IsType<SourceDeletionWorkItem>(await store.ClaimNextAsync(default));
+        Assert.Equal("cleanup-memberships", (await store.PurgeAsync(rebuilding, null, default)).Phase);
+        var firstBatch = Assert.IsType<SourceDeletionWorkItem>(await store.ClaimNextAsync(default));
+
+        var lostBatchAcknowledgement = new SqlSourceDeletionStore(new CommitLossContextFactory(_fixture.ConnectionString), TimeProvider.System);
+        Assert.True((await lostBatchAcknowledgement.PurgeAsync(firstBatch, null, default)).ContinueImmediately);
+        await using (var check = CreateContext())
+        {
+            Assert.Equal(1501, await check.IndexGenerationVectors.CountAsync(row => row.VectorId == vector.VectorId));
+            Assert.Equal(2501, await check.SourceDeletionCleanupItems.CountAsync(row => row.SourceDeletionOperationId == operationId));
+            var progress = await check.SourceDeletionOperations.SingleAsync();
+            Assert.Equal(1000, progress.MembershipRowsDeleted);
+            Assert.Null(progress.MembershipVectorCursor);
+            Assert.Equal(firstBatch.LeaseId, progress.LastCommittedLeaseId);
+        }
+        Assert.True((await store.PurgeAsync(firstBatch, null, default)).ContinueImmediately);
+        await using (var check = CreateContext())
+        {
+            Assert.Equal(1501, await check.IndexGenerationVectors.CountAsync(row => row.VectorId == vector.VectorId));
+            Assert.Equal(1000, await check.SourceDeletionOperations.Select(row => row.MembershipRowsDeleted).SingleAsync());
+        }
+        var resumed = new SqlSourceDeletionStore(SqlTestData.CreateFactory(_fixture), TimeProvider.System);
+        var secondBatch = Assert.IsType<SourceDeletionWorkItem>(await resumed.ClaimNextAsync(default));
+        await resumed.PurgeAsync(secondBatch, null, default);
+        await using (var check = CreateContext())
+        {
+            Assert.Equal(501, await check.IndexGenerationVectors.CountAsync(row => row.VectorId == vector.VectorId));
+            Assert.Equal(2000, await check.SourceDeletionOperations.Select(row => row.MembershipRowsDeleted).SingleAsync());
+            Assert.Null(await check.SourceDeletionOperations.Select(row => row.MembershipVectorCursor).SingleAsync());
+        }
+        var finalBatch = Assert.IsType<SourceDeletionWorkItem>(await resumed.ClaimNextAsync(default));
+        await resumed.PurgeAsync(finalBatch, null, default);
+        await using var finalCheck = CreateContext();
+        Assert.False(await finalCheck.IndexGenerationVectors.AnyAsync(row => row.VectorId == vector.VectorId));
+        Assert.True(await finalCheck.Vectors.AnyAsync(row => row.VectorId == vector.VectorId));
+        Assert.Equal(2501, await finalCheck.SourceDeletionOperations.Select(row => row.MembershipRowsDeleted).SingleAsync());
+        Assert.Equal(vector.VectorId, await finalCheck.SourceDeletionOperations.Select(row => row.MembershipVectorCursor).SingleAsync());
+    }
+
+    [NativeSqlServerFact]
+    public async Task Survivor_cutover_commits_cleanup_targets_before_removing_historical_memberships()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var deleting = await SeedRootAsync("durable-cutover", SourceRootState.Deleting, now);
+        var generationId = Guid.NewGuid();
+        var operationId = Guid.NewGuid();
+        await using (var setup = CreateContext())
+        {
+            setup.IndexGenerations.Add(new IndexGenerationEntity
+            {
+                Id = generationId, ModelFingerprint = "source-deletion-test:1", Dimensions = 1,
+                IndexPath = "historical-durable-cutover", MetadataChecksum = new string('a', 64),
+                VectorCount = 1, CreatedAtUtc = now, ValidatedAtUtc = now
+            });
+            setup.SourceDeletionOperations.Add(new SourceDeletionOperationEntity
+            {
+                Id = operationId, SourceRootId = deleting.RootId, State = 0, Phase = "accepted",
+                CreatedAtUtc = now, UpdatedAtUtc = now
+            });
+            await setup.SaveChangesAsync();
+        }
+        var vector = await AddVectorAsync(deleting, generationId, "owned", now);
+        await using (var setup = CreateContext())
+        {
+            setup.IndexGenerationVectors.Add(new() { GenerationId = generationId, VectorId = vector.VectorId });
+            await setup.SaveChangesAsync();
+        }
+        var store = new SqlSourceDeletionStore(SqlTestData.CreateFactory(_fixture), TimeProvider.System);
+        var accepted = Assert.IsType<SourceDeletionWorkItem>(await store.ClaimNextAsync(default));
+        Assert.True((await store.PurgeAsync(accepted, null, default)).RequiresIndexBuild);
+        var rebuilding = Assert.IsType<SourceDeletionWorkItem>(await store.ClaimNextAsync(default));
+
+        var cutover = await store.PurgeAsync(rebuilding, null, default);
+
+        Assert.Equal("cleanup-memberships", cutover.Phase);
+        await using var check = CreateContext();
+        Assert.True(await check.PipelineRecords.AnyAsync(row => row.Id == deleting.RecordId));
+        Assert.True(await check.Vectors.AnyAsync(row => row.VectorId == vector.VectorId && row.IsDeleted));
+        Assert.True(await check.IndexGenerationVectors.AnyAsync(row => row.VectorId == vector.VectorId));
+        Assert.NotNull(await check.IndexGenerations.Where(row => row.Id == generationId)
+            .Select(row => row.RetiredAtUtc).SingleAsync());
+        Assert.Equal(generationId.ToString("N"), await check.SourceDeletionCleanupItems
+            .Where(row => row.SourceDeletionOperationId == operationId && row.StorageKind == 2)
+            .Select(row => row.RelativePath).SingleAsync());
+        var recovery = await new SqlDerivedIndexRecoveryStore(SqlTestData.CreateFactory(_fixture), TimeProvider.System)
+            .ReadActiveAsync(default);
+        Assert.True(recovery.IsProjectionUnavailable);
+        Assert.False(recovery.IsValidatedEmptyCatalogue);
+    }
 
     [NativeSqlServerFact]
     public async Task Generation_file_cleanup_waits_for_cross_instance_queries_then_resumes()
@@ -56,7 +218,8 @@ public sealed class SourceDeletionIntegrationTests(NativeSqlServerFixture fixtur
         Assert.True((await deletionStore.PurgeAsync(deletingWork, null, CancellationToken.None)).RequiresIndexBuild);
         var rebuildingWork = await deletionStore.ClaimNextAsync(CancellationToken.None);
         Assert.NotNull(rebuildingWork);
-        Assert.Equal("cleanup-files", (await deletionStore.PurgeAsync(rebuildingWork, null, CancellationToken.None)).Phase);
+        Assert.Equal("cleanup-memberships", (await deletionStore.PurgeAsync(rebuildingWork, null, CancellationToken.None)).Phase);
+        await AdvanceSqlToFilesAsync(deletionStore, operationId);
         var files = new RecordingFileStore();
         var coordinator = new SourceDeletionCoordinator(deletionStore, fileStore: files,
             queryCleanupGate: new SqlDerivedIndexRecoveryStore(factory, TimeProvider.System));
@@ -833,10 +996,7 @@ public sealed class SourceDeletionIntegrationTests(NativeSqlServerFixture fixtur
         }
 
         var store = new SqlSourceDeletionStore(SqlTestData.CreateFactory(_fixture), TimeProvider.System);
-        var accepted = Assert.IsType<SourceDeletionWorkItem>(await store.ClaimNextAsync(CancellationToken.None));
-        Assert.True((await store.PurgeAsync(accepted, survivorGeneration: null, CancellationToken.None)).ContinueImmediately);
-        var rebuilding = Assert.IsType<SourceDeletionWorkItem>(await store.ClaimNextAsync(CancellationToken.None));
-        Assert.True((await store.PurgeAsync(rebuilding, survivorGeneration: null, CancellationToken.None)).ContinueImmediately);
+        await AdvanceSqlToFilesAsync(store, operationId);
 
         await using (var writer = CreateContext())
         {
@@ -853,15 +1013,18 @@ public sealed class SourceDeletionIntegrationTests(NativeSqlServerFixture fixtur
             await writer.SaveChangesAsync();
         }
 
-        var cleanup = Assert.IsType<SourceDeletionWorkItem>(await store.ClaimNextAsync(CancellationToken.None));
-        Assert.Empty(await store.ReadPendingCleanupAsync(cleanup, CancellationToken.None));
+        var files = new RecordingFileStore();
+        var coordinator = new SourceDeletionCoordinator(store, fileStore: files,
+            artifactPublicationGate: new SqlSourceArtifactPublicationGate(SqlTestData.CreateFactory(_fixture)));
+        Assert.True(await RunDeletionUntilStoppedAsync(coordinator));
+        Assert.Equal(0, files.DeleteCalls);
 
         await using var verification = CreateContext();
         Assert.Contains(await verification.SourceArtifacts.ToListAsync(), artifact => artifact.SourceRevisionId == control.RevisionId);
-        Assert.Equal("source-delete-shared-artifact-preserved", await verification.SourceDeletionCleanupItems
-            .Where(item => item.SourceDeletionOperationId == operationId)
-            .Select(item => item.ReasonCode)
-            .SingleAsync());
+        Assert.Equal(1, await verification.SourceDeletionOperations.Where(item => item.Id == operationId)
+            .Select(item => item.SharedArtifactCount).SingleAsync());
+        Assert.Equal(3, await verification.SourceDeletionOperations.Where(item => item.Id == operationId)
+            .Select(item => item.State).SingleAsync());
     }
 
     [NativeSqlServerFact]
@@ -1246,7 +1409,8 @@ public sealed class SourceDeletionIntegrationTests(NativeSqlServerFixture fixtur
         var rebuilding = Assert.IsType<SourceDeletionWorkItem>(await store.ClaimNextAsync(CancellationToken.None));
         var completedPurge = await store.PurgeAsync(rebuilding, survivorGeneration: null, CancellationToken.None);
 
-        Assert.Equal("cleanup-files", completedPurge.Phase);
+        Assert.Equal("cleanup-memberships", completedPurge.Phase);
+        await AdvanceSqlToFilesAsync(store, claimed.OperationId);
         await using var verification = CreateContext();
         var projection = await verification.IndexState.SingleAsync();
         Assert.Null(projection.ActiveIndexGenerationId);
@@ -1343,6 +1507,19 @@ public sealed class SourceDeletionIntegrationTests(NativeSqlServerFixture fixtur
         });
         await context.SaveChangesAsync();
         return new SeededRoot(rootId, revisionId, recordId, jobId);
+    }
+
+    private async Task<Guid> AddDeletionAsync(SeededRoot source, DateTimeOffset now)
+    {
+        var id = Guid.NewGuid();
+        await using var context = CreateContext();
+        context.SourceDeletionOperations.Add(new()
+        {
+            Id = id, SourceRootId = source.RootId, State = 0, Phase = "accepted",
+            CreatedAtUtc = now, UpdatedAtUtc = now
+        });
+        await context.SaveChangesAsync();
+        return id;
     }
 
     private FluxKnowledgeDbContext CreateContext() => new(
@@ -1494,4 +1671,32 @@ public sealed class SourceDeletionIntegrationTests(NativeSqlServerFixture fixtur
 
         public FluxKnowledgeDbContext CreateDbContext() => new(_options);
     }
+
+    private sealed class CommitLossContextFactory(string connectionString) : IDbContextFactory<FluxKnowledgeDbContext>
+    {
+        private readonly DbContextOptions<FluxKnowledgeDbContext> _options = new DbContextOptionsBuilder<FluxKnowledgeDbContext>()
+            .UseSqlServer(connectionString, sql => sql.ExecutionStrategy(dependencies => new CommitLossRetryStrategy(dependencies)))
+            .AddInterceptors(new LoseOneCommitAcknowledgement())
+            .Options;
+        public FluxKnowledgeDbContext CreateDbContext() => new(_options);
+    }
+
+    private sealed class LoseOneCommitAcknowledgement : DbTransactionInterceptor
+    {
+        private int _commits;
+        public override Task TransactionCommittedAsync(DbTransaction transaction, TransactionEndEventData eventData,
+            CancellationToken cancellationToken = default)
+        {
+            if (Interlocked.Increment(ref _commits) == 1) throw new CommitAcknowledgementLostException();
+            return Task.CompletedTask;
+        }
+    }
+
+    private sealed class CommitLossRetryStrategy(ExecutionStrategyDependencies dependencies)
+        : ExecutionStrategy(dependencies, 1, TimeSpan.Zero)
+    {
+        protected override bool ShouldRetryOn(Exception exception) => exception is CommitAcknowledgementLostException;
+    }
+
+    private sealed class CommitAcknowledgementLostException : Exception;
 }

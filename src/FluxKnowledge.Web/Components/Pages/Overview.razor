@@ -242,7 +242,9 @@
     private void Announce()
     {
         var view = PipelineActivityView.From(ProjectionState.Current.Activity, SelectedRoot);
-        _announcement = ProjectionState.IsStale ? $"{ProjectionState.RefreshIssue} The last successful read may be out of date." : $"{view.State}. {view.Message}";
+        _announcement = ProjectionState.IsStale
+            ? $"{ProjectionState.RefreshIssue} {(ProjectionState.HasSnapshot ? "The last successful read may be out of date." : "Current activity is unavailable; zero activity has not been confirmed.")}"
+            : $"{view.State}. {view.Message}";
     }
     private async Task RefreshAsync()
     {

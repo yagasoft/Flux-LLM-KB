@@ -1,3 +1,4 @@
+using System.Data;
 using FluxKnowledge.Application.Contracts;
 using FluxKnowledge.Application.Indexing;
 using FluxKnowledge.Application.Sources;
@@ -55,8 +56,47 @@ public sealed class SqlProjectionReader(
 
     public async ValueTask<OverviewProjection> ReadOverviewAsync(CancellationToken cancellationToken)
     {
-        await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        // One deadline includes the deletion precheck, lock acquisition and all
+        // coordinated attempts/retry delays. Idle reads keep their caller token.
+        using var budget = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        budget.CancelAfter(TimeSpan.FromSeconds(2));
+        try
+        {
+            await using var execution = await contextFactory.CreateDbContextAsync(budget.Token).ConfigureAwait(false);
+            return await execution.Database.CreateExecutionStrategy().ExecuteAsync(
+                state: cancellationToken,
+                operation: (_, callerToken, boundedToken) => ReadOverviewCoreAsync(callerToken, boundedToken),
+                verifySucceeded: null,
+                cancellationToken: budget.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException exception) when (!cancellationToken.IsCancellationRequested && budget.IsCancellationRequested)
+        {
+            // Disposal in the core completes before status is marked unavailable.
+            // Caller cancellation and genuine SQL failures are not translated.
+            throw new OverviewReadBudgetExceededException(exception);
+        }
+    }
+
+    private async Task<OverviewProjection> ReadOverviewCoreAsync(CancellationToken cancellationToken, CancellationToken coordinationToken)
+    {
+        await using var context = await contextFactory.CreateDbContextAsync(coordinationToken).ConfigureAwait(false);
         var startedAt = _clock.GetUtcNow();
+        var deleting = await context.SourceDeletionOperations.AsNoTracking()
+            .AnyAsync(operation => operation.State == 0 || operation.State == 1, coordinationToken).ConfigureAwait(false);
+        if (deleting) cancellationToken = coordinationToken;
+        await using var transaction = deleting
+            ? await context.Database.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken).ConfigureAwait(false)
+            : null;
+        if (deleting)
+        {
+            // Match public deletion/purge order. Claim and receipt writers only
+            // need the operation rows, and finish before we capture the fence.
+            await SqlPublishedPassageSelection.AcquireFenceAsync(context, cancellationToken).ConfigureAwait(false);
+            _ = await context.Database.SqlQuery<Guid>($"""
+                SELECT [Id] AS [Value] FROM [SourceDeletionOperations] WITH (UPDLOCK, HOLDLOCK)
+                WHERE [State] IN (0, 1)
+                """).ToArrayAsync(cancellationToken).ConfigureAwait(false);
+        }
         var before = await SqlPipelineActivityQuery.ReadFenceAsync(context, cancellationToken).ConfigureAwait(false);
         if (!before.IsStable)
             return new(0, 0, 0, 0, 0, 0, 0, "none", new("Unknown", null, null, null, null, 0))
@@ -98,6 +138,7 @@ public sealed class SqlProjectionReader(
         var activity = await _activityReader.ReadAsync(context, startedAt, cancellationToken).ConfigureAwait(false);
         var after = await SqlPipelineActivityQuery.ReadFenceAsync(context, cancellationToken).ConfigureAwait(false);
         activity = activity with { ObservedAtUtc = _clock.GetUtcNow(), IsConsistent = before.Accepts(after) };
+        if (transaction is not null) await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
         return new OverviewProjection(
             GetCount(PublicJobState.WorkerQueued),
             GetCount(PublicJobState.WorkerProcessing),

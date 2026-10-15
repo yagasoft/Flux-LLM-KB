@@ -1,3 +1,4 @@
+using System.Data.Common;
 using FluxKnowledge.Application.Contracts;
 using FluxKnowledge.Web.Components.Status;
 using Microsoft.AspNetCore.Hosting;
@@ -197,6 +198,107 @@ public sealed class OverviewProjectionTests
         Assert.NotNull(state.LastSuccessfulReadAtUtc);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task An_exhausted_read_budget_marks_status_busy_without_inventing_a_successful_snapshot(bool hasSnapshot)
+    {
+        var reader = new FakeProjectionReader(CreateOverview(1, 7));
+        var state = new OverviewProjectionState(reader);
+        if (hasSnapshot) await state.ReloadAsync(CancellationToken.None);
+        var previous = state.Current;
+        var previousTimestamp = state.LastSuccessfulReadAtUtc;
+        reader.Replace(CreateOverview(99, 99));
+        reader.ReadFailure = new OverviewReadBudgetExceededException(new OperationCanceledException());
+
+        await state.ReloadAsync(CancellationToken.None);
+
+        Assert.Same(previous, state.Current);
+        Assert.Equal(hasSnapshot, state.HasSnapshot);
+        Assert.Equal(previousTimestamp, state.LastSuccessfulReadAtUtc);
+        Assert.True(state.IsStale);
+        Assert.Equal("Status is busy. Waiting for a consistent sample.", state.RefreshIssue);
+
+        reader.ReadFailure = null;
+        await state.ReloadAsync(CancellationToken.None);
+        Assert.Equal(99, state.Current.IndexedRecordCount);
+        Assert.True(state.HasSnapshot);
+        Assert.False(state.IsStale);
+        Assert.Null(state.RefreshIssue);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Genuine_timeouts_and_database_errors_remain_refresh_failures(bool databaseError)
+    {
+        var reader = new FakeProjectionReader(CreateOverview(1, 7));
+        var state = new OverviewProjectionState(reader);
+        await state.ReloadAsync(CancellationToken.None);
+        var previousTimestamp = state.LastSuccessfulReadAtUtc;
+        reader.ReadFailure = databaseError ? new ProjectionDbException() : new TimeoutException("SQL deadline");
+
+        await state.ReloadAsync(CancellationToken.None);
+
+        Assert.Equal(7, state.Current.IndexedRecordCount);
+        Assert.True(state.HasSnapshot);
+        Assert.True(state.IsStale);
+        Assert.Equal(previousTimestamp, state.LastSuccessfulReadAtUtc);
+        Assert.Equal("Status refresh failed.", state.RefreshIssue);
+    }
+
+    [Fact]
+    public async Task Caller_cancellation_is_not_presented_as_busy_or_failed_status()
+    {
+        using var cancellation = new CancellationTokenSource();
+        var reader = new FakeProjectionReader(CreateOverview(1, 7))
+        {
+            ReadFailure = new OperationCanceledException(cancellation.Token)
+        };
+        var state = new OverviewProjectionState(reader);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => state.ReloadAsync(cancellation.Token).AsTask());
+        Assert.False(state.HasSnapshot);
+        Assert.Null(state.LastSuccessfulReadAtUtc);
+        Assert.Null(state.RefreshIssue);
+    }
+
+    [Fact]
+    public async Task An_initial_busy_read_renders_explicit_unavailability_without_a_refresh_error()
+    {
+        using var factory = new OverviewApplicationFactory(CreateOverview(1, 7),
+            readFailure: new OverviewReadBudgetExceededException(new OperationCanceledException()));
+        using var client = factory.CreateClient();
+        using var response = await client.GetAsync("/");
+        var html = await response.Content.ReadAsStringAsync();
+        Assert.Equal(System.Net.HttpStatusCode.OK, response.StatusCode);
+        Assert.Contains("Status is busy. Waiting for a consistent sample.", html, StringComparison.Ordinal);
+        Assert.Contains("Current activity is unavailable; zero activity has not been confirmed.", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("Status refresh failed.", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("Status as of", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("The last successful read may be out of date.", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task A_busy_read_can_render_only_the_labelled_last_snapshot_and_its_original_timestamp()
+    {
+        var reader = new FakeProjectionReader(CreateOverview(1, 7));
+        var state = new OverviewProjectionState(reader);
+        await state.ReloadAsync(CancellationToken.None);
+        var timestamp = state.LastSuccessfulReadAtUtc;
+        reader.ReadFailure = new OverviewReadBudgetExceededException(new OperationCanceledException());
+        using var factory = new OverviewApplicationFactory(CreateOverview(99, 99), projectionState: state);
+        using var client = factory.CreateClient();
+
+        var html = await client.GetStringAsync("/");
+
+        Assert.Contains("Status is busy. Waiting for a consistent sample.", html, StringComparison.Ordinal);
+        Assert.Contains("Status as of", html, StringComparison.Ordinal);
+        Assert.Contains("The last successful read is shown below and may be out of date.", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("Status refresh failed.", html, StringComparison.Ordinal);
+        Assert.Equal(7, state.Current.IndexedRecordCount);
+        Assert.Equal(timestamp, state.LastSuccessfulReadAtUtc);
+    }
+
     [Fact]
     public async Task Initial_read_failure_stays_unknown_and_a_later_refresh_recovers()
     {
@@ -378,11 +480,14 @@ public sealed class OverviewProjectionTests
 
         public bool FailReads { get; set; }
 
+        public Exception? ReadFailure { get; set; }
+
         public void Replace(OverviewProjection projection) => Current = projection;
 
         public ValueTask<OverviewProjection> ReadOverviewAsync(CancellationToken cancellationToken)
         {
             ReadOverviewCount++;
+            if (ReadFailure is { } failure) throw failure;
             if (FailReads) throw new InvalidOperationException("Simulated projection failure");
             return ValueTask.FromResult(Current);
         }
@@ -440,7 +545,10 @@ public sealed class OverviewProjectionTests
             ValueTask.FromResult<PipelineRecordProjection?>(null);
     }
 
-    private sealed class OverviewApplicationFactory(OverviewProjection? projection = null, bool failReads = false) : WebApplicationFactory<Program>
+    private sealed class ProjectionDbException() : DbException("SQL read failed");
+
+    private sealed class OverviewApplicationFactory(OverviewProjection? projection = null, bool failReads = false,
+        Exception? readFailure = null, OverviewProjectionState? projectionState = null) : WebApplicationFactory<Program>
     {
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
@@ -456,7 +564,13 @@ public sealed class OverviewProjectionTests
             {
                 services.RemoveAll<IProjectionReader>();
                 if (projection is null) services.AddScoped<IProjectionReader, NoActiveSchedulerProjectionReader>();
-                else services.AddScoped<IProjectionReader>(_ => new FakeProjectionReader(projection) { FailReads = failReads });
+                else services.AddScoped<IProjectionReader>(_ => new FakeProjectionReader(projection)
+                    { FailReads = failReads, ReadFailure = readFailure });
+                if (projectionState is not null)
+                {
+                    services.RemoveAll<OverviewProjectionState>();
+                    services.AddScoped(_ => projectionState);
+                }
             });
         }
     }

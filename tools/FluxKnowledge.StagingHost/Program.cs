@@ -50,6 +50,11 @@ if (args.Length == 3)
             N'; GRANT CREATE FULLTEXT CATALOG TO ' + QUOTENAME(@login);
         EXEC sys.sp_executesql @grant;
         """, new SqlParameter("@login", runtimeLogin));
+    if (Environment.GetEnvironmentVariable("FLUXKNOWLEDGE_STAGING_SHOWPLAN") == "1")
+        await database.Database.ExecuteSqlRawAsync("""
+            DECLARE @grant nvarchar(max) = N'GRANT SHOWPLAN TO ' + QUOTENAME(@login);
+            EXEC sys.sp_executesql @grant;
+            """,new SqlParameter("@login",runtimeLogin));
     var indexState = await database.IndexState.SingleAsync(state => state.Id == 1);
     if (indexState.ActiveIndexGenerationId is null && indexState.EmptyCatalogueValidatedAtUtc is null &&
         !await database.PipelineRecords.AnyAsync() && !await database.Artifacts.AnyAsync() &&

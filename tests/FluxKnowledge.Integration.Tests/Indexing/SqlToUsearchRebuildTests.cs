@@ -502,7 +502,11 @@ public sealed class SqlToUsearchRebuildTests(NativeSqlServerFixture fixture) : I
         await lease.DisposeAsync();
         var resumed = await deletionStore.ClaimNextAsync(CancellationToken.None);
         Assert.NotNull(resumed);
-        Assert.True((await deletionStore.PurgeAsync(resumed, null, CancellationToken.None)).Completed);
+        var refused = await deletionStore.PurgeAsync(resumed, null, CancellationToken.None);
+        Assert.False(refused.Completed);
+        Assert.Equal("source-delete-source-root-missing", refused.ReasonCode);
+        await using var preserved = await environment.Factory.CreateDbContextAsync();
+        Assert.True(await preserved.IndexGenerations.AnyAsync(value => value.Id == active.Id && value.RetiredAtUtc == null));
     }
 
     [NativeSqlServerTheory]

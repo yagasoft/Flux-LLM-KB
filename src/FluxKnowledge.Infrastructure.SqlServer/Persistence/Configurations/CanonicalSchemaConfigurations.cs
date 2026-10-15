@@ -1072,11 +1072,18 @@ public sealed class SourceDeletionOperationConfiguration : IEntityTypeConfigurat
 {
     public void Configure(EntityTypeBuilder<SourceDeletionOperationEntity> builder)
     {
-        builder.ToTable("SourceDeletionOperations");
+        builder.ToTable("SourceDeletionOperations", table =>
+        {
+            table.HasCheckConstraint("CK_SourceDeletionOperations_MembershipRowsDeleted", "[MembershipRowsDeleted] >= 0");
+            table.HasCheckConstraint("CK_SourceDeletionOperations_MembershipVectorCursor", "[MembershipVectorCursor] IS NULL OR [MembershipVectorCursor] > 0");
+        });
         builder.HasKey(entity => entity.Id);
         builder.Property(entity => entity.Id).ValueGeneratedNever();
         builder.Property(entity => entity.Phase).HasMaxLength(64).IsRequired().UseCollation(SchemaConfiguration.SchedulerFenceCollation);
         builder.Property(entity => entity.ReasonCode).HasMaxLength(256).UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(entity => entity.ResumePhase).HasMaxLength(64).UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(entity => entity.MembershipRowsDeleted).HasDefaultValue(0L);
+        builder.Property(entity => entity.LastProgressAtUtc).HasColumnType("datetimeoffset(7)");
         builder.Property(entity => entity.LeaseExpiresAtUtc).HasColumnType("datetimeoffset(7)");
         builder.Property(entity => entity.CreatedAtUtc).HasColumnType("datetimeoffset(7)");
         builder.Property(entity => entity.UpdatedAtUtc).HasColumnType("datetimeoffset(7)");

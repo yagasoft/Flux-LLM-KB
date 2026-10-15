@@ -114,6 +114,24 @@ are excluded, owned records/files are removed and shared blobs or surviving
 index members are preserved. Cleanup uses bounded, no-follow application paths.
 Source originals and model-store files are never deletion targets.
 
+Deletion commits survivor activation and exact cleanup targets before removing
+historical memberships. `cleanup-memberships` removes at most 1,000 rows for one
+owned scalar vector ID per transaction; the cursor advances only after that
+vector is empty. Committed row counts, the last committed lease token and the
+resume phase survive cancellation, ambiguous commit acknowledgement and restart.
+`purge-records` refuses late memberships before removing the owned canonical graph.
+The existing 15-minute claim expiry remains the upper wait for recovery of an
+uncommitted claim whose process disappeared; expiry never proves native cleanup.
+
+In `cleanup-files`, pending-target reads are read-only. The coordinator acquires
+the existing generation-query or content-hash publication gate, rereads authority
+and immutable target metadata, then holds the gate through native IO. An already
+started old worker can finish that exact idempotent IO after takeover, but its
+stale SQL receipt cannot change the new owner's operation. Shared blobs remain
+captured targets until a gated preservation/removal receipt decides their outcome.
+Attention retains its exact resume phase and safe reason; the UI shows committed
+membership counts and last progress without estimating a completion percentage.
+
 An expired lease alone does not prove that a Visio process has stopped. Unknown
 process cleanup retains the deletion fence. Failed terminal work is not silently
 reset by replaying an idempotent command.
@@ -680,8 +698,13 @@ rowversion fence: intervening versioned writes or pending versioned transactions
 reject the sample. Immutable evidence and graph deletion rely on the existing
 atomic versioned record/branch/lifecycle/index companion writes. This is not snapshot
 isolation for arbitrary direct SQL. Rejected/failed refreshes retain the last good
-sample with an explicit stale warning; initial failure remains unknown. Source
-events and a non-overlapping ten-second timer refresh the overview. Attention detail
+sample with an explicit stale warning; initial failure remains unknown. During
+source deletion, overview reads acquire the publication fence before deletion
+operation locks, then retain the same DBTS acceptance guard. One two-second
+budget bounds coordination and its retry delays. An exhausted internal budget
+releases its locks and reports busy/unavailable without advancing the successful
+read timestamp; caller cancellation and genuine SQL failures remain distinct.
+Source events and a non-overlapping ten-second timer refresh the overview. Attention detail
 is read-only and paged in batches of 25, with its own loaded time and source scope.
 An initially pending transaction rejects before reading potentially locked rows.
 Only an end-fence mismatch permits one complete fresh attention read; names,

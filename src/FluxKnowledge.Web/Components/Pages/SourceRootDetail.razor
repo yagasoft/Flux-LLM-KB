@@ -17,7 +17,7 @@ else
     <section aria-labelledby="source-root-heading">
         <h1 id="source-root-heading">@PageState.Detail.DisplayName</h1>
         <p class="diagnostic-value">@PageState.Detail.CanonicalPath</p>
-        <SourceLifecycleControls RootId="PageState.Detail.Id" State="@PageState.Detail.State" DisplayName="@PageState.Detail.DisplayName" CanonicalPath="@PageState.Detail.CanonicalPath" OwnedItemEstimate="@PageState.Detail.DiscoveredCount" DeletionPhase="@PageState.Detail.DeletionPhase" DeletionReason="@PageState.Detail.DeletionReason" OnCommitted="ReloadAsync" />
+        <SourceLifecycleControls RootId="PageState.Detail.Id" State="@PageState.Detail.State" DisplayName="@PageState.Detail.DisplayName" CanonicalPath="@PageState.Detail.CanonicalPath" OwnedItemEstimate="@PageState.Detail.DiscoveredCount" DeletionPhase="@PageState.Detail.DeletionPhase" DeletionReason="@PageState.Detail.DeletionReason" DeletionProgress="@PageState.Detail.DeletionProgress" OnCommitted="ReloadAsync" />
         <dl class="status-grid">
             <div><dt>Root state</dt><dd>@PageState.Detail.State</dd></div>
             <div><dt>Scan progress</dt><dd>@PageState.Detail.ScanState</dd></div>

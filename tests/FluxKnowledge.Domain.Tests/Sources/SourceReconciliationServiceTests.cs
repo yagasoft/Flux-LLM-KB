@@ -10,6 +10,28 @@ namespace FluxKnowledge.Domain.Tests.Sources;
 public sealed class SourceReconciliationServiceTests
 {
     [Fact]
+    public async Task Waiting_deletion_is_revisited_without_waiting_for_or_polling_source_reconciliation()
+    {
+        var deletionStore = new WaitingDeletionStore();
+        var control = new RecordingControlStore([_ => ValueTask.FromResult<ClaimedSourceScan?>(null)]);
+        var services = new ServiceCollection();
+        services.AddSingleton<ISourceScanControlStore>(control);
+        services.AddSingleton<ISourceScanner>(new UnusedScanner());
+        services.AddSingleton(new SourceDeletionCoordinator(deletionStore));
+        await using var provider = services.BuildServiceProvider();
+        using var service = new SourceReconciliationService(provider.GetRequiredService<IServiceScopeFactory>(),
+            new ChannelSourceScanWakeSignal(), TimeProvider.System);
+
+        try
+        {
+            await service.StartAsync(default);
+            await deletionStore.Revisited.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Equal(1, control.ClaimAttempts);
+        }
+        finally { await service.StopAsync(default); }
+    }
+
+    [Fact]
     public async Task Startup_wait_preserves_a_queued_wake_and_scans_once_after_database_readiness()
     {
         var claim = Claim();
@@ -56,6 +78,28 @@ public sealed class SourceReconciliationServiceTests
             Waiting.TrySetResult();
             return new(_ready.Task.WaitAsync(ct));
         }
+    }
+
+    private sealed class WaitingDeletionStore : ISourceDeletionStore
+    {
+        private int _claims;
+        public TaskCompletionSource Revisited { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public ValueTask<SourceDeletionWorkItem?> ClaimNextAsync(CancellationToken cancellationToken)
+        {
+            if (Interlocked.Increment(ref _claims) >= 2) Revisited.TrySetResult();
+            return ValueTask.FromResult<SourceDeletionWorkItem?>(new(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), "draining"));
+        }
+        public ValueTask<SourceDeletionRunResult> PurgeAsync(SourceDeletionWorkItem workItem,
+            IndexGenerationCandidateSnapshot? survivorGeneration, CancellationToken cancellationToken) =>
+            ValueTask.FromResult(new SourceDeletionRunResult(false, "draining"));
+        public ValueTask<IReadOnlyList<SourceDeletionFileTarget>> ReadPendingCleanupAsync(SourceDeletionWorkItem workItem,
+            CancellationToken cancellationToken) => throw new NotSupportedException();
+        public ValueTask RecordCleanupResultAsync(SourceDeletionWorkItem workItem, Guid cleanupItemId,
+            SourceDeletionFileResult result, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public ValueTask FailAsync(SourceDeletionWorkItem workItem, string reasonCode, CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+        public ValueTask DeferAsync(SourceDeletionWorkItem workItem, string reasonCode, CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
     }
 
     [Fact]

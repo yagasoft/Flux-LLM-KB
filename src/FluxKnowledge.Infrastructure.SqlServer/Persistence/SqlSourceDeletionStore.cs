@@ -15,10 +15,10 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
 
 /// <summary>
 /// Owns the SQL portion of a local-source deletion.  The root is fenced before this
-/// store is called; it still rechecks every durable relationship under one serializable
-/// transaction so a failed cleanup never spills into another root.
+/// store is called; each leased unit rechecks its authority under a serializable
+/// transaction. Historical memberships drain without holding a whole-source purge open.
 /// </summary>
-public sealed class SqlSourceDeletionStore(
+public sealed partial class SqlSourceDeletionStore(
     IDbContextFactory<FluxKnowledgeDbContext> contextFactory,
     TimeProvider timeProvider,
     PaddleOcrVlmExecutionRegistry? localOcrExecutions = null, IGpuInteractiveOwnerProbe? queryOwnerProbe = null,
@@ -31,8 +31,15 @@ public sealed class SqlSourceDeletionStore(
     {
     }
 
-    public async ValueTask<SourceDeletionWorkItem?> ClaimNextAsync(CancellationToken cancellationToken)
+    public ValueTask<SourceDeletionWorkItem?> ClaimNextAsync(CancellationToken cancellationToken) =>
+        WithSqlFailureAsync(() => ClaimNextCoreAsync(cancellationToken));
+
+    private async ValueTask<SourceDeletionWorkItem?> ClaimNextCoreAsync(CancellationToken cancellationToken)
     {
+        // A retry after COMMIT must recover this attempted claim, not take a
+        // second source. Keep both identities outside the retry delegate.
+        var attemptedLease = Guid.NewGuid();
+        Guid? attemptedOperation = null;
         await using var executionContext = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         var strategy = executionContext.Database.CreateExecutionStrategy();
         return await strategy.ExecuteAsync(async () =>
@@ -40,24 +47,36 @@ public sealed class SqlSourceDeletionStore(
             await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
             await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken).ConfigureAwait(false);
             var now = timeProvider.GetUtcNow();
-            var operation = await context.SourceDeletionOperations
-                .FromSqlInterpolated($"""
+            var operation = attemptedOperation is { } operationId
+                ? await ReadOperationForUpdateAsync(context, operationId, cancellationToken).ConfigureAwait(false)
+                : await context.SourceDeletionOperations.FromSqlInterpolated($"""
                     SELECT TOP (1) *
                     FROM [SourceDeletionOperations] WITH (UPDLOCK, HOLDLOCK, ROWLOCK)
                     WHERE [State] = {0}
                        OR ([State] = {1} AND ([LeaseExpiresAtUtc] IS NULL OR [LeaseExpiresAtUtc] <= {now}))
                     ORDER BY [CreatedAtUtc], [Id]
                     """)
-                .SingleOrDefaultAsync(cancellationToken)
-                .ConfigureAwait(false);
+                    .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
             if (operation is null)
             {
                 await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
                 return null;
             }
 
+            attemptedOperation = operation.Id;
+            if (operation.State == 1 && operation.LeaseId == attemptedLease && operation.LeaseExpiresAtUtc > now)
+            {
+                await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+                return new SourceDeletionWorkItem(operation.Id, operation.SourceRootId, attemptedLease, operation.Phase);
+            }
+            if (operation.State != 0 && !(operation.State == 1 &&
+                (operation.LeaseExpiresAtUtc is null || operation.LeaseExpiresAtUtc <= now)))
+            {
+                await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+                return null;
+            }
             operation.State = 1;
-            operation.LeaseId = Guid.NewGuid();
+            operation.LeaseId = attemptedLease;
             operation.LeaseExpiresAtUtc = now.Add(LeaseDuration);
             operation.UpdatedAtUtc = now;
             await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
@@ -71,6 +90,21 @@ public sealed class SqlSourceDeletionStore(
         IndexGenerationCandidateSnapshot? survivorGeneration,
         CancellationToken cancellationToken)
     {
+        try
+        {
+            return await WithSqlFailureAsync(() => PurgeCoreAsync(workItem, survivorGeneration, cancellationToken)).ConfigureAwait(false);
+        }
+        catch (SourceDeletionLeaseLostException)
+        {
+            return LostOwnership(workItem);
+        }
+    }
+
+    private async ValueTask<SourceDeletionRunResult> PurgeCoreAsync(
+        SourceDeletionWorkItem workItem,
+        IndexGenerationCandidateSnapshot? survivorGeneration,
+        CancellationToken cancellationToken)
+    {
         ArgumentNullException.ThrowIfNull(workItem);
         await using var executionContext = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         var strategy = executionContext.Database.CreateExecutionStrategy();
@@ -80,60 +114,35 @@ public sealed class SqlSourceDeletionStore(
             await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken).ConfigureAwait(false);
             if (!await SqlCorpusGenerationLeaseStore.TryAcquireCleanupTransactionAsync(context, queryOwnerProbe, cancellationToken).ConfigureAwait(false))
             {
-                var waiting = await context.SourceDeletionOperations.SingleAsync(value => value.Id == workItem.OperationId, cancellationToken).ConfigureAwait(false);
-                if (!OwnsActiveLease(waiting, workItem, timeProvider.GetUtcNow()))
-                    throw new InvalidOperationException("The source deletion cleanup lease is no longer owned.");
-                waiting.State = 0;
-                ReleaseLease(waiting);
-                waiting.ReasonCode = "source-delete-search-queries-active";
-                waiting.UpdatedAtUtc = timeProvider.GetUtcNow();
-                await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
-                await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-                return new SourceDeletionRunResult(false, waiting.Phase);
+                var waiting = await ReadOperationForUpdateAsync(context, workItem.OperationId, cancellationToken).ConfigureAwait(false);
+                if (ReadPreviousOutcome(waiting, workItem) is { } previous) return previous;
+                return await CommitUnitAsync(context, transaction, waiting!, waiting!.Phase,
+                    cancellationToken, "source-delete-search-queries-active", progressed: false, continueImmediately: false).ConfigureAwait(false);
             }
             await SqlPublishedPassageSelection.AcquireFenceAsync(context, cancellationToken).ConfigureAwait(false);
-            var operation = await context.SourceDeletionOperations
-                .FromSqlInterpolated($"""
-                    SELECT * FROM [SourceDeletionOperations] WITH (UPDLOCK, HOLDLOCK)
-                    WHERE [Id] = {workItem.OperationId}
-                    """)
-                .SingleAsync(cancellationToken)
-                .ConfigureAwait(false);
-            if (operation.State == 3)
-            {
-                await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-                return new SourceDeletionRunResult(true, operation.Phase);
-            }
-
-            if (!OwnsActiveLease(operation, workItem, timeProvider.GetUtcNow()))
-            {
-                throw new InvalidOperationException("The source deletion operation is no longer owned by this purge step.");
-            }
+            var claimedOperation = await ReadOperationForUpdateAsync(context, workItem.OperationId, cancellationToken).ConfigureAwait(false);
+            if (ReadPreviousOutcome(claimedOperation, workItem) is { } previousOutcome) return previousOutcome;
+            var operation = claimedOperation!;
 
             if (string.Equals(operation.Phase, "cleanup-files", StringComparison.Ordinal))
             {
-                if (await context.SourceDeletionCleanupItems.AnyAsync(item => item.SourceDeletionOperationId == operation.Id && item.State == 0, cancellationToken).ConfigureAwait(false))
+                var sourceState = await context.SourceRootConfigurations.Where(root => root.Id == operation.SourceRootId)
+                    .Select(root => (int?)root.State).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+                if (sourceState != (int)SourceRootState.Deleting)
+                    return await RefuseAsync(context, transaction, operation, "source-delete-not-fenced", cancellationToken).ConfigureAwait(false);
+                if (await context.SourceDeletionCleanupItems.AnyAsync(item => item.SourceDeletionOperationId == operation.Id && item.State == 2, cancellationToken).ConfigureAwait(false))
+                    return await RefuseAsync(context, transaction, operation, "source-delete-file-cleanup-failed", cancellationToken).ConfigureAwait(false);
+                if (await context.SourceDeletionCleanupItems.AnyAsync(item => item.SourceDeletionOperationId == operation.Id && item.State != 1, cancellationToken).ConfigureAwait(false))
                 {
-                    operation.State = 0;
-                    ReleaseLease(operation);
-                    operation.UpdatedAtUtc = timeProvider.GetUtcNow();
-                    await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
-                    await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-                    return new SourceDeletionRunResult(false, operation.Phase);
+                    return await CommitUnitAsync(context, transaction, operation, operation.Phase,
+                        cancellationToken, progressed: false, continueImmediately: false).ConfigureAwait(false);
                 }
 
                 await context.SourceDeletionCleanupItems.Where(item => item.SourceDeletionOperationId == operation.Id)
                     .ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
                 await context.SourceRootConfigurations.Where(value => value.Id == operation.SourceRootId)
                     .ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
-                operation.State = 3;
-                ReleaseLease(operation);
-                operation.Phase = "completed";
-                operation.ReasonCode = null;
-                operation.UpdatedAtUtc = timeProvider.GetUtcNow();
-                await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
-                await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-                return new SourceDeletionRunResult(true, operation.Phase);
+                return await CommitUnitAsync(context, transaction, operation, "completed", cancellationToken, nextState: 3).ConfigureAwait(false);
             }
 
             var root = await context.SourceRootConfigurations
@@ -145,13 +154,7 @@ public sealed class SqlSourceDeletionStore(
                 .ConfigureAwait(false);
             if (root is null)
             {
-                operation.State = 3;
-                ReleaseLease(operation);
-                operation.Phase = "completed";
-                operation.UpdatedAtUtc = timeProvider.GetUtcNow();
-                await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
-                await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-                return new SourceDeletionRunResult(true, operation.Phase);
+                return await RefuseAsync(context, transaction, operation, "source-delete-source-root-missing", cancellationToken).ConfigureAwait(false);
             }
 
             if (root.State != (int)SourceRootState.Deleting)
@@ -217,28 +220,32 @@ public sealed class SqlSourceDeletionStore(
                 if (localEmbeddingExecutions is not null)
                     foreach (var taskId in activeLocalTaskIds.Where(localEmbeddingTaskSet.Contains)) localEmbeddingExecutions.RequestCancellation(taskId);
 
-                operation.State = 0;
-                ReleaseLease(operation);
-                operation.Phase = "draining";
-                operation.UpdatedAtUtc = timeProvider.GetUtcNow();
-                await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
-                await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-                return new SourceDeletionRunResult(false, operation.Phase);
+                return await CommitUnitAsync(context, transaction, operation,
+                    IsAfterCutover(operation.Phase) ? operation.Phase : "draining", cancellationToken,
+                    "source-delete-native-cleanup-pending", progressed: false, continueImmediately: false).ConfigureAwait(false);
             }
             if (await HasActiveWorkAsync(context, root.Id, revisionIds, recordIds, timeProvider.GetUtcNow(), cancellationToken).ConfigureAwait(false))
             {
-                operation.State = 0;
-                ReleaseLease(operation);
-                operation.Phase = "draining";
-                operation.UpdatedAtUtc = timeProvider.GetUtcNow();
-                await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
-                await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-                return new SourceDeletionRunResult(false, operation.Phase);
+                return await CommitUnitAsync(context, transaction, operation,
+                    IsAfterCutover(operation.Phase) ? operation.Phase : "draining", cancellationToken,
+                    "source-delete-work-active", progressed: false, continueImmediately: false).ConfigureAwait(false);
             }
 
             if (await HasCrossRootDependencyAsync(context, revisionIds, recordIds, cancellationToken).ConfigureAwait(false))
             {
                 return await RefuseAsync(context, transaction, operation, "source-delete-cross-root-dependency", cancellationToken).ConfigureAwait(false);
+            }
+
+            if (operation.Phase == "cleanup-memberships")
+                return await DeleteMembershipUnitAsync(context, transaction, operation, cancellationToken).ConfigureAwait(false);
+            if (operation.Phase == "purge-records")
+            {
+                if (await HasOwnedMembershipsAsync(context, root.Id, cancellationToken).ConfigureAwait(false))
+                    return await RefuseAsync(context, transaction, operation, "source-delete-membership-changed", cancellationToken).ConfigureAwait(false);
+                await DeleteOwnedGraphAsync(context, root.Id, revisionIds, recordIds, cancellationToken).ConfigureAwait(false);
+                if ((await SqlPublishedPassageSelection.ReadVectorIdsAsync(context, cancellationToken).ConfigureAwait(false)).Count == 0)
+                    await ClearProjectionAndValidateEmptyCatalogueAsync(context, cancellationToken).ConfigureAwait(false);
+                return await CommitUnitAsync(context, transaction, operation, "cleanup-files", cancellationToken).ConfigureAwait(false);
             }
 
             var targetVectorIds = await ReadTargetVectorIdsAsync(context, recordIds, cancellationToken).ConfigureAwait(false);
@@ -263,14 +270,7 @@ public sealed class SqlSourceDeletionStore(
                         .ConfigureAwait(false);
                 }
 
-                operation.State = 0;
-                ReleaseLease(operation);
-                operation.Phase = "rebuild-index";
-                operation.ReasonCode = null;
-                operation.UpdatedAtUtc = timeProvider.GetUtcNow();
-                await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
-                await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-                return new SourceDeletionRunResult(false, operation.Phase, ContinueImmediately: true, RequiresIndexBuild: true);
+                return await CommitUnitAsync(context, transaction, operation, "rebuild-index", cancellationToken).ConfigureAwait(false);
             }
 
             var currentMembership = await SqlPublishedPassageSelection.ReadVectorsAsync(context, cancellationToken).ConfigureAwait(false);
@@ -289,13 +289,8 @@ public sealed class SqlSourceDeletionStore(
                  survivorGeneration.ExpectedCorpusStamp is { } expectedStamp && expectedStamp != corpusStamp ||
                  survivorGeneration.Generation.CorpusStamp is { } generationStamp && generationStamp != corpusStamp))
             {
-                operation.State = 0;
-                ReleaseLease(operation);
-                operation.Phase = "rebuild-index";
-                operation.UpdatedAtUtc = timeProvider.GetUtcNow();
-                await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
-                await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-                return new SourceDeletionRunResult(false, operation.Phase, ContinueImmediately: true, RequiresIndexBuild: true);
+                return await CommitUnitAsync(context, transaction, operation, "rebuild-index", cancellationToken,
+                    progressed: false).ConfigureAwait(false);
             }
 
             await CaptureCleanupTargetsAsync(
@@ -304,141 +299,19 @@ public sealed class SqlSourceDeletionStore(
                 revisionIds,
                 recordIds,
                 targetVectorIds,
-                retireAllGenerations: survivorGeneration is null,
                 cancellationToken).ConfigureAwait(false);
             if (survivorGeneration is not null)
             {
                 await ActivateSurvivorGenerationAsync(context, survivorGeneration, cancellationToken).ConfigureAwait(false);
             }
-            // Persist captured retirement in this transaction before releasing checkpoint
-            // job foreign keys; database reads must see the same ownership proof.
-            await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
-            await DeleteOwnedGraphAsync(context, root.Id, revisionIds, recordIds, cancellationToken).ConfigureAwait(false);
             if (survivorGeneration is null)
             {
                 await ClearProjectionAndValidateEmptyCatalogueAsync(context, cancellationToken).ConfigureAwait(false);
             }
-            operation.State = 0;
-            ReleaseLease(operation);
-            operation.Phase = "cleanup-files";
-            operation.ReasonCode = null;
-            operation.UpdatedAtUtc = timeProvider.GetUtcNow();
-            await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
-            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-            return new SourceDeletionRunResult(false, operation.Phase, ContinueImmediately: true);
+            return await CommitUnitAsync(context, transaction, operation, "cleanup-memberships", cancellationToken).ConfigureAwait(false);
         }).ConfigureAwait(false);
     }
 
-    public async ValueTask<IReadOnlyList<SourceDeletionFileTarget>> ReadPendingCleanupAsync(
-        SourceDeletionWorkItem workItem,
-        CancellationToken cancellationToken)
-    {
-        await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
-        var operation = await context.SourceDeletionOperations.SingleOrDefaultAsync(value =>
-            value.Id == workItem.OperationId && value.SourceRootId == workItem.SourceRootId &&
-            value.State == 1 && value.LeaseId == workItem.LeaseId && value.LeaseExpiresAtUtc > timeProvider.GetUtcNow() &&
-            value.Phase == "cleanup-files", cancellationToken).ConfigureAwait(false);
-        if (operation is null)
-        {
-            throw new InvalidOperationException("The source deletion cleanup items are no longer owned by this operation.");
-        }
-
-        var pending = await context.SourceDeletionCleanupItems
-            .Where(item => item.SourceDeletionOperationId == workItem.OperationId && item.State == 0)
-            .OrderBy(item => item.StorageKind).ThenBy(item => item.RelativePath).ThenBy(item => item.Id)
-            .ToListAsync(cancellationToken).ConfigureAwait(false);
-        var now = timeProvider.GetUtcNow();
-        foreach (var item in pending.Where(item => item.StorageKind == 1))
-        {
-            var shared = await context.SourceArtifacts.AnyAsync(artifact =>
-                artifact.ContentSha256 == item.ContentSha256 &&
-                artifact.StoreRelativePath == item.RelativePath &&
-                artifact.ByteLength == item.ByteLength,
-                cancellationToken).ConfigureAwait(false);
-            if (!shared)
-            {
-                continue;
-            }
-
-            item.State = 1;
-            item.ReasonCode = "source-delete-shared-artifact-preserved";
-            item.UpdatedAtUtc = now;
-            operation.SharedArtifactCount++;
-            operation.UpdatedAtUtc = now;
-        }
-        if (context.ChangeTracker.HasChanges())
-        {
-            await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
-        }
-
-        return pending
-            .Where(item => item.State == 0)
-            .Select(item => new SourceDeletionFileTarget(item.Id, item.StorageKind, item.RelativePath, item.ContentSha256, item.ByteLength))
-            .ToArray();
-    }
-
-    public async ValueTask RecordCleanupResultAsync(
-        SourceDeletionWorkItem workItem,
-        Guid cleanupItemId,
-        SourceDeletionFileResult result,
-        CancellationToken cancellationToken)
-    {
-        ArgumentNullException.ThrowIfNull(result);
-        await using var executionContext = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
-        var strategy = executionContext.Database.CreateExecutionStrategy();
-        await strategy.ExecuteAsync(async () =>
-        {
-            await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
-            await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken).ConfigureAwait(false);
-            var operation = await context.SourceDeletionOperations.SingleOrDefaultAsync(value =>
-                value.Id == workItem.OperationId && value.SourceRootId == workItem.SourceRootId &&
-                value.State == 1 && value.LeaseId == workItem.LeaseId && value.LeaseExpiresAtUtc > timeProvider.GetUtcNow(), cancellationToken).ConfigureAwait(false);
-            var item = await context.SourceDeletionCleanupItems.SingleOrDefaultAsync(value => value.Id == cleanupItemId && value.SourceDeletionOperationId == workItem.OperationId, cancellationToken).ConfigureAwait(false);
-            if (operation is null || item is null || !string.Equals(operation.Phase, "cleanup-files", StringComparison.Ordinal))
-            {
-                throw new InvalidOperationException("The source deletion cleanup item is no longer owned by this operation.");
-            }
-
-            item.State = result.Completed ? 1 : 2;
-            item.ReasonCode = result.ReasonCode;
-            item.UpdatedAtUtc = timeProvider.GetUtcNow();
-            operation.UpdatedAtUtc = item.UpdatedAtUtc;
-            if (!result.Completed)
-            {
-                operation.State = 4;
-                ReleaseLease(operation);
-                operation.Phase = "attention";
-                operation.ReasonCode = result.ReasonCode ?? "source-delete-file-cleanup-failed";
-            }
-            else
-            {
-                operation.State = 0;
-                ReleaseLease(operation);
-            }
-
-            await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
-            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-        }).ConfigureAwait(false);
-    }
-
-    public async ValueTask FailAsync(SourceDeletionWorkItem workItem, string reasonCode, CancellationToken cancellationToken)
-    {
-        await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
-        var operation = await context.SourceDeletionOperations.SingleOrDefaultAsync(value =>
-            value.Id == workItem.OperationId && value.SourceRootId == workItem.SourceRootId &&
-            value.State == 1 && value.LeaseId == workItem.LeaseId && value.LeaseExpiresAtUtc > timeProvider.GetUtcNow(), cancellationToken).ConfigureAwait(false);
-        if (operation is null)
-        {
-            return;
-        }
-
-        operation.State = 4;
-        ReleaseLease(operation);
-        operation.Phase = "attention";
-        operation.ReasonCode = reasonCode;
-        operation.UpdatedAtUtc = timeProvider.GetUtcNow();
-        await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
-    }
 
     private static async Task<long[]> ReadTargetVectorIdsAsync(
         FluxKnowledgeDbContext context,
@@ -465,7 +338,6 @@ public sealed class SqlSourceDeletionStore(
         IReadOnlyCollection<Guid> revisionIds,
         IReadOnlyCollection<Guid> recordIds,
         IReadOnlyCollection<long> targetVectorIds,
-        bool retireAllGenerations,
         CancellationToken cancellationToken)
     {
         var artifacts = revisionIds.Count == 0
@@ -475,20 +347,13 @@ public sealed class SqlSourceDeletionStore(
                 .ToArrayAsync(cancellationToken).ConfigureAwait(false);
         var distinctArtifacts = artifacts.DistinctBy(artifact => new { artifact.StoreRelativePath, artifact.ContentSha256, artifact.ByteLength }).ToArray();
         operation.SourceArtifactCount = distinctArtifacts.Length;
+        operation.SharedArtifactCount = 0;
         operation.PipelineRecordCount = await context.PipelineRecords.CountAsync(record => record.SourceRevisionId.HasValue && revisionIds.Contains(record.SourceRevisionId.Value), cancellationToken).ConfigureAwait(false);
         foreach (var artifact in distinctArtifacts)
         {
-            var shared = await context.SourceArtifacts.AnyAsync(candidate =>
-                !revisionIds.Contains(candidate.SourceRevisionId) &&
-                candidate.StoreRelativePath == artifact.StoreRelativePath &&
-                candidate.ContentSha256 == artifact.ContentSha256 &&
-                candidate.ByteLength == artifact.ByteLength, cancellationToken).ConfigureAwait(false);
-            if (shared)
-            {
-                operation.SharedArtifactCount++;
-                continue;
-            }
-
+            // Keep a target even when another source currently shares it. Two
+            // deleting roots can both cut over before either drops its reference;
+            // the final gated receipt decides preservation or physical removal.
             context.SourceDeletionCleanupItems.Add(new SourceDeletionCleanupItemEntity
             {
                 Id = Guid.NewGuid(),
@@ -520,10 +385,7 @@ public sealed class SqlSourceDeletionStore(
             where recordIds.Contains(job.PipelineRecordId)
             select generation.Id).ToArrayAsync(cancellationToken).ConfigureAwait(false);
         ownedGenerationIds = ownedGenerationIds.Union(checkpointIds).ToArray();
-        var generations = retireAllGenerations
-            ? await context.IndexGenerations.Where(generation => generation.IndexPath != string.Empty ||
-                ownedGenerationIds.Contains(generation.Id)).ToArrayAsync(cancellationToken).ConfigureAwait(false)
-            : targetVectorIds.Count == 0 && ownedGenerationIds.Length == 0
+        var generations = targetVectorIds.Count == 0 && ownedGenerationIds.Length == 0
                 ? []
                 : await (
                     from generation in context.IndexGenerations
@@ -816,7 +678,6 @@ public sealed class SqlSourceDeletionStore(
             var vectorIds = await context.Vectors.Where(value => chunkIds.Contains(value.TextChunkId)).Select(value => value.VectorId).ToArrayAsync(cancellationToken).ConfigureAwait(false);
             if (vectorIds.Length > 0)
             {
-                await context.IndexGenerationVectors.Where(value => vectorIds.Contains(value.VectorId)).ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
                 await context.Vectors.Where(value => vectorIds.Contains(value.VectorId)).ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
             }
             await context.TextChunks.Where(value => chunkIds.Contains(value.Id)).ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
@@ -929,13 +790,7 @@ public sealed class SqlSourceDeletionStore(
         string reasonCode,
         CancellationToken cancellationToken)
     {
-        operation.State = 4;
-        ReleaseLease(operation);
-        operation.Phase = "attention";
-        operation.ReasonCode = reasonCode;
-        operation.UpdatedAtUtc = timeProvider.GetUtcNow();
-        await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
-        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-        return new SourceDeletionRunResult(false, operation.Phase, reasonCode);
+        return await CommitUnitAsync(context, transaction, operation, "attention", cancellationToken,
+            reasonCode, progressed: false, nextState: 4, continueImmediately: false).ConfigureAwait(false);
     }
 }

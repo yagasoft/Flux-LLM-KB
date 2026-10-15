@@ -38,6 +38,13 @@ public sealed record SourceRootPreview(
     public int UnavailableFileCount { get; init; }
 }
 
+public sealed record SourceDeletionProgressProjection(
+    Guid OperationId,
+    int State,
+    string? ResumePhase,
+    long MembershipRowsDeleted,
+    DateTimeOffset? LastProgressAtUtc);
+
 public sealed record SourceRootListProjection(
     Guid Id,
     string DisplayName,
@@ -52,6 +59,8 @@ public sealed record SourceRootListProjection(
     public string? DeletionPhase { get; init; }
 
     public string? DeletionReason { get; init; }
+
+    public SourceDeletionProgressProjection? DeletionProgress { get; init; }
 }
 
 public sealed record SourceActivityReasonProjection(string State, string Reason, int Count);
@@ -82,6 +91,8 @@ public sealed record SourceRootDetailProjection(
     public string? DeletionPhase { get; init; }
 
     public string? DeletionReason { get; init; }
+
+    public SourceDeletionProgressProjection? DeletionProgress { get; init; }
 
     public bool CanReprocessDeferredContent => ReprocessableActivities.Count > 0;
 

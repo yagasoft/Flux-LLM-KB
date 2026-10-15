@@ -43,6 +43,12 @@ public sealed class OverviewProjectionState(IProjectionReader reader, ILogger<Ov
             RefreshIssue = null;
             LastSuccessfulReadAtUtc = next.Activity.IsAvailable ? next.Activity.ObservedAtUtc : DateTimeOffset.UtcNow;
         }
+        catch (OverviewReadBudgetExceededException exception)
+        {
+            logger?.LogDebug(exception, "Overview status read budget was exhausted.");
+            IsStale = true;
+            RefreshIssue = "Status is busy. Waiting for a consistent sample.";
+        }
         catch (Exception exception) when (exception is DbException or InvalidOperationException or TimeoutException)
         {
             logger?.LogWarning(exception, "Overview status refresh failed.");

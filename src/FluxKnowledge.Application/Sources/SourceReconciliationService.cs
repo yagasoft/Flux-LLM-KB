@@ -67,6 +67,15 @@ public sealed class SourceReconciliationService(
                 await RunAvailableAsync(stoppingToken).ConfigureAwait(false);
                 nextReconciliationAtUtc = timeProvider.GetUtcNow().Add(DefaultCadence);
             }
+            else
+            {
+                // A query/publication owner may have released a deletion fence since
+                // the last tick. Revisit deletion without polling unrelated source scans.
+                using var scope = scopeFactory.CreateScope();
+                var deletion = scope.ServiceProvider.GetService<SourceDeletionCoordinator>();
+                if (deletion is not null && await deletion.RunOneAsync(stoppingToken).ConfigureAwait(false))
+                    await RunAvailableAsync(stoppingToken).ConfigureAwait(false);
+            }
         }
     }
 
@@ -104,6 +113,9 @@ public sealed class SourceReconciliationService(
             var deletion = scope.ServiceProvider.GetService<SourceDeletionCoordinator>();
             if (deletion is not null && await deletion.RunOneAsync(cancellationToken).ConfigureAwait(false))
             {
+                // No transaction/native cleanup gate spans this yield. Give readers a
+                // chance to acquire their shared ownership between bounded quanta.
+                await Task.Delay(TimeSpan.FromMilliseconds(25), cancellationToken).ConfigureAwait(false);
                 continue;
             }
             var control = scope.ServiceProvider.GetRequiredService<ISourceScanControlStore>();
