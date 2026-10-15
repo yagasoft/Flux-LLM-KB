@@ -26,8 +26,10 @@ else
             <div><dt>Indexed</dt><dd>@PageState.Detail.IndexedCount</dd></div>
             <div><dt>Deferred</dt><dd>@PageState.Detail.DeferredCount</dd></div>
             <div><dt>Blocked</dt><dd>@PageState.Detail.BlockedCount</dd></div>
-            <div><dt>Errors</dt><dd>@PageState.Detail.ErrorCount</dd></div>
+            <div><dt>Failed files</dt><dd>@PageState.Detail.ErrorCount</dd></div>
+            <div><dt>Last scan issues</dt><dd>@PageState.Detail.LastScanIssueCount</dd></div>
         </dl>
+        <p>The failed-file count shows unresolved processing failures for current items. Last scan issues shows access, availability and read problems from the last finished crawl; a later finished crawl replaces that total. Earlier failures remain in history.</p>
     </section>
     <section aria-labelledby="source-files-heading">
         <h2 id="source-files-heading">Files</h2>

@@ -20,6 +20,125 @@ public sealed class SourceRootProjectionReaderIntegrationTests(NativeSqlServerFi
     private readonly NativeSqlServerFixture _fixture = fixture;
 
     [NativeSqlServerFact]
+    public async Task Verified_recovery_clears_current_failure_without_erasing_scan_history_or_hiding_unrelated_failures()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var root = Guid.NewGuid();
+        var source = Guid.NewGuid();
+        var record = Guid.NewGuid();
+        var identity = Guid.NewGuid();
+        var otherSource = Guid.NewGuid();
+        var otherRecord = Guid.NewGuid();
+        var otherIdentity = Guid.NewGuid();
+        var scan = Guid.NewGuid();
+        var factory = new TestDbContextFactory(_fixture.ConnectionString);
+        await using (var setup = factory.CreateDbContext())
+        {
+            setup.SourceRootConfigurations.Add(new SourceRootConfigurationEntity
+            {
+                Id = root, CanonicalPath = $"E:\\source-projection-tests\\{root:N}", DisplayName = "Recovery",
+                State = (int)SourceRootState.Enabled, ConfigurationRevision = 1,
+                CreatedAtUtc = now, UpdatedAtUtc = now, MaximumFileBytes = 10000,
+                ReconciliationCadenceSeconds = 900
+            });
+            setup.SourceRevisions.Add(Revision(source, root, "recovering.txt", now, false));
+            var other = Revision(otherSource, root, "another-input.txt", now, false);
+            other.OriginKind = 2;
+            other.ParentSourceRevisionId = source;
+            setup.SourceRevisions.Add(other);
+            setup.SourceIdentities.Add(new SourceIdentityEntity
+            {
+                Id = identity, SourceKind = "projection-test", StableKey = $"recovery:{root:N}", CreatedAtUtc = now
+            });
+            setup.PipelineRecords.Add(new PipelineRecordEntity
+            {
+                Id = record, SourceIdentityId = identity, SourceRevisionId = source, Revision = 1,
+                ContentHash = new string('a', 64), RootLineageRecordId = record,
+                CurrentStage = (int)PipelineStage.Publish, RegisteredAtUtc = now
+            });
+            setup.SourceIdentities.Add(new SourceIdentityEntity
+            {
+                Id = otherIdentity, SourceKind = "projection-test", StableKey = $"other:{root:N}", CreatedAtUtc = now
+            });
+            setup.PipelineRecords.Add(new PipelineRecordEntity
+            {
+                Id = otherRecord, SourceIdentityId = otherIdentity, SourceRevisionId = otherSource, Revision = 1,
+                ContentHash = new string('a', 64), RootLineageRecordId = otherRecord,
+                CurrentStage = (int)PipelineStage.Publish, CompletionCriteriaMet = true, RegisteredAtUtc = now
+            });
+            var activity = Activity(source, SourceActivityState.FailedTerminal, record);
+            activity.ResultingPipelineRecordRevision = 1;
+            setup.SourceActivities.Add(activity);
+            setup.SourceScanRequests.Add(new SourceScanRequestEntity
+            {
+                Id = scan, SourceRootId = root, RequestedBy = "test", RequestedAtUtc = now,
+                IsReleased = true, State = (int)SourceScanRequestState.Completed,
+                DiscoveredFileCount = 1, ErrorFileCount = 7, AuditEvidenceJson = "{\"retainedHistory\":true}"
+            });
+            await setup.SaveChangesAsync();
+        }
+        var reader = new SourceRootProjectionReader(factory, new NoPathPolicy(), new NoEnumeration(),
+            new LocalSourceCapabilityHandlerRegistry([]));
+        var before = Assert.IsType<SourceRootDetailProjection>(await reader.ReadRootAsync(root, default));
+        Assert.Equal(1, before.ErrorCount);
+        Assert.Equal(7, before.LastScanIssueCount);
+
+        await using (var update = factory.CreateDbContext())
+        {
+            (await update.PipelineRecords.SingleAsync(value => value.Id == record)).CompletionCriteriaMet = true;
+            await update.SaveChangesAsync();
+        }
+        var recovered = Assert.IsType<SourceRootDetailProjection>(await reader.ReadRootAsync(root, default));
+        Assert.Equal(0, recovered.ErrorCount);
+        Assert.Equal(1, recovered.IndexedCount);
+        Assert.Equal("Indexed", Assert.Single(recovered.Files).Status);
+        Assert.Null(Assert.Single(recovered.Files).Reason);
+        Assert.Equal(record, Assert.Single(recovered.Files).CorpusPipelineRecordId);
+        Assert.Empty(recovered.DeferredOrBlockedReasons);
+        Assert.Equal(0, (await reader.ReadRootsAsync(default)).Single(value => value.Id == root).ErrorCount);
+
+        var nextScan = Guid.NewGuid();
+        await using (var update = factory.CreateDbContext())
+        {
+            update.SourceScanRequests.Add(new SourceScanRequestEntity
+            {
+                Id = nextScan, SourceRootId = root, RequestedBy = "test", RequestedAtUtc = now.AddMinutes(1),
+                IsReleased = true, State = (int)SourceScanRequestState.Running
+            });
+            await update.SaveChangesAsync();
+        }
+        Assert.Equal(7, (await reader.ReadRootAsync(root, default))!.LastScanIssueCount);
+        Assert.Equal(7, (await reader.ReadRootsAsync(default)).Single(value => value.Id == root).LastScanIssueCount);
+
+        await using (var update = factory.CreateDbContext())
+        {
+            (await update.SourceScanRequests.SingleAsync(value => value.Id == nextScan)).State = (int)SourceScanRequestState.Completed;
+            await update.SaveChangesAsync();
+        }
+        Assert.Equal(0, (await reader.ReadRootAsync(root, default))!.LastScanIssueCount);
+        await using (var update = factory.CreateDbContext())
+        {
+            // A valid completed record for another source cannot resolve this failed item.
+            (await update.SourceActivities.SingleAsync(value => value.SourceRevisionId == source)).ResultingPipelineRecordId = otherRecord;
+            await update.SaveChangesAsync();
+        }
+        Assert.Equal(1, (await reader.ReadRootAsync(root, default))!.ErrorCount);
+        await using (var update = factory.CreateDbContext())
+        {
+            (await update.SourceActivities.SingleAsync(value => value.SourceRevisionId == source)).ResultingPipelineRecordId = record;
+            var independentFailure = Activity(source, SourceActivityState.FailedTerminal);
+            independentFailure.ProcessorVersion = "independent-v2";
+            update.SourceActivities.Add(independentFailure);
+            await update.SaveChangesAsync();
+        }
+        Assert.Equal(1, (await reader.ReadRootAsync(root, default))!.ErrorCount);
+        await using var verify = factory.CreateDbContext();
+        Assert.Equal(7, (await verify.SourceScanRequests.SingleAsync(value => value.Id == scan)).ErrorFileCount);
+        Assert.Equal(2, await verify.SourceActivities.CountAsync(value => value.SourceRevisionId == source &&
+            value.State == (int)SourceActivityState.FailedTerminal));
+    }
+
+    [NativeSqlServerFact]
     public async Task Pending_selected_replacement_overrides_a_valid_older_publication_in_both_file_and_summary_views()
     {
         var now = DateTimeOffset.UtcNow;
@@ -433,12 +552,14 @@ public sealed class SourceRootProjectionReaderIntegrationTests(NativeSqlServerFi
         Assert.Equal(1, list.IndexedCount);
         Assert.Equal(1, list.DeferredCount);
         Assert.Equal(1, list.BlockedCount);
-        Assert.Equal(2, list.ErrorCount);
+        Assert.Equal(1, list.ErrorCount);
+        Assert.Equal(1, list.LastScanIssueCount);
         Assert.Equal(5, detail.DiscoveredCount);
         Assert.Equal(1, detail.IndexedCount);
         Assert.Equal(1, detail.DeferredCount);
         Assert.Equal(1, detail.BlockedCount);
-        Assert.Equal(2, detail.ErrorCount);
+        Assert.Equal(1, detail.ErrorCount);
+        Assert.Equal(1, detail.LastScanIssueCount);
         Assert.Collection(
             detail.Files,
             file =>

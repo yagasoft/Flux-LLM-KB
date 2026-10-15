@@ -681,6 +681,15 @@ Held initial scans and recorded retries are waiting; a future ordinary periodic
 check alone is not backlog. Paused intake without outstanding work may be idle.
 Unconfirmed scan/processor leases remain attributed to their source.
 
+Source-root `ErrorCount` (labelled `Failed files`) counts unresolved processing
+failures for current files. A failed activity with a verified completed,
+non-deleted pipeline record bound to the same source is recovered and retains its
+corpus link; independent unresolved failures remain visible. `LastScanIssueCount`
+(`Last scan issues`) separately reports access, availability and read issues from
+the last completed or failed crawl. Queued/running crawls do not reset that total;
+a later finished crawl replaces it. Recovery changes the current projection,
+while activity and scan audit history remain intact.
+
 File counts use distinct current file owners, including retained archive members;
 logical text/metadata children roll up to their original file. Successful publication
 is distinct from extraction registration, metadata-only and no-text outcomes.

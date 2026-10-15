@@ -56,6 +56,8 @@ public sealed record SourceRootListProjection(
     int BlockedCount,
     int ErrorCount)
 {
+    public int LastScanIssueCount { get; init; }
+
     public string? DeletionPhase { get; init; }
 
     public string? DeletionReason { get; init; }
@@ -88,6 +90,8 @@ public sealed record SourceRootDetailProjection(
     IReadOnlyList<SourceActivityReasonProjection> DeferredOrBlockedReasons,
     IReadOnlyList<DeferredContentReplayRequest> ReprocessableActivities)
 {
+    public int LastScanIssueCount { get; init; }
+
     public string? DeletionPhase { get; init; }
 
     public string? DeletionReason { get; init; }

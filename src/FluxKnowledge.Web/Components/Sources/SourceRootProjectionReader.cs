@@ -41,7 +41,8 @@ public sealed class SourceRootProjectionReader(
             .Where(request => rootIds.Contains(request.SourceRootId))
             .OrderByDescending(request => request.RequestedAtUtc).ThenByDescending(request => request.Id)
             .ToListAsync(cancellationToken).ConfigureAwait(false);
-        var latestByRoot = requests
+        var lastFinishedByRoot = requests
+            .Where(request => request.State is (int)SourceScanRequestState.Completed or (int)SourceScanRequestState.Failed)
             .GroupBy(request => request.SourceRootId)
             .ToDictionary(group => group.Key, group => group.First());
         var summaries = await ReadStateSummariesAsync(context, rootIds, cancellationToken).ConfigureAwait(false);
@@ -53,7 +54,7 @@ public sealed class SourceRootProjectionReader(
         return roots.Select(root =>
         {
             var operation = deletions.GetValueOrDefault(root.Id);
-            return ToListProjection(root, latestByRoot.GetValueOrDefault(root.Id), summaries.GetValueOrDefault(root.Id) ?? SourceStateSummary.Empty) with
+            return ToListProjection(root, lastFinishedByRoot.GetValueOrDefault(root.Id), summaries.GetValueOrDefault(root.Id) ?? SourceStateSummary.Empty) with
             {
                 DeletionPhase = operation?.Phase,
                 DeletionReason = operation?.ReasonCode,
@@ -75,6 +76,11 @@ public sealed class SourceRootProjectionReader(
 
         var request = await context.SourceScanRequests.AsNoTracking()
             .Where(value => value.SourceRootId == rootId)
+            .OrderByDescending(value => value.RequestedAtUtc).ThenByDescending(value => value.Id)
+            .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+        var lastFinishedRequest = await context.SourceScanRequests.AsNoTracking()
+            .Where(value => value.SourceRootId == rootId &&
+                (value.State == (int)SourceScanRequestState.Completed || value.State == (int)SourceScanRequestState.Failed))
             .OrderByDescending(value => value.RequestedAtUtc).ThenByDescending(value => value.Id)
             .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
         var summary = (await ReadStateSummariesAsync(context, [rootId], cancellationToken).ConfigureAwait(false)).GetValueOrDefault(rootId)
@@ -177,7 +183,7 @@ public sealed class SourceRootProjectionReader(
             .Where(activity => activity.OriginKind is not (2 or 3) && !publications.ContainsKey(activity.SourceRevisionId))
             .Where(activity => activity.State == (int)SourceActivityState.DeferredUnsupported ||
                 activity.State == (int)SourceActivityState.DeferredPolicy ||
-                activity.State == (int)SourceActivityState.FailedTerminal)
+                activity.State == (int)SourceActivityState.FailedTerminal && !activity.PipelineCompleted)
             .Select(activity => new SourceActivityReasonProjection(
                 ((SourceActivityState)activity.State).ToString(),
                 DisplayReason(activity),
@@ -251,14 +257,15 @@ public sealed class SourceRootProjectionReader(
             ((SourceRootState)root.State).ToString(),
             request is null ? "No scan requested" : ((SourceScanRequestState)request.State).ToString(),
             root.LastScanCompletedAtUtc,
-            request?.DiscoveredFileCount ?? 0,
+            lastFinishedRequest?.DiscoveredFileCount ?? 0,
             summary.Indexed,
             summary.Deferred,
             summary.Blocked,
-            summary.Error + (request?.ErrorFileCount ?? 0),
+            summary.Error,
             reasons,
             replayActivities)
         {
+            LastScanIssueCount = lastFinishedRequest?.ErrorFileCount ?? 0,
             Files = files,
             DeletionPhase = deletion?.Phase,
             DeletionReason = deletion?.ReasonCode,
@@ -356,7 +363,10 @@ public sealed class SourceRootProjectionReader(
             summary.Indexed,
             summary.Deferred,
             summary.Blocked,
-            summary.Error + (request?.ErrorFileCount ?? 0));
+            summary.Error)
+        {
+            LastScanIssueCount = request?.ErrorFileCount ?? 0
+        };
 
     internal static async ValueTask<IReadOnlyDictionary<Guid, SourceStateSummary>> ReadStateSummariesAsync(
         FluxKnowledgeDbContext context,
@@ -478,14 +488,16 @@ public sealed class SourceRootProjectionReader(
             return SourceRevisionProjectionState.WithoutText;
         if (rows.Any(row => row.PublishedPipelineRecordId is not null && row.PublishedOriginKind == 2))
             return SourceRevisionProjectionState.Indexed;
-        if (rows.Any(row => row.State == (int)SourceActivityState.FailedTerminal)) return SourceRevisionProjectionState.Error;
+        if (rows.Any(row => row.State == (int)SourceActivityState.FailedTerminal && row.ResultingPipelineRecordId is null))
+            return SourceRevisionProjectionState.Error;
         if (rows.Any(row => row.ProcessorBranchState == (int)RetainedProcessorBranchState.Blocked ||
                             row.State == (int)SourceActivityState.DeferredPolicy)) return SourceRevisionProjectionState.Blocked;
         if (rows.Any(row => row.State == (int)SourceActivityState.DeferredUnsupported && row.ResultingPipelineRecordId is null))
             return SourceRevisionProjectionState.Deferred;
         if (rows.Any(row => row.TerminalOutcome == "No extractable text")) return SourceRevisionProjectionState.WithoutText;
         if (rows.Any(row => row.PublishedPipelineRecordId != null && row.PublishedOriginKind == 3)) return SourceRevisionProjectionState.MetadataOnly;
-        if (rows.Any(row => row.State == (int)SourceActivityState.Completed && row.ResultingPipelineRecordId is not null))
+        if (rows.Any(row => row.State is (int)SourceActivityState.Completed or (int)SourceActivityState.FailedTerminal &&
+                            row.ResultingPipelineRecordId is not null))
             return SourceRevisionProjectionState.Indexed;
         return SourceRevisionProjectionState.Unresolved;
     }
@@ -583,7 +595,7 @@ public sealed class SourceRootProjectionReader(
                 DisplayFileReason(state, revisionActivities, revisionBranches, terminalAttempts),
                 state == SourceRevisionProjectionState.Indexed
                     ? revisionActivities
-                        .Where(activity => activity.State == (int)SourceActivityState.Completed && activity.ResultingPipelineRecordId is not null)
+                        .Where(activity => activity.PipelineCompleted && activity.ResultingPipelineRecordId is not null)
                         .Select(activity => activity.ResultingPipelineRecordId)
                         .FirstOrDefault()
                     : null);
@@ -795,7 +807,7 @@ public sealed class SourceRootProjectionReader(
         IReadOnlyList<SourceProcessorAttemptRow> attempts) => state switch
     {
         SourceRevisionProjectionState.Error => activities
-            .Where(activity => activity.State == (int)SourceActivityState.FailedTerminal)
+            .Where(activity => activity.State == (int)SourceActivityState.FailedTerminal && !activity.PipelineCompleted)
             .Select(DisplayReason)
             .FirstOrDefault(),
         SourceRevisionProjectionState.Blocked => activities
