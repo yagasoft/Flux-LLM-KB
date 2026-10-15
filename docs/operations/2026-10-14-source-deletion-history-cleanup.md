@@ -429,9 +429,26 @@ final receipt. Its identical staged squash was preserved before the successful
 rerun; that interruption is not successful verification evidence.
 
 The remaining production gate is the revised standalone action: prepare the
-immutable web/companion payloads, review a fresh stopped-receipt PlanOnly and
-obtain independent execution review and specific approval before Apply. Production
+immutable web/companion payloads, review a fresh eligible PlanOnly and obtain
+independent execution review and specific approval before Apply. Production
 payload/schema activation and the named retry have not run. Original source files,
 unrelated canonical data, actual native target absence and survivor validity remain
 live acceptance checks. Completed task archival follows those checks; unfinished
 R1 staging, its branch/data and the preserved combined candidate remain retained.
+
+Fresh production planning subsequently rejected the stopped-receipt path because
+the pool was Started. A bounded fixed-target read found an active worker, unchanged
+original web/companion payloads, configurations and task/launcher identity, with
+the companion still disabled. The normal Started-pool PlanOnly passed against the
+exact prior schema and zero runnable deletions. The restart cause is unproved and
+was not investigated; the earlier stopped receipt is now ineligible.
+
+Independent Astra review approved the revised approach: use the ordinary
+Started-pool migration path, including its existing drain and exact worker-exit
+proof, without the old stopped receipt. After confirmed release and a healthy
+matching candidate, revalidate task, launcher, companion and configuration bindings,
+then explicitly restore the original enabled task policy without starting it.
+An enable error may have an uncertain outcome: observe and record the actual task
+state, without blind repetition or release rollback. Specific user approval and
+final execution review remain required. No migration, payload activation, named
+retry or task-policy restoration has run in this preparation.
