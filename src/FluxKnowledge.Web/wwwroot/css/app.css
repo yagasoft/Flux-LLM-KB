@@ -34,6 +34,9 @@ main { padding-block: 1.5rem; }
 .source-file-counts dd { font-size: 1.3rem; font-weight: 700; margin: .25rem 0 0; }
 .status-freshness { font-size: .9rem; }
 .pipeline-warning { border-inline-start: .3rem solid currentColor; padding: .5rem .75rem; }
+.refresh-notice-slot { display: grid; margin-block: 1rem; }
+.refresh-notice-slot > .pipeline-warning { grid-area: 1 / 1; margin: 0; }
+.refresh-notice-reserve { visibility: hidden; pointer-events: none; user-select: none; }
 .activity-list, .attention-counts { padding-inline-start: 1.25rem; }
 .activity-list li, .attention-counts li { margin-block: .5rem; }
 .scheduler-details > summary { font-weight: 600; cursor: pointer; }

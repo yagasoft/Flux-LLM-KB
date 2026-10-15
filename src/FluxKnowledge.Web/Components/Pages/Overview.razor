@@ -16,6 +16,9 @@
     var global = PipelineActivityView.From(activity);
     var diagnostics = OverviewDiagnosticSummary.From(ProjectionState.Current.ActiveIndexGeneration, ProjectionState.Current.IndexRecovery);
     var scheduler = ProjectionState.Current.GpuSchedulerStatus;
+    var refreshContext = ProjectionState.HasSnapshot
+        ? "The last successful read is shown below and may be out of date."
+        : "Current activity is unavailable; zero activity has not been confirmed.";
 }
 <div class="pipeline-overview">
     <header class="overview-header">
@@ -23,10 +26,14 @@
         <button type="button" @onclick="RefreshAsync">Refresh status</button>
     </header>
     <p class="visually-hidden" role="status" aria-live="polite">@_announcement</p>
-    @if (ProjectionState.IsStale)
-    {
-        <p class="pipeline-warning" role="alert">@ProjectionState.RefreshIssue @(ProjectionState.HasSnapshot ? "The last successful read is shown below and may be out of date." : "Current activity is unavailable; zero activity has not been confirmed.")</p>
-    }
+    @* Reserve the longest built-in notice at the current width without announcing it. *@
+    <div class="refresh-notice-slot">
+        <p class="pipeline-warning refresh-notice-reserve" aria-hidden="true">Status changed during the read. Waiting for a consistent sample. @refreshContext</p>
+        @if (ProjectionState.IsStale)
+        {
+            <p class="pipeline-warning" role="alert">@ProjectionState.RefreshIssue @refreshContext</p>
+        }
+    </div>
     @if (ProjectionState.LastSuccessfulReadAtUtc is { } observed)
     {
         <p class="status-freshness">Status as of <time datetime="@observed.ToString("O")">@Time(observed)</time>. Updates automatically every 10 seconds and when status changes.</p>
