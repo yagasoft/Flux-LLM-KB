@@ -4,7 +4,9 @@ The change replaces a whole-source historical membership delete inside the graph
 purge with scalar, bounded, committed units. It preserves source fencing, exact
 ownership, survivor publication and native-cleanup requirements. The supplied
 production incident is prior evidence of expensive, underestimated work; no
-historical blocking chain was captured and no fresh production status was read.
+historical blocking chain was captured. The specifically approved 15 October
+production outcome is recorded below. Earlier pending statements are a
+chronological record, superseded by that outcome.
 
 ## Acceptance and current evidence
 
@@ -452,3 +454,100 @@ An enable error may have an uncertain outcome: observe and record the actual tas
 state, without blind repetition or release rollback. Specific user approval and
 final execution review remain required. No migration, payload activation, named
 retry or task-policy restoration has run in this preparation.
+
+## Approved production outcome on 15 October
+
+The user approved the revised exact-target rollout after immutable payload
+preparation, fresh normal running-pool planning and independent Astra execution
+review. The incremental updater deployed Main `1577aca8` to the existing
+production installation and completed release `20261015T120851Z-1577aca8ccf8`.
+It applied only the additive
+`20261014134909_AddResumableSourceDeletionCleanup` migration, retained the
+predecessor web/companion pair and recovery receipts, and released its hold after
+verification. The old stopped-pool receipt was not used. After a healthy matching
+release, the original companion task's enabled policy was restored without
+starting it; subsequent ordinary scheduled activation returned result zero.
+
+One public REST preview/commit retried only source Test. The same durable deletion
+operation completed without an active lease, with 4,847,721 membership removals,
+all 3,434 captured vectors and all 11 pipeline records removed. Its root and 24
+source revisions are absent. Membership absence is supported by the captured
+vector identities and the enabled, trusted membership foreign key, without a
+whole historical-table scan. No direct database repair, lease reset or repeated
+retry was used.
+
+Physical checks verified all 1,454 captured generation paths absent; they were
+already absent at the baseline, so this is not evidence that this retry removed
+1,454 directories. All 11 eligible owned blobs are absent. Four shared blobs
+retain their surviving references, byte lengths and hashes. All 11 original
+workspace files and the two sampled unrelated canonical/blob controls are
+unchanged. A separate read-only verifier checked the active survivor's exact
+54,914 SQL vectors and native USearch contents at 1,024 dimensions, with a stable
+descriptor and active pointer; it completed in 4.11 seconds. It constructed no
+model provider and performed no acquisition or database mutation.
+
+Production cleanup took 39 minutes 25 seconds from public retry intent. Across
+three bounded observation windows, Overview was usable for 545 of 607 samples
+(89.786%), with 62 explicit busy responses. All 1,665 other sampled source-list,
+source-detail and REST roots reads were usable; none of the 2,272 sampled reads
+had an HTTP failure. The maximum gaps between usable Overview samples within
+those windows were approximately 8, 15 and 23 seconds, below the approved
+production 30-second threshold. Gaps between observation windows prevent a claim
+of continuous coverage. Production did not reproduce the staged under-ten-minute
+and 90%-usable Overview benchmark; those fixed staging thresholds were not
+production service-level commitments in the approved packet.
+
+Final probes were healthy, the installed payload hashes matched, the release
+hold was absent and the same worker remained running. No matching crash,
+host-stop or native-cleanup-deadline event was observed. Five managed SQL
+deadlocks and five source-watcher reparse warnings remain recorded unresolved
+observations. This is not evidence of error-free operation, historical blocking
+or resolution of the earlier native heap incident. Independent Astra final
+review accepted this scoped rollout and named deletion with these limitations
+explicitly retained and no blocking integrity finding.
+
+The original payload pair, migration/release receipts, staging data and private
+evidence remain preserved. An application rollback requires a separately reviewed
+and approved guarded incremental action that proves the selected pair compatible
+with the additive schema and committed cleanup state. The retained predecessor is
+recovery evidence, not permission to restart an old binary. Do not run a down
+migration or replay the completed deletion. Restoring purged indexed data would
+require a separately approved consistent database and retained-content recovery,
+or new ingestion from the preserved originals.
+
+Release 1's frozen acceptance and staging recovery remain separate. Its branch,
+runtime, storage, catalogue and evidence are preserved. The queued 17-generation
+cleanup, dead letters, model acquisition/cache changes, shared SQL configuration
+and clean-slate deployment were not performed. Private approval, execution,
+canonical/file/native proof, read metrics and review receipts are retained under
+`I:\Codex Workspaces\Release Preparation\FluxKnowledge\source-deletion-20261015`.
+
+## Completed-task cleanup and recovery
+
+The completed source, pipeline and incident checkouts were removed after final
+acceptance. The completed source-production and pipeline branches were removed;
+the combined source candidate, original incident recovery branch, all 27 stashes,
+unfinished Release 1 checkout and external investigation/rollback evidence remain
+preserved. Pipeline evidence checks found no missing file or size change, but
+lacked a pre-archive hash baseline. Incident cleanup detached its artifacts
+junction first and then verified all 2,992 preserved files by hash without a
+mismatch.
+
+The completed pipeline and incident chats were archived. Release 1 remains open;
+the temporary production-recovery resource hold was released without starting or
+authorising a new workload. Its own reviewed resource plan and acceptance gates
+still apply.
+
+Source cleanup exposed an archive-tool limitation: native archival emptied its
+linked external staging Build directory, and native restore then reported a
+missing snapshot. The verified full-history Git bundle and eleven separately
+preserved ignored evidence files retain source-task recovery. The generated
+solution outputs were rebuilt from the preserved feature commit with zero
+warnings/errors, offline package restore and an explicit external output path.
+The temporary recovery checkout had no junction and was removed only after
+checking that it was clean. These rebuilt files are not byte-identical to the
+pre-archive generated output. The separate staging App, Data and Recovery paths
+remain outside the affected Build path; the accepted result receipt still matches
+its original hash. No host, database or model operation ran during this recovery.
+Use the retained bundle for source checkout recovery rather than assuming native
+restore is available, and detach external junctions before future worktree cleanup.
