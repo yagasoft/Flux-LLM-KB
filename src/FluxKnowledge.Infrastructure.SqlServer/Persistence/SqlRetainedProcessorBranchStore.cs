@@ -1958,7 +1958,7 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
                 child = new SourceRevisionEntity
                 {
                     Id = Guid.NewGuid(), SourceRootId = parent.SourceRootId, StableSourceIdentity = member.StableSourceIdentity,
-                    Revision = member.OriginKind == 1 ? parent.Revision : 1, ContentSha256 = member.ContentSha256,
+                    Revision = parent.Revision, ContentSha256 = member.ContentSha256,
                     CanonicalPath = member.SyntheticLocator,
                     ParentSourceRevisionId = parent.Id, Classification = member.Classification, Extension = member.Extension, OriginKind = member.OriginKind,
                     ByteLength = member.ByteLength, DiscoveredAtUtc = now, DiscoveryEvidenceJson = "{}"
@@ -2078,7 +2078,7 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
         return true;
         }, cancellationToken).ConfigureAwait(false);
         }
-        catch (DbUpdateException exception) when (IsArchiveChildIdentityConflict(exception))
+        catch (DbUpdateException exception) when (IsDerivedChildIdentityConflict(exception))
         {
             // The transaction/context have been disposed before the activation service records
             // a fenced item failure. A duplicate must never leave a partial child publication.
@@ -2086,11 +2086,11 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
         }
     }
 
-    private static bool IsArchiveChildIdentityConflict(DbUpdateException exception)
+    internal static bool IsDerivedChildIdentityConflict(DbUpdateException exception)
     {
         if (exception.InnerException is not SqlException sqlException ||
             !exception.Entries.Any(entry => entry.State == EntityState.Added &&
-                entry.Entity is SourceRevisionEntity { OriginKind: 1, ParentSourceRevisionId: not null }))
+                entry.Entity is SourceRevisionEntity { OriginKind: 1 or 2 or 3, ParentSourceRevisionId: not null }))
         {
             return false;
         }
