@@ -14,6 +14,79 @@ namespace FluxKnowledge.Web.Tests.Browser;
 public sealed class PipelineOverviewBrowserTests
 {
     [BrowserFact]
+    public async Task Refresh_notices_do_not_move_the_timestamp_or_activity_during_failure_and_recovery()
+    {
+        var reader = new ControlledOverviewReader();
+        var root = BrowserTestRoots.Create($"FluxPipelineNotice_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            await using var host = await PhaseOneVerticalSliceBrowserTests.BrowserHost.StartAsync(
+                "Server=unreachable.invalid;Database=unreachable;Integrated Security=true;Encrypt=true;TrustServerCertificate=true",
+                root, Path.Combine(root, "indexes"), services =>
+                {
+                    services.RemoveAll<IHostedService>();
+                    services.RemoveAll<IProjectionReader>();
+                    services.AddSingleton<IProjectionReader>(reader);
+                });
+            using var playwright = await Playwright.CreateAsync();
+            await using var browser = await playwright.Chromium.LaunchAsync(BrowserLaunchOptions.Create());
+            foreach (var viewport in new[] { (Width: 1440, Height: 1000, Zoom: 1), (Width: 390, Height: 844, Zoom: 1), (Width: 1280, Height: 900, Zoom: 2) })
+            {
+                await using var page = await browser.NewPageAsync(new() { ViewportSize = new() { Width = viewport.Width, Height = viewport.Height } });
+                var errors = new List<string>();
+                page.PageError += (_, message) => errors.Add(message);
+                page.Console += (_, message) => { if (message.Type is "error" or "warning") errors.Add($"{message.Type}: {message.Text}"); };
+                await page.GotoAsync(host.BaseAddress.AbsoluteUri, new() { WaitUntil = WaitUntilState.NetworkIdle });
+                await Assertions.Expect(page.Locator(".activity-state")).ToHaveTextAsync("Catching up");
+                await page.EvaluateAsync("zoom => document.body.style.zoom = zoom", viewport.Zoom.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                var positions = await ContentTopsAsync(page);
+                await Assertions.Expect(page.GetByRole(AriaRole.Alert)).ToHaveCountAsync(0);
+                Assert.DoesNotContain("Status changed during the read", await page.Locator(".pipeline-overview").InnerTextAsync(), StringComparison.Ordinal);
+                var timestamp = await page.Locator(".status-freshness time").GetAttributeAsync("datetime");
+                await ScreenshotAsync(page, $"banner-{viewport.Width}-{viewport.Zoom}x-fresh.png");
+
+                reader.InconsistentReads = true;
+                await page.GetByRole(AriaRole.Button, new() { Name = "Refresh status" }).ClickAsync();
+                await Assertions.Expect(page.GetByRole(AriaRole.Alert)).ToContainTextAsync("Status changed during the read");
+                await Assertions.Expect(page.GetByRole(AriaRole.Alert)).ToContainTextAsync("last successful read");
+                await ScreenshotAsync(page, $"banner-{viewport.Width}-{viewport.Zoom}x-stale.png");
+                await AssertContentTopsAsync(page, positions);
+                await Assertions.Expect(page.Locator(".status-freshness time")).ToHaveAttributeAsync("datetime", timestamp!);
+
+                reader.InconsistentReads = false;
+                reader.ReadFailure = new OverviewReadBudgetExceededException(new OperationCanceledException());
+                await page.GetByRole(AriaRole.Button, new() { Name = "Refresh status" }).ClickAsync();
+                await Assertions.Expect(page.GetByRole(AriaRole.Alert)).ToContainTextAsync("Status is busy");
+                await AssertContentTopsAsync(page, positions);
+
+                reader.ReadFailure = new TimeoutException("Synthetic status timeout");
+                await page.GetByRole(AriaRole.Button, new() { Name = "Refresh status" }).ClickAsync();
+                await Assertions.Expect(page.GetByRole(AriaRole.Alert)).ToContainTextAsync("Status refresh failed");
+                await AssertContentTopsAsync(page, positions);
+
+                reader.ReadFailure = null;
+                await page.GetByRole(AriaRole.Button, new() { Name = "Refresh status" }).ClickAsync();
+                await Assertions.Expect(page.GetByRole(AriaRole.Alert)).ToHaveCountAsync(0);
+                await AssertContentTopsAsync(page, positions);
+                Assert.True(await page.EvaluateAsync<bool>("document.documentElement.scrollWidth <= window.innerWidth"));
+                Assert.Empty(errors);
+            }
+        }
+        finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
+    }
+
+    private static Task<double[]> ContentTopsAsync(IPage page) => page.EvaluateAsync<double[]>(
+        "['.pipeline-overview > .status-freshness', '.activity-banner', '.source-scope'].map(selector => document.querySelector(selector).getBoundingClientRect().top + window.scrollY)");
+
+    private static async Task AssertContentTopsAsync(IPage page, double[] expected)
+    {
+        var actual = await ContentTopsAsync(page);
+        for (var i = 0; i < expected.Length; i++)
+            Assert.InRange(actual[i], expected[i] - .5, expected[i] + .5);
+    }
+
+    [BrowserFact]
     public async Task Attention_failures_log_the_requested_scope_without_exposing_errors_or_replacing_a_new_scope()
     {
         var reader = new ControlledOverviewReader();
@@ -181,6 +254,8 @@ public sealed class PipelineOverviewBrowserTests
         public static readonly Guid FirstRoot = Guid.Parse("11111111-1111-1111-1111-111111111111");
         public static readonly Guid SecondRoot = Guid.Parse("22222222-2222-2222-2222-222222222222");
         public bool FailReads { get; set; }
+        public bool InconsistentReads { get; set; }
+        public Exception? ReadFailure { get; set; }
         public Exception? AttentionFailure { get; set; }
         public bool RemoveFirstRoot { get; set; }
         private TaskCompletionSource<PipelineAttentionPage>? _delayedAttention;
@@ -193,6 +268,7 @@ public sealed class PipelineOverviewBrowserTests
         }
         public ValueTask<OverviewProjection> ReadOverviewAsync(CancellationToken cancellationToken)
         {
+            if (ReadFailure is { } failure) throw failure;
             if (FailReads) throw new InvalidOperationException("Synthetic status failure");
             var now = DateTimeOffset.UtcNow;
             var projection = new OverviewProjection(0, 0, 8, 31, 7139, 35, 1100, "synthetic-generation",
@@ -207,6 +283,7 @@ public sealed class PipelineOverviewBrowserTests
                      new(FirstRoot, "Example workspace", "Embed", PipelineWorkState.Historical, true, "Suppressed", 31)],
                     [new(null, "Interactive search", "Outcome uncertain", 179)], 0, 0, 0)
             };
+            if (InconsistentReads) projection = projection with { Activity = projection.Activity with { IsConsistent = false } };
             return ValueTask.FromResult(RemoveFirstRoot ? projection with { Activity = projection.Activity with
             {
                 Sources = projection.Activity.Sources.Where(s => s.Id != FirstRoot).ToArray(),

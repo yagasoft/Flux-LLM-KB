@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Data;
 using System.Data.Common;
 using System.Diagnostics;
@@ -173,8 +174,9 @@ public sealed class SourceDeletionOverviewConcurrencyTests(NativeSqlServerFixtur
         change.Parameters.Add(new SqlParameter("@name", SqlDbType.NVarChar, 256) { Value = "Changed concurrently" });
         change.Parameters.Add(new SqlParameter("@root", SqlDbType.UniqueIdentifier) { Value = _publicRoot });
         var pause = new ReadPause(output);
+        using var timing = new ReadTimingTrace(stopping.Token);
         output.WriteLine($"{DateTimeOffset.UtcNow:O} timestamp={Stopwatch.GetTimestamp()} frequency={Stopwatch.Frequency} Overview starting.");
-        var read = Reader(new Factory(fixture.ConnectionString, pause)).ReadOverviewAsync(stopping.Token).AsTask();
+        var read = Reader(new Factory(fixture.ConnectionString, timing, pause)).ReadOverviewAsync(stopping.Token).AsTask();
         Exception? failure = null;
         try
         {
@@ -192,11 +194,13 @@ public sealed class SourceDeletionOverviewConcurrencyTests(NativeSqlServerFixtur
         }
         catch (Exception exception)
         {
+            timing.Record("overview-failed", exception: exception);
             failure = exception;
             throw;
         }
         finally
         {
+            timing.Record("cleanup-start");
             pause.Release.TrySetResult();
             try
             {
@@ -208,6 +212,7 @@ public sealed class SourceDeletionOverviewConcurrencyTests(NativeSqlServerFixtur
             {
                 output.WriteLine($"{DateTimeOffset.UtcNow:O} Read cleanup observed {exception.GetType().Name}; original test failure retained.");
             }
+            finally { timing.WriteTo(output); }
         }
     }
 
@@ -376,6 +381,75 @@ public sealed class SourceDeletionOverviewConcurrencyTests(NativeSqlServerFixtur
             output.WriteLine($"{DateTimeOffset.UtcNow:O} WRITE COMMIT attempt sequence={sequence}");
             return ValueTask.FromResult(result);
         }
+    }
+    private sealed class ReadTimingTrace(CancellationToken caller) : DbCommandInterceptor, IDisposable
+    {
+        private readonly long _started = Stopwatch.GetTimestamp();
+        private readonly ConcurrentQueue<string> _observations = new();
+        private CancellationToken _commandToken;
+        private CancellationTokenRegistration? _cancellation;
+
+        public void Record(string phase, Guid commandId = default, string query = "overview", TimeSpan? duration = null,
+            Exception? exception = null)
+        {
+            _observations.Enqueue($"READ TIMING elapsed={Stopwatch.GetElapsedTime(_started).TotalMilliseconds:F3}ms " +
+                $"phase={phase} command={commandId} query={query} duration={duration?.TotalMilliseconds:F3}ms " +
+                $"command-cancelled={_commandToken.IsCancellationRequested} caller-cancelled={caller.IsCancellationRequested} " +
+                $"exception={exception?.GetType().Name} sql-number={(exception as SqlException)?.Number}");
+        }
+
+        public override ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(DbCommand command,
+            CommandEventData eventData, InterceptionResult<DbDataReader> result, CancellationToken cancellationToken = default)
+        {
+            _commandToken = cancellationToken;
+            // Observe the read token without issuing SQL or moving the cold read.
+            _cancellation ??= cancellationToken.Register(() => Record("read-token-cancelled"));
+            Record("command-start", eventData.CommandId, Query(command));
+            return ValueTask.FromResult(result);
+        }
+
+        public override ValueTask<DbDataReader> ReaderExecutedAsync(DbCommand command, CommandExecutedEventData eventData,
+            DbDataReader result, CancellationToken cancellationToken = default)
+        {
+            Record("reader-returned", eventData.CommandId, Query(command), eventData.Duration);
+            return ValueTask.FromResult(result);
+        }
+
+        public override InterceptionResult DataReaderDisposing(DbCommand command, DataReaderDisposingEventData eventData,
+            InterceptionResult result)
+        {
+            Record("reader-disposing", eventData.CommandId, Query(command), eventData.Duration);
+            return result;
+        }
+
+        public override Task CommandFailedAsync(DbCommand command, CommandErrorEventData eventData,
+            CancellationToken cancellationToken = default)
+        {
+            Record("command-failed", eventData.CommandId, Query(command), eventData.Duration, eventData.Exception);
+            return Task.CompletedTask;
+        }
+
+        public override Task CommandCanceledAsync(DbCommand command, CommandEndEventData eventData,
+            CancellationToken cancellationToken = default)
+        {
+            Record("command-cancelled", eventData.CommandId, Query(command), eventData.Duration);
+            return Task.CompletedTask;
+        }
+
+        private static string Query(DbCommand command)
+        {
+            if (command.CommandText.Contains("MIN_ACTIVE_ROWVERSION", StringComparison.Ordinal)) return "fence";
+            var start = command.CommandText.IndexOf("FROM [", StringComparison.Ordinal);
+            var end = start < 0 ? -1 : command.CommandText.IndexOf(']', start + 6);
+            return end < 0 ? "other" : command.CommandText[(start + 6)..end];
+        }
+
+        public void WriteTo(ITestOutputHelper output)
+        {
+            foreach (var observation in _observations) output.WriteLine(observation);
+        }
+
+        public void Dispose() => _cancellation?.Dispose();
     }
     private class FenceTrace(ITestOutputHelper output, EventOrder? order = null) : DbCommandInterceptor
     {
