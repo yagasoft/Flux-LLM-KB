@@ -13,6 +13,181 @@ public sealed class CorpusProjectionIntegrationTests(NativeSqlServerFixture fixt
     public Task InitializeAsync() => SqlTestData.ClearPhase3SourceDataAsync(fixture);
     public Task DisposeAsync() => Task.CompletedTask;
 
+    [NativeSqlServerTheory]
+    [InlineData(null)]
+    [InlineData(1L)]
+    public async Task Verified_recovery_clears_current_corpus_failure_and_restores_preview_without_erasing_history(long? boundRevision)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var rootId = Guid.NewGuid();
+        var revisionId = Guid.NewGuid();
+        var recordId = Guid.NewGuid();
+        var activityId = Guid.NewGuid();
+        await using (var db = Context())
+        {
+            db.SourceRootConfigurations.Add(Root(rootId, now));
+            db.SourceRevisions.Add(Revision(rootId, "C:\\corpus\\recovery\\entry.txt", now, revisionId));
+            db.SourceIdentities.Add(Identity(recordId, "recovering"));
+            var record = Record(recordId, recordId, now);
+            record.SourceRevisionId = revisionId;
+            db.PipelineRecords.Add(record);
+            var activity = Activity(revisionId, SourceActivityState.FailedTerminal, recordId, now);
+            activity.Id = activityId;
+            activity.ResultingPipelineRecordRevision = boundRevision;
+            activity.Reason = "Earlier processing attempt failed.";
+            db.SourceActivities.Add(activity);
+            db.Artifacts.Add(Artifact(recordId, now, new string('x', 9_000)));
+            db.AuditEvents.Add(new AuditEventEntity
+            {
+                SourceRevisionId = revisionId, PipelineRecordId = recordId, EventType = "source.activity.failed",
+                Actor = "test", DetailsJson = "{}", OccurredAtUtc = now
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var reader = new SqlCorpusProjectionReader(Factory());
+        var before = Assert.IsType<CorpusEntryDetail>(await reader.ReadDetailAsync(recordId, default));
+        Assert.Equal("Failed", before.SourceActivityState);
+        Assert.NotNull(before.DeferredOrFailureReason);
+        Assert.Null(before.IndexedTextPreview);
+        Assert.Single((await reader.ReadPageAsync(new CorpusQuery(new CorpusFilters(SourceActivityStatus: "failed")), default)).Items);
+        Assert.Empty((await reader.ReadPageAsync(new CorpusQuery(new CorpusFilters(SourceActivityStatus: "indexed")), default)).Items);
+        Assert.Equal(1, Assert.Single(await reader.ReadFoldersAsync(rootId, null, default)).FailedCount);
+
+        await using (var db = Context())
+        {
+            (await db.PipelineRecords.SingleAsync(record => record.Id == recordId)).CompletionCriteriaMet = true;
+            await db.SaveChangesAsync();
+        }
+
+        var after = Assert.IsType<CorpusEntryDetail>(await reader.ReadDetailAsync(recordId, default));
+        Assert.Equal("Indexed", after.SourceActivityState);
+        Assert.Null(after.DeferredOrFailureReason);
+        Assert.Equal(new string('x', 8_192), after.IndexedTextPreview);
+        Assert.Equal("Indexed", Assert.Single((await reader.ReadPageAsync(new CorpusQuery(), default)).Items).SourceActivityState);
+        Assert.Equal(recordId, Assert.Single((await reader.ReadPageAsync(new CorpusQuery(new CorpusFilters(SourceActivityStatus: "indexed")), default)).Items).PipelineRecordId);
+        Assert.Empty((await reader.ReadPageAsync(new CorpusQuery(new CorpusFilters(SourceActivityStatus: "failed")), default)).Items);
+        var folder = Assert.Single(await reader.ReadFoldersAsync(rootId, null, default));
+        Assert.Equal(1, folder.CurrentCount);
+        Assert.Equal(0, folder.FailedCount);
+        var history = Assert.Single(after.SourceActivities);
+        Assert.Equal(activityId, history.Id);
+        Assert.Equal("FailedTerminal", history.State);
+        Assert.Equal("Earlier processing attempt failed.", history.Reason);
+        Assert.Contains(after.RelatedEvents, item => item.EventType == "source.activity.failed");
+
+        await using (var db = Context())
+        {
+            var independent = Activity(revisionId, SourceActivityState.FailedTerminal, null, now.AddMinutes(1));
+            independent.ProcessorVersion = "independent-v2";
+            independent.Reason = "Separate unresolved activity.";
+            db.SourceActivities.Add(independent);
+            await db.SaveChangesAsync();
+        }
+        // A completed record must not resolve another activity which has no binding to it.
+        var independentFolder = Assert.Single(await reader.ReadFoldersAsync(rootId, null, default));
+        Assert.Equal(0, independentFolder.CurrentCount);
+        Assert.Equal(1, independentFolder.FailedCount);
+        Assert.Equal(2, (await reader.ReadDetailAsync(recordId, default))!.SourceActivities.Count);
+    }
+
+    [NativeSqlServerTheory]
+    [InlineData("incomplete")]
+    [InlineData("deleted")]
+    [InlineData("wrong-source")]
+    [InlineData("unbound")]
+    [InlineData("suppressed")]
+    [InlineData("deleting")]
+    public async Task Unverified_or_out_of_scope_failure_does_not_gain_indexed_status_or_preview(string condition)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var rootId = Guid.NewGuid();
+        var revisionId = Guid.NewGuid();
+        var recordId = Guid.NewGuid();
+        await using (var db = Context())
+        {
+            var root = Root(rootId, now);
+            if (condition == "deleting") root.State = (int)SourceRootState.Deleting;
+            var revision = Revision(rootId, "C:\\corpus\\failure\\entry.txt", now, revisionId);
+            if (condition == "suppressed") revision.SuppressedAtUtc = now;
+            var record = Record(recordId, recordId, now);
+            record.SourceRevisionId = revisionId;
+            record.CompletionCriteriaMet = condition != "incomplete";
+            record.IsDeleted = condition == "deleted";
+            db.SourceRootConfigurations.Add(root);
+            db.SourceRevisions.Add(revision);
+            db.SourceIdentities.Add(Identity(recordId, "unverified"));
+            db.PipelineRecords.Add(record);
+            Guid? boundRecordId = condition == "unbound" ? null : recordId;
+            if (condition == "wrong-source")
+            {
+                var otherRevisionId = Guid.NewGuid();
+                var otherRecordId = Guid.NewGuid();
+                var otherRevision = Revision(rootId, "C:\\retained\\other.txt", now, otherRevisionId);
+                otherRevision.OriginKind = 2;
+                otherRevision.ParentSourceRevisionId = revisionId;
+                var otherRecord = Record(otherRecordId, otherRecordId, now);
+                otherRecord.SourceRevisionId = otherRevisionId;
+                otherRecord.CompletionCriteriaMet = true;
+                db.SourceRevisions.Add(otherRevision);
+                db.SourceIdentities.Add(Identity(otherRecordId, "other"));
+                db.PipelineRecords.Add(otherRecord);
+                boundRecordId = otherRecordId;
+            }
+            var activity = Activity(revisionId, SourceActivityState.FailedTerminal, boundRecordId, now);
+            activity.ResultingPipelineRecordRevision = boundRecordId is null ? null : 1;
+            activity.Reason = "Unresolved failure.";
+            db.SourceActivities.Add(activity);
+            db.Artifacts.Add(Artifact(recordId, now, "must remain unavailable"));
+            await db.SaveChangesAsync();
+        }
+
+        var reader = new SqlCorpusProjectionReader(Factory());
+        var detail = await reader.ReadDetailAsync(recordId, default);
+        if (condition == "deleting") Assert.Null(detail);
+        else
+        {
+            Assert.NotNull(detail);
+            Assert.NotEqual("Indexed", detail.SourceActivityState);
+            Assert.Null(detail.IndexedTextPreview);
+        }
+        var indexed = await reader.ReadPageAsync(new CorpusQuery(new CorpusFilters(SourceActivityStatus: "indexed"), IncludeHistorical: true), default);
+        Assert.DoesNotContain(indexed.Items, item => item.PipelineRecordId == recordId);
+        var folders = await reader.ReadFoldersAsync(rootId, null, default);
+        if (condition is "suppressed" or "deleting") Assert.Empty(folders);
+        else
+        {
+            var folder = Assert.Single(folders);
+            Assert.Equal(0, folder.CurrentCount);
+            Assert.Equal(1, folder.FailedCount);
+        }
+    }
+
+    [NativeSqlServerFact]
+    public async Task Failed_activity_cannot_bind_to_a_different_pipeline_revision()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var rootId = Guid.NewGuid();
+        var revisionId = Guid.NewGuid();
+        var recordId = Guid.NewGuid();
+        await using var db = Context();
+        db.SourceRootConfigurations.Add(Root(rootId, now));
+        db.SourceRevisions.Add(Revision(rootId, "C:\\corpus\\binding\\entry.txt", now, revisionId));
+        db.SourceIdentities.Add(Identity(recordId, "binding"));
+        var record = Record(recordId, recordId, now);
+        record.SourceRevisionId = revisionId;
+        record.CompletionCriteriaMet = true;
+        db.PipelineRecords.Add(record);
+        await db.SaveChangesAsync();
+        var activity = Activity(revisionId, SourceActivityState.FailedTerminal, recordId, now);
+        activity.ResultingPipelineRecordRevision = 2;
+        db.SourceActivities.Add(activity);
+        var failure = await Assert.ThrowsAsync<DbUpdateException>(() => db.SaveChangesAsync());
+        Assert.Equal(547, Assert.IsType<Microsoft.Data.SqlClient.SqlException>(failure.InnerException).Number);
+        await using var verify = Context();
+        Assert.Empty(await verify.SourceActivities.ToArrayAsync());
+    }
+
     [NativeSqlServerFact]
     public async Task Corpus_page_includes_direct_and_source_backed_records_without_counting_an_offer_as_indexed()
     {
@@ -64,7 +239,7 @@ public sealed class CorpusProjectionIntegrationTests(NativeSqlServerFixture fixt
     }
 
     [NativeSqlServerFact]
-    public async Task Selected_document_input_is_projected_once_as_its_physical_vsdx_owner()
+    public async Task Selected_recovered_document_input_is_projected_once_as_its_physical_vsdx_owner_with_scope_fences()
     {
         var now = DateTimeOffset.UtcNow;
         var rootId = Guid.NewGuid();
@@ -96,6 +271,7 @@ public sealed class CorpusProjectionIntegrationTests(NativeSqlServerFixture fixt
             var record = Record(recordId, sourceIdentityId, now);
             record.SourceRevisionId = documentInputRevisionId;
             record.CurrentStage = 3;
+            record.CompletionCriteriaMet = true;
             db.PipelineRecords.Add(record);
             db.SourceActivities.AddRange(
                 new SourceActivityEntity
@@ -108,7 +284,7 @@ public sealed class CorpusProjectionIntegrationTests(NativeSqlServerFixture fixt
                 {
                     Id = documentActivityId, SourceRevisionId = documentInputRevisionId, ActivityKind = (int)SourceActivityKind.DocumentParsing, ExecutionClass = 1,
                     ProcessorVersion = "phase-6-vsdx-document-v1", InputFingerprint = new string('c', 64),
-                    State = (int)SourceActivityState.Completed, ResultingPipelineRecordId = recordId, ResultingPipelineRecordRevision = 1,
+                    State = (int)SourceActivityState.FailedTerminal, Reason = "Earlier document failure.", ResultingPipelineRecordId = recordId, ResultingPipelineRecordRevision = 1,
                     CreatedAtUtc = now, UpdatedAtUtc = now
                 });
             db.SourceProcessorBranches.Add(new SourceProcessorBranchEntity
@@ -137,6 +313,19 @@ public sealed class CorpusProjectionIntegrationTests(NativeSqlServerFixture fixt
         Assert.Equal("VsdxDocumentContainer", entry.SourceClassification);
         Assert.Equal("Indexed", entry.SourceActivityState);
         Assert.DoesNotContain(page.Items, item => item.Entry.Contains("hidden-document-input", StringComparison.Ordinal));
+        var reader = new SqlCorpusProjectionReader(Factory());
+        var detail = Assert.IsType<CorpusEntryDetail>(await reader.ReadDetailAsync(recordId, default));
+        Assert.Null(detail.DeferredOrFailureReason);
+        Assert.Equal("selected document text", detail.IndexedTextPreview);
+        Assert.Contains(detail.SourceActivities, activity => activity.State == "FailedTerminal");
+        await using (var db = Context())
+        {
+            (await db.SourceRevisions.SingleAsync(revision => revision.Id == ownerRevisionId)).SuppressedAtUtc = now;
+            await db.SaveChangesAsync();
+        }
+        var suppressed = Assert.IsType<CorpusEntryDetail>(await reader.ReadDetailAsync(recordId, default));
+        Assert.Equal("Failed", suppressed.SourceActivityState);
+        Assert.Null(suppressed.IndexedTextPreview);
     }
 
     [NativeSqlServerFact]

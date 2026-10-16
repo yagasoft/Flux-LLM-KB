@@ -689,6 +689,11 @@ corpus link; independent unresolved failures remain visible. `LastScanIssueCount
 the last completed or failed crawl. Queued/running crawls do not reset that total;
 a later finished crawl replaces it. Recovery changes the current projection,
 while activity and scan audit history remain intact.
+Corpus lists, details, indexed/failed filters and folder counts use the same
+verified recovery rule. A recovered record can preview its bounded persisted
+indexed text without retaining a current failure reason. Recovery requires its
+own activity binding and current, unsuppressed source scope, including the
+physical owner of a selected document input; unrelated failures stay unresolved.
 
 File counts use distinct current file owners, including retained archive members;
 logical text/metadata children roll up to their original file. Successful publication

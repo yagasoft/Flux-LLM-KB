@@ -81,15 +81,21 @@ public sealed class SqlCorpusProjectionReader(IDbContextFactory<FluxKnowledgeDbC
             ), [Rows] AS (
                 SELECT [revision].[Id],
                        SUBSTRING([revision].[CanonicalPath], LEN([root].[CanonicalPath]) + 2, 4000) AS [RelativePath],
-                       [latest].[State], [latest].[ResultingPipelineRecordId]
+                       [latest].[State], [latest].[ResultingPipelineRecordId],
+                       CASE WHEN [latest].[State] = {(int)SourceActivityState.FailedTerminal}
+                                  AND [result].[CompletionCriteriaMet] = 1 AND [result].[IsDeleted] = 0
+                                  AND ([latest].[ResultingPipelineRecordRevision] IS NULL OR [result].[Revision] = [latest].[ResultingPipelineRecordRevision])
+                            THEN 1 ELSE 0 END AS [RecoveredFailure]
                 FROM [SourceRevisions] AS [revision]
                 CROSS JOIN [Root] AS [root]
                 OUTER APPLY (
-                    SELECT TOP (1) [activity].[State], [activity].[ResultingPipelineRecordId]
+                    SELECT TOP (1) [activity].[State], [activity].[ResultingPipelineRecordId], [activity].[ResultingPipelineRecordRevision]
                     FROM [SourceActivities] AS [activity]
                     WHERE [activity].[SourceRevisionId] = [revision].[Id]
                     ORDER BY [activity].[UpdatedAtUtc] DESC, [activity].[Id] DESC
                 ) AS [latest]
+                LEFT JOIN [PipelineRecords] AS [result]
+                  ON [result].[Id] = [latest].[ResultingPipelineRecordId] AND [result].[SourceRevisionId] = [revision].[Id]
                 WHERE [revision].[SourceRootId] = {sourceRootId}
                   AND [revision].[SuppressedAtUtc] IS NULL
                   AND [revision].[OriginKind] NOT IN (2, 3)
@@ -105,10 +111,10 @@ public sealed class SqlCorpusProjectionReader(IDbContextFactory<FluxKnowledgeDbC
                 FROM [Scoped]
             )
             SELECT CASE WHEN {normalisedFolder} = N'' THEN [Child] ELSE {normalisedFolder} + N'\' + [Child] END AS [RelativePath],
-                   SUM(CASE WHEN [State] IS NULL OR ([State] = {(int)SourceActivityState.Completed} AND [ResultingPipelineRecordId] IS NOT NULL) THEN 1 ELSE 0 END) AS [CurrentCount],
+                   SUM(CASE WHEN [State] IS NULL OR ([State] = {(int)SourceActivityState.Completed} AND [ResultingPipelineRecordId] IS NOT NULL) OR [RecoveredFailure] = 1 THEN 1 ELSE 0 END) AS [CurrentCount],
                    SUM(CASE WHEN [State] = {(int)SourceActivityState.DeferredUnsupported} THEN 1 ELSE 0 END) AS [DeferredCount],
                    SUM(CASE WHEN [State] = {(int)SourceActivityState.DeferredPolicy} THEN 1 ELSE 0 END) AS [BlockedCount],
-                   SUM(CASE WHEN [State] = {(int)SourceActivityState.FailedTerminal} THEN 1 ELSE 0 END) AS [FailedCount]
+                   SUM(CASE WHEN [State] = {(int)SourceActivityState.FailedTerminal} AND [RecoveredFailure] = 0 THEN 1 ELSE 0 END) AS [FailedCount]
             FROM [Children]
             WHERE [Child] IS NOT NULL
             GROUP BY [Child]
@@ -124,7 +130,7 @@ public sealed class SqlCorpusProjectionReader(IDbContextFactory<FluxKnowledgeDbC
         if (row is null)
             return null;
 
-        var state = SourceActivityStatus(row.LatestActivityState, row.LatestActivityResultingPipelineRecordId, row.PipelineRecordId, row.SourceRevisionId);
+        var state = SourceActivityStatus(row);
         var canPreview = !row.IsDeleted && row.SourceRevisionId is not null && row.SuppressedAtUtc is null && state == "Indexed";
         var preview = canPreview
             ? await ReadPreviewAsync(context, pipelineRecordId, row.RecordRevision, cancellationToken).ConfigureAwait(false)
@@ -144,7 +150,7 @@ public sealed class SqlCorpusProjectionReader(IDbContextFactory<FluxKnowledgeDbC
         var activities = activityRows.Select(activity => new CorpusActivityEvidence(activity.Id, ((SourceActivityState)activity.State).ToString(), activity.Reason, activity.ResultingPipelineRecordId, activity.UpdatedAtUtc)).ToArray();
 
         return new CorpusEntryDetail(row.PipelineRecordId, row.Entry, row.SourceKind, ((PipelineStage)row.CurrentStage).ToString(), state,
-            row.LatestActivityReason, preview, row.SourceRootId, row.SourceRevisionId, row.SafeDisplayIdentity, row.ContentSha256, jobs, eventRows.Select(value => value.Id).ToArray(),
+            row.RecoveredFailure ? null : row.LatestActivityReason, preview, row.SourceRootId, row.SourceRevisionId, row.SafeDisplayIdentity, row.ContentSha256, jobs, eventRows.Select(value => value.Id).ToArray(),
             new CorpusLineage(row.RootLineageRecordId, row.ParentPipelineRecordId, row.ParentSourceRevisionId), activities,
             eventRows.Select(value => new CorpusEventEvidence(value.Id, value.OccurredAtUtc, value.EventType, SanitiseEventDetails(value.DetailsJson))).ToArray())
         {
@@ -182,7 +188,7 @@ public sealed class SqlCorpusProjectionReader(IDbContextFactory<FluxKnowledgeDbC
             .Select(e => (DateTimeOffset?)e.OccurredAtUtc).Max()
         let latestActivity = context.SourceActivities.Where(a => revision != null && a.SourceRevisionId == revision.Id &&
                 (a.ResultingPipelineRecordId == null || a.ResultingPipelineRecordId == record.Id))
-            .OrderByDescending(a => a.ResultingPipelineRecordId == record.Id).ThenByDescending(a => a.UpdatedAtUtc).ThenByDescending(a => a.Id).Select(a => new { a.State, a.ResultingPipelineRecordId, a.Reason }).FirstOrDefault()
+            .OrderByDescending(a => a.ResultingPipelineRecordId == record.Id).ThenByDescending(a => a.UpdatedAtUtc).ThenByDescending(a => a.Id).Select(a => new { a.State, a.ResultingPipelineRecordId, a.ResultingPipelineRecordRevision, a.Reason }).FirstOrDefault()
         select new Row
         {
             PipelineRecordId = record.Id,
@@ -209,31 +215,38 @@ public sealed class SqlCorpusProjectionReader(IDbContextFactory<FluxKnowledgeDbC
             LastActivityAtUtc = latestEvent ?? record.RegisteredAtUtc,
             LatestActivityState = latestActivity == null ? null : (int?)latestActivity.State,
             LatestActivityResultingPipelineRecordId = latestActivity == null ? null : latestActivity.ResultingPipelineRecordId,
-            LatestActivityReason = latestActivity == null ? null : latestActivity.Reason
+            LatestActivityReason = latestActivity == null ? null : latestActivity.Reason,
+            RecoveredFailure = latestActivity != null && latestActivity.State == (int)SourceActivityState.FailedTerminal &&
+                latestActivity.ResultingPipelineRecordId == record.Id &&
+                (latestActivity.ResultingPipelineRecordRevision == null || latestActivity.ResultingPipelineRecordRevision == record.Revision) &&
+                record.CompletionCriteriaMet && !record.IsDeleted && revision != null && revision.SuppressedAtUtc == null &&
+                root != null && root.State != (int)SourceRootState.Deleting &&
+                (publication == null || owner != null && owner.SuppressedAtUtc == null &&
+                    ownerRoot != null && ownerRoot.State != (int)SourceRootState.Deleting)
         };
 
     private static IQueryable<Row> ApplyActivityFilter(IQueryable<Row> rows, string status) => status switch
     {
-        "indexed" => rows.Where(row => row.SourceRevisionId == null || (row.LatestActivityState == (int)SourceActivityState.Completed && row.LatestActivityResultingPipelineRecordId == row.PipelineRecordId)),
+        "indexed" => rows.Where(row => row.SourceRevisionId == null || row.RecoveredFailure || (row.LatestActivityState == (int)SourceActivityState.Completed && row.LatestActivityResultingPipelineRecordId == row.PipelineRecordId)),
         "deferred" => rows.Where(row => row.LatestActivityState == (int)SourceActivityState.DeferredUnsupported),
         "blocked" => rows.Where(row => row.LatestActivityState == (int)SourceActivityState.DeferredPolicy),
-        "failed" => rows.Where(row => row.LatestActivityState == (int)SourceActivityState.FailedTerminal),
+        "failed" => rows.Where(row => row.LatestActivityState == (int)SourceActivityState.FailedTerminal && !row.RecoveredFailure),
         _ => rows.Where(row => row.SourceRevisionId != null && row.LatestActivityState != null && row.LatestActivityState != (int)SourceActivityState.Completed && row.LatestActivityState != (int)SourceActivityState.DeferredUnsupported && row.LatestActivityState != (int)SourceActivityState.DeferredPolicy && row.LatestActivityState != (int)SourceActivityState.FailedTerminal)
     };
 
     private static CorpusEntry ToEntry(Row row) => new(row.PipelineRecordId, row.Entry, row.SourceKind, row.SourceClassification,
         row.SourceRootId is null ? "Direct" : Location(row.RootDisplayName, row.RelativePath), ((PipelineStage)row.CurrentStage).ToString(),
-        SourceActivityStatus(row.LatestActivityState, row.LatestActivityResultingPipelineRecordId, row.PipelineRecordId, row.SourceRevisionId), row.LastActivityAtUtc,
+        SourceActivityStatus(row), row.LastActivityAtUtc,
         row.SourceRootId, row.SourceRevisionId, row.LatestActivityResultingPipelineRecordId)
     {
         FileName = row.FileName,
         RelativePath = row.RelativePath
     };
 
-    private static string SourceActivityStatus(int? state, Guid? resultingRecordId, Guid pipelineRecordId, Guid? sourceRevisionId) =>
-        sourceRevisionId is null ? "Indexed" : state switch
+    private static string SourceActivityStatus(Row row) =>
+        row.SourceRevisionId is null || row.RecoveredFailure ? "Indexed" : row.LatestActivityState switch
         {
-            (int)SourceActivityState.Completed when resultingRecordId == pipelineRecordId => "Indexed",
+            (int)SourceActivityState.Completed when row.LatestActivityResultingPipelineRecordId == row.PipelineRecordId => "Indexed",
             (int)SourceActivityState.DeferredUnsupported => "Deferred",
             (int)SourceActivityState.DeferredPolicy => "Blocked",
             (int)SourceActivityState.FailedTerminal => "Failed",
@@ -322,6 +335,7 @@ public sealed class SqlCorpusProjectionReader(IDbContextFactory<FluxKnowledgeDbC
         public int? LatestActivityState { get; init; }
         public Guid? LatestActivityResultingPipelineRecordId { get; init; }
         public string? LatestActivityReason { get; init; }
+        public bool RecoveredFailure { get; init; }
         public string SafeDisplayIdentity => System.IO.Path.GetFileName(SafeSourceIdentity);
         public string FileName => RelativePath is { Length: > 0 } ? System.IO.Path.GetFileName(RelativePath) : SafeDisplayIdentity;
         public string Entry => RelativePath is { Length: > 0 } ? RelativePath : SafeDisplayIdentity;
