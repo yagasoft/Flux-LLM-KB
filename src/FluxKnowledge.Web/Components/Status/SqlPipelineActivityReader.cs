@@ -26,7 +26,8 @@ internal sealed class SqlPipelineActivityReader(IDeploymentValidationHold? hold,
             roots.Select(r => r.Id).ToArray(), cancellationToken).ConfigureAwait(false);
         var branches = JsonSerializer.Serialize(sourceStates.Values.SelectMany(s => s.SelectedBranches).Distinct());
         var admission = hold?.ReadAdmissionState() ?? new(false, null);
-        var jobRows = await SqlPipelineActivityQuery.Jobs(context, now, admission, branches)
+        var gpuEvidence = await SqlGpuActivityReadEvidence.ReadAsync(context, cancellationToken).ConfigureAwait(false);
+        var jobRows = await SqlPipelineActivityQuery.Jobs(context, now, admission, branches, gpuEvidence)
             .GroupBy(row => new
             {
                 row.SourceRootId, row.Stage, row.PublicState, row.IsHistorical, row.SourceAdmitted, row.HasWorkerLease,
@@ -49,7 +50,7 @@ internal sealed class SqlPipelineActivityReader(IDeploymentValidationHold? hold,
             .Select(group => new PipelineWorkGroup(group.Key.SourceRootId, group.Key.SourceName, group.Key.Stage,
                 group.Key.State, group.Key.IsHistorical, group.Key.Reason, group.Sum(j => j.Count)))
             .OrderBy(j => j.State).ThenBy(j => j.SourceName).ThenBy(j => j.Stage).ToArray();
-        var gpuRows = await SqlPipelineActivityQuery.GpuTasks(context, now, admission, branches)
+        var gpuRows = await SqlPipelineActivityQuery.GpuTasks(context, now, admission, branches, gpuEvidence)
             .GroupBy(row => new { row.SourceRootId, row.State, row.IsInteractive })
             .Select(group => new { group.Key, Count = group.Count() })
             .ToArrayAsync(cancellationToken).ConfigureAwait(false);
@@ -104,10 +105,7 @@ internal sealed class SqlPipelineActivityReader(IDeploymentValidationHold? hold,
             scans.Where(s => s.Key.Confirmed).Sum(s => s.Count), processors.Where(p => p.Key.Confirmed).Sum(p => p.Count),
             scans.Where(s => s.Key.State == (int)SourceScanJobState.Running && !s.Key.Confirmed).Sum(s => s.Count) + processors.Where(p => !p.Key.Confirmed).Sum(p => p.Count))
         {
-            UncertainCapacitySlots = await context.GpuCapacitySlots.AsNoTracking().CountAsync(slot => slot.State == 2 ||
-                slot.State == 1 && !context.GpuBatches.Any(batch => batch.Id == slot.ActiveBatchId &&
-                    (batch.State == 0 || batch.State == 1) && batch.OwnerKey == slot.OwnerKey &&
-                    context.GpuMiniTasks.Any(task => task.BatchId == batch.Id && task.ExecutionState == 1)), cancellationToken).ConfigureAwait(false)
+            UncertainCapacitySlots = gpuEvidence.UncertainCapacitySlots
         };
     }
 
@@ -123,12 +121,13 @@ internal sealed class SqlPipelineActivityReader(IDeploymentValidationHold? hold,
         var branches = JsonSerializer.Serialize(states.Values.SelectMany(s => s.SelectedBranches).Distinct());
         var admission = hold?.ReadAdmissionState() ?? new(false, null);
         var now = clock.GetUtcNow();
+        var gpuEvidence = await SqlGpuActivityReadEvidence.ReadAsync(context, cancellationToken).ConfigureAwait(false);
         const int pageSize = 25;
         int total;
         PipelineAttentionItem[] items;
         if (unit == "jobs")
         {
-            var query = SqlPipelineActivityQuery.Jobs(context, now, admission, branches);
+            var query = SqlPipelineActivityQuery.Jobs(context, now, admission, branches, gpuEvidence);
             if (sourceRootId is { } root) query = query.Where(row => row.SourceRootId == root);
             total = await query.CountAsync(cancellationToken).ConfigureAwait(false);
             page = Math.Clamp(page, 0, Math.Max(0, (total - 1) / pageSize));
@@ -142,7 +141,7 @@ internal sealed class SqlPipelineActivityReader(IDeploymentValidationHold? hold,
         }
         else
         {
-            var query = SqlPipelineActivityQuery.GpuTasks(context, now, admission, branches)
+            var query = SqlPipelineActivityQuery.GpuTasks(context, now, admission, branches, gpuEvidence)
                 .Where(row => row.State == "Outcome uncertain" || row.State == "Ownership unconfirmed" || row.State == "Historical unresolved");
             if (sourceRootId is { } root) query = query.Where(row => row.SourceRootId == root);
             total = await query.CountAsync(cancellationToken).ConfigureAwait(false);

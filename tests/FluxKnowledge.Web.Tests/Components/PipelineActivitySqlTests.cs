@@ -18,7 +18,7 @@ using Xunit.Abstractions;
 
 namespace FluxKnowledge.Web.Tests.Components;
 
-public sealed class PipelineActivitySqlTests(NativeSqlServerFixture fixture, ITestOutputHelper output)
+public sealed partial class PipelineActivitySqlTests(NativeSqlServerFixture fixture, ITestOutputHelper output)
     : IClassFixture<NativeSqlServerFixture>
 {
     private readonly NativeSqlServerFixture _fixture = fixture;

@@ -9,7 +9,7 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
 public static class SqlPipelineActivityQuery
 {
     public static IQueryable<PipelineJobActivityRow> Jobs(FluxKnowledgeDbContext context, DateTimeOffset now,
-        DeploymentHoldAdmission admission, string selectedBranches)
+        DeploymentHoldAdmission admission, string selectedBranches, SqlGpuActivityReadEvidence gpuEvidence)
     {
         var sql = $$"""
             SELECT j.Id, j.PipelineRecordId, s.SourceRootId, j.Stage, j.PublicState,
@@ -45,11 +45,11 @@ public static class SqlPipelineActivityQuery
             LEFT JOIN SourceRevisions owner ON owner.Id = s.ParentSourceRevisionId
             WHERE j.PublicState <> 4
             """;
-        return context.Database.SqlQueryRaw<PipelineJobActivityRow>(sql, Parameters(now, admission, selectedBranches));
+        return context.Database.SqlQueryRaw<PipelineJobActivityRow>(sql, Parameters(now, admission, selectedBranches, gpuEvidence));
     }
 
     public static IQueryable<GpuTaskActivityRow> GpuTasks(FluxKnowledgeDbContext context, DateTimeOffset now,
-        DeploymentHoldAdmission admission, string selectedBranches)
+        DeploymentHoldAdmission admission, string selectedBranches, SqlGpuActivityReadEvidence gpuEvidence)
     {
         var sql = $$"""
             SELECT t.Id, j.PipelineRecordId, s.SourceRootId, t.CreatedAtUtc,
@@ -77,7 +77,7 @@ public static class SqlPipelineActivityQuery
             LEFT JOIN SourceRevisions owner ON owner.Id = s.ParentSourceRevisionId
             WHERE t.State IN (0,1,3)
             """;
-        return context.Database.SqlQueryRaw<GpuTaskActivityRow>(sql, Parameters(now, admission, selectedBranches));
+        return context.Database.SqlQueryRaw<GpuTaskActivityRow>(sql, Parameters(now, admission, selectedBranches, gpuEvidence));
     }
 
     // Every condition here proves applicability; timestamps are deliberately not used.
@@ -115,23 +115,23 @@ public static class SqlPipelineActivityQuery
 
     private static string OwnedTask(string task, bool pendingDelivery) => $$"""
         {{task}}.State = 1 AND EXISTS (
-          SELECT 1 FROM GpuBatches batch
-          INNER JOIN GpuCapacitySlots slot ON slot.ActiveBatchId = batch.Id AND slot.SlotKey = batch.CapacitySlotKey
-          INNER JOIN GpuExecutorDispatches delivery ON delivery.BatchId = batch.Id AND delivery.CapacitySlotKey = slot.SlotKey
-          WHERE batch.Id = {{task}}.BatchId AND batch.State IN (0,1) AND slot.State = 1
-            AND batch.AdmissionGeneration = {{task}}.AdmissionGeneration AND delivery.AdmissionGeneration = batch.AdmissionGeneration
-            AND batch.OwnerKey COLLATE Latin1_General_100_BIN2 = slot.OwnerKey COLLATE Latin1_General_100_BIN2
-            AND delivery.OwnerKey COLLATE Latin1_General_100_BIN2 = batch.OwnerKey COLLATE Latin1_General_100_BIN2
-            AND delivery.State {{(pendingDelivery ? "= 0" : "IN (1,2)")}})
+          SELECT 1 FROM OPENJSON(@ownedGpuTasks) WITH (
+            Id uniqueidentifier '$.Id', BatchId uniqueidentifier '$.BatchId', AdmissionGeneration bigint '$.AdmissionGeneration',
+            HasActive bit '$.HasActive', HasPending bit '$.HasPending') proof
+          WHERE proof.Id = {{task}}.Id AND proof.BatchId = {{task}}.BatchId
+            AND proof.AdmissionGeneration = {{task}}.AdmissionGeneration
+            AND proof.{{(pendingDelivery ? "HasPending" : "HasActive")}} = 1)
         """;
 
-    private static object[] Parameters(DateTimeOffset now, DeploymentHoldAdmission admission, string branches) =>
+    private static object[] Parameters(DateTimeOffset now, DeploymentHoldAdmission admission, string branches,
+        SqlGpuActivityReadEvidence gpuEvidence) =>
     [
         new SqlParameter("@nowUtc", SqlDbType.DateTimeOffset) { Value = now },
         new SqlParameter("@deploymentHeld", SqlDbType.Bit) { Value = admission.IsHeld },
         new SqlParameter("@permittedRebuildOperationId", SqlDbType.UniqueIdentifier)
             { Value = (object?)admission.PermittedCorpusRebuildOperationId ?? DBNull.Value },
-        new SqlParameter("@selectedBranches", SqlDbType.NVarChar, -1) { Value = branches }
+        new SqlParameter("@selectedBranches", SqlDbType.NVarChar, -1) { Value = branches },
+        new SqlParameter("@ownedGpuTasks", SqlDbType.NVarChar, -1) { Value = gpuEvidence.OwnedTasksJson }
     ];
 }
 
