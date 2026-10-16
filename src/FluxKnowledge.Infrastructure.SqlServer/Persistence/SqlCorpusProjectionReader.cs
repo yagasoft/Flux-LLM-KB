@@ -186,7 +186,7 @@ public sealed class SqlCorpusProjectionReader(IDbContextFactory<FluxKnowledgeDbC
               (root == null || root.State != (int)SourceRootState.Deleting)
         let latestEvent = context.AuditEvents.Where(e => e.PipelineRecordId == record.Id || (revision != null && e.SourceRevisionId == revision.Id))
             .Select(e => (DateTimeOffset?)e.OccurredAtUtc).Max()
-        let latestActivity = context.SourceActivities.Where(a => revision != null && a.SourceRevisionId == revision.Id &&
+        let latestActivity = SqlCurrentSourceActivities.Query(context).Where(a => revision != null && a.SourceRevisionId == revision.Id &&
                 (a.ResultingPipelineRecordId == null || a.ResultingPipelineRecordId == record.Id))
             .OrderByDescending(a => a.ResultingPipelineRecordId == record.Id).ThenByDescending(a => a.UpdatedAtUtc).ThenByDescending(a => a.Id).Select(a => new { a.State, a.ResultingPipelineRecordId, a.ResultingPipelineRecordRevision, a.Reason }).FirstOrDefault()
         select new Row

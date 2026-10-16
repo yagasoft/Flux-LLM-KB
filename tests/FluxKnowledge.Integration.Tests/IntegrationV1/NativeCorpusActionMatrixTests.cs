@@ -21,6 +21,24 @@ public sealed class NativeCorpusActionMatrixTests(NativeSqlServerFixture fixture
     private static readonly DateTimeOffset Now = DateTimeOffset.Parse("2026-08-25T12:00:00+00:00");
     private readonly NativeSqlServerFixture _fixture = fixture;
 
+    [NativeSqlServerFact]
+    public async Task Default_policy_update_is_revision_fenced_idempotent_and_can_save_without_scanning()
+    {
+        var rootId = await SeedRootAsync();
+        var service = CreateService();
+        var mutation = Mutation("root_update", new { rootId, displayName = "Policy root", applyDefaultPolicy = true, reconcile = false });
+        var preview = await service.PreviewAsync(mutation, "test", CancellationToken.None);
+        var first = await service.CommitAsync(mutation, preview.ConfirmationId, "default-policy-update", "test", CancellationToken.None);
+        var replay = await service.CommitAsync(mutation, preview.ConfirmationId, "default-policy-update", "test", CancellationToken.None);
+        Assert.True(replay.WasReplay);
+        Assert.Equal(first.OperationId, replay.OperationId);
+        await using var db = await SqlTestData.CreateFactory(_fixture).CreateDbContextAsync();
+        var root = await db.SourceRootConfigurations.SingleAsync(value => value.Id == rootId);
+        Assert.Equal(SourcePolicyDefaults.MaximumTextBytes, root.MaximumFileBytes);
+        Assert.Contains("text/x-source-code", root.AllowedClassificationsJson, StringComparison.Ordinal);
+        Assert.Empty(await db.SourceScanRequests.Where(value => value.SourceRootId == rootId).ToArrayAsync());
+    }
+
     [NativeSqlServerTheory]
     [InlineData("root_update")]
     [InlineData("root_disable")]

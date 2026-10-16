@@ -2,6 +2,9 @@ using FluxKnowledge.Infrastructure.SqlServer.Configuration;
 using FluxKnowledge.Infrastructure.SqlServer.Provisioning;
 using FluxKnowledge.Application.Indexing;
 using FluxKnowledge.Application.Ports;
+using FluxKnowledge.Application.Sources;
+using FluxKnowledge.Infrastructure.SqlServer.Persistence;
+using Microsoft.EntityFrameworkCore;
 using FluxKnowledge.Integrations.Windows.NativeGoLive;
 
 namespace FluxKnowledge.Web.Endpoints;
@@ -35,6 +38,10 @@ public static class HealthEndpoints
         SqlServerReadinessResult result;
         try
         {
+            if (services.GetService<IDeploymentValidationHold>() is { IsHeld: true } &&
+                (services.GetService<IDbContextFactory<FluxKnowledgeDbContext>>() is not { } factory ||
+                 !await SqlRetainedPolicyCompatibility.HasNoLegacyRunnableWorkAsync(factory, cancellationToken).ConfigureAwait(false)))
+                return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
             result = await readinessValidator
                 .ValidateAsync(options, cancellationToken)
                 .ConfigureAwait(false);

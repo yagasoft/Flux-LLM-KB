@@ -302,6 +302,8 @@ public sealed class SqlNativeOperationStore(
 
     private static bool CorpusOperationMatchesPayload(NativeCorpusMutationCommitOperation operation, string canonicalPayload)
     {
+        if (operation.Action == "policy_reprocess") return operation.RootAdmission is null && operation.PolicyAdmission is not null;
+        if (operation.PolicyAdmission is not null) return false;
         if (operation.Action != "root_create")
         {
             return operation.RootAdmission is null;
@@ -540,6 +542,12 @@ public sealed class SqlNativeOperationStore(
     {
         using var document = JsonDocument.Parse(operation.CanonicalPayload);
         var payload = document.RootElement;
+        if (operation.Action == "policy_reprocess")
+        {
+            await SqlDefaultRetainedPolicy.ApplyAsync(context, operation.CanonicalPayload,
+                operation.PolicyAdmission ?? throw new NativeOperationException("invalid-commit-operation"), targets, now, cancellationToken).ConfigureAwait(false);
+            return;
+        }
         if (operation.Action == "root_create")
         {
             if (operation.RootAdmission is null) throw new NativeOperationException("invalid-commit-operation");
@@ -548,7 +556,7 @@ public sealed class SqlNativeOperationStore(
             await LockCanonicalRootAsync(context, path, cancellationToken);
             if (await context.SourceRootConfigurations.AnyAsync(value => value.CanonicalPath == path, cancellationToken)) throw new NativeOperationException("operation-fenced");
             var rootId = Guid.NewGuid();
-            var recursive = Bool(payload, "recursive", true); var followLinks = Bool(payload, "followLinks", false); var maximumFileBytes = Long(payload, "maximumFileBytes", 16L * 1024 * 1024); var cadenceSeconds = Long(payload, "reconciliationSeconds", 900);
+            var recursive = Bool(payload, "recursive", true); var followLinks = Bool(payload, "followLinks", false); var maximumFileBytes = Long(payload, "maximumFileBytes", SourcePolicyDefaults.MaximumTextBytes); var cadenceSeconds = Long(payload, "reconciliationSeconds", 900);
             var creation = NativeSourceRootCreation.Parse(payload, actor) with { FullPath = path };
             var configuration = SourceRootControlConfiguration.From(creation);
             context.SourceRootConfigurations.Add(new SourceRootConfigurationEntity
@@ -590,9 +598,15 @@ public sealed class SqlNativeOperationStore(
         if (operation.Action == "root_update")
         {
             root!.DisplayName = String(payload, "displayName", 256); root.ConfigurationRevision++; root.UpdatedAtUtc = now;
+            if (Bool(payload, "applyDefaultPolicy", false))
+            {
+                root.MaximumFileBytes = SourcePolicyDefaults.MaximumTextBytes;
+                root.AllowedClassificationsJson = JsonSerializer.Serialize(SourcePolicyDefaults.AllowedClassifications);
+            }
             var configuration = SourceRootControlConfiguration.From(root);
             root.HealthEvidenceJson = SourceRootControlAuditEvidence.UpdateConfigurationFingerprint(root.HealthEvidenceJson, configuration);
-            await EnqueueAsync(context, targets, rootIdValue, actor, now, requestKind: 1, configuration, cancellationToken);
+            if (Bool(payload, "reconcile", true))
+                await EnqueueAsync(context, targets, rootIdValue, actor, now, requestKind: 1, configuration, cancellationToken);
             return;
         }
         if (operation.Action is "root_disable" or "root_pause")

@@ -119,7 +119,7 @@ public sealed class SourceRootProjectionReader(
             .ConfigureAwait(false);
         var logicalStates = await ReadLogicalOwnerStatesAsync(context, [rootId], cancellationToken).ConfigureAwait(false);
         var activities = await (
-                from activity in context.SourceActivities.AsNoTracking()
+                from activity in SqlCurrentSourceActivities.Query(context)
                 join revision in context.SourceRevisions.AsNoTracking() on activity.SourceRevisionId equals revision.Id
                 join artifactValue in context.SourceArtifacts.AsNoTracking() on revision.Id equals artifactValue.SourceRevisionId into artifactValues
                 from artifact in artifactValues.DefaultIfEmpty()
@@ -150,6 +150,7 @@ public sealed class SourceRootProjectionReader(
                 .ToListAsync(cancellationToken).ConfigureAwait(false);
         var terminalBlockedBranches = await (
                 from branch in context.SourceProcessorBranches.AsNoTracking()
+                join activity in SqlCurrentSourceActivities.Query(context) on branch.SourceActivityId equals activity.Id
                 join revision in context.SourceRevisions.AsNoTracking() on branch.SourceRevisionId equals revision.Id
                 where revision.SourceRootId == rootId && revision.SuppressedAtUtc == null &&
                       branch.State == (int)RetainedProcessorBranchState.Blocked
@@ -222,7 +223,7 @@ public sealed class SourceRootProjectionReader(
                 activity.ResultingPipelineRecordId is null && activity.SuppressedAtUtc is null &&
                 string.Equals(activity.InputFingerprint, activity.ContentSha256, StringComparison.Ordinal) &&
                 string.Equals(activity.Classification, "AcceptedUtf8Text", StringComparison.Ordinal) &&
-                activity.ByteLength is >= 0 and <= 16L * 1024 * 1024 &&
+                activity.ByteLength is >= 0 and <= SourcePolicyDefaults.MaximumTextBytes &&
                 activity.ArtifactByteLength == activity.ByteLength &&
                 string.Equals(activity.ArtifactContentSha256, activity.ContentSha256, StringComparison.Ordinal) &&
                 string.Equals(activity.ArtifactStoreRelativePath, Path.Combine("sha256", activity.ContentSha256[..2], $"{activity.ContentSha256}.bin"), StringComparison.OrdinalIgnoreCase))
@@ -380,7 +381,7 @@ public sealed class SourceRootProjectionReader(
 
         var currentFiles = CurrentFileRevisions(context).Where(revision => rootIds.Contains(revision.SourceRootId));
         var rows = await (
-            from activity in context.SourceActivities.AsNoTracking()
+            from activity in SqlCurrentSourceActivities.Query(context)
             join revision in currentFiles on activity.SourceRevisionId equals revision.Id
             join branch in context.SourceProcessorBranches.AsNoTracking() on activity.Id equals branch.SourceActivityId into branches
             from branch in branches.DefaultIfEmpty()
@@ -618,12 +619,11 @@ public sealed class SourceRootProjectionReader(
         var noContent = await (
                 from branch in context.SourceProcessorBranches.AsNoTracking()
                 join owner in currentOwners on branch.SourceRevisionId equals owner.Id
-                join ownerActivity in context.SourceActivities.AsNoTracking() on branch.SourceActivityId equals ownerActivity.Id
+                join ownerActivity in SqlCurrentSourceActivities.Query(context) on branch.SourceActivityId equals ownerActivity.Id
                 join member in context.SourceProcessorBranchMembers.AsNoTracking() on branch.Id equals member.BranchId
                 where rootIds.Contains(owner.SourceRootId) && owner.SuppressedAtUtc == null &&
                       branch.State == (int)RetainedProcessorBranchState.Completed && branch.CompletedMemberCount == 0 &&
-                      branch.ProcessorVersion == OoxmlStructuralTextProcessor.Capability.ProcessorVersion &&
-                      branch.ProcessorFingerprint == OoxmlStructuralTextProcessor.Capability.ProcessorFingerprint &&
+                      (branch.ProcessorVersion == OoxmlStructuralTextProcessor.Capability.ProcessorVersion && branch.ProcessorFingerprint == OoxmlStructuralTextProcessor.Capability.ProcessorFingerprint || branch.ProcessorVersion == OoxmlStructuralTextProcessor.LegacyProcessorVersion && branch.ProcessorFingerprint == OoxmlStructuralTextProcessor.LegacyProcessorFingerprint) &&
                       ownerActivity.SourceRevisionId == owner.Id &&
                       EF.Functions.Collate(ownerActivity.InputFingerprint, SchemaConfiguration.SchedulerFenceCollation) ==
                           EF.Functions.Collate(branch.InputSha256, SchemaConfiguration.SchedulerFenceCollation) &&
@@ -662,7 +662,7 @@ public sealed class SourceRootProjectionReader(
         var incompleteBranches = await (
                 from branch in context.SourceProcessorBranches.AsNoTracking()
                 join owner in currentOwners on branch.SourceRevisionId equals owner.Id
-                join ownerActivity in context.SourceActivities.AsNoTracking() on branch.SourceActivityId equals ownerActivity.Id
+                join ownerActivity in SqlCurrentSourceActivities.Query(context) on branch.SourceActivityId equals ownerActivity.Id
                 where rootIds.Contains(owner.SourceRootId) && owner.SuppressedAtUtc == null &&
                       branch.State != (int)RetainedProcessorBranchState.Completed &&
                       ownerActivity.SourceRevisionId == owner.Id &&
@@ -672,22 +672,20 @@ public sealed class SourceRootProjectionReader(
                           EF.Functions.Collate(branch.ProcessorVersion, SchemaConfiguration.SchedulerFenceCollation) &&
                       EF.Functions.Collate(ownerActivity.DescriptorFingerprint, SchemaConfiguration.SchedulerFenceCollation) ==
                           EF.Functions.Collate(branch.ProcessorFingerprint, SchemaConfiguration.SchedulerFenceCollation) &&
-                      ((branch.ProcessorVersion == OoxmlStructuralTextProcessor.Capability.ProcessorVersion &&
-                        branch.ProcessorFingerprint == OoxmlStructuralTextProcessor.Capability.ProcessorFingerprint) ||
+                      (((branch.ProcessorVersion == OoxmlStructuralTextProcessor.Capability.ProcessorVersion && branch.ProcessorFingerprint == OoxmlStructuralTextProcessor.Capability.ProcessorFingerprint || branch.ProcessorVersion == OoxmlStructuralTextProcessor.LegacyProcessorVersion && branch.ProcessorFingerprint == OoxmlStructuralTextProcessor.LegacyProcessorFingerprint)) ||
                        (branch.ProcessorVersion == VisioDocumentInputProcessor.Capability.ProcessorVersion &&
                         branch.ProcessorFingerprint == VisioDocumentInputProcessor.Capability.ProcessorFingerprint) ||
                        (branch.ProcessorVersion == PdfDocumentProcessor.Capability.ProcessorVersion &&
                         branch.ProcessorFingerprint == PdfDocumentProcessor.Capability.ProcessorFingerprint) ||
                        (branch.ProcessorVersion == ImageDocumentInputProcessor.Capability.ProcessorVersion &&
                         branch.ProcessorFingerprint == ImageDocumentInputProcessor.Capability.ProcessorFingerprint) ||
-                       (branch.ProcessorVersion == MediaMetadataRetainedProcessor.Capability.ProcessorVersion &&
-                        branch.ProcessorFingerprint == MediaMetadataRetainedProcessor.Capability.ProcessorFingerprint))
+                       ((branch.ProcessorVersion == MediaMetadataRetainedProcessor.Capability.ProcessorVersion && branch.ProcessorFingerprint == MediaMetadataRetainedProcessor.Capability.ProcessorFingerprint || branch.ProcessorVersion == MediaMetadataRetainedProcessor.LegacyProcessorVersion && branch.ProcessorFingerprint == MediaMetadataRetainedProcessor.LegacyProcessorFingerprint)))
                 select new LogicalBranchExecutionRow(
                     owner.SourceRootId,
                     owner.Id,
                     branch.Id,
                     branch.CreatedAtUtc,
-                    branch.ProcessorFingerprint == MediaMetadataRetainedProcessor.Capability.ProcessorFingerprint ? 1 : 2,
+                    (branch.ProcessorFingerprint == MediaMetadataRetainedProcessor.Capability.ProcessorFingerprint || branch.ProcessorFingerprint == MediaMetadataRetainedProcessor.LegacyProcessorFingerprint) ? 1 : 2,
                     branch.State,
                     branch.LeaseGeneration))
             .ToListAsync(cancellationToken).ConfigureAwait(false);

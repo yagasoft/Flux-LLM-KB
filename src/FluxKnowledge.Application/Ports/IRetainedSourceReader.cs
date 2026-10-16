@@ -19,6 +19,18 @@ public interface IRetainedSourceReader
         SourceRevisionId sourceRevisionId,
         CancellationToken cancellationToken);
 
+    /// <summary>Holds a checksum-verified, seekable retained file open until its consumer finishes.</summary>
+    async ValueTask<RetainedSourceReadLease> OpenReadAsync(
+        SourceRevisionId sourceRevisionId,
+        long maximumByteLength,
+        CancellationToken cancellationToken)
+    {
+        var retained = await ReadBytesAsync(sourceRevisionId, cancellationToken).ConfigureAwait(false);
+        return await RetainedSourceReadLease.VerifyAsync(retained.SourceRevisionId,
+            new MemoryStream(retained.Bytes, writable: false), retained.ContentSha256,
+            retained.ByteLength, maximumByteLength, cancellationToken).ConfigureAwait(false);
+    }
+
     ValueTask<Utf8FileSource> ReadUtf8Async(
         SourceRevisionId sourceRevisionId,
         CancellationToken cancellationToken);

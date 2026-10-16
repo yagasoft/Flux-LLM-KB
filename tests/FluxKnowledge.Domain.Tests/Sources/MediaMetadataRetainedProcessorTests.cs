@@ -13,6 +13,88 @@ namespace FluxKnowledge.Domain.Tests.Sources;
 public sealed class MediaMetadataRetainedProcessorTests
 {
     [Fact]
+    public async Task Verified_stream_parses_metadata_after_a_large_movie_payload_with_bounded_reads()
+    {
+        await using var input = new SparseMovieStream(IsoBmff("isom"), Mp4(2_000).Skip(IsoBmff("isom").Length).ToArray());
+        var hash = Convert.ToHexStringLower(SHA256.HashData(input));
+        var revision = SourceRevisionId.New();
+        await using var retained = await RetainedSourceReadLease.VerifyAsync(revision, input, hash, input.Length,
+            MediaMetadataRetainedProcessor.MaximumRetainedInputBytes, CancellationToken.None);
+        Assert.Equal(0, retained.Stream.Position);
+        var verificationReadBytes = input.ReadBytes;
+        var writer = new RecordingWriter();
+        var claim = new RetainedProcessorClaim(Guid.NewGuid(), revision, "parent", hash, "owner", 1, DateTimeOffset.UtcNow.AddMinutes(5));
+
+        await new MediaMetadataRetainedProcessor(writer, new AllowingDisclosure()).ProcessAsync(claim, retained, CancellationToken.None);
+
+        Assert.Contains("\"duration_ms\":2000", writer.Text, StringComparison.Ordinal);
+        Assert.InRange(input.ReadBytes - verificationReadBytes, 1, 1024 * 1024);
+        Assert.InRange(input.MaximumReadSize, 1, 128 * 1024);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Streaming_lease_rejects_checksum_mismatch_or_cancellation_and_disposes_the_input(bool cancelled)
+    {
+        var input = new MemoryStream(Png(), writable: false);
+        using var cancellation = new CancellationTokenSource();
+        if (cancelled) cancellation.Cancel();
+        await Assert.ThrowsAnyAsync<Exception>(() => RetainedSourceReadLease.VerifyAsync(SourceRevisionId.New(), input,
+            new string('0', 64), input.Length, 1024, cancellation.Token).AsTask());
+        Assert.False(input.CanRead);
+    }
+
+    private sealed class SparseMovieStream : Stream
+    {
+        private readonly byte[] _prefix;
+        private readonly byte[] _suffix;
+        private const int PayloadLength = 160 * 1024 * 1024;
+        public SparseMovieStream(byte[] ftyp, byte[] suffix)
+        {
+            _prefix = new byte[ftyp.Length + 8];
+            ftyp.CopyTo(_prefix, 0);
+            BinaryPrimitives.WriteInt32BigEndian(_prefix.AsSpan(ftyp.Length), PayloadLength + 8);
+            "mdat"u8.CopyTo(_prefix.AsSpan(ftyp.Length + 4));
+            _suffix = suffix;
+        }
+        public long ReadBytes { get; private set; }
+        public int MaximumReadSize { get; private set; }
+        public override bool CanRead => true;
+        public override bool CanSeek => true;
+        public override bool CanWrite => false;
+        public override long Length => _prefix.Length + PayloadLength + _suffix.Length;
+        public override long Position { get; set; }
+        public override int Read(byte[] buffer, int offset, int count) => Read(buffer.AsSpan(offset, count));
+        public override int Read(Span<byte> buffer)
+        {
+            var count = (int)Math.Min(buffer.Length, Length - Position);
+            MaximumReadSize = Math.Max(MaximumReadSize, buffer.Length);
+            var target = buffer[..count];
+            target.Clear();
+            CopyOverlap(_prefix, 0, target);
+            CopyOverlap(_suffix, _prefix.Length + PayloadLength, target);
+            Position += count;
+            ReadBytes += count;
+            return count;
+        }
+        private void CopyOverlap(byte[] source, long start, Span<byte> target)
+        {
+            var from = Math.Max(start, Position);
+            var to = Math.Min(start + source.Length, Position + target.Length);
+            if (from < to) source.AsSpan((int)(from - start), (int)(to - from)).CopyTo(target[(int)(from - Position)..]);
+        }
+        public override long Seek(long offset, SeekOrigin origin) => Position = origin switch
+        {
+            SeekOrigin.Begin => offset, SeekOrigin.Current => Position + offset, SeekOrigin.End => Length + offset,
+            _ => throw new ArgumentOutOfRangeException(nameof(origin))
+        };
+        public override void Flush() => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
+
+    [Fact]
     public async Task Process_writes_the_canonical_manifest_for_a_signature_confirmed_png()
     {
         var bytes = Png();
@@ -232,6 +314,18 @@ public sealed class MediaMetadataRetainedProcessorTests
         var error = await Assert.ThrowsAsync<RetainedProcessorException>(() => processor.ProcessAsync(Claim(bytes), Retained(bytes), CancellationToken.None).AsTask());
 
         Assert.Equal("media-metadata-read-limit", error.OutcomeCode);
+    }
+
+    [Theory]
+    [InlineData("read-budget")]
+    [InlineData("seek-outside")]
+    public async Task Swallowed_stream_guard_failures_cannot_publish_partial_metadata(string failure)
+    {
+        var bytes = Png();
+        var writer = new RecordingWriter();
+        var processor = new MediaMetadataRetainedProcessor(writer, new AllowingDisclosure(), new SwallowingStreamFailureParser(failure));
+        await Assert.ThrowsAsync<RetainedProcessorException>(() => processor.ProcessAsync(Claim(bytes), Retained(bytes), default).AsTask());
+        Assert.Equal(0, writer.WriteCount);
     }
 
     [Fact]
@@ -778,6 +872,29 @@ public sealed class MediaMetadataRetainedProcessorTests
                 }
             }
             return result;
+        }
+    }
+
+    private sealed class SwallowingStreamFailureParser(string failure) : IMediaMetadataParser
+    {
+        public MediaMetadataParserPreflight Preflight() => new(true, null);
+        public MediaMetadataParseResult Parse(Stream stream, MediaMetadataFormat format, CancellationToken cancellationToken)
+        {
+            try
+            {
+                if (failure == "seek-outside") stream.Seek(stream.Length + 1, SeekOrigin.Begin);
+                else
+                {
+                    var buffer = new byte[1024];
+                    while (true)
+                    {
+                        stream.Position = 0;
+                        while (stream.Read(buffer) > 0) { }
+                    }
+                }
+            }
+            catch (IOException) { }
+            return MediaMetadataParseResult.Png(1, 1);
         }
     }
 

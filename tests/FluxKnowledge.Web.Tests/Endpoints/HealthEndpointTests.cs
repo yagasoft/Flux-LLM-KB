@@ -1,5 +1,6 @@
 using System.Net;
 using FluxKnowledge.Application.Indexing;
+using FluxKnowledge.Application.Sources;
 using FluxKnowledge.Infrastructure.SqlServer.Configuration;
 using FluxKnowledge.Infrastructure.SqlServer.Provisioning;
 using FluxKnowledge.Web.Endpoints;
@@ -13,6 +14,33 @@ namespace FluxKnowledge.Web.Tests.Endpoints;
 
 public sealed class HealthEndpointTests
 {
+    [Fact]
+    public async Task Held_readiness_fails_closed_when_legacy_work_cannot_be_verified()
+    {
+        var readiness = new RecordingReadinessValidator(true);
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseTestServer();
+        builder.Services.AddSingleton<ISqlServerReadinessValidator>(readiness);
+        builder.Services.AddSingleton<IDeploymentValidationHold>(new HeldAdmission());
+        builder.Services.AddSingleton<IDerivedIndexRecoveryStatus>(new FixedRecoveryStatus(
+            new DerivedIndexRecoverySnapshot(DerivedIndexRecoveryState.Healthy, null, null, null, null, 0)));
+        builder.Services.AddSingleton(SqlServerOptions.ForProduction(
+            "Server=unreachable.invalid;Initial Catalog=FluxKnowledge;Integrated Security=true;Encrypt=true;TrustServerCertificate=true",
+            SqlServerOptions.ProductionDataFilePath, SqlServerOptions.ProductionLogFilePath));
+        await using var application = builder.Build();
+        application.MapFluxKnowledgeHealth();
+        await application.StartAsync();
+        var response = await application.GetTestClient().GetAsync("/health/ready");
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        Assert.Equal(0, readiness.CallCount);
+    }
+
+    private sealed class HeldAdmission : IDeploymentValidationHold
+    {
+        public bool IsHeld => true;
+        public ValueTask WaitUntilReleasedAsync(CancellationToken cancellationToken) => throw new NotSupportedException();
+    }
+
     [Fact]
     public async Task Live_health_refuses_forwarded_requests_even_from_a_loopback_peer()
     {

@@ -1,4 +1,5 @@
 using FluxKnowledge.Application.Ports;
+using FluxKnowledge.Domain.Sources;
 
 namespace FluxKnowledge.Application.Contracts;
 
@@ -11,7 +12,7 @@ public sealed record SourceRootDraft(
     long MaximumFileBytes,
     string RequestedBy,
     FluxKnowledge.Domain.Sources.SourceDiscoveryMode DiscoveryMode = FluxKnowledge.Domain.Sources.SourceDiscoveryMode.Filesystem,
-    bool IndexSourceText = false)
+    bool IndexSourceText = true)
 {
     public static SourceRootDraft Empty { get; } = new(
         string.Empty,
@@ -19,7 +20,7 @@ public sealed record SourceRootDraft(
         true,
         [],
         [],
-        16L * 1024 * 1024,
+        SourcePolicyDefaults.MaximumTextBytes,
         "local-operator");
 }
 

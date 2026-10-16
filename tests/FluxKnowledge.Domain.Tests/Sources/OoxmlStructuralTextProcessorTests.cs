@@ -13,15 +13,35 @@ namespace FluxKnowledge.Domain.Tests.Sources;
 
 public sealed class OoxmlStructuralTextProcessorTests
 {
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Default_policy_accepts_large_legitimate_xml_and_does_not_expand_inert_binary_parts(bool inertBinary)
+    {
+        var archive = CreateWordPackageWithAdditionalXml(
+            inertBinary ? "word/media/image.bin" : "customXml/item1.xml",
+            inertBinary ? new string('x', 2 * 1024 * 1024) :
+                "<root>" + string.Concat(Enumerable.Range(0, 500_001).Select(index => $"<x>{index:D6}</x>")) + "</root>");
+        var hash = Convert.ToHexStringLower(SHA256.HashData(archive));
+        var claim = new RetainedProcessorClaim(Guid.NewGuid(), SourceRevisionId.New(), "parent", hash, "owner", 1, DateTimeOffset.UtcNow.AddMinutes(5));
+        var writer = new RecordingWriter();
+
+        var completion = await new OoxmlStructuralTextProcessor(writer).ProcessAsync(
+            claim, new RetainedSourceBytes(claim.SourceRevisionId, archive, hash, archive.Length), new RetainedProcessorOptions(), CancellationToken.None);
+
+        Assert.Single(completion.Members);
+        Assert.True(writer.BytesWritten > 0);
+    }
+
     [Fact]
     public void Ooxml_handler_exposes_the_approved_runnable_descriptor()
     {
         var descriptor = OoxmlStructuralTextProcessor.Capability;
 
-        Assert.Equal(new Guid("3d72bf21-5358-482d-a6a9-576ff23012a3"), descriptor.Id);
+        Assert.Equal(new Guid("1e73f18a-0151-4b02-aca7-d6ca34a557ea"), descriptor.Id);
         Assert.Equal("document-ooxml-structural-extract", descriptor.ProcessorKind);
-        Assert.Equal("phase-5-ooxml-structural-v1", descriptor.ProcessorVersion);
-        Assert.Equal("phase-5-ooxml-retained-structural-v1", descriptor.ProcessorFingerprint);
+        Assert.Equal("phase-5-ooxml-structural-v2", descriptor.ProcessorVersion);
+        Assert.Equal("phase-5-ooxml-retained-structural-v2", descriptor.ProcessorFingerprint);
         Assert.Equal(SourceActivityKind.TextExtraction, descriptor.AcceptedActivityKind);
         Assert.Equal("OoxmlDocumentContainer", descriptor.AcceptedClassification);
     }
@@ -962,6 +982,35 @@ public sealed class OoxmlStructuralTextProcessorTests
         Assert.DoesNotContain("\n1\n", writer.Text, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("<c/>")]
+    [InlineData("<c s='1'/>")]
+    [InlineData("<c><v/></c>")]
+    public async Task Workbook_blank_cells_do_not_invalidate_later_shared_string_cells(string blankCell)
+    {
+        var archive = CreateWorkbookWithSharedStringReferences($"<worksheet><sheetData><row>{blankCell}<c t='s'><v>0</v></c>{blankCell}</row></sheetData></worksheet>");
+        var hash = Convert.ToHexStringLower(SHA256.HashData(archive));
+        var claim = new RetainedProcessorClaim(Guid.NewGuid(), SourceRevisionId.New(), "parent", hash, "owner", 1, DateTimeOffset.UtcNow.AddMinutes(5));
+        var writer = new RecordingWriter();
+        await new OoxmlStructuralTextProcessor(writer).ProcessAsync(claim,
+            new RetainedSourceBytes(claim.SourceRevisionId, archive, hash, archive.Length), new RetainedProcessorOptions(), default);
+        Assert.Equal("first shared cell\n", writer.Text);
+    }
+
+    [Theory]
+    [InlineData("<c><c/></c>")]
+    [InlineData("<c t='s'><v/></c>")]
+    public async Task Workbook_still_rejects_nested_cells_and_invalid_shared_string_values(string malformedCell)
+    {
+        var archive = CreateWorkbookWithSharedStringReferences($"<worksheet><sheetData><row>{malformedCell}</row></sheetData></worksheet>");
+        var hash = Convert.ToHexStringLower(SHA256.HashData(archive));
+        var claim = new RetainedProcessorClaim(Guid.NewGuid(), SourceRevisionId.New(), "parent", hash, "owner", 1, DateTimeOffset.UtcNow.AddMinutes(5));
+        var writer = new RecordingWriter();
+        await Assert.ThrowsAsync<RetainedProcessorException>(() => new OoxmlStructuralTextProcessor(writer).ProcessAsync(claim,
+            new RetainedSourceBytes(claim.SourceRevisionId, archive, hash, archive.Length), new RetainedProcessorOptions(), default).AsTask());
+        Assert.Equal(0, writer.BytesWritten);
+    }
+
     [Fact]
     public async Task Main_part_with_a_forged_content_type_is_not_a_genuine_ooxml_package()
     {
@@ -1150,9 +1199,9 @@ public sealed class OoxmlStructuralTextProcessorTests
     }
 
     [Fact]
-    public async Task Vsdx_unselected_xml_above_500k_is_rejected_before_document_output()
+    public async Task Vsdx_unselected_xml_above_two_million_elements_is_rejected_before_document_output()
     {
-        var xml = "<root>" + string.Concat(Enumerable.Range(0, 500_000).Select(index => $"<x>{index:D6}</x>")) + "</root>";
+        var xml = "<root>" + string.Concat(Enumerable.Range(0, 2_000_000).Select(index => $"<x>{index:D6}</x>")) + "</root>";
         var archive = CreateVsdxWithInertBinaryMember("customXml/item1.xml", Encoding.UTF8.GetBytes(xml));
         var hash = Convert.ToHexStringLower(SHA256.HashData(archive));
         var claim = new RetainedProcessorClaim(Guid.NewGuid(), SourceRevisionId.New(), "parent", hash, "owner", 1, DateTimeOffset.UtcNow.AddMinutes(5));
@@ -1168,7 +1217,7 @@ public sealed class OoxmlStructuralTextProcessorTests
     [Fact]
     public async Task Unselected_xml_counts_against_the_package_wide_element_bound_before_any_child_write()
     {
-        var archive = CreateWordPackageWithAdditionalXml("customXml/item1.xml", "<root>" + string.Concat(Enumerable.Range(0, 500_000).Select(index => $"<x>{index:D6}</x>")) + "</root>");
+        var archive = CreateWordPackageWithAdditionalXml("customXml/item1.xml", "<root>" + string.Concat(Enumerable.Range(0, 2_000_000).Select(index => $"<x>{index:D6}</x>")) + "</root>");
         var hash = Convert.ToHexStringLower(SHA256.HashData(archive));
         var claim = new RetainedProcessorClaim(Guid.NewGuid(), SourceRevisionId.New(), "parent", hash, "owner", 1, DateTimeOffset.UtcNow.AddMinutes(5));
         var writer = new RecordingWriter();
@@ -1218,7 +1267,7 @@ public sealed class OoxmlStructuralTextProcessorTests
         cases.Add("office-document-container-invalid", CreateWordPackageWithAdditionalXml("customXml/alternate:stream.xml", "<x/>"));
         cases.Add("office-document-container-invalid", CreateWordPackageWithDuplicateEntry());
         cases.Add("office-document-container-invalid", CreateWordPackageWithAdditionalXml(new string('p', 509) + ".xml", "<x/>"));
-        cases.Add("office-document-container-invalid", CreatePackageWithEntryCount(513));
+        cases.Add("office-document-container-invalid", CreatePackageWithEntryCount(2_049));
         cases.Add("office-document-expanded-xml-limit", CreateWordPackageWithAdditionalXml("customXml/ratio.xml", "<x>" + new string('x', 20_000) + "</x>"));
         cases.Add("office-document-depth-limit", CreateWordPackageWithAdditionalXml("customXml/depth.xml", "<x>" + string.Concat(Enumerable.Repeat("<x>", 128)) + "z" + string.Concat(Enumerable.Repeat("</x>", 128)) + "</x>"));
         cases.Add("office-document-part-unsupported", CreateWordPackageWithRelationships(8_193));
@@ -1326,9 +1375,9 @@ public sealed class OoxmlStructuralTextProcessorTests
     }
 
     [Fact]
-    public async Task Package_wide_256_mib_expanded_xml_limit_is_rejected_from_central_directory_metadata_before_xml_open()
+    public async Task Package_wide_512_mib_expanded_xml_limit_is_rejected_from_central_directory_metadata_before_xml_open()
     {
-        var archive = PatchEveryHeaderSize(CreateWordPackageWithManyXmlParts(9), 32 * 1024 * 1024);
+        var archive = PatchEveryHeaderSize(CreateWordPackageWithManyXmlParts(9), 64 * 1024 * 1024);
         var hash = Convert.ToHexStringLower(SHA256.HashData(archive));
         var claim = new RetainedProcessorClaim(Guid.NewGuid(), SourceRevisionId.New(), "parent", hash, "owner", 1, DateTimeOffset.UtcNow.AddMinutes(5));
         var writer = new RecordingWriter();
@@ -1341,7 +1390,7 @@ public sealed class OoxmlStructuralTextProcessorTests
     }
 
     [Fact]
-    public async Task Selected_structural_part_larger_than_32_mib_is_rejected_before_any_child_write()
+    public async Task Selected_structural_part_larger_than_64_mib_is_rejected_before_any_child_write()
     {
         var archive = CreateWordPackageWithLargeMainPart();
         var hash = Convert.ToHexStringLower(SHA256.HashData(archive));
@@ -1475,7 +1524,7 @@ public sealed class OoxmlStructuralTextProcessorTests
         return buffer.ToArray();
     }
 
-    private static byte[] CreateWorkbookWithSharedStringReferences()
+    private static byte[] CreateWorkbookWithSharedStringReferences(string? worksheet = null)
     {
         using var buffer = new MemoryStream();
         using (var archive = new ZipArchive(buffer, ZipArchiveMode.Create, true))
@@ -1485,7 +1534,7 @@ public sealed class OoxmlStructuralTextProcessorTests
             WriteEntry(archive, "xl/workbook.xml", "<workbook xmlns:r='r'><sheets><sheet r:id='rId2'/></sheets></workbook>");
             WriteEntry(archive, "xl/_rels/workbook.xml.rels", "<Relationships><Relationship Id='rId2' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet' Target='worksheets/sheet2.xml'/><Relationship Id='rIdShared' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings' Target='sharedStrings.xml'/></Relationships>");
             WriteEntry(archive, "xl/sharedStrings.xml", "<sst><si><t>first shared cell</t></si><si><t>second shared cell</t></si></sst>");
-            WriteEntry(archive, "xl/worksheets/sheet2.xml", "<worksheet><sheetData><row><c t='s'><v>1</v></c><c t='s'><v>0</v></c></row></sheetData></worksheet>");
+            WriteEntry(archive, "xl/worksheets/sheet2.xml", worksheet ?? "<worksheet><sheetData><row><c t='s'><v>1</v></c><c t='s'><v>0</v></c></row></sheetData></worksheet>");
         }
         return buffer.ToArray();
     }
@@ -1612,7 +1661,7 @@ public sealed class OoxmlStructuralTextProcessorTests
 
     private static byte[] CreateWordPackageWithLargeMainPart()
     {
-        var text = new string('x', 32 * 1024 * 1024);
+        var text = new string('x', 64 * 1024 * 1024);
         using var buffer = new MemoryStream();
         using (var archive = new ZipArchive(buffer, ZipArchiveMode.Create, true))
         {

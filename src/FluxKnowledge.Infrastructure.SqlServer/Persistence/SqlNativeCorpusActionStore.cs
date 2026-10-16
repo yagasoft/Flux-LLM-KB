@@ -16,11 +16,17 @@ public sealed class SqlNativeCorpusActionStore(
     IDbContextFactory<FluxKnowledgeDbContext> contextFactory,
     ISourceRootPathPolicy sourceRootPathPolicy,
     ILocalPrivateContentDisclosure disclosure, EmbeddingGpuRuntime? embeddingRuntime = null,
-    SqlIndexRetentionOperations? indexRetention = null) : INativeCorpusActionStore
+    SqlIndexRetentionOperations? indexRetention = null,
+    IRetainedSourceReader? retainedSourceReader = null) : INativeCorpusActionStore
 {
     public async ValueTask<IReadOnlyList<NativeTargetVersion>> ResolveTargetsAsync(string action, string canonicalPayload, CancellationToken cancellationToken)
     {
         ValidatePayload(action, canonicalPayload);
+        if (action == "policy_reprocess")
+        {
+            await using var policyContext = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+            return await SqlDefaultRetainedPolicy.ResolveAsync(policyContext, SqlDefaultRetainedPolicy.Parse(canonicalPayload), cancellationToken).ConfigureAwait(false);
+        }
         if (action is "index_retention" or "index_retention_restore")
             return await (indexRetention ?? throw new NativeOperationException("index-retention-unavailable"))
                 .ResolveTargetsAsync(action, canonicalPayload, cancellationToken).ConfigureAwait(false);
@@ -62,10 +68,17 @@ public sealed class SqlNativeCorpusActionStore(
         return targets;
     }
 
-    public ValueTask<NativeActionCommitOperation> CreateCommitOperationAsync(string action, string canonicalPayload, IReadOnlyList<NativeTargetVersion> targets, CancellationToken cancellationToken)
+    public async ValueTask<NativeActionCommitOperation> CreateCommitOperationAsync(string action, string canonicalPayload, IReadOnlyList<NativeTargetVersion> targets, CancellationToken cancellationToken)
     {
+        if (action == "policy_reprocess" && retainedSourceReader is null) throw new NativeOperationException("policy-reprocess-unavailable");
         ValidatePayload(action, canonicalPayload);
-        return ValueTask.FromResult<NativeActionCommitOperation>(new NativeCorpusMutationCommitOperation(action, canonicalPayload, action == "root_create" ? RootAdmission(canonicalPayload) : null));
+        if (action == "policy_reprocess")
+        {
+            await using var policyContext = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+            var admission = await SqlDefaultRetainedPolicy.PrepareAsync(policyContext, retainedSourceReader!, SqlDefaultRetainedPolicy.Parse(canonicalPayload), cancellationToken).ConfigureAwait(false);
+            return new NativeCorpusMutationCommitOperation(action, canonicalPayload, PolicyAdmission: admission);
+        }
+        return new NativeCorpusMutationCommitOperation(action, canonicalPayload, action == "root_create" ? RootAdmission(canonicalPayload) : null);
     }
 
     public ValueTask<NativeActionReceipt> FinalizeCommitAsync(string action, string canonicalPayload, NativeActionReceipt receipt, CancellationToken cancellationToken) =>
@@ -167,7 +180,8 @@ public sealed class SqlNativeCorpusActionStore(
             var allowed = action switch
             {
                 "root_create" => new[] { "path", "displayName", "recursive", "followLinks", "maximumFileBytes", "reconciliationSeconds", "discoveryMode", "indexSourceText", "includePatterns", "excludePatterns" },
-                "root_update" => new[] { "rootId", "displayName" },
+                "root_update" => new[] { "rootId", "displayName", "applyDefaultPolicy", "reconcile" },
+                "policy_reprocess" => new[] { "rootId", "sourceRevisionId", "predecessorActivityId", "inputSha256", "configurationRevision" },
                 "root_disable" or "root_pause" or "root_resume" or "root_delete" or "source_sync" => new[] { "rootId" },
                 "watcher_set" => new[] { "rootId", "enabled" },
                 "job_retry" or "publication_retry" or "embedding_retry" => new[] { "jobId" },
@@ -177,13 +191,17 @@ public sealed class SqlNativeCorpusActionStore(
             if (root.EnumerateObject().Any(property => !allowed.Contains(property.Name, StringComparer.Ordinal))) throw new NativeOperationException("invalid-payload");
             switch (action)
             {
+                case "policy_reprocess": _ = SqlDefaultRetainedPolicy.Parse(payload); break;
                 case "root_create":
                     _ = RequiredString(root, "path", 2048); RequireSafeDisplayName(RequiredString(root, "displayName", 256));
                     _ = OptionalBool(root, "recursive", true); _ = OptionalBool(root, "followLinks", false);
-                    _ = OptionalLong(root, "maximumFileBytes", 16L * 1024 * 1024); _ = OptionalLong(root, "reconciliationSeconds", 900);
+                    _ = OptionalLong(root, "maximumFileBytes", SourcePolicyDefaults.MaximumTextBytes); _ = OptionalLong(root, "reconciliationSeconds", 900);
                     _ = NativeSourceRootCreation.Parse(root, "native-v1");
                     break;
-                case "root_update": _ = RequiredGuid(root, "rootId"); RequireSafeDisplayName(RequiredString(root, "displayName", 256)); break;
+                case "root_update":
+                    _ = RequiredGuid(root, "rootId"); RequireSafeDisplayName(RequiredString(root, "displayName", 256));
+                    _ = OptionalBool(root, "applyDefaultPolicy", false); _ = OptionalBool(root, "reconcile", true);
+                    break;
                 case "root_disable": case "root_pause": case "root_resume": case "root_delete": case "source_sync": _ = RequiredGuid(root, "rootId"); break;
                 case "watcher_set": _ = RequiredGuid(root, "rootId"); if (!root.TryGetProperty("enabled", out var enabled) || enabled.ValueKind is not (JsonValueKind.True or JsonValueKind.False)) throw new NativeOperationException("invalid-payload"); break;
                 case "job_retry": case "publication_retry": case "embedding_retry": _ = RequiredGuid(root, "jobId"); break;

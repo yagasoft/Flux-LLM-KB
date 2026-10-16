@@ -19,6 +19,51 @@ public sealed class SourceRootProjectionReaderIntegrationTests(NativeSqlServerFi
 {
     private readonly NativeSqlServerFixture _fixture = fixture;
 
+    [NativeSqlServerTheory]
+    [InlineData(SourceActivityState.Pending)]
+    [InlineData(SourceActivityState.Completed)]
+    public async Task Policy_successor_removes_the_old_block_from_file_status_and_current_reasons_without_deleting_history(SourceActivityState state)
+    {
+        var root = Guid.NewGuid(); var revision = Guid.NewGuid(); var branch = Guid.NewGuid(); var now = DateTimeOffset.UtcNow;
+        var factory = new TestDbContextFactory(_fixture.ConnectionString);
+        var old = Activity(revision, SourceActivityState.FailedTerminal);
+        old.ActivityKind = (int)SourceActivityKind.CodeParsing;
+        old.ProcessorVersion = RetainedCsharpCodeProcessor.ProcessorVersion;
+        old.DescriptorFingerprint = RetainedCsharpCodeProcessor.LegacyDescriptorFingerprint;
+        old.Reason = "csharp-code-signature-limit";
+        var current = Activity(revision, state);
+        current.ActivityKind = (int)SourceActivityKind.CodeParsing;
+        current.ProcessorVersion = RetainedCsharpCodeProcessor.ProcessorVersion;
+        current.DescriptorFingerprint = RetainedCsharpCodeProcessor.Capability.ProcessorFingerprint;
+        await using (var db = factory.CreateDbContext())
+        {
+            db.SourceRootConfigurations.Add(new SourceRootConfigurationEntity { Id = root, CanonicalPath = $"E:\\source-projection-tests\\{root:N}",
+                DisplayName = "Policy projection", State = (int)SourceRootState.Enabled, ConfigurationRevision = 1,
+                MaximumFileBytes = SourcePolicyDefaults.MaximumTextBytes, CreatedAtUtc = now, UpdatedAtUtc = now });
+            db.SourceRevisions.Add(Revision(revision, root, "source.cs", now, false));
+            db.SourceActivities.AddRange(old, current);
+            db.SourceProcessorBranches.Add(new SourceProcessorBranchEntity { Id = branch, SourceRevisionId = revision, SourceActivityId = old.Id,
+                InputSha256 = old.InputFingerprint, ProcessorVersion = old.ProcessorVersion, ProcessorFingerprint = old.DescriptorFingerprint,
+                State = (int)RetainedProcessorBranchState.Blocked, LeaseGeneration = 1, AttemptCount = 1, CreatedAtUtc = now, UpdatedAtUtc = now });
+            db.SourceProcessorAttempts.Add(new SourceProcessorAttemptEntity { Id = Guid.NewGuid(), BranchId = branch, LeaseGeneration = 1,
+                StartedAtUtc = now, FinishedAtUtc = now, OutcomeCode = old.Reason });
+            db.SourceActivityRelations.Add(new SourceActivityRelationEntity { Id = Guid.NewGuid(), PredecessorActivityId = old.Id,
+                SuccessorActivityId = current.Id, RelationshipKind = RetainedDefaultPolicy.RelationshipKind,
+                ReasonCode = RetainedDefaultPolicy.Version, CreatedAtUtc = now });
+            await db.SaveChangesAsync();
+        }
+        var reader = new SourceRootProjectionReader(factory, new NoPathPolicy(), new NoEnumeration(), new LocalSourceCapabilityHandlerRegistry([]));
+        var detail = Assert.IsType<SourceRootDetailProjection>(await reader.ReadRootAsync(root, default));
+        Assert.Equal(0, detail.BlockedCount);
+        Assert.DoesNotContain(detail.DeferredOrBlockedReasons, value => value.Reason == old.Reason);
+        var file = Assert.Single(detail.Files);
+        Assert.NotEqual("Blocked", file.Status);
+        Assert.NotEqual(old.Reason, file.Reason);
+        await using var verification = factory.CreateDbContext();
+        Assert.Equal((int)RetainedProcessorBranchState.Blocked, (await verification.SourceProcessorBranches.SingleAsync(value => value.Id == branch)).State);
+        Assert.Equal(old.Reason, (await verification.SourceProcessorAttempts.SingleAsync(value => value.BranchId == branch)).OutcomeCode);
+    }
+
     [NativeSqlServerFact]
     public async Task Verified_recovery_clears_current_failure_without_erasing_scan_history_or_hiding_unrelated_failures()
     {

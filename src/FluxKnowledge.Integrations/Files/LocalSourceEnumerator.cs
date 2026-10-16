@@ -182,7 +182,7 @@ public sealed class LocalSourceEnumerator : IAuthoritativeSourceFileEnumerator, 
         catch (IOException exception) { errors.Add(new("io", relative, exception.GetType().Name)); }
     }
 
-    private static bool MatchesPolicy(string relativePath, IReadOnlyList<string> includes, IReadOnlyList<string> excludes)
+    public static bool MatchesPolicy(string relativePath, IReadOnlyList<string> includes, IReadOnlyList<string> excludes)
     {
         var normalised = relativePath.Replace(Path.DirectorySeparatorChar, '/');
         return (includes.Count == 0 || includes.Any(pattern => GlobMatches(normalised, pattern))) &&

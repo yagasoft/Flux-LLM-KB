@@ -877,11 +877,9 @@ public sealed partial class SqlStageTransitionStore : IStageTransitionStore
         SourceProcessorBranchEntity branch,
         CancellationToken cancellationToken)
     {
-        var expected = branch.ProcessorVersion == OoxmlStructuralTextProcessor.Capability.ProcessorVersion &&
-                       branch.ProcessorFingerprint == OoxmlStructuralTextProcessor.Capability.ProcessorFingerprint
+        var expected = OoxmlStructuralTextProcessor.IsKnownProcessor(branch.ProcessorVersion, branch.ProcessorFingerprint)
             ? OoxmlStructuralTextProcessor.Capability
-            : branch.ProcessorVersion == MediaMetadataRetainedProcessor.Capability.ProcessorVersion &&
-              branch.ProcessorFingerprint == MediaMetadataRetainedProcessor.Capability.ProcessorFingerprint
+            : MediaMetadataRetainedProcessor.IsKnownProcessor(branch.ProcessorVersion, branch.ProcessorFingerprint)
                 ? MediaMetadataRetainedProcessor.Capability
                 : null;
         return expected is null

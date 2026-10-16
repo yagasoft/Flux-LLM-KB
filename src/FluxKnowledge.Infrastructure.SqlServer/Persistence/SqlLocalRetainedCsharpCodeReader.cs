@@ -341,14 +341,13 @@ public sealed class SqlLocalRetainedCsharpCodeReader(
             identity.ExecutionClass != (int)ExecutionClass.InProcess ||
             !string.Equals(identity.ProcessorVersion, RetainedCsharpCodeProcessor.ProcessorVersion, StringComparison.Ordinal) ||
             !string.Equals(identity.ActivityProcessorVersion, RetainedCsharpCodeProcessor.ProcessorVersion, StringComparison.Ordinal) ||
-            !string.Equals(identity.ProcessorFingerprint, RetainedCsharpCodeProcessor.Capability.ProcessorFingerprint, StringComparison.Ordinal) ||
-            !string.Equals(identity.ActivityDescriptorFingerprint, RetainedCsharpCodeProcessor.Capability.ProcessorFingerprint, StringComparison.Ordinal) ||
+            !string.Equals(identity.ProcessorFingerprint, receipt.DescriptorFingerprint, StringComparison.Ordinal) ||
+            !string.Equals(identity.ActivityDescriptorFingerprint, receipt.DescriptorFingerprint, StringComparison.Ordinal) ||
             !string.Equals(identity.CompletionReceiptFingerprint, receipt.CompletionFingerprint, StringComparison.Ordinal) ||
             receipt.ActivityKind != (int)SourceActivityKind.CodeParsing ||
             !string.Equals(receipt.ProcessorVersion, RetainedCsharpCodeProcessor.ProcessorVersion, StringComparison.Ordinal) ||
-            !string.Equals(receipt.DescriptorFingerprint, RetainedCsharpCodeProcessor.Capability.ProcessorFingerprint, StringComparison.Ordinal) ||
-            !string.Equals(receipt.ParserFingerprint, RetainedCsharpCodeProcessor.ParserFingerprint, StringComparison.Ordinal) ||
-            !string.Equals(receipt.HandlerImplementationId, RetainedCsharpCodeProcessor.HandlerImplementationId, StringComparison.Ordinal) ||
+            !RetainedCsharpCodeProcessor.IsKnownCompletionIdentity(receipt.ProcessorVersion, receipt.DescriptorFingerprint,
+                receipt.ParserFingerprint, receipt.HandlerImplementationId) ||
             identity.LeaseOwner is not null || identity.LeaseExpiresAtUtc is not null)
         {
             throw new InvalidDataException("The retained C# durable terminal binding is invalid.");

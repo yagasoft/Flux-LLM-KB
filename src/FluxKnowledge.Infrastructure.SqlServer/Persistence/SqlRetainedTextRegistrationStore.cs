@@ -29,7 +29,7 @@ public sealed class SqlRetainedTextRegistrationStore(
     private const string AcceptedMimePolicy = "[\"text/plain\"]";
     private const string ExtractUtf8OutputContract = "pipeline:extract-utf8";
     private const long MaximumDocumentInputBytes = 128L * 1024 * 1024;
-    private const long MaximumAcceptedUtf8TextBytes = 16L * 1024 * 1024;
+    private const long MaximumAcceptedUtf8TextBytes = SourcePolicyDefaults.MaximumTextBytes;
     private const long MaximumOoxmlTextBytes = 200L * 1024 * 1024;
     private readonly string? _retainedArtifactRoot = string.IsNullOrWhiteSpace(retainedArtifactRoot)
         ? null
@@ -115,7 +115,11 @@ public sealed class SqlRetainedTextRegistrationStore(
                  context.OutlookCaptureProfiles.Any(profile => profile.SourceRootId == root.Id)) &&
                 ((activity.ActivityKind == (int)SourceActivityKind.TextExtraction ||
                   activity.ActivityKind == (int)SourceActivityKind.MetadataExtraction) &&
-                 revision.Classification == AcceptedUtf8Classification && revision.ByteLength >= 0 &&
+                 (revision.Classification == AcceptedUtf8Classification ||
+                  revision.OriginKind == 0 && activity.ProcessorVersion == RetainedDefaultPolicy.Version &&
+                  activity.DescriptorFingerprint == RetainedDefaultPolicy.TextFingerprint &&
+                  context.SourceActivityRelations.Any(relation => relation.SuccessorActivityId == activity.Id &&
+                      relation.RelationshipKind == RetainedDefaultPolicy.RelationshipKind && relation.ReasonCode == RetainedDefaultPolicy.Version)) && revision.ByteLength >= 0 &&
                  (revision.ByteLength <= MaximumAcceptedUtf8TextBytes ||
                   revision.ByteLength <= MaximumOoxmlTextBytes && revision.OriginKind == 2 &&
                   context.SourceProcessorBranchMembers.Any(member =>
@@ -124,8 +128,7 @@ public sealed class SqlRetainedTextRegistrationStore(
                       context.SourceProcessorBranches.Any(branch =>
                           branch.Id == member.BranchId && branch.SourceRevisionId == revision.ParentSourceRevisionId &&
                           branch.State == (int)RetainedProcessorBranchState.Completed && branch.CompletedMemberCount == 1 &&
-                           branch.ProcessorVersion == OoxmlStructuralTextProcessor.Capability.ProcessorVersion &&
-                           branch.ProcessorFingerprint == OoxmlStructuralTextProcessor.Capability.ProcessorFingerprint &&
+                           (branch.ProcessorVersion == OoxmlStructuralTextProcessor.Capability.ProcessorVersion && branch.ProcessorFingerprint == OoxmlStructuralTextProcessor.Capability.ProcessorFingerprint || branch.ProcessorVersion == OoxmlStructuralTextProcessor.LegacyProcessorVersion && branch.ProcessorFingerprint == OoxmlStructuralTextProcessor.LegacyProcessorFingerprint) &&
                            context.SourceRevisions.Any(parent => parent.Id == branch.SourceRevisionId &&
                                parent.ContentSha256 == branch.InputSha256 && parent.SourceRootId == revision.SourceRootId) &&
                            context.SourceActivities.Any(ownerActivity =>
@@ -256,8 +259,17 @@ public sealed class SqlRetainedTextRegistrationStore(
             activity.Kind == SourceActivityKind.DocumentParsing &&
             activity.ProcessorVersion == documentContract.ProcessorVersion &&
             activity.DescriptorFingerprint == documentContract.ProcessorFingerprint;
+        var isPolicyText = sourceRevision is not null && sourceRoot is not null &&
+            await SqlDefaultRetainedPolicy.IsTextSuccessorAsync(context, sourceRoot, sourceRevision, activity, cancellationToken).ConfigureAwait(false);
+        if (activity.ProcessorVersion == RetainedDefaultPolicy.Version && !isPolicyText && activity.State == SourceActivityState.Pending)
+        {
+            await SqlDefaultRetainedPolicy.BlockStaleAsync(context, activity.Id.Value, null, timeProvider.GetUtcNow(), cancellationToken).ConfigureAwait(false);
+            await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            return false;
+        }
         var isUtf8Input = sourceRevision is not null &&
-            sourceRevision.Classification == AcceptedUtf8Classification &&
+            (sourceRevision.Classification == AcceptedUtf8Classification && activity.ProcessorVersion != RetainedDefaultPolicy.Version || isPolicyText) &&
             activity.Kind is SourceActivityKind.TextExtraction or SourceActivityKind.MetadataExtraction;
         if ((sourceRoot?.CrawlMode == (int)SourceDiscoveryMode.GitTracked && sourceRevision?.OriginKind == 0 && SourceClassifier.IsSourceTextExtension(sourceRevision.CanonicalPath)) ||
             activity.ProcessorVersion == RepositorySourceTextPolicy.ProcessorVersion ||
@@ -274,8 +286,7 @@ public sealed class SqlRetainedTextRegistrationStore(
                 context.SourceProcessorBranches.Any(branch =>
                     branch.Id == member.BranchId && branch.SourceRevisionId == sourceRevision.ParentSourceRevisionId &&
                     branch.State == (int)RetainedProcessorBranchState.Completed && branch.CompletedMemberCount == 1 &&
-                    branch.ProcessorVersion == OoxmlStructuralTextProcessor.Capability.ProcessorVersion &&
-                     branch.ProcessorFingerprint == OoxmlStructuralTextProcessor.Capability.ProcessorFingerprint &&
+                    (branch.ProcessorVersion == OoxmlStructuralTextProcessor.Capability.ProcessorVersion && branch.ProcessorFingerprint == OoxmlStructuralTextProcessor.Capability.ProcessorFingerprint || branch.ProcessorVersion == OoxmlStructuralTextProcessor.LegacyProcessorVersion && branch.ProcessorFingerprint == OoxmlStructuralTextProcessor.LegacyProcessorFingerprint) &&
                      context.SourceRevisions.Any(parent => parent.Id == branch.SourceRevisionId &&
                          parent.ContentSha256 == branch.InputSha256 && parent.SourceRootId == sourceRevision.SourceRootId) &&
                      context.SourceActivities.Any(ownerActivity =>
@@ -626,7 +637,7 @@ public sealed class SqlRetainedTextRegistrationStore(
             var verified = await ContainedFileReader.ReadAsync(
                 artifactRoot,
                 artifact.StoreRelativePath,
-                16L * 1024 * 1024,
+                SourcePolicyDefaults.MaximumTextBytes,
                 cancellationToken,
                 sourceRevision.ContentSha256,
                 sourceRevision.ByteLength).ConfigureAwait(false);
@@ -661,7 +672,7 @@ public sealed class SqlRetainedSourceReader(
     private readonly string _artifactRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(artifactRoot));
     private readonly PhysicalDirectoryLease _rootLease = PhysicalFileIdentity.OpenDirectoryLease(artifactRoot);
     private const long MaximumAcceptedBinaryBytes = 128L * 1024 * 1024;
-    private const long MaximumAcceptedUtf8TextBytes = 16L * 1024 * 1024;
+    private const long MaximumAcceptedUtf8TextBytes = SourcePolicyDefaults.MaximumTextBytes;
     private const long MaximumOoxmlTextBytes = 200L * 1024 * 1024;
 
     public async ValueTask<RetainedSourceBytes> ReadBytesAsync(SourceRevisionId sourceRevisionId, CancellationToken cancellationToken)
@@ -770,8 +781,7 @@ public sealed class SqlRetainedSourceReader(
                 context.SourceProcessorBranches.Any(branch =>
                     branch.Id == member.BranchId && branch.SourceRevisionId == child.ParentSourceRevisionId &&
                     branch.State == (int)RetainedProcessorBranchState.Completed && branch.CompletedMemberCount == 1 &&
-                    branch.ProcessorVersion == OoxmlStructuralTextProcessor.Capability.ProcessorVersion &&
-                    branch.ProcessorFingerprint == OoxmlStructuralTextProcessor.Capability.ProcessorFingerprint &&
+                    (branch.ProcessorVersion == OoxmlStructuralTextProcessor.Capability.ProcessorVersion && branch.ProcessorFingerprint == OoxmlStructuralTextProcessor.Capability.ProcessorFingerprint || branch.ProcessorVersion == OoxmlStructuralTextProcessor.LegacyProcessorVersion && branch.ProcessorFingerprint == OoxmlStructuralTextProcessor.LegacyProcessorFingerprint) &&
                     context.SourceRevisions.Any(parent => parent.Id == branch.SourceRevisionId &&
                         parent.ContentSha256 == branch.InputSha256 && parent.SourceRootId == child.SourceRootId) &&
                     context.SourceActivities.Any(ownerActivity =>
@@ -790,7 +800,25 @@ public sealed class SqlRetainedSourceReader(
     private async ValueTask<VerifiedRetainedSource> ReadVerifiedAsync(SourceRevisionId sourceRevisionId, CancellationToken cancellationToken) =>
         await ReadVerifiedAsync(sourceRevisionId, MaximumAcceptedBinaryBytes, cancellationToken).ConfigureAwait(false);
 
+    public async ValueTask<RetainedSourceReadLease> OpenReadAsync(
+        SourceRevisionId sourceRevisionId,
+        long maximumByteLength,
+        CancellationToken cancellationToken) =>
+        (await OpenVerifiedAsync(sourceRevisionId, maximumByteLength, cancellationToken).ConfigureAwait(false)).Lease;
+
     private async ValueTask<VerifiedRetainedSource> ReadVerifiedAsync(
+        SourceRevisionId sourceRevisionId,
+        long maximumByteLength,
+        CancellationToken cancellationToken)
+    {
+        var verified = await OpenVerifiedAsync(sourceRevisionId, maximumByteLength, cancellationToken).ConfigureAwait(false);
+        await using var lease = verified.Lease;
+        var bytes = new byte[checked((int)lease.ByteLength)];
+        await lease.Stream.ReadExactlyAsync(bytes, cancellationToken).ConfigureAwait(false);
+        return new VerifiedRetainedSource(sourceRevisionId, verified.CanonicalPath, bytes, lease.ContentSha256, lease.ByteLength);
+    }
+
+    private async ValueTask<VerifiedRetainedStream> OpenVerifiedAsync(
         SourceRevisionId sourceRevisionId,
         long maximumByteLength,
         CancellationToken cancellationToken)
@@ -837,7 +865,10 @@ public sealed class SqlRetainedSourceReader(
             privateRootLease = PhysicalFileIdentity.OpenDirectoryLease(selectedArtifactRoot);
         }
 
-        using (privateRootLease)
+        PhysicalDirectoryLease? sha256Lease = null;
+        PhysicalDirectoryLease? shardLease = null;
+        FileStream? stream = null;
+        try
         {
             var selectedRootLease = privateRootLease ?? _rootLease;
             var artifactPath = ResolveArtifactPath(
@@ -849,16 +880,17 @@ public sealed class SqlRetainedSourceReader(
             {
                 throw new InvalidDataException("The retained artifact exceeds the accepted retained-byte limit.");
             }
-            var bytes = new byte[checked((int)source.ByteLength)];
-            using var sha256Lease = OpenContainedLease(
+            sha256Lease = OpenContainedLease(
                 Path.Combine(selectedArtifactRoot, "sha256"),
                 selectedArtifactRoot,
                 selectedRootLease);
-            using var shardLease = OpenContainedLease(
+            shardLease = OpenContainedLease(
                 Path.GetDirectoryName(artifactPath)!,
                 selectedArtifactRoot,
                 selectedRootLease);
-            using var artifactHandle = PhysicalFileIdentity.OpenReadNoFollow(artifactPath);
+            var artifactHandle = PhysicalFileIdentity.OpenReadNoFollow(artifactPath);
+            try { stream = new FileStream(artifactHandle, FileAccess.Read, bufferSize: 81920, isAsync: true); }
+            catch { artifactHandle.Dispose(); throw; }
             var finalArtifactPath = PhysicalFileIdentity.GetFinalPath(artifactHandle);
             var finalShardPath = Path.GetDirectoryName(finalArtifactPath)
                 ?? throw new InvalidDataException("The retained artifact final path has no shard directory.");
@@ -869,26 +901,22 @@ public sealed class SqlRetainedSourceReader(
             {
                 throw new InvalidDataException("The retained artifact final file does not belong to its leased shard.");
             }
-            await using var stream = new FileStream(artifactHandle, FileAccess.Read, bufferSize: 81920, isAsync: true);
             if (stream.Length != source.ByteLength)
             {
                 throw new InvalidDataException("The retained artifact has an unexpected byte length.");
             }
-            var offset = 0;
-            using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-            while (offset < bytes.Length)
-            {
-                var read = await stream.ReadAsync(bytes.AsMemory(offset), cancellationToken).ConfigureAwait(false);
-                if (read == 0) throw new InvalidDataException("The retained artifact ended before its recorded length.");
-                hash.AppendData(bytes, offset, read);
-                offset += read;
-            }
-            if (stream.ReadByte() != -1 || !string.Equals(Convert.ToHexStringLower(hash.GetHashAndReset()), source.ContentSha256, StringComparison.Ordinal))
-            {
-                throw new InvalidDataException("The retained artifact checksum is invalid.");
-            }
-
-            return new VerifiedRetainedSource(sourceRevisionId, source.CanonicalPath, bytes, source.ContentSha256, source.ByteLength);
+            var ownership = new RetainedDirectoryOwnership(privateRootLease, sha256Lease, shardLease);
+            var lease = await RetainedSourceReadLease.VerifyAsync(sourceRevisionId, stream, source.ContentSha256,
+                source.ByteLength, maximumByteLength, cancellationToken, ownership).ConfigureAwait(false);
+            return new VerifiedRetainedStream(lease, source.CanonicalPath);
+        }
+        catch
+        {
+            if (stream is not null) await stream.DisposeAsync().ConfigureAwait(false);
+            shardLease?.Dispose();
+            sha256Lease?.Dispose();
+            privateRootLease?.Dispose();
+            throw;
         }
     }
 
@@ -940,6 +968,16 @@ public sealed class SqlRetainedSourceReader(
         path.StartsWith(Path.EndsInDirectorySeparator(root) ? root : root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
 
     public void Dispose() => _rootLease.Dispose();
+
+    private sealed record VerifiedRetainedStream(RetainedSourceReadLease Lease, string CanonicalPath);
+
+    private sealed class RetainedDirectoryOwnership(params IDisposable?[] leases) : IDisposable
+    {
+        public void Dispose()
+        {
+            foreach (var lease in leases.Reverse()) lease?.Dispose();
+        }
+    }
 
     private sealed record VerifiedRetainedSource(
         SourceRevisionId SourceRevisionId,

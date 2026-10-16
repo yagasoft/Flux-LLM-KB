@@ -309,9 +309,9 @@ public sealed class RetainedTextPipelineIntegrationTests(NativeSqlServerFixture 
     }
 
     [NativeSqlServerFact]
-    public async Task Retained_reader_rejects_artifacts_larger_than_the_16_mib_text_limit_before_reading_them()
+    public async Task Retained_reader_rejects_artifacts_larger_than_the_32_mib_text_limit_before_reading_them()
     {
-        const int maximumTextBytes = 16 * 1024 * 1024;
+        const int maximumTextBytes = 32 * 1024 * 1024;
         var bytes = new byte[maximumTextBytes + 1];
         Array.Fill(bytes, (byte)'x');
         var hash = Convert.ToHexStringLower(SHA256.HashData(bytes));
@@ -336,9 +336,9 @@ public sealed class RetainedTextPipelineIntegrationTests(NativeSqlServerFixture 
     }
 
     [NativeSqlServerFact]
-    public async Task Retained_reader_accepts_text_above_16_mib_only_for_the_single_completed_ooxml_child()
+    public async Task Retained_reader_accepts_text_above_32_mib_only_for_the_single_completed_ooxml_child()
     {
-        const int byteLength = 16 * 1024 * 1024 + 1;
+        const int byteLength = 32 * 1024 * 1024 + 1;
         var bytes = Enumerable.Repeat((byte)'x', byteLength).ToArray();
         var hash = Convert.ToHexStringLower(SHA256.HashData(bytes));
         var root = Path.Combine(Path.GetTempPath(), $"flux-retained-ooxml-{Guid.NewGuid():N}");
@@ -364,7 +364,7 @@ public sealed class RetainedTextPipelineIntegrationTests(NativeSqlServerFixture 
     [NativeSqlServerFact]
     public async Task Retained_registration_rejects_large_text_with_forged_ooxml_origin_but_accepts_exact_branch_binding()
     {
-        const int byteLength = 16 * 1024 * 1024 + 1;
+        const int byteLength = 32 * 1024 * 1024 + 1;
         var hash = new string('f', 64);
         var revisionId = await SeedRevisionAsync(hash, byteLength, Path.Combine("sha256", "ff", $"{hash}.bin"));
         var activity = SourceActivity.Create(new SourceRevisionId(revisionId), SourceActivityKind.TextExtraction,

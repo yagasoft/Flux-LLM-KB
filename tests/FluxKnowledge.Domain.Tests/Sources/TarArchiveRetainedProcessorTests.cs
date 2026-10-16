@@ -87,7 +87,7 @@ public sealed class TarArchiveRetainedProcessorTests
     {
         var entries = Enumerable.Range(0, 257).Select(index => ($"{index}.txt", "x"));
         var tooMany = CreateTar(TarEntryFormat.Ustar, entries);
-        var big = CreateTar(TarEntryFormat.Ustar, TarEntryType.RegularFile, "large.txt", new string('x', 16 * 1024 * 1024 + 1));
+        var big = CreateTar(TarEntryFormat.Ustar, TarEntryType.RegularFile, "large.txt", new string('x', 32 * 1024 * 1024 + 1));
         var writer = new RecordingStreamWriter();
 
         var tooManyError = await Assert.ThrowsAsync<RetainedProcessorException>(() => ProcessAsync(tooMany, writer));
@@ -169,9 +169,9 @@ public sealed class TarArchiveRetainedProcessorTests
     }
 
     [Fact]
-    public async Task Archive_larger_than_64_mib_is_rejected_without_opening_a_tar_member()
+    public async Task Archive_larger_than_128_mib_is_rejected_without_opening_a_tar_member()
     {
-        var bytes = new byte[64 * 1024 * 1024 + 1];
+        var bytes = new byte[128 * 1024 * 1024 + 1];
         var writer = new RecordingStreamWriter();
 
         var error = await Assert.ThrowsAsync<RetainedProcessorException>(() => ProcessAsync(bytes, writer));
@@ -200,7 +200,7 @@ public sealed class TarArchiveRetainedProcessorTests
         var options = new RetainedProcessorOptions
         {
             MaximumCompressedInputBytes = 129L * 1024 * 1024,
-            MaximumMemberBytes = 128L * 1024 * 1024
+            MaximumMemberBytes = 128L * 1024 * 1024, MaximumExpandedBytes = 128L * 1024 * 1024
         };
 
         var error = await Assert.ThrowsAsync<RetainedProcessorException>(() => ProcessAsync(archive, writer, options));

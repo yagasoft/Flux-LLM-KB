@@ -22,7 +22,8 @@ public sealed class RetainedCsharpCodeProcessor(
 {
     public const string ProcessorKind = "retained-csharp-code";
     public const string ProcessorVersion = "phase-5-retained-csharp-code-v1";
-    public const string HandlerImplementationId = "retained-csharp-roslyn-syntax-v1";
+    public const string HandlerImplementationId = "retained-csharp-roslyn-syntax-v2";
+    public const string LegacyHandlerImplementationId = "retained-csharp-roslyn-syntax-v1";
     public const int MaximumClaimBatchSize = 8;
     public const int MaximumInputBytes = 4 * 1024 * 1024;
     public const int MaximumDecodedUtf16CodeUnits = 4_000_000;
@@ -32,6 +33,7 @@ public sealed class RetainedCsharpCodeProcessor(
     public const int MaximumReferences = 100_000;
     public const int MaximumIdentifierUtf16CodeUnits = 1_024;
     public const int MaximumSignatureUtf16CodeUnits = 4_096;
+    public const int MaximumFactTextUtf16CodeUnits = 16 * 1024 * 1024;
     public const int MaximumDiagnostics = 256;
     public const int MaximumDiagnosticMessageUtf16CodeUnits = 1_024;
 
@@ -54,7 +56,7 @@ public sealed class RetainedCsharpCodeProcessor(
     private static readonly string CanonicalParserFingerprint = Hash(CanonicalParserWireRecord);
 
     public static readonly SourceCapabilityDescriptor Capability = new(
-        new Guid("08dd66fb-6502-4b31-a4a5-51e8cc66f916"),
+        new Guid("8148aa4d-cc8f-4a46-adea-b6d589597ed9"),
         ProcessorKind,
         ProcessorVersion,
         ExecutionClass.InProcess,
@@ -66,6 +68,13 @@ public sealed class RetainedCsharpCodeProcessor(
     public static string DescriptorWireRecord => CanonicalDescriptorWireRecord;
     public static string ParserWireRecord => CanonicalParserWireRecord;
     public static string ParserFingerprint => CanonicalParserFingerprint;
+    public static readonly string LegacyDescriptorFingerprint = Hash(BuildDescriptorWireRecord(legacy: true));
+    public static readonly string LegacyParserFingerprint = Hash(BuildParserWireRecord(legacy: true));
+
+    public static bool IsKnownCompletionIdentity(string version, string descriptor, string parser, string implementation) =>
+        version == ProcessorVersion &&
+        (descriptor == Capability.ProcessorFingerprint && parser == ParserFingerprint && implementation == HandlerImplementationId ||
+         descriptor == LegacyDescriptorFingerprint && parser == LegacyParserFingerprint && implementation == LegacyHandlerImplementationId);
 
     public static string ComputeDescriptorFingerprint() => CanonicalDescriptorFingerprint;
 
@@ -213,6 +222,7 @@ public sealed class RetainedCsharpCodeProcessor(
         }
 
         var rawSymbols = new List<RawSymbol>();
+        long factTextLength = 0;
         var declarationContexts = new Dictionary<SyntaxNode, DeclarationContext>();
         foreach (var node in root.DescendantNodesAndSelf(descendIntoTrivia: false))
         {
@@ -223,10 +233,6 @@ public sealed class RetainedCsharpCodeProcessor(
             }
 
             var signature = RenderSignature(node);
-            if (signature.Length > MaximumSignatureUtf16CodeUnits)
-            {
-                return Blocked(claim, "csharp-code-signature-limit");
-            }
             if (rawSymbols.Count + 1 > MaximumSymbols)
             {
                 return Blocked(claim, "csharp-code-symbol-limit");
@@ -234,6 +240,9 @@ public sealed class RetainedCsharpCodeProcessor(
 
             var parentRawOrdinal = NearestDeclaration(node.Parent, declarationContexts)?.RawOrdinal ?? -1;
             var qualifiedName = QualifiedName(node, description.LocalName, declarationContexts);
+            if (qualifiedName.Length > MaximumSignatureUtf16CodeUnits) return Blocked(claim, "csharp-code-qualified-name-limit");
+            factTextLength += signature.Length + qualifiedName.Length + description.LocalName.Length;
+            if (factTextLength > MaximumFactTextUtf16CodeUnits) return Blocked(claim, "csharp-code-fact-text-limit");
             var raw = new RawSymbol(
                 rawSymbols.Count,
                 description.KindCode,
@@ -263,10 +272,8 @@ public sealed class RetainedCsharpCodeProcessor(
             foreach (var reference in nodeReferences)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                if (reference.TargetDisplay.Length > MaximumSignatureUtf16CodeUnits)
-                {
-                    return Blocked(claim, "csharp-code-signature-limit");
-                }
+                factTextLength += reference.TargetDisplay.Length;
+                if (factTextLength > MaximumFactTextUtf16CodeUnits) return Blocked(claim, "csharp-code-fact-text-limit");
                 if (rawReferences.Count + 1 > MaximumReferences)
                 {
                     return Blocked(claim, "csharp-code-reference-limit");
@@ -352,13 +359,14 @@ public sealed class RetainedCsharpCodeProcessor(
                 rawSymbols,
                 emittedSymbolOrdinals,
                 includeSelf: true);
+            var boundedSignature = BoundDisplay(raw.RenderedSignature);
             var fingerprint = ComputeSymbolFingerprint(
                 documentFingerprint,
                 ordinal,
                 raw.KindCode,
                 raw.LocalName,
                 raw.QualifiedName,
-                raw.RenderedSignature,
+                boundedSignature,
                 raw.Modifiers,
                 parent,
                 raw.SpanStart,
@@ -369,7 +377,7 @@ public sealed class RetainedCsharpCodeProcessor(
                 raw.Kind,
                 raw.LocalName,
                 raw.QualifiedName,
-                raw.RenderedSignature,
+                boundedSignature,
                 raw.Modifiers,
                 parent,
                 raw.SpanStart,
@@ -395,12 +403,13 @@ public sealed class RetainedCsharpCodeProcessor(
                 nullableSourceOrdinal = null;
             }
             var ordinal = references.Count;
+            var boundedDisplay = BoundDisplay(raw.TargetDisplay);
             references.Add(new RetainedCsharpCodeReference(
                 ordinal,
                 raw.KindCode,
                 raw.Kind,
                 nullableSourceOrdinal,
-                raw.TargetDisplay,
+                boundedDisplay,
                 raw.SpanStart,
                 raw.SpanLength,
                 ComputeReferenceFingerprint(
@@ -408,7 +417,7 @@ public sealed class RetainedCsharpCodeProcessor(
                     ordinal,
                     raw.KindCode,
                     nullableSourceOrdinal,
-                    raw.TargetDisplay,
+                    boundedDisplay,
                     raw.SpanStart,
                     raw.SpanLength)));
         }
@@ -856,6 +865,15 @@ public sealed class RetainedCsharpCodeProcessor(
         return depth;
     }
 
+    private static string BoundDisplay(string value)
+    {
+        if (value.Length <= MaximumSignatureUtf16CodeUnits) return value;
+        var suffix = "… [truncated sha256:" + Hash(value) + "]";
+        var length = MaximumSignatureUtf16CodeUnits - suffix.Length;
+        if (char.IsHighSurrogate(value[length - 1])) length--;
+        return value[..length] + suffix;
+    }
+
     private static string RenderSignature(SyntaxNode node)
     {
         if (node is BaseNamespaceDeclarationSyntax namespaceDeclaration)
@@ -1253,16 +1271,16 @@ public sealed class RetainedCsharpCodeProcessor(
         IEnumerable<string> codes) => Hash(BlockedCompletionWireRecord(
             revision, sha256, diagnostics, withheldDiagnostics, codes));
 
-    private static string BuildDescriptorWireRecord() => Record(
+    private static string BuildDescriptorWireRecord(bool legacy = false) => Record(
         ("frame", Text("retained-csharp-descriptor-v1")),
-        ("capability_id", Text("08dd66fb65024b31a4a551e8cc66f916")),
+        ("capability_id", Text(legacy ? "08dd66fb65024b31a4a551e8cc66f916" : "8148aa4dcc8f4a46adeab6d589597ed9")),
         ("processor_kind", Text(ProcessorKind)),
         ("processor_version", Text(ProcessorVersion)),
         ("execution_class", UInt((int)ExecutionClass.InProcess)),
         ("activity_kind", UInt((int)SourceActivityKind.CodeParsing)),
         ("accepted_classification", Text("AcceptedUtf8Text")),
         ("output_contract", Text("retained:csharp-code-facts-v1")),
-        ("handler_implementation_id", Text(HandlerImplementationId)),
+        ("handler_implementation_id", Text(legacy ? LegacyHandlerImplementationId : HandlerImplementationId)),
         ("roslyn_assembly_version", Text("5.0.0.0")),
         ("language_version", Text("CSharp14")),
         ("utf8_policy", Text("utf8-strict-optional-bom")),
@@ -1275,15 +1293,16 @@ public sealed class RetainedCsharpCodeProcessor(
         ("limit_identifier_utf16_code_units", UInt(MaximumIdentifierUtf16CodeUnits)),
         ("limit_signature_utf16_code_units", UInt(MaximumSignatureUtf16CodeUnits)),
         ("limit_diagnostics", UInt(MaximumDiagnostics)),
-        ("limit_diagnostic_message_utf16_code_units", UInt(MaximumDiagnosticMessageUtf16CodeUnits)));
+        ("limit_diagnostic_message_utf16_code_units", UInt(MaximumDiagnosticMessageUtf16CodeUnits))) +
+        (legacy ? string.Empty : "|" + Record(("limit_fact_text_utf16_code_units", UInt(MaximumFactTextUtf16CodeUnits))));
 
-    private static string BuildParserWireRecord() => Record(
+    private static string BuildParserWireRecord(bool legacy = false) => Record(
         ("frame", Text("retained-csharp-parser-v1")),
-        ("handler_implementation_id", Text(HandlerImplementationId)),
+        ("handler_implementation_id", Text(legacy ? LegacyHandlerImplementationId : HandlerImplementationId)),
         ("roslyn_assembly_version", Text("5.0.0.0")),
         ("language_version", Text("CSharp14")),
         ("utf8_policy", Text("utf8-strict-optional-bom")),
-        ("fact_normalisation_revision", Text("without-trivia-one-line-v1")),
+        ("fact_normalisation_revision", Text(legacy ? "without-trivia-one-line-v1" : "without-trivia-one-line-bounded-hash-v2")),
         ("traversal_limit_precedence_revision", Text("source-preorder-v1")),
         ("limit_input_bytes", UInt(MaximumInputBytes)),
         ("limit_decoded_utf16_code_units", UInt(MaximumDecodedUtf16CodeUnits)),
@@ -1295,7 +1314,8 @@ public sealed class RetainedCsharpCodeProcessor(
         ("limit_signature_utf16_code_units", UInt(MaximumSignatureUtf16CodeUnits)),
         ("limit_diagnostics", UInt(MaximumDiagnostics)),
         ("limit_diagnostic_message_utf16_code_units", UInt(MaximumDiagnosticMessageUtf16CodeUnits)),
-        ("syntax_invalid_outcome", Text("csharp-code-syntax-invalid")));
+        ("syntax_invalid_outcome", Text("csharp-code-syntax-invalid"))) +
+        (legacy ? string.Empty : "|" + Record(("limit_fact_text_utf16_code_units", UInt(MaximumFactTextUtf16CodeUnits))));
 
     private static string Record(params (string Name, string Value)[] values) =>
         string.Join('|', values.Select(value => Text(value.Name) + "|" + value.Value));

@@ -12,6 +12,25 @@ namespace FluxKnowledge.Domain.Tests.Sources;
 public sealed class ZipArchiveRetainedProcessorTests
 {
     [Fact]
+    public async Task Nested_zip_uses_the_same_total_budget_and_extracts_safe_text_at_two_levels()
+    {
+        var archive = CreateZip("outer.zip", CreateZip("inner.zip", CreateZip("report.rdl", "safe nested report")));
+        var hash = Convert.ToHexStringLower(SHA256.HashData(archive));
+        var claim = new RetainedProcessorClaim(Guid.NewGuid(), SourceRevisionId.New(), "parent", hash, "owner", 1, DateTimeOffset.UtcNow.AddMinutes(5));
+        var writer = new RecordingStreamWriter();
+        var completion = await new ZipArchiveRetainedProcessor(writer).ProcessAsync(claim,
+            new RetainedSourceBytes(claim.SourceRevisionId, archive, hash, archive.Length), new RetainedProcessorOptions(), CancellationToken.None);
+        Assert.Single(completion.Members);
+        Assert.Equal("safe nested report".Length, writer.BytesWritten);
+        var bounded = new RetainedProcessorOptions { MaximumExpandedBytes = archive.Length - 1 };
+        var blockedWriter = new RecordingStreamWriter();
+        var error = await Assert.ThrowsAsync<RetainedProcessorException>(() => new ZipArchiveRetainedProcessor(blockedWriter).ProcessAsync(claim,
+            new RetainedSourceBytes(claim.SourceRevisionId, archive, hash, archive.Length), bounded, CancellationToken.None).AsTask());
+        Assert.Equal("archive-expanded-total-limit", error.OutcomeCode);
+        Assert.Equal(0, blockedWriter.BytesWritten);
+    }
+
+    [Fact]
     public void Archive_member_identity_uses_a_fingerprint_not_the_raw_entry_name()
     {
         var identity = ArchiveMemberIdentity.Create("parent-stable", "docs/readme.txt");
@@ -58,10 +77,10 @@ public sealed class ZipArchiveRetainedProcessorTests
     {
         var descriptor = ZipArchiveRetainedProcessor.Capability;
 
-        Assert.Equal(new Guid("1f0fd4d6-00e4-4838-8e3c-ee1a482017dc"), descriptor.Id);
+        Assert.Equal(new Guid("2ebba08c-d6af-4aca-ab9f-91a93bca93b5"), descriptor.Id);
         Assert.Equal("archive-zip-expand", descriptor.ProcessorKind);
-        Assert.Equal("phase-5-zip-v2", descriptor.ProcessorVersion);
-        Assert.Equal("phase-5-zip-retained-archive-v2", descriptor.ProcessorFingerprint);
+        Assert.Equal("phase-5-zip-v3", descriptor.ProcessorVersion);
+        Assert.Equal("phase-5-zip-retained-archive-v3", descriptor.ProcessorFingerprint);
         Assert.Equal("ArchiveZip", descriptor.AcceptedClassification);
         Assert.Equal("retained:archive-zip-expand", descriptor.OutputContract);
     }
@@ -385,7 +404,7 @@ public sealed class ZipArchiveRetainedProcessorTests
         cases.Add("archive-entry-count-limit", CreateZip(Enumerable.Range(0, 257).Select(index => ($"{index}.txt", "x"))), defaultOptions);
         cases.Add("archive-entry-path-invalid", CreateZip(new string('p', 509) + ".txt", "x"), defaultOptions);
         cases.Add("archive-compression-ratio-limit", CreateZip("ratio.txt", new string('x', 16_001)), defaultOptions);
-        cases.Add("nested-archive-depth-limit", CreateZip("nested.zip", CreateZip("inner.txt", "x")), defaultOptions);
+        cases.Add("nested-archive-depth-limit", CreateZip("nested.zip", CreateZip("second.zip", CreateZip("third.zip", CreateZip("inner.txt", "x")))), defaultOptions);
         cases.Add("archive-entry-link-invalid", PatchExternalAttributes(CreateZip("link.txt", "x"), 0xA000), defaultOptions);
         cases.Add("archive-entry-link-invalid", PatchWindowsReparsePoint(CreateZip("reparse.txt", "x")), defaultOptions);
         cases.Add("archive-entry-encrypted", PatchGeneralPurposeFlags(CreateZip("encrypted.txt", "x"), 0x0001), defaultOptions);
@@ -396,9 +415,9 @@ public sealed class ZipArchiveRetainedProcessorTests
     }
 
     [Fact]
-    public async Task Archive_larger_than_64_mib_is_rejected_without_opening_a_member()
+    public async Task Archive_larger_than_128_mib_is_rejected_without_opening_a_member()
     {
-        var bytes = new byte[64 * 1024 * 1024 + 1];
+        var bytes = new byte[128 * 1024 * 1024 + 1];
         var writer = new RecordingStreamWriter();
         var hash = Convert.ToHexStringLower(SHA256.HashData(bytes));
         var claim = new RetainedProcessorClaim(Guid.NewGuid(), SourceRevisionId.New(), "parent", hash, "owner", 1, DateTimeOffset.UtcNow.AddMinutes(5));
@@ -417,7 +436,7 @@ public sealed class ZipArchiveRetainedProcessorTests
         var writer = new RecordingStreamWriter();
         var hash = Convert.ToHexStringLower(SHA256.HashData(archive));
         var claim = new RetainedProcessorClaim(Guid.NewGuid(), SourceRevisionId.New(), "parent", hash, "owner", 1, DateTimeOffset.UtcNow.AddMinutes(5));
-        var options = new RetainedProcessorOptions { MaximumCompressionRatio = 100_000, MaximumMemberBytes = 128L * 1024 * 1024 };
+        var options = new RetainedProcessorOptions { MaximumCompressionRatio = 100_000, MaximumMemberBytes = 128L * 1024 * 1024, MaximumExpandedBytes = 128L * 1024 * 1024 };
 
         var failure = await Assert.ThrowsAsync<RetainedProcessorException>(async () => await new ZipArchiveRetainedProcessor(writer)
             .ProcessAsync(claim, new RetainedSourceBytes(claim.SourceRevisionId, archive, hash, archive.Length), options, CancellationToken.None));
@@ -427,9 +446,9 @@ public sealed class ZipArchiveRetainedProcessorTests
     }
 
     [Fact]
-    public async Task Archive_member_larger_than_16_mib_is_rejected_before_any_member_is_written()
+    public async Task Archive_member_larger_than_32_mib_is_rejected_before_any_member_is_written()
     {
-        var archive = CreateZip("large.txt", new string('x', 16 * 1024 * 1024 + 1));
+        var archive = CreateZip("large.txt", new string('x', 32 * 1024 * 1024 + 1));
         var writer = new RecordingStreamWriter();
         var hash = Convert.ToHexStringLower(SHA256.HashData(archive));
         var claim = new RetainedProcessorClaim(Guid.NewGuid(), SourceRevisionId.New(), "parent", hash, "owner", 1, DateTimeOffset.UtcNow.AddMinutes(5));
@@ -445,7 +464,7 @@ public sealed class ZipArchiveRetainedProcessorTests
     [Fact]
     public async Task Nested_member_after_a_safe_member_is_preflighted_before_any_artifact_write()
     {
-        var archive = CreateZip(new (string Name, byte[] Content)[] { ("safe.txt", Encoding.UTF8.GetBytes("safe")), ("nested.zip", CreateZip("inner.txt", "x")) });
+        var archive = CreateZip(new (string Name, byte[] Content)[] { ("safe.txt", Encoding.UTF8.GetBytes("safe")), ("nested.zip", CreateZip("second.zip", CreateZip("third.zip", CreateZip("inner.txt", "x")))) });
         var writer = new RecordingStreamWriter();
         var hash = Convert.ToHexStringLower(SHA256.HashData(archive));
         var claim = new RetainedProcessorClaim(Guid.NewGuid(), SourceRevisionId.New(), "parent", hash, "owner", 1, DateTimeOffset.UtcNow.AddMinutes(5));

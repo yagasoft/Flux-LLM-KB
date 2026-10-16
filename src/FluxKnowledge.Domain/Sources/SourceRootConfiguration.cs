@@ -70,12 +70,11 @@ public sealed record SourceRootConfiguration
 
         var effectiveIncludePatterns = CopyRules(includePatterns, nameof(includePatterns));
         var effectiveExcludePatterns = CopyRules(excludePatterns, nameof(excludePatterns));
-        var effectiveAllowedClassifications = CopyRules(allowedClassifications, nameof(allowedClassifications));
+        var effectiveAllowedClassifications = CopyRules(allowedClassifications ?? SourcePolicyDefaults.AllowedClassifications, nameof(allowedClassifications));
         if (!Enum.IsDefined(discoveryMode) ||
-            effectiveAllowedClassifications.Contains("text/x-source-code", StringComparer.OrdinalIgnoreCase) && discoveryMode != SourceDiscoveryMode.GitTracked ||
             discoveryMode == SourceDiscoveryMode.GitTracked && (!recursive || followLinks))
         {
-            throw new DomainInvariantException("Git source discovery requires a recognised mode, recursive scanning and no links; source text requires Git discovery.");
+            throw new DomainInvariantException("Git source discovery requires a recognised mode, recursive scanning and no links.");
         }
         var effectiveReconciliationCadence = reconciliationCadence ?? TimeSpan.FromMinutes(15);
         if (effectiveReconciliationCadence <= TimeSpan.Zero)

@@ -1388,6 +1388,7 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
         {
             await using var context = await contextFactory.CreateDbContextAsync(retryCancellationToken).ConfigureAwait(false);
             await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, retryCancellationToken).ConfigureAwait(false);
+            await SqlPublishedPassageSelection.AcquireFenceAsync(context, retryCancellationToken).ConfigureAwait(false);
             var now = await DatabaseUtcNowAsync(context, retryCancellationToken).ConfigureAwait(false);
             var expiry = now.AddMinutes(5);
             var branches = await context.SourceProcessorBranches.FromSqlInterpolated($"""
@@ -1426,6 +1427,11 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
                 1,
                 RetainedCsharpCodeProcessor.MaximumClaimBatchSize)).ToListAsync(retryCancellationToken).ConfigureAwait(false);
             var attempts = new Dictionary<Guid, Guid>();
+            var currentBranches = new List<SourceProcessorBranchEntity>();
+            foreach (var candidate in branches)
+                if (await SqlDefaultRetainedPolicy.BindingIsCurrentAsync(context, candidate.SourceActivityId, retryCancellationToken).ConfigureAwait(false)) currentBranches.Add(candidate);
+                else await SqlDefaultRetainedPolicy.BlockStaleAsync(context, candidate.SourceActivityId, candidate, now, retryCancellationToken).ConfigureAwait(false);
+            branches = currentBranches;
             foreach (var branch in branches)
             {
                 if (branch.State == (int)RetainedProcessorBranchState.Running && branch.LeaseExpiresAtUtc < now)
@@ -1493,6 +1499,7 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
         {
         await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken).ConfigureAwait(false);
+        await SqlPublishedPassageSelection.AcquireFenceAsync(context, cancellationToken).ConfigureAwait(false);
         var receipt = await context.SourceProcessorCodeCompletionReceipts.FromSqlInterpolated($"SELECT * FROM [SourceProcessorCodeCompletionReceipts] WITH (UPDLOCK, HOLDLOCK) WHERE [SourceProcessorBranchId] = {claim.BranchId}").SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
         if (receipt is not null)
         {
@@ -1521,6 +1528,14 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
         if (branch is null || attempt is null || activity is null || revision is null || artifact is null)
         {
             return new RetainedCsharpCodeCompletionWriteResult(false, false, "processor-fence-invalid", null);
+        }
+
+        if (!await SqlDefaultRetainedPolicy.BindingIsCurrentAsync(context, activity.Id, cancellationToken).ConfigureAwait(false))
+        {
+            await SqlDefaultRetainedPolicy.BlockStaleAsync(context, activity.Id, branch, await DatabaseUtcNowAsync(context, cancellationToken).ConfigureAwait(false), cancellationToken).ConfigureAwait(false);
+            await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            return new RetainedCsharpCodeCompletionWriteResult(false, false, "policy-binding-stale", null);
         }
 
         var now = await DatabaseUtcNowAsync(context, cancellationToken).ConfigureAwait(false);
@@ -1809,6 +1824,7 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
         {
         await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken).ConfigureAwait(false);
+        await SqlPublishedPassageSelection.AcquireFenceAsync(context, cancellationToken).ConfigureAwait(false);
         var now = await DatabaseUtcNowAsync(context, cancellationToken).ConfigureAwait(false);
         var expiry = now.AddMinutes(5);
         var branches = await context.SourceProcessorBranches
@@ -1845,6 +1861,11 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
             .ThenBy(value => value.Id)
             .Take(Math.Clamp(maximumCount, 1, RetainedProcessorOptions.MaximumAutomaticReplayBatchSize))
             .ToListAsync(cancellationToken).ConfigureAwait(false);
+        var currentBranches = new List<SourceProcessorBranchEntity>();
+        foreach (var candidate in branches)
+            if (await SqlDefaultRetainedPolicy.BindingIsCurrentAsync(context, candidate.SourceActivityId, cancellationToken).ConfigureAwait(false)) currentBranches.Add(candidate);
+            else await SqlDefaultRetainedPolicy.BlockStaleAsync(context, candidate.SourceActivityId, candidate, now, cancellationToken).ConfigureAwait(false);
+        branches = currentBranches;
         foreach (var branch in branches)
         {
             if (branch.State == (int)RetainedProcessorBranchState.Running && branch.LeaseExpiresAtUtc < now)
@@ -1877,6 +1898,7 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
         {
         await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken).ConfigureAwait(false);
+        await SqlPublishedPassageSelection.AcquireFenceAsync(context, cancellationToken).ConfigureAwait(false);
         var now = await DatabaseUtcNowAsync(context, cancellationToken).ConfigureAwait(false);
         var forceRequest = await LockClaimedForceRequestAsync(context, claim, cancellationToken).ConfigureAwait(false);
         var branch = await context.SourceProcessorBranches
@@ -1896,6 +1918,13 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
                 """)
             .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
         if (branch is null) return false;
+        if (!await SqlDefaultRetainedPolicy.BindingIsCurrentAsync(context, branch.SourceActivityId, cancellationToken).ConfigureAwait(false))
+        {
+            await SqlDefaultRetainedPolicy.BlockStaleAsync(context, branch.SourceActivityId, branch, now, cancellationToken).ConfigureAwait(false);
+            await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            return false;
+        }
         var parent = await context.SourceRevisions.FromSqlInterpolated($"""
             SELECT *
             FROM [SourceRevisions] WITH (UPDLOCK, HOLDLOCK)
@@ -2766,10 +2795,10 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
     private static string EventKind(string? processorFingerprint) => processorFingerprint switch
     {
         "phase-5-zip-retained-archive-v1" => "archive_zip",
-        "phase-5-zip-retained-archive-v2" => "archive_zip",
-        "phase-5-tar-retained-archive-v1" => "archive_tar",
-        "phase-5-ooxml-retained-structural-v1" => "document_ooxml",
-        "phase-5-media-metadata-retained-v1" => "media_metadata",
+        "phase-5-zip-retained-archive-v2" or "phase-5-zip-retained-archive-v3" => "archive_zip",
+        "phase-5-tar-retained-archive-v1" or "phase-5-tar-retained-archive-v2" => "archive_tar",
+        "phase-5-ooxml-retained-structural-v1" or "phase-5-ooxml-retained-structural-v2" => "document_ooxml",
+        "phase-5-media-metadata-retained-v1" or "phase-5-media-metadata-retained-v2" => "media_metadata",
         _ => "retained_processor"
     };
 

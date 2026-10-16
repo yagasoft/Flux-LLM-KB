@@ -25,7 +25,10 @@ public sealed class MediaMetadataRetainedProcessor(
     ILocalPrivateContentDisclosure disclosure,
     IMediaMetadataParser? parser = null)
 {
+    public const string LegacyProcessorVersion = "phase-5-media-metadata-v1";
+    public const string LegacyProcessorFingerprint = "phase-5-media-metadata-retained-v1";
     public const long MaximumInputBytes = 64L * 1024 * 1024;
+    public const long MaximumRetainedInputBytes = 1024L * 1024 * 1024;
     public const long MaximumParserReadBytes = 96L * 1024 * 1024;
     public const int MaximumMetadataDirectories = 128;
     public const int MaximumManifestUtf8Bytes = 1_024;
@@ -33,14 +36,18 @@ public sealed class MediaMetadataRetainedProcessor(
     private readonly IMediaMetadataParser _parser = parser ?? new MetadataExtractorMediaMetadataParser();
 
     public static readonly SourceCapabilityDescriptor Capability = new(
-        new Guid("9a956b70-7f10-416a-ab0d-1f5b817988f0"),
+        new Guid("98f5a34d-bcc2-4d06-a5c3-3af52e302b21"),
         "media-metadata",
-        "phase-5-media-metadata-v1",
+        "phase-5-media-metadata-v2",
         ExecutionClass.InProcess,
-        "phase-5-media-metadata-retained-v1",
+        "phase-5-media-metadata-retained-v2",
         SourceActivityKind.TextExtraction,
         "MediaMetadata",
         "retained:media-metadata-v1");
+
+    public static bool IsKnownProcessor(string version, string fingerprint) =>
+        version == Capability.ProcessorVersion && fingerprint == Capability.ProcessorFingerprint ||
+        version == LegacyProcessorVersion && fingerprint == LegacyProcessorFingerprint;
 
     public MediaMetadataParserPreflight Preflight() => Preflight(CancellationToken.None);
 
@@ -97,7 +104,28 @@ public sealed class MediaMetadataRetainedProcessor(
         {
             throw new RetainedProcessorException("retained-artifact-checksum-invalid");
         }
-        if (!MediaMetadataSignature.TryDetect(retained.Bytes, cancellationToken, out var format))
+        await using var lease = await RetainedSourceReadLease.VerifyAsync(retained.SourceRevisionId,
+            new MemoryStream(retained.Bytes, writable: false), retained.ContentSha256, retained.ByteLength,
+            MaximumInputBytes, cancellationToken).ConfigureAwait(false);
+        return await ProcessAsync(claim, lease, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async ValueTask<RetainedProcessorCompletion> ProcessAsync(
+        RetainedProcessorClaim claim,
+        RetainedSourceReadLease retained,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (retained.ByteLength > MaximumRetainedInputBytes)
+            throw new RetainedProcessorException("media-metadata-input-too-large");
+        if (retained.SourceRevisionId != claim.SourceRevisionId ||
+            !string.Equals(retained.ContentSha256, claim.InputSha256, StringComparison.Ordinal))
+            throw new RetainedProcessorException("retained-artifact-checksum-invalid");
+        var prefix = new byte[(int)Math.Min(retained.ByteLength, 64 * 1024)];
+        retained.Stream.Position = 0;
+        await retained.Stream.ReadExactlyAsync(prefix, cancellationToken).ConfigureAwait(false);
+        retained.Stream.Position = 0;
+        if (!MediaMetadataSignature.TryDetect(prefix, cancellationToken, out var format))
             throw new RetainedProcessorException("media-metadata-format-unsupported");
 
         var preflight = Preflight(cancellationToken);
@@ -107,9 +135,9 @@ public sealed class MediaMetadataRetainedProcessor(
         MediaMetadataParseResult parsed;
         try
         {
-            await using var input = new MemoryStream(retained.Bytes, writable: false);
-            await using var bounded = new BoundedReadStream(input, MaximumParserReadBytes, cancellationToken);
+            await using var bounded = new BoundedReadStream(retained.Stream, MaximumParserReadBytes, cancellationToken);
             parsed = _parser.Parse(bounded, format, cancellationToken);
+            bounded.ThrowIfGuardFailed();
         }
         catch (ParserReadLimitException exception)
         {
@@ -218,19 +246,53 @@ public sealed class MediaMetadataRetainedProcessor(
     private sealed class BoundedReadStream(Stream inner, long maximumReadBytes, CancellationToken cancellationToken) : Stream
     {
         private long _readBytes;
+        private bool _readBudgetExceeded;
+        private bool _invalidSeek;
         public override bool CanRead => inner.CanRead;
         public override bool CanSeek => inner.CanSeek;
         public override bool CanWrite => false;
-        public override long Length => inner.Length;
-        public override long Position { get => inner.Position; set => inner.Position = value; }
+        public override long Length { get { ThrowIfGuardFailed(); return inner.Length; } }
+        public override long Position { get { ThrowIfGuardFailed(); return inner.Position; } set => Seek(value, SeekOrigin.Begin); }
         public override void Flush() => throw new NotSupportedException();
-        public override long Seek(long offset, SeekOrigin origin) => inner.Seek(offset, origin);
+        public override long Seek(long offset, SeekOrigin origin)
+        {
+            ThrowIfGuardFailed();
+            long target;
+            try
+            {
+                target = checked(origin switch
+                {
+                    SeekOrigin.Begin => offset,
+                    SeekOrigin.Current => inner.Position + offset,
+                    SeekOrigin.End => inner.Length + offset,
+                    _ => throw new ArgumentOutOfRangeException(nameof(origin))
+                });
+            }
+            catch (OverflowException)
+            {
+                _invalidSeek = true;
+                throw new InvalidDataException("Media metadata seek exceeds the retained stream.");
+            }
+            if (target < 0 || target > inner.Length)
+            {
+                _invalidSeek = true;
+                throw new InvalidDataException("Media metadata seek exceeds the retained stream.");
+            }
+            return inner.Seek(target, SeekOrigin.Begin);
+        }
+
+        public void ThrowIfGuardFailed()
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (_readBudgetExceeded) throw new ParserReadLimitException();
+            if (_invalidSeek) throw new InvalidDataException("Media metadata seek exceeds the retained stream.");
+        }
         public override void SetLength(long value) => throw new NotSupportedException();
         public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
 
         public override int Read(byte[] buffer, int offset, int count)
         {
-            cancellationToken.ThrowIfCancellationRequested();
+            ThrowIfGuardFailed();
             var read = inner.Read(buffer, offset, Allow(count));
             _readBytes += read;
             return read;
@@ -238,7 +300,7 @@ public sealed class MediaMetadataRetainedProcessor(
 
         public override int Read(Span<byte> buffer)
         {
-            cancellationToken.ThrowIfCancellationRequested();
+            ThrowIfGuardFailed();
             var read = inner.Read(buffer[..Allow(buffer.Length)]);
             _readBytes += read;
             return read;
@@ -246,8 +308,8 @@ public sealed class MediaMetadataRetainedProcessor(
 
         public override int ReadByte()
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            Allow(1);
+            ThrowIfGuardFailed();
+            if (Allow(1) == 0) return -1;
             var value = inner.ReadByte();
             if (value >= 0) _readBytes++;
             return value;
@@ -255,7 +317,7 @@ public sealed class MediaMetadataRetainedProcessor(
 
         public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken ignored = default)
         {
-            cancellationToken.ThrowIfCancellationRequested();
+            ThrowIfGuardFailed();
             var read = await inner.ReadAsync(buffer[..Allow(buffer.Length)], cancellationToken).ConfigureAwait(false);
             _readBytes += read;
             return read;
@@ -263,8 +325,14 @@ public sealed class MediaMetadataRetainedProcessor(
 
         private int Allow(int requested)
         {
+            if (requested == 0) return 0;
             var remaining = maximumReadBytes - _readBytes;
-            if (remaining <= 0) throw new ParserReadLimitException();
+            if (remaining <= 0)
+            {
+                if (inner.Position == inner.Length) return 0;
+                _readBudgetExceeded = true;
+                throw new ParserReadLimitException();
+            }
             return checked((int)Math.Min(requested, remaining));
         }
     }

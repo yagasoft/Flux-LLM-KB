@@ -7,19 +7,21 @@ using FluxKnowledge.Application.Workers;
 namespace FluxKnowledge.Application.IntegrationV1.Corpus;
 
 public sealed record NativeCorpusMutation(string Action, JsonElement Payload);
-public sealed record NativeCorpusMutationCommitOperation(string Action, string CanonicalPayload, SourceRootPathValidation? RootAdmission = null) : NativeActionCommitOperation;
+public sealed record NativeCorpusMutationCommitOperation(string Action, string CanonicalPayload, SourceRootPathValidation? RootAdmission = null,
+    RetainedPolicyAdmission? PolicyAdmission = null) : NativeActionCommitOperation;
 
 public sealed class NativeCorpusCommandService
 {
     private static readonly IReadOnlyDictionary<string, string> Effects = new Dictionary<string, string>(StringComparer.Ordinal)
     {
         ["root_create"] = "Queue source-root creation.",
-        ["root_update"] = "Update the selected source root and queue reconciliation.",
+        ["root_update"] = "Update the selected source root; optionally apply the default policy or save without queuing reconciliation.",
         ["root_disable"] = "Disable the selected source root.",
         ["root_pause"] = "Pause the selected source root.",
         ["root_resume"] = "Resume the selected source root and queue reconciliation.",
         ["root_delete"] = "Delete the selected local source root and its owned data.",
         ["source_sync"] = "Queue source synchronisation.",
+        ["policy_reprocess"] = "Re-evaluate one exact retained item under the current default policy, preserving its original attempts and publication.",
         ["watcher_set"] = "Set persisted watcher state.",
         ["job_retry"] = "Queue a supported job retry.",
         ["publication_retry"] = "Requeue exactly the selected terminal Publish job and its completed delivery.",

@@ -58,8 +58,13 @@ a periodic reconciliation fallback for missed signals.
 ZIP and TAR processing enforce archive bounds and member path rules. Office Open
 XML extraction produces one logical UTF-8 result for the original DOCX/XLSX/PPTX.
 Document package members are not separately published corpus documents. Ordinary
-retained UTF-8 is limited to 16 MiB; the bounded Office extracted-text result can
-reach 200 MiB without changing package security limits.
+retained UTF-8 is limited to 32 MiB; the bounded Office extracted-text result can
+reach 200 MiB. Office XML has finite part, total expansion, element and depth
+limits; compression ratios apply to XML opened for extraction, not unopened
+binary media. ZIP expansion permits two nested ZIP levels with one cumulative
+entry and expansion budget. Media metadata uses a checksum-verified retained
+stream up to 1 GiB, with a separate 96 MiB parser-read budget; it does not decode
+or publish the media payload.
 
 The C# processor parses retained syntax without building or executing a project,
 restoring packages or running source generators/analyzers. Its code facts,
@@ -68,6 +73,9 @@ guards. Opted-in Git sources also publish strict UTF-8 source text through a
 separate, fingerprinted text activity; only that admitted route can coexist
 with the C# branch. Other languages have searchable source text for the
 supported extensions, without implied symbol/reference analysis.
+Long C# display signatures and references are shortened with the full-value hash
+after secret scanning. Input, syntax, qualified-name and cumulative fact-text
+bounds remain enforced.
 
 ## Source lifecycle
 
@@ -89,6 +97,21 @@ Local source roots must pass fixed-drive NTFS and root-overlap/path policies.
 Registration uses preview/commit fencing and maintains stable revision identity.
 Watcher-driven refresh is reconciled against retained state and configured
 include/exclude rules.
+
+New roots default to 32 MiB strict UTF-8 text and inert source-text indexing.
+Explicit root restrictions remain authoritative. The additional text extensions
+are RDL, INI, HTML, NDJSON, VTT and URL; content is indexed as text and never
+executed or followed. Applying revised defaults to an existing root is explicit.
+Previously retained policy refusals are re-evaluated one exact item at a time
+through `policy_reprocess`, with a current root revision, unique unsuppressed
+physical binding and checksum proof. Immutable source classification, original
+terminal attempts and the last good publication stay intact. Current status
+follows the versioned successor while history remains available.
+Configuration drift blocks unexecuted successors visibly; only never-executed,
+unlinked work can receive a newly verified admission proof. Changed processors
+use new capability identities and retain exact previous read compatibility. During
+the ordinary incremental deployment hold, readiness rejects outstanding previous
+runnable work before activation. See [the policy delivery record](operations/2026-10-16-default-source-policy.md).
 
 Filesystem sources admit the Windows Cloud Files reparse-tag family alongside
 ordinary local folders. Parent-relative, no-follow/no-recall handles preserve the

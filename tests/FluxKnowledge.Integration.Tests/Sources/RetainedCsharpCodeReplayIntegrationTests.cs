@@ -165,7 +165,7 @@ public sealed class RetainedCsharpCodeReplayIntegrationTests(NativeSqlServerFixt
     }
 
     [NativeSqlServerFact]
-    public async Task Hosted_activation_records_an_oversized_query_reference_and_continues_to_the_next_file()
+    public async Task Hosted_activation_bounds_a_long_query_reference_and_continues_to_the_next_file()
     {
         var root = Path.Combine(Path.GetTempPath(), $"flux-csharp-reference-limit-{Guid.NewGuid():N}");
         Directory.CreateDirectory(root);
@@ -194,15 +194,18 @@ public sealed class RetainedCsharpCodeReplayIntegrationTests(NativeSqlServerFixt
 
             var result = await activation.RunOnceAsync(CancellationToken.None);
 
-            Assert.Equal(1, result.CompletedBranches);
-            Assert.Equal(1, result.FailedBranches);
+            Assert.Equal(2, result.CompletedBranches);
+            Assert.Equal(0, result.FailedBranches);
             await using var verification = CreateContext();
-            var blocked = await verification.SourceProcessorBranches.SingleAsync(value => value.SourceRevisionId == seeds[0].RevisionId);
-            Assert.Equal((int)RetainedProcessorBranchState.Blocked, blocked.State);
-            var attempt = await verification.SourceProcessorAttempts.SingleAsync(value => value.BranchId == blocked.Id);
-            Assert.Equal("csharp-code-signature-limit", attempt.OutcomeCode);
+            var bounded = await verification.SourceProcessorBranches.SingleAsync(value => value.SourceRevisionId == seeds[0].RevisionId);
+            Assert.Equal((int)RetainedProcessorBranchState.Completed, bounded.State);
+            var attempt = await verification.SourceProcessorAttempts.SingleAsync(value => value.BranchId == bounded.Id);
+            Assert.Equal("success", attempt.OutcomeCode);
             Assert.NotNull(attempt.FinishedAtUtc);
-            Assert.Empty(await verification.SourceProcessorCodeDocuments.Where(value => value.SourceRevisionId == seeds[0].RevisionId).ToListAsync());
+            var references = await verification.SourceProcessorCodeReferences.Where(value => value.DocumentId == bounded.Id).ToArrayAsync();
+            Assert.Contains(references, value => value.TargetDisplay.Contains("[truncated sha256:", StringComparison.Ordinal));
+            Assert.All(references, value => Assert.True(value.TargetDisplay.Length <= RetainedCsharpCodeProcessor.MaximumSignatureUtf16CodeUnits));
+            Assert.Single(await verification.SourceProcessorCodeDocuments.Where(value => value.SourceRevisionId == seeds[0].RevisionId).ToListAsync());
             Assert.Single(await verification.SourceProcessorCodeDocuments.Where(value => value.SourceRevisionId == seeds[1].RevisionId).ToListAsync());
             Assert.Equal(0, (await activation.RunOnceAsync(CancellationToken.None)).ClaimedBranches);
         }

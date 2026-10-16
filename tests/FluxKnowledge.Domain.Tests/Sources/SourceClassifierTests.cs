@@ -6,6 +6,55 @@ namespace FluxKnowledge.Domain.Tests.Sources;
 
 public sealed class SourceClassifierTests
 {
+    [Theory]
+    [InlineData("empty.zip", "504b0506000000000000000000000000000000000000", "archive-zip-expansion-pending")]
+    [InlineData("data.rar", "526172211a070100", "binary-format-parser-unavailable")]
+    [InlineData("data.7z", "377abcaf271c0000", "binary-format-parser-unavailable")]
+    [InlineData("data.db-wal", "", "database-sidecar-parser-unavailable")]
+    [InlineData("data.db-shm", "00000000", "database-sidecar-parser-unavailable")]
+    public void Recognised_binary_formats_are_capability_deferrals_instead_of_text_policy_errors(string path, string hex, string reason)
+    {
+        var bytes = Convert.FromHexString(hex);
+        var result = SourceClassifier.Classify(path, bytes, bytes.Length);
+        Assert.Equal(SourceClassification.DeferredCapability, result.Classification);
+        Assert.Equal(reason, result.Reason);
+        Assert.Null(result.Text);
+    }
+
+    [Theory]
+    [InlineData("report.rdl")]
+    [InlineData("settings.ini")]
+    [InlineData("page.html")]
+    [InlineData("records.ndjson")]
+    [InlineData("captions.vtt")]
+    [InlineData("shortcut.url")]
+    [InlineData("query.sql")]
+    [InlineData("script.py")]
+    [InlineData("module.fs")]
+    [InlineData("component.ts")]
+    public void Default_policy_accepts_supported_workspace_text_as_inert_strict_utf8(string fileName)
+    {
+        var bytes = "Workspace text"u8.ToArray();
+        var result = SourceClassifier.Classify(fileName, bytes, bytes.Length);
+        Assert.Equal(SourceClassification.AcceptedUtf8Text, result.Classification);
+        Assert.Equal("Workspace text", result.Text);
+        Assert.Null(result.Reason);
+        Assert.False(SourceClassifier.Classify(fileName, [0xc3, 0x28], 2).IsAccepted);
+        Assert.False(SourceClassifier.Classify(fileName, "%PDF-1.7"u8, 8).IsAccepted);
+    }
+
+    [Fact]
+    public void Default_text_limit_admits_twenty_mebibytes_and_keeps_a_finite_ceiling()
+    {
+        var bytes = new byte[20 * 1024 * 1024];
+        Array.Fill(bytes, (byte)'a');
+        var result = SourceClassifier.Classify("large.csv", bytes, bytes.Length);
+        Assert.True(result.IsAccepted);
+        Assert.Equal(bytes.Length, result.Text!.Length);
+        Assert.False(SourceClassifier.Classify("oversized.csv", "a"u8, 32L * 1024 * 1024 + 1).IsAccepted);
+        Assert.False(SourceClassifier.Classify("partial.csv", "a"u8, bytes.Length, hasFullBoundedBuffer: false).IsAccepted);
+    }
+
     [Fact]
     public void Classify_accepts_only_complete_strict_utf8_csharp_after_binary_guards()
     {
@@ -33,9 +82,9 @@ public sealed class SourceClassifierTests
     [InlineData("example.fs")]
     [InlineData("example.vb")]
     [InlineData("example.ts")]
-    public void Classify_keeps_every_other_code_language_deferred(string fileName)
+    public void Explicitly_disabled_code_text_remains_deferred(string fileName)
     {
-        var result = SourceClassifier.Classify(fileName, "code"u8, 4);
+        var result = SourceClassifier.Classify(fileName, "code"u8, 4, indexSourceText: false);
 
         Assert.Equal(SourceClassification.DeferredPolicy, result.Classification);
         Assert.Null(result.Text);
@@ -140,7 +189,8 @@ public sealed class SourceClassifierTests
     [Fact]
     public void Classify_defers_text_larger_than_sixteen_mebibytes()
     {
-        var result = SourceClassifier.Classify("large.txt", "a"u8.ToArray(), (16 * 1024 * 1024) + 1);
+        var result = SourceClassifier.Classify("large.txt", "a"u8.ToArray(), (16 * 1024 * 1024) + 1,
+            maximumAcceptedTextBytes: 16 * 1024 * 1024);
 
         Assert.Equal(SourceClassification.DeferredPolicy, result.Classification);
         Assert.Null(result.Text);

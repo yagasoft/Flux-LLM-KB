@@ -18,10 +18,10 @@ public sealed class RetainedProcessorOptions
     public bool MediaMetadataEnabled { get; init; }
     public bool ImageDocumentOcrEnabled { get; init; }
     public int AutomaticReplayBatchSize { get; init; } = MaximumAutomaticReplayBatchSize;
-    public long MaximumCompressedInputBytes { get; init; } = 64L * 1024 * 1024;
+    public long MaximumCompressedInputBytes { get; init; } = 128L * 1024 * 1024;
     public int MaximumEntryCount { get; init; } = 256;
-    public long MaximumExpandedBytes { get; init; } = 128L * 1024 * 1024;
-    public long MaximumMemberBytes { get; init; } = 16L * 1024 * 1024;
+    public long MaximumExpandedBytes { get; init; } = 256L * 1024 * 1024;
+    public long MaximumMemberBytes { get; init; } = 32L * 1024 * 1024;
     public int MaximumLogicalPathLength { get; init; } = 512;
     public int MaximumCompressionRatio { get; init; } = 169;
 }
@@ -29,9 +29,11 @@ public sealed class RetainedProcessorOptions
 /// <summary>Processes only checksum-verified retained ZIP bytes into content-addressed child artifacts.</summary>
 public sealed class ZipArchiveRetainedProcessor(IRetainedArtifactWriter artifactWriter) : ILocalSourceCapabilityHandler
 {
+    public const string LegacyProcessorVersion = "phase-5-zip-v2";
+    public const string LegacyProcessorFingerprint = "phase-5-zip-retained-archive-v2";
     private static readonly HashSet<string> TextExtensions = new(StringComparer.OrdinalIgnoreCase)
     {
-        ".txt", ".md", ".markdown", ".log", ".csv", ".tsv", ".json", ".xml", ".yaml", ".yml"
+        ".txt", ".md", ".markdown", ".log", ".csv", ".tsv", ".json", ".xml", ".yaml", ".yml", ".rdl", ".ini", ".html", ".ndjson", ".vtt", ".url"
     };
 
     private static readonly HashSet<string> CodeExtensions = new(StringComparer.OrdinalIgnoreCase)
@@ -42,11 +44,11 @@ public sealed class ZipArchiveRetainedProcessor(IRetainedArtifactWriter artifact
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);
 
     public static readonly SourceCapabilityDescriptor Capability = new(
-        new Guid("1f0fd4d6-00e4-4838-8e3c-ee1a482017dc"),
+        new Guid("2ebba08c-d6af-4aca-ab9f-91a93bca93b5"),
         "archive-zip-expand",
-        "phase-5-zip-v2",
+        "phase-5-zip-v3",
         ExecutionClass.InProcess,
-        "phase-5-zip-retained-archive-v2",
+        "phase-5-zip-retained-archive-v3",
         SourceActivityKind.ArchiveExpansion,
         "ArchiveZip",
         "retained:archive-zip-expand");
@@ -75,50 +77,61 @@ public sealed class ZipArchiveRetainedProcessor(IRetainedArtifactWriter artifact
 
         try
         {
-            var centralEntries = ValidateSafePackageMetadata(retained.Bytes, options.MaximumEntryCount);
             using var input = new MemoryStream(retained.Bytes, writable: false);
             using var archive = new ZipArchive(input, ZipArchiveMode.Read, leaveOpen: false);
-            if (archive.Entries.Count > options.MaximumEntryCount)
-            {
-                throw new RetainedProcessorException("archive-entry-count-limit");
-            }
+            using var nestedArchives = new NestedArchiveOwnership();
 
             long expandedTotal = 0;
             var preparedMembers = new List<(ZipArchiveEntry Entry, ArchiveMemberIdentity Identity, string Path)>();
             var fingerprints = new HashSet<string>(StringComparer.Ordinal);
             var blockedMembers = new List<RetainedProcessorMemberOutcome>();
-            if (centralEntries.Count != archive.Entries.Count)
+            var entryCount = 0;
+            async ValueTask PrepareAsync(ZipArchive current, byte[] bytes, string prefix, int depth)
             {
-                throw new RetainedProcessorException("archive-entry-unsupported");
-            }
-            for (var index = 0; index < archive.Entries.Count; index++)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                var entry = archive.Entries[index];
-                var centralEntry = centralEntries[index];
-                try
+                var centralEntries = ValidateSafePackageMetadata(bytes, options.MaximumEntryCount);
+                entryCount = checked(entryCount + current.Entries.Count);
+                if (entryCount > options.MaximumEntryCount) throw new RetainedProcessorException("archive-entry-count-limit");
+                if (centralEntries.Count != current.Entries.Count) throw new RetainedProcessorException("archive-entry-unsupported");
+                for (var index = 0; index < current.Entries.Count; index++)
                 {
-                    var path = ValidateEntryPath(IsDirectory(entry) ? entry.FullName.TrimEnd('/', '\\') : entry.FullName, options.MaximumLogicalPathLength);
-                    if (IsDirectory(entry)) continue;
-                    ValidateEntry(entry, options, centralEntry);
-                    expandedTotal = checked(expandedTotal + entry.Length);
-                    if (expandedTotal > options.MaximumExpandedBytes) throw new RetainedProcessorException("archive-expanded-total-limit");
-                    var identity = ArchiveMemberIdentity.Create(claim.ParentStableIdentity, path);
-                    if (!fingerprints.Add(identity.MemberFingerprint)) throw new RetainedProcessorException("archive-member-identity-conflict");
-                    await using var preflightStream = entry.Open();
-                    if (IsZipSignature(await ReadPrefixAsync(preflightStream, cancellationToken).ConfigureAwait(false)))
+                    cancellationToken.ThrowIfCancellationRequested();
+                    var entry = current.Entries[index];
+                    try
                     {
-                        throw new RetainedProcessorException("nested-archive-depth-limit");
+                        var localPath = ValidateEntryPath(IsDirectory(entry) ? entry.FullName.TrimEnd('/', '\\') : entry.FullName, options.MaximumLogicalPathLength);
+                        var path = ValidateEntryPath(prefix + localPath, options.MaximumLogicalPathLength);
+                        if (IsDirectory(entry)) continue;
+                        ValidateEntry(entry, options, centralEntries[index]);
+                        expandedTotal = checked(expandedTotal + entry.Length);
+                        if (expandedTotal > options.MaximumExpandedBytes) throw new RetainedProcessorException("archive-expanded-total-limit");
+                        var identity = ArchiveMemberIdentity.Create(claim.ParentStableIdentity, path);
+                        if (!fingerprints.Add(identity.MemberFingerprint)) throw new RetainedProcessorException("archive-member-identity-conflict");
+                        await using var preflightStream = entry.Open();
+                        if (IsZipSignature(await ReadPrefixAsync(preflightStream, cancellationToken).ConfigureAwait(false)))
+                        {
+                            if (depth >= 2) throw new RetainedProcessorException("nested-archive-depth-limit");
+                            var nestedBytes = new byte[checked((int)entry.Length)];
+                            await using var nestedStream = entry.Open();
+                            await nestedStream.ReadExactlyAsync(nestedBytes, cancellationToken).ConfigureAwait(false);
+                            if (nestedStream.ReadByte() != -1) throw new RetainedProcessorException("archive-member-size-invalid");
+                            var nestedInput = new MemoryStream(nestedBytes, writable: false);
+                            ZipArchive nested;
+                            try { nested = new ZipArchive(nestedInput, ZipArchiveMode.Read, leaveOpen: false); }
+                            catch { nestedInput.Dispose(); throw; }
+                            nestedArchives.Add(nested);
+                            await PrepareAsync(nested, nestedBytes, path + "/", depth + 1).ConfigureAwait(false);
+                        }
+                        else preparedMembers.Add((entry, identity, path));
                     }
-                    preparedMembers.Add((entry, identity, path));
-                }
-                catch (RetainedProcessorException exception)
-                {
-                    blockedMembers.Add(new RetainedProcessorMemberOutcome(
-                        ComputeUnsafeMemberFingerprint(claim.ParentStableIdentity, index, entry.FullName),
-                        Math.Max(0, entry.Length), "blocked", exception.OutcomeCode));
+                    catch (RetainedProcessorException exception)
+                    {
+                        blockedMembers.Add(new RetainedProcessorMemberOutcome(
+                            ComputeUnsafeMemberFingerprint(claim.ParentStableIdentity, entryCount + index, prefix + entry.FullName),
+                            Math.Max(0, entry.Length), "blocked", exception.OutcomeCode));
+                    }
                 }
             }
+            await PrepareAsync(archive, retained.Bytes, "", 0).ConfigureAwait(false);
             if (blockedMembers.Count > 0)
             {
                 throw new RetainedProcessorException(blockedMembers[0].ReasonCode, blockedMembers);
@@ -497,6 +510,13 @@ public sealed class ZipArchiveRetainedProcessor(IRetainedArtifactWriter artifact
     private static string ComputeUnsafeMemberFingerprint(string parentStableIdentity, int centralDirectoryOrdinal, string rawEntryName) =>
         Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(
             $"archive-member-outcome:{parentStableIdentity.Length}:{parentStableIdentity}:{centralDirectoryOrdinal}:{rawEntryName.Length}:{rawEntryName}")));
+
+    private sealed class NestedArchiveOwnership : IDisposable
+    {
+        private readonly List<ZipArchive> _archives = [];
+        public void Add(ZipArchive archive) => _archives.Add(archive);
+        public void Dispose() { foreach (var archive in _archives.AsEnumerable().Reverse()) archive.Dispose(); }
+    }
 
     private sealed record CentralDirectoryEntry(
         ushort GeneralPurposeBitFlag,

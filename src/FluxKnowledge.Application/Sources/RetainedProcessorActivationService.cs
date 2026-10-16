@@ -198,6 +198,15 @@ public sealed class RetainedProcessorActivationService
          extension.Equals(".ppt", StringComparison.OrdinalIgnoreCase)) &&
          bytes.StartsWith(new byte[] { 0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1 });
 
+    private async ValueTask<RetainedSourceBytes> ReadMediaSignatureAsync(SourceRevisionId revisionId, CancellationToken cancellationToken)
+    {
+        await using var lease = await _retainedSourceReader.OpenReadAsync(revisionId,
+            MediaMetadataRetainedProcessor.MaximumRetainedInputBytes, cancellationToken).ConfigureAwait(false);
+        var prefix = new byte[(int)Math.Min(lease.ByteLength, 64 * 1024)];
+        await lease.Stream.ReadExactlyAsync(prefix, cancellationToken).ConfigureAwait(false);
+        return new RetainedSourceBytes(lease.SourceRevisionId, prefix, lease.ContentSha256, lease.ByteLength);
+    }
+
     private async ValueTask DeferUnavailableMediaMetadataAsync(string outcomeCode, CancellationToken cancellationToken)
     {
         var candidates = await _branchStore.ReadPromotionCandidatesAsync(
@@ -212,12 +221,12 @@ public sealed class RetainedProcessorActivationService
                     await _branchStore.BlockPromotionAsync(candidate, "retained-artifact-checksum-invalid", cancellationToken).ConfigureAwait(false);
                     continue;
                 }
-                if (inspection.ByteLength > MediaMetadataRetainedProcessor.MaximumInputBytes)
+                if (inspection.ByteLength > MediaMetadataRetainedProcessor.MaximumRetainedInputBytes)
                 {
                     await _branchStore.BlockPromotionAsync(candidate, "media-metadata-input-too-large", cancellationToken).ConfigureAwait(false);
                     continue;
                 }
-                var retained = await _retainedSourceReader.ReadBytesAsync(candidate.SourceRevisionId, cancellationToken).ConfigureAwait(false);
+                var retained = await ReadMediaSignatureAsync(candidate.SourceRevisionId, cancellationToken).ConfigureAwait(false);
                 if (retained.SourceRevisionId != candidate.SourceRevisionId ||
                     !string.Equals(retained.ContentSha256, candidate.InputSha256, StringComparison.Ordinal))
                 {
@@ -256,12 +265,12 @@ public sealed class RetainedProcessorActivationService
                     await _branchStore.BlockPromotionAsync(candidate, "retained-artifact-checksum-invalid", cancellationToken).ConfigureAwait(false);
                     continue;
                 }
-                if (inspection.ByteLength > MediaMetadataRetainedProcessor.MaximumInputBytes)
+                if (inspection.ByteLength > MediaMetadataRetainedProcessor.MaximumRetainedInputBytes)
                 {
                     await _branchStore.BlockPromotionAsync(candidate, "media-metadata-input-too-large", cancellationToken).ConfigureAwait(false);
                     continue;
                 }
-                var retained = await _retainedSourceReader.ReadBytesAsync(candidate.SourceRevisionId, cancellationToken).ConfigureAwait(false);
+                var retained = await ReadMediaSignatureAsync(candidate.SourceRevisionId, cancellationToken).ConfigureAwait(false);
                 if (retained.SourceRevisionId != candidate.SourceRevisionId ||
                     !string.Equals(retained.ContentSha256, candidate.InputSha256, StringComparison.Ordinal))
                 {
@@ -321,7 +330,7 @@ public sealed class RetainedProcessorActivationService
                 continue;
             }
             if (descriptor.Id == MediaMetadataRetainedProcessor.Capability.Id &&
-                inspection.ByteLength > MediaMetadataRetainedProcessor.MaximumInputBytes)
+                inspection.ByteLength > MediaMetadataRetainedProcessor.MaximumRetainedInputBytes)
             {
                 await _branchStore.BlockPromotionAsync(candidate, "media-metadata-input-too-large", cancellationToken).ConfigureAwait(false);
                 continue;
@@ -337,7 +346,9 @@ public sealed class RetainedProcessorActivationService
             RetainedSourceBytes retained;
             try
             {
-                retained = await _retainedSourceReader.ReadBytesAsync(candidate.SourceRevisionId, cancellationToken).ConfigureAwait(false);
+                retained = descriptor.Id == MediaMetadataRetainedProcessor.Capability.Id
+                    ? await ReadMediaSignatureAsync(candidate.SourceRevisionId, cancellationToken).ConfigureAwait(false)
+                    : await _retainedSourceReader.ReadBytesAsync(candidate.SourceRevisionId, cancellationToken).ConfigureAwait(false);
             }
             catch (Exception exception) when (exception is FileNotFoundException or DirectoryNotFoundException)
             {
@@ -383,14 +394,24 @@ public sealed class RetainedProcessorActivationService
                 if (!string.Equals(inspection.ContentSha256, claim.InputSha256, StringComparison.Ordinal))
                     throw new RetainedProcessorException("retained-artifact-checksum-invalid");
                 if (descriptor.Id == MediaMetadataRetainedProcessor.Capability.Id &&
-                    inspection.ByteLength > MediaMetadataRetainedProcessor.MaximumInputBytes)
+                    inspection.ByteLength > MediaMetadataRetainedProcessor.MaximumRetainedInputBytes)
                 {
                     throw new RetainedProcessorException("media-metadata-input-too-large");
                 }
                 if (descriptor.Id == OoxmlStructuralTextProcessor.Capability.Id && inspection.ByteLength > 128L * 1024 * 1024)
                     throw new RetainedProcessorException("office-document-input-too-large");
-                var retained = await _retainedSourceReader.ReadBytesAsync(claim.SourceRevisionId, cancellationToken).ConfigureAwait(false);
-                var completion = await process(claim, retained, _options, cancellationToken).ConfigureAwait(false);
+                RetainedProcessorCompletion completion;
+                if (descriptor.Id == MediaMetadataRetainedProcessor.Capability.Id)
+                {
+                    await using var retained = await _retainedSourceReader.OpenReadAsync(claim.SourceRevisionId,
+                        MediaMetadataRetainedProcessor.MaximumRetainedInputBytes, cancellationToken).ConfigureAwait(false);
+                    completion = await _mediaMetadataProcessor!.ProcessAsync(claim, retained, cancellationToken).ConfigureAwait(false);
+                }
+                else
+                {
+                    var retained = await _retainedSourceReader.ReadBytesAsync(claim.SourceRevisionId, cancellationToken).ConfigureAwait(false);
+                    completion = await process(claim, retained, _options, cancellationToken).ConfigureAwait(false);
+                }
                 try
                 {
                     if (await _branchStore.CommitAsync(claim, completion, cancellationToken).ConfigureAwait(false)) completed++;

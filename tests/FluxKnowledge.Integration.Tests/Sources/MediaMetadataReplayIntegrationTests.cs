@@ -786,7 +786,7 @@ public sealed class MediaMetadataReplayIntegrationTests(NativeSqlServerFixture f
         public ValueTask<RetainedArtifactInspection> InspectAsync(SourceRevisionId requestedRevisionId, CancellationToken cancellationToken)
         {
             Assert.Equal(sourceRevisionId, requestedRevisionId);
-            return ValueTask.FromResult(new RetainedArtifactInspection(sourceRevisionId, hash, MediaMetadataRetainedProcessor.MaximumInputBytes + 1));
+            return ValueTask.FromResult(new RetainedArtifactInspection(sourceRevisionId, hash, MediaMetadataRetainedProcessor.MaximumRetainedInputBytes + 1));
         }
 
         public ValueTask<RetainedSourceBytes> ReadBytesAsync(SourceRevisionId sourceRevisionId, CancellationToken cancellationToken)

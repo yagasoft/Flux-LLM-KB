@@ -60,6 +60,19 @@ the incremental IIS updater. It accepts `plan --operation <guid>`,
 The rebuild requires the updater's owned hold and scheduler drain; these commands
 do not grant production authority or replace normal public search/write contracts.
 
+`corpus.write` supports `policy_reprocess` through the same preview/confirmed
+commit routes. Its closed payload contains `rootId`, `sourceRevisionId`,
+`predecessorActivityId`, lowercase `inputSha256` and positive
+`configurationRevision`. It checks only retained bytes and creates one versioned
+successor for an eligible historic policy refusal. Stale configuration, ambiguous
+physical identity, unsafe content, unavailable retained bytes and outstanding
+ownership refuse admission. Original classification and terminal attempts stay
+immutable; retries are idempotent. A never-executed stale successor can be
+reverified; executed work is not reset. `root_update` accepts
+`applyDefaultPolicy: true` and `reconcile: false` to apply text defaults without
+queuing a workspace scan. Installation does not itself apply policy or replay
+items; production application requires explicit authority.
+
 `corpus.write` also supports explicit terminal Publish recovery with
 `action: "publication_retry"` and `payload: { "jobId": "<guid>" }` through the same
 preview/confirmed commit routes. It only admits one current retained record,

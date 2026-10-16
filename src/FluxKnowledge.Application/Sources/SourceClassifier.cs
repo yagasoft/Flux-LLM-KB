@@ -1,4 +1,5 @@
 using System.Text;
+using FluxKnowledge.Domain.Sources;
 
 namespace FluxKnowledge.Application.Sources;
 
@@ -21,13 +22,14 @@ public sealed record SourceClassificationResult(
 /// <summary>Classifies local bytes before any extension-based text processing occurs.</summary>
 public static class SourceClassifier
 {
-    public const long MaximumAcceptedTextBytes = 16L * 1024 * 1024;
+    public const long MaximumAcceptedTextBytes = SourcePolicyDefaults.MaximumTextBytes;
     public static bool IsSourceTextExtension(string path) => Path.GetExtension(path).ToLowerInvariant() is
         ".cs" or ".ps1" or ".psm1" or ".py" or ".js" or ".sql" or ".razor" or ".css" or ".csproj" or ".props" or ".slnx";
 
     private static readonly HashSet<string> TextExtensions = new(StringComparer.OrdinalIgnoreCase)
     {
-        ".txt", ".md", ".markdown", ".log", ".csv", ".tsv", ".json", ".xml", ".yaml", ".yml"
+        ".txt", ".md", ".markdown", ".log", ".csv", ".tsv", ".json", ".xml", ".yaml", ".yml",
+        ".rdl", ".ini", ".html", ".ndjson", ".vtt", ".url"
     };
 
     private static readonly HashSet<string> CodeExtensions = new(StringComparer.OrdinalIgnoreCase)
@@ -43,7 +45,7 @@ public static class SourceClassifier
         long declaredByteLength,
         bool hasFullBoundedBuffer = true,
         long maximumAcceptedTextBytes = MaximumAcceptedTextBytes,
-        bool indexSourceText = false)
+        bool indexSourceText = true)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(fileName);
         if (declaredByteLength < 0)
@@ -57,6 +59,8 @@ public static class SourceClassifier
         }
 
         var extension = Path.GetExtension(fileName);
+        if (extension.Equals(".db-wal", StringComparison.OrdinalIgnoreCase) || extension.Equals(".db-shm", StringComparison.OrdinalIgnoreCase))
+            return DeferredCapability("database-sidecar-parser-unavailable");
         if (HasBinarySignature(bytes))
         {
             if (TextExtensions.Contains(extension))
@@ -71,7 +75,8 @@ public static class SourceClassifier
             return DeferredPolicy("File bytes contain binary control values and are not accepted as text.");
         }
 
-        if (string.Equals(extension, ".cs", StringComparison.OrdinalIgnoreCase) || indexSourceText && IsSourceTextExtension(fileName))
+        if (string.Equals(extension, ".cs", StringComparison.OrdinalIgnoreCase) ||
+            indexSourceText && (IsSourceTextExtension(fileName) || CodeExtensions.Contains(extension)))
         {
             if (declaredByteLength > maximumAcceptedTextBytes)
             {
@@ -168,7 +173,9 @@ public static class SourceClassifier
 
     private static bool HasBinarySignature(ReadOnlySpan<byte> bytes) =>
         bytes.StartsWith("%PDF-"u8) ||
-        bytes.StartsWith(new byte[] { 0x50, 0x4b, 0x03, 0x04 }) ||
+        ZipArchiveRetainedProcessor.IsZipSignature(bytes) ||
+        bytes.StartsWith(new byte[] { 0x52, 0x61, 0x72, 0x21, 0x1a, 0x07 }) ||
+        bytes.StartsWith(new byte[] { 0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c }) ||
         TarArchiveRetainedProcessor.IsTarSignature(bytes) ||
         bytes.StartsWith(new byte[] { 0x1f, 0x8b }) ||
         bytes.StartsWith(new byte[] { 0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1 }) ||

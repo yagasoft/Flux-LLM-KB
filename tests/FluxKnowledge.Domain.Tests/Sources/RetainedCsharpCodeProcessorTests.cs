@@ -11,22 +11,57 @@ namespace FluxKnowledge.Domain.Tests.Sources;
 public sealed class RetainedCsharpCodeProcessorTests
 {
     [Fact]
+    public void Legacy_completion_identity_is_exact_and_cannot_mix_parser_or_handler_versions()
+    {
+        Assert.Equal("7fe4418293ef7cce98be6918c1aa393e8b19cbc33404488ec3134648661420cd", RetainedCsharpCodeProcessor.LegacyDescriptorFingerprint);
+        Assert.Equal("b824392bda99068d236ce8b7bf1d079d806c66d2ba892193a42b316f1f15f1fe", RetainedCsharpCodeProcessor.LegacyParserFingerprint);
+        Assert.True(RetainedCsharpCodeProcessor.IsKnownCompletionIdentity(RetainedCsharpCodeProcessor.ProcessorVersion,
+            RetainedCsharpCodeProcessor.LegacyDescriptorFingerprint, RetainedCsharpCodeProcessor.LegacyParserFingerprint, RetainedCsharpCodeProcessor.LegacyHandlerImplementationId));
+        Assert.False(RetainedCsharpCodeProcessor.IsKnownCompletionIdentity(RetainedCsharpCodeProcessor.ProcessorVersion,
+            RetainedCsharpCodeProcessor.LegacyDescriptorFingerprint, RetainedCsharpCodeProcessor.ParserFingerprint, RetainedCsharpCodeProcessor.HandlerImplementationId));
+    }
+
+    [Fact]
+    public async Task Full_long_signature_is_secret_scanned_before_its_display_is_shortened()
+    {
+        var disclosure = new RetainedCsharpCodeTestData.Disclosure((value, _) => value.Contains("private-secret-sentinel", StringComparison.Ordinal)
+            ? new LocalDisclosureResult(null, true, "secret-content-withheld") : new LocalDisclosureResult(value, false, null));
+        var (processor, claim, _) = Create("class C { void M(string value = \"" + new string('x', 6000) + "private-secret-sentinel\") { } }", disclosure);
+        var completion = await processor.ProcessAsync(claim, CancellationToken.None);
+        Assert.Equal("success", completion.OutcomeCode);
+        Assert.DoesNotContain(completion.Symbols, symbol => symbol.LocalName == "M");
+        Assert.Contains(disclosure.Calls, call => call.Value.Contains("private-secret-sentinel", StringComparison.Ordinal));
+        Assert.True(completion.WithheldSymbolCount > 0);
+    }
+
+    [Fact]
+    public async Task Long_repeated_reference_displays_share_a_finite_fact_text_budget()
+    {
+        var source = "class C { void M() { Build(\"" + new string('x', 500_000) + "\")" + string.Concat(Enumerable.Repeat(".Run()", 40)) + "; } }";
+        var (processor, claim, _) = Create(source);
+        var completion = await processor.ProcessAsync(claim, CancellationToken.None);
+        Assert.Equal("csharp-code-fact-text-limit", completion.OutcomeCode);
+        Assert.Empty(completion.Symbols);
+        Assert.Empty(completion.References);
+    }
+
+    [Fact]
     public void Descriptor_and_parser_records_match_the_approved_golden_vectors()
     {
         var descriptor = RetainedCsharpCodeProcessor.Capability;
 
-        Assert.Equal(new Guid("08dd66fb-6502-4b31-a4a5-51e8cc66f916"), descriptor.Id);
+        Assert.Equal(new Guid("8148aa4d-cc8f-4a46-adea-b6d589597ed9"), descriptor.Id);
         Assert.Equal("retained-csharp-code", descriptor.ProcessorKind);
         Assert.Equal("phase-5-retained-csharp-code-v1", descriptor.ProcessorVersion);
         Assert.Equal(ExecutionClass.InProcess, descriptor.ExecutionClass);
         Assert.Equal(SourceActivityKind.CodeParsing, descriptor.AcceptedActivityKind);
         Assert.Equal("AcceptedUtf8Text", descriptor.AcceptedClassification);
         Assert.Equal("retained:csharp-code-facts-v1", descriptor.OutputContract);
-        Assert.Equal("7fe4418293ef7cce98be6918c1aa393e8b19cbc33404488ec3134648661420cd", descriptor.ProcessorFingerprint);
+        Assert.Equal("f58130ac14377583fe768d9363fcb2b865906fde624adcf321583200d37513cb", descriptor.ProcessorFingerprint);
         Assert.Equal(descriptor.ProcessorFingerprint, RetainedCsharpCodeProcessor.ComputeDescriptorFingerprint());
-        Assert.Equal("5:frame|29:retained-csharp-descriptor-v1|13:capability_id|32:08dd66fb65024b31a4a551e8cc66f916|14:processor_kind|20:retained-csharp-code|17:processor_version|31:phase-5-retained-csharp-code-v1|15:execution_class|0;|13:activity_kind|5;|23:accepted_classification|16:AcceptedUtf8Text|15:output_contract|29:retained:csharp-code-facts-v1|25:handler_implementation_id|32:retained-csharp-roslyn-syntax-v1|23:roslyn_assembly_version|7:5.0.0.0|16:language_version|8:CSharp14|11:utf8_policy|24:utf8-strict-optional-bom|17:limit_input_bytes|4194304;|30:limit_decoded_utf16_code_units|4000000;|18:limit_syntax_nodes|200000;|19:limit_nesting_depth|256;|13:limit_symbols|20000;|16:limit_references|100000;|33:limit_identifier_utf16_code_units|1024;|32:limit_signature_utf16_code_units|4096;|17:limit_diagnostics|256;|41:limit_diagnostic_message_utf16_code_units|1024;", RetainedCsharpCodeProcessor.DescriptorWireRecord);
-        Assert.Equal("5:frame|25:retained-csharp-parser-v1|25:handler_implementation_id|32:retained-csharp-roslyn-syntax-v1|23:roslyn_assembly_version|7:5.0.0.0|16:language_version|8:CSharp14|11:utf8_policy|24:utf8-strict-optional-bom|27:fact_normalisation_revision|26:without-trivia-one-line-v1|35:traversal_limit_precedence_revision|18:source-preorder-v1|17:limit_input_bytes|4194304;|30:limit_decoded_utf16_code_units|4000000;|18:limit_syntax_nodes|200000;|19:limit_nesting_depth|256;|13:limit_symbols|20000;|16:limit_references|100000;|33:limit_identifier_utf16_code_units|1024;|32:limit_signature_utf16_code_units|4096;|17:limit_diagnostics|256;|41:limit_diagnostic_message_utf16_code_units|1024;|22:syntax_invalid_outcome|26:csharp-code-syntax-invalid", RetainedCsharpCodeProcessor.ParserWireRecord);
-        Assert.Equal("b824392bda99068d236ce8b7bf1d079d806c66d2ba892193a42b316f1f15f1fe", RetainedCsharpCodeProcessor.ParserFingerprint);
+        Assert.Equal("5:frame|29:retained-csharp-descriptor-v1|13:capability_id|32:8148aa4dcc8f4a46adeab6d589597ed9|14:processor_kind|20:retained-csharp-code|17:processor_version|31:phase-5-retained-csharp-code-v1|15:execution_class|0;|13:activity_kind|5;|23:accepted_classification|16:AcceptedUtf8Text|15:output_contract|29:retained:csharp-code-facts-v1|25:handler_implementation_id|32:retained-csharp-roslyn-syntax-v2|23:roslyn_assembly_version|7:5.0.0.0|16:language_version|8:CSharp14|11:utf8_policy|24:utf8-strict-optional-bom|17:limit_input_bytes|4194304;|30:limit_decoded_utf16_code_units|4000000;|18:limit_syntax_nodes|200000;|19:limit_nesting_depth|256;|13:limit_symbols|20000;|16:limit_references|100000;|33:limit_identifier_utf16_code_units|1024;|32:limit_signature_utf16_code_units|4096;|17:limit_diagnostics|256;|41:limit_diagnostic_message_utf16_code_units|1024;|32:limit_fact_text_utf16_code_units|16777216;", RetainedCsharpCodeProcessor.DescriptorWireRecord);
+        Assert.Equal("5:frame|25:retained-csharp-parser-v1|25:handler_implementation_id|32:retained-csharp-roslyn-syntax-v2|23:roslyn_assembly_version|7:5.0.0.0|16:language_version|8:CSharp14|11:utf8_policy|24:utf8-strict-optional-bom|27:fact_normalisation_revision|39:without-trivia-one-line-bounded-hash-v2|35:traversal_limit_precedence_revision|18:source-preorder-v1|17:limit_input_bytes|4194304;|30:limit_decoded_utf16_code_units|4000000;|18:limit_syntax_nodes|200000;|19:limit_nesting_depth|256;|13:limit_symbols|20000;|16:limit_references|100000;|33:limit_identifier_utf16_code_units|1024;|32:limit_signature_utf16_code_units|4096;|17:limit_diagnostics|256;|41:limit_diagnostic_message_utf16_code_units|1024;|22:syntax_invalid_outcome|26:csharp-code-syntax-invalid|32:limit_fact_text_utf16_code_units|16777216;", RetainedCsharpCodeProcessor.ParserWireRecord);
+        Assert.Equal("fdf08c384687a9aa4b607b1c30ca0d236074d45334a737932c646778da9424d7", RetainedCsharpCodeProcessor.ParserFingerprint);
     }
 
     [Fact]
@@ -36,15 +71,15 @@ public sealed class RetainedCsharpCodeProcessorTests
         const string parser = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
         var revision = RetainedCsharpCodeTestData.FixedSourceRevisionId;
 
-        Assert.Equal("5:frame|27:retained-csharp-document-v1|18:source_revision_id|32:11111111222233334444555555555555|24:retained_artifact_sha256|64:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa|17:processor_version|31:phase-5-retained-csharp-code-v1|22:descriptor_fingerprint|64:7fe4418293ef7cce98be6918c1aa393e8b19cbc33404488ec3134648661420cd|18:parser_fingerprint|64:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789", RetainedCsharpCodeProcessor.DocumentWireRecord(revision, new string('a', 64), parser));
+        Assert.Equal("5:frame|27:retained-csharp-document-v1|18:source_revision_id|32:11111111222233334444555555555555|24:retained_artifact_sha256|64:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa|17:processor_version|31:phase-5-retained-csharp-code-v1|22:descriptor_fingerprint|64:f58130ac14377583fe768d9363fcb2b865906fde624adcf321583200d37513cb|18:parser_fingerprint|64:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789", RetainedCsharpCodeProcessor.DocumentWireRecord(revision, new string('a', 64), parser));
         Assert.Equal("5:frame|25:retained-csharp-symbol-v1|20:document_fingerprint|64:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef|7:ordinal|2;|21:declaration_kind_code|11;|10:local_name|1:M|14:qualified_name|13:global::N.C.M|18:rendered_signature|15:public void M()|9:modifiers|6:public|22:lexical_parent_ordinal|1;|16:span_start_utf16|12;|17:span_length_utf16|8;", RetainedCsharpCodeProcessor.SymbolWireRecord(document, 2, 11, "M", "global::N.C.M", "public void M()", "public", 1, 12, 8));
         Assert.Equal("5:frame|28:retained-csharp-reference-v1|20:document_fingerprint|64:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef|7:ordinal|0;|22:relationship_kind_code|1;|21:source_symbol_ordinal|-;|14:target_display|6:System|16:span_start_utf16|0;|17:span_length_utf16|6;", RetainedCsharpCodeProcessor.ReferenceWireRecord(document, 0, 1, null, "System", 0, 6));
         Assert.Equal("5:frame|29:retained-csharp-diagnostic-v1|20:document_fingerprint|64:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef|7:ordinal|0;|13:diagnostic_id|6:CS0001|13:severity_code|2;|16:span_start_utf16|3;|17:span_length_utf16|4;|14:representation|7:scanned|15:scanned_message|7:warning|15:withheld_reason|-;", RetainedCsharpCodeProcessor.DiagnosticWireRecord(document, 0, "CS0001", 2, 3, 4, "warning", null));
-        Assert.Equal("5:frame|37:retained-csharp-blocked-diagnostic-v1|18:source_revision_id|32:11111111222233334444555555555555|24:retained_artifact_sha256|64:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa|22:descriptor_fingerprint|64:7fe4418293ef7cce98be6918c1aa393e8b19cbc33404488ec3134648661420cd|18:parser_fingerprint|64:b824392bda99068d236ce8b7bf1d079d806c66d2ba892193a42b316f1f15f1fe|7:ordinal|0;|13:diagnostic_id|6:CS1513|13:severity_code|3;|16:span_start_utf16|20;|17:span_length_utf16|0;|14:representation|8:withheld|15:scanned_message|-;|15:withheld_reason|23:secret-content-withheld", RetainedCsharpCodeProcessor.BlockedDiagnosticWireRecord(revision, new string('a', 64), 0, "CS1513", 3, 20, 0, null, "secret-content-withheld"));
+        Assert.Equal("5:frame|37:retained-csharp-blocked-diagnostic-v1|18:source_revision_id|32:11111111222233334444555555555555|24:retained_artifact_sha256|64:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa|22:descriptor_fingerprint|64:f58130ac14377583fe768d9363fcb2b865906fde624adcf321583200d37513cb|18:parser_fingerprint|64:fdf08c384687a9aa4b607b1c30ca0d236074d45334a737932c646778da9424d7|7:ordinal|0;|13:diagnostic_id|6:CS1513|13:severity_code|3;|16:span_start_utf16|20;|17:span_length_utf16|0;|14:representation|8:withheld|15:scanned_message|-;|15:withheld_reason|23:secret-content-withheld", RetainedCsharpCodeProcessor.BlockedDiagnosticWireRecord(revision, new string('a', 64), 0, "CS1513", 3, 20, 0, null, "secret-content-withheld"));
         Assert.Equal("5:frame|29:retained-csharp-completion-v1|20:document_fingerprint|64:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef|18:parser_fingerprint|64:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789|19:symbol_fingerprints|1;64:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa|22:reference_fingerprints|0;|23:diagnostic_fingerprints|0;|21:withheld_symbol_count|1;|24:withheld_reference_count|2;|25:withheld_diagnostic_count|3;|24:receipt_diagnostic_codes|1;6:CS0001", RetainedCsharpCodeProcessor.CompletionWireRecord(document, parser, [new string('a', 64)], [], [], 1, 2, 3, ["CS0001"]));
-        Assert.Equal("5:frame|37:retained-csharp-blocked-completion-v1|18:source_revision_id|32:11111111222233334444555555555555|24:retained_artifact_sha256|64:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa|22:descriptor_fingerprint|64:7fe4418293ef7cce98be6918c1aa393e8b19cbc33404488ec3134648661420cd|18:parser_fingerprint|64:b824392bda99068d236ce8b7bf1d079d806c66d2ba892193a42b316f1f15f1fe|12:outcome_code|26:csharp-code-syntax-invalid|31:blocked_diagnostic_fingerprints|1;64:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb|21:withheld_symbol_count|0;|24:withheld_reference_count|0;|25:withheld_diagnostic_count|1;|24:receipt_diagnostic_codes|1;6:CS1513", RetainedCsharpCodeProcessor.BlockedCompletionWireRecord(revision, new string('a', 64), [new string('b', 64)], 1, ["CS1513"]));
+        Assert.Equal("5:frame|37:retained-csharp-blocked-completion-v1|18:source_revision_id|32:11111111222233334444555555555555|24:retained_artifact_sha256|64:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa|22:descriptor_fingerprint|64:f58130ac14377583fe768d9363fcb2b865906fde624adcf321583200d37513cb|18:parser_fingerprint|64:fdf08c384687a9aa4b607b1c30ca0d236074d45334a737932c646778da9424d7|12:outcome_code|26:csharp-code-syntax-invalid|31:blocked_diagnostic_fingerprints|1;64:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb|21:withheld_symbol_count|0;|24:withheld_reference_count|0;|25:withheld_diagnostic_count|1;|24:receipt_diagnostic_codes|1;6:CS1513", RetainedCsharpCodeProcessor.BlockedCompletionWireRecord(revision, new string('a', 64), [new string('b', 64)], 1, ["CS1513"]));
 
-        Assert.Equal("bd7f4158f827af8701edff39ed01a5b2d161c75f5f60a06e5e50b3d2c43d8a09",
+        Assert.Equal("2a24b50d127803edec412f1e02b9dd049132ef7b05c345389406d1287768e672",
             RetainedCsharpCodeProcessor.ComputeDocumentFingerprint(revision, new string('a', 64), parser));
         Assert.Equal("aea8991242015a1c36024316d73e6fb1486adcaed3bc88a38e8114049d2abc78",
             RetainedCsharpCodeProcessor.ComputeSymbolFingerprint(document, 2, 11, "M", "global::N.C.M", "public void M()", "public", 1, 12, 8));
@@ -52,11 +87,11 @@ public sealed class RetainedCsharpCodeProcessorTests
             RetainedCsharpCodeProcessor.ComputeReferenceFingerprint(document, 0, 1, null, "System", 0, 6));
         Assert.Equal("d7bd2ff3f039c1bda801d3a59522f2b1e7704a1e38e630ff996e859d1db1d6aa",
             RetainedCsharpCodeProcessor.ComputeDiagnosticFingerprint(document, 0, "CS0001", 2, 3, 4, "warning", null));
-        Assert.Equal("6d998af1214d1af4b8f053eca041b66c6207f70149a20f2df3af32c49eae43cf",
+        Assert.Equal("08fdbb6097a38fe26f777adafb907f93ea6ffa78af63a936e3370961356de7cf",
             RetainedCsharpCodeProcessor.ComputeBlockedDiagnosticFingerprint(revision, new string('a', 64), 0, "CS1513", 3, 20, 0, null, "secret-content-withheld"));
         Assert.Equal("758f7cbc1af4eaa5c82830a11fa2752f2bab6bb833a58023f7b7da4c01ba8df6",
             RetainedCsharpCodeProcessor.ComputeCompletionFingerprint(document, parser, [new string('a', 64)], [], [], 1, 2, 3, ["CS0001"]));
-        Assert.Equal("9736b8d27a7dbbcd15156fc3193cafb9e394c66f9eb3cd438763d714a57141aa",
+        Assert.Equal("fd781a1e788bd06e7c45ab102816755a1d34953950fbf27f4c5582855ca7fad4",
             RetainedCsharpCodeProcessor.ComputeBlockedCompletionFingerprint(revision, new string('a', 64), [new string('b', 64)], 1, ["CS1513"]));
 
         var unicodeWire = RetainedCsharpCodeProcessor.SymbolWireRecord(
@@ -74,9 +109,9 @@ public sealed class RetainedCsharpCodeProcessorTests
 
         var completion = await processor.ProcessAsync(claim, CancellationToken.None);
 
-        Assert.Equal("81ba13294b7a8c5fc2ed62707ab11a2e7da71c784c459b4c535fea33fadade4e", completion.DocumentFingerprint);
-        Assert.Equal("44bfadce904649d18d54151701a58ea7fa9533d1261ecb5504f545639c45d4d7", Assert.Single(completion.Symbols).SymbolFingerprint);
-        Assert.Equal("3a69851e5df1ec85d049c127c22239f549e441dd832e12c8223a1ee6d64fef2d", completion.CompletionFingerprint);
+        Assert.Equal("132a5191a6dcad565a12ec1687085c86c4de32361086b44436644c75b3f6946b", completion.DocumentFingerprint);
+        Assert.Equal("fc2d19f8a18d613b9a6ad6a33c8f4abd9c3908c3101420bde778e1b5ada927da", Assert.Single(completion.Symbols).SymbolFingerprint);
+        Assert.Equal("d9901e39e6a95c28fce8fd4b8e439eb9c2dc77f1de79345231c470b4bd9b2558", completion.CompletionFingerprint);
     }
 
     [Fact]
@@ -734,14 +769,17 @@ public sealed class RetainedCsharpCodeProcessorTests
     }
 
     [Fact]
-    public async Task Signature_limit_preserves_default_expression_before_blocking()
+    public async Task Long_default_expression_keeps_a_bounded_explicit_display_and_full_content_hash()
     {
         var literal = new string('x', RetainedCsharpCodeProcessor.MaximumSignatureUtf16CodeUnits + 1);
         var (processor, claim, _) = Create("class C { string M(string value = \"" + literal + "\") => value; }");
 
         var completion = await processor.ProcessAsync(claim, CancellationToken.None);
 
-        Assert.Equal("csharp-code-signature-limit", completion.OutcomeCode);
+        Assert.Equal("success", completion.OutcomeCode);
+        var method = Assert.Single(completion.Symbols, value => value.LocalName == "M");
+        Assert.InRange(method.RenderedSignature.Length, 1, RetainedCsharpCodeProcessor.MaximumSignatureUtf16CodeUnits);
+        Assert.Contains("[truncated sha256:", method.RenderedSignature, StringComparison.Ordinal);
     }
 
     [Theory]
@@ -756,15 +794,15 @@ public sealed class RetainedCsharpCodeProcessorTests
 
         var completion = await processor.ProcessAsync(claim, CancellationToken.None);
 
-        Assert.Equal(accepted ? "success" : "csharp-code-signature-limit", completion.OutcomeCode);
+        Assert.Equal("success", completion.OutcomeCode);
         if (accepted)
         {
             Assert.Contains(completion.References, reference => reference.TargetDisplay == target);
         }
         else
         {
-            Assert.Empty(completion.Symbols);
-            Assert.Empty(completion.References);
+            Assert.Contains(completion.References, reference => reference.TargetDisplay.Contains("[truncated sha256:", StringComparison.Ordinal));
+            Assert.All(completion.References, reference => Assert.InRange(reference.TargetDisplay.Length, 1, RetainedCsharpCodeProcessor.MaximumSignatureUtf16CodeUnits));
         }
     }
 

@@ -17,11 +17,10 @@ public static class NativeSourceRootCreation
             "git-tracked" => SourceDiscoveryMode.GitTracked,
             _ => throw new NativeOperationException("invalid-discovery-mode")
         };
-        var sourceText = Bool(payload, "indexSourceText", false);
-        if (sourceText && mode != SourceDiscoveryMode.GitTracked) throw new NativeOperationException("invalid-discovery-mode");
+        var sourceText = Bool(payload, "indexSourceText", true);
         return new SourceRootCreateRequest(payload.GetProperty("path").GetString()!, payload.GetProperty("displayName").GetString()!,
             Bool(payload, "recursive", true), Rules(payload, "includePatterns"), Rules(payload, "excludePatterns"),
-            Bool(payload, "followLinks", false), Long(payload, "maximumFileBytes", 16L * 1024 * 1024),
+            Bool(payload, "followLinks", false), Long(payload, "maximumFileBytes", SourcePolicyDefaults.MaximumTextBytes),
             sourceText ? ["text/plain", "text/x-source-code"] : [],
             TimeSpan.FromSeconds(Long(payload, "reconciliationSeconds", 900)), actor, DiscoveryMode: mode);
     }

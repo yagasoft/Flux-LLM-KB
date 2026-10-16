@@ -1,3 +1,4 @@
+using System.Data;
 using FluxKnowledge.Application.Contracts;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Sources;
@@ -17,6 +18,33 @@ public sealed class SqlSourceActivityStore(
     {
         ArgumentNullException.ThrowIfNull(draft);
         await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        if (draft.ActivityKind == SourceActivityKind.TextExtraction && draft.ExecutionClass == ExecutionClass.InProcess &&
+            draft.ProcessorVersion == "phase-3a-v1" && (draft.DescriptorFingerprint ?? SourceActivityEntity.LegacyDescriptorFingerprint) == SourceActivityEntity.LegacyDescriptorFingerprint &&
+            await context.SourceRevisions.AnyAsync(value => value.Id == draft.SourceRevisionId.Value &&
+                (value.Classification == "Unknown" || value.Classification == "DeferredPolicy"), cancellationToken).ConfigureAwait(false))
+        {
+            return await context.Database.CreateExecutionStrategy().ExecuteAsync(async () =>
+            {
+                await using var db = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+                await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken).ConfigureAwait(false);
+                await SqlPublishedPassageSelection.AcquireFenceAsync(db, cancellationToken).ConfigureAwait(false);
+                var revision = await db.SourceRevisions.SingleAsync(value => value.Id == draft.SourceRevisionId.Value, cancellationToken).ConfigureAwait(false);
+                var root = await db.SourceRootConfigurations.SingleAsync(value => value.Id == revision.SourceRootId, cancellationToken).ConfigureAwait(false);
+                var successor = await db.SourceActivities.SingleOrDefaultAsync(value => value.SourceRevisionId == revision.Id &&
+                    value.InputFingerprint == draft.InputFingerprint && value.ProcessorVersion == RetainedDefaultPolicy.Version &&
+                    value.DescriptorFingerprint == RetainedDefaultPolicy.TextFingerprint, cancellationToken).ConfigureAwait(false);
+                if (successor is not null && await SqlDefaultRetainedPolicy.IsTextSuccessorAsync(db, root, revision,
+                        SqlSourceActivityWriter.Restore(successor), cancellationToken).ConfigureAwait(false))
+                {
+                    await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+                    return SqlSourceActivityWriter.Restore(successor);
+                }
+                var planned = await new SqlSourceActivityWriter(timeProvider).FindOrCreateAsync(db, draft, cancellationToken).ConfigureAwait(false);
+                await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+                await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+                return planned;
+            }).ConfigureAwait(false);
+        }
         var writer = new SqlSourceActivityWriter(timeProvider);
         var activity = await writer.FindOrCreateAsync(context, draft, cancellationToken).ConfigureAwait(false);
         if (context.ChangeTracker.HasChanges())
@@ -102,6 +130,18 @@ public sealed class SqlSourceActivityStore(
                      value.ProcessorKind == "document-vsdx-visio-extract"))
                 .ExecuteUpdateAsync(setters => setters.SetProperty(value => value.IsRunnable, false), cancellationToken)
                 .ConfigureAwait(false);
+        }
+
+        if (capability.Id == OoxmlStructuralTextProcessor.Capability.Id || capability.Id == MediaMetadataRetainedProcessor.Capability.Id ||
+            capability.Id == ZipArchiveRetainedProcessor.Capability.Id || capability.Id == TarArchiveRetainedProcessor.Capability.Id ||
+            capability.Id == RetainedCsharpCodeProcessor.Capability.Id)
+        {
+            string[] replaced = [OoxmlStructuralTextProcessor.LegacyProcessorFingerprint, MediaMetadataRetainedProcessor.LegacyProcessorFingerprint,
+                ZipArchiveRetainedProcessor.LegacyProcessorFingerprint, "phase-5-zip-retained-archive-v1", TarArchiveRetainedProcessor.LegacyProcessorFingerprint,
+                RetainedCsharpCodeProcessor.LegacyDescriptorFingerprint];
+            await context.SourceCapabilities.Where(value => value.Id != capability.Id && value.ProcessorKind == capability.ProcessorKind &&
+                    replaced.Contains(value.ProcessorFingerprint) && value.IsRunnable)
+                .ExecuteUpdateAsync(setters => setters.SetProperty(value => value.IsRunnable, false), cancellationToken).ConfigureAwait(false);
         }
 
         return registered;

@@ -10,13 +10,15 @@ namespace FluxKnowledge.Application.Sources;
 /// <summary>Processes only checksum-verified retained ustar/GNU TAR bytes into content-addressed child artifacts.</summary>
 public sealed class TarArchiveRetainedProcessor(IRetainedArtifactWriter artifactWriter) : ILocalSourceCapabilityHandler
 {
+    public const string LegacyProcessorVersion = "phase-5-tar-v1";
+    public const string LegacyProcessorFingerprint = "phase-5-tar-retained-archive-v1";
     private const int MaximumTarCompressionRatio = 100;
     public static readonly SourceCapabilityDescriptor Capability = new(
-        new Guid("3d8e4b4e-8d16-45c7-aa02-c4e546ba997d"),
+        new Guid("0d3708c6-ae54-4bc3-a65f-1d38c2bed0a9"),
         "archive-tar-expand",
-        "phase-5-tar-v1",
+        "phase-5-tar-v2",
         ExecutionClass.InProcess,
-        "phase-5-tar-retained-archive-v1",
+        "phase-5-tar-retained-archive-v2",
         SourceActivityKind.ArchiveExpansion,
         "ArchiveTar",
         "retained:archive-tar-expand");
