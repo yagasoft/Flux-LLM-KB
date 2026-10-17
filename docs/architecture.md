@@ -384,6 +384,16 @@ process lifetime; each tokenizer and ONNX model session retains per-request
 disposal. The corrected payload finished the held rebuild and passed startup
 readiness after an exact-release restart.
 
+Further tokenizer-only isolation reproduced native arena retention when complete
+tokenizer lifecycles ran on departing OS threads, despite that process pin,
+successful disposal and managed garbage collection. The native tokenizer now has
+one permanent background thread for initialisation, encoding, cleanup and native
+library calls. A bounded queue applies backpressure; operation failures return to
+their caller without replacing the owner. Per-tokenizer locking and verified file
+leases remain in force until accepted native work finishes, including during
+cancellation and shutdown. The [memory incident record](operations/2026-10-17-tokenizer-native-memory.md)
+distinguishes the reproduced mechanism from other unresolved native crash risks.
+
 Interactive ownership now records an opaque Windows machine fingerprint, PID and
 process start time. Independently reviewed recovery proves the exact local process
 incarnation has exited before reconciling capacity; it never replays private search

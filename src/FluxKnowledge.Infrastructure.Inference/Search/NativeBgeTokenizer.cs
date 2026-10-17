@@ -51,7 +51,7 @@ internal sealed class NativeBgeTokenizer : IBgeTokenizer
     }
 
     internal static IBgeTokenizer OpenForTest(VerifiedLocalModelLease tokenizer, VerifiedLocalModelLease runtime, string filename) =>
-        new NativeBgeTokenizer(tokenizer, runtime, "synthetic", filename);
+        ProcessTokenizerNativeThread.Invoke(() => new NativeBgeTokenizer(tokenizer, runtime, "synthetic", filename));
 
     internal static async ValueTask<IBgeTokenizer> CreateAsync(VerifiedLocalModelLease tokenizer, VerifiedLocalModelLease runtime,
         string fingerprint, CancellationToken cancellationToken)
@@ -71,7 +71,7 @@ internal sealed class NativeBgeTokenizer : IBgeTokenizer
             json.RootElement.GetProperty("padding").ValueKind != JsonValueKind.Null)
             throw new BgeInferenceException("bge-tokenizer-truncation-refused");
         cancellationToken.ThrowIfCancellationRequested();
-        return new NativeBgeTokenizer(tokenizer, runtime, fingerprint);
+        return ProcessTokenizerNativeThread.Invoke(() => new NativeBgeTokenizer(tokenizer, runtime, fingerprint));
     }
 
     public string Fingerprint { get; }
@@ -85,7 +85,7 @@ internal sealed class NativeBgeTokenizer : IBgeTokenizer
         lock (_sync)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
-            return _encode(text).Select(static id => (long)id).ToArray();
+            return ProcessTokenizerNativeThread.Invoke(() => _encode(text).Select(static id => (long)id).ToArray());
         }
     }
 
@@ -95,17 +95,20 @@ internal sealed class NativeBgeTokenizer : IBgeTokenizer
         {
             if (_disposed) return;
             _disposed = true;
-            try { _tokenizer.Dispose(); }
-            finally
+            ProcessTokenizerNativeThread.Invoke(() =>
             {
-                // The managed binding caches P/Invoke targets. Balance this request's
-                // reference; the separate verified process pin protects allocator arenas.
-                GC.SuppressFinalize(_tokenizer);
-                _context.Unload();
-                ReleaseNativeLibrary();
-                _runtimeLease.Dispose();
-                _tokenizerLease.Dispose();
-            }
+                try { _tokenizer.Dispose(); }
+                finally
+                {
+                    // Balance this request's reference on the same native owner.
+                    // The separate verified process pin protects allocator arenas.
+                    GC.SuppressFinalize(_tokenizer);
+                    _context.Unload();
+                    ReleaseNativeLibrary();
+                    _runtimeLease.Dispose();
+                    _tokenizerLease.Dispose();
+                }
+            });
         }
     }
 

@@ -5,11 +5,101 @@ using FluxKnowledge.Infrastructure.Inference.Models;
 using FluxKnowledge.Infrastructure.Inference.Search;
 using FluxKnowledge.Integrations.Models;
 using Xunit;
+using Xunit.Abstractions;
 
 namespace FluxKnowledge.Integration.Tests.Models;
 
-public sealed class BgeCpuOfflineProbeTests
+public sealed class BgeCpuOfflineProbeTests(ITestOutputHelper output)
 {
+    [BgeNativeProbeFact]
+    public async Task Changing_caller_threads_do_not_accumulate_native_tokenizer_arenas()
+    {
+        var tokenizerStore = new LocalModelStore(() => WindowsModelVerificationFiles.OpenProductionBundle(
+            ["bundles", "bge-m3-onnx", BgeOfflineModels.EmbeddingRevision, "onnx"]));
+        var runtimeStore = new LocalModelStore(() => WindowsModelVerificationFiles.OpenProductionBundle(
+            ["runtimes", "bge-onnx-net-tokenizer-1.4.0-win-x64"]));
+        long[] expected;
+        using (var tokenizer = await BgeOfflineModels.CreateTokenizerAsync(tokenizerStore, runtimeStore, false, CancellationToken.None))
+            expected = tokenizer.EncodeUntruncated("Sample request. English العربية.");
+        var specification = new FluxKnowledge.Application.Models.ModelBundleSpecification(1,
+            [new(BgeOfflineModels.EmbeddingRevision, "tokenizer.json",
+                "6710678b12670bc442b99edc952c4d996ae309a7020c1fa0096dd245c2faf790", 17082821)]);
+        await RunCaller(); // Warm a complete native lifecycle before measuring retention.
+        using var process = Process.GetCurrentProcess();
+        process.Refresh();
+        var before = process.PrivateMemorySize64;
+        for (var caller = 0; caller < 32; caller++) await RunCaller();
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        GC.Collect();
+        process.Refresh();
+        output.WriteLine($"Departed callers: 32; private bytes before: {before}; after: {process.PrivateMemorySize64}; growth: {process.PrivateMemorySize64 - before}.");
+        // Native model initialisation on each departed thread formerly retained
+        // several committed 32 MiB arenas, even after successful cleanup.
+        // Managed GC cannot release those arenas; a fixed owner must reuse them.
+        Assert.InRange(process.PrivateMemorySize64 - before, long.MinValue, 128L * 1024 * 1024);
+
+        async Task RunCaller()
+        {
+            // Resolve exact local files before starting the caller, so async file IO
+            // cannot move native initialisation onto a reusable thread-pool thread.
+            var tokenizerLease = (await tokenizerStore.ResolveAsync(specification, CancellationToken.None)).Lease!;
+            FluxKnowledge.Application.Models.VerifiedLocalModelLease runtimeLease;
+            try { runtimeLease = (await runtimeStore.ResolveAsync(BgeOfflineModels.TokenizerRuntime, CancellationToken.None)).Lease!; }
+            catch { tokenizerLease.Dispose(); throw; }
+            Exception? failure = null;
+            var thread = new Thread(() =>
+            {
+                try
+                {
+                    using var ownedTokenizerLease = tokenizerLease;
+                    using var ownedRuntimeLease = runtimeLease;
+                    using var tokenizer = NativeBgeTokenizer.OpenForTest(tokenizerLease, runtimeLease, "tokenizer.json");
+                    Assert.Equal(expected, tokenizer.EncodeUntruncated("Sample request. English العربية."));
+                }
+                catch (Exception exception) { failure = exception; }
+            }) { IsBackground = true };
+            try { thread.Start(); }
+            catch { runtimeLease.Dispose(); tokenizerLease.Dispose(); throw; }
+            // A timeout must not release files still owned by the background caller.
+            Assert.True(thread.Join(TimeSpan.FromSeconds(10)), "Tokenizer caller did not finish.");
+            Assert.Null(failure);
+        }
+    }
+
+    [BgeNativeProbeFact]
+    public async Task Concurrent_encode_and_dispose_complete_without_releasing_native_state_under_a_caller()
+    {
+        var tokenizerStore = new LocalModelStore(() => WindowsModelVerificationFiles.OpenProductionBundle(
+            ["bundles", "bge-m3-onnx", BgeOfflineModels.EmbeddingRevision, "onnx"]));
+        var runtimeStore = new LocalModelStore(() => WindowsModelVerificationFiles.OpenProductionBundle(
+            ["runtimes", "bge-onnx-net-tokenizer-1.4.0-win-x64"]));
+        using var tokenizer = await BgeOfflineModels.CreateTokenizerAsync(tokenizerStore, runtimeStore, false, CancellationToken.None);
+        var expected = tokenizer.EncodeUntruncated("Sample concurrent request.");
+        using var start = new ManualResetEventSlim();
+        var failures = new System.Collections.Concurrent.ConcurrentQueue<Exception>();
+        var callers = Enumerable.Range(0, 16).Select(index => new Thread(() =>
+        {
+            start.Wait();
+            try
+            {
+                if (index % 2 == 0)
+                {
+                    try { Assert.Equal(expected, tokenizer.EncodeUntruncated("Sample concurrent request.")); }
+                    catch (ObjectDisposedException) { }
+                }
+                else tokenizer.Dispose();
+            }
+            catch (Exception exception) { failures.Enqueue(exception); }
+        }) { IsBackground = true }).ToArray();
+        foreach (var caller in callers) caller.Start();
+        start.Set();
+        foreach (var caller in callers) Assert.True(caller.Join(TimeSpan.FromSeconds(10)));
+        Assert.Empty(failures);
+        Assert.Throws<ObjectDisposedException>(() => tokenizer.EncodeUntruncated("After disposal."));
+        tokenizer.Dispose();
+    }
+
     [BgeNativeProbeFact]
     public async Task Native_tokenizers_are_disposed_while_the_verified_runtime_survives_failure_and_repetition()
     {

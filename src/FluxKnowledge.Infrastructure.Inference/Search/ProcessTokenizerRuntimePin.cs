@@ -36,7 +36,7 @@ internal sealed class ProcessTokenizerRuntimePin(Func<string, nint>? loadLibrary
                 // Publication transfers this separate lease to the process owner. Never
                 // free this handle during managed shutdown: callers/finalisers may remain.
                 var pinned = new PinnedRuntime(identity, path, lease);
-                pinned.Handle = _loadLibrary(path);
+                pinned.Handle = ProcessTokenizerNativeThread.Invoke(() => _loadLibrary(path));
                 if (pinned.Handle == 0) throw new DllNotFoundException("bge-tokenizer-runtime-load-failed");
                 _pinned = pinned;
                 lease = null;
