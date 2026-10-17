@@ -99,9 +99,9 @@ public sealed class LocalSourceEnumerator : IAuthoritativeSourceFileEnumerator, 
             }
             catch (FileNotFoundException) when (inventory is not null) { continue; }
             catch (DirectoryNotFoundException) when (inventory is not null) { continue; }
-            catch (SourceContentUnavailableException)
+            catch (SourceContentUnavailableException exception)
             {
-                errors.Add(new("unavailable", relativePath, "SourceContentNotAvailableLocally"));
+                errors.Add(FailureEvidence(exception, relativePath));
                 continue;
             }
             catch (PreviewLimitException)
@@ -114,9 +114,9 @@ public sealed class LocalSourceEnumerator : IAuthoritativeSourceFileEnumerator, 
                 budget.RecordLimit("PreviewTimeLimit");
                 break;
             }
-            catch (UnauthorizedAccessException)
+            catch (UnauthorizedAccessException exception)
             {
-                errors.Add(new("permission", relativePath, "SourcePathDenied"));
+                errors.Add(FailureEvidence(exception, relativePath));
                 continue;
             }
             catch (SourceSnapshotChangedException)
@@ -126,7 +126,7 @@ public sealed class LocalSourceEnumerator : IAuthoritativeSourceFileEnumerator, 
             }
             catch (IOException exception)
             {
-                errors.Add(new("io", relativePath, exception.GetType().Name));
+                errors.Add(FailureEvidence(exception, relativePath));
                 continue;
             }
             yield return file with { GitInventory = inventory is null ? null :
@@ -178,8 +178,8 @@ public sealed class LocalSourceEnumerator : IAuthoritativeSourceFileEnumerator, 
             if (after.NamespaceIncomplete && !errors.Any(item => item.RelativePath == relative && item.Detail == "CloudDirectoryNamespaceIncomplete"))
                 errors.Add(new("partial", relative, "CloudDirectoryNamespaceIncomplete"));
         }
-        catch (UnauthorizedAccessException) { errors.Add(new("reparse", relative, "SourceDirectoryDenied")); }
-        catch (IOException exception) { errors.Add(new("io", relative, exception.GetType().Name)); }
+        catch (UnauthorizedAccessException exception) { errors.Add(FailureEvidence(exception, relative)); }
+        catch (IOException exception) { errors.Add(FailureEvidence(exception, relative)); }
     }
 
     public static bool MatchesPolicy(string relativePath, IReadOnlyList<string> includes, IReadOnlyList<string> excludes)
@@ -260,10 +260,27 @@ public sealed class LocalSourceEnumerator : IAuthoritativeSourceFileEnumerator, 
             }
             return lease;
         }
-        catch (UnauthorizedAccessException) { errors.Add(new("permission", ".", "SourceRootAccessDenied")); }
-        catch (IOException) { errors.Add(new("identity", ".", "SourceRootRevalidationFailed")); }
+        catch (UnauthorizedAccessException exception) { errors.Add(FailureEvidence(exception, ".")); }
+        catch (IOException exception) { errors.Add(FailureEvidence(exception, ".")); }
         lease?.Dispose();
         return null;
+    }
+
+    private static SourceEnumerationEvidence FailureEvidence(Exception exception, string relativePath)
+    {
+        var nativeCode = exception.InnerException is System.ComponentModel.Win32Exception native ? (int?)native.NativeErrorCode : null;
+        var (kind, reason) = exception switch
+        {
+            SourcePathSecurityException security => ("security", security.ReasonCode),
+            SourceContentUnavailableException => ("unavailable", "SourceContentNotAvailableLocally"),
+            UnauthorizedAccessException when nativeCode == 5 => ("permission", "SourceAccessDenied"),
+            UnauthorizedAccessException => ("security", "SourcePathSafetyRefused"),
+            SourceSnapshotChangedException => ("changed", "SourceChangedDuringDiscovery"),
+            FileNotFoundException or DirectoryNotFoundException => ("changed", "SourcePathNoLongerExists"),
+            IOException when nativeCode == 32 => ("io", "SourceInUse"),
+            _ => ("io", "SourceIoFailure")
+        };
+        return new(kind, relativePath, reason) { NativeErrorCode = nativeCode };
     }
 
     private sealed class PreviewLimitException : IOException;

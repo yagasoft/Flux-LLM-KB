@@ -38,9 +38,18 @@ internal sealed class CloudSourceFixture : IDisposable
 
     public static (uint Attributes, uint Tag) Metadata(string path)
     {
-        using var handle = CreateFile(path, 0x80, 7, IntPtr.Zero, 3, 0x02200000, IntPtr.Zero);
+        using var handle = OpenMetadata(path);
         if (!GetFileInformationByHandleEx(handle, 9, out var result, 8)) throw new Win32Exception(Marshal.GetLastPInvokeError());
         return (result.Attributes, result.Tag);
+    }
+
+    public static SafeFileHandle OpenMetadata(string path)
+    {
+        var handle = CreateFile(path, 0x80, 7, IntPtr.Zero, 3, 0x02300000, IntPtr.Zero);
+        if (!handle.IsInvalid) return handle;
+        var error = Marshal.GetLastPInvokeError();
+        handle.Dispose();
+        throw new Win32Exception(error);
     }
 
     public string File(string relativePath, string content, bool dehydrate = false)

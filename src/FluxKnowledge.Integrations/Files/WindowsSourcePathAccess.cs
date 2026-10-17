@@ -29,7 +29,7 @@ internal static class WindowsSourcePathAccess
     internal static void ValidateTag(Metadata metadata)
     {
         if ((metadata.Attributes & 0x400) != 0 && !IsCloudTag(metadata.ReparseTag))
-            throw new UnauthorizedAccessException($"Source reparse type 0x{metadata.ReparseTag:X8} is not supported; symbolic links and redirected folders are not allowed.");
+            throw new SourcePathSecurityException("SourceReparseTypeNotSupported", $"Source reparse type 0x{metadata.ReparseTag:X8} is not supported; symbolic links and redirected folders are not allowed.");
     }
 
     internal static void EnsureContentAvailable(Metadata metadata)
@@ -52,7 +52,7 @@ internal static class WindowsSourcePathAccess
     {
         if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("Source physical-path validation requires Windows.");
         var canonical = Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
-        if (canonical.StartsWith(@"\\", StringComparison.Ordinal)) throw new UnauthorizedAccessException("UNC source paths are not allowed.");
+        if (canonical.StartsWith(@"\\", StringComparison.Ordinal)) throw new SourcePathSecurityException("SourceUncPathNotAllowed", "UNC source paths are not allowed.");
         var volume = Path.GetPathRoot(canonical) ?? throw new IOException("Source path has no volume.");
         var lease = new DirectoryPathLease(canonical);
         try
@@ -89,7 +89,7 @@ internal static class WindowsSourcePathAccess
     {
         var canonicalRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(root));
         var canonicalPath = Path.GetFullPath(path);
-        if (!IsWithin(canonicalRoot, canonicalPath)) throw new UnauthorizedAccessException("Source path is outside its authorised root.");
+        if (!IsWithin(canonicalRoot, canonicalPath)) throw new SourcePathSecurityException("SourcePathOutsideRoot", "Source path is outside its authorised root.");
         var parent = OpenDirectoryPath(Path.GetDirectoryName(canonicalPath)!);
         SafeFileHandle? handle = null;
         try
@@ -105,7 +105,7 @@ internal static class WindowsSourcePathAccess
             EnsureContentAvailable(ReadMetadata(handle));
             var finalPath = PhysicalFileIdentity.GetFinalPath(handle);
             if (!string.Equals(finalPath, canonicalPath, StringComparison.OrdinalIgnoreCase) || !IsWithin(rootIdentity.CanonicalPath, finalPath))
-                throw new UnauthorizedAccessException("The source physical target escaped its held parent or authorised root.");
+                throw new SourcePathSecurityException("SourcePhysicalPathMismatch", "The source physical target escaped its held parent or authorised root.");
             var identity = PhysicalFileIdentity.Get(handle);
             if (fileIdentity is not null && fileIdentity != identity)
                 throw new SourceSnapshotChangedException("The source identity changed after discovery.");
@@ -121,7 +121,7 @@ internal static class WindowsSourcePathAccess
     private static SafeFileHandle OpenRelative(SafeFileHandle parent, string name, uint access, uint share, uint options)
     {
         if (name is "." or ".." || name.IndexOfAny(['\\', '/', ':']) >= 0)
-            throw new UnauthorizedAccessException("Source path component is not a single local name.");
+            throw new SourcePathSecurityException("SourcePathComponentInvalid", "Source path component is not a single local name.");
         var text = Marshal.StringToHGlobalUni(name);
         var unicodePointer = Marshal.AllocHGlobal(Marshal.SizeOf<UnicodeString>());
         try
@@ -173,7 +173,7 @@ internal static class WindowsSourcePathAccess
                 if (!metadata.IsDirectory) throw new DirectoryNotFoundException("A source ancestor is no longer a directory.");
                 var finalPath = PhysicalFileIdentity.GetFinalPath(handle);
                 if (!string.Equals(finalPath, canonicalPath, StringComparison.OrdinalIgnoreCase))
-                    throw new UnauthorizedAccessException("A source ancestor resolves outside its configured physical path.");
+                    throw new SourcePathSecurityException("SourcePhysicalPathMismatch", "A source ancestor resolves outside its configured physical path.");
                 var identity = PhysicalFileIdentity.Get(handle);
                 var fingerprint = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(identity["ntfs:".Length..])));
                 _chain.Add((canonicalPath, handle, new(finalPath, fingerprint)));

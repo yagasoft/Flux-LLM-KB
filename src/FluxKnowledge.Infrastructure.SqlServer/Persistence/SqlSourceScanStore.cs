@@ -4,6 +4,7 @@ using System.Text.Json.Nodes;
 using FluxKnowledge.Application.Contracts;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Gpu;
+using FluxKnowledge.Application.Sources;
 using FluxKnowledge.Domain.Sources;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
 using Microsoft.EntityFrameworkCore;
@@ -679,7 +680,7 @@ public sealed class SqlSourceScanStore(
         value.Length == 64 && value.All(static character =>
             character is >= '0' and <= '9' or >= 'a' and <= 'f' or >= 'A' and <= 'F');
 
-    private static string MergeEvidence(string? existing, IReadOnlyList<SourceEnumerationEvidence> evidence)
+    internal static string MergeEvidence(string? existing, IReadOnlyList<SourceEnumerationEvidence> evidence)
     {
         JsonObject value;
         try
@@ -692,6 +693,7 @@ public sealed class SqlSourceScanStore(
         }
 
         value["enumerationErrors"] = JsonSerializer.SerializeToNode(evidence.Take(100));
+        value["enumerationIssueSummary"] = JsonSerializer.SerializeToNode(SourceScanIssueSummary.Create(evidence));
         value["enumerationComplete"] = evidence.Count == 0;
         return value.ToJsonString();
     }

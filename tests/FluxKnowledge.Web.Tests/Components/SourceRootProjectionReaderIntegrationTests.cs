@@ -9,6 +9,7 @@ using FluxKnowledge.Infrastructure.SqlServer.Persistence;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
 using FluxKnowledge.Integration.Tests.Support;
 using FluxKnowledge.Web.Components.Sources;
+using FluxKnowledge.Web.Components.Status;
 using Microsoft.EntityFrameworkCore;
 using Xunit;
 
@@ -64,8 +65,10 @@ public sealed class SourceRootProjectionReaderIntegrationTests(NativeSqlServerFi
         Assert.Equal(old.Reason, (await verification.SourceProcessorAttempts.SingleAsync(value => value.BranchId == branch)).OutcomeCode);
     }
 
-    [NativeSqlServerFact]
-    public async Task Verified_recovery_clears_current_failure_without_erasing_scan_history_or_hiding_unrelated_failures()
+    [NativeSqlServerTheory]
+    [InlineData(SourceScanRequestState.Running)]
+    [InlineData(SourceScanRequestState.Released)]
+    public async Task Verified_recovery_clears_current_failure_without_erasing_scan_history_or_hiding_unrelated_failures(SourceScanRequestState nextScanState)
     {
         var now = DateTimeOffset.UtcNow;
         var root = Guid.NewGuid();
@@ -118,15 +121,27 @@ public sealed class SourceRootProjectionReaderIntegrationTests(NativeSqlServerFi
             {
                 Id = scan, SourceRootId = root, RequestedBy = "test", RequestedAtUtc = now,
                 IsReleased = true, State = (int)SourceScanRequestState.Completed,
-                DiscoveredFileCount = 1, ErrorFileCount = 7, AuditEvidenceJson = "{\"retainedHistory\":true}"
+                DiscoveredFileCount = 1, ErrorFileCount = 7, AuditEvidenceJson = "{\"retainedHistory\":true,\"enumerationErrors\":[{\"Kind\":\"permission\",\"RelativePath\":\"old-scan-item.txt\",\"Detail\":\"SourcePathDenied\"}]}"
             });
             await setup.SaveChangesAsync();
         }
         var reader = new SourceRootProjectionReader(factory, new NoPathPolicy(), new NoEnumeration(),
             new LocalSourceCapabilityHandlerRegistry([]));
+        async Task<int> ReadOverviewScanErrorsAsync()
+        {
+            await using var context = factory.CreateDbContext();
+            var summary = await new SqlPipelineActivityReader(null, TimeProvider.System)
+                .ReadAsync(context, DateTimeOffset.UtcNow, default);
+            return summary.Sources.Single(value => value.Id == root).ScanErrors;
+        }
         var before = Assert.IsType<SourceRootDetailProjection>(await reader.ReadRootAsync(root, default));
         Assert.Equal(1, before.ErrorCount);
         Assert.Equal(7, before.LastScanIssueCount);
+        Assert.Equal(7, await ReadOverviewScanErrorsAsync());
+        Assert.Equal(7, before.ScanIssues.ReportedCount);
+        Assert.False(before.ScanIssues.CauseCountsComplete);
+        Assert.Equal("old-scan-item.txt", Assert.Single(Assert.Single(before.ScanIssues.Groups).SamplePaths));
+        Assert.Equal("recovering.txt", Assert.Single(Assert.Single(before.CurrentProcessingIssues).AffectedPaths));
 
         await using (var update = factory.CreateDbContext())
         {
@@ -140,6 +155,7 @@ public sealed class SourceRootProjectionReaderIntegrationTests(NativeSqlServerFi
         Assert.Null(Assert.Single(recovered.Files).Reason);
         Assert.Equal(record, Assert.Single(recovered.Files).CorpusPipelineRecordId);
         Assert.Empty(recovered.DeferredOrBlockedReasons);
+        Assert.Empty(recovered.CurrentProcessingIssues);
         Assert.Equal(0, (await reader.ReadRootsAsync(default)).Single(value => value.Id == root).ErrorCount);
 
         var nextScan = Guid.NewGuid();
@@ -148,12 +164,13 @@ public sealed class SourceRootProjectionReaderIntegrationTests(NativeSqlServerFi
             update.SourceScanRequests.Add(new SourceScanRequestEntity
             {
                 Id = nextScan, SourceRootId = root, RequestedBy = "test", RequestedAtUtc = now.AddMinutes(1),
-                IsReleased = true, State = (int)SourceScanRequestState.Running
+                IsReleased = true, State = (int)nextScanState
             });
             await update.SaveChangesAsync();
         }
         Assert.Equal(7, (await reader.ReadRootAsync(root, default))!.LastScanIssueCount);
         Assert.Equal(7, (await reader.ReadRootsAsync(default)).Single(value => value.Id == root).LastScanIssueCount);
+        Assert.Equal(7, await ReadOverviewScanErrorsAsync());
 
         await using (var update = factory.CreateDbContext())
         {
@@ -161,6 +178,8 @@ public sealed class SourceRootProjectionReaderIntegrationTests(NativeSqlServerFi
             await update.SaveChangesAsync();
         }
         Assert.Equal(0, (await reader.ReadRootAsync(root, default))!.LastScanIssueCount);
+        Assert.Equal(0, await ReadOverviewScanErrorsAsync());
+        Assert.Empty((await reader.ReadRootAsync(root, default))!.ScanIssues.Groups);
         await using (var update = factory.CreateDbContext())
         {
             // A valid completed record for another source cannot resolve this failed item.
@@ -504,6 +523,9 @@ public sealed class SourceRootProjectionReaderIntegrationTests(NativeSqlServerFi
         Assert.Equal(0, detail.IndexedCount);
         Assert.Equal(1, detail.BlockedCount);
         Assert.Equal(1, detail.ErrorCount);
+        var failedGroup = Assert.Single(detail.CurrentProcessingIssues, group => group.State == "Failed");
+        Assert.Equal("document-ocr-provider-refused", failedGroup.Reason);
+        Assert.Equal("replacement.pdf", Assert.Single(failedGroup.AffectedPaths));
     }
 
     [NativeSqlServerFact]

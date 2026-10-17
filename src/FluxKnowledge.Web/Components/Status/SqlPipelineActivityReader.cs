@@ -18,7 +18,8 @@ internal sealed class SqlPipelineActivityReader(IDeploymentValidationHold? hold,
         var now = clock.GetUtcNow();
         var roots = await context.SourceRootConfigurations.AsNoTracking().OrderBy(r => r.DisplayName).ThenBy(r => r.Id)
             .Select(r => new RootRow(r.Id, r.DisplayName, r.CanonicalPath, r.State, r.LastScanCompletedAtUtc,
-                context.SourceScanRequests.Where(request => request.SourceRootId == r.Id)
+                context.SourceScanRequests.Where(request => request.SourceRootId == r.Id &&
+                        (request.State == (int)SourceScanRequestState.Completed || request.State == (int)SourceScanRequestState.Failed))
                     .OrderByDescending(request => request.RequestedAtUtc).ThenByDescending(request => request.Id)
                     .Select(request => (int?)request.ErrorFileCount).FirstOrDefault() ?? 0))
             .ToArrayAsync(cancellationToken).ConfigureAwait(false);

@@ -65,27 +65,31 @@ public sealed class LocalSourceRootWatchHostedService(
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { }
     }
 
-    private async Task<IDisposable> BuildWatchersAsync(CancellationToken cancellationToken)
+    internal async Task<IDisposable> BuildWatchersAsync(CancellationToken cancellationToken)
     {
-        var watchers = new List<FileSystemWatcher>();
+        var registrations = new List<IDisposable>();
         var roots = await store.ReadEnabledRootsAsync(cancellationToken).ConfigureAwait(false);
         _signals.ConfigureRoots(roots.Select(root => root.Id));
         foreach (var root in roots)
         {
+            var registration = new List<IDisposable>();
             try
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                Revalidate(root);
+                // Pin validated ancestor/root names for this registration's lifetime. FileSystemWatcher
+                // opens its own handle; only guarded reconciliation may authorise source content reads.
+                registration.Add(Revalidate(root));
                 var watchPaths = GetWatchPaths(root, out var repository);
                 foreach (var watchPath in watchPaths)
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
                     var watcher = new FileSystemWatcher(watchPath)
                     {
                         IncludeSubdirectories = root.Recursive,
                         NotifyFilter = NotifyFilters.FileName | NotifyFilters.LastWrite | NotifyFilters.Size | NotifyFilters.CreationTime |
                             (root.DiscoveryMode == SourceDiscoveryMode.GitTracked ? NotifyFilters.DirectoryName : 0)
                     };
-                    watchers.Add(watcher);
+                    registration.Add(watcher);
                     watcher.Created += (_, change) => SignalIfRelevant(root, SourceWatchSignalKind.Created, change, repository);
                     watcher.Changed += (_, change) => SignalIfRelevant(root, SourceWatchSignalKind.Changed, change, repository);
                     watcher.Deleted += (_, change) => SignalIfRelevant(root, SourceWatchSignalKind.Deleted, change, repository);
@@ -93,19 +97,22 @@ public sealed class LocalSourceRootWatchHostedService(
                     watcher.Error += (_, _) => Signal(root.Id, SourceWatchSignalKind.Overflow);
                     watcher.EnableRaisingEvents = true;
                 }
+                registrations.Add(new CompositeDisposable(registration));
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
-                new CompositeDisposable(watchers).Dispose();
+                new CompositeDisposable(registration).Dispose();
+                new CompositeDisposable(registrations).Dispose();
                 throw;
             }
             catch (Exception exception)
             {
+                new CompositeDisposable(registration).Dispose();
                 logger.LogWarning(exception, "Source-root watcher was not opened for {SourceRootId}; periodic reconciliation remains authoritative.", root.Id.Value);
                 Signal(root.Id, SourceWatchSignalKind.Overflow);
             }
         }
-        return new CompositeDisposable(watchers);
+        return new CompositeDisposable(registrations);
     }
 
     private void Signal(SourceRootId rootId, SourceWatchSignalKind kind) =>
@@ -150,12 +157,27 @@ public sealed class LocalSourceRootWatchHostedService(
             control.StartsWith(path + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
     }
 
-    private static void Revalidate(SourceRootConfiguration root)
+    private static IDisposable Revalidate(SourceRootConfiguration root)
     {
         if (root.FollowLinks) throw new UnauthorizedAccessException("Source-root watchers do not follow links.");
-        PhysicalFileIdentity.EnsureNoReparsePointTraversal(root.CanonicalPath);
-        var identity = PhysicalFileIdentity.GetDirectory(root.CanonicalPath);
-        if (root.RequiresPhysicalIdentityValidation && !string.Equals(identity.IdentityFingerprint, root.PhysicalIdentityFingerprint, StringComparison.Ordinal)) throw new IOException("Source-root identity changed.");
+        if (root.RequiresPhysicalIdentityValidation && string.IsNullOrWhiteSpace(root.PhysicalIdentityFingerprint))
+            throw new IOException("The admitted source-root identity is missing; re-admit the folder before watching it.");
+        if (!string.IsNullOrWhiteSpace(root.PhysicalIdentityFingerprint) &&
+            (root.PhysicalIdentityFingerprint.Length != 64 || !root.PhysicalIdentityFingerprint.All(char.IsAsciiHexDigit)))
+            throw new IOException("The admitted source-root identity is malformed; re-admit the folder before watching it.");
+        if (root.DiscoveryMode == SourceDiscoveryMode.GitTracked)
+            PhysicalFileIdentity.EnsureNoReparsePointTraversal(root.CanonicalPath);
+        else if (root.DiscoveryMode != SourceDiscoveryMode.Filesystem)
+            throw new UnauthorizedAccessException("The source-root discovery mode is not supported.");
+        var lease = WindowsSourcePathAccess.OpenDirectoryPath(root.CanonicalPath, enumerate: true);
+        try
+        {
+            if (!string.IsNullOrWhiteSpace(root.PhysicalIdentityFingerprint) &&
+                !string.Equals(lease.Identity.IdentityFingerprint, root.PhysicalIdentityFingerprint, StringComparison.Ordinal))
+                throw new IOException("The admitted source-root identity changed; re-admit the folder before watching it.");
+            return lease;
+        }
+        catch { lease.Dispose(); throw; }
     }
 
     public static IReadOnlyList<string> GetWatchPaths(SourceRootConfiguration root) => GetWatchPaths(root, out _);
@@ -172,8 +194,12 @@ public sealed class LocalSourceRootWatchHostedService(
             ? [root.CanonicalPath] : [root.CanonicalPath, repository.CommonDirectory];
     }
 
-    private sealed class CompositeDisposable(IReadOnlyList<FileSystemWatcher> watchers) : IDisposable
+    private sealed class CompositeDisposable(IReadOnlyList<IDisposable> registrations) : IDisposable
     {
-        public void Dispose() { foreach (var watcher in watchers) watcher.Dispose(); }
+        public void Dispose()
+        {
+            // Watchers close before their path leases, including a partially opened Git registration.
+            for (var index = registrations.Count - 1; index >= 0; index--) registrations[index].Dispose();
+        }
     }
 }

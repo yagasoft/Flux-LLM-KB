@@ -23,7 +23,7 @@ public sealed class CloudSourcePathTests
     [InlineData(0x9000101bu)] // unsupported Microsoft tag
     [InlineData(0x1000001au)] // not the Microsoft cloud family
     public void Unsupported_reparse_tags_are_rejected(uint tag) =>
-        Assert.Throws<UnauthorizedAccessException>(() => WindowsSourcePathAccess.ValidateTag(new(0x410, tag, 0)));
+        Assert.Throws<SourcePathSecurityException>(() => WindowsSourcePathAccess.ValidateTag(new(0x410, tag, 0)));
 
     [Theory]
     [InlineData(0x1000u, 0u)]
@@ -172,7 +172,7 @@ public sealed class CloudSourcePathTests
             var enumerator = new LocalSourceEnumerator();
             var root = SourceRootConfiguration.Create(fixture.Root, "Cloud", false, false, 1024, includePatterns: ["linked.txt"]);
             await foreach (var _ in enumerator.EnumerateAsync(root, default)) Assert.Fail("A linked source file was read.");
-            Assert.Contains(enumerator.LastEvidence, item => item.Kind == "permission" && item.RelativePath == "linked.txt");
+            Assert.Contains(enumerator.LastEvidence, item => item.Kind == "security" && item.Detail == "SourceReparseTypeNotSupported" && item.RelativePath == "linked.txt");
         }
         finally { System.IO.File.Delete(link); }
     }

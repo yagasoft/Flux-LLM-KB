@@ -186,15 +186,9 @@ public sealed class SourceRootProjectionReader(
                 activity.State == (int)SourceActivityState.DeferredPolicy ||
                 activity.State == (int)SourceActivityState.FailedTerminal && !activity.PipelineCompleted)
             .Select(activity => new SourceActivityReasonProjection(
-                ((SourceActivityState)activity.State).ToString(),
-                DisplayReason(activity),
-                1))
+                ((SourceActivityState)activity.State).ToString(), DisplayReason(activity), 1))
             .Concat(terminalBlockedReasons)
-            .GroupBy(activity => new
-            {
-                activity.State,
-                activity.Reason
-            })
+            .GroupBy(activity => new { activity.State, activity.Reason })
             .OrderByDescending(group => group.Count()).ThenBy(group => group.Key.State).ThenBy(group => group.Key.Reason)
             .Take(20)
             .Select(group => new SourceActivityReasonProjection(group.Key.State, group.Key.Reason, group.Count()))
@@ -250,6 +244,9 @@ public sealed class SourceRootProjectionReader(
                 value.Capabilities[0].ProcessorFingerprint))
             .ToArray();
         var files = ProjectFiles(root.CanonicalPath, revisions, activities, terminalBlockedBranches, terminalAttempts, publications, logicalStates);
+        // Use the same current logical file projection as the table: derived OCR failures belong to
+        // their source file, and completed/superseded work must not remain in current issue counts.
+        var processingIssues = SourceIssuePresentation.GroupCurrentFiles(files);
 
         return new SourceRootDetailProjection(
             root.Id,
@@ -267,6 +264,8 @@ public sealed class SourceRootProjectionReader(
             replayActivities)
         {
             LastScanIssueCount = lastFinishedRequest?.ErrorFileCount ?? 0,
+            ScanIssues = SourceScanIssueSummary.FromAudit(lastFinishedRequest?.AuditEvidenceJson, lastFinishedRequest?.ErrorFileCount ?? 0),
+            CurrentProcessingIssues = processingIssues,
             Files = files,
             DeletionPhase = deletion?.Phase,
             DeletionReason = deletion?.ReasonCode,
@@ -333,6 +332,7 @@ public sealed class SourceRootProjectionReader(
             "PreviewEntryLimit" or "PreviewFileLimit" => "Preview reached its sample limit. These counts are not workspace totals.",
             "PreviewTimeLimit" => "Preview reached its time limit. These counts are not workspace totals.",
             "SourceDirectoryDenied" or "SourcePathDenied" => "A source path was inaccessible or uses unsupported redirection; it was not traversed.",
+            _ when item.Kind is "permission" or "security" or "identity" or "io" or "changed" => $"{item.Detail}: {SourceIssuePresentation.Guidance(item.Detail)}",
             _ => item.Detail
         }));
         return new SourceRootPreview(

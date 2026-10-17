@@ -33,7 +33,10 @@ public interface IBoundedSourceFileEnumerator : ISourceFileEnumerator
 
 public sealed record SourceScanOwnership(SourceScanRequestId RequestId, SourceScanLease Lease);
 
-public sealed record SourceEnumerationEvidence(string Kind, string RelativePath, string Detail);
+public sealed record SourceEnumerationEvidence(string Kind, string RelativePath, string Detail)
+{
+    public int? NativeErrorCode { get; init; }
+}
 
 public sealed record GitInventoryEvidence(string RepositoryIdentity, string Generation, int TrackedCount, int ExcludedCount);
 

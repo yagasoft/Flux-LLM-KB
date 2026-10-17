@@ -66,7 +66,11 @@ public sealed record SourceRootListProjection(
     public SourceDeletionProgressProjection? DeletionProgress { get; init; }
 }
 
-public sealed record SourceActivityReasonProjection(string State, string Reason, int Count);
+public sealed record SourceActivityReasonProjection(string State, string Reason, int Count)
+{
+    [System.Text.Json.Serialization.JsonIgnore]
+    public IReadOnlyList<string> AffectedPaths { get; init; } = [];
+}
 
 public sealed record SourceFileProjection(
     string FileName,
@@ -92,6 +96,11 @@ public sealed record SourceRootDetailProjection(
     IReadOnlyList<DeferredContentReplayRequest> ReprocessableActivities)
 {
     public int LastScanIssueCount { get; init; }
+
+    [System.Text.Json.Serialization.JsonIgnore]
+    public FluxKnowledge.Application.Sources.SourceScanIssueSummary ScanIssues { get; init; } = FluxKnowledge.Application.Sources.SourceScanIssueSummary.Empty;
+
+    public IReadOnlyList<SourceActivityReasonProjection> CurrentProcessingIssues { get; init; } = [];
 
     public string? DeletionPhase { get; init; }
 

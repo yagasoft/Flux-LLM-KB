@@ -1,0 +1,52 @@
+@using FluxKnowledge.Application.Contracts
+@using FluxKnowledge.Application.Sources
+
+<section aria-labelledby="source-scan-issues-heading">
+    <h2 id="source-scan-issues-heading">Last finished scan issues</h2>
+    @if (ScanIssues.ReportedCount == 0)
+    {
+        <p>No issues were reported by the last finished scan.</p>
+    }
+    else
+    {
+        <p>@ScanIssues.ReportedCount issue reports. A later finished scan replaces this view; older reports remain in history.</p>
+        @if (!ScanIssues.CauseCountsComplete)
+        {
+            <p role="status">The retained details are incomplete. The groups below show sample counts, not a complete inventory of causes or affected items.</p>
+        }
+        @if (ScanIssues.Groups.Count == 0)
+        {
+            <p>Detailed causes were not retained for this scan. The next finished scan will provide grouped diagnostics.</p>
+        }
+        @foreach (var issue in ScanIssues.Groups)
+        {
+            <details>
+                <summary>@issue.Reason: @issue.Count reports affecting @issue.AffectedPathCount paths</summary>
+                <p>@SourceIssuePresentation.Guidance(issue.Reason)</p>
+                @if (issue.NativeErrorCode is { } nativeCode) { <p>Windows error: @nativeCode</p> }
+                <p>Retained path samples (@issue.SamplePaths.Count of @issue.AffectedPathCount):</p>
+                <ul>@foreach (var path in issue.SamplePaths) { <li class="diagnostic-value">@path</li> }</ul>
+            </details>
+        }
+    }
+</section>
+<section aria-labelledby="source-processing-issues-heading">
+    <h2 id="source-processing-issues-heading">Current processing issues</h2>
+    @if (ProcessingIssues.Count == 0)
+    {
+        <p>No current failed, blocked, deferred or unconfirmed items.</p>
+    }
+    @foreach (var issue in ProcessingIssues)
+    {
+        <details>
+            <summary>@issue.State: @issue.Reason (@issue.Count items)</summary>
+            <p>@SourceIssuePresentation.Guidance(issue.Reason)</p>
+            <ul>@foreach (var path in issue.AffectedPaths) { <li class="diagnostic-value">@path</li> }</ul>
+        </details>
+    }
+</section>
+
+@code {
+    [Parameter] public SourceScanIssueSummary ScanIssues { get; set; } = SourceScanIssueSummary.Empty;
+    [Parameter] public IReadOnlyList<SourceActivityReasonProjection> ProcessingIssues { get; set; } = [];
+}

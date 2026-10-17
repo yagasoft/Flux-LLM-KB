@@ -53,6 +53,7 @@ else
             </table></div>
         }
     </section>
+    <SourceIssueSummaryPanel ScanIssues="PageState.Detail.ScanIssues" ProcessingIssues="PageState.Detail.CurrentProcessingIssues" />
     <section aria-labelledby="source-events-heading">
         <h2 id="source-events-heading">Recent events</h2>
         @if (PageState.RecentEvents.Count == 0)
@@ -65,20 +66,7 @@ else
         }
     </section>
     <section aria-labelledby="source-reasons-heading">
-        <h2 id="source-reasons-heading">Deferred and blocked reasons</h2>
-        @if (PageState.Detail.DeferredOrBlockedReasons.Count == 0)
-        {
-            <p>No deferred or blocked activity reasons have been recorded.</p>
-        }
-        else
-        {
-            <ul>
-            @foreach (var reason in PageState.Detail.DeferredOrBlockedReasons)
-            {
-                <li><strong>@reason.State</strong> (@reason.Count): @reason.Reason</li>
-            }
-            </ul>
-        }
+        <h2 id="source-reasons-heading">Deferred content recovery</h2>
         @if (PageState.CanReprocessDeferredContent)
         {
             <p><button type="button" @onclick="ReprocessAsync">Reprocess deferred content</button></p>

@@ -1,0 +1,49 @@
+using FluxKnowledge.Application.Contracts;
+
+namespace FluxKnowledge.Web.Components.Sources;
+
+internal static class SourceIssuePresentation
+{
+    internal static IReadOnlyList<SourceActivityReasonProjection> GroupCurrentFiles(IReadOnlyList<SourceFileProjection> files) =>
+        files.Where(file => file.Status is "Failed" or "Blocked" or "Deferred" or "Unconfirmed")
+            .GroupBy(file => (file.Status, Reason: string.IsNullOrWhiteSpace(file.Reason) ? "No reason recorded." : file.Reason))
+            .Select(group =>
+            {
+                var paths = group.Select(file => file.RelativePath).Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.OrdinalIgnoreCase).ToArray();
+                return new SourceActivityReasonProjection(group.Key.Status, group.Key.Reason, paths.Length) { AffectedPaths = paths };
+            })
+            .OrderByDescending(group => group.Count).ThenBy(group => group.State, StringComparer.Ordinal).ThenBy(group => group.Reason, StringComparer.Ordinal).ToArray();
+
+    internal static string Guidance(string? reason) => reason switch
+    {
+        "SourceAccessDenied" => "Windows denied access to the application account. An administrator should review read and traversal permissions for this approved item, then rescan. FluxKnowledge does not change source permissions.",
+        "SourcePathDenied" or "SourceDirectoryDenied" or "SourceRootAccessDenied" => "This older scan did not distinguish permissions from path-security refusals. A scan with the updated diagnostics is needed before changing permissions.",
+        "SourceReparseTypeNotSupported" or "SourcePathSafetyRefused" => "An unsupported reparse point or unsafe redirection was refused. Use the real authorised local folder; symbolic links and junctions remain excluded.",
+        "SourcePhysicalPathMismatch" or "SourcePathOutsideRoot" or "SourceRootIdentityMismatch" or "SourceRootIdentityMissing" or "SourceRootIdentityMalformed" => "The path or physical identity no longer matches the admitted source. Review the real folder and re-admit it; do not bypass the identity check.",
+        "SourceContentNotAvailableLocally" => "The provider could not supply guarded local content. Make only the required item available locally in the sync client, then rescan. No download was requested by FluxKnowledge.",
+        "CloudDirectoryNamespaceIncomplete" => "Only the locally materialised cloud namespace was scanned. Make the required folder available in the sync client before rescanning. Unseen files are preserved, not treated as deleted.",
+        "SourceInUse" => "Another process prevented a stable read. Let its write finish or close the item, then rescan.",
+        "SourceChangedDuringDiscovery" or "SourcePathNoLongerExists" => "The item changed during the scan. Let changes settle, then rescan.",
+        "SourceIoFailure" => "Windows or the filesystem provider refused guarded I/O. Review the recorded native error and provider status before rescanning.",
+        "document-ocr-runtime-failed" => "The OCR child exited without a specific failure result. A bounded retry with failure-stage diagnostics is required; this is not proof that the source is corrupt.",
+        { } code when code.StartsWith("document-ocr-runtime-exit-", StringComparison.Ordinal) => "The OCR child exited before returning a valid failure result. The final eight hexadecimal digits record its exit status. Review interpreter access and runtime startup under the application account before retrying; this is not a content-corruption diagnosis.",
+        "document-ocr-dependency-unavailable" => "An installed OCR dependency is missing or incompatible. Repair the verified offline runtime before retrying this item; model downloads are not automatic.",
+        "document-ocr-model-initialization-failed" => "OCR failed while initialising the verified local runtime or models. Diagnose that stage in isolation before retrying source items.",
+        "document-ocr-orientation-failed" or "document-ocr-recognition-failed" => "OCR failed at the indicated inference stage. Validate one retained item in isolation before a bounded retry; do not replay the whole source.",
+        "document-ocr-offline-operation-refused" => "OCR attempted an operation outside the offline contract. Review the local runtime configuration; automatic acquisition and network fallback remain blocked.",
+        "document-ocr-provider-result-invalid" => "OCR did not return a valid bounded result. Review the runtime using one isolated item before retrying.",
+        "image-document-dimensions-exceeded" => "The image exceeds the safe decode limit: 6000 pixels on either side or 25 million pixels in total. Supply a smaller authorised copy; the decode guard remains enabled.",
+        "pdf-document-encrypted" or "office-document-encrypted" => "Supply an authorised unlocked copy. Encryption is not bypassed.",
+        "office-document-container-invalid" => "The processor could not validate this Office package. Inspect the retained package and parser reason before choosing targeted recovery; this code alone does not establish corruption. Package-integrity checks remain enabled.",
+        "office-document-part-unsupported" => "An Office part, relationship structure or derived-output receipt was refused. Inspect the retained package and processor evidence before choosing recovery; a 64 MiB XML-part limit is only one possible cause. The validation guards remain enabled.",
+        "office-document-element-limit" => "The Office package exceeds the safe XML element budget. Use a smaller export or arrange a bounded capacity review; the parser limit remains enabled.",
+        "archive-entry-path-invalid" => "An archive member has an unsafe or unsupported path. Repack authorised members using relative forward-slash paths without traversal, drive names or links.",
+        "archive-entry-count-limit" or "archive-member-size-limit" or "nested-archive-depth-limit" => "The archive exceeds the indicated safe processing limit. Split or flatten an authorised copy rather than disabling archive safeguards.",
+        "retained-artifact-checksum-invalid" => "Retained bytes failed their checksum. Preserve the evidence and verify the original and retained copy before any re-retention; do not bypass the checksum.",
+        "repository-gpu-outcome-cleanup-or-binding-unconfirmed" or "source-revision-binding-unconfirmed" => "Execution ownership or prior native cleanup is unconfirmed. Review the exact binding and cleanup evidence before recovery; do not blindly retry or clear it.",
+        "compound-binary-parser-unavailable" or "legacy-office-binary-parser-unavailable" or "binary-format-parser-unavailable" or "No installed parser can process this retained binary format." => "No installed parser supports these bytes. Export an authorised copy to a supported format; allowing the policy does not add a parser.",
+        "archive-zip-expansion-pending" => "Archive expansion has not completed. Review the current retained branch and enabled capability before scheduling a bounded replay.",
+        "File bytes contain binary control values and are not accepted as text." => "These bytes cannot safely be treated as text. Use a supported binary parser or an authorised text export.",
+        _ => "Review the recorded cause and affected item before retrying. Current security and content-safety checks remain in force."
+    };
+}

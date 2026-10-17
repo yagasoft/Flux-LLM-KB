@@ -68,7 +68,7 @@ public sealed class SourceRootPathPolicyTests : IDisposable
                 throw SkipException.ForSkip($"Directory symbolic links are unavailable: {linkException.Message}");
             }
 
-            var exception = Assert.Throws<UnauthorizedAccessException>(() =>
+            var exception = Assert.Throws<SourcePathSecurityException>(() =>
                 CreatePolicy().ValidateAndCanonicalise(Request(link)));
 
             Assert.Contains("reparse", exception.Message, StringComparison.OrdinalIgnoreCase);

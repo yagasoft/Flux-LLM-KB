@@ -6,6 +6,7 @@ using FluxKnowledge.Application.Operations;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Sources;
 using FluxKnowledge.Integrations.Models;
+using FluxKnowledge.Integrations.Files;
 
 namespace FluxKnowledge.Integrations.Documents;
 
@@ -250,7 +251,7 @@ public sealed class PaddleOcrVlmLocalExecutor : IDocumentOcrExecutor
 
         if (!wire.Succeeded)
         {
-            return Refused(wire.ReasonCode.StartsWith("document-ocr-", StringComparison.Ordinal)
+            return Refused(PaddleOcrVlmProcessRunner.IsKnownFailureReason(wire.ReasonCode)
                 ? wire.ReasonCode
                 : "document-ocr-provider-result-invalid");
         }
@@ -387,8 +388,9 @@ internal sealed class PaddleOcrVlmProcessRunner : IPaddleOcrVlmProcessRunner
                 return new PaddleOcrVlmProcessResult(false, "document-ocr-runtime-launch-failed");
             }
 
-            var stdout = process.StandardOutput.ReadToEndAsync(CancellationToken.None);
-            var stderr = process.StandardError.ReadToEndAsync(CancellationToken.None);
+            // Drain provider output without retaining unbounded logs or private document text.
+            var stdout = DiscardOutputAsync(process.StandardOutput);
+            var stderr = DiscardOutputAsync(process.StandardError);
             using var timeout = new CancellationTokenSource(MaximumExecutionTime);
             using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeout.Token);
             try
@@ -409,9 +411,9 @@ internal sealed class PaddleOcrVlmProcessRunner : IPaddleOcrVlmProcessRunner
             }
 
             await DrainAsync(stdout, stderr).ConfigureAwait(false);
-            return process.ExitCode == 0
-                ? PaddleOcrVlmProcessResult.Completed
-                : new PaddleOcrVlmProcessResult(false, "document-ocr-runtime-failed");
+            if (process.ExitCode == 0) return PaddleOcrVlmProcessResult.Completed;
+            var failure = await ReadFailureReasonAsync(request.WorkingDirectory, request.OutputPath, cancellationToken).ConfigureAwait(false);
+            return new PaddleOcrVlmProcessResult(false, failure == "document-ocr-runtime-failed" ? RuntimeExitReason(process.ExitCode) : failure);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -465,7 +467,41 @@ internal sealed class PaddleOcrVlmProcessRunner : IPaddleOcrVlmProcessRunner
         }
     }
 
-    private static async Task DrainAsync(Task<string> stdout, Task<string> stderr)
+    internal static bool IsKnownFailureReason(string reason) => reason is
+        "document-ocr-dependency-unavailable" or "document-ocr-model-initialization-failed" or
+        "document-ocr-orientation-failed" or "document-ocr-recognition-failed" or
+        "document-ocr-offline-operation-refused" or "document-ocr-provider-result-invalid";
+
+    internal static string RuntimeExitReason(int exitCode) => $"document-ocr-runtime-exit-{unchecked((uint)exitCode):x8}";
+
+    internal static async ValueTask<string> ReadFailureReasonAsync(string workingDirectory, string outputPath, CancellationToken cancellationToken)
+    {
+        const string unknown = "document-ocr-runtime-failed";
+        try
+        {
+            if (!string.Equals(Path.GetFullPath(outputPath), Path.Combine(Path.GetFullPath(workingDirectory), "output.json"), StringComparison.OrdinalIgnoreCase)) return unknown;
+            var file = await ContainedFileReader.ReadAsync(workingDirectory, "output.json", 4096, cancellationToken).ConfigureAwait(false);
+            using var document = JsonDocument.Parse(file.Bytes);
+            var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object ||
+                !root.TryGetProperty("succeeded", out var succeeded) || succeeded.ValueKind != JsonValueKind.False ||
+                !root.TryGetProperty("reasonCode", out var reason) || reason.ValueKind != JsonValueKind.String ||
+                !root.TryGetProperty("pages", out var pages) || pages.ValueKind != JsonValueKind.Array || pages.GetArrayLength() != 0) return unknown;
+            return IsKnownFailureReason(reason.GetString()!) ? reason.GetString()! : unknown;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidDataException or JsonException or ArgumentException or NotSupportedException)
+        {
+            return unknown;
+        }
+    }
+
+    private static async Task DiscardOutputAsync(StreamReader output)
+    {
+        var buffer = new char[4096];
+        while (await output.ReadAsync(buffer.AsMemory(), CancellationToken.None).ConfigureAwait(false) != 0) { }
+    }
+
+    private static async Task DrainAsync(Task stdout, Task stderr)
     {
         await Task.WhenAll(stdout, stderr).ConfigureAwait(false);
     }

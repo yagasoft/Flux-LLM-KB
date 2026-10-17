@@ -282,28 +282,41 @@ def main(argv=None):
     parser.add_argument("--output", required=True)
     args = parser.parse_args(argv)
     destination, inputs = _read_input(args.input, args.output)
-    orientation_predictor, pipeline = _create_components()
-    from paddlex.inference.pipelines.components.common.warp_image import rotate_image
-    import cv2
+    phase = "document-ocr-model-initialization-failed"
+    try:
+        orientation_predictor, pipeline = _create_components()
+        from paddlex.inference.pipelines.components.common.warp_image import rotate_image
+        import cv2
 
-    pages = []
-    for page_index, image_path in inputs:
-        image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
-        if image is None:
-            _refuse("input-image-invalid")
-        orientation_result = next(orientation_predictor.predict(image))
-        corrected, orientation_degrees = _correct_orientation(image, orientation_result, rotate_image)
-        prediction = next(pipeline.predict(corrected))
-        raw_result = dict(prediction.json["res"])
-        pages.append(
-            {
-                "pageIndex": page_index,
-                "orientationDegrees": orientation_degrees,
-                "blocks": _output_blocks(raw_result),
-            }
-        )
-    _write_result(destination, {"succeeded": True, "reasonCode": "document-ocr-complete", "pages": pages})
-    return 0
+        pages = []
+        for page_index, image_path in inputs:
+            phase = "document-ocr-provider-result-invalid"
+            image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+            if image is None:
+                _refuse("input-image-invalid")
+            phase = "document-ocr-orientation-failed"
+            orientation_result = next(orientation_predictor.predict(image))
+            corrected, orientation_degrees = _correct_orientation(image, orientation_result, rotate_image)
+            phase = "document-ocr-recognition-failed"
+            prediction = next(pipeline.predict(corrected))
+            phase = "document-ocr-provider-result-invalid"
+            raw_result = dict(prediction.json["res"])
+            pages.append(
+                {
+                    "pageIndex": page_index,
+                    "orientationDegrees": orientation_degrees,
+                    "blocks": _output_blocks(raw_result),
+                }
+            )
+        _write_result(destination, {"succeeded": True, "reasonCode": "document-ocr-complete", "pages": pages})
+        return 0
+    except Exception as error:
+        # Fixed codes only: never persist exception messages, paths, document text or provider logs.
+        reason = "document-ocr-dependency-unavailable" if isinstance(error, ImportError) else phase
+        if isinstance(error, RuntimeError) and str(error) in {"unexpected-model-download", "unexpected-network-connect"}:
+            reason = "document-ocr-offline-operation-refused"
+        _write_result(destination, {"succeeded": False, "reasonCode": reason, "pages": []})
+        return 1
 
 
 if __name__ == "__main__":

@@ -366,7 +366,7 @@ public sealed class LocalSourceFileTests : IDisposable
         var evidence = Assert.Single(enumerator.LastEvidence);
         Assert.Equal("io", evidence.Kind);
         Assert.Equal("locked.txt", evidence.RelativePath);
-        Assert.Equal("IOException", evidence.Detail);
+        Assert.Equal("SourceIoFailure", evidence.Detail);
     }
 
     [Fact]
@@ -393,8 +393,10 @@ public sealed class LocalSourceFileTests : IDisposable
             var files = await enumerator.EnumerateAsync(configuration, CancellationToken.None).ToListAsync();
 
             Assert.Empty(files);
-            Assert.Contains(enumerator.LastEvidence, evidence =>
-                evidence.Kind == "reparse" && evidence.RelativePath == "linked");
+            var evidence = Assert.Single(enumerator.LastEvidence);
+            Assert.Equal("security", evidence.Kind);
+            Assert.Equal("linked", evidence.RelativePath);
+            Assert.Equal("SourceReparseTypeNotSupported", evidence.Detail);
         }
         finally
         {
