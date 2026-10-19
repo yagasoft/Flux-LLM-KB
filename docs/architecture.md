@@ -59,13 +59,22 @@ ZIP and TAR processing enforce archive bounds and member path rules. Office Open
 XML extraction produces one logical UTF-8 result for the original DOCX/XLSX/PPTX.
 Document package members are not separately published corpus documents. Ordinary
 retained UTF-8 is limited to 32 MiB; the bounded Office extracted-text result can
-reach 200 MiB. OOXML v3 permits 128 MiB XML parts; the shared Visio parser keeps
-its 64 MiB part budget. Total XML expansion remains 512 MiB with finite element
-and depth limits; compression ratios apply to XML opened for extraction, not unopened
+reach 200 MiB. OOXML v4 permits 128 MiB XML parts and streams XML without an
+element-count ceiling; the separately versioned Visio parser keeps its 64 MiB
+part and two-million-element budgets. Total XML expansion remains 512 MiB with a
+finite depth limit; compression ratios apply to XML opened for extraction, not unopened
 binary media. ZIP expansion permits two nested ZIP levels with one cumulative
 entry and expansion budget. Media metadata uses a checksum-verified retained
 stream up to 1 GiB, with a separate 96 MiB parser-read budget; it does not decode
 or publish the media payload.
+
+OOXML v4 resolves extension-default content types, package-rooted internal
+relationships and valid empty directory markers without following external
+resources or accepting package escapes. Worksheet inline strings and DrawingML
+slide text contribute to the retained text. Versions 1–3 remain recognised for
+existing child registration, publication and exact policy lineage; registration
+retires their runnable capabilities. Terminal predecessors require explicit,
+exactly bound policy recovery rather than automatic replay.
 
 The C# processor parses retained syntax without building or executing a project,
 restoring packages or running source generators/analyzers. Its code facts,
@@ -458,6 +467,14 @@ activating it. It preserves the old generation and all canonical rows; a
 concurrent publication retries from a fresh snapshot. Deployment holds defer
 this refresh. Zero eligible vectors remain `IndexUpdating` without claiming an
 empty canonical catalogue. An unknown absent pointer still fails validation.
+
+Routine Healthy probes read the active projection under the same serializable
+publication fence, preserving membership, payload, stamp, path and empty-catalogue
+checks. They do not audit unrelated inactive checkpoint payloads or authorise
+cleanup. Startup, fault recovery and exclusive recovery retain the full snapshot
+and checkpoint validation; a projection read without an active generation also
+uses that full proof. Checkpoint append, seal, publication and resume checks are
+unchanged.
 
 The prepared maintenance correction keeps complete healthy projection checks
 under Shared ownership, allowing concurrent query leases. Detected faults leave

@@ -9,7 +9,7 @@ public static class SqlRetainedPolicyCompatibility
 {
     public static async ValueTask<bool> HasNoLegacyRunnableWorkAsync(IDbContextFactory<FluxKnowledgeDbContext> factory, CancellationToken token)
     {
-        string[] legacy = [OoxmlStructuralTextProcessor.LegacyProcessorFingerprint, OoxmlStructuralTextProcessor.PreviousProcessorFingerprint,
+        string[] legacy = [OoxmlStructuralTextProcessor.LegacyProcessorFingerprint, OoxmlStructuralTextProcessor.PreviousProcessorFingerprint, OoxmlStructuralTextProcessor.Version3ProcessorFingerprint,
             MediaMetadataRetainedProcessor.LegacyProcessorFingerprint,
             ZipArchiveRetainedProcessor.LegacyProcessorFingerprint, "phase-5-zip-retained-archive-v1", TarArchiveRetainedProcessor.LegacyProcessorFingerprint,
             RetainedCsharpCodeProcessor.LegacyDescriptorFingerprint];

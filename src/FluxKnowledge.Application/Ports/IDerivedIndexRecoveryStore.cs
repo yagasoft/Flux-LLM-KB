@@ -38,6 +38,13 @@ public interface IDerivedIndexRecoveryStore
     ValueTask<DerivedIndexRecoverySqlSnapshot> ReadActiveAsync(
         CancellationToken cancellationToken);
 
+    /// <summary>
+    /// Reads serving-projection health without auditing unrelated retained drafts.
+    /// This read must never supply authority for recovery or file cleanup.
+    /// </summary>
+    ValueTask<DerivedIndexRecoverySqlSnapshot> ReadActiveProjectionAsync(
+        CancellationToken cancellationToken) => ReadActiveAsync(cancellationToken);
+
     ValueTask<IDerivedIndexRecoveryLease?> TryAcquireExclusiveLeaseAsync(
         TimeSpan lockTimeout,
         CancellationToken cancellationToken);

@@ -106,9 +106,12 @@ public sealed class OoxmlReplayIntegrationTests(NativeSqlServerFixture fixture) 
                 Assert.Equal(2, child.OriginKind);
                 Assert.StartsWith("retained-office-structural-text:", child.CanonicalPath, StringComparison.Ordinal);
                 Assert.Single(await verification.SourceActivities.Where(value => value.SourceRevisionId == child.Id).ToListAsync());
+                var childArtifact = await verification.SourceArtifacts.SingleAsync(value => value.SourceRevisionId == child.Id);
+                var artifactRoot = seed.Text == "outlook retained sentinel" ? outlookPrivateRoot : privateRoot;
+                var extractedText = await File.ReadAllTextAsync(Path.Combine(artifactRoot, childArtifact.StoreRelativePath));
+                Assert.Contains(seed.Text, extractedText, StringComparison.Ordinal);
                 if (seed.Text == "outlook retained sentinel")
                 {
-                    var childArtifact = await verification.SourceArtifacts.SingleAsync(value => value.SourceRevisionId == child.Id);
                     Assert.True(File.Exists(Path.Combine(outlookPrivateRoot, childArtifact.StoreRelativePath)));
                     Assert.False(File.Exists(Path.Combine(privateRoot, childArtifact.StoreRelativePath)));
                 }
@@ -785,7 +788,7 @@ public sealed class OoxmlReplayIntegrationTests(NativeSqlServerFixture fixture) 
                 WriteEntry(archive, "_rels/.rels", "<Relationships><Relationship Id='rId1' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument' Target='ppt/presentation.xml'/></Relationships>");
                 WriteEntry(archive, "ppt/presentation.xml", "<p:presentation xmlns:p='p' xmlns:r='r'><p:sldIdLst><p:sldId r:id='rId2'/></p:sldIdLst></p:presentation>");
                 WriteEntry(archive, "ppt/_rels/presentation.xml.rels", "<Relationships><Relationship Id='rId2' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide' Target='slides/slide2.xml'/></Relationships>");
-                WriteEntry(archive, "ppt/slides/slide2.xml", $"<p:sld xmlns:p='p'><p:txBody><p:p><p:r><p:t>{text}</p:t></p:r></p:p></p:txBody></p:sld>");
+                WriteEntry(archive, "ppt/slides/slide2.xml", $"<p:sld xmlns:p='p' xmlns:a='http://schemas.openxmlformats.org/drawingml/2006/main'><p:txBody><a:p><a:r><a:t>{text}</a:t></a:r></a:p></p:txBody></p:sld>");
             }
         }
         return buffer.ToArray();

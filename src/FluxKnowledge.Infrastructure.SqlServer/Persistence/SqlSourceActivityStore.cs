@@ -136,7 +136,7 @@ public sealed class SqlSourceActivityStore(
             capability.Id == ZipArchiveRetainedProcessor.Capability.Id || capability.Id == TarArchiveRetainedProcessor.Capability.Id ||
             capability.Id == RetainedCsharpCodeProcessor.Capability.Id)
         {
-            string[] replaced = [OoxmlStructuralTextProcessor.LegacyProcessorFingerprint, OoxmlStructuralTextProcessor.PreviousProcessorFingerprint,
+            string[] replaced = [OoxmlStructuralTextProcessor.LegacyProcessorFingerprint, OoxmlStructuralTextProcessor.PreviousProcessorFingerprint, OoxmlStructuralTextProcessor.Version3ProcessorFingerprint,
                 MediaMetadataRetainedProcessor.LegacyProcessorFingerprint,
                 ZipArchiveRetainedProcessor.LegacyProcessorFingerprint, "phase-5-zip-retained-archive-v1", TarArchiveRetainedProcessor.LegacyProcessorFingerprint,
                 RetainedCsharpCodeProcessor.LegacyDescriptorFingerprint];

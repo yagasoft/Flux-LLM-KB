@@ -74,6 +74,7 @@ public sealed class LargeOoxmlStructuralTextProcessorTests
     [InlineData("phase-5-ooxml-structural-v1", "phase-5-ooxml-retained-structural-v1", true)]
     [InlineData("phase-5-ooxml-structural-v2", "phase-5-ooxml-retained-structural-v2", true)]
     [InlineData("phase-5-ooxml-structural-v3", "phase-5-ooxml-retained-structural-v3", true)]
+    [InlineData("phase-5-ooxml-structural-v4", "phase-5-ooxml-retained-structural-v4", true)]
     [InlineData("phase-5-ooxml-structural-v1", "phase-5-ooxml-retained-structural-v2", false)]
     [InlineData("phase-5-ooxml-structural-v3", "phase-5-ooxml-retained-structural-v2", false)]
     public void Historical_readback_accepts_only_exact_known_descriptor_pairs(string version, string fingerprint, bool expected)

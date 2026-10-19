@@ -312,7 +312,10 @@ internal static class SqlDefaultRetainedPolicy
              reason is "office-document-container-invalid" or "office-document-element-limit" or "office-document-expanded-xml-limit" or "office-document-part-unsupported") ||
              (branch.ProcessorVersion == OoxmlStructuralTextProcessor.PreviousProcessorVersion &&
              branch.ProcessorFingerprint == OoxmlStructuralTextProcessor.PreviousProcessorFingerprint &&
-             reason == "office-document-part-unsupported")))
+             reason is "office-document-part-unsupported" or "office-document-container-invalid" or "office-document-element-limit") ||
+             (branch.ProcessorVersion == OoxmlStructuralTextProcessor.Version3ProcessorVersion &&
+             branch.ProcessorFingerprint == OoxmlStructuralTextProcessor.Version3ProcessorFingerprint &&
+             reason is "office-document-container-invalid" or "office-document-element-limit")))
             return OoxmlStructuralTextProcessor.Capability;
         if (branch.ProcessorVersion == MediaMetadataRetainedProcessor.LegacyProcessorVersion && branch.ProcessorFingerprint == MediaMetadataRetainedProcessor.LegacyProcessorFingerprint &&
             reason == "media-metadata-input-too-large" && MediaMetadataSignature.TryGetFormatForExtension(extension, out _)) return MediaMetadataRetainedProcessor.Capability;

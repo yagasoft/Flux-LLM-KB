@@ -55,13 +55,20 @@ passed 122 OOXML domain checks, 70 SQL integration checks and 19 Web projection
 and presentation checks, with no skips or new warnings. A new fixture initially
 reused an idempotency key across v1/v2 cases and correctly received a confirmation
 refusal; distinct test keys resolved it without changing product guards or
-assertions. Canonical closeout, independent final review and production
-application remain separate gates.
+assertions. Canonical closeout subsequently passed all required native gates and
+3,590 tests on both the feature and Main checkouts, with 30 opt-in skips and
+zero-warning builds. The reviewed squash is `c5d5f84f`.
 
 Production deployment and any exact-item recovery require fresh user approval,
 current independent operational review and the incremental updater's native
-drain/validation-hold safeguards. No failed-item replay, ACL change, interpreter
-adoption, new scan or model acquisition has been performed by this follow-up.
+drain/validation-hold safeguards. The approved ordinary incremental release
+`20261019T060941Z-c5d5f84f96da` installed matching application/companion payloads
+with unchanged configuration and released the validation hold. One exact native
+policy recovery was admitted; retained extraction and the first three pipeline
+stages passed. Embedding is progressing through normally scheduled requests;
+publication and supported readback remain open. No broader replay, ACL change,
+new scan or model acquisition was performed. A verified add-only cached Python
+runtime was staged separately; application runtime activation remains pending.
 Paired rollback is valid only before any attempt to release the deployment hold.
 After a release attempt, including a successful release before explicit item
 admission, workers may have written durable state. Preserve the installed
@@ -84,3 +91,39 @@ Unnecessary processor refusals should give way to suitable streaming, batching o
 resumable work; the runtime must still report actual access, integrity and
 ownership failures truthfully. This delivery does not claim those follow-ups are
 already implemented.
+
+## Active projection probe follow-up
+
+Bounded SQL metadata found the full retained-checkpoint audit holding the global
+publication fence while source operations waited. A focused correction gives
+routine Healthy probes an active-projection read, preserving active integrity,
+stamp, path and empty-catalogue checks. Full startup, fault/exclusive recovery and
+cleanup validation remain unchanged. Five new checks first failed against the
+old behaviour; the corrected combined recovery suite passed 114 tests with one
+opt-in scale skip. Independent implementation review approved the correction;
+deployment is pending.
+The observed IIS shutdown crash remains unexplained and is not claimed fixed.
+
+## Office package and text fidelity follow-up
+
+Sixteen sealed retained samples exposed three package compatibility problems:
+ignored extension-default content types, rejected package-rooted internal
+relationships and rejected empty directory markers. Further inspection found
+omitted worksheet inline strings and slide text read from the wrong namespace.
+The slide correction uses DrawingML text; PresentationML text decoys are excluded.
+
+OOXML v4 corrects these cases and removes its arbitrary XML element-count ceiling.
+Existing byte, depth, checksum, package-path and external-resource controls remain.
+The shared Visio extractor retains its separately versioned semantics and limits.
+Versions 1–3 stay valid historical bindings, with old runnable descriptors retired
+and exact recovery available for the v1/v2/v3 refusals the correction addresses.
+Neither startup nor ordinary promotion replays terminal work.
+
+Test-first verification reproduced 13 failures against v3. The corrected batch
+passed 168 domain checks, 69 SQL integration checks and 15 Web projection checks,
+without skips or build warnings. Four checks explicitly preserve Visio behaviour.
+The actual v4 assembly then produced a nonempty retained text child for all 16
+sealed samples in an isolated runner, without production access, models or
+original-source reads. These are implementation checks; production publication
+and supported readback for the v4 cohort still require the reviewed deployment
+and finite exact-item recovery.

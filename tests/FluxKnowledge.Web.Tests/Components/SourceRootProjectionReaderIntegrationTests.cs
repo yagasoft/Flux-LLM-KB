@@ -417,6 +417,7 @@ public sealed class SourceRootProjectionReaderIntegrationTests(NativeSqlServerFi
     [InlineData(1)]
     [InlineData(2)]
     [InlineData(3)]
+    [InlineData(4)]
     public async Task Logical_document_statuses_show_no_content_metadata_only_and_failed_replacement_truthfully(int officeGeneration)
     {
         var now = DateTimeOffset.Parse("2026-09-21T04:00:00+00:00");
@@ -426,7 +427,7 @@ public sealed class SourceRootProjectionReaderIntegrationTests(NativeSqlServerFi
         var failedOwnerId = Guid.NewGuid();
         var blockedOwnerId = Guid.NewGuid();
         var publishedOfficeOwnerId = Guid.NewGuid();
-        var office = officeGeneration == 3 ? OoxmlStructuralTextProcessor.Capability :
+        var office = officeGeneration == 4 ? OoxmlStructuralTextProcessor.Capability :
             OoxmlStructuralTextProcessor.Capability with
             {
                 ProcessorVersion = $"phase-5-ooxml-structural-v{officeGeneration}",

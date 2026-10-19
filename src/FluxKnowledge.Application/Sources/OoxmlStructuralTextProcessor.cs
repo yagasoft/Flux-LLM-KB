@@ -19,6 +19,8 @@ public sealed class OoxmlStructuralTextProcessor : ILocalSourceCapabilityHandler
     public const string LegacyProcessorFingerprint = "phase-5-ooxml-retained-structural-v1";
     public const string PreviousProcessorVersion = "phase-5-ooxml-structural-v2";
     public const string PreviousProcessorFingerprint = "phase-5-ooxml-retained-structural-v2";
+    public const string Version3ProcessorVersion = "phase-5-ooxml-structural-v3";
+    public const string Version3ProcessorFingerprint = "phase-5-ooxml-retained-structural-v3";
     private readonly IRetainedArtifactWriter _artifactWriter;
     private readonly SourceCapabilityDescriptor _descriptor;
     private const long MaximumInputBytes = 128L * 1024 * 1024;
@@ -47,15 +49,16 @@ public sealed class OoxmlStructuralTextProcessor : ILocalSourceCapabilityHandler
     private const string WordprocessingNamespace = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
     private const string SpreadsheetNamespace = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
     private const string PresentationNamespace = "http://schemas.openxmlformats.org/presentationml/2006/main";
+    private const string DrawingNamespace = "http://schemas.openxmlformats.org/drawingml/2006/main";
     private const string OfficeRelationshipNamespace = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
     private const string VisioNamespace = "http://schemas.microsoft.com/office/visio/2012/main";
 
     public static readonly SourceCapabilityDescriptor Capability = new(
-        new Guid("c784f889-e910-4d42-95fd-b4d8a91b9a03"),
+        new Guid("bf48eb59-d75a-47d9-a897-d14cdfb1b1f4"),
         "document-ooxml-structural-extract",
-        "phase-5-ooxml-structural-v3",
+        "phase-5-ooxml-structural-v4",
         ExecutionClass.InProcess,
-        "phase-5-ooxml-retained-structural-v3",
+        "phase-5-ooxml-retained-structural-v4",
         SourceActivityKind.TextExtraction,
         "OoxmlDocumentContainer",
         "retained:document-ooxml-structural-extract");
@@ -74,6 +77,7 @@ public sealed class OoxmlStructuralTextProcessor : ILocalSourceCapabilityHandler
     public SourceCapabilityDescriptor Descriptor => _descriptor;
     public static bool IsKnownProcessor(string version, string fingerprint) =>
         version == Capability.ProcessorVersion && fingerprint == Capability.ProcessorFingerprint ||
+        version == Version3ProcessorVersion && fingerprint == Version3ProcessorFingerprint ||
         version == PreviousProcessorVersion && fingerprint == PreviousProcessorFingerprint ||
         version == LegacyProcessorVersion && fingerprint == LegacyProcessorFingerprint;
 
@@ -184,10 +188,16 @@ public sealed class OoxmlStructuralTextProcessor : ILocalSourceCapabilityHandler
             // Visio shares this parser but retains its existing, separately versioned budget.
             var maximumPartBytes = requireVsdx ? MaximumVsdxSelectedPartBytes : MaximumSelectedPartBytes;
             long expandedTotal = 0;
-            var paths = new HashSet<string>(StringComparer.Ordinal);
+            var paths = new HashSet<string>(requireVsdx ? StringComparer.Ordinal : StringComparer.OrdinalIgnoreCase);
             foreach (var entry in package.Entries)
             {
                 cancellationToken.ThrowIfCancellationRequested();
+                if (!requireVsdx && entry.FullName.EndsWith("/", StringComparison.Ordinal))
+                {
+                    var directory = ValidatePath(entry.FullName[..^1]);
+                    if (entry.Length != 0 || !paths.Add(directory)) throw new RetainedProcessorException("office-document-container-invalid");
+                    continue;
+                }
                 var path = ValidatePath(entry.FullName);
                 if (!paths.Add(path) || !entriesByPath.TryAdd(path, entry)) throw new RetainedProcessorException("office-document-container-invalid");
                 entriesInArchiveOrder.Add(entry);
@@ -204,12 +214,12 @@ public sealed class OoxmlStructuralTextProcessor : ILocalSourceCapabilityHandler
                     if (expandedTotal > MaximumExpandedXmlBytes) throw new RetainedProcessorException("office-document-expanded-xml-limit");
                 }
             }
-            var xmlBudget = new XmlBudget();
+            var xmlBudget = new XmlBudget(enforceElementLimit: requireVsdx);
             foreach (var entry in entriesInArchiveOrder)
             {
                 if (IsXmlPart(entry.FullName)) ScanXmlPart(entry, xmlBudget, cancellationToken);
             }
-            var selected = ValidatePackageTopology(entriesByPath, cancellationToken);
+            var selected = ValidatePackageTopology(entriesByPath, allowPackageCompatibility: !requireVsdx, cancellationToken);
             if (requireVsdx && selected is not VisioTopology)
             {
                 throw new RetainedProcessorException("office-document-container-invalid");
@@ -769,6 +779,7 @@ public sealed class OoxmlStructuralTextProcessor : ILocalSourceCapabilityHandler
 
     private static OoxmlTopology ValidatePackageTopology(
         IReadOnlyDictionary<string, ZipArchiveEntry> entriesByPath,
+        bool allowPackageCompatibility,
         CancellationToken cancellationToken)
     {
         if (!entriesByPath.TryGetValue("[Content_Types].xml", out var contentTypes) ||
@@ -777,6 +788,7 @@ public sealed class OoxmlStructuralTextProcessor : ILocalSourceCapabilityHandler
         string? mainPart = null;
         OoxmlFamily? family = null;
         var partContentTypes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var defaultContentTypes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         using var reader = CreateReader(contentTypes.Open());
         while (reader.Read())
         {
@@ -784,7 +796,16 @@ public sealed class OoxmlStructuralTextProcessor : ILocalSourceCapabilityHandler
             if (reader.NodeType != XmlNodeType.Element) continue;
             if (reader.Depth == 0 && (reader.LocalName != "Types" || reader.NamespaceURI != ContentTypesNamespace))
                 throw new RetainedProcessorException("office-document-container-invalid");
-            if (reader.LocalName == "Override")
+            if (allowPackageCompatibility && reader.LocalName == "Default")
+            {
+                var extension = reader.GetAttribute("Extension");
+                var contentType = reader.GetAttribute("ContentType");
+                if (reader.NamespaceURI != ContentTypesNamespace || string.IsNullOrWhiteSpace(extension) ||
+                    extension.IndexOfAny(['/', '\\', ':', '.']) >= 0 || string.IsNullOrWhiteSpace(contentType) ||
+                    !defaultContentTypes.TryAdd(extension, contentType))
+                    throw new RetainedProcessorException("office-document-container-invalid");
+            }
+            else if (reader.LocalName == "Override")
             {
                 if (reader.NamespaceURI != ContentTypesNamespace) throw new RetainedProcessorException("office-document-container-invalid");
                 var partName = reader.GetAttribute("PartName") ?? string.Empty;
@@ -801,9 +822,28 @@ public sealed class OoxmlStructuralTextProcessor : ILocalSourceCapabilityHandler
                 }
             }
         }
+        if (allowPackageCompatibility)
+        {
+            foreach (var path in entriesByPath.Keys)
+            {
+                var extension = Path.GetExtension(path);
+                if (!partContentTypes.ContainsKey(path) && extension.Length > 1 &&
+                    defaultContentTypes.TryGetValue(extension[1..], out var contentType))
+                    partContentTypes.Add(path, contentType);
+            }
+            foreach (var (path, contentType) in partContentTypes)
+            {
+                var candidate = MainPartFor('/' + path, contentType);
+                if (candidate is null) continue;
+                if (mainPart is not null && !string.Equals(mainPart, path, StringComparison.OrdinalIgnoreCase))
+                    throw new RetainedProcessorException("office-document-container-invalid");
+                mainPart = path;
+                family = candidate.Value;
+            }
+        }
         if (mainPart is null || !entriesByPath.ContainsKey(mainPart)) throw new RetainedProcessorException("office-document-container-invalid");
         if (family is null) throw new RetainedProcessorException("office-document-container-invalid");
-        var rootTargets = ReadRelationshipTargets(rootRelationships, "", cancellationToken);
+        var rootTargets = ReadRelationshipTargets(rootRelationships, "", cancellationToken, allowRootedTargets: allowPackageCompatibility);
         var mainRelationshipType = family == OoxmlFamily.Visio ? VisioDocumentRelationshipType : OfficeDocumentRelationshipType;
         if (!rootTargets.Values.Any(target => target.Type == mainRelationshipType &&
             string.Equals(target.Target, mainPart, StringComparison.OrdinalIgnoreCase)))
@@ -832,7 +872,7 @@ public sealed class OoxmlStructuralTextProcessor : ILocalSourceCapabilityHandler
             !entriesByPath.TryGetValue("xl/_rels/workbook.xml.rels", out var relationships))
             throw new RetainedProcessorException("office-document-container-invalid");
         RequirePartRoot(workbook, "workbook", SpreadsheetNamespace, cancellationToken);
-        var targets = ReadRelationshipTargets(relationships, "xl/workbook.xml", cancellationToken);
+        var targets = ReadRelationshipTargets(relationships, "xl/workbook.xml", cancellationToken, allowRootedTargets: true);
         var parts = new List<ZipArchiveEntry>();
         entriesByPath.TryGetValue("xl/sharedStrings.xml", out var sharedStrings);
         if (sharedStrings is not null)
@@ -867,7 +907,7 @@ public sealed class OoxmlStructuralTextProcessor : ILocalSourceCapabilityHandler
             !entriesByPath.TryGetValue("ppt/_rels/presentation.xml.rels", out var relationships))
             throw new RetainedProcessorException("office-document-container-invalid");
         RequirePartRoot(presentation, "presentation", PresentationNamespace, cancellationToken);
-        var targets = ReadRelationshipTargets(relationships, "ppt/presentation.xml", cancellationToken);
+        var targets = ReadRelationshipTargets(relationships, "ppt/presentation.xml", cancellationToken, allowRootedTargets: true);
         var parts = new List<ZipArchiveEntry>();
         foreach (var relationshipId in ReadRelationshipIds(presentation, "sldId", PresentationNamespace, cancellationToken))
         {
@@ -1113,7 +1153,7 @@ public sealed class OoxmlStructuralTextProcessor : ILocalSourceCapabilityHandler
         return results;
     }
 
-    private static Dictionary<string, RelationshipTarget> ReadRelationshipTargets(ZipArchiveEntry relationshipsEntry, string ownerPart, CancellationToken cancellationToken)
+    private static Dictionary<string, RelationshipTarget> ReadRelationshipTargets(ZipArchiveEntry relationshipsEntry, string ownerPart, CancellationToken cancellationToken, bool allowRootedTargets = false)
     {
         var targets = new Dictionary<string, RelationshipTarget>(StringComparer.Ordinal);
         var relationshipIds = new HashSet<string>(StringComparer.Ordinal);
@@ -1134,7 +1174,7 @@ public sealed class OoxmlStructuralTextProcessor : ILocalSourceCapabilityHandler
             var target = relationships.GetAttribute("Target");
             var type = relationships.GetAttribute("Type");
             if (string.IsNullOrWhiteSpace(target) || string.IsNullOrWhiteSpace(type) ||
-                !targets.TryAdd(id, new RelationshipTarget(ResolveRelationshipTarget(ownerPart, target), type)))
+                !targets.TryAdd(id, new RelationshipTarget(ResolveRelationshipTarget(ownerPart, target, allowRootedTargets), type)))
                 throw new RetainedProcessorException("office-document-container-invalid");
         }
         return targets;
@@ -1298,12 +1338,14 @@ public sealed class OoxmlStructuralTextProcessor : ILocalSourceCapabilityHandler
         return values;
     }
 
-    private static string ResolveRelationshipTarget(string ownerPart, string target)
+    private static string ResolveRelationshipTarget(string ownerPart, string target, bool allowRootedTargets)
     {
-        if (target.IndexOf('\\') >= 0 || target.IndexOf('\0') >= 0 || target.StartsWith("/", StringComparison.Ordinal) || target.Contains(':'))
+        var rooted = target.StartsWith("/", StringComparison.Ordinal);
+        if (target.IndexOf('\\') >= 0 || target.IndexOf('\0') >= 0 || target.Contains(':') ||
+            target.StartsWith("//", StringComparison.Ordinal) || rooted && !allowRootedTargets)
             throw new RetainedProcessorException("office-document-container-invalid");
-        var ownerSegments = string.IsNullOrEmpty(ownerPart) ? [] : ownerPart.Split('/').SkipLast(1).ToList();
-        foreach (var segment in target.Split('/', StringSplitOptions.None))
+        var ownerSegments = rooted || string.IsNullOrEmpty(ownerPart) ? [] : ownerPart.Split('/').SkipLast(1).ToList();
+        foreach (var segment in (rooted ? target[1..] : target).Split('/', StringSplitOptions.None))
         {
             if (segment.Length == 0) throw new RetainedProcessorException("office-document-container-invalid");
             if (segment == ".") continue;
@@ -1331,14 +1373,12 @@ public sealed class OoxmlStructuralTextProcessor : ILocalSourceCapabilityHandler
     private static async ValueTask AppendStructuralTextAsync(ZipArchiveEntry entry, StructuralTextBuffer text, CancellationToken cancellationToken)
     {
         using var reader = CreateReader(entry.Open());
-        var elements = 0;
         var structuralDepths = new Stack<int>();
         while (await reader.ReadAsync().ConfigureAwait(false))
         {
             cancellationToken.ThrowIfCancellationRequested();
             if (reader.NodeType == XmlNodeType.Element)
             {
-                if (++elements > MaximumElements) throw new RetainedProcessorException("office-document-element-limit");
                 if (reader.Depth + 1 > MaximumDepth) throw new RetainedProcessorException("office-document-depth-limit");
                 if (IsStructuralTextElement(entry.FullName, reader.LocalName, reader.NamespaceURI)) structuralDepths.Push(reader.Depth);
             }
@@ -1363,6 +1403,8 @@ public sealed class OoxmlStructuralTextProcessor : ILocalSourceCapabilityHandler
         using var reader = CreateReader(entry.Open());
         var cellDepth = -1;
         var isSharedStringCell = false;
+        var isInlineStringCell = false;
+        var inlineSeen = false;
         var valueDepth = -1;
         StringBuilder? value = null;
         while (await reader.ReadAsync().ConfigureAwait(false))
@@ -1376,9 +1418,23 @@ public sealed class OoxmlStructuralTextProcessor : ILocalSourceCapabilityHandler
                     if (reader.IsEmptyElement) continue;
                     cellDepth = reader.Depth;
                     isSharedStringCell = string.Equals(reader.GetAttribute("t"), "s", StringComparison.Ordinal);
+                    isInlineStringCell = string.Equals(reader.GetAttribute("t"), "inlineStr", StringComparison.Ordinal);
+                    inlineSeen = false;
+                }
+                else if (cellDepth >= 0 && isInlineStringCell && reader.LocalName == "is" && reader.NamespaceURI == SpreadsheetNamespace)
+                {
+                    if (inlineSeen) throw new RetainedProcessorException("office-document-container-invalid");
+                    inlineSeen = true;
+                    var inline = await ReadInlineStringAsync(reader, cancellationToken).ConfigureAwait(false);
+                    if (inline.Length > 0)
+                    {
+                        text.Append(inline);
+                        text.Append("\n");
+                    }
                 }
                 else if (cellDepth >= 0 && reader.LocalName == "v" && reader.NamespaceURI == SpreadsheetNamespace)
                 {
+                    if (isInlineStringCell) throw new RetainedProcessorException("office-document-container-invalid");
                     if (value is not null) throw new RetainedProcessorException("office-document-container-invalid");
                     if (reader.IsEmptyElement)
                     {
@@ -1421,6 +1477,34 @@ public sealed class OoxmlStructuralTextProcessor : ILocalSourceCapabilityHandler
             }
         }
         if (cellDepth >= 0 || value is not null) throw new RetainedProcessorException("office-document-xml-invalid");
+    }
+
+    private static async ValueTask<string> ReadInlineStringAsync(XmlReader reader, CancellationToken cancellationToken)
+    {
+        using var subtree = reader.ReadSubtree();
+        var value = new StringBuilder();
+        var textDepth = -1;
+        var phoneticDepth = -1;
+        while (await subtree.ReadAsync().ConfigureAwait(false))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (subtree.NodeType == XmlNodeType.Element && subtree.NamespaceURI == SpreadsheetNamespace)
+            {
+                if (subtree.LocalName == "rPh" && !subtree.IsEmptyElement) phoneticDepth = subtree.Depth;
+                else if (subtree.LocalName == "t" && phoneticDepth < 0 && !subtree.IsEmptyElement) textDepth = subtree.Depth;
+            }
+            else if ((subtree.NodeType is XmlNodeType.Text or XmlNodeType.CDATA or XmlNodeType.Whitespace or XmlNodeType.SignificantWhitespace) &&
+                     textDepth >= 0 && phoneticDepth < 0)
+            {
+                value.Append(subtree.Value);
+            }
+            else if (subtree.NodeType == XmlNodeType.EndElement)
+            {
+                if (subtree.Depth == textDepth) textDepth = -1;
+                if (subtree.Depth == phoneticDepth) phoneticDepth = -1;
+            }
+        }
+        return value.ToString();
     }
 
     private static async ValueTask<bool> AppendVisioPageTextAsync(
@@ -1513,7 +1597,7 @@ public sealed class OoxmlStructuralTextProcessor : ILocalSourceCapabilityHandler
     private static bool IsStructuralTextElement(string partPath, string localName, string namespaceUri)
     {
         return (partPath.StartsWith("word/", StringComparison.OrdinalIgnoreCase) && namespaceUri == WordprocessingNamespace ||
-            partPath.StartsWith("ppt/slides/", StringComparison.OrdinalIgnoreCase) && namespaceUri == PresentationNamespace) && localName == "t";
+            partPath.StartsWith("ppt/slides/", StringComparison.OrdinalIgnoreCase) && namespaceUri == DrawingNamespace) && localName == "t";
     }
 
     private sealed class StructuralTextBuffer
@@ -1530,14 +1614,14 @@ public sealed class OoxmlStructuralTextProcessor : ILocalSourceCapabilityHandler
         }
     }
 
-    private sealed class XmlBudget
+    private sealed class XmlBudget(bool enforceElementLimit)
     {
         private int _elements;
         private int _relationships;
 
         public void AddElement(int depth)
         {
-            if (++_elements > MaximumElements) throw new RetainedProcessorException("office-document-element-limit");
+            if (enforceElementLimit && ++_elements > MaximumElements) throw new RetainedProcessorException("office-document-element-limit");
             if (depth > MaximumDepth) throw new RetainedProcessorException("office-document-depth-limit");
         }
 

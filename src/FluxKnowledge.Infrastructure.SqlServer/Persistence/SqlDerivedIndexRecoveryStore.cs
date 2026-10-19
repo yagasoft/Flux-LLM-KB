@@ -27,8 +27,14 @@ public sealed partial class SqlDerivedIndexRecoveryStore(
     private const string AuditActor = "DerivedIndexRecoveryService";
     private const int QueryBatchSize = 1_000;
 
-    public async ValueTask<DerivedIndexRecoverySqlSnapshot> ReadActiveAsync(
-        CancellationToken cancellationToken)
+    public ValueTask<DerivedIndexRecoverySqlSnapshot> ReadActiveAsync(CancellationToken cancellationToken) =>
+        ReadSnapshotAsync(activeProjectionOnly: false, cancellationToken);
+
+    public ValueTask<DerivedIndexRecoverySqlSnapshot> ReadActiveProjectionAsync(CancellationToken cancellationToken) =>
+        ReadSnapshotAsync(activeProjectionOnly: true, cancellationToken);
+
+    private async ValueTask<DerivedIndexRecoverySqlSnapshot> ReadSnapshotAsync(
+        bool activeProjectionOnly, CancellationToken cancellationToken)
     {
         try
         {
@@ -41,7 +47,7 @@ public sealed partial class SqlDerivedIndexRecoveryStore(
                 await using var context = await contextFactory
                     .CreateDbContextAsync(cancellationToken)
                     .ConfigureAwait(false);
-                return await ReadActiveWithinTransactionAsync(context, cancellationToken)
+                return await ReadActiveWithinTransactionAsync(context, activeProjectionOnly, cancellationToken)
                     .ConfigureAwait(false);
             }).ConfigureAwait(false);
         }
@@ -53,6 +59,7 @@ public sealed partial class SqlDerivedIndexRecoveryStore(
 
     private static async Task<DerivedIndexRecoverySqlSnapshot> ReadActiveWithinTransactionAsync(
         FluxKnowledgeDbContext context,
+        bool activeProjectionOnly,
         CancellationToken cancellationToken)
     {
         await using var transaction = await context.Database
@@ -124,7 +131,11 @@ public sealed partial class SqlDerivedIndexRecoveryStore(
         {
             referencedGenerationIds.Add(referencedActiveId);
         }
-        var recognisedDraftIds = await ReadRecognisedUnplacedDraftIdsAsync(
+        // A healthy serving-projection read never authorises draft recovery or cleanup.
+        // With no active generation, retain the full pending/empty-catalogue proof.
+        var recognisedDraftIds = activeProjectionOnly && activeGenerationId is not null
+            ? ImmutableHashSet<Guid>.Empty
+            : await ReadRecognisedUnplacedDraftIdsAsync(
                 context,
                 activeGenerationId,
                 generations.Where(candidate => candidate.RetiredAtUtc is null && candidate.IndexPath == string.Empty).ToArray(),

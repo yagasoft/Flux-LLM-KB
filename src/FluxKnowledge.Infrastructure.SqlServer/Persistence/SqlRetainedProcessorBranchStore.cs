@@ -2797,7 +2797,7 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
         "phase-5-zip-retained-archive-v1" => "archive_zip",
         "phase-5-zip-retained-archive-v2" or "phase-5-zip-retained-archive-v3" => "archive_zip",
         "phase-5-tar-retained-archive-v1" or "phase-5-tar-retained-archive-v2" => "archive_tar",
-        "phase-5-ooxml-retained-structural-v1" or "phase-5-ooxml-retained-structural-v2" or "phase-5-ooxml-retained-structural-v3" => "document_ooxml",
+        "phase-5-ooxml-retained-structural-v1" or "phase-5-ooxml-retained-structural-v2" or "phase-5-ooxml-retained-structural-v3" or "phase-5-ooxml-retained-structural-v4" => "document_ooxml",
         "phase-5-media-metadata-retained-v1" or "phase-5-media-metadata-retained-v2" => "media_metadata",
         _ => "retained_processor"
     };

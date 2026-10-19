@@ -269,7 +269,7 @@ public sealed class DerivedIndexRecoveryCoordinator : IDerivedIndexRecoveryStatu
     {
         await using var lease = await recoveryStore.TryAcquireSharedLeaseAsync(TimeSpan.Zero, cancellationToken);
         if (lease is null) return true;
-        var sql = await recoveryStore.ReadActiveAsync(cancellationToken);
+        var sql = await recoveryStore.ReadActiveProjectionAsync(cancellationToken);
         if (sql.IsProjectionUnavailable || sql.IsPublicationLag)
         {
             if (sql.IsValidatedEmptyCatalogue) throw new SqlMembershipValidationException();

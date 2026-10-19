@@ -133,18 +133,21 @@ public sealed class DefaultRetainedPolicyIntegrationTests(NativeSqlServerFixture
     [NativeSqlServerTheory]
     [InlineData("office")]
     [InlineData("office-v2")]
+    [InlineData("office-v3")]
     [InlineData("media")]
     [InlineData("zip")]
     [InlineData("csharp")]
     public async Task Changed_processor_registration_preserves_and_retires_the_legacy_descriptor(string kind)
     {
-        var current = kind switch { "office" or "office-v2" => OoxmlStructuralTextProcessor.Capability, "media" => MediaMetadataRetainedProcessor.Capability,
+        var current = kind switch { "office" or "office-v2" or "office-v3" => OoxmlStructuralTextProcessor.Capability, "media" => MediaMetadataRetainedProcessor.Capability,
             "zip" => ZipArchiveRetainedProcessor.Capability, _ => RetainedCsharpCodeProcessor.Capability };
-        var old = current with { Id = kind == "office-v2" ? new Guid("1e73f18a-0151-4b02-aca7-d6ca34a557ea") : Guid.NewGuid(), ProcessorVersion = kind switch { "office" => OoxmlStructuralTextProcessor.LegacyProcessorVersion,
+        var old = current with { Id = kind switch { "office-v2" => new Guid("1e73f18a-0151-4b02-aca7-d6ca34a557ea"), "office-v3" => new Guid("c784f889-e910-4d42-95fd-b4d8a91b9a03"), _ => Guid.NewGuid() }, ProcessorVersion = kind switch { "office" => OoxmlStructuralTextProcessor.LegacyProcessorVersion,
             "office-v2" => "phase-5-ooxml-structural-v2",
+            "office-v3" => OoxmlStructuralTextProcessor.Version3ProcessorVersion,
             "media" => MediaMetadataRetainedProcessor.LegacyProcessorVersion, "zip" => ZipArchiveRetainedProcessor.LegacyProcessorVersion, _ => current.ProcessorVersion },
             ProcessorFingerprint = kind switch { "office" => OoxmlStructuralTextProcessor.LegacyProcessorFingerprint,
                 "office-v2" => "phase-5-ooxml-retained-structural-v2",
+                "office-v3" => OoxmlStructuralTextProcessor.Version3ProcessorFingerprint,
                 "media" => MediaMetadataRetainedProcessor.LegacyProcessorFingerprint, "zip" => ZipArchiveRetainedProcessor.LegacyProcessorFingerprint,
                 _ => RetainedCsharpCodeProcessor.LegacyDescriptorFingerprint } };
         var store = new SqlSourceActivityStore(SqlTestData.CreateFactory(fixture), TimeProvider.System);
@@ -243,18 +246,34 @@ public sealed class DefaultRetainedPolicyIntegrationTests(NativeSqlServerFixture
     [InlineData("office", "after-claim", true)]
     [InlineData("office", "expired-claim", true)]
     public async Task Legacy_policy_block_creates_one_current_branch_and_preserves_its_original_attempt(string kind, string drift, bool previousOffice)
+        => await VerifyLegacyPolicyRecoveryAsync(kind, drift, previousOffice ? 2 : 1,
+            previousOffice ? "office-document-part-unsupported" : "office-document-element-limit");
+
+    [NativeSqlServerTheory]
+    [InlineData(2, "office-document-container-invalid", "none")]
+    [InlineData(2, "office-document-element-limit", "none")]
+    [InlineData(3, "office-document-container-invalid", "none")]
+    [InlineData(3, "office-document-element-limit", "none")]
+    [InlineData(3, "office-document-container-invalid", "before-claim")]
+    [InlineData(3, "office-document-container-invalid", "after-claim")]
+    [InlineData(3, "office-document-element-limit", "expired-claim")]
+    public async Task V4_compatibility_recovery_requires_explicit_admission_and_preserves_old_versions_and_fences(int officeGeneration, string reason, string drift)
+        => await VerifyLegacyPolicyRecoveryAsync("office", drift, officeGeneration, reason);
+
+    private async Task VerifyLegacyPolicyRecoveryAsync(string kind, string drift, int officeGeneration, string officeReason)
     {
+        var previousOffice = officeGeneration > 1;
         var descriptor = kind switch { "office" => OoxmlStructuralTextProcessor.Capability, "media" => MediaMetadataRetainedProcessor.Capability,
             "zip" => ZipArchiveRetainedProcessor.Capability, _ => RetainedCsharpCodeProcessor.Capability };
         var extension = kind switch { "office" => ".docx", "media" => ".mp4", "zip" => ".zip", _ => ".cs" };
         var bytes = kind switch { "office" => Word(), "media" => Movie(), "zip" => Zip("nested.zip", Zip("report.rdl", Encoding.UTF8.GetBytes("safe nested text"))),
             _ => Encoding.UTF8.GetBytes("class C { void M(string value = \"" + new string('x', 6000) + "\") { } }") };
         var seeded = await SeedAsync(extension: extension, payload: bytes, classification: kind == "csharp" ? "AcceptedUtf8Text" : "DeferredCapability");
-        var reason = kind switch { "office" => previousOffice ? "office-document-part-unsupported" : "office-document-element-limit", "media" => "media-metadata-input-too-large",
+        var reason = kind switch { "office" => officeReason, "media" => "media-metadata-input-too-large",
             "zip" => "nested-archive-depth-limit", _ => "csharp-code-signature-limit" };
-        var legacyVersion = kind switch { "office" => previousOffice ? "phase-5-ooxml-structural-v2" : OoxmlStructuralTextProcessor.LegacyProcessorVersion, "media" => MediaMetadataRetainedProcessor.LegacyProcessorVersion,
+        var legacyVersion = kind switch { "office" => $"phase-5-ooxml-structural-v{officeGeneration}", "media" => MediaMetadataRetainedProcessor.LegacyProcessorVersion,
             "zip" => ZipArchiveRetainedProcessor.LegacyProcessorVersion, _ => RetainedCsharpCodeProcessor.ProcessorVersion };
-        var legacyFingerprint = kind switch { "office" => previousOffice ? "phase-5-ooxml-retained-structural-v2" : OoxmlStructuralTextProcessor.LegacyProcessorFingerprint, "media" => MediaMetadataRetainedProcessor.LegacyProcessorFingerprint,
+        var legacyFingerprint = kind switch { "office" => $"phase-5-ooxml-retained-structural-v{officeGeneration}", "media" => MediaMetadataRetainedProcessor.LegacyProcessorFingerprint,
             "zip" => ZipArchiveRetainedProcessor.LegacyProcessorFingerprint, _ => RetainedCsharpCodeProcessor.LegacyDescriptorFingerprint };
         var oldBranchId = Guid.NewGuid(); var oldActivityId = Guid.NewGuid(); var now = DateTimeOffset.UtcNow;
         var historicalActivityId = previousOffice ? Guid.NewGuid() : (Guid?)null;
@@ -302,9 +321,9 @@ public sealed class DefaultRetainedPolicyIntegrationTests(NativeSqlServerFixture
             Assert.Empty(await branches.ClaimAsync("no-automatic-terminal-replay", 1, descriptor.ProcessorFingerprint, CancellationToken.None));
         }
         var preview = await service.PreviewAsync(mutation, "test", CancellationToken.None);
-        await service.CommitAsync(mutation, preview.ConfirmationId, "policy-processor-" + kind + "-" + drift + "-" + previousOffice, "test", CancellationToken.None);
+        await service.CommitAsync(mutation, preview.ConfirmationId, "policy-processor-" + kind + "-" + drift + "-" + officeGeneration + "-" + officeReason, "test", CancellationToken.None);
         if (previousOffice)
-            await service.CommitAsync(mutation, preview.ConfirmationId, "policy-processor-" + kind + "-" + drift + "-" + previousOffice, "test", CancellationToken.None);
+            await service.CommitAsync(mutation, preview.ConfirmationId, "policy-processor-" + kind + "-" + drift + "-" + officeGeneration + "-" + officeReason, "test", CancellationToken.None);
         var writer = new SqlRetainedArtifactWriter(factory, seeded.ArtifactRoot);
         async Task ChangeConfigurationAsync()
         {
@@ -365,7 +384,7 @@ public sealed class DefaultRetainedPolicyIntegrationTests(NativeSqlServerFixture
             }
             var renewed = Mutation(seeded, 2);
             var renewalPreview = await service.PreviewAsync(renewed, "test", CancellationToken.None);
-            await service.CommitAsync(renewed, renewalPreview.ConfirmationId, "policy-renew-" + kind + "-" + previousOffice, "test", CancellationToken.None);
+            await service.CommitAsync(renewed, renewalPreview.ConfirmationId, "policy-renew-" + kind + "-" + officeGeneration + "-" + officeReason, "test", CancellationToken.None);
         }
         if (kind == "csharp")
         {
@@ -408,7 +427,7 @@ public sealed class DefaultRetainedPolicyIntegrationTests(NativeSqlServerFixture
             Assert.Equal("policy-binding-stale", (await verification.SourceProcessorAttempts.SingleAsync(value => value.BranchId == successor.Id)).OutcomeCode);
             var cannotRenew = Mutation(seeded, 2);
             var renewal = await service.PreviewAsync(cannotRenew, "test", CancellationToken.None);
-            var error = await Assert.ThrowsAsync<NativeOperationException>(() => service.CommitAsync(cannotRenew, renewal.ConfirmationId, "executed-renew-" + kind + "-" + drift + "-" + previousOffice, "test", CancellationToken.None).AsTask());
+            var error = await Assert.ThrowsAsync<NativeOperationException>(() => service.CommitAsync(cannotRenew, renewal.ConfirmationId, "executed-renew-" + kind + "-" + drift + "-" + officeGeneration + "-" + officeReason, "test", CancellationToken.None).AsTask());
             Assert.Equal("policy-successor-conflict", error.ReasonCode);
         }
         Assert.Equal((int)RetainedProcessorBranchState.Blocked, (await verification.SourceProcessorBranches.SingleAsync(value => value.Id == oldBranchId)).State);
@@ -501,9 +520,10 @@ public sealed class DefaultRetainedPolicyIntegrationTests(NativeSqlServerFixture
     }
 
     [NativeSqlServerTheory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task Activation_gate_rejects_old_runnable_work_and_accepts_terminal_history(bool previousOffice)
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    public async Task Activation_gate_rejects_old_runnable_work_and_accepts_terminal_history(int officeGeneration)
     {
         var seeded = await SeedAsync(); var branchId = Guid.NewGuid();
         await using (var db = await SqlTestData.CreateFactory(fixture).CreateDbContextAsync())
@@ -512,8 +532,8 @@ public sealed class DefaultRetainedPolicyIntegrationTests(NativeSqlServerFixture
             // Use a distinct activity because its immutable descriptor cannot be edited.
             var pending = new SourceActivityEntity { Id = Guid.NewGuid(), SourceRevisionId = seeded.RevisionId,
                 ActivityKind = (int)SourceActivityKind.TextExtraction, ExecutionClass = (int)ExecutionClass.InProcess,
-                ProcessorVersion = previousOffice ? "phase-5-ooxml-structural-v2" : OoxmlStructuralTextProcessor.LegacyProcessorVersion,
-                DescriptorFingerprint = previousOffice ? "phase-5-ooxml-retained-structural-v2" : OoxmlStructuralTextProcessor.LegacyProcessorFingerprint,
+                ProcessorVersion = $"phase-5-ooxml-structural-v{officeGeneration}",
+                DescriptorFingerprint = $"phase-5-ooxml-retained-structural-v{officeGeneration}",
                 InputFingerprint = seeded.Hash, State = (int)SourceActivityState.Pending, CreatedAtUtc = DateTimeOffset.UtcNow, UpdatedAtUtc = DateTimeOffset.UtcNow };
             db.SourceActivities.Add(pending);
             db.SourceProcessorBranches.Add(new SourceProcessorBranchEntity { Id = branchId, SourceActivityId = pending.Id, SourceRevisionId = seeded.RevisionId,

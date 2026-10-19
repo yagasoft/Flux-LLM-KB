@@ -40,7 +40,7 @@ public sealed class CheckpointRecoveryPerformanceTests(NativeSqlServerFixture fi
     [InlineData("payload")]
     [InlineData("normalisation")]
     [InlineData("count")]
-    public async Task Batched_probe_still_refuses_corrupt_retained_checkpoints(string corruption)
+    public async Task Full_recovery_read_still_refuses_corrupt_retained_checkpoints(string corruption)
     {
         await using var environment = await SqlToUsearchRebuildTests.PipelineEnvironment.CreateAsync(fixture, "Checkpoint integrity control.", publish: false, embed: false);
         var now = DateTimeOffset.UtcNow;
@@ -90,7 +90,7 @@ public sealed class CheckpointRecoveryPerformanceTests(NativeSqlServerFixture fi
     }
 
     [Visibility.RepositoryRecoveryMigrationDeploymentTests.RecoveryScaleFact]
-    public async Task Healthy_probe_and_real_query_lease_meet_the_existing_budget_at_retained_production_scale()
+    public async Task Full_recovery_read_and_real_query_lease_meet_the_existing_budget_at_retained_production_scale()
     {
         await using var environment = await SqlToUsearchRebuildTests.PipelineEnvironment.CreateAsync(fixture, "Synthetic scale control.", embed: false);
         var expected = await SeedEmptyCheckpointsAsync(environment.Factory, 1336);
@@ -195,7 +195,7 @@ public sealed class CheckpointRecoveryPerformanceTests(NativeSqlServerFixture fi
         """;
 
     [NativeSqlServerFact]
-    public async Task Healthy_probe_batches_checkpoint_checks_instead_of_round_tripping_per_draft()
+    public async Task Full_recovery_read_batches_checkpoint_checks_instead_of_round_tripping_per_draft()
     {
         await using var environment = await SqlToUsearchRebuildTests.PipelineEnvironment.CreateAsync(fixture, "Published control.");
         var expected = await SeedEmptyCheckpointsAsync(environment.Factory, 100);

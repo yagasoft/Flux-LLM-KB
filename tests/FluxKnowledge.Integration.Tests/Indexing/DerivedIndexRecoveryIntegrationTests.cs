@@ -67,6 +67,30 @@ public sealed class DerivedIndexRecoveryIntegrationTests(NativeSqlServerFixture 
         Assert.Equal(1, store.LeaseAcquisitions);
     }
 
+    [Fact]
+    public async Task Healthy_probe_uses_projection_read_and_a_fault_returns_to_full_recovery()
+    {
+        var store = new RecordingRecoveryStore(new DerivedIndexRecoverySqlSnapshot(null, null, [],
+            ImmutableHashSet<Guid>.Empty, ImmutableHashSet<string>.Empty, IsValidatedEmptyCatalogue: true));
+        var services = new ServiceCollection();
+        services.AddSingleton<IDerivedIndexRecoveryStore>(store);
+        using var provider = services.BuildServiceProvider();
+        var coordinator = new DerivedIndexRecoveryCoordinator(provider.GetRequiredService<IServiceScopeFactory>(),
+            UsearchIndexConfiguration.FromConfiguredRoot(Path.GetTempPath()), TimeProvider.System);
+
+        await coordinator.RunOnceAsync(CancellationToken.None);
+        await coordinator.RunOnceAsync(CancellationToken.None);
+        Assert.Equal(DerivedIndexRecoveryState.Healthy, coordinator.Snapshot.State);
+        Assert.Equal(1, store.ReadCount);
+        Assert.Equal(1, store.ProjectionReadCount);
+
+        coordinator.Notify(new(DerivedIndexRecoveryFailureCategory.InvalidDerivedIndex, null));
+        await coordinator.RunOnceAsync(CancellationToken.None);
+        Assert.Equal(DerivedIndexRecoveryState.Healthy, coordinator.Snapshot.State);
+        Assert.Equal(2, store.ReadCount);
+        Assert.Equal(1, store.ProjectionReadCount);
+    }
+
     [NativeSqlServerFact]
     public async Task Missing_active_directory_recovers_to_a_unique_path_without_changing_the_active_pointer()
     {
@@ -1352,6 +1376,7 @@ public sealed class DerivedIndexRecoveryIntegrationTests(NativeSqlServerFixture 
     {
         public int PathUpdateAttempts { get; private set; }
         public int ReadCount { get; private set; }
+        public int ProjectionReadCount { get; private set; }
         public int LeaseAcquisitions { get; private set; }
         public ValueTask<IDerivedIndexRecoveryLease?> TryAcquireSharedLeaseAsync(TimeSpan lockTimeout, CancellationToken cancellationToken) =>
             ValueTask.FromResult<IDerivedIndexRecoveryLease?>(new NoopRecoveryLease());
@@ -1359,6 +1384,12 @@ public sealed class DerivedIndexRecoveryIntegrationTests(NativeSqlServerFixture 
         public ValueTask<DerivedIndexRecoverySqlSnapshot> ReadActiveAsync(CancellationToken cancellationToken)
         {
             ReadCount++;
+            return ValueTask.FromResult(snapshot);
+        }
+
+        public ValueTask<DerivedIndexRecoverySqlSnapshot> ReadActiveProjectionAsync(CancellationToken cancellationToken)
+        {
+            ProjectionReadCount++;
             return ValueTask.FromResult(snapshot);
         }
 

@@ -339,6 +339,7 @@ public sealed class RetainedTextPipelineIntegrationTests(NativeSqlServerFixture 
     [InlineData(1)]
     [InlineData(2)]
     [InlineData(3)]
+    [InlineData(4)]
     public async Task Retained_reader_accepts_text_above_32_mib_only_for_the_single_completed_ooxml_child(int processorGeneration)
     {
         const int byteLength = 32 * 1024 * 1024 + 1;
@@ -785,7 +786,7 @@ public sealed class RetainedTextPipelineIntegrationTests(NativeSqlServerFixture 
         return revisionId;
     }
 
-    private async Task BindCompletedOoxmlChildAsync(Guid childRevisionId, string childHash, Guid? childActivityId = null, int processorGeneration = 3)
+    private async Task BindCompletedOoxmlChildAsync(Guid childRevisionId, string childHash, Guid? childActivityId = null, int processorGeneration = 4)
     {
         await using var context = CreateContext();
         var child = await context.SourceRevisions.SingleAsync(value => value.Id == childRevisionId);
@@ -796,8 +797,8 @@ public sealed class RetainedTextPipelineIntegrationTests(NativeSqlServerFixture 
         var parentHash = new string('a', 64);
         child.ParentSourceRevisionId = parentId;
         var now = DateTimeOffset.UtcNow;
-        var processorVersion = processorGeneration == 3 ? OoxmlStructuralTextProcessor.Capability.ProcessorVersion : $"phase-5-ooxml-structural-v{processorGeneration}";
-        var processorFingerprint = processorGeneration == 3 ? OoxmlStructuralTextProcessor.Capability.ProcessorFingerprint : $"phase-5-ooxml-retained-structural-v{processorGeneration}";
+        var processorVersion = $"phase-5-ooxml-structural-v{processorGeneration}";
+        var processorFingerprint = $"phase-5-ooxml-retained-structural-v{processorGeneration}";
         context.SourceRevisions.Add(new SourceRevisionEntity
         {
             Id = parentId, SourceRootId = sourceRootId, StableSourceIdentity = $"ooxml-parent:{parentId:N}", Revision = 1,

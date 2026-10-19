@@ -38,10 +38,10 @@ public sealed class OoxmlStructuralTextProcessorTests
     {
         var descriptor = OoxmlStructuralTextProcessor.Capability;
 
-        Assert.Equal(new Guid("c784f889-e910-4d42-95fd-b4d8a91b9a03"), descriptor.Id);
+        Assert.Equal(new Guid("bf48eb59-d75a-47d9-a897-d14cdfb1b1f4"), descriptor.Id);
         Assert.Equal("document-ooxml-structural-extract", descriptor.ProcessorKind);
-        Assert.Equal("phase-5-ooxml-structural-v3", descriptor.ProcessorVersion);
-        Assert.Equal("phase-5-ooxml-retained-structural-v3", descriptor.ProcessorFingerprint);
+        Assert.Equal("phase-5-ooxml-structural-v4", descriptor.ProcessorVersion);
+        Assert.Equal("phase-5-ooxml-retained-structural-v4", descriptor.ProcessorFingerprint);
         Assert.Equal(SourceActivityKind.TextExtraction, descriptor.AcceptedActivityKind);
         Assert.Equal("OoxmlDocumentContainer", descriptor.AcceptedClassification);
     }
@@ -54,7 +54,7 @@ public sealed class OoxmlStructuralTextProcessorTests
 
     [Theory]
     [InlineData("word/document.xml", "<w:document xmlns:w='w'><w:p><w:r><w:t>Hello Word</w:t></w:r></w:p></w:document>", "Hello Word")]
-    [InlineData("ppt/slides/slide1.xml", "<p:sld xmlns:p='p'><p:txBody><p:p><p:r><p:t>Hello Slide</p:t></p:r></p:p></p:txBody></p:sld>", "Hello Slide")]
+    [InlineData("ppt/slides/slide1.xml", "<p:sld xmlns:p='p' xmlns:a='http://schemas.openxmlformats.org/drawingml/2006/main'><p:txBody><a:p><a:r><a:t>Hello Slide</a:t></a:r></a:p></p:txBody></p:sld>", "Hello Slide")]
     public async Task Valid_ooxml_structural_part_is_retained_as_an_opaque_text_child(string part, string xml, string expectedText)
     {
         var archive = CreateZip(part, xml);
@@ -1214,19 +1214,64 @@ public sealed class OoxmlStructuralTextProcessorTests
         Assert.Equal(0, writer.BytesWritten);
     }
 
+    [Theory]
+    [InlineData("default-main")]
+    [InlineData("rooted-main")]
+    [InlineData("empty-directory")]
+    public async Task V4_package_compatibility_does_not_change_the_immutable_Visio_extractor(string variant)
+    {
+        var bytes = CreateVsdxWithInertBinaryMember(compatibilityVariant: variant);
+        var hash = Convert.ToHexStringLower(SHA256.HashData(bytes));
+
+        var error = await Assert.ThrowsAsync<RetainedProcessorException>(() => new VsdxDocumentExtractor().ExtractAsync(
+            new RetainedSourceBytes(SourceRevisionId.New(), bytes, hash, bytes.Length), CancellationToken.None).AsTask());
+
+        Assert.Equal("office-document-container-invalid", error.OutcomeCode);
+    }
+
     [Fact]
-    public async Task Unselected_xml_counts_against_the_package_wide_element_bound_before_any_child_write()
+    public async Task V4_default_mapping_validation_does_not_reject_previously_ignored_Visio_defaults()
+    {
+        var bytes = CreateVsdxWithInertBinaryMember(compatibilityVariant: "duplicate-defaults");
+        var hash = Convert.ToHexStringLower(SHA256.HashData(bytes));
+
+        var result = await new VsdxDocumentExtractor().ExtractAsync(
+            new RetainedSourceBytes(SourceRevisionId.New(), bytes, hash, bytes.Length), CancellationToken.None);
+
+        Assert.Contains("Gateway", result.Text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Large_unselected_ooxml_is_streamed_without_an_arbitrary_element_count_refusal()
     {
         var archive = CreateWordPackageWithAdditionalXml("customXml/item1.xml", "<root>" + string.Concat(Enumerable.Range(0, 2_000_000).Select(index => $"<x>{index:D6}</x>")) + "</root>");
         var hash = Convert.ToHexStringLower(SHA256.HashData(archive));
         var claim = new RetainedProcessorClaim(Guid.NewGuid(), SourceRevisionId.New(), "parent", hash, "owner", 1, DateTimeOffset.UtcNow.AddMinutes(5));
         var writer = new RecordingWriter();
 
-        var error = await Assert.ThrowsAsync<RetainedProcessorException>(() => new OoxmlStructuralTextProcessor(writer).ProcessAsync(
-            claim, new RetainedSourceBytes(claim.SourceRevisionId, archive, hash, archive.Length), new RetainedProcessorOptions(), CancellationToken.None).AsTask());
+        var result = await new OoxmlStructuralTextProcessor(writer).ProcessAsync(
+            claim, new RetainedSourceBytes(claim.SourceRevisionId, archive, hash, archive.Length), new RetainedProcessorOptions(), CancellationToken.None);
 
-        Assert.Equal("office-document-element-limit", error.OutcomeCode);
-        Assert.Equal(0, writer.BytesWritten);
+        Assert.Single(result.Members);
+        Assert.Equal("safe\n", writer.Text);
+    }
+
+    [Fact]
+    public async Task Large_selected_word_xml_is_streamed_to_its_final_text_within_the_byte_budget()
+    {
+        var xml = "<w:document xmlns:w='w'>" +
+            string.Concat(Enumerable.Range(0, 2_000_000).Select(index => $"<w:bookmarkStart w:id='{index:D6}'/>")) +
+            "<w:p><w:r><w:t>Text after two million elements</w:t></w:r></w:p></w:document>";
+        var archive = CreateZip("word/document.xml", xml);
+        var hash = Convert.ToHexStringLower(SHA256.HashData(archive));
+        var claim = new RetainedProcessorClaim(Guid.NewGuid(), SourceRevisionId.New(), "parent", hash, "owner", 1, DateTimeOffset.UtcNow.AddMinutes(5));
+        var writer = new RecordingWriter();
+
+        var result = await new OoxmlStructuralTextProcessor(writer).ProcessAsync(
+            claim, new RetainedSourceBytes(claim.SourceRevisionId, archive, hash, archive.Length), new RetainedProcessorOptions(), CancellationToken.None);
+
+        Assert.Single(result.Members);
+        Assert.Equal("Text after two million elements\n", writer.Text);
     }
 
     [Fact]
@@ -1408,7 +1453,7 @@ public sealed class OoxmlStructuralTextProcessorTests
             }
             if (name.StartsWith("ppt/", StringComparison.Ordinal))
             {
-                WriteEntry(archive, "ppt/presentation.xml", "<p:presentation xmlns:p='p' xmlns:r='r'><p:sldIdLst><p:sldId r:id='rId1' /></p:sldIdLst></p:presentation>");
+                WriteEntry(archive, "ppt/presentation.xml", "<p:presentation xmlns:p='p' xmlns:a='http://schemas.openxmlformats.org/drawingml/2006/main' xmlns:r='r'><p:sldIdLst><p:sldId r:id='rId1' /></p:sldIdLst></p:presentation>");
                 WriteEntry(archive, "ppt/_rels/presentation.xml.rels", $"<Relationships><Relationship Id='rId1' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide' Target='{name[4..]}' /></Relationships>");
             }
             WriteEntry(archive, name, value);
@@ -1421,14 +1466,20 @@ public sealed class OoxmlStructuralTextProcessorTests
         byte[]? inertMemberBytes = null,
         string? pageXml = null,
         byte[]? pageBytes = null,
-        string? pagesXml = null)
+        string? pagesXml = null,
+        string? compatibilityVariant = null)
     {
         const string visio = "http://schemas.microsoft.com/office/visio/2012/main";
         using var buffer = new MemoryStream();
         using (var archive = new ZipArchive(buffer, ZipArchiveMode.Create, true))
         {
-            WriteEntry(archive, "[Content_Types].xml", "<Types><Override PartName='/visio/document.xml' ContentType='application/vnd.ms-visio.drawing.main+xml'/><Override PartName='/visio/pages/pages.xml' ContentType='application/vnd.ms-visio.pages+xml'/><Override PartName='/visio/pages/page1.xml' ContentType='application/vnd.ms-visio.page+xml'/></Types>");
-            WriteEntry(archive, "_rels/.rels", "<Relationships><Relationship Id='rId1' Type='http://schemas.microsoft.com/visio/2010/relationships/document' Target='visio/document.xml'/></Relationships>");
+            var types = "<Types><Override PartName='/visio/document.xml' ContentType='application/vnd.ms-visio.drawing.main+xml'/><Override PartName='/visio/pages/pages.xml' ContentType='application/vnd.ms-visio.pages+xml'/><Override PartName='/visio/pages/page1.xml' ContentType='application/vnd.ms-visio.page+xml'/></Types>";
+            if (compatibilityVariant == "default-main") types = types.Replace("<Override PartName='/visio/document.xml'", "<Default Extension='xml'", StringComparison.Ordinal);
+            if (compatibilityVariant == "duplicate-defaults") types = types.Replace("<Types>", "<Types><Default Extension='xml' ContentType='application/xml'/><Default Extension='xml' ContentType='application/xml'/>", StringComparison.Ordinal);
+            WriteEntry(archive, "[Content_Types].xml", types);
+            var mainTarget = compatibilityVariant == "rooted-main" ? "/visio/document.xml" : "visio/document.xml";
+            WriteEntry(archive, "_rels/.rels", $"<Relationships><Relationship Id='rId1' Type='http://schemas.microsoft.com/visio/2010/relationships/document' Target='{mainTarget}'/></Relationships>");
+            if (compatibilityVariant == "empty-directory") archive.CreateEntry("visio/");
             WriteEntry(archive, "visio/document.xml", $"<VisioDocument xmlns='{visio}' xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships'><Pages r:id='rIdPages'/></VisioDocument>");
             WriteEntry(archive, "visio/_rels/document.xml.rels", "<Relationships><Relationship Id='rIdPages' Type='http://schemas.microsoft.com/visio/2010/relationships/pages' Target='pages/pages.xml'/></Relationships>");
             WriteEntry(archive, "visio/pages/pages.xml", pagesXml ?? $"<Pages xmlns='{visio}' xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships'><Page ID='1' Name='Current architecture'><Rel r:id='rIdPage1'/></Page></Pages>");
@@ -1486,10 +1537,10 @@ public sealed class OoxmlStructuralTextProcessorTests
         {
             WriteEntry(archive, "[Content_Types].xml", "<Types><Override PartName='/ppt/presentation.xml' ContentType='application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml'/><Override PartName='/ppt/slides/slide2.xml' ContentType='application/vnd.openxmlformats-officedocument.presentationml.slide+xml'/><Override PartName='/ppt/slides/slide10.xml' ContentType='application/vnd.openxmlformats-officedocument.presentationml.slide+xml'/></Types>");
             WriteEntry(archive, "_rels/.rels", "<Relationships><Relationship Id='rId1' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument' Target='ppt/presentation.xml' /></Relationships>");
-            WriteEntry(archive, "ppt/presentation.xml", "<p:presentation xmlns:p='p'><p:sldIdLst><p:sldId id='2' r:id='rId2' xmlns:r='r'/><p:sldId id='10' r:id='rId10' xmlns:r='r'/></p:sldIdLst></p:presentation>");
+            WriteEntry(archive, "ppt/presentation.xml", "<p:presentation xmlns:p='p' xmlns:a='http://schemas.openxmlformats.org/drawingml/2006/main'><p:sldIdLst><p:sldId id='2' r:id='rId2' xmlns:r='r'/><p:sldId id='10' r:id='rId10' xmlns:r='r'/></p:sldIdLst></p:presentation>");
             WriteEntry(archive, "ppt/_rels/presentation.xml.rels", "<Relationships><Relationship Id='rId2' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide' Target='slides/slide2.xml'/><Relationship Id='rId10' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide' Target='slides/slide10.xml'/></Relationships>");
-            WriteEntry(archive, "ppt/slides/slide2.xml", "<p:sld xmlns:p='p'><p:txBody><p:p><p:r><p:t>slide two</p:t></p:r></p:p></p:txBody></p:sld>");
-            WriteEntry(archive, "ppt/slides/slide10.xml", "<p:sld xmlns:p='p'><p:txBody><p:p><p:r><p:t>slide ten</p:t></p:r></p:p></p:txBody></p:sld>");
+            WriteEntry(archive, "ppt/slides/slide2.xml", "<p:sld xmlns:p='p' xmlns:a='http://schemas.openxmlformats.org/drawingml/2006/main'><p:txBody><a:p><a:r><a:t>slide two</a:t></a:r></a:p></p:txBody></p:sld>");
+            WriteEntry(archive, "ppt/slides/slide10.xml", "<p:sld xmlns:p='p' xmlns:a='http://schemas.openxmlformats.org/drawingml/2006/main'><p:txBody><a:p><a:r><a:t>slide ten</a:t></a:r></a:p></p:txBody></p:sld>");
         }
         return buffer.ToArray();
     }
@@ -1702,9 +1753,9 @@ public sealed class OoxmlStructuralTextProcessorTests
         {
             WriteEntry(archive, "[Content_Types].xml", "<Types><Override PartName='/ppt/presentation.xml' ContentType='application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml'/><Override PartName='/ppt/slides/slide1.xml' ContentType='application/vnd.openxmlformats-officedocument.presentationml.slide+xml'/></Types>");
             WriteEntry(archive, "_rels/.rels", "<Relationships><Relationship Id='rIdMain' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument' Target='ppt/presentation.xml'/></Relationships>");
-            WriteEntry(archive, "ppt/presentation.xml", "<p:presentation xmlns:p='p' xmlns:r='r'><p:sldIdLst><p:sldId r:id='rIdSlide'/></p:sldIdLst></p:presentation>");
+            WriteEntry(archive, "ppt/presentation.xml", "<p:presentation xmlns:p='p' xmlns:a='http://schemas.openxmlformats.org/drawingml/2006/main' xmlns:r='r'><p:sldIdLst><p:sldId r:id='rIdSlide'/></p:sldIdLst></p:presentation>");
             WriteEntry(archive, "ppt/_rels/presentation.xml.rels", "<Relationships><Relationship Id='rIdSlide' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide' Target='https://external-target-not-followed.invalid/' TargetMode='External'/><Relationship Id='rIdSlide' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide' Target='slides/slide1.xml'/></Relationships>");
-            WriteEntry(archive, "ppt/slides/slide1.xml", "<p:sld xmlns:p='p'><p:txBody><p:p><p:r><p:t>safe</p:t></p:r></p:p></p:txBody></p:sld>");
+            WriteEntry(archive, "ppt/slides/slide1.xml", "<p:sld xmlns:p='p' xmlns:a='http://schemas.openxmlformats.org/drawingml/2006/main'><p:txBody><a:p><a:r><a:t>safe</a:t></a:r></a:p></p:txBody></p:sld>");
         }
         return buffer.ToArray();
     }

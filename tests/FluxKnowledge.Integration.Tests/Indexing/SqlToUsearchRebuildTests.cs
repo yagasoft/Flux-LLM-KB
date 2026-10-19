@@ -28,7 +28,7 @@ using Xunit;
 namespace FluxKnowledge.Integration.Tests.Indexing;
 
 [Collection("sql-full-text")]
-public sealed class SqlToUsearchRebuildTests(NativeSqlServerFixture fixture) : IClassFixture<NativeSqlServerFixture>
+public sealed partial class SqlToUsearchRebuildTests(NativeSqlServerFixture fixture) : IClassFixture<NativeSqlServerFixture>
 {
     private readonly NativeSqlServerFixture _fixture = fixture;
 
