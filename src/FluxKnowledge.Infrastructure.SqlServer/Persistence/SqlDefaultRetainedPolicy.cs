@@ -200,7 +200,7 @@ internal static class SqlDefaultRetainedPolicy
     private static bool MatchesScope(SourceRootConfigurationEntity root, SourceRevisionEntity revision, Request request)
     {
         if (root.Id != revision.SourceRootId || root.Id != request.RootId || root.State != (int)SourceRootState.Enabled || root.ConfigurationRevision != request.ConfigurationRevision ||
-            root.FollowLinks || revision.Id != request.RevisionId || revision.SuppressedAtUtc is not null || revision.OriginKind != 0 || revision.ParentSourceRevisionId is not null ||
+            root.FollowLinks || revision.Id != request.RevisionId || revision.SuppressedAtUtc is not null || revision.OriginKind != 0 ||
             revision.ContentSha256 != request.Hash || revision.ByteLength < 0) return false;
         var prefix = Path.TrimEndingDirectorySeparator(root.CanonicalPath) + Path.DirectorySeparatorChar;
         if (!Path.IsPathFullyQualified(revision.CanonicalPath) || !string.Equals(Path.GetFullPath(revision.CanonicalPath), revision.CanonicalPath, StringComparison.OrdinalIgnoreCase) ||

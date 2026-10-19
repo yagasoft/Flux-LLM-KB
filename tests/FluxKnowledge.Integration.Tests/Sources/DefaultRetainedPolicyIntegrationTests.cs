@@ -47,9 +47,82 @@ public sealed class DefaultRetainedPolicyIntegrationTests(NativeSqlServerFixture
         Assert.False(Directory.Exists(seeded.OriginalRoot));
     }
 
+    [NativeSqlServerFact]
+    public async Task A_derived_revision_with_physical_looking_history_is_not_a_policy_source_owner()
+    {
+        var seeded = await SeedAsync(withPhysicalHistory: true, originKind: 2);
+        using var reader = new SqlRetainedSourceReader(SqlTestData.CreateFactory(fixture), seeded.ArtifactRoot);
+        var service = Service(reader); var mutation = Mutation(seeded);
+        var preview = await service.PreviewAsync(mutation, "test", CancellationToken.None);
+        var refusal = await Assert.ThrowsAsync<NativeOperationException>(() => service.CommitAsync(mutation,
+            preview.ConfirmationId, "derived-owner-refused", "test", CancellationToken.None).AsTask());
+        Assert.Equal("policy-item-not-eligible", refusal.ReasonCode);
+    }
+
     private NativeCorpusCommandService Service(SqlRetainedSourceReader reader) => new(
         new NativeOperationService(new SqlNativeOperationStore(SqlTestData.CreateFactory(fixture), TimeProvider.System), []),
         new SqlNativeCorpusActionStore(SqlTestData.CreateFactory(fixture), new NoOriginalIoPolicy(), new LocalPrivateContentDisclosure(), retainedSourceReader: reader));
+
+    [NativeSqlServerTheory]
+    [InlineData(true, false)]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    public async Task Physical_revision_history_allows_policy_recovery_only_without_an_unsuppressed_competitor(bool suppressed, bool differentIdentity)
+    {
+        var seeded = await SeedAsync(revision: 2, withPhysicalHistory: true, suppressPrevious: suppressed, differentHistoryIdentity: differentIdentity);
+        var factory = SqlTestData.CreateFactory(fixture);
+        var previousId = Assert.IsType<Guid>(seeded.PreviousId);
+        using var reader = new SqlRetainedSourceReader(factory, seeded.ArtifactRoot);
+        var service = Service(reader); var mutation = Mutation(seeded);
+        if (!suppressed)
+        {
+            var refusedPreview = await service.PreviewAsync(mutation, "test", CancellationToken.None);
+            var refusal = await Assert.ThrowsAsync<NativeOperationException>(() => service.CommitAsync(mutation, refusedPreview.ConfirmationId,
+                "physical-history-policy-refused", "test", CancellationToken.None).AsTask());
+            Assert.Equal("policy-item-not-eligible", refusal.ReasonCode);
+            return;
+        }
+        var preview = await service.PreviewAsync(mutation, "test", CancellationToken.None);
+        await service.CommitAsync(mutation, preview.ConfirmationId, "physical-history-policy", "test", CancellationToken.None);
+        Assert.True(await new SqlRetainedTextRegistrationStore(factory, TimeProvider.System, seeded.ArtifactRoot)
+            .OfferUnlinkedInProcessActivitiesAsync(CancellationToken.None) >= 1);
+        await using var verify = await factory.CreateDbContextAsync();
+        Assert.Equal(previousId, (await verify.SourceRevisions.SingleAsync(value => value.Id == seeded.RevisionId)).ParentSourceRevisionId);
+        Assert.Single(await verify.PipelineRecords.Where(value => value.SourceRevisionId == seeded.RevisionId).ToArrayAsync());
+        Assert.False(Directory.Exists(seeded.OriginalRoot));
+    }
+
+    [NativeSqlServerTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Physical_revision_policy_rechecks_history_competitors_at_commit_and_registration(bool afterCommit)
+    {
+        var seeded = await SeedAsync(revision: 2, withPhysicalHistory: true);
+        var factory = SqlTestData.CreateFactory(fixture);
+        var previousId = Assert.IsType<Guid>(seeded.PreviousId);
+        using var reader = new SqlRetainedSourceReader(factory, seeded.ArtifactRoot);
+        var service = Service(reader); var mutation = Mutation(seeded);
+        var preview = await service.PreviewAsync(mutation, "test", CancellationToken.None);
+        if (afterCommit) await service.CommitAsync(mutation, preview.ConfirmationId, "history-before-competitor", "test", CancellationToken.None);
+        await using (var change = await factory.CreateDbContextAsync())
+        {
+            (await change.SourceRevisions.SingleAsync(value => value.Id == previousId)).SuppressedAtUtc = null;
+            await change.SaveChangesAsync();
+        }
+        if (!afterCommit)
+        {
+            var refused = await Assert.ThrowsAsync<NativeOperationException>(() => service.CommitAsync(mutation, preview.ConfirmationId,
+                "history-after-competitor", "test", CancellationToken.None).AsTask());
+            Assert.Equal("policy-item-not-eligible", refused.ReasonCode);
+        }
+        else
+        {
+            Assert.Equal(0, await new SqlRetainedTextRegistrationStore(factory, TimeProvider.System, seeded.ArtifactRoot)
+                .OfferUnlinkedInProcessActivitiesAsync(CancellationToken.None));
+        }
+        await using var verify = await factory.CreateDbContextAsync();
+        Assert.False(await verify.PipelineRecords.AnyAsync(value => value.SourceRevisionId == seeded.RevisionId));
+    }
 
     [NativeSqlServerFact]
     public async Task Later_scans_reuse_the_verified_policy_successor_and_supersede_an_unlinked_legacy_pending_activity()
@@ -552,7 +625,8 @@ public sealed class DefaultRetainedPolicyIntegrationTests(NativeSqlServerFixture
         Assert.True(await SqlRetainedPolicyCompatibility.HasNoLegacyRunnableWorkAsync(SqlTestData.CreateFactory(fixture), CancellationToken.None));
     }
 
-    private async Task<Seed> SeedAsync(long revision = 1, string extension = ".rdl", byte[]? payload = null, string classification = "Unknown")
+    private async Task<Seed> SeedAsync(long revision = 1, string extension = ".rdl", byte[]? payload = null, string classification = "Unknown",
+        bool withPhysicalHistory = false, bool suppressPrevious = true, bool differentHistoryIdentity = false, int originKind = 0)
     {
         var root = Path.Combine(Environment.GetEnvironmentVariable(NativeSqlServerFixture.FileRootEnvironmentVariable)!, "policy-artifacts", Guid.NewGuid().ToString("N"));
         var original = Path.Combine(root, "original-must-not-read");
@@ -566,18 +640,21 @@ public sealed class DefaultRetainedPolicyIntegrationTests(NativeSqlServerFixture
         db.SourceRootConfigurations.Add(new SourceRootConfigurationEntity { Id = rootId, CanonicalPath = original, DisplayName = "Policy test", State = 0,
             Recursive = true, MaximumFileBytes = SourcePolicyDefaults.MaximumTextBytes, AllowedClassificationsJson = "[\"text/plain\",\"text/x-source-code\"]",
             ConfigurationRevision = 1, ReconciliationCadenceSeconds = 900, CreatedAtUtc = now, UpdatedAtUtc = now });
-        db.SourceRevisions.Add(new SourceRevisionEntity { Id = revisionId, SourceRootId = rootId, CanonicalPath = Path.Combine(original, "report" + extension),
+        var current = new SourceRevisionEntity { Id = revisionId, SourceRootId = rootId, CanonicalPath = Path.Combine(original, "report" + extension),
             StableSourceIdentity = $"policy-test:{revisionId:N}", ContentSha256 = hash, Classification = classification, Extension = extension, ByteLength = bytes.Length,
-            Revision = revision, DiscoveredAtUtc = now });
+            Revision = revision, DiscoveredAtUtc = now };
+        Guid? previousId = withPhysicalHistory ? SqlTestData.AddPhysicalRevisionHistory(db, current, suppressPrevious, differentHistoryIdentity) : null;
+        current.OriginKind = originKind;
+        db.SourceRevisions.Add(current);
         db.SourceArtifacts.Add(new SourceArtifactEntity { Id = Guid.NewGuid(), SourceRevisionId = revisionId, ContentSha256 = hash,
             StoreRelativePath = relative, ByteLength = bytes.Length, ReferenceCount = 1, ChecksumVerifiedAtUtc = now });
         db.SourceActivities.Add(new SourceActivityEntity { Id = activityId, SourceRevisionId = revisionId, ActivityKind = (int)SourceActivityKind.DocumentParsing,
             ExecutionClass = (int)ExecutionClass.DeferredCapability, State = (int)SourceActivityState.DeferredPolicy, ProcessorVersion = "phase-3a-v1",
             InputFingerprint = hash, Reason = "File extension is unknown to local source ingestion.", CreatedAtUtc = now, UpdatedAtUtc = now });
         await db.SaveChangesAsync();
-        return new Seed(rootId, revisionId, activityId, hash, root, original);
+        return new Seed(rootId, revisionId, activityId, hash, root, original, previousId);
     }
-    private sealed record Seed(Guid RootId, Guid RevisionId, Guid ActivityId, string Hash, string ArtifactRoot, string OriginalRoot);
+    private sealed record Seed(Guid RootId, Guid RevisionId, Guid ActivityId, string Hash, string ArtifactRoot, string OriginalRoot, Guid? PreviousId = null);
     private sealed class NoOriginalIoPolicy : ISourceRootPathPolicy
     {
         public SourceRootPathValidation ValidateAndCanonicalise(SourceRootCreateRequest request) => throw new InvalidOperationException("Original source I/O is forbidden in retained replay.");

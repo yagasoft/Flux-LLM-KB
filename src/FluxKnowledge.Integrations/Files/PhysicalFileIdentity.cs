@@ -41,6 +41,13 @@ public static class PhysicalFileIdentity
         return $"ntfs:{information.VolumeSerialNumber:X8}:{information.FileIndexHigh:X8}{information.FileIndexLow:X8}";
     }
 
+    internal static uint GetLinkCount(SafeFileHandle handle)
+    {
+        if (!GetFileInformationByHandle(handle, out var information))
+            throw new IOException("The source file link count cannot be read.", new Win32Exception(Marshal.GetLastPInvokeError()));
+        return information.NumberOfLinks;
+    }
+
     /// <summary>Opens one existing file without following a final reparse point.</summary>
     public static SafeFileHandle OpenReadNoFollow(string path)
     {

@@ -137,6 +137,27 @@ junctions and unknown reparse types remain rejected for source-root scans; retai
 storage and Git control paths retain their stricter policies. Direct UTF-8 ingress
 still permits aliases whose resolved physical targets remain authorised.
 
+An owned filesystem scan can resolve a positively observed file's older physical
+bindings even when unrelated entries make its inventory incomplete. The hashing
+read handle stays open through convergence; root admission, scope, scan ownership,
+physical identity and metadata are checked again before commit. Only a verified
+single-link capture under a no-follow root can suppress conflicting older
+physical observations. Unavailable siblings are never treated as deleted, and
+retained bytes or persisted discovery JSON alone cannot authorise suppression.
+Ordinary files under an existing `FollowLinks` setting still ingest through the
+same strict no-follow reader, without this additional suppression authority.
+Same-content replacements with a different physical identity remain unresolved
+rather than relabelling immutable history. The handle prevents writes and renames;
+hard-link and access-control changes are checked but are not atomically excluded
+with the SQL commit.
+
+Physical revisions may retain a history parent. Retained policy admission and
+exact settled-document recovery use origin and unique current binding to identify
+the physical owner, rather than requiring its history parent to be empty. Derived
+inputs remain ineligible as physical owners. Later physical revisions require the
+marked, fenced document-recovery contract at exact claim; the earlier reprocess
+contract is unchanged.
+
 Discovery requests only materialised directory entries. Offline, recall-required
 or partial content is reported unavailable without requesting hydration; an
 incomplete cloud namespace or a retention failure prevents unseen-source

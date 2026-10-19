@@ -238,5 +238,43 @@ still use the parent-qualified locator. No persisted locator is rewritten. Both
 earlier image and PDF regressions failed before the correction; all 102 document
 handoff/recovery checks now pass, including publication, unchanged predecessor
 history and wrong-locator/hash, ambiguous-owner and uncertain-native refusals.
-Canonical closeout, deployment and one bounded real-item acceptance remain open
-for this compatibility correction. Further cohort admission remains paused.
+The next release and exact live acceptance are recorded below.
+
+## Positive file bindings and physical revision history
+
+Release `20261019T151854Z-94753620ba32` subsequently deployed the narrow earlier
+locator compatibility. The exact settled image completed all five stages,
+selected its recovered publication and returned nonempty text through the
+supported Corpus page. Its matching native result, receipt and terminal ownership
+checks passed; this does not assess OCR fidelity. The three separately authorised
+access repairs also reached selected publications and supported readback through
+normal processing. No source content or OneDrive configuration changed.
+
+Of thirteen explicitly selected Office candidates, nine admitted new v4 work and
+four refused ambiguous physical bindings without repeat admission. All nine
+produced retained text; the bounded 19 October 16:17 UTC snapshot confirmed one
+selected publication with five completed stages, while eight remained at
+embedding. This snapshot alone is not readback acceptance for that new document.
+
+Disposable integration tests now prove positive file capture resolves edits,
+replacement content, renames and reversions despite an unavailable sibling.
+Suppression requires the actual held hashing handle, current scan ownership,
+unchanged root admission and scope, and a single physical link. Configuration or
+ownership drift, case aliases, derived owners, pre-commit mutation and retried
+stale captures refuse without changing bindings. Ordinary-file ingestion under
+an existing `FollowLinks` setting remains compatible and does not gain suppression
+authority. A same-content replacement with a new physical identity still refuses
+instead of rewriting immutable history.
+
+Later physical revisions now remain eligible for exact retained policy and
+settled-document recovery when no unsuppressed competitor exists. Admission,
+claim and commit recheck their respective current-binding proofs; derived owners
+and the earlier document contract remain restricted. The focused binding/history
+batch passes 28 checks. Canonical closeout, deployment and bounded operational
+acceptance of these changes remain open.
+
+The scan issue flood was independently grouped as access-denied reports on
+distinct paths. Broader stale-inheritance repair still requires the requested
+permission scope; only the original three leaves have been changed. Resolved
+event compaction, other format limits, native uncertainty and measurable GPU
+throughput remain separate follow-up work.

@@ -169,7 +169,7 @@ internal static class SqlDocumentInputRecovery
         var pdf = processorFingerprint == PdfDocumentProcessor.Capability.ProcessorFingerprint;
         var contract = pdf ? DocumentProcessingInput.Pdf : DocumentProcessingInput.Jpeg;
         var parent = await db.SourceRevisions.SingleOrDefaultAsync(value => value.Id == parentId, token).ConfigureAwait(false);
-        if (parent is null || parent.ParentSourceRevisionId is not null || parent.OriginKind != 0 || parent.SuppressedAtUtc is not null || parent.ContentSha256 != hash ||
+        if (parent is null || parent.OriginKind != 0 || parent.SuppressedAtUtc is not null || parent.ContentSha256 != hash ||
             parent.ByteLength <= 0 || parent.ByteLength > (pdf ? PdfDocumentProcessor.MaximumInputBytes : ImageDocumentInputProcessor.MaximumInputBytes) ||
             (pdf ? !parent.Extension.Equals(".pdf", StringComparison.OrdinalIgnoreCase) : parent.Extension.ToLowerInvariant() is not (".jpg" or ".jpeg" or ".png"))) return null;
         var root = await db.SourceRootConfigurations.SingleOrDefaultAsync(value => value.Id == parent.SourceRootId, token).ConfigureAwait(false);

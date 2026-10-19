@@ -7,6 +7,8 @@ using FluxKnowledge.Application.Gpu;
 using FluxKnowledge.Application.Sources;
 using FluxKnowledge.Domain.Sources;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
+using FluxKnowledge.Infrastructure.SqlServer.Persistence.Configurations;
+using FluxKnowledge.Integrations.Files;
 using Microsoft.EntityFrameworkCore;
 
 namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
@@ -75,13 +77,27 @@ public sealed class SqlSourceScanStore(
         await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken).ConfigureAwait(false);
 
         await SqlPublishedPassageSelection.AcquireFenceAsync(context, cancellationToken).ConfigureAwait(false);
-        // All source reconciliation transactions take these locks in this order: publication fence, root, stable identity,
-        // canonical path/content hash, then artifact-by-revision. This prevents inverse lock deadlocks.
+        // Publication, root, owned scan (when present), stable identity, all hashes
+        // at the exact path, then artifact. Keep this order with deletion and replay.
         await context.Database.ExecuteSqlInterpolatedAsync(
             $"SELECT [Id] FROM [SourceRootConfigurations] WITH (UPDLOCK, HOLDLOCK) WHERE [Id] = {sourceRoot.Id.Value};",
             cancellationToken).ConfigureAwait(false);
         string? admittedGitRepositoryIdentity = null;
         SourceRootConfigurationEntity? currentGitRoot = null;
+        SourceRootConfigurationEntity? currentPhysicalRoot = null;
+        var capture = receipt?.PublicationLease as ISourceCaptureLease;
+        var authoritativePhysicalCapture = false;
+        if (sourceRoot.DiscoveryMode == SourceDiscoveryMode.Filesystem && file.ScanOwnership is not null && file.SourcePath is not null)
+        {
+            currentPhysicalRoot = await context.SourceRootConfigurations.SingleAsync(value => value.Id == sourceRoot.Id.Value, cancellationToken).ConfigureAwait(false);
+            await ValidateOwnedPhysicalScanAsync(context, currentPhysicalRoot, sourceRoot, file, cancellationToken).ConfigureAwait(false);
+            if (capture is not null)
+            {
+                if (!ReferenceEquals(capture.Snapshot, file)) throw new InvalidDataException("The live capture belongs to a different source snapshot.");
+                capture.ValidateCurrent();
+                authoritativePhysicalCapture = !currentPhysicalRoot.FollowLinks && capture.HasSingleLink;
+            }
+        }
         if (sourceRoot.DiscoveryMode == SourceDiscoveryMode.GitTracked)
         {
             var currentRoot = await context.SourceRootConfigurations.SingleAsync(value => value.Id == sourceRoot.Id.Value, cancellationToken).ConfigureAwait(false);
@@ -97,10 +113,11 @@ public sealed class SqlSourceScanStore(
             .FromSqlInterpolated($"SELECT * FROM [SourceRevisions] WITH (UPDLOCK, HOLDLOCK, INDEX([IX_SourceRevisions_SourceRootId_StableSourceIdentity_Revision])) WHERE [SourceRootId] = {sourceRoot.Id.Value} AND [StableSourceIdentity] = {file.StableSourceIdentity}")
             .OrderByDescending(value => value.Revision)
             .ToListAsync(cancellationToken).ConfigureAwait(false);
-        var pathAndHash = await context.SourceRevisions
-            .FromSqlInterpolated($"SELECT * FROM [SourceRevisions] WITH (UPDLOCK, HOLDLOCK, INDEX([IX_SourceRevisions_SourceRootId_CanonicalPathFingerprint_ContentSha256])) WHERE [SourceRootId] = {sourceRoot.Id.Value} AND [CanonicalPathFingerprint] = CONVERT(char(64), HASHBYTES('SHA2_256', {file.CanonicalPath}), 2) AND [ContentSha256] = {file.ContentSha256}")
+        var pathOwners = await context.SourceRevisions
+            .FromSqlInterpolated($"SELECT * FROM [SourceRevisions] WITH (UPDLOCK, HOLDLOCK, INDEX([IX_SourceRevisions_SourceRootId_CanonicalPathFingerprint_ContentSha256])) WHERE [SourceRootId] = {sourceRoot.Id.Value} AND [CanonicalPathFingerprint] = CONVERT(char(64), HASHBYTES('SHA2_256', {file.CanonicalPath}), 2)")
             .ToListAsync(cancellationToken).ConfigureAwait(false);
-        var exactOwners = pathAndHash.Where(value => string.Equals(value.CanonicalPath, file.CanonicalPath, StringComparison.Ordinal)).ToList();
+        var exactOwners = pathOwners.Where(value => value.ContentSha256 == file.ContentSha256 &&
+            string.Equals(value.CanonicalPath, file.CanonicalPath, StringComparison.Ordinal)).ToList();
         SourceRevisionEntity? revision = null;
         if (exactOwners.Any(value => !string.Equals(value.StableSourceIdentity, file.StableSourceIdentity, StringComparison.Ordinal)))
         {
@@ -116,6 +133,7 @@ public sealed class SqlSourceScanStore(
             string.Equals(value.ContentSha256, file.ContentSha256, StringComparison.Ordinal) &&
             string.Equals(value.CanonicalPath, file.CanonicalPath, StringComparison.Ordinal));
         var eventType = "source.unchanged";
+        var selectionChanged = false;
         if (revision is null)
         {
             var latest = revisions.FirstOrDefault();
@@ -133,11 +151,14 @@ public sealed class SqlSourceScanStore(
         }
         else if (revision.SuppressedAtUtc is not null && currentGitRoot is null)
         {
-            await SqlPublishedPassageSelection.AdvanceVersionAsync(context, timeProvider.GetUtcNow(), cancellationToken).ConfigureAwait(false);
+            selectionChanged = true;
             revision.SuppressedAtUtc = null;
             revision.RetentionEvidenceJson = null;
             eventType = "source.updated";
         }
+
+        if (authoritativePhysicalCapture && revision.OriginKind != 0)
+            throw new InvalidDataException("A physical capture cannot adopt a derived source identity.");
 
         var artifacts = await context.SourceArtifacts
             .FromSqlInterpolated($"SELECT * FROM [SourceArtifacts] WITH (UPDLOCK, HOLDLOCK, INDEX([IX_SourceArtifacts_SourceRevisionId])) WHERE [SourceRevisionId] = {revision.Id}")
@@ -182,6 +203,45 @@ public sealed class SqlSourceScanStore(
             revision.CurrentDiscoveryEvidenceJson = SqlRepositoryWorkRecovery.Observe(currentGitRoot, revision,
                 artifact?.Id ?? receipt.SourceArtifactId.Value, file, timeProvider.GetUtcNow());
 
+        if (authoritativePhysicalCapture)
+        {
+            var superseded = revisions.Concat(pathOwners).DistinctBy(value => value.Id)
+                .Where(value => value.Id != revision.Id && value.OriginKind == 0 && value.SuppressedAtUtc is null &&
+                    (value.StableSourceIdentity == file.StableSourceIdentity ||
+                     string.Equals(value.CanonicalPath, file.CanonicalPath, StringComparison.Ordinal))).ToArray();
+            // Only an actual supersession needs this wider ambiguity check. Ordinary
+            // new/unchanged files keep indexed identity/path lookups, avoiding a root
+            // path scan for every file in a large workspace.
+            if (superseded.Length > 0 && await context.SourceRevisions.AnyAsync(value =>
+                    value.SourceRootId == sourceRoot.Id.Value && value.OriginKind == 0 && value.SuppressedAtUtc == null &&
+                    value.StableSourceIdentity != file.StableSourceIdentity &&
+                    EF.Functions.Collate(value.CanonicalPath, "Latin1_General_100_CI_AS") == file.CanonicalPath &&
+                    EF.Functions.Collate(value.CanonicalPath, SchemaConfiguration.SchedulerFenceCollation) != file.CanonicalPath,
+                    cancellationToken).ConfigureAwait(false))
+                throw new InvalidDataException("Conflicting physical path casing requires reconciliation before supersession.");
+            var observedAt = timeProvider.GetUtcNow();
+            foreach (var previous in superseded)
+            {
+                previous.SuppressedAtUtc = observedAt;
+                previous.RetainUntilUtc = observedAt.AddDays(30);
+                previous.CurrentDiscoveryEvidenceJson = SqlRepositoryWorkRecovery.Withdraw();
+                previous.RetentionEvidenceJson = JsonSerializer.Serialize(new
+                { reason = "superseded-by-verified-physical-capture", successorSourceRevisionId = revision.Id });
+                selectionChanged = true;
+                OperatorEventAppender.Add(context, OperatorEventDraft.SourceRemoved(sourceRoot.Id.Value, previous.Id,
+                    $"source:{previous.Id:N}", new { revision = previous.Revision, reason = "superseded-by-verified-physical-capture" }));
+            }
+            // This is explanatory observation, not reusable persisted authority.
+            revision.CurrentDiscoveryEvidenceJson = JsonSerializer.Serialize(new
+            {
+                kind = "verified-physical-capture", sourceRevisionId = revision.Id,
+                configurationRevision = currentPhysicalRoot!.ConfigurationRevision,
+                scanRequestId = file.ScanOwnership!.RequestId.Value, leaseGeneration = file.ScanOwnership.Lease.Generation,
+                rootIdentityFingerprint = file.SourcePath!.RootIdentityFingerprint, file.StableSourceIdentity,
+                file.ContentSha256, file.ByteLength, file.LastWriteAtUtc, observedAt
+            });
+        }
+
         if (eventType != "source.unchanged")
         {
             var correlationId = $"source:{revision.Id:N}";
@@ -189,7 +249,18 @@ public sealed class SqlSourceScanStore(
                 ? OperatorEventDraft.SourceAdded(sourceRoot.Id.Value, null, revision.Id, correlationId, new { revision = revision.Revision, classification = revision.Classification })
                 : OperatorEventDraft.SourceUpdated(sourceRoot.Id.Value, null, revision.Id, correlationId, new { revision = revision.Revision, classification = revision.Classification }));
         }
+        if (selectionChanged)
+            await SqlPublishedPassageSelection.AdvanceVersionAsync(context, timeProvider.GetUtcNow(), cancellationToken).ConfigureAwait(false);
         await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        if (currentPhysicalRoot is not null)
+        {
+            await ValidateOwnedPhysicalScanAsync(context, currentPhysicalRoot, sourceRoot, file, cancellationToken).ConfigureAwait(false);
+            if (authoritativePhysicalCapture)
+            {
+                capture!.ValidateCurrent();
+                if (!capture.HasSingleLink) throw new SourceSnapshotChangedException("The physical capture gained another file link before commit.");
+            }
+        }
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
         return new SourceRetentionConvergence(new SourceRevisionId(revision.Id), receipt is null && artifact is null);
     }
@@ -197,6 +268,26 @@ public sealed class SqlSourceScanStore(
     private static bool ReceiptMatchesFile(SourceArtifactReceipt receipt, SourceDiscoveredFile file) =>
         receipt.ByteLength == file.ByteLength &&
         string.Equals(receipt.ContentSha256, file.ContentSha256, StringComparison.Ordinal);
+
+    private async Task ValidateOwnedPhysicalScanAsync(FluxKnowledgeDbContext context, SourceRootConfigurationEntity current,
+        SourceRootConfiguration expected, SourceDiscoveredFile file, CancellationToken token)
+    {
+        var binding = file.SourcePath!;
+        var admittedIdentity = ParseAdmissionIdentityFingerprint(current.HealthEvidenceJson);
+        var prefix = Path.TrimEndingDirectorySeparator(current.CanonicalPath) + Path.DirectorySeparatorChar;
+        var relative = Path.GetRelativePath(current.CanonicalPath, file.CanonicalPath);
+        if (current.State != (int)SourceRootState.Enabled || current.CrawlMode != (int)SourceDiscoveryMode.Filesystem || current.FollowLinks != expected.FollowLinks ||
+            current.ConfigurationRevision != expected.ConfigurationRevision || admittedIdentity is null ||
+            expected.PhysicalIdentityFingerprint != admittedIdentity || binding.RootIdentityFingerprint != admittedIdentity ||
+            !string.Equals(current.CanonicalPath, expected.CanonicalPath, StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(binding.RootPath, current.CanonicalPath, StringComparison.OrdinalIgnoreCase) ||
+            !file.CanonicalPath.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(relative, file.RelativePath, StringComparison.Ordinal) ||
+            (!current.Recursive && relative.IndexOfAny([Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar]) >= 0) ||
+            !LocalSourceEnumerator.MatchesPolicy(relative, DeserializeRules(current.IncludePatternsJson), DeserializeRules(current.ExcludePatternsJson)) ||
+            !await OwnsRootScanAsync(context, current.Id, file.ScanOwnership!, timeProvider.GetUtcNow(), token).ConfigureAwait(false))
+            throw new InvalidDataException("Filesystem source configuration, scope or scan ownership is stale.");
+    }
 
     private static bool IsRetainedGitOwner(SourceRevisionEntity revision, long byteLength, string? repositoryIdentity)
     {

@@ -2703,7 +2703,7 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
                 WHERE [Id] = {expectedSourceRevisionId.Value}
                   AND [ContentSha256] = {expectedInputSha256}
                   AND [SuppressedAtUtc] IS NULL
-                  AND [ParentSourceRevisionId] IS NULL
+                  AND [OriginKind] = 0
                 """).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
             var root = revision is null ? null : await context.SourceRootConfigurations.FromSqlInterpolated($"""
                 SELECT * FROM [SourceRootConfigurations] WITH (UPDLOCK, HOLDLOCK)
@@ -2716,7 +2716,12 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
                   AND [ContentSha256] = {expectedInputSha256}
                   AND [ByteLength] = {revision.ByteLength}
                 """).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
-            if (revision is null || root is null || artifact is null || !HasExpectedDocumentExtension(revision.Extension, descriptor) ||
+            var documentRecoveryId = await SqlDocumentInputRecovery.ReadRecoveryIdAsync(context, branch.SourceActivityId, cancellationToken).ConfigureAwait(false);
+            // A physical revision can retain its history parent. Only the fenced recovery
+            // contract may claim that case; the earlier reprocess contract stays unchanged.
+            if (revision is null || root is null || artifact is null ||
+                revision.ParentSourceRevisionId is not null && (documentRecoveryId is null || documentRecoveryId == Guid.Empty) ||
+                !HasExpectedDocumentExtension(revision.Extension, descriptor) ||
                 !await IsExactDocumentDescriptorRunnableAsync(context, descriptor, cancellationToken).ConfigureAwait(false) ||
                 !await SqlDefaultRetainedPolicy.BindingIsCurrentAsync(context, branch.SourceActivityId, cancellationToken).ConfigureAwait(false) ||
                 !await context.SourceActivityRelations.AnyAsync(value =>
@@ -2770,7 +2775,7 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
             return new RetainedProcessorClaim(branch.Id, expectedSourceRevisionId, revision.StableSourceIdentity,
                 expectedInputSha256, leaseOwner, branch.LeaseGeneration, expiry)
-                { DocumentRecoveryId = await SqlDocumentInputRecovery.ReadRecoveryIdAsync(context, branch.SourceActivityId, cancellationToken).ConfigureAwait(false) };
+                { DocumentRecoveryId = documentRecoveryId };
         }, cancellationToken).ConfigureAwait(false);
     }
 

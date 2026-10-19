@@ -34,7 +34,7 @@ public sealed class SourceScanWorker(
         var retentionEvidence = new List<SourceEnumerationEvidence>();
         await foreach (var discoveredFile in enumerator.EnumerateAsync(sourceRoot, cancellationToken).ConfigureAwait(false))
         {
-            var file = sourceRoot.DiscoveryMode == SourceDiscoveryMode.GitTracked && scanRequest.Lease is { } lease
+            var file = scanRequest.Lease is { } lease
                 ? discoveredFile with { ScanOwnership = new(scanRequest.Id, lease) } : discoveredFile;
             cancellationToken.ThrowIfCancellationRequested();
             discovered++;

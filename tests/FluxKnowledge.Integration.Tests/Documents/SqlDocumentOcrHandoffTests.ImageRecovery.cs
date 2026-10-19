@@ -600,7 +600,8 @@ public sealed partial class SqlDocumentOcrHandoffTests
 
     private async Task<ImageFailureSeed> CreateSettledImageFailureAsync(bool pdf = false,
         string failureReason = "image-document-dimensions-exceeded", bool native = true,
-        Func<RetainedProcessorDerivedChild, string>? predecessorLocator = null)
+        Func<RetainedProcessorDerivedChild, string>? predecessorLocator = null, bool withPhysicalHistory = false,
+        bool suppressPrevious = true, bool differentHistoryIdentity = false, int parentOriginKind = 0)
     {
         await SqlTestData.ClearPhase3SourceDataAsync(_fixture);
         var factory = SqlTestData.CreateFactory(_fixture);
@@ -630,8 +631,12 @@ public sealed partial class SqlDocumentOcrHandoffTests
             db.SourceRootConfigurations.Add(new() { Id = rootId, CanonicalPath = sourceRoot, DisplayName = "Image recovery test", State = 0,
                 Recursive = true, MaximumFileBytes = 1_000_000, AllowedClassificationsJson = "[]", ConfigurationRevision = 1,
                 ReconciliationCadenceSeconds = 900, CreatedAtUtc = now, UpdatedAtUtc = now });
-            db.SourceRevisions.Add(new() { Id = parentId, SourceRootId = rootId, StableSourceIdentity = parentStable, CanonicalPath = Path.Combine(sourceRoot, pdf ? "document.pdf" : "diagram.jpg"),
-                Revision = 1, ContentSha256 = hash, ByteLength = bytes.Length, Classification = descriptor.AcceptedClassification, Extension = contract.Extension, DiscoveredAtUtc = now });
+            var parent = new FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.SourceRevisionEntity
+            { Id = parentId, SourceRootId = rootId, StableSourceIdentity = parentStable, CanonicalPath = Path.Combine(sourceRoot, pdf ? "document.pdf" : "diagram.jpg"),
+                Revision = 1, ContentSha256 = hash, ByteLength = bytes.Length, Classification = descriptor.AcceptedClassification, Extension = contract.Extension, DiscoveredAtUtc = now };
+            if (withPhysicalHistory) SqlTestData.AddPhysicalRevisionHistory(db, parent, suppressPrevious, differentHistoryIdentity);
+            parent.OriginKind = parentOriginKind;
+            db.SourceRevisions.Add(parent);
             await db.SaveChangesAsync();
             db.SourceRevisions.Add(new() { Id = childId, SourceRootId = rootId, StableSourceIdentity = child.StableSourceIdentity, CanonicalPath = childLocator,
                 Revision = 1, ContentSha256 = hash, ByteLength = bytes.Length, Classification = child.Classification, Extension = child.Extension,

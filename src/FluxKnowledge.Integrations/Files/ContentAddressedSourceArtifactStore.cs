@@ -57,9 +57,14 @@ public sealed class ContentAddressedSourceArtifactStore : ISourceArtifactStore, 
         using var destination = EnsureArtifactDestinationDirectory(hash);
         var finalPath = Path.Combine(destination.Path, $"{hash}.bin");
         await RunBeforeArtifactWriteAsync(destination, cancellationToken).ConfigureAwait(false);
+        // Only a real owned filesystem capture carries positive per-file authority.
+        // Synthetic writes, unowned callers and Git inventory retain their contracts.
+        if (snapshot.ScanOwnership is not null && snapshot.SourcePath is not null && snapshot.GitInventory is null)
+            publicationLease = SourceCaptureLease.Open(snapshot, publicationLease);
+        var capture = publicationLease as SourceCaptureLease;
         if (File.Exists(finalPath))
         {
-            var current = await CopyAndHashAsync(snapshot, temporaryPath: null, cancellationToken).ConfigureAwait(false);
+            var current = await CopyAndHashAsync(snapshot, temporaryPath: null, cancellationToken, capture).ConfigureAwait(false);
             if (current.Length != snapshot.ByteLength || !string.Equals(current.Hash, hash, StringComparison.OrdinalIgnoreCase))
             {
                 throw new SourceSnapshotChangedException("The source changed while its retained artifact was being verified.");
@@ -73,7 +78,7 @@ public sealed class ContentAddressedSourceArtifactStore : ISourceArtifactStore, 
         var temporaryPath = Path.Combine(Path.GetDirectoryName(finalPath)!, $".{hash}.{Guid.NewGuid():N}.tmp");
         try
         {
-            var result = await CopyAndHashAsync(snapshot, temporaryPath, cancellationToken).ConfigureAwait(false);
+            var result = await CopyAndHashAsync(snapshot, temporaryPath, cancellationToken, capture).ConfigureAwait(false);
             if (result.Length != snapshot.ByteLength || !string.Equals(result.Hash, hash, StringComparison.OrdinalIgnoreCase))
             {
                 throw new SourceSnapshotChangedException("The source changed while its retained artifact was being written.");
@@ -251,8 +256,11 @@ public sealed class ContentAddressedSourceArtifactStore : ISourceArtifactStore, 
         string hash,
         string relativePath,
         bool existing,
-        ISourceArtifactPublicationLease? publicationLease) =>
-        new(SourceArtifactId.New(), hash, relativePath, metadata.ByteLength, existing, publicationLease);
+        ISourceArtifactPublicationLease? publicationLease)
+    {
+        if (publicationLease is SourceCaptureLease capture) capture.Seal(hash, metadata.ByteLength);
+        return new(SourceArtifactId.New(), hash, relativePath, metadata.ByteLength, existing, publicationLease);
+    }
 
     private ValueTask<ISourceArtifactPublicationLease?> AcquirePublicationLeaseAsync(
         string contentSha256,
@@ -366,13 +374,17 @@ public sealed class ContentAddressedSourceArtifactStore : ISourceArtifactStore, 
     private async Task<(string Hash, long Length)> CopyAndHashAsync(
         SourceDiscoveredFile snapshot,
         string? temporaryPath,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        SourceCaptureLease? capture = null)
     {
         var buffer = new byte[128 * 1024];
         var length = 0L;
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-        using var source = OpenSource(snapshot);
-        await using var input = new FileStream(source.Handle, FileAccess.Read, buffer.Length, isAsync: true);
+        using var ownedSource = capture is null ? OpenSource(snapshot) : null;
+        await using var ownedInput = capture is null
+            ? new FileStream(ownedSource!.Handle, FileAccess.Read, buffer.Length, isAsync: true) : null;
+        var source = capture?.Source ?? ownedSource!;
+        var input = capture?.Input ?? ownedInput!;
         if (input.Length != snapshot.ByteLength || File.GetLastWriteTimeUtc(source.Handle) != snapshot.LastWriteAtUtc)
         {
             throw new SourceSnapshotChangedException("The source identity changed after discovery.");
@@ -524,4 +536,70 @@ public sealed class ContentAddressedSourceArtifactStore : ISourceArtifactStore, 
     }
 
     public void Dispose() => _rootLease.Dispose();
+
+    private sealed class SourceCaptureLease : ISourceCaptureLease
+    {
+        private readonly ISourceArtifactPublicationLease? _publication;
+        private int _disposed;
+        private bool _verified;
+        public SourceDiscoveredFile Snapshot { get; }
+        internal WindowsSourcePathAccess.SourceReadLease Source { get; }
+        internal FileStream Input { get; }
+
+        private SourceCaptureLease(SourceDiscoveredFile snapshot, WindowsSourcePathAccess.SourceReadLease source,
+            FileStream input, ISourceArtifactPublicationLease? publication)
+        {
+            Snapshot = snapshot; Source = source; Input = input; _publication = publication;
+        }
+
+        internal static SourceCaptureLease Open(SourceDiscoveredFile snapshot, ISourceArtifactPublicationLease? publication)
+        {
+            var source = OpenSource(snapshot);
+            try { return new(snapshot, source, new FileStream(source.Handle, FileAccess.Read, 128 * 1024, isAsync: true), publication); }
+            catch { source.Dispose(); throw; }
+        }
+
+        internal void Seal(string hash, long length)
+        {
+            if (Snapshot.ContentSha256 != hash || Snapshot.ByteLength != length)
+                throw new InvalidDataException("Verified capture and retained artifact differ.");
+            _verified = true;
+            ValidateCurrent();
+        }
+
+        public bool HasSingleLink
+        {
+            get { ValidateCurrent(); return PhysicalFileIdentity.GetLinkCount(Source.Handle) == 1; }
+        }
+
+        public void ValidateCurrent()
+        {
+            ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+            if (!_verified) throw new InvalidOperationException("The physical capture is not yet verified.");
+            WindowsSourcePathAccess.EnsureContentAvailable(WindowsSourcePathAccess.ReadMetadata(Source.Handle));
+            if (PhysicalFileIdentity.Get(Source.Handle) != Snapshot.StableSourceIdentity ||
+                RandomAccess.GetLength(Source.Handle) != Snapshot.ByteLength ||
+                File.GetLastWriteTimeUtc(Source.Handle) != Snapshot.LastWriteAtUtc ||
+                !string.Equals(PhysicalFileIdentity.GetFinalPath(Source.Handle), Snapshot.CanonicalPath, StringComparison.OrdinalIgnoreCase))
+                throw new SourceSnapshotChangedException("The held physical capture changed before reference publication.");
+            // Metadata-only ancestor leases alone do not authorise a later path:
+            // reopen the complete no-follow/no-recall chain before each commit.
+            using var current = OpenSource(Snapshot);
+            if (current.Root.IdentityFingerprint != Snapshot.SourcePath!.RootIdentityFingerprint ||
+                RandomAccess.GetLength(current.Handle) != Snapshot.ByteLength ||
+                File.GetLastWriteTimeUtc(current.Handle) != Snapshot.LastWriteAtUtc)
+                throw new SourceSnapshotChangedException("The current source path differs from its held capture.");
+        }
+
+        public async ValueTask DisposeAsync()
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+            try { await Input.DisposeAsync().ConfigureAwait(false); }
+            finally
+            {
+                Source.Dispose();
+                if (_publication is not null) await _publication.DisposeAsync().ConfigureAwait(false);
+            }
+        }
+    }
 }

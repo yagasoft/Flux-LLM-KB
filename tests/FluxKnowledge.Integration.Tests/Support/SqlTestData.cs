@@ -14,6 +14,31 @@ internal static class SqlTestData
         NativeSqlServerFixture fixture) =>
         new TestDbContextFactory(fixture.ConnectionString);
 
+    internal static Guid AddPhysicalRevisionHistory(
+        FluxKnowledgeDbContext db, SourceRevisionEntity current,
+        bool suppressPrevious = true, bool differentIdentity = false)
+    {
+        if (db.Entry(current).State is not (EntityState.Detached or EntityState.Added) ||
+            current.OriginKind != 0 || current.ParentSourceRevisionId is not null)
+            throw new InvalidOperationException("Physical history must be arranged before saving the current revision.");
+        current.Revision = Math.Max(2, current.Revision);
+        var now = DateTimeOffset.UtcNow;
+        var previousBytes = System.Text.Encoding.UTF8.GetBytes("previous physical content:" + current.ContentSha256);
+        var previous = new SourceRevisionEntity
+        {
+            Id = Guid.NewGuid(), SourceRootId = current.SourceRootId,
+            StableSourceIdentity = differentIdentity ? "different-physical-item:" + Guid.NewGuid().ToString("N") : current.StableSourceIdentity,
+            Revision = current.Revision - 1, ContentSha256 = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(previousBytes)),
+            CanonicalPath = current.CanonicalPath, Classification = current.Classification,
+            Extension = current.Extension, OriginKind = 0, ByteLength = previousBytes.Length,
+            DiscoveredAtUtc = now.AddMinutes(-1), SuppressedAtUtc = suppressPrevious ? now : null,
+            RetainUntilUtc = suppressPrevious ? now.AddDays(30) : null
+        };
+        db.SourceRevisions.Add(previous);
+        current.ParentSourceRevisionId = previous.Id;
+        return previous.Id;
+    }
+
     /// <summary>Clears only the retained OOXML/operator-action lifecycle tables between class-fixture tests.</summary>
     public static async Task ClearOoxmlOperatorActionDataAsync(NativeSqlServerFixture fixture)
     {
