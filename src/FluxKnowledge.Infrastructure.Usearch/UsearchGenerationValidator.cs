@@ -7,7 +7,7 @@ using FluxKnowledge.Application.Operations;
 
 namespace FluxKnowledge.Infrastructure.Usearch;
 
-public sealed class IndexGenerationValidationException(string message) : Exception(message);
+public sealed class IndexGenerationValidationException(string message, Exception? innerException = null) : Exception(message, innerException);
 
 public class UsearchGenerationValidator : IIndexGenerationVerifier
 {
@@ -42,14 +42,17 @@ public class UsearchGenerationValidator : IIndexGenerationVerifier
         {
             ValidateCore(directory, expected, vectors);
         }
-        catch (Exception exception) when (exception is not IndexGenerationValidationException and not IOException and not UnauthorizedAccessException and not OperationCanceledException)
+        catch (Exception exception) when (exception is not IndexGenerationValidationException and not IOException and not UnauthorizedAccessException and not OperationCanceledException and not OutOfMemoryException and not StackOverflowException)
         {
-            throw new IndexGenerationValidationException("The derived USearch index cannot be validated.");
+            throw new IndexGenerationValidationException("The derived USearch index cannot be validated.", exception);
         }
     }
 
     private static void ValidateCore(string directory, IndexGenerationDescriptor expected, IReadOnlyList<CanonicalVector> vectors)
     {
+        if (vectors.Count != expected.VectorCount || vectors.Count == 0 ||
+            vectors.Select(vector => vector.VectorId).Distinct().Count() != vectors.Count)
+            throw new IndexGenerationValidationException("SQL generation membership does not contain the expected distinct vector IDs.");
         if (vectors.Any(vector =>
                 !string.Equals(
                     vector.PayloadChecksum,
@@ -120,6 +123,8 @@ public class UsearchGenerationValidator : IIndexGenerationVerifier
         foreach (var query in queries)
         {
             var count = index.Search(query, Math.Max(1, vectors.Count), out var keys, out var distances);
+            // Approximate traversal is not an enumeration contract. Exact membership
+            // is proved above by cardinality and bitwise Get for every distinct SQL ID.
             var position = Array.IndexOf(keys, (ulong)vector.VectorId, 0, count);
             if (position < 0)
             {

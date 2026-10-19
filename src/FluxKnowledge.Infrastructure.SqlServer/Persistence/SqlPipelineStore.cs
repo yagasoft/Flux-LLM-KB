@@ -314,6 +314,7 @@ public sealed class SqlPipelineStore(
         await SqlPublishedPassageSelection.AcquireFenceAsync(context, cancellationToken);
         var expectedStamp = await SqlPublishedPassageSelection.ReadStampAsync(context, cancellationToken);
         var previousMembership = await SqlPublishedPassageSelection.ReadVectorIdsAsync(context, cancellationToken);
+        var appendBase = await ReadPublicationBaseAsync(context, expectedStamp, previousMembership, cancellationToken);
         var origins = await (from vector in context.Vectors
             join chunk in context.TextChunks on vector.TextChunkId equals chunk.Id
             join artifact in context.Artifacts on chunk.ArtifactId equals artifact.Id
@@ -368,7 +369,24 @@ public sealed class SqlPipelineStore(
         // Preview invokes the commit selection, including branch precedence and retirement,
         // but rolls back every mutation before returning detached immutable vector data.
         await transaction.RollbackAsync(cancellationToken);
-        return new IndexPublicationSnapshot(vectors, expectedStamp, publishedStamp);
+        return new IndexPublicationSnapshot(vectors, expectedStamp, publishedStamp, appendBase);
+    }
+
+    private static async Task<IndexGenerationBaseSnapshot?> ReadPublicationBaseAsync(FluxKnowledgeDbContext context,
+        CorpusPublicationStamp expectedStamp, IReadOnlyList<long> publishedMembership, CancellationToken cancellationToken)
+    {
+        var generation = await (from state in context.IndexState.AsNoTracking()
+            join candidate in context.IndexGenerations.AsNoTracking() on state.ActiveIndexGenerationId equals (Guid?)candidate.Id
+            where state.Id == 1 && state.CorpusRebuildOperationId == null && candidate.RetiredAtUtc == null &&
+                candidate.ValidatedAtUtc != null && candidate.IndexPath != string.Empty && candidate.VectorCount > 0 &&
+                candidate.CorpusEpoch == expectedStamp.CorpusEpoch && candidate.CorpusVersion == expectedStamp.CorpusVersion
+            select candidate).SingleOrDefaultAsync(cancellationToken);
+        if (generation is null) return null;
+        var membership = await context.IndexGenerationVectors.AsNoTracking().Where(value => value.GenerationId == generation.Id)
+            .OrderBy(value => value.VectorId).Select(value => value.VectorId).ToArrayAsync(cancellationToken);
+        if (generation.VectorCount != membership.Length || !publishedMembership.SequenceEqual(membership)) return null;
+        return new(new(generation.Id, generation.ModelFingerprint, generation.Dimensions, generation.IndexPath,
+            generation.MetadataChecksum, generation.VectorCount, expectedStamp), membership);
     }
 
     public async ValueTask<IndexGenerationDescriptor?> GetGenerationAsync(

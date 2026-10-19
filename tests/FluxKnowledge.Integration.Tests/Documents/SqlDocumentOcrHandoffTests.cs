@@ -21,7 +21,7 @@ using Xunit;
 
 namespace FluxKnowledge.Integration.Tests.Documents;
 
-public sealed class SqlDocumentOcrHandoffTests(NativeSqlServerFixture fixture)
+public sealed partial class SqlDocumentOcrHandoffTests(NativeSqlServerFixture fixture)
     : IClassFixture<NativeSqlServerFixture>
 {
     private readonly NativeSqlServerFixture _fixture = fixture;

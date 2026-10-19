@@ -26,6 +26,9 @@ public static class DocumentProcessingInput
     public const string ImageProcessorVersion = "phase-6-image-document-v1";
     public const string ImageProcessorFingerprint = "phase-6-image-document-input-v1";
     public const string ImageOutputContract = "pipeline:extract-document-image";
+    public const string DocumentRecoveryVersion = "exact-document-recovery-v1";
+    public const string DocumentRecoveryChildRelationship = "superseded-by-document-recovery-child";
+    public const string DocumentRecoveryActivityPrefix = DocumentRecoveryVersion + ":";
 
     public static readonly DocumentProcessingContract Vsdx = new(
         Classification,
@@ -128,20 +131,39 @@ public static class DocumentProcessingInput
     {
         ArgumentNullException.ThrowIfNull(claim);
         ArgumentNullException.ThrowIfNull(retained);
-        var memberFingerprint = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(
-            $"document-input:{claim.ParentStableIdentity.Length}:{claim.ParentStableIdentity}:{contract.ProcessorFingerprint}")));
-        var identity = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(
-            $"document-input-identity:{claim.ParentStableIdentity.Length}:{claim.ParentStableIdentity}:{memberFingerprint}")));
+        var identity = CreateIdentity(claim, contract);
         return new RetainedProcessorDerivedChild(
-            memberFingerprint,
-            $"retained-document-input:{claim.SourceRevisionId.Value:N}:{memberFingerprint}",
-            identity,
+            identity.MemberFingerprint,
+            identity.SyntheticLocator,
+            identity.StableSourceIdentity,
             retained.ContentSha256,
             string.Empty,
             retained.ByteLength,
             contract.Classification,
             OriginKind: 2,
             Extension: contract.Extension);
+    }
+
+    public static ArchiveMemberIdentity CreateImageIdentity(RetainedProcessorClaim claim, string extension) =>
+        CreateIdentity(claim, string.Equals(extension, ".png", StringComparison.OrdinalIgnoreCase) ? Png : Jpeg);
+
+    public static ArchiveMemberIdentity CreatePdfIdentity(RetainedProcessorClaim claim) => CreateIdentity(claim, Pdf);
+
+    private static ArchiveMemberIdentity CreateIdentity(RetainedProcessorClaim claim, DocumentProcessingContract contract)
+    {
+        var memberFingerprint = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(
+            $"document-input:{claim.ParentStableIdentity.Length}:{claim.ParentStableIdentity}:{contract.ProcessorFingerprint}")));
+        if (claim.DocumentRecoveryId is { } recoveryId)
+        {
+            if (recoveryId == Guid.Empty || contract.Classification is not (ImageClassification or PdfClassification))
+                throw new ArgumentException("An exact recovery identity requires a nonempty supported document recovery activity.", nameof(claim));
+            memberFingerprint = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(
+                $"document-input-recovery-v1:{memberFingerprint}:{recoveryId:N}")));
+        }
+        var stableIdentity = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(
+            $"document-input-identity:{claim.ParentStableIdentity.Length}:{claim.ParentStableIdentity}:{memberFingerprint}")));
+        return new ArchiveMemberIdentity(memberFingerprint,
+            $"retained-document-input:{claim.SourceRevisionId.Value:N}:{memberFingerprint}", stableIdentity);
     }
 }
 

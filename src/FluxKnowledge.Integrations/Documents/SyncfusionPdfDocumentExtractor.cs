@@ -54,11 +54,9 @@ public sealed class SyncfusionPdfDocumentExtractor : IPdfDocumentExtractor
         PdfToImageConverter? visualConverter = null;
         try
         {
-            using var document = new PdfLoadedDocument(retained.Bytes);
-            if (document.IsEncrypted)
-            {
-                throw new RetainedProcessorException("pdf-document-encrypted");
-            }
+            // Encryption can protect editing while allowing normal password-free
+            // reading. A successful ordinary open is the relevant boundary.
+            using var document = OpenDocument(retained.Bytes);
             if (document.PageCount > MaximumPageCount)
             {
                 throw new RetainedProcessorException("pdf-document-page-limit-exceeded");
@@ -139,6 +137,18 @@ public sealed class SyncfusionPdfDocumentExtractor : IPdfDocumentExtractor
         {
             visualConverter?.Dispose();
             visualInput?.Dispose();
+        }
+    }
+
+    private static PdfLoadedDocument OpenDocument(byte[] bytes)
+    {
+        try
+        {
+            return new PdfLoadedDocument(bytes);
+        }
+        catch (PdfInvalidPasswordException)
+        {
+            throw new RetainedProcessorException("pdf-document-password-required");
         }
     }
 

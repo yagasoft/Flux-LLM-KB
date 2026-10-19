@@ -1885,8 +1885,13 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
             context.SourceProcessorAttempts.Add(new SourceProcessorAttemptEntity { Id = Guid.NewGuid(), BranchId = branch.Id, LeaseGeneration = branch.LeaseGeneration, StartedAtUtc = now }); }
         await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false); await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
         var revisions = await context.SourceRevisions.AsNoTracking().Where(value => branches.Select(branch => branch.SourceRevisionId).Contains(value.Id)).ToDictionaryAsync(value => value.Id, cancellationToken).ConfigureAwait(false);
+        var documentActivityIds = branches.Where(value => value.ProcessorFingerprint == ImageDocumentInputProcessor.Capability.ProcessorFingerprint ||
+            value.ProcessorFingerprint == PdfDocumentProcessor.Capability.ProcessorFingerprint).Select(value => value.SourceActivityId).ToArray();
+        var documentActivities = documentActivityIds.Length == 0 ? new Dictionary<Guid, SourceActivityEntity>() :
+            await context.SourceActivities.AsNoTracking().Where(value => documentActivityIds.Contains(value.Id)).ToDictionaryAsync(value => value.Id, cancellationToken).ConfigureAwait(false);
         return branches.Select(branch => new RetainedProcessorClaim(branch.Id, new SourceRevisionId(branch.SourceRevisionId), revisions[branch.SourceRevisionId].StableSourceIdentity,
-            branch.InputSha256, leaseOwner, branch.LeaseGeneration, expiry)).ToArray();
+            branch.InputSha256, leaseOwner, branch.LeaseGeneration, expiry)
+            { DocumentRecoveryId = documentActivities.TryGetValue(branch.SourceActivityId, out var activity) ? SqlDocumentInputRecovery.RecoveryId(activity) : null }).ToArray();
         }, cancellationToken).ConfigureAwait(false);
     }
 
@@ -1918,6 +1923,8 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
                 """)
             .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
         if (branch is null) return false;
+        var recoveryId = await SqlDocumentInputRecovery.ReadRecoveryIdAsync(context, branch.SourceActivityId, cancellationToken).ConfigureAwait(false);
+        if (recoveryId == Guid.Empty || recoveryId != claim.DocumentRecoveryId) return false;
         if (!await SqlDefaultRetainedPolicy.BindingIsCurrentAsync(context, branch.SourceActivityId, cancellationToken).ConfigureAwait(false))
         {
             await SqlDefaultRetainedPolicy.BlockStaleAsync(context, branch.SourceActivityId, branch, now, cancellationToken).ConfigureAwait(false);
@@ -1932,6 +1939,7 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
               AND [SuppressedAtUtc] IS NULL
             """).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
         if (parent is null) return false;
+        if (recoveryId is not null && (parent.Id != claim.SourceRevisionId.Value || parent.StableSourceIdentity != claim.ParentStableIdentity || parent.ContentSha256 != claim.InputSha256)) return false;
         var parentArtifact = await context.SourceArtifacts.SingleOrDefaultAsync(
             value => value.SourceRevisionId == parent.Id,
             cancellationToken).ConfigureAwait(false);
@@ -1942,6 +1950,17 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
             throw new InvalidOperationException("The retained document parent artifact is not bound to its source revision.");
         }
         var memberOutcomes = completion.MemberOutcomes ?? [];
+        if (recoveryId is not null)
+        {
+            if (completion.Members.Count != 1 || memberOutcomes.Count != 0) return false;
+            var member = completion.Members[0];
+            var pdf = branch.ProcessorFingerprint == PdfDocumentProcessor.Capability.ProcessorFingerprint;
+            if (member.Classification != (pdf ? DocumentProcessingInput.PdfClassification : DocumentProcessingInput.ImageClassification) || member.OriginKind != 2 ||
+                (pdf ? member.Extension != ".pdf" : member.Extension is not (".jpg" or ".png"))) return false;
+            var expected = pdf ? DocumentProcessingInput.CreatePdfIdentity(claim) : DocumentProcessingInput.CreateImageIdentity(claim, member.Extension);
+            if (member.MemberFingerprint != expected.MemberFingerprint || member.StableSourceIdentity != expected.StableSourceIdentity || member.SyntheticLocator != expected.SyntheticLocator)
+                return false;
+        }
         var memberFingerprints = new HashSet<string>(StringComparer.Ordinal);
         if (completion.Members.Any(member => !memberFingerprints.Add(member.MemberFingerprint)) ||
             memberOutcomes.Any(outcome => !memberFingerprints.Add(outcome.MemberFingerprint)))
@@ -2022,6 +2041,8 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
             {
                 throw new InvalidOperationException("A retained processor member outcome conflicts with its durable disposition.");
             }
+            if (recoveryId is not null)
+                await SqlDocumentInputRecovery.AddChildRelationAsync(context, branch.SourceActivityId, childActivity.Id, now, cancellationToken).ConfigureAwait(false);
         }
         foreach (var outcome in memberOutcomes)
         {
@@ -2425,6 +2446,12 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
         DocumentReprocessRequest request,
         CancellationToken cancellationToken)
     {
+        if (request.ExpectedProcessorFingerprint == ImageDocumentInputProcessor.Capability.ProcessorFingerprint ||
+            request.ExpectedProcessorFingerprint == PdfDocumentProcessor.Capability.ProcessorFingerprint &&
+            (request.FailedExtractJobId is not null || request.ExpectedRootConfigurationRevision is not null))
+            return await ExecuteWithRetryAsync(() => SqlDocumentInputRecovery.RequestAsync(contextFactory, request, cancellationToken), cancellationToken).ConfigureAwait(false);
+        if (request.FailedExtractJobId is not null || request.ExpectedRootConfigurationRevision is not null)
+            return DocumentReprocessRequestResult.NotEligible;
         if (!TryGetExactDocumentDescriptor(request.ExpectedProcessorFingerprint, out var descriptor) ||
             request.SourceRevisionId.Value == Guid.Empty || !IsCanonicalSha256(request.ExpectedInputSha256))
         {
@@ -2657,6 +2684,7 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
         {
             await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
             await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken).ConfigureAwait(false);
+            await SqlPublishedPassageSelection.AcquireFenceAsync(context, cancellationToken).ConfigureAwait(false);
             var branch = await context.SourceProcessorBranches.FromSqlInterpolated($"""
                 SELECT * FROM [SourceProcessorBranches] WITH (UPDLOCK, HOLDLOCK)
                 WHERE [Id] = {branchId}
@@ -2690,10 +2718,12 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
                 """).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
             if (revision is null || root is null || artifact is null || !HasExpectedDocumentExtension(revision.Extension, descriptor) ||
                 !await IsExactDocumentDescriptorRunnableAsync(context, descriptor, cancellationToken).ConfigureAwait(false) ||
+                !await SqlDefaultRetainedPolicy.BindingIsCurrentAsync(context, branch.SourceActivityId, cancellationToken).ConfigureAwait(false) ||
                 !await context.SourceActivityRelations.AnyAsync(value =>
                     value.SuccessorActivityId == branch.SourceActivityId &&
                     value.RelationshipKind == "superseded-by-retained-processor" &&
-                    value.ReasonCode == "superseded-by-exact-document-reprocess-v1", cancellationToken).ConfigureAwait(false))
+                    (value.ReasonCode == "superseded-by-exact-document-reprocess-v1" ||
+                     value.ReasonCode == DocumentProcessingInput.DocumentRecoveryVersion), cancellationToken).ConfigureAwait(false))
             {
                 return null;
             }
@@ -2739,7 +2769,8 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
             await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
             return new RetainedProcessorClaim(branch.Id, expectedSourceRevisionId, revision.StableSourceIdentity,
-                expectedInputSha256, leaseOwner, branch.LeaseGeneration, expiry);
+                expectedInputSha256, leaseOwner, branch.LeaseGeneration, expiry)
+                { DocumentRecoveryId = await SqlDocumentInputRecovery.ReadRecoveryIdAsync(context, branch.SourceActivityId, cancellationToken).ConfigureAwait(false) };
         }, cancellationToken).ConfigureAwait(false);
     }
 
@@ -2779,7 +2810,7 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
           string.Equals(extension, ".jpeg", StringComparison.OrdinalIgnoreCase) ||
           string.Equals(extension, ".png", StringComparison.OrdinalIgnoreCase)));
 
-    private static async ValueTask<bool> IsExactDocumentDescriptorRunnableAsync(
+    internal static async ValueTask<bool> IsExactDocumentDescriptorRunnableAsync(
         FluxKnowledgeDbContext context,
         SourceCapabilityDescriptor descriptor,
         CancellationToken cancellationToken) =>

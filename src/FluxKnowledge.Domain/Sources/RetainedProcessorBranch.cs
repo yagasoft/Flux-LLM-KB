@@ -32,7 +32,11 @@ public sealed record RetainedProcessorClaim(
     string InputSha256,
     string LeaseOwner,
     long LeaseGeneration,
-    DateTimeOffset LeaseExpiresAtUtc);
+    DateTimeOffset LeaseExpiresAtUtc)
+{
+    /// <summary>Durable, verified exact document recovery activity; ordinary document identities are unchanged.</summary>
+    public Guid? DocumentRecoveryId { get; init; }
+}
 
 /// <summary>
 /// Immutable C# syntax-processing claim materialised from a persisted branch attempt.

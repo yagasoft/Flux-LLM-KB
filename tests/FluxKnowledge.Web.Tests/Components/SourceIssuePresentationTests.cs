@@ -21,7 +21,19 @@ public sealed class SourceIssuePresentationTests
         Assert.Contains("version-specific lower budgets", guidance);
         Assert.Contains("512 MiB across XML parts", guidance);
         Assert.Contains("169:1", guidance);
-        Assert.Contains("cannot be overridden", guidance);
+        Assert.Contains("runtime has no budget override", guidance);
+    }
+
+    [Theory]
+    [InlineData("image-document-dimensions-exceeded", "previous execution is confirmed settled")]
+    [InlineData("image-document-decoded-memory-budget-exceeded", "256 MiB")]
+    [InlineData("image-ocr-raster-page-output-too-large", "16 MiB")]
+    [InlineData("pdf-document-encrypted", "password-free readable PDFs")]
+    [InlineData("pdf-document-password-required", "authorised unlocked copy")]
+    [InlineData("office-document-element-limit", "OOXML v4 removes that ceiling")]
+    public void Current_processor_guidance_distinguishes_recoverable_old_refusals_from_remaining_limits(string reason, string action)
+    {
+        Assert.Contains(action, SourceIssuePresentation.Guidance(reason), StringComparison.Ordinal);
     }
 
     [Fact]

@@ -127,3 +127,63 @@ sealed samples in an isolated runner, without production access, models or
 original-source reads. These are implementation checks; production publication
 and supported readback for the v4 cohort still require the reviewed deployment
 and finite exact-item recovery.
+
+## Exact document recovery and publication throughput
+
+The same 19 October release deployed OOXML v4. One exact retained workbook
+recovery produced 23,136 UTF-8 bytes and completed Extract, Normalise and
+Canonical index by the bounded 09:24 UTC observation. Embedding, selected
+publication and supported readback had not yet completed. The larger Word
+recovery also remains in embedding; neither admission is to be repeated.
+
+A prepared common Image/PDF recovery path uses the existing trusted-local
+`documents reprocess` command with the exact failed Extract job and expected root
+configuration revision. It creates a distinct child and durable recovery proof;
+it never resets the failed predecessor. Admission, claim, commit, registration
+and Publish recheck source scope, configuration, hashes, old attempts/delivery,
+selected publication and native settlement. Only the specific historical runtime
+failure or image-dimension refusal is eligible with completed native receipts,
+terminal dispatch and no retained capacity/worker/uncertainty binding. The
+historical encrypted-PDF case instead requires zero native execution history.
+Unrelated historical GPU uncertainty and dead letters remain untouched.
+
+A PDF that opens without a password is now read even if its encryption flag is
+set. A genuine password-open failure reports `pdf-document-password-required`;
+other read failures cannot become partial success. Images retain full resolution
+within a 256 MiB decoded-bitmap budget, accounting for the additional rotation
+bitmap. Encoding uses the live pixmap and checks the existing 16 MiB PNG bound
+before a managed copy. Tests cover the exact identity/rotation allocation
+boundaries, one row above each boundary and valid high-entropy output above the
+encoded bound. The new fixed Python launcher uses the separately verified,
+add-only cached J: runtime. No download, weights change, source mutation or ACL
+change is part of activation. Actual application-account OCR remains a live gate.
+
+The old failed child leaves current processing views only after the exact
+successor has all five completed pipeline stages and is the selected successful
+publication. Wrong revisions, deletion, incomplete stages, unrelated source
+failures and mismatched lineage cannot hide a current problem. This does not yet
+compact general audit events or historical scan observations.
+
+Production metadata also identified a serial publication bottleneck: adding
+five or six vectors rebuilt roughly 252,000 vectors and a 1 GiB graph for about
+five minutes. The prepared correction can reuse an exact validated active graph
+only for append-only membership. SQL captures the base descriptor and membership
+under the publication fence. Strict held ancestor/file guards protect native
+loading; a mutable RAM copy receives only new vectors and saves to fresh staging.
+Full checksum, native payload, key-count and cosine validation still precede
+activation. Exact membership uses distinct SQL IDs, matching native cardinality
+and bitwise retrieval of every payload. Approximate metric probes do not enumerate
+membership: repeated or distant vectors need not all appear in a search result.
+Removal or payload replacement uses a full rebuild, since native tombstones can
+retain deleted vector bytes. Missing bases can rebuild; unsafe paths, access
+refusal, cancellation, allocation and unknown native errors remain fail-closed.
+Recovery/rebuild paths and activation/job fences are unchanged.
+
+A disposable actual-product experiment on 16,384 synthetic 256-dimensional
+vectors took 18,267 ms for full construction/validation and 564 ms to append four
+vectors with base loading, validation, save and final validation. The original
+19,207,888-byte file was unchanged. This used no model or production binding and
+measured no SQL phases. A separate disposable SQL test verifies dispatch,
+publication and lexical readback. Production-scale latency and bounded real-item
+acceptance are still required. Full rebuilds for removals/replacements remain
+costly; this increment does not change pump concurrency or lease duration.

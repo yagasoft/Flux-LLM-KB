@@ -16,6 +16,7 @@ public sealed class SyncfusionPdfPageRasterizer(
     public const int MaximumPageCount = SyncfusionPdfDocumentExtractor.MaximumPageCount;
     public const int MaximumPagePngBytes = 16 * 1024 * 1024;
     public const int MaximumTotalPngBytes = 256 * 1024 * 1024;
+    public const long MaximumImageBitmapBytes = 256L * 1024 * 1024;
 
     public async ValueTask<IReadOnlyList<PdfRasterizedPage>> RenderAsync(
         RetainedSourceBytes retained,
@@ -103,14 +104,6 @@ public sealed class SyncfusionPdfPageRasterizer(
             if (codec.FrameCount > 1)
                 throw new RetainedProcessorException("image-document-multiframe-unsupported");
             var info = codec.Info;
-            if (info.Width <= 0 || info.Height <= 0 || info.Width > 6000 || info.Height > 6000 ||
-                (long)info.Width * info.Height > 25_000_000)
-                throw new RetainedProcessorException("image-document-dimensions-exceeded");
-
-            using var decoded = new SKBitmap(new SKImageInfo(info.Width, info.Height, SKColorType.Bgra8888, SKAlphaType.Premul));
-            if (codec.GetPixels(decoded.Info, decoded.GetPixels()) != SKCodecResult.Success)
-                throw new RetainedProcessorException("image-document-decode-failed");
-
             var (sourceOrientationDegrees, sourceTransform, swapsAxes) = codec.EncodedOrigin switch
             {
                 SKEncodedOrigin.TopLeft => (0, "identity", false),
@@ -119,23 +112,36 @@ public sealed class SyncfusionPdfPageRasterizer(
                 SKEncodedOrigin.LeftBottom => (270, "rotate-270", true),
                 _ => throw new RetainedProcessorException("image-document-orientation-unsupported")
             };
-            using var oriented = new SKBitmap(
-                swapsAxes ? info.Height : info.Width,
-                swapsAxes ? info.Width : info.Height,
-                SKColorType.Bgra8888,
-                SKAlphaType.Premul);
-            using (var canvas = new SKCanvas(oriented))
+            var bitmapCount = codec.EncodedOrigin == SKEncodedOrigin.TopLeft ? 1 : 2;
+            // Divide before multiplying: even a hostile int-sized header cannot
+            // overflow or allocate native pixels before the working-set check.
+            var pixels = (long)info.Width * info.Height;
+            if (info.Width <= 0 || info.Height <= 0 || pixels > MaximumImageBitmapBytes / (4 * bitmapCount))
+                throw new RetainedProcessorException("image-document-decoded-memory-budget-exceeded");
+            cancellationToken.ThrowIfCancellationRequested();
+            using var decoded = new SKBitmap(new SKImageInfo(info.Width, info.Height, SKColorType.Bgra8888, SKAlphaType.Premul));
+            if (codec.GetPixels(decoded.Info, decoded.GetPixels()) != SKCodecResult.Success)
+                throw new RetainedProcessorException("image-document-decode-failed");
+            cancellationToken.ThrowIfCancellationRequested();
+
+            using var oriented = bitmapCount == 1 ? null : new SKBitmap(
+                swapsAxes ? info.Height : info.Width, swapsAxes ? info.Width : info.Height, SKColorType.Bgra8888, SKAlphaType.Premul);
+            if (oriented is not null)
             {
+                using var canvas = new SKCanvas(oriented);
                 ApplyOrientation(canvas, codec.EncodedOrigin, info.Width, info.Height);
                 canvas.DrawBitmap(decoded, 0, 0);
                 canvas.Flush();
             }
-            using var image = SKImage.FromBitmap(oriented);
-            using var encoded = image.Encode(SKEncodedImageFormat.Png, 100) ??
+            cancellationToken.ThrowIfCancellationRequested();
+            // Encode the live bitmap directly: SKImage.FromBitmap may copy its pixels.
+            using var pixmap = (oriented ?? decoded).PeekPixels();
+            using var encoded = pixmap.Encode(SKEncodedImageFormat.Png, 100) ??
                 throw new RetainedProcessorException("image-ocr-rasterization-failed");
-            var png = encoded.ToArray();
-            if (png.Length == 0 || png.Length > MaximumPagePngBytes)
+            cancellationToken.ThrowIfCancellationRequested();
+            if (encoded.Size == 0 || encoded.Size > MaximumPagePngBytes)
                 throw new RetainedProcessorException("image-ocr-raster-page-output-too-large");
+            var png = encoded.ToArray();
             return [new PdfRasterizedPage(0, png, sourceOrientationDegrees, info.Width, info.Height, sourceTransform)];
         }
         catch (RetainedProcessorException)

@@ -109,6 +109,60 @@ public sealed class PaddleOcrVlmLocalExecutorTests : IDisposable
         Assert.Equal(120, decoded.Height);
     }
 
+    [Theory]
+    [InlineData(7780, 12)]
+    [InlineData(5120, 5120)]
+    public async Task Document_rasterizer_preserves_full_image_resolution_within_its_decoded_memory_budget(int width, int height)
+    {
+        byte[] bytes;
+        using (var source = new SKBitmap(width, height, SKColorType.Bgra8888, SKAlphaType.Premul))
+        {
+            source.Erase(SKColors.White);
+            using var canvas = new SKCanvas(source);
+            using var paint = new SKPaint { Color = SKColors.Black };
+            canvas.DrawRect(1, 1, 8, 8, paint);
+            canvas.Flush();
+            using var image = SKImage.FromBitmap(source);
+            using var encoded = image.Encode(SKEncodedImageFormat.Png, 100);
+            bytes = encoded.ToArray();
+        }
+        var page = Assert.Single(await new SyncfusionPdfPageRasterizer(new SyncfusionLicenceRegistration())
+            .RenderAsync(CreateRetained(bytes), CancellationToken.None, new HashSet<int> { 0 }));
+
+        Assert.Equal(width, page.SourceWidth);
+        Assert.Equal(height, page.SourceHeight);
+        Assert.Equal("identity", page.SourceTransform);
+        using var decoded = SKBitmap.Decode(page.PngBytes);
+        Assert.Equal(width, decoded.Width);
+        Assert.Equal(height, decoded.Height);
+        Assert.Equal(SKColors.Black, decoded.GetPixel(3, 3));
+    }
+
+    [Fact]
+    public async Task Document_rasterizer_refuses_a_declared_image_allocation_before_decoding_or_launching_any_provider()
+    {
+        byte[] bytes;
+        using (var source = new SKBitmap(16, 16))
+        using (var image = SKImage.FromBitmap(source))
+        using (var encoded = image.Encode(SKEncodedImageFormat.Jpeg, 90))
+            bytes = encoded.ToArray();
+        var frame = Enumerable.Range(2, bytes.Length - 11).First(index => bytes[index] == 0xff && bytes[index + 1] == 0xc0);
+        bytes[frame + 5] = 0x40; bytes[frame + 6] = 0;
+        bytes[frame + 7] = 0x40; bytes[frame + 8] = 0;
+        using (var codec = SKCodec.Create(new MemoryStream(bytes, writable: false)))
+        {
+            Assert.NotNull(codec);
+            Assert.Equal(16_384, codec.Info.Width);
+            Assert.Equal(16_384, codec.Info.Height);
+        }
+
+        var failure = await Assert.ThrowsAsync<RetainedProcessorException>(() =>
+            new SyncfusionPdfPageRasterizer(new SyncfusionLicenceRegistration())
+                .RenderAsync(CreateRetained(bytes), CancellationToken.None, new HashSet<int> { 0 }).AsTask());
+
+        Assert.Equal("image-document-decoded-memory-budget-exceeded", failure.OutcomeCode);
+    }
+
     [Fact]
     public async Task Document_rasterizer_records_jpeg_exif_rotation_and_rejects_mirroring()
     {
@@ -130,6 +184,67 @@ public sealed class PaddleOcrVlmLocalExecutorTests : IDisposable
         var refusal = await Assert.ThrowsAsync<RetainedProcessorException>(async () => await rasterizer.RenderAsync(
             CreateRetained(WithExifOrientation(encoded.ToArray(), 2)), CancellationToken.None, new HashSet<int> { 0 }));
         Assert.Equal("image-document-orientation-unsupported", refusal.OutcomeCode);
+    }
+
+    [Theory]
+    [InlineData(8192, 8192, 1, null)]
+    [InlineData(8192, 8193, 1, "image-document-decoded-memory-budget-exceeded")]
+    [InlineData(8192, 4096, 6, null)]
+    [InlineData(8192, 4097, 6, "image-document-decoded-memory-budget-exceeded")]
+    public async Task Document_rasterizer_accounts_for_both_rotation_bitmaps_at_the_allocation_boundary(
+        int width, int height, int orientation, string? expectedReason)
+    {
+        byte[] bytes;
+        using (var source = new SKBitmap(16, 16))
+        using (var image = SKImage.FromBitmap(source))
+        using (var encoded = image.Encode(SKEncodedImageFormat.Jpeg, 90))
+            bytes = encoded.ToArray();
+        var frame = Enumerable.Range(2, bytes.Length - 11).First(index => bytes[index] == 0xff && bytes[index + 1] == 0xc0);
+        bytes[frame + 5] = (byte)(height >> 8); bytes[frame + 6] = (byte)height;
+        bytes[frame + 7] = (byte)(width >> 8); bytes[frame + 8] = (byte)width;
+        bytes = WithExifOrientation(bytes, checked((ushort)orientation));
+
+        var rasterizer = new SyncfusionPdfPageRasterizer(new SyncfusionLicenceRegistration());
+        if (expectedReason is null)
+        {
+            // The JPEG codec accepts and pads this synthetic fixture. At the exact
+            // allocation budget the full declared image must survive orientation.
+            var page = Assert.Single(await rasterizer.RenderAsync(CreateRetained(bytes), CancellationToken.None, new HashSet<int> { 0 }));
+            using var decoded = SKBitmap.Decode(page.PngBytes);
+            Assert.Equal(orientation == 6 ? height : width, decoded.Width);
+            Assert.Equal(orientation == 6 ? width : height, decoded.Height);
+        }
+        else
+        {
+            var failure = await Assert.ThrowsAsync<RetainedProcessorException>(() =>
+                rasterizer.RenderAsync(CreateRetained(bytes), CancellationToken.None, new HashSet<int> { 0 }).AsTask());
+            Assert.Equal(expectedReason, failure.OutcomeCode);
+        }
+    }
+
+    [Fact]
+    public async Task Document_rasterizer_refuses_large_encoded_output_within_the_decoded_bitmap_budget()
+    {
+        byte[] bytes;
+        using (var bitmap = new SKBitmap(2400, 2400, SKColorType.Bgra8888, SKAlphaType.Premul))
+        {
+            var noise = new byte[bitmap.ByteCount];
+            new Random(74561).NextBytes(noise);
+            for (var offset = 3; offset < noise.Length; offset += 4) noise[offset] = byte.MaxValue;
+            System.Runtime.InteropServices.Marshal.Copy(noise, 0, bitmap.GetPixels(), noise.Length);
+            using var pixmap = bitmap.PeekPixels();
+            using var encoded = pixmap.Encode(SKEncodedImageFormat.Png, 100);
+            Assert.NotNull(encoded);
+            bytes = encoded.ToArray();
+        }
+        Assert.True(bytes.Length > SyncfusionPdfPageRasterizer.MaximumPagePngBytes);
+        Assert.True(bytes.Length < ImageDocumentInputProcessor.MaximumInputBytes);
+
+        var failure = await Assert.ThrowsAsync<RetainedProcessorException>(() =>
+            new SyncfusionPdfPageRasterizer(new SyncfusionLicenceRegistration())
+                .RenderAsync(CreateRetained(bytes), CancellationToken.None, new HashSet<int> { 0 }).AsTask());
+
+        Assert.Equal("image-ocr-raster-page-output-too-large", failure.OutcomeCode);
     }
 
     [Fact]

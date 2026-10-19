@@ -29,7 +29,7 @@ else
             <div><dt>Failed files</dt><dd>@PageState.Detail.ErrorCount</dd></div>
             <div><dt>Last scan issues</dt><dd>@PageState.Detail.LastScanIssueCount</dd></div>
         </dl>
-        <p>The failed-file count shows unresolved processing failures for current items. Last scan issues shows access, availability and read problems from the last finished crawl; a later finished crawl replaces that total. Earlier failures remain in history.</p>
+        <p>The failed-file count shows unresolved processing failures for current items. Completed replacement processing clears earlier failures from current item counts. Last scan issues shows access, availability and read observations from the last finished crawl; it can include repeated reports for one path. A later finished crawl replaces that total.</p>
     </section>
     <section aria-labelledby="source-files-heading">
         <h2 id="source-files-heading">Files</h2>

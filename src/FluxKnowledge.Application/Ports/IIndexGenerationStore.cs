@@ -32,7 +32,19 @@ public sealed record CorpusPublicationStamp(Guid CorpusEpoch, long CorpusVersion
 public sealed record IndexPublicationSnapshot(
     IReadOnlyList<CanonicalVector> Vectors,
     CorpusPublicationStamp? ExpectedCorpusStamp = null,
-    CorpusPublicationStamp? PublicationStamp = null);
+    CorpusPublicationStamp? PublicationStamp = null,
+    IndexGenerationBaseSnapshot? AppendBase = null);
+
+/// <summary>An optional immutable active projection captured with the publication snapshot.</summary>
+public sealed record IndexGenerationBaseSnapshot(
+    IndexGenerationDescriptor Generation,
+    IReadOnlyList<long> VectorIds);
+
+/// <summary>Holds generation files and every pathname component against replacement during native loading.</summary>
+public interface IIndexGenerationReadLeaseFactory
+{
+    IDisposable Acquire(string generationDirectory);
+}
 
 public sealed record IndexGenerationDescriptor(
     Guid Id,

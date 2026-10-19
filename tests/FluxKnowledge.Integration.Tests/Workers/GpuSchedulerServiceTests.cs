@@ -120,11 +120,22 @@ public sealed class GpuSchedulerServiceTests(NativeSqlServerFixture fixture)
             Assert.True((await store.HandoffInteractiveAsync(second, CancellationToken.None)).Committed);
             signal.Notify(GpuSchedulerWakeReason.WorkReady);
             resumeReleaseRound.TrySetResult();
-            var secondHandle = await adapter.Deliveries.Reader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5));
+            // Dispatch recovery can read the first pending handle before its acknowledgement
+            // commits. Such an exact redelivery is valid and is not the second admission.
+            GpuExecutorBatchHandle secondHandle;
+            using (var deliveryDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(5)))
+            {
+                do
+                {
+                    secondHandle = await adapter.Deliveries.Reader.ReadAsync(deliveryDeadline.Token);
+                    if (secondHandle.BatchId == firstHandle.BatchId) Assert.Equal(firstHandle, secondHandle);
+                } while (secondHandle.BatchId == firstHandle.BatchId);
+            }
             Assert.NotEqual(firstHandle.BatchId, secondHandle.BatchId);
             await using var verify = await factory.CreateDbContextAsync();
             var admitted = await verify.GpuMiniTasks.SingleAsync(task => task.Id == second.RequestId);
             var batch = await verify.GpuBatches.SingleAsync(candidate => candidate.Id == secondHandle.BatchId);
+            Assert.Equal(secondHandle.BatchId, admitted.BatchId);
             Assert.Equal((int)GpuMiniTaskExecutionState.Active, admitted.ExecutionState);
             Assert.True(batch.CreatedAtUtc - admitted.CreatedAtUtc < TimeSpan.FromSeconds(2));
             Assert.Single(await verify.GpuBatches.Where(candidate => candidate.State == (int)GpuBatchState.Active).ToArrayAsync());

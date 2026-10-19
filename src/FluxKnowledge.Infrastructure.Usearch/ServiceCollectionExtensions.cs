@@ -93,7 +93,8 @@ public static class ServiceCollectionExtensions
             provider.GetRequiredService<UsearchGenerationValidator>(),
             storageSafety,
             directoryCreator,
-            provider.GetService<Microsoft.Extensions.Logging.ILogger<UsearchGenerationBuilder>>()));
+            provider.GetService<Microsoft.Extensions.Logging.ILogger<UsearchGenerationBuilder>>(),
+            provider.GetService<IIndexGenerationReadLeaseFactory>()));
         services.AddScoped<IIndexGenerationPublisher>(provider => provider.GetRequiredService<UsearchGenerationBuilder>());
         services.AddSingleton<UsearchAnnIndex>();
         services.AddSingleton<IAnnIndex>(provider => provider.GetRequiredService<UsearchAnnIndex>());

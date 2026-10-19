@@ -9,7 +9,7 @@
     }
     else
     {
-        <p>@ScanIssues.ReportedCount issue reports. A later finished scan replaces this view; older reports remain in history.</p>
+        <p>@ScanIssues.ReportedCount issue reports from the last finished scan. These are observations and may mention the same path more than once. A later finished scan replaces this view.</p>
         @if (!ScanIssues.CauseCountsComplete)
         {
             <p role="status">The retained details are incomplete. The groups below show sample counts, not a complete inventory of causes or affected items.</p>

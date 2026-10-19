@@ -231,7 +231,9 @@ public sealed record ArchiveZipMemberEncodingFailureReconciliationResult(
 public sealed record DocumentReprocessRequest(
     SourceRevisionId SourceRevisionId,
     string ExpectedInputSha256,
-    string ExpectedProcessorFingerprint);
+    string ExpectedProcessorFingerprint,
+    Guid? FailedExtractJobId = null,
+    long? ExpectedRootConfigurationRevision = null);
 
 public sealed record DocumentReprocessRequestResult(
     bool Created,

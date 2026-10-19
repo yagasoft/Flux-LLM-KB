@@ -1,4 +1,5 @@
 using System.Text.Json;
+using FluxKnowledge.Application.Documents;
 using FluxKnowledge.Application.IntegrationV1;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Sources;
@@ -235,9 +236,12 @@ internal static class SqlDefaultRetainedPolicy
 
     internal static async ValueTask<bool> BindingIsCurrentAsync(FluxKnowledgeDbContext db, Guid activityId, CancellationToken token)
     {
+        var activity = await db.SourceActivities.SingleAsync(value => value.Id == activityId, token);
+        if (SqlDocumentInputRecovery.IsMarked(activity) || await db.SourceActivityRelations.AnyAsync(value => value.SuccessorActivityId == activityId &&
+                value.RelationshipKind == "superseded-by-retained-processor" && value.ReasonCode == DocumentProcessingInput.DocumentRecoveryVersion, token))
+            return await SqlDocumentInputRecovery.BindingIsCurrentAsync(db, activityId, token);
         if (!await db.SourceActivityRelations.AnyAsync(value => value.SuccessorActivityId == activityId &&
                 value.RelationshipKind == RetainedDefaultPolicy.RelationshipKind && value.ReasonCode == RetainedDefaultPolicy.Version, token)) return true;
-        var activity = await db.SourceActivities.SingleAsync(value => value.Id == activityId, token);
         if (activity.AttemptEvidenceJson is null) return false;
         using var proof = JsonDocument.Parse(activity.AttemptEvidenceJson);
         if (!proof.RootElement.TryGetProperty("policy", out var policy) || policy.GetString() != RetainedDefaultPolicy.Version ||
@@ -250,9 +254,10 @@ internal static class SqlDefaultRetainedPolicy
 
     internal static async Task BlockStaleAsync(FluxKnowledgeDbContext db, Guid activityId, SourceProcessorBranchEntity? branch, DateTimeOffset now, CancellationToken token)
     {
-        if (!await db.SourceActivityRelations.AnyAsync(value => value.SuccessorActivityId == activityId &&
-            value.RelationshipKind == RetainedDefaultPolicy.RelationshipKind && value.ReasonCode == RetainedDefaultPolicy.Version, token)) return;
         var activity = await db.SourceActivities.SingleAsync(value => value.Id == activityId, token);
+        if (!SqlDocumentInputRecovery.IsMarked(activity) && !await db.SourceActivityRelations.AnyAsync(value => value.SuccessorActivityId == activityId &&
+            (value.RelationshipKind == RetainedDefaultPolicy.RelationshipKind && value.ReasonCode == RetainedDefaultPolicy.Version ||
+             value.RelationshipKind == "superseded-by-retained-processor" && value.ReasonCode == DocumentProcessingInput.DocumentRecoveryVersion), token)) return;
         if (activity.ResultingPipelineRecordId is not null) return;
         if (branch is not null)
         {

@@ -308,6 +308,8 @@ public sealed class SqlRetainedTextRegistrationStore(
                 branch.ProcessorVersion == documentContract!.ParentProcessorVersion &&
                 branch.ProcessorFingerprint == documentContract!.ParentProcessorFingerprint &&
                 branch.State == (int)RetainedProcessorBranchState.Completed), cancellationToken).ConfigureAwait(false);
+        if (documentInputBound && !await SqlDocumentInputRecovery.InputBindingIsCurrentAsync(context, sourceRevision!.Id, activity.Id.Value, cancellationToken).ConfigureAwait(false))
+            return false;
         var maximumInputBytes = isDocumentInput
             ? MaximumDocumentInputBytes
             : isBoundOoxmlText ? MaximumOoxmlTextBytes : MaximumAcceptedUtf8TextBytes;

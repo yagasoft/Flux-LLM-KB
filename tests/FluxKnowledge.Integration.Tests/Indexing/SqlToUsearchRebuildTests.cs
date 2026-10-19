@@ -2164,7 +2164,8 @@ public sealed partial class SqlToUsearchRebuildTests(NativeSqlServerFixture fixt
         public FluxKnowledge.Application.Contracts.RegisterUtf8FileResult? LastReceipt { get; private set; }
 
         public static async Task<PipelineEnvironment> CreateAsync(NativeSqlServerFixture fixture, string text,
-            PassageBuilder? passageBuilder = null, bool publish = true, bool embed = true, TimeProvider? clock = null)
+            PassageBuilder? passageBuilder = null, bool publish = true, bool embed = true, TimeProvider? clock = null,
+            bool appendReuse = false)
         {
             await SqlTestData.ClearPipelineAsync(fixture);
             var ingress = Path.Combine(Path.GetTempPath(), $"FluxKnowledgeIngress_{Guid.NewGuid():N}");
@@ -2182,6 +2183,8 @@ public sealed partial class SqlToUsearchRebuildTests(NativeSqlServerFixture fixt
                 provider.GetRequiredService<IDbContextFactory<FluxKnowledgeDbContext>>(), artifact));
             services.AddFluxKnowledgeOutboxWorkers();
             services.AddSingleton<IEmbeddingProvider, DeterministicTokenHashEmbeddingProvider>();
+            if (appendReuse)
+                services.AddSingleton<IIndexGenerationReadLeaseFactory>(new WindowsIndexGenerationReadLeaseFactory(index));
             services.AddSingleton<FluxKnowledge.Application.Visibility.ILocalPrivateContentDisclosure,
                 FluxKnowledge.Infrastructure.SqlServer.Visibility.LocalPrivateContentDisclosure>();
             services.AddSingleton<FluxKnowledge.Application.Visibility.CsharpDisclosureProofBuilder>();

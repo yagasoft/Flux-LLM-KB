@@ -9,6 +9,8 @@ using FluxKnowledge.Infrastructure.Inference.Models;
 using FluxKnowledge.Integrations.Documents;
 using FluxKnowledge.Integrations.Models;
 using SkiaSharp;
+using Syncfusion.Pdf;
+using Syncfusion.Pdf.Parsing;
 using Syncfusion.Telemetry;
 using Xunit;
 
@@ -73,6 +75,55 @@ public sealed class PdfDocumentProcessingTests
         Assert.Contains("Native PDF paragraph", result.Text, StringComparison.Ordinal);
         Assert.Empty(result.Warnings);
         Assert.Equal(1, registrations);
+    }
+
+    [Fact]
+    public async Task Encrypted_pdf_that_opens_without_a_password_preserves_its_native_text()
+    {
+        using var fixture = new LicenceFixture();
+        var bytes = CreateEncryptedPdf(requiresPassword: false);
+        using (var verify = new PdfLoadedDocument(bytes)) Assert.True(verify.IsEncrypted);
+        var extractor = new SyncfusionPdfDocumentExtractor(
+            new SyncfusionLicenceRegistration(() => fixture.Path, static _ => { }));
+
+        var result = await extractor.ExtractAsync(CreateRetained(bytes), CancellationToken.None);
+
+        Assert.True(result.IsComplete);
+        Assert.Contains("Authorised readable encrypted PDF", result.Text, StringComparison.Ordinal);
+        Assert.False(Assert.Single(result.Pages).RequiresOcr);
+        Assert.Empty(result.Warnings);
+    }
+
+    [Fact]
+    public async Task Pdf_that_requires_an_open_password_has_an_actionable_refusal_without_exception_text()
+    {
+        using var fixture = new LicenceFixture();
+        var extractor = new SyncfusionPdfDocumentExtractor(
+            new SyncfusionLicenceRegistration(() => fixture.Path, static _ => { }));
+
+        var failure = await Assert.ThrowsAsync<RetainedProcessorException>(() => extractor.ExtractAsync(
+            CreateRetained(CreateEncryptedPdf(requiresPassword: true)), CancellationToken.None).AsTask());
+
+        Assert.Equal("pdf-document-password-required", failure.OutcomeCode);
+        Assert.Null(failure.InnerException);
+        Assert.DoesNotContain("test-secret", failure.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Failure_after_a_readable_page_never_returns_partial_success_or_mislabels_it_as_an_open_password_refusal()
+    {
+        using var fixture = new LicenceFixture();
+        var extractor = new SyncfusionPdfDocumentExtractor(
+            new SyncfusionLicenceRegistration(() => fixture.Path, static _ => { }),
+            static page => page == 1 ? throw new InvalidOperationException("private provider detail") : false);
+
+        var failure = await Assert.ThrowsAsync<RetainedProcessorException>(() => extractor.ExtractAsync(
+            CreateRetained(CreatePdfWithContents("BT\n/F1 12 Tf\n72 720 Td\n(first readable page) Tj\nET\n", null)),
+            CancellationToken.None).AsTask());
+
+        Assert.Equal("pdf-document-container-invalid", failure.OutcomeCode);
+        Assert.Null(failure.InnerException);
+        Assert.DoesNotContain("private provider detail", failure.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -227,6 +278,16 @@ public sealed class PdfDocumentProcessingTests
 
     private static byte[] CreatePdf(string? text) => CreatePdfWithContents(
         text is null ? null : $"BT\n/F1 12 Tf\n72 720 Td\n({text}) Tj\nET\n");
+
+    private static byte[] CreateEncryptedPdf(bool requiresPassword)
+    {
+        using var document = new PdfLoadedDocument(CreatePdf("Authorised readable encrypted PDF"));
+        document.Security.OwnerPassword = "test-owner";
+        if (requiresPassword) document.Security.UserPassword = "test-secret";
+        using var output = new MemoryStream();
+        document.Save(output);
+        return output.ToArray();
+    }
 
     private static byte[] CreatePng(string text)
     {

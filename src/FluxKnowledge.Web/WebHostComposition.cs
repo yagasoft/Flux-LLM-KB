@@ -253,6 +253,9 @@ public static class WebHostComposition
         services.AddSingleton<ILocalPrivateContentDisclosure, LocalPrivateContentDisclosure>();
         services.AddSingleton<CsharpDisclosureProofBuilder>();
         services.AddHttpContextAccessor();
+        if (OperatingSystem.IsWindows())
+            services.TryAddSingleton<IIndexGenerationReadLeaseFactory>(provider =>
+                new WindowsIndexGenerationReadLeaseFactory(provider.GetRequiredService<UsearchIndexOptions>().RootPath));
         if (strictProductionPaths)
         {
             services.AddProductionFluxKnowledgeUsearch(

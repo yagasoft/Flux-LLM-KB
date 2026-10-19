@@ -23,7 +23,7 @@ public sealed class PaddleOcrVlmModelGate : IDisposable
     public const string OrientationManifestPath =
         @"J:\Models\manifests\document-ocr-20260919\page-orientation.json";
     public const string PythonExecutablePath =
-        @"J:\Models\runtimes\ppstructurev3-3.7.0-ort-1.30.0-cp312\Scripts\python.exe";
+        @"J:\Models\runtimes\ppstructurev3-3.7.0-ort-1.30.0-cp312-iis-84d3e0db03b2\Scripts\python.exe";
 
     internal const string VlmBundlePath =
         @"J:\Models\bundles\paddleocr-vl-1.6\c5630abae1d940eafe0697512a0325494b02ab42";

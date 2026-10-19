@@ -21,18 +21,20 @@ public sealed class UsearchGenerationBuilder : IIndexGenerationPublisher
     private readonly LiveRootStorageSafety? _storageSafety;
     private readonly IUsearchDirectoryCreator _directoryCreator;
     private readonly ILogger<UsearchGenerationBuilder>? _logger;
+    private readonly IIndexGenerationReadLeaseFactory? _baseReadLeaseFactory;
 
     public UsearchGenerationBuilder(
         IIndexGenerationStore store,
         UsearchIndexOptions options,
         UsearchGenerationValidator validator,
-        ILogger<UsearchGenerationBuilder>? logger = null)
+        ILogger<UsearchGenerationBuilder>? logger = null,
+        IIndexGenerationReadLeaseFactory? baseReadLeaseFactory = null)
         : this(
             store,
             options,
             validator,
             storageSafety: null,
-            FileSystemUsearchDirectoryCreator.Instance, logger)
+            FileSystemUsearchDirectoryCreator.Instance, logger, baseReadLeaseFactory)
     {
     }
 
@@ -42,7 +44,8 @@ public sealed class UsearchGenerationBuilder : IIndexGenerationPublisher
         UsearchGenerationValidator validator,
         LiveRootStorageSafety? storageSafety,
         IUsearchDirectoryCreator directoryCreator,
-        ILogger<UsearchGenerationBuilder>? logger = null)
+        ILogger<UsearchGenerationBuilder>? logger = null,
+        IIndexGenerationReadLeaseFactory? baseReadLeaseFactory = null)
     {
         ArgumentNullException.ThrowIfNull(store);
         ArgumentNullException.ThrowIfNull(options);
@@ -54,6 +57,7 @@ public sealed class UsearchGenerationBuilder : IIndexGenerationPublisher
         _storageSafety = storageSafety;
         _directoryCreator = directoryCreator;
         _logger = logger;
+        _baseReadLeaseFactory = baseReadLeaseFactory;
     }
 
     public ValueTask<IndexGenerationDescriptor> BuildRecoveryCandidateAsync(
@@ -70,7 +74,7 @@ public sealed class UsearchGenerationBuilder : IIndexGenerationPublisher
         string? placedPath = null;
         try
         {
-            SaveCandidate(staging, generation, membership);
+            SaveCandidate(staging, generation, membership, cancellationToken);
             validator.Validate(staging, generation, membership);
             var path = AtomicGenerationPlacement.PlaceRecovery(
                 options,
@@ -122,7 +126,7 @@ public sealed class UsearchGenerationBuilder : IIndexGenerationPublisher
         }
         try
         {
-            SaveCandidate(staging, existing, vectors);
+            SaveCandidate(staging, existing, vectors, cancellationToken);
             validator.Validate(staging, existing, vectors);
             var finalPath = AtomicGenerationPlacement.Place(
                 options,
@@ -196,8 +200,11 @@ public sealed class UsearchGenerationBuilder : IIndexGenerationPublisher
         _directoryCreator.CreateDirectory(staging);
         try
         {
-            SaveCandidate(staging, candidate, vectors);
+            if (!TrySaveAppendCandidate(staging, candidate, publication, cancellationToken))
+                SaveCandidate(staging, candidate, vectors, cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
             validator.Validate(staging, candidate, vectors);
+            cancellationToken.ThrowIfCancellationRequested();
             try
             {
                 var finalPath = AtomicGenerationPlacement.Place(
@@ -233,19 +240,79 @@ public sealed class UsearchGenerationBuilder : IIndexGenerationPublisher
     private void SaveCandidate(
         string staging,
         IndexGenerationDescriptor candidate,
-        IReadOnlyList<CanonicalVector> vectors)
+        IReadOnlyList<CanonicalVector> vectors,
+        CancellationToken cancellationToken)
     {
         EnsureStorageSafe(staging);
         using (var index = new USearchIndex(MetricKind.Cos, ScalarKind.Float32, (ulong)candidate.Dimensions, 0, 0, 0, false))
         {
             foreach (var vector in vectors)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 var values = new float[candidate.Dimensions];
                 Buffer.BlockCopy(vector.Values, 0, values, 0, vector.Values.Length);
                 index.Add((ulong)vector.VectorId, values);
             }
             index.Save(Path.Combine(staging, UsearchGenerationValidator.IndexFileName));
         }
+        WriteMetadata(staging, candidate);
+    }
+
+    private bool TrySaveAppendCandidate(string staging, IndexGenerationDescriptor candidate,
+        IndexPublicationSnapshot publication, CancellationToken cancellationToken)
+    {
+        if (_baseReadLeaseFactory is null || publication.AppendBase is not { } basis ||
+            publication.ExpectedCorpusStamp is null || basis.Generation.CorpusStamp != publication.ExpectedCorpusStamp ||
+            basis.Generation.Id == candidate.Id || basis.Generation.Dimensions != candidate.Dimensions ||
+            basis.Generation.ModelFingerprint != candidate.ModelFingerprint || basis.VectorIds.Count == 0 ||
+            basis.Generation.VectorCount != basis.VectorIds.Count ||
+            !basis.VectorIds.SequenceEqual(basis.VectorIds.Distinct().Order())) return false;
+
+        var target = publication.Vectors.ToDictionary(value => value.VectorId);
+        // Removal needs a full build: native Remove retains tombstone payload bytes
+        // that would no longer be represented by SQL's source-deletion membership.
+        if (basis.VectorIds.Any(id => !target.ContainsKey(id))) return false;
+        var previousVectors = basis.VectorIds.Select(id => target[id]).ToArray();
+        if (basis.Generation.MetadataChecksum != UsearchGenerationValidator.ComputeChecksum(
+                basis.Generation.ModelFingerprint, basis.Generation.Dimensions, previousVectors)) return false;
+
+        var fileSystem = new DerivedIndexFileSystem(options, null, _storageSafety, _directoryCreator);
+        if (!fileSystem.TryCanonicalIntendedGenerationPath(basis.Generation.IndexPath, out var baseDirectory))
+            throw new UnauthorizedAccessException("The publication base is outside the safe generation directory.");
+        EnsureStorageSafe(baseDirectory);
+        IDisposable heldFiles;
+        try { heldFiles = _baseReadLeaseFactory.Acquire(baseDirectory); }
+        catch (FileNotFoundException) { return false; }
+        catch (DirectoryNotFoundException) { return false; }
+        using (heldFiles)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try { validator.Validate(baseDirectory, basis.Generation, previousVectors); }
+            catch (IndexGenerationValidationException exception) when (exception.InnerException is null or JsonException) { return false; }
+            catch (FileNotFoundException) { return false; }
+            catch (DirectoryNotFoundException) { return false; }
+            cancellationToken.ThrowIfCancellationRequested();
+            // A mutable RAM copy, never a view or a write to the base generation.
+            using var index = new USearchIndex(Path.Combine(baseDirectory, UsearchGenerationValidator.IndexFileName), false);
+            var existingIds = basis.VectorIds.ToHashSet();
+            foreach (var vector in publication.Vectors)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (existingIds.Contains(vector.VectorId)) continue;
+                var values = new float[candidate.Dimensions];
+                Buffer.BlockCopy(vector.Values, 0, values, 0, vector.Values.Length);
+                index.Add((ulong)vector.VectorId, values);
+            }
+            cancellationToken.ThrowIfCancellationRequested();
+            EnsureStorageSafe(staging);
+            index.Save(Path.Combine(staging, UsearchGenerationValidator.IndexFileName));
+        }
+        WriteMetadata(staging, candidate);
+        return true;
+    }
+
+    private static void WriteMetadata(string staging, IndexGenerationDescriptor candidate)
+    {
         File.WriteAllText(Path.Combine(staging, UsearchGenerationValidator.MetadataFileName),
             JsonSerializer.Serialize(new UsearchGenerationValidator.Metadata(
                 candidate.Id, candidate.ModelFingerprint, "cos", candidate.Dimensions,

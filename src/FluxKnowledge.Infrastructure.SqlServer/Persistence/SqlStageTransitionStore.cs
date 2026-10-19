@@ -775,14 +775,20 @@ public sealed partial class SqlStageTransitionStore : IStageTransitionStore
                       EF.Functions.Collate(candidateBranch.InputSha256, SchemaConfiguration.SchedulerFenceCollation) &&
                   EF.Functions.Collate(ownerActivity.ProcessorVersion, SchemaConfiguration.SchedulerFenceCollation) ==
                       EF.Functions.Collate(candidateBranch.ProcessorVersion, SchemaConfiguration.SchedulerFenceCollation) &&
-                  EF.Functions.Collate(ownerActivity.DescriptorFingerprint, SchemaConfiguration.SchedulerFenceCollation) ==
-                      EF.Functions.Collate(candidateBranch.ProcessorFingerprint, SchemaConfiguration.SchedulerFenceCollation)
-            select new { Branch = candidateBranch, OwnerActivity = ownerActivity }).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+                  (EF.Functions.Collate(ownerActivity.DescriptorFingerprint, SchemaConfiguration.SchedulerFenceCollation) ==
+                      EF.Functions.Collate(candidateBranch.ProcessorFingerprint, SchemaConfiguration.SchedulerFenceCollation) ||
+                   (candidateBranch.ProcessorFingerprint == ImageDocumentInputProcessor.Capability.ProcessorFingerprint ||
+                    candidateBranch.ProcessorFingerprint == PdfDocumentProcessor.Capability.ProcessorFingerprint) &&
+                   ownerActivity.DescriptorFingerprint == DocumentProcessingInput.DocumentRecoveryActivityPrefix + ownerActivity.Id.ToString().Replace("-", "").ToLower())
+            select new { Branch = candidateBranch, OwnerActivity = ownerActivity, ChildActivityId = childActivity.Id }).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
         if (binding is null)
         {
             throw new InvalidOperationException("The document publication has no exact completed retained-processor binding.");
         }
         var branch = binding.Branch;
+        if (binding.OwnerActivity.DescriptorFingerprint != branch.ProcessorFingerprint &&
+            !await SqlDocumentInputRecovery.InputBindingIsCurrentAsync(context, inputRevisionId, binding.ChildActivityId, cancellationToken).ConfigureAwait(false))
+            throw new InvalidOperationException("document-recovery-binding-stale");
         var exactBinaryBinding = isDocumentInput &&
             branch.ProcessorFingerprint == documentContract.ParentProcessorFingerprint &&
             branch.ProcessorVersion == documentContract.ParentProcessorVersion;

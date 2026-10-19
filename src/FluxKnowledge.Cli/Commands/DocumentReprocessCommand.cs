@@ -70,7 +70,7 @@ public static class DocumentReprocessCommand
     private static bool TryReadRequest(string[] args, out DocumentReprocessRequest request)
     {
         request = default!;
-        if (args.Length != 7 || args[0] != "reprocess" || args[1] != "--source-revision" ||
+        if (args.Length is not (7 or 11) || args[0] != "reprocess" || args[1] != "--source-revision" ||
             args[3] != "--expected-input-sha256" || args[5] != "--expected-processor-fingerprint" ||
             !Guid.TryParse(args[2], out var revisionId) || !IsCanonicalSha256(args[4]) ||
             !IsDocumentProcessorFingerprint(args[6]))
@@ -78,20 +78,32 @@ public static class DocumentReprocessCommand
             return false;
         }
 
-        request = new DocumentReprocessRequest(new SourceRevisionId(revisionId), args[4], args[6]);
+        var image = args[6] == ImageDocumentInputProcessor.Capability.ProcessorFingerprint;
+        if (image || args.Length == 11 && args[6] == PdfDocumentProcessor.Capability.ProcessorFingerprint)
+        {
+            if (args.Length != 11 || args[7] != "--failed-extract-job" || !Guid.TryParse(args[8], out var failedJob) || failedJob == Guid.Empty ||
+                args[9] != "--expected-root-configuration-revision" || !long.TryParse(args[10], out var configuration) || configuration <= 0) return false;
+            request = new(new(revisionId), args[4], args[6], failedJob, configuration);
+        }
+        else
+        {
+            if (args.Length != 7) return false;
+            request = new DocumentReprocessRequest(new SourceRevisionId(revisionId), args[4], args[6]);
+        }
         return true;
     }
 
     private static bool IsDocumentProcessorFingerprint(string fingerprint) =>
         string.Equals(fingerprint, VsdxStructuralTextProcessor.Capability.ProcessorFingerprint, StringComparison.Ordinal) ||
-        string.Equals(fingerprint, PdfDocumentProcessor.Capability.ProcessorFingerprint, StringComparison.Ordinal);
+        string.Equals(fingerprint, PdfDocumentProcessor.Capability.ProcessorFingerprint, StringComparison.Ordinal) ||
+        string.Equals(fingerprint, ImageDocumentInputProcessor.Capability.ProcessorFingerprint, StringComparison.Ordinal);
 
     private static bool IsCanonicalSha256(string value) =>
         value.Length == 64 && value.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f');
 
     private static async Task WriteUsageAsync(TextWriter error) =>
         await error.WriteLineAsync(
-            "Usage: FluxKnowledge.Cli documents reprocess --source-revision <guid> --expected-input-sha256 <lowercase-sha256> --expected-processor-fingerprint <vsdx-or-pdf-fingerprint>").ConfigureAwait(false);
+            "Usage: FluxKnowledge.Cli documents reprocess --source-revision <guid> --expected-input-sha256 <lowercase-sha256> --expected-processor-fingerprint <vsdx-pdf-or-image-fingerprint> [--failed-extract-job <guid> --expected-root-configuration-revision <positive-number> (exact PDF or image recovery; required for images)]").ConfigureAwait(false);
 
     private sealed class ExecutorLease(IDocumentReprocessExecutor executor, SqlRetainedSourceReader sourceReader) : IDisposable
     {
@@ -119,7 +131,8 @@ public static class DocumentReprocessCommand
                 new LocalSourceCapabilityHandlerRegistry(
                 [
                     new VsdxStructuralTextCapabilityHandler(),
-                    new PdfDocumentCapabilityHandler()
+                    new PdfDocumentCapabilityHandler(),
+                    new ImageDocumentInputCapabilityHandler()
                 ]));
             return new ExecutorLease(
                 new LocalDocumentReprocessExecutor(
@@ -127,7 +140,7 @@ public static class DocumentReprocessCommand
                     sourceReader,
                     capabilityService,
                     new VsdxStructuralTextProcessor(artifactWriter),
-                    new PdfDocumentProcessor(artifactWriter)),
+                    new PdfDocumentProcessor(artifactWriter), imageProcessor: new ImageDocumentInputProcessor()),
                 sourceReader);
         }
 
@@ -168,13 +181,18 @@ internal sealed class LocalDocumentReprocessExecutor(
     SourceCapabilityService capabilityService,
     VsdxStructuralTextProcessor vsdxProcessor,
     PdfDocumentProcessor pdfProcessor,
-    VisioDocumentInputProcessor? visioProcessor = null) : IDocumentReprocessExecutor
+    VisioDocumentInputProcessor? visioProcessor = null,
+    ImageDocumentInputProcessor? imageProcessor = null) : IDocumentReprocessExecutor
 {
     public async ValueTask<DocumentReprocessCommandResult> ExecuteAsync(
         DocumentReprocessRequest request,
         CancellationToken cancellationToken)
     {
-        var descriptor = visioProcessor is not null && request.ExpectedProcessorFingerprint == VisioDocumentInputProcessor.Capability.ProcessorFingerprint
+        if (request.ExpectedProcessorFingerprint == ImageDocumentInputProcessor.Capability.ProcessorFingerprint && imageProcessor is null)
+            return new(null, false, false, false, false, "document-processor-unavailable");
+        var descriptor = request.ExpectedProcessorFingerprint == ImageDocumentInputProcessor.Capability.ProcessorFingerprint
+            ? ImageDocumentInputProcessor.Capability
+            : visioProcessor is not null && request.ExpectedProcessorFingerprint == VisioDocumentInputProcessor.Capability.ProcessorFingerprint
             ? VisioDocumentInputProcessor.Capability
             : string.Equals(request.ExpectedProcessorFingerprint, VsdxStructuralTextProcessor.Capability.ProcessorFingerprint, StringComparison.Ordinal)
             ? VsdxStructuralTextProcessor.Capability
@@ -219,7 +237,9 @@ internal sealed class LocalDocumentReprocessExecutor(
             }
 
             var retained = await sourceReader.ReadBytesAsync(claim.SourceRevisionId, cancellationToken).ConfigureAwait(false);
-            var completion = descriptor.Id == VisioDocumentInputProcessor.Capability.Id
+            var completion = descriptor.Id == ImageDocumentInputProcessor.Capability.Id
+                ? await imageProcessor!.ProcessAsync(claim, retained, new RetainedProcessorOptions(), cancellationToken).ConfigureAwait(false)
+                : descriptor.Id == VisioDocumentInputProcessor.Capability.Id
                 ? await visioProcessor!.ProcessAsync(claim, retained, cancellationToken).ConfigureAwait(false)
                 : descriptor.Id == VsdxStructuralTextProcessor.Capability.Id
                 ? await vsdxProcessor.ProcessAsync(claim, retained, new RetainedProcessorOptions(), cancellationToken).ConfigureAwait(false)
