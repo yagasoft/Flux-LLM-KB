@@ -10,12 +10,14 @@ using FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence.Configurations;
 using FluxKnowledge.Integrations.Files;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 
 namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
 
-public sealed class SqlSourceScanStore(
+public sealed partial class SqlSourceScanStore(
     IDbContextFactory<FluxKnowledgeDbContext> contextFactory,
-    TimeProvider timeProvider, EmbeddingGpuRuntime? embeddingRuntime = null) : ISourceScanStore, ISourceScanControlStore
+    TimeProvider timeProvider, EmbeddingGpuRuntime? embeddingRuntime = null,
+    ILogger<SqlSourceScanStore>? logger = null) : ISourceScanStore, ISourceScanControlStore
 {
     private const string SourceArtifactStoreCapability = "source-artifact-store";
     private const string SourceProcessorVersion = "phase-3a-v1";
@@ -600,7 +602,7 @@ public sealed class SqlSourceScanStore(
     {
         await using var executionContext = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         var strategy = executionContext.Database.CreateExecutionStrategy();
-        await strategy.ExecuteAsync(async () =>
+        var cleanup = await strategy.ExecuteAsync(async () =>
         {
         await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken).ConfigureAwait(false);
@@ -623,6 +625,13 @@ public sealed class SqlSourceScanStore(
             throw new InvalidOperationException("The source scan control lease is no longer owned by this worker.");
         }
         var request = await context.SourceScanRequests.SingleAsync(value => value.Id == claim.ScanRequest.Id.Value, cancellationToken).ConfigureAwait(false);
+        // Filesystem completion keeps its existing acceptance rules. Deleting old
+        // diagnostics needs the stronger, fresh authority used for source mutations.
+        var cleanupUntil = failureReason is null && root.State == (int)SourceRootState.Enabled &&
+            root.ConfigurationRevision == claim.SourceRoot.ConfigurationRevision && root.CrawlMode == (int)claim.SourceRoot.DiscoveryMode &&
+            await OwnsRootScanAsync(context, root.Id, new(claim.ScanRequest.Id,
+                new(claim.ControlJobId, claim.LeaseOwner, claim.LeaseGeneration)), now, cancellationToken).ConfigureAwait(false)
+            ? job.LeaseExpiresAtUtc : null;
         job.State = failureReason is null ? (int)SourceScanJobState.Completed : (int)SourceScanJobState.Pending;
         job.Reason = failureReason;
         job.LeaseOwner = null;
@@ -642,7 +651,22 @@ public sealed class SqlSourceScanStore(
         }
         await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        return cleanupUntil is { } expires ? new IssueCleanupAuthority(now, expires) : null;
         }).ConfigureAwait(false);
+        if (cleanup is not null)
+        {
+            // Include context creation, strategy entry and disposal in the optional
+            // cleanup boundary. None may turn a committed completion into a retry.
+            try { await TryCompactResolvedIssuesAsync(claim, cleanup, cancellationToken).ConfigureAwait(false); }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                logger?.LogDebug("Resolved issue cleanup reached its deadline after source scan {ScanRequestId} completed.", claim.ScanRequest.Id.Value);
+            }
+            catch (Exception exception) when (!cancellationToken.IsCancellationRequested)
+            {
+                logger?.LogWarning(exception, "Resolved issue cleanup did not confirm completion for source scan {ScanRequestId}; the completed scan is preserved.", claim.ScanRequest.Id.Value);
+            }
+        }
     }
 
     private static async Task CreateDueRecurringRequestsAsync(

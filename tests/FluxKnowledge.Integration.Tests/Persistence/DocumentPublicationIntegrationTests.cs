@@ -18,7 +18,7 @@ using Xunit;
 
 namespace FluxKnowledge.Integration.Tests.Persistence;
 
-public sealed class DocumentPublicationIntegrationTests(NativeSqlServerFixture fixture)
+public sealed partial class DocumentPublicationIntegrationTests(NativeSqlServerFixture fixture)
     : IClassFixture<NativeSqlServerFixture>, IAsyncLifetime
 {
     private readonly NativeSqlServerFixture _fixture = fixture;

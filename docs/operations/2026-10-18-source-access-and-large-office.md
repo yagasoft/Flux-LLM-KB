@@ -337,7 +337,49 @@ release. The SQL admission fence, permitted rebuild restriction and all native
 ownership/result checks remain in place. Thirty-three scheduler checks pass,
 including seven new hold/release cases and a disposable SQL test that admits
 pre-existing work without adding a task or notification after release. Independent
-review, canonical integration, incremental deployment and bounded existing-work
-validation remain open for this correction. This covers one updater validation
+review and canonical integration passed as `e7cdded7`: each checkout passed
+3,890 tests with 30 existing opt-in skips and zero build warnings. Incremental
+release `20261019T200859Z-e7cdded710cb` preserved matching application/companion
+payloads and configuration, released the hold after unchanged-state validation
+and passed the approved health checks. Existing G6 work advanced from 936 to
+952 of 2,004 durable vectors, including completion of a sixteen-input request.
+Progress was already occurring before this release; it is not an exclusive
+throughput attribution. The document still awaits full publication.
+
+A fresh exact graph check confirmed seven of the nine admitted Office owners
+with selected publications and five completed stages, while two remained in
+embedding. One newly proved item passed supported nonempty Corpus readback.
+The four earlier ambiguous bindings were not readmitted. An advisory reading
+grouped 380 uncertain GPU tasks: 117 with completed parents, 103 with suppressed
+source bindings, 60 other document tasks and 100 interactive tasks. All retained
+recorded nonterminal dispatches; these metadata groups do not establish physical
+settlement or authorise disposition.
+
+The scheduler guarantee covers one updater validation
 hold and full release for its newly started worker. Repeated in-place live holds,
 or an entire unobserved hold cycle inside one call, are outside this correction.
+
+## Resolved diagnostic cleanup
+
+The next slice removes earlier matched activity, pipeline and retained-processor
+diagnostics from current event pages before pagination. Its proof follows the
+selected document publication, current unsuppressed owner and child bindings,
+retained artifacts, recognised processor history and five completed stages.
+Office v1–v4 policy chains may change derived text without changing their physical
+owner. Explicit image/PDF recovery retains its separate child relation. Access
+failures, later failures, unknown policy history and malformed correlations remain.
+
+Physical removal runs separately after a successful scan, subject to fresh
+completion authority and publication-first lock order. It inspects at most 1,000
+root-scoped diagnostic candidates and deletes at most 100 proved-obsolete events
+per attempt. It preserves pipeline/native history and never replays an ambiguous
+cleanup commit. A small wrapping cursor prevents a persistent unresolved prefix
+from starving later candidates; it changes no proof or deletion authority.
+All 182 affected persistence checks pass with no skips, including pagination, proof refusal,
+bounded deletion, changed or expired authority, concurrent publication/root/scan
+changes, lost commit acknowledgement and an unrelated diagnostic backlog. A cold
+cleanup regression also proves that an unresolved prefix cannot starve a resolved
+tail. Query-plan diagnosis found repeated proof compilation taking 3.9 seconds
+against 8 ms execution; one shared proof now passes the unchanged two-second SQL
+budget. Temporary plan-capture instrumentation was removed. Final
+review, canonical integration and production application remain open for this slice.

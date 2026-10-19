@@ -792,8 +792,26 @@ non-deleted pipeline record bound to the same source is recovered and retains it
 corpus link; independent unresolved failures remain visible. `LastScanIssueCount`
 (`Last scan issues`) separately reports access, availability and read issues from
 the last completed or failed crawl. Queued/running crawls do not reset that total;
-a later finished crawl replaces it. Recovery changes the current projection,
-while activity and scan audit history remain intact.
+a later finished crawl replaces it. Activity, scan and native execution records
+remain intact. Current operator events exclude an earlier diagnostic only when
+its canonical identifiers match an exact selected successful document publication.
+Recognised Office policy history is limited to increasing shipped v1–v4 processor
+pairs on the same immutable physical owner; image/PDF recovery uses its explicit
+child relationship. Derived text may change across Office versions. The proof
+requires the selected branch, child/activity/artifacts and five completed stages;
+pausing a source does not reverse a proved success. Unrelated access errors,
+unknown relationships, malformed correlations and later failures remain visible.
+
+After an authorised successful scan completes, a separate short transaction can
+remove at most 100 such obsolete diagnostic rows from 1,000 root-scoped candidates.
+A wrapping advisory cursor advances with the delete transaction, preserving other
+health evidence and revisiting unresolved candidates on later bounded passes.
+It rechecks fresh completion authority under publication, root and scan locks.
+An expired or changed claim skips cleanup without changing filesystem completion
+semantics. Cleanup has a five-second overall deadline, two-second SQL commands
+and a 250 ms lock timeout. It never retries an ambiguous cleanup commit; failure
+does not reopen the completed scan. Jobs, attempts, policy relationships, native
+receipts and unresolved diagnostics are preserved.
 Corpus lists, details, indexed/failed filters and folder counts use the same
 verified recovery rule. A recovered record can preview its bounded persisted
 indexed text without retaining a current failure reason. Recovery requires its

@@ -14,7 +14,8 @@ public sealed class SqlOperatorEventProjectionReader(IDbContextFactory<FluxKnowl
         ArgumentNullException.ThrowIfNull(query);
         await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         var filters = query.Filters;
-        var rows = context.AuditEvents.AsNoTracking();
+        var resolved = SqlResolvedSourceIssueEvents.Query(context, filters.SourceRootId);
+        var rows = context.AuditEvents.AsNoTracking().Where(value => !resolved.Any(obsolete => obsolete.Id == value.Id));
         if (filters.Family is { } family) rows = rows.Where(value => value.EventFamily != null && value.EventFamily == family);
         if (filters.Severity is { } severity) rows = rows.Where(value => value.Severity != null && value.Severity == severity);
         if (filters.SourceRootId is { } rootId) rows = rows.Where(value => value.SourceRootId == rootId);
