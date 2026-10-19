@@ -599,7 +599,8 @@ public sealed partial class SqlDocumentOcrHandoffTests
     }
 
     private async Task<ImageFailureSeed> CreateSettledImageFailureAsync(bool pdf = false,
-        string failureReason = "image-document-dimensions-exceeded", bool native = true)
+        string failureReason = "image-document-dimensions-exceeded", bool native = true,
+        Func<RetainedProcessorDerivedChild, string>? predecessorLocator = null)
     {
         await SqlTestData.ClearPhase3SourceDataAsync(_fixture);
         var factory = SqlTestData.CreateFactory(_fixture);
@@ -623,6 +624,7 @@ public sealed partial class SqlDocumentOcrHandoffTests
             ? await new PdfDocumentProcessor(new SqlRetainedArtifactWriter(factory, artifactRoot)).ProcessAsync(parentClaim, retained, new(), CancellationToken.None)
             : await new ImageDocumentInputProcessor().ProcessAsync(parentClaim, retained, new(), CancellationToken.None);
         var child = Assert.Single(completion.Members);
+        var childLocator = predecessorLocator?.Invoke(child) ?? child.SyntheticLocator;
         await using (var db = await factory.CreateDbContextAsync())
         {
             db.SourceRootConfigurations.Add(new() { Id = rootId, CanonicalPath = sourceRoot, DisplayName = "Image recovery test", State = 0,
@@ -631,7 +633,7 @@ public sealed partial class SqlDocumentOcrHandoffTests
             db.SourceRevisions.Add(new() { Id = parentId, SourceRootId = rootId, StableSourceIdentity = parentStable, CanonicalPath = Path.Combine(sourceRoot, pdf ? "document.pdf" : "diagram.jpg"),
                 Revision = 1, ContentSha256 = hash, ByteLength = bytes.Length, Classification = descriptor.AcceptedClassification, Extension = contract.Extension, DiscoveredAtUtc = now });
             await db.SaveChangesAsync();
-            db.SourceRevisions.Add(new() { Id = childId, SourceRootId = rootId, StableSourceIdentity = child.StableSourceIdentity, CanonicalPath = child.SyntheticLocator,
+            db.SourceRevisions.Add(new() { Id = childId, SourceRootId = rootId, StableSourceIdentity = child.StableSourceIdentity, CanonicalPath = childLocator,
                 Revision = 1, ContentSha256 = hash, ByteLength = bytes.Length, Classification = child.Classification, Extension = child.Extension,
                 OriginKind = 2, ParentSourceRevisionId = parentId, DiscoveredAtUtc = now });
             db.SourceActivities.Add(new() { Id = parentActivityId, SourceRevisionId = parentId, ActivityKind = (int)SourceActivityKind.TextExtraction,
@@ -643,7 +645,7 @@ public sealed partial class SqlDocumentOcrHandoffTests
                 State = (int)RetainedProcessorBranchState.Completed, LeaseGeneration = 1, AttemptCount = 1, CompletedMemberCount = 1,
                 CompletionReceiptFingerprint = completion.ReceiptFingerprint, CreatedAtUtc = now, UpdatedAtUtc = now });
             db.SourceProcessorAttempts.Add(new() { Id = Guid.NewGuid(), BranchId = branchId, LeaseGeneration = 1, StartedAtUtc = now, FinishedAtUtc = now, OutcomeCode = "completed" });
-            db.SourceIdentities.Add(new() { Id = identityId, SourceKind = "retained document", StableKey = child.SyntheticLocator, CreatedAtUtc = now });
+            db.SourceIdentities.Add(new() { Id = identityId, SourceKind = "retained document", StableKey = childLocator, CreatedAtUtc = now });
             db.PipelineRecords.Add(new() { Id = recordId, SourceIdentityId = identityId, SourceRevisionId = childId, Revision = 1, ContentHash = hash,
                 RootLineageRecordId = recordId, CurrentStage = (int)PipelineStage.Extract, RegisteredAtUtc = now });
             db.SourceActivities.Add(new() { Id = childActivityId, SourceRevisionId = childId, ActivityKind = (int)SourceActivityKind.DocumentParsing,

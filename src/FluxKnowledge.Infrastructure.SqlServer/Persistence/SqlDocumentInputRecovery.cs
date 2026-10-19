@@ -233,7 +233,10 @@ internal static class SqlDocumentInputRecovery
         var receiptFingerprint = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(
             $"completed:{identity.MemberFingerprint}:{hash}:{parent.ByteLength}")));
         if (owner.Member.MemberFingerprint != identity.MemberFingerprint || child.StableSourceIdentity != identity.StableSourceIdentity ||
-            child.CanonicalPath != identity.SyntheticLocator || owner.Branch.CompletionReceiptFingerprint != receiptFingerprint) return null;
+            // Persisted predecessors may predate the parent-qualified locator. Its
+            // independently derived member identity and all ownership proofs still apply.
+            (child.CanonicalPath != identity.SyntheticLocator && child.CanonicalPath != $"retained-document-input:{identity.MemberFingerprint}") ||
+            owner.Branch.CompletionReceiptFingerprint != receiptFingerprint) return null;
         if (await db.SourceActivityRelations.AnyAsync(relation => relation.PredecessorActivityId == childActivity.Id &&
             (relation.RelationshipKind != DocumentProcessingInput.DocumentRecoveryChildRelationship || relation.ReasonCode != DocumentProcessingInput.DocumentRecoveryVersion ||
              !db.SourceProcessorBranchMembers.Any(member => member.BranchId == recoveryBranchId && member.ChildSourceActivityId == relation.SuccessorActivityId && member.Disposition == "completed")), token).ConfigureAwait(false)) return null;

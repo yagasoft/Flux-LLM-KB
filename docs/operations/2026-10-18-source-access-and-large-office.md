@@ -222,3 +222,21 @@ consistency fences remain unchanged. SqlClient zero-number cancellation is
 reported as budget unavailability only after the internal deadline expires and
 the caller remains active; the original exception is retained. Genuine SQL
 errors, including timeout and deadlock, remain unchanged.
+
+Release `20261019T140228Z-bc82af83377f` deployed the set-based membership and
+cold overview corrections. Canonical verification passed on the feature and Main,
+and live, readiness and index-health checks returned HTTP 200 after deployment.
+The next one-image command returned promptly but refused its exact binding.
+Bounded metadata and historical code confirmed a compatibility defect: older
+document inputs used `retained-document-input:{memberFingerprint}`, while the
+recovery check required the newer parent-qualified locator.
+
+Fenced predecessor validation now accepts that exact earlier literal only after
+independently deriving the member identity and checking the existing parent,
+child, artifact, failed-job, completion and native-settlement proofs. New children
+still use the parent-qualified locator. No persisted locator is rewritten. Both
+earlier image and PDF regressions failed before the correction; all 102 document
+handoff/recovery checks now pass, including publication, unchanged predecessor
+history and wrong-locator/hash, ambiguous-owner and uncertain-native refusals.
+Canonical closeout, deployment and one bounded real-item acceptance remain open
+for this compatibility correction. Further cohort admission remains paused.
