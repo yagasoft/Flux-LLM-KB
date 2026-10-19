@@ -59,8 +59,9 @@ ZIP and TAR processing enforce archive bounds and member path rules. Office Open
 XML extraction produces one logical UTF-8 result for the original DOCX/XLSX/PPTX.
 Document package members are not separately published corpus documents. Ordinary
 retained UTF-8 is limited to 32 MiB; the bounded Office extracted-text result can
-reach 200 MiB. Office XML has finite part, total expansion, element and depth
-limits; compression ratios apply to XML opened for extraction, not unopened
+reach 200 MiB. OOXML v3 permits 128 MiB XML parts; the shared Visio parser keeps
+its 64 MiB part budget. Total XML expansion remains 512 MiB with finite element
+and depth limits; compression ratios apply to XML opened for extraction, not unopened
 binary media. ZIP expansion permits two nested ZIP levels with one cumulative
 entry and expansion budget. Media metadata uses a checksum-verified retained
 stream up to 1 GiB, with a separate 96 MiB parser-read budget; it does not decode
@@ -78,6 +79,13 @@ after secret scanning. Input, syntax, qualified-name and cumulative fact-text
 bounds remain enforced.
 
 ## Source lifecycle
+
+Sources explicitly added by the local user are trusted content. The delivery
+priority is to process legitimate files by default, replacing unnecessary format,
+encoding, size, count, nesting and classification refusals with suitable streaming,
+batching or resumable processing. Current processor limits below describe the
+implemented runtime, rather than permanent product requirements. Physical scope,
+protected paths, integrity and truthful outcomes remain necessary.
 
 Repository sources use `CrawlMode=1` (`git-tracked`) and one configured root.
 Local, helper-disabled `git ls-files` supplies membership; retained bytes come

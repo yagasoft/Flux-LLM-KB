@@ -13,6 +13,18 @@ namespace FluxKnowledge.Web.Tests.Components;
 public sealed class SourceIssuePresentationTests
 {
     [Fact]
+    public void Expansion_refusal_explains_current_and_historical_budgets_without_offering_an_override()
+    {
+        var guidance = SourceIssuePresentation.Guidance("office-document-expanded-xml-limit");
+        Assert.Contains("128 MiB per part", guidance);
+        Assert.Contains("Visio and OOXML v2 use 64 MiB parts", guidance);
+        Assert.Contains("version-specific lower budgets", guidance);
+        Assert.Contains("512 MiB across XML parts", guidance);
+        Assert.Contains("169:1", guidance);
+        Assert.Contains("cannot be overridden", guidance);
+    }
+
+    [Fact]
     public void Current_processing_groups_count_files_and_remove_a_later_resolved_item()
     {
         SourceFileProjection[] files = [

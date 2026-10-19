@@ -38,10 +38,10 @@ public sealed class OoxmlStructuralTextProcessorTests
     {
         var descriptor = OoxmlStructuralTextProcessor.Capability;
 
-        Assert.Equal(new Guid("1e73f18a-0151-4b02-aca7-d6ca34a557ea"), descriptor.Id);
+        Assert.Equal(new Guid("c784f889-e910-4d42-95fd-b4d8a91b9a03"), descriptor.Id);
         Assert.Equal("document-ooxml-structural-extract", descriptor.ProcessorKind);
-        Assert.Equal("phase-5-ooxml-structural-v2", descriptor.ProcessorVersion);
-        Assert.Equal("phase-5-ooxml-retained-structural-v2", descriptor.ProcessorFingerprint);
+        Assert.Equal("phase-5-ooxml-structural-v3", descriptor.ProcessorVersion);
+        Assert.Equal("phase-5-ooxml-retained-structural-v3", descriptor.ProcessorFingerprint);
         Assert.Equal(SourceActivityKind.TextExtraction, descriptor.AcceptedActivityKind);
         Assert.Equal("OoxmlDocumentContainer", descriptor.AcceptedClassification);
     }
@@ -1389,21 +1389,6 @@ public sealed class OoxmlStructuralTextProcessorTests
         Assert.Equal(0, writer.BytesWritten);
     }
 
-    [Fact]
-    public async Task Selected_structural_part_larger_than_64_mib_is_rejected_before_any_child_write()
-    {
-        var archive = CreateWordPackageWithLargeMainPart();
-        var hash = Convert.ToHexStringLower(SHA256.HashData(archive));
-        var claim = new RetainedProcessorClaim(Guid.NewGuid(), SourceRevisionId.New(), "parent", hash, "owner", 1, DateTimeOffset.UtcNow.AddMinutes(5));
-        var writer = new RecordingWriter();
-
-        var error = await Assert.ThrowsAsync<RetainedProcessorException>(() => new OoxmlStructuralTextProcessor(writer).ProcessAsync(
-            claim, new RetainedSourceBytes(claim.SourceRevisionId, archive, hash, archive.Length), new RetainedProcessorOptions(), CancellationToken.None).AsTask());
-
-        Assert.Equal("office-document-part-unsupported", error.OutcomeCode);
-        Assert.Equal(0, writer.BytesWritten);
-    }
-
     private static byte[] CreateZip(string name, string value)
     {
         using var buffer = new MemoryStream();
@@ -1655,19 +1640,6 @@ public sealed class OoxmlStructuralTextProcessorTests
             WriteEntry(archive, "_rels/.rels", "<Relationships><Relationship Id='rId1' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument' Target='word/document.xml'/></Relationships>");
             WriteEntry(archive, "word/document.xml", "<w:document xmlns:w='w'><w:t>safe</w:t></w:document>");
             for (var index = 0; index < count; index++) WriteEntry(archive, $"customXml/item{index}.xml", "<x/>");
-        }
-        return buffer.ToArray();
-    }
-
-    private static byte[] CreateWordPackageWithLargeMainPart()
-    {
-        var text = new string('x', 64 * 1024 * 1024);
-        using var buffer = new MemoryStream();
-        using (var archive = new ZipArchive(buffer, ZipArchiveMode.Create, true))
-        {
-            WriteEntry(archive, "[Content_Types].xml", "<Types><Override PartName='/word/document.xml' ContentType='application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml'/></Types>");
-            WriteEntry(archive, "_rels/.rels", "<Relationships><Relationship Id='rId1' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument' Target='word/document.xml'/></Relationships>");
-            WriteEntry(archive, "word/document.xml", $"<w:document xmlns:w='w'><w:t>{text}</w:t></w:document>", CompressionLevel.NoCompression);
         }
         return buffer.ToArray();
     }

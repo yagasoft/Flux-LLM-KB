@@ -12,7 +12,7 @@ establish successful extraction.
 | PowerShell (`.ps1`, `.psm1`), Python, JavaScript, SQL, Razor, CSS, `.csproj`, `.props` and `.slnx` | Searchable strict UTF-8 source text when `indexSourceText=true` on a Git-tracked source. | Existing text/signature/disclosure protections apply. No structured symbols/references for these formats. |
 | Other code languages | Recognised and explicitly deferred when no supported capability exists. | Do not infer semantic code analysis from extension recognition. |
 | ZIP and TAR | Bounded archive expansion using retained members and durable processor branches. | Path traversal, links, excessive expansion and unsupported members are refused or deferred. |
-| DOCX, XLSX and PPTX | Office Open XML structural extraction under the original document identity. | One logical document; package members are not corpus entries. Extracted text is capped at 200 MiB within package security bounds. |
+| DOCX, XLSX and PPTX | Office Open XML structural extraction under the original document identity. | One logical document; package members are not corpus entries. OOXML v3 permits 128 MiB XML parts within a 512 MiB total XML expansion budget. Extracted text is capped at 200 MiB; element, depth, ratio and package-security checks remain. |
 | PDF with native text | Page extraction, normalisation and one original-document publication. | Retained page provenance; encrypted or invalid inputs refuse processing. |
 | PDF pages with visible content but no native text | Provisioned English OCR through the fenced GPU scheduler. | Requires verified local models and explicit runtime activation. |
 | JPEG and PNG | Provisioned single-frame English OCR with encoded-orientation handling. | 64 MiB, 25 megapixels and a 6,000-pixel maximum edge. |

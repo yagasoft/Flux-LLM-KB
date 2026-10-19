@@ -136,7 +136,8 @@ public sealed class SqlSourceActivityStore(
             capability.Id == ZipArchiveRetainedProcessor.Capability.Id || capability.Id == TarArchiveRetainedProcessor.Capability.Id ||
             capability.Id == RetainedCsharpCodeProcessor.Capability.Id)
         {
-            string[] replaced = [OoxmlStructuralTextProcessor.LegacyProcessorFingerprint, MediaMetadataRetainedProcessor.LegacyProcessorFingerprint,
+            string[] replaced = [OoxmlStructuralTextProcessor.LegacyProcessorFingerprint, OoxmlStructuralTextProcessor.PreviousProcessorFingerprint,
+                MediaMetadataRetainedProcessor.LegacyProcessorFingerprint,
                 ZipArchiveRetainedProcessor.LegacyProcessorFingerprint, "phase-5-zip-retained-archive-v1", TarArchiveRetainedProcessor.LegacyProcessorFingerprint,
                 RetainedCsharpCodeProcessor.LegacyDescriptorFingerprint];
             await context.SourceCapabilities.Where(value => value.Id != capability.Id && value.ProcessorKind == capability.ProcessorKind &&

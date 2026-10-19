@@ -49,6 +49,7 @@ public sealed partial class PipelineActivitySqlTests
     public async Task A_GPU_write_between_consumed_queries_discards_the_sample_and_preserves_exact_ownership(
         string change, bool commit)
     {
+        await WaitForFullTextIdleAsync();
         var now = DateTimeOffset.UtcNow;
         var seed = await SeedGpuReadLockAsync(now);
         var interleaving = new AfterGpuQueryInterceptor(async () =>
@@ -87,6 +88,7 @@ public sealed partial class PipelineActivitySqlTests
     [NativeSqlServerFact]
     public async Task A_held_uncommitted_GPU_owner_change_is_never_reported_as_confirmed()
     {
+        await WaitForFullTextIdleAsync();
         var seed = await SeedGpuReadLockAsync(DateTimeOffset.UtcNow);
         await using var writer = new TestDbContextFactory(_fixture.ConnectionString).CreateDbContext();
         await using var transaction = await writer.Database.BeginTransactionAsync();
@@ -103,6 +105,37 @@ public sealed partial class PipelineActivitySqlTests
         var fresh = await ActivityReader().ReadOverviewAsync(deadline.Token);
         Assert.True(fresh.Activity.IsConsistent);
         Assert.Equal(1, PipelineActivityView.From(fresh.Activity, seed.Root).ActiveGpuTasks);
+    }
+
+    private async Task WaitForFullTextIdleAsync()
+    {
+        // Migrations start asynchronous Full-Text populations. Those advance
+        // @@DBTS even without application writes, so the single fresh sample
+        // needs this fixture precondition as well as the awaited GPU mutation.
+        // Keep indexing enabled and retain the production fence unchanged.
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        await using var context = new TestDbContextFactory(_fixture.ConnectionString).CreateDbContext();
+        context.Database.SetCommandTimeout(5);
+        const string sql = """
+            SELECT CASE WHEN COUNT(*) = 2
+                AND SUM(CASE WHEN is_enabled = 1 AND change_tracking_state_desc = N'AUTO'
+                    AND has_crawl_completed = 1
+                    AND CONVERT(int, OBJECTPROPERTYEX(object_id, 'TableFulltextPopulateStatus')) = 0
+                    AND CONVERT(int, OBJECTPROPERTYEX(object_id, 'TableFulltextPendingChanges')) = 0
+                  THEN 1 ELSE 0 END) = 2
+              THEN 1 ELSE 0 END AS [Value]
+            FROM sys.fulltext_indexes
+            WHERE object_id IN (OBJECT_ID(N'Artifacts'), OBJECT_ID(N'TextChunks'))
+            """;
+        try
+        {
+            while (await context.Database.SqlQueryRaw<int>(sql).SingleAsync(deadline.Token) != 1)
+                await Task.Delay(100, deadline.Token);
+        }
+        catch (OperationCanceledException exception) when (deadline.IsCancellationRequested)
+        {
+            throw new TimeoutException("The owned test Full-Text indexes did not become idle before the GPU read test.", exception);
+        }
     }
 
     private async Task<(Guid Root, Guid Batch, Guid Task, string Slot)> SeedGpuReadLockAsync(DateTimeOffset now)

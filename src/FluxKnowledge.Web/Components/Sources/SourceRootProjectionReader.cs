@@ -623,7 +623,7 @@ public sealed class SourceRootProjectionReader(
                 join member in context.SourceProcessorBranchMembers.AsNoTracking() on branch.Id equals member.BranchId
                 where rootIds.Contains(owner.SourceRootId) && owner.SuppressedAtUtc == null &&
                       branch.State == (int)RetainedProcessorBranchState.Completed && branch.CompletedMemberCount == 0 &&
-                      (branch.ProcessorVersion == OoxmlStructuralTextProcessor.Capability.ProcessorVersion && branch.ProcessorFingerprint == OoxmlStructuralTextProcessor.Capability.ProcessorFingerprint || branch.ProcessorVersion == OoxmlStructuralTextProcessor.LegacyProcessorVersion && branch.ProcessorFingerprint == OoxmlStructuralTextProcessor.LegacyProcessorFingerprint) &&
+                      (branch.ProcessorVersion == OoxmlStructuralTextProcessor.Capability.ProcessorVersion && branch.ProcessorFingerprint == OoxmlStructuralTextProcessor.Capability.ProcessorFingerprint || branch.ProcessorVersion == OoxmlStructuralTextProcessor.PreviousProcessorVersion && branch.ProcessorFingerprint == OoxmlStructuralTextProcessor.PreviousProcessorFingerprint || branch.ProcessorVersion == OoxmlStructuralTextProcessor.LegacyProcessorVersion && branch.ProcessorFingerprint == OoxmlStructuralTextProcessor.LegacyProcessorFingerprint) &&
                       ownerActivity.SourceRevisionId == owner.Id &&
                       EF.Functions.Collate(ownerActivity.InputFingerprint, SchemaConfiguration.SchedulerFenceCollation) ==
                           EF.Functions.Collate(branch.InputSha256, SchemaConfiguration.SchedulerFenceCollation) &&
@@ -672,7 +672,7 @@ public sealed class SourceRootProjectionReader(
                           EF.Functions.Collate(branch.ProcessorVersion, SchemaConfiguration.SchedulerFenceCollation) &&
                       EF.Functions.Collate(ownerActivity.DescriptorFingerprint, SchemaConfiguration.SchedulerFenceCollation) ==
                           EF.Functions.Collate(branch.ProcessorFingerprint, SchemaConfiguration.SchedulerFenceCollation) &&
-                      (((branch.ProcessorVersion == OoxmlStructuralTextProcessor.Capability.ProcessorVersion && branch.ProcessorFingerprint == OoxmlStructuralTextProcessor.Capability.ProcessorFingerprint || branch.ProcessorVersion == OoxmlStructuralTextProcessor.LegacyProcessorVersion && branch.ProcessorFingerprint == OoxmlStructuralTextProcessor.LegacyProcessorFingerprint)) ||
+                      (((branch.ProcessorVersion == OoxmlStructuralTextProcessor.Capability.ProcessorVersion && branch.ProcessorFingerprint == OoxmlStructuralTextProcessor.Capability.ProcessorFingerprint || branch.ProcessorVersion == OoxmlStructuralTextProcessor.PreviousProcessorVersion && branch.ProcessorFingerprint == OoxmlStructuralTextProcessor.PreviousProcessorFingerprint || branch.ProcessorVersion == OoxmlStructuralTextProcessor.LegacyProcessorVersion && branch.ProcessorFingerprint == OoxmlStructuralTextProcessor.LegacyProcessorFingerprint)) ||
                        (branch.ProcessorVersion == VisioDocumentInputProcessor.Capability.ProcessorVersion &&
                         branch.ProcessorFingerprint == VisioDocumentInputProcessor.Capability.ProcessorFingerprint) ||
                        (branch.ProcessorVersion == PdfDocumentProcessor.Capability.ProcessorVersion &&

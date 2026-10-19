@@ -413,8 +413,11 @@ public sealed class SourceRootProjectionReaderIntegrationTests(NativeSqlServerFi
             value => value.Reason == "vsdx-structural-extraction-pending");
     }
 
-    [NativeSqlServerFact]
-    public async Task Logical_document_statuses_show_no_content_metadata_only_and_failed_replacement_truthfully()
+    [NativeSqlServerTheory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    public async Task Logical_document_statuses_show_no_content_metadata_only_and_failed_replacement_truthfully(int officeGeneration)
     {
         var now = DateTimeOffset.Parse("2026-09-21T04:00:00+00:00");
         var rootId = Guid.NewGuid();
@@ -422,6 +425,13 @@ public sealed class SourceRootProjectionReaderIntegrationTests(NativeSqlServerFi
         var metadataOwnerId = Guid.NewGuid();
         var failedOwnerId = Guid.NewGuid();
         var blockedOwnerId = Guid.NewGuid();
+        var publishedOfficeOwnerId = Guid.NewGuid();
+        var office = officeGeneration == 3 ? OoxmlStructuralTextProcessor.Capability :
+            OoxmlStructuralTextProcessor.Capability with
+            {
+                ProcessorVersion = $"phase-5-ooxml-structural-v{officeGeneration}",
+                ProcessorFingerprint = $"phase-5-ooxml-retained-structural-v{officeGeneration}"
+            };
         Guid blockedLastGoodRecordId;
         var factory = new TestDbContextFactory(_fixture.ConnectionString);
         await using (var setup = factory.CreateDbContext())
@@ -437,10 +447,11 @@ public sealed class SourceRootProjectionReaderIntegrationTests(NativeSqlServerFi
                 Owner(noContentOwnerId, "empty.docx", "OoxmlDocumentContainer"),
                 Owner(metadataOwnerId, "scan.png", "DeferredCapability"),
                 Owner(failedOwnerId, "replacement.pdf", "PdfDocumentContainer"),
-                Owner(blockedOwnerId, "blocked-before-child.pdf", "PdfDocumentContainer"));
+                Owner(blockedOwnerId, "blocked-before-child.pdf", "PdfDocumentContainer"),
+                Owner(publishedOfficeOwnerId, "published.docx", "OoxmlDocumentContainer"));
 
-            var noContentActivity = BranchActivity(noContentOwnerId, OoxmlStructuralTextProcessor.Capability);
-            var noContentBranch = Branch(noContentOwnerId, noContentActivity.Id, OoxmlStructuralTextProcessor.Capability, now);
+            var noContentActivity = BranchActivity(noContentOwnerId, office);
+            var noContentBranch = Branch(noContentOwnerId, noContentActivity.Id, office, now);
             noContentBranch.CompletedMemberCount = 0;
             setup.SourceActivities.Add(noContentActivity);
             setup.SourceProcessorBranches.Add(noContentBranch);
@@ -452,6 +463,8 @@ public sealed class SourceRootProjectionReaderIntegrationTests(NativeSqlServerFi
 
             AddPublishedChild(
                 setup, metadataOwnerId, OriginKind: 3, MediaMetadataRetainedProcessor.Capability, now, "metadata");
+            AddPublishedChild(
+                setup, publishedOfficeOwnerId, OriginKind: 2, office, now, "published-office");
             AddPublishedChild(
                 setup, failedOwnerId, OriginKind: 2, PdfDocumentProcessor.Capability, now, "last-good");
             var failedChild = AddChild(
@@ -488,7 +501,7 @@ public sealed class SourceRootProjectionReaderIntegrationTests(NativeSqlServerFi
             setup.SourceScanRequests.Add(new SourceScanRequestEntity
             {
                 Id = Guid.NewGuid(), SourceRootId = rootId, RequestKind = 0, RequestedBy = "test", RequestedAtUtc = now,
-                IsReleased = true, ReleasedAtUtc = now, State = (int)SourceScanRequestState.Completed, DiscoveredFileCount = 4
+                IsReleased = true, ReleasedAtUtc = now, State = (int)SourceScanRequestState.Completed, DiscoveredFileCount = 5
             });
             await setup.SaveChangesAsync();
 
@@ -520,7 +533,11 @@ public sealed class SourceRootProjectionReaderIntegrationTests(NativeSqlServerFi
         Assert.Equal("Blocked", blocked.Status);
         Assert.Equal("retained-artifact-checksum-invalid", blocked.Reason);
         Assert.Equal(blockedLastGoodRecordId, blocked.CorpusPipelineRecordId);
-        Assert.Equal(0, detail.IndexedCount);
+        var publishedOffice = Assert.Single(detail.Files, value => value.FileName == "published.docx");
+        Assert.Equal("Indexed", publishedOffice.Status);
+        Assert.NotNull(publishedOffice.CorpusPipelineRecordId);
+        Assert.DoesNotContain(detail.CurrentProcessingIssues.SelectMany(value => value.AffectedPaths), value => value == "published.docx");
+        Assert.Equal(1, detail.IndexedCount);
         Assert.Equal(1, detail.BlockedCount);
         Assert.Equal(1, detail.ErrorCount);
         var failedGroup = Assert.Single(detail.CurrentProcessingIssues, group => group.State == "Failed");

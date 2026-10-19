@@ -4,6 +4,7 @@ using System.Text.Json;
 using FluxKnowledge.Application.Contracts;
 using FluxKnowledge.Application.IntegrationV1;
 using FluxKnowledge.Application.Knowledge;
+using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
 using FluxKnowledge.Infrastructure.SqlServer.Visibility;
@@ -121,8 +122,9 @@ public sealed class NativeCodexHookPersistenceIntegrationTests(NativeSqlServerFi
         var service = new NativeCodexHookService(
             new PreflightFacade(),
             new SqlNativeOperationStore(factory, TimeProvider.System),
-            auditWriter: new SqlCodexHookAuditWriter(factory),
-            promptContext: new FixedPromptContext());
+            auditWriter: new DelayedAuditWriter(new SqlCodexHookAuditWriter(factory)),
+            promptContext: new FixedPromptContext(),
+            timeProvider: new PersistenceTimeProvider());
 
         var response = await service.HandleAsync(
             "UserPromptSubmit",
@@ -179,7 +181,8 @@ public sealed class NativeCodexHookPersistenceIntegrationTests(NativeSqlServerFi
             new FailingPreflightFacade(),
             new SqlNativeOperationStore(factory, TimeProvider.System),
             auditWriter: new SqlCodexHookAuditWriter(factory),
-            promptContext: new FailingPromptContext());
+            promptContext: new FailingPromptContext(),
+            timeProvider: new PersistenceTimeProvider());
 
         var startedAt = DateTimeOffset.UtcNow;
         var response = await service.HandleAsync(
@@ -332,7 +335,8 @@ public sealed class NativeCodexHookPersistenceIntegrationTests(NativeSqlServerFi
             new EchoingPreflightFailureFacade(),
             new SqlNativeOperationStore(factory, TimeProvider.System),
             auditWriter: new SqlCodexHookAuditWriter(factory),
-            promptContext: new EchoingPromptFailure());
+            promptContext: new EchoingPromptFailure(),
+            timeProvider: new PersistenceTimeProvider());
 
         var startedAt = DateTimeOffset.UtcNow;
         var response = await service.HandleAsync(
@@ -532,6 +536,24 @@ public sealed class NativeCodexHookPersistenceIntegrationTests(NativeSqlServerFi
 
         public ValueTask<NativeActionReceipt> CommitAsync(string family, object command, string confirmationId, string idempotencyKey, string surface, CancellationToken cancellationToken) =>
             throw new NotSupportedException();
+    }
+
+    // These tests verify durable SQL metadata, not the production prompt deadlines.
+    // Keep real UTC timestamps and caller cancellation; Web tests verify the timed audit budget.
+    private sealed class PersistenceTimeProvider : TimeProvider
+    {
+        public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period) =>
+            base.CreateTimer(callback, state, Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
+    }
+
+    private sealed class DelayedAuditWriter(ICodexHookAuditWriter inner) : ICodexHookAuditWriter
+    {
+        public async ValueTask AppendAsync(CodexHookAuditEvent auditEvent, CancellationToken cancellationToken)
+        {
+            // Reproduce an audit slower than the production prompt budget without relying on SQL load.
+            await Task.Delay(TimeSpan.FromMilliseconds(350), cancellationToken);
+            await inner.AppendAsync(auditEvent, cancellationToken);
+        }
     }
 
     private sealed class FixedPromptContext : ICodexPromptContextService

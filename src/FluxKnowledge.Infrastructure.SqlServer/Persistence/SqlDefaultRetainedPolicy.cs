@@ -306,9 +306,13 @@ internal static class SqlDefaultRetainedPolicy
         if (attempt?.FinishedAtUtc is null) return null;
         var reason = attempt.OutcomeCode;
         if (activity.Reason is not null && activity.Reason != reason) return null;
-        if (extension is ".docx" or ".xlsx" or ".pptx" && branch.ProcessorVersion == OoxmlStructuralTextProcessor.LegacyProcessorVersion &&
-            branch.ProcessorFingerprint == OoxmlStructuralTextProcessor.LegacyProcessorFingerprint &&
-            reason is "office-document-container-invalid" or "office-document-element-limit" or "office-document-expanded-xml-limit" or "office-document-part-unsupported")
+        if ((extension is ".docx" or ".xlsx" or ".pptx") &&
+            ((branch.ProcessorVersion == OoxmlStructuralTextProcessor.LegacyProcessorVersion &&
+             branch.ProcessorFingerprint == OoxmlStructuralTextProcessor.LegacyProcessorFingerprint &&
+             reason is "office-document-container-invalid" or "office-document-element-limit" or "office-document-expanded-xml-limit" or "office-document-part-unsupported") ||
+             (branch.ProcessorVersion == OoxmlStructuralTextProcessor.PreviousProcessorVersion &&
+             branch.ProcessorFingerprint == OoxmlStructuralTextProcessor.PreviousProcessorFingerprint &&
+             reason == "office-document-part-unsupported")))
             return OoxmlStructuralTextProcessor.Capability;
         if (branch.ProcessorVersion == MediaMetadataRetainedProcessor.LegacyProcessorVersion && branch.ProcessorFingerprint == MediaMetadataRetainedProcessor.LegacyProcessorFingerprint &&
             reason == "media-metadata-input-too-large" && MediaMetadataSignature.TryGetFormatForExtension(extension, out _)) return MediaMetadataRetainedProcessor.Capability;

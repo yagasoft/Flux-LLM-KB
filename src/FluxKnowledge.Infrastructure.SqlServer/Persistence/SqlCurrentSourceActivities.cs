@@ -18,6 +18,7 @@ public static class SqlCurrentSourceActivities
                 (successor.ProcessorVersion == RetainedDefaultPolicy.Version && successor.DescriptorFingerprint == RetainedDefaultPolicy.TextFingerprint ||
                  successor.ProcessorVersion == RetainedDefaultPolicy.UnsupportedBinary.ProcessorVersion && successor.DescriptorFingerprint == RetainedDefaultPolicy.UnsupportedBinary.ProcessorFingerprint ||
                  successor.ProcessorVersion == OoxmlStructuralTextProcessor.Capability.ProcessorVersion && successor.DescriptorFingerprint == OoxmlStructuralTextProcessor.Capability.ProcessorFingerprint ||
+                 successor.ProcessorVersion == OoxmlStructuralTextProcessor.PreviousProcessorVersion && successor.DescriptorFingerprint == OoxmlStructuralTextProcessor.PreviousProcessorFingerprint ||
                  successor.ProcessorVersion == MediaMetadataRetainedProcessor.Capability.ProcessorVersion && successor.DescriptorFingerprint == MediaMetadataRetainedProcessor.Capability.ProcessorFingerprint ||
                  successor.ProcessorVersion == ZipArchiveRetainedProcessor.Capability.ProcessorVersion && successor.DescriptorFingerprint == ZipArchiveRetainedProcessor.Capability.ProcessorFingerprint ||
                  successor.ProcessorVersion == TarArchiveRetainedProcessor.Capability.ProcessorVersion && successor.DescriptorFingerprint == TarArchiveRetainedProcessor.Capability.ProcessorFingerprint ||

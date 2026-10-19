@@ -335,8 +335,11 @@ public sealed class RetainedTextPipelineIntegrationTests(NativeSqlServerFixture 
         }
     }
 
-    [NativeSqlServerFact]
-    public async Task Retained_reader_accepts_text_above_32_mib_only_for_the_single_completed_ooxml_child()
+    [NativeSqlServerTheory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    public async Task Retained_reader_accepts_text_above_32_mib_only_for_the_single_completed_ooxml_child(int processorGeneration)
     {
         const int byteLength = 32 * 1024 * 1024 + 1;
         var bytes = Enumerable.Repeat((byte)'x', byteLength).ToArray();
@@ -348,7 +351,7 @@ public sealed class RetainedTextPipelineIntegrationTests(NativeSqlServerFixture 
         try
         {
             var revisionId = await SeedRevisionAsync(hash, bytes.Length, relative);
-            await BindCompletedOoxmlChildAsync(revisionId, hash);
+            await BindCompletedOoxmlChildAsync(revisionId, hash, processorGeneration: processorGeneration);
 
             var source = await new SqlRetainedSourceReader(new ContextFactory(_fixture.ConnectionString), root)
                 .ReadUtf8Async(new SourceRevisionId(revisionId), CancellationToken.None);
@@ -361,8 +364,11 @@ public sealed class RetainedTextPipelineIntegrationTests(NativeSqlServerFixture 
         }
     }
 
-    [NativeSqlServerFact]
-    public async Task Retained_registration_rejects_large_text_with_forged_ooxml_origin_but_accepts_exact_branch_binding()
+    [NativeSqlServerTheory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    public async Task Retained_registration_rejects_large_text_with_forged_ooxml_origin_but_accepts_exact_branch_binding(int processorGeneration)
     {
         const int byteLength = 32 * 1024 * 1024 + 1;
         var hash = new string('f', 64);
@@ -386,7 +392,7 @@ public sealed class RetainedTextPipelineIntegrationTests(NativeSqlServerFixture 
         var store = new SqlRetainedTextRegistrationStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System);
         Assert.False(await store.RegisterAsync(activity, CancellationToken.None));
 
-        await BindCompletedOoxmlChildAsync(revisionId, hash, activity.Id.Value);
+        await BindCompletedOoxmlChildAsync(revisionId, hash, activity.Id.Value, processorGeneration);
 
         Assert.True(await store.RegisterAsync(activity, CancellationToken.None));
     }
@@ -779,7 +785,7 @@ public sealed class RetainedTextPipelineIntegrationTests(NativeSqlServerFixture 
         return revisionId;
     }
 
-    private async Task BindCompletedOoxmlChildAsync(Guid childRevisionId, string childHash, Guid? childActivityId = null)
+    private async Task BindCompletedOoxmlChildAsync(Guid childRevisionId, string childHash, Guid? childActivityId = null, int processorGeneration = 3)
     {
         await using var context = CreateContext();
         var child = await context.SourceRevisions.SingleAsync(value => value.Id == childRevisionId);
@@ -790,6 +796,8 @@ public sealed class RetainedTextPipelineIntegrationTests(NativeSqlServerFixture 
         var parentHash = new string('a', 64);
         child.ParentSourceRevisionId = parentId;
         var now = DateTimeOffset.UtcNow;
+        var processorVersion = processorGeneration == 3 ? OoxmlStructuralTextProcessor.Capability.ProcessorVersion : $"phase-5-ooxml-structural-v{processorGeneration}";
+        var processorFingerprint = processorGeneration == 3 ? OoxmlStructuralTextProcessor.Capability.ProcessorFingerprint : $"phase-5-ooxml-retained-structural-v{processorGeneration}";
         context.SourceRevisions.Add(new SourceRevisionEntity
         {
             Id = parentId, SourceRootId = sourceRootId, StableSourceIdentity = $"ooxml-parent:{parentId:N}", Revision = 1,
@@ -803,8 +811,8 @@ public sealed class RetainedTextPipelineIntegrationTests(NativeSqlServerFixture 
         {
             Id = ownerActivityId, SourceRevisionId = parentId, ActivityKind = (int)SourceActivityKind.TextExtraction,
             ExecutionClass = (int)ExecutionClass.InProcess,
-            ProcessorVersion = OoxmlStructuralTextProcessor.Capability.ProcessorVersion,
-            DescriptorFingerprint = OoxmlStructuralTextProcessor.Capability.ProcessorFingerprint,
+            ProcessorVersion = processorVersion,
+            DescriptorFingerprint = processorFingerprint,
             InputFingerprint = parentHash, State = (int)SourceActivityState.Completed,
             CreatedAtUtc = now, UpdatedAtUtc = now
         });
@@ -822,8 +830,8 @@ public sealed class RetainedTextPipelineIntegrationTests(NativeSqlServerFixture 
         context.SourceProcessorBranches.Add(new SourceProcessorBranchEntity
         {
             Id = branchId, SourceActivityId = ownerActivityId, SourceRevisionId = parentId, InputSha256 = parentHash,
-            ProcessorVersion = OoxmlStructuralTextProcessor.Capability.ProcessorVersion,
-            ProcessorFingerprint = OoxmlStructuralTextProcessor.Capability.ProcessorFingerprint,
+            ProcessorVersion = processorVersion,
+            ProcessorFingerprint = processorFingerprint,
             State = (int)RetainedProcessorBranchState.Completed, CompletedMemberCount = 1,
             CreatedAtUtc = now, UpdatedAtUtc = now
         });

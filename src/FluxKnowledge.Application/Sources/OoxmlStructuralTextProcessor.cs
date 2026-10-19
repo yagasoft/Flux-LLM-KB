@@ -17,6 +17,8 @@ public sealed class OoxmlStructuralTextProcessor : ILocalSourceCapabilityHandler
 {
     public const string LegacyProcessorVersion = "phase-5-ooxml-structural-v1";
     public const string LegacyProcessorFingerprint = "phase-5-ooxml-retained-structural-v1";
+    public const string PreviousProcessorVersion = "phase-5-ooxml-structural-v2";
+    public const string PreviousProcessorFingerprint = "phase-5-ooxml-retained-structural-v2";
     private readonly IRetainedArtifactWriter _artifactWriter;
     private readonly SourceCapabilityDescriptor _descriptor;
     private const long MaximumInputBytes = 128L * 1024 * 1024;
@@ -26,7 +28,8 @@ public sealed class OoxmlStructuralTextProcessor : ILocalSourceCapabilityHandler
     internal const long MaximumTextBytes = 200L * 1024 * 1024;
     private const int MaximumEntries = 2_048;
     private const int MaximumRelationships = 8_192;
-    private const long MaximumSelectedPartBytes = 64L * 1024 * 1024;
+    private const long MaximumSelectedPartBytes = 128L * 1024 * 1024;
+    private const long MaximumVsdxSelectedPartBytes = 64L * 1024 * 1024;
     private const int MaximumPathLength = 512;
     private const int MaximumCompressionRatio = 169;
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);
@@ -48,11 +51,11 @@ public sealed class OoxmlStructuralTextProcessor : ILocalSourceCapabilityHandler
     private const string VisioNamespace = "http://schemas.microsoft.com/office/visio/2012/main";
 
     public static readonly SourceCapabilityDescriptor Capability = new(
-        new Guid("1e73f18a-0151-4b02-aca7-d6ca34a557ea"),
+        new Guid("c784f889-e910-4d42-95fd-b4d8a91b9a03"),
         "document-ooxml-structural-extract",
-        "phase-5-ooxml-structural-v2",
+        "phase-5-ooxml-structural-v3",
         ExecutionClass.InProcess,
-        "phase-5-ooxml-retained-structural-v2",
+        "phase-5-ooxml-retained-structural-v3",
         SourceActivityKind.TextExtraction,
         "OoxmlDocumentContainer",
         "retained:document-ooxml-structural-extract");
@@ -71,6 +74,7 @@ public sealed class OoxmlStructuralTextProcessor : ILocalSourceCapabilityHandler
     public SourceCapabilityDescriptor Descriptor => _descriptor;
     public static bool IsKnownProcessor(string version, string fingerprint) =>
         version == Capability.ProcessorVersion && fingerprint == Capability.ProcessorFingerprint ||
+        version == PreviousProcessorVersion && fingerprint == PreviousProcessorFingerprint ||
         version == LegacyProcessorVersion && fingerprint == LegacyProcessorFingerprint;
 
     /// <summary>Promotion is extension-led; package confirmation stays inside the bounded processor.</summary>
@@ -177,6 +181,8 @@ public sealed class OoxmlStructuralTextProcessor : ILocalSourceCapabilityHandler
 
             var entriesByPath = new Dictionary<string, ZipArchiveEntry>(StringComparer.OrdinalIgnoreCase);
             var entriesInArchiveOrder = new List<ZipArchiveEntry>(package.Entries.Count);
+            // Visio shares this parser but retains its existing, separately versioned budget.
+            var maximumPartBytes = requireVsdx ? MaximumVsdxSelectedPartBytes : MaximumSelectedPartBytes;
             long expandedTotal = 0;
             var paths = new HashSet<string>(StringComparer.Ordinal);
             foreach (var entry in package.Entries)
@@ -192,7 +198,8 @@ public sealed class OoxmlStructuralTextProcessor : ILocalSourceCapabilityHandler
                     // Binary payloads stay unopened. Expansion limits apply to the XML we actually read.
                     if (entry.Length > checked(Math.Max(1L, entry.CompressedLength) * MaximumCompressionRatio))
                         throw new RetainedProcessorException("office-document-expanded-xml-limit");
-                    if (entry.Length > MaximumSelectedPartBytes) throw new RetainedProcessorException("office-document-part-unsupported");
+                    if (entry.Length > maximumPartBytes)
+                        throw new RetainedProcessorException(requireVsdx ? "office-document-part-unsupported" : "office-document-expanded-xml-limit");
                     expandedTotal = checked(expandedTotal + entry.Length);
                     if (expandedTotal > MaximumExpandedXmlBytes) throw new RetainedProcessorException("office-document-expanded-xml-limit");
                 }

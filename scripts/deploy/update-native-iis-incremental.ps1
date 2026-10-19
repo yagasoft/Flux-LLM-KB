@@ -2401,6 +2401,7 @@ $interactiveHostMutationStarted = $false
 $interactiveHostTaskWasEnabled = $false
 $interactiveHostPreviousRoot = $null
 $interactiveHostRollbackVerified = $true
+$holdReleaseAttempted = $false
 $holdReleased = $false
 $hostingChange = @{ Original=$null; Desired=@{ StartMode='AlwaysRunning'; IdleTimeout='00:00:00'; PreloadEnabled=$true }
     Attempted=$false; RollbackVerified=$true }
@@ -2723,6 +2724,8 @@ try {
         }
 
     if (!$ApplyResumableSourceDeletionCleanupMigration) {
+        # From this attempt onwards workers may have observed the hold disappear.
+        $holdReleaseAttempted = $true
         Remove-DeploymentValidationHold -Path $ValidationHoldPath -ReleaseId $releaseId
     }
     $deploymentValidation.HoldCreated = $false
@@ -2771,7 +2774,7 @@ try {
 }
 catch {
     $deploymentFailure = $_
-    if ($holdReleased -or ($ApplyResumableSourceDeletionCleanupMigration -and $null -ne $sourceDeletionCleanupState -and $sourceDeletionCleanupState.ForwardRecoveryRequired)) {
+    if ($holdReleaseAttempted -or $holdReleased -or ($ApplyResumableSourceDeletionCleanupMigration -and $null -ne $sourceDeletionCleanupState -and $sourceDeletionCleanupState.ForwardRecoveryRequired)) {
         throw "Deployment hold release was attempted; outcome requires reconciliation after a failure. Current matching payloads and schema are retained; do not replay migration or predecessor rollback. Inspect recovery release $releaseRoot. Failure: $($_.Exception.Message)"
     }
     if ($interactiveHostMutationStarted) {
@@ -2818,7 +2821,7 @@ catch {
     throw
 }
 finally {
-    if ($leaseAcquired -and $null -ne $deploymentValidation -and
+    if ($leaseAcquired -and -not $holdReleaseAttempted -and $null -ne $deploymentValidation -and
         (Test-IncrementalRollbackHoldRelease -Validation $deploymentValidation `
             -ApplyMigrations ([bool]$ApplyMigrations) `
             -ApplyCorpusChunkFullTextMigration ([bool]$ApplyCorpusChunkFullTextMigration) `
