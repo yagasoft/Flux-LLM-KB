@@ -130,13 +130,13 @@ and finite exact-item recovery.
 
 ## Exact document recovery and publication throughput
 
-The same 19 October release deployed OOXML v4. One exact retained workbook
-recovery produced 23,136 UTF-8 bytes and completed Extract, Normalise and
-Canonical index by the bounded 09:24 UTC observation. Embedding, selected
-publication and supported readback had not yet completed. The larger Word
-recovery also remains in embedding; neither admission is to be repeated.
+The 19 October OOXML v4 release recovered one exact retained workbook into
+23,136 UTF-8 bytes. All five stages and its exact selected publication completed;
+supported Corpus readback returned nonempty text at 10:20 UTC. The larger Word
+recovery remains in embedding, with durable checkpoint progress observed. Neither
+admission is to be repeated.
 
-A prepared common Image/PDF recovery path uses the existing trusted-local
+A common Image/PDF recovery path uses the existing trusted-local
 `documents reprocess` command with the exact failed Extract job and expected root
 configuration revision. It creates a distinct child and durable recovery proof;
 it never resets the failed predecessor. Admission, claim, commit, registration
@@ -187,3 +187,38 @@ measured no SQL phases. A separate disposable SQL test verifies dispatch,
 publication and lexical readback. Production-scale latency and bounded real-item
 acceptance are still required. Full rebuilds for removals/replacements remain
 costly; this increment does not change pump concurrency or lease duration.
+
+Release `20261019T115128Z-3fabb2e571d0` deployed the common document recovery,
+image/PDF handling, cached runtime binding and immutable append correction. The
+incremental updater confirmed unchanged retained state and released its validation
+hold. Live, readiness and index-health endpoints returned HTTP 200. The first
+one-image command exited with a generic availability error and no returned
+successor. Exact bounded reconciliation found only its historical branch, with
+no new recovery branch at observation. Its attempt marker is preserved; live OCR
+success and further cohort admission remain unproved.
+
+The follow-up found a second publication cost: activation issued one SQL insert
+per vector while holding the serializable publication fence. A disposable product
+regression reproduced 1,025 membership commands for 1,025 vectors. Set-based
+activation now sends the typed vector IDs in one parameterised `nvarchar(max)`
+JSON value and inserts the missing set with `OPENJSON`. It retains the transaction,
+publication fence, row/range locks, immutable-generation comparison and exact
+membership checks. It changes no schema, isolation, retries or timeouts.
+
+Four focused SQL checks pass for one-round-trip exact membership, repeated
+activation/replay, incompatible membership refusal, duplicate snapshot refusal
+and rollback after cancellation immediately following the insert. Live metadata
+also recorded lock waits, but a later statement-classification sample did not
+capture the earlier blocking command. The generic CLI exception is not yet
+attributed conclusively to this loop. Independent review, canonical closeout and
+incremental deployment of the SQL correction precede further bounded acceptance.
+General resolved-event compaction, source permission failures and the native IIS
+crash cause remain separate open work; no source ACL or model content changed.
+
+Cold empty-root overview reads now materialise the existing current-file query
+before constructing derived branch summaries. If that set is empty, no branch
+query is needed. The two-second read budget, deletion transaction and both
+consistency fences remain unchanged. SqlClient zero-number cancellation is
+reported as budget unavailability only after the internal deadline expires and
+the caller remains active; the original exception is retained. Genuine SQL
+errors, including timeout and deadlock, remain unchanged.

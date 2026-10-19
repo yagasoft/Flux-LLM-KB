@@ -12,6 +12,7 @@ using FluxKnowledge.Domain.Pipeline;
 using FluxKnowledge.Domain.Sources;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence.Configurations;
+using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 
 namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
@@ -1081,22 +1082,29 @@ public sealed partial class SqlStageTransitionStore : IStageTransitionStore
         IReadOnlyList<CanonicalVector> vectors,
         CancellationToken cancellationToken)
     {
-        foreach (var vector in vectors)
-        {
-            await context.Database.ExecuteSqlInterpolatedAsync(
-                    $"""
-                     INSERT INTO [IndexGenerationVectors] ([GenerationId], [VectorId])
-                     SELECT {generationId}, {vector.VectorId}
-                     WHERE NOT EXISTS
-                     (
-                         SELECT 1
-                         FROM [IndexGenerationVectors] WITH (UPDLOCK, HOLDLOCK)
-                         WHERE [GenerationId] = {generationId} AND [VectorId] = {vector.VectorId}
-                     );
-                     """,
-                    cancellationToken)
-                .ConfigureAwait(false);
-        }
+        cancellationToken.ThrowIfCancellationRequested();
+        // Membership is already checked against the exact fenced snapshot above.
+        // Insert the set in one round trip instead of holding the publication fence
+        // across one client/server exchange for every vector in the entire corpus.
+        var members = JsonSerializer.Serialize(vectors.Select(vector => vector.VectorId));
+        await context.Database.ExecuteSqlRawAsync(
+                """
+                INSERT INTO [IndexGenerationVectors] ([GenerationId], [VectorId])
+                SELECT @generationId, [source].[VectorId]
+                FROM OPENJSON(@members) WITH ([VectorId] bigint '$') AS [source]
+                WHERE NOT EXISTS
+                (
+                    SELECT 1
+                    FROM [IndexGenerationVectors] WITH (UPDLOCK, HOLDLOCK)
+                    WHERE [GenerationId] = @generationId AND [VectorId] = [source].[VectorId]
+                );
+                """,
+                new object[]
+                {
+                    new SqlParameter("@generationId", SqlDbType.UniqueIdentifier) { Value = generationId },
+                    new SqlParameter("@members", SqlDbType.NVarChar, -1) { Value = members }
+                }, cancellationToken)
+            .ConfigureAwait(false);
     }
 
     private static bool SameGeneration(

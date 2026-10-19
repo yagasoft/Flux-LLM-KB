@@ -1,3 +1,4 @@
+using System.Data.Common;
 using FluxKnowledge.Application.Contracts;
 using FluxKnowledge.Application.Documents;
 using FluxKnowledge.Application.Ports;
@@ -11,6 +12,7 @@ using FluxKnowledge.Integration.Tests.Support;
 using FluxKnowledge.Web.Components.Sources;
 using FluxKnowledge.Web.Components.Status;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Xunit;
 
 namespace FluxKnowledge.Web.Tests.Components;
@@ -19,6 +21,43 @@ public sealed class SourceRootProjectionReaderIntegrationTests(NativeSqlServerFi
     : IClassFixture<NativeSqlServerFixture>
 {
     private readonly NativeSqlServerFixture _fixture = fixture;
+
+    [NativeSqlServerFact]
+    public async Task Empty_root_avoids_derived_branch_queries_and_returns_empty_file_counts()
+    {
+        var root = Guid.NewGuid();
+        var factory = new TestDbContextFactory(_fixture.ConnectionString);
+        await using (var setup = factory.CreateDbContext())
+        {
+            setup.SourceRootConfigurations.Add(new SourceRootConfigurationEntity
+            {
+                Id = root, CanonicalPath = $"E:\\empty-source-summary\\{root:N}", DisplayName = "Empty source",
+                State = (int)SourceRootState.Enabled, ConfigurationRevision = 1,
+                CreatedAtUtc = DateTimeOffset.UtcNow, UpdatedAtUtc = DateTimeOffset.UtcNow
+            });
+            await setup.SaveChangesAsync();
+        }
+        var trace = new EmptySummaryCommandTrace();
+        await using var context = new FluxKnowledgeDbContext(new DbContextOptionsBuilder<FluxKnowledgeDbContext>()
+            .UseSqlServer(_fixture.ConnectionString).AddInterceptors(trace).Options);
+        var summary = await SourceRootProjectionReader.ReadStateSummariesAsync(context, [root], default);
+        Assert.Empty(summary);
+        Assert.Equal(0, trace.BranchQueries);
+        Assert.Equal(1, trace.RevisionQueries);
+    }
+
+    private sealed class EmptySummaryCommandTrace : DbCommandInterceptor
+    {
+        public int BranchQueries { get; private set; }
+        public int RevisionQueries { get; private set; }
+        public override ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(DbCommand command,
+            CommandEventData eventData, InterceptionResult<DbDataReader> result, CancellationToken cancellationToken = default)
+        {
+            if (command.CommandText.Contains("[SourceProcessorBranches]", StringComparison.Ordinal)) BranchQueries++;
+            if (command.CommandText.Contains("[SourceRevisions]", StringComparison.Ordinal)) RevisionQueries++;
+            return ValueTask.FromResult(result);
+        }
+    }
 
     [NativeSqlServerTheory]
     [InlineData(SourceActivityState.Pending)]

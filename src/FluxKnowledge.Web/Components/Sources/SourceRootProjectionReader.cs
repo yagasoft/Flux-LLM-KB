@@ -380,6 +380,13 @@ public sealed class SourceRootProjectionReader(
         }
 
         var currentFiles = CurrentFileRevisions(context).Where(revision => rootIds.Contains(revision.SourceRootId));
+        var knownFiles = await currentFiles
+            .Select(revision => new SourceRevisionRow(revision.Id, revision.CanonicalPath, revision.Classification,
+                revision.Extension, revision.OriginKind, revision.SourceRootId, revision.StableSourceIdentity, revision.DiscoveredAtUtc))
+            .ToArrayAsync(cancellationToken).ConfigureAwait(false);
+        // Every summary/derived branch below joins this same current-owner set.
+        // Empty roots need no branch plans; the overview still checks its fences.
+        if (knownFiles.Length == 0) return new Dictionary<Guid, SourceStateSummary>();
         var rows = await (
             from activity in SqlCurrentSourceActivities.Query(context)
             join revision in currentFiles on activity.SourceRevisionId equals revision.Id
@@ -434,10 +441,6 @@ public sealed class SourceRootProjectionReader(
                 state.BranchId,
                 state.Status == "Completed" ? "No extractable text" : null));
         }
-        var knownFiles = await currentFiles
-            .Select(revision => new SourceRevisionRow(revision.Id, revision.CanonicalPath, revision.Classification,
-                revision.Extension, revision.OriginKind, revision.SourceRootId, revision.StableSourceIdentity, revision.DiscoveredAtUtc))
-            .ToArrayAsync(cancellationToken).ConfigureAwait(false);
         var unconfirmed = UnconfirmedRevisionIds(knownFiles);
         var represented = rows.Select(row => row.SourceRevisionId).ToHashSet();
         rows.AddRange(knownFiles.Where(file => !represented.Contains(file.Id)).Select(file =>

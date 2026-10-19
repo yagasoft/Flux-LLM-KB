@@ -6,6 +6,7 @@ using FluxKnowledge.Domain.Gpu;
 using FluxKnowledge.Domain.Jobs;
 using FluxKnowledge.Domain.Outlook;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
+using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 using GpuSchedulerStore = FluxKnowledge.Application.Gpu.IGpuSchedulerStore;
 using SchedulerStoreStatusSnapshot = FluxKnowledge.Application.Gpu.GpuSchedulerStatusSnapshot;
@@ -73,6 +74,13 @@ public sealed class SqlProjectionReader(
         {
             // Disposal in the core completes before status is marked unavailable.
             // Caller cancellation and genuine SQL failures are not translated.
+            throw new OverviewReadBudgetExceededException(exception);
+        }
+        catch (SqlException exception) when (!cancellationToken.IsCancellationRequested && budget.IsCancellationRequested &&
+            exception.Errors.Count > 0 && exception.Errors.Cast<SqlError>().All(error => error.Number == 0))
+        {
+            // SqlClient can report command cancellation as a zero-number SQL
+            // exception. Preserve the provider evidence and all genuine errors.
             throw new OverviewReadBudgetExceededException(exception);
         }
     }
