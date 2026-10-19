@@ -35,7 +35,7 @@ using Xunit;
 namespace FluxKnowledge.Integration.Tests.Indexing;
 
 [Collection("sql-full-text")]
-public sealed class EmbeddingGpuRequestTests(NativeSqlServerFixture fixture) : IClassFixture<NativeSqlServerFixture>, IAsyncLifetime
+public sealed partial class EmbeddingGpuRequestTests(NativeSqlServerFixture fixture) : IClassFixture<NativeSqlServerFixture>, IAsyncLifetime
 {
     private static readonly EmbeddingGpuRuntime Runtime = new(BgeOfflineModels.GpuRuntimeKey,
         BgeOfflineModels.GpuSettingsFingerprint, new(BgeOfflineModels.EmbeddingFingerprint, 1024), 1024);

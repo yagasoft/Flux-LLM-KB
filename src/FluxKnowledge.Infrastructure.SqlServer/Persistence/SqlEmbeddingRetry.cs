@@ -151,7 +151,7 @@ internal sealed record SqlEmbeddingRetry(JobEntity Job, OutboxMessageEntity Disp
             GpuInput[] inputs;
             try { inputs = JsonSerializer.Deserialize<GpuInput[]>(request.InputsJson) ?? []; }
             catch (JsonException) { Refuse(); throw; }
-            if (inputs.Length is < 1 or > 4 || inputs.Select(value => value.Id).Distinct().Count() != inputs.Length) Refuse();
+            if (inputs.Length is < 1 or > EmbeddingGpuRuntime.MaximumRequestChunks || inputs.Select(value => value.Id).Distinct().Count() != inputs.Length) Refuse();
             using var resultHash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
             foreach (var input in inputs)
             {

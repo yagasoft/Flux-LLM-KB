@@ -17,6 +17,7 @@ public sealed class SqlEmbeddingCheckpointStore(
     IDbContextFactory<FluxKnowledgeDbContext> contextFactory, TimeProvider timeProvider, EmbeddingGpuRuntime? embeddingRuntime = null) : IEmbeddingCheckpointStore
 {
     internal const int MaximumBatchSize = 4;
+    private int BatchSize => embeddingRuntime is null ? MaximumBatchSize : EmbeddingGpuRuntime.MaximumRequestChunks;
 
     public ValueTask<EmbeddingWorkBatch> ReadNextAsync(StageWorkItem work, EmbeddingProfile profile, CancellationToken cancellationToken)
         => ExecuteAsync(async context =>
@@ -43,9 +44,15 @@ public sealed class SqlEmbeddingCheckpointStore(
             }
             ValidateDraft(draft, work, profile, state.CorpusEpoch);
             await ValidateStoredVectorsAsync(context, draft, work, cancellationToken).ConfigureAwait(false);
+            if (embeddingRuntime is not null)
+            {
+                if (profile != embeddingRuntime.Profile) throw new InvalidOperationException("embedding-checkpoint-profile-invalid");
+                var replay = await SqlEmbeddingGpuRequestStore.ReadRequiredReplayAsync(context, work, draft, embeddingRuntime, cancellationToken).ConfigureAwait(false);
+                if (replay is not null) return replay.Value.Batch;
+            }
             var chunks = await Chunks(context, work).Where(chunk => !context.Vectors.Any(vector =>
                     vector.IndexGenerationId == draft.Id && vector.TextChunkId == chunk.Id))
-                .OrderBy(chunk => chunk.Ordinal).ThenBy(chunk => chunk.Id).Take(MaximumBatchSize)
+                .OrderBy(chunk => chunk.Ordinal).ThenBy(chunk => chunk.Id).Take(BatchSize)
                 .Select(chunk => new CanonicalTextChunk(chunk.Id, chunk.Ordinal, chunk.StartOffset, chunk.Length,
                     chunk.Content, chunk.ContentHash, chunk.PassagePolicyFingerprint, chunk.ContextHeader))
                 .ToArrayAsync(cancellationToken).ConfigureAwait(false);
@@ -58,7 +65,7 @@ public sealed class SqlEmbeddingCheckpointStore(
         IReadOnlyList<EmbeddingResult> results, CancellationToken cancellationToken)
     {
         ValidateProfile(batch.Profile);
-        if (batch.Chunks.Count is < 1 or > MaximumBatchSize || results.Count != batch.Chunks.Count ||
+        if (batch.Chunks.Count < 1 || batch.Chunks.Count > BatchSize || results.Count != batch.Chunks.Count ||
             batch.Chunks.Select(chunk => chunk.Id).Distinct().Count() != batch.Chunks.Count || batch.CompletedChecksum is not null)
             throw new InvalidOperationException("embedding-checkpoint-batch-invalid");
         var values = results.Select(result => ValidateResult(result, batch.Profile)).ToArray();

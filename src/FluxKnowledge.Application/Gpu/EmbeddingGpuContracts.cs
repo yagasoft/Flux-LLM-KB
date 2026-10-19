@@ -4,7 +4,11 @@ using FluxKnowledge.Application.Workers;
 namespace FluxKnowledge.Application.Gpu;
 
 public sealed record EmbeddingGpuRuntime(string RuntimeKey, string SettingsFingerprint,
-    EmbeddingProfile Profile, long EstimatedBytes);
+    EmbeddingProfile Profile, long EstimatedBytes)
+{
+    // Scheduling quantum; providers retain their smaller tensor batch limit.
+    public const int MaximumRequestChunks = 16;
+}
 
 public interface IEmbeddingGpuHandoff
 {

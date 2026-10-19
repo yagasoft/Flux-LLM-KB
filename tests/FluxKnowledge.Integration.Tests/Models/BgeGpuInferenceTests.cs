@@ -6,7 +6,7 @@ using Xunit;
 
 namespace FluxKnowledge.Integration.Tests.Models;
 
-public sealed class BgeGpuInferenceTests
+public sealed partial class BgeGpuInferenceTests
 {
     [Theory]
     [InlineData(false)]
@@ -140,7 +140,7 @@ public sealed class BgeGpuInferenceTests
         Assert.Equal(4, result.Value!.Count);
         Assert.True(result.NativeCapacityReleased);
         factory.Events.Clear();
-        var invalid = await session.EmbedBatchAsync(Owner(), ["one", "two", "three", "four", "five"], CancellationToken.None);
+        var invalid = await session.EmbedBatchAsync(Owner(), Enumerable.Repeat("passage", 17).ToArray(), CancellationToken.None);
         Assert.Equal("bge-batch-invalid", invalid.RefusalReason);
         Assert.Empty(factory.Events);
     }
@@ -165,8 +165,10 @@ public sealed class BgeGpuInferenceTests
     internal sealed class RecordingModels : IBgeGpuModelFactory
     {
         public List<string> Events { get; } = [];
+        public List<string[]> Batches { get; } = [];
         public string? Failure { get; init; }
         public Action? BeforeRun { get; init; }
+        public Func<int, IReadOnlyList<string>, IReadOnlyList<EmbeddingResult>>? EmbeddingResults { get; init; }
 
         public ValueTask<BgeGpuModelLease<IBatchedEmbeddingProvider>> OpenEmbeddingAsync(GpuOwnedWorkContext owner)
         {
@@ -203,8 +205,9 @@ public sealed class BgeGpuInferenceTests
             public async ValueTask<EmbeddingResult> CreateEmbeddingAsync(string text, CancellationToken ct) => (await CreateEmbeddingsAsync([text], ct))[0];
             public ValueTask<IReadOnlyList<EmbeddingResult>> CreateEmbeddingsAsync(IReadOnlyList<string> texts, CancellationToken ct)
             {
-                owner.Events.Add("embedding.run"); owner.BeforeRun?.Invoke(); ct.ThrowIfCancellationRequested();
+                owner.Events.Add("embedding.run"); owner.Batches.Add(texts.ToArray()); owner.BeforeRun?.Invoke(); ct.ThrowIfCancellationRequested();
                 if (owner.Failure == "run") throw new InvalidOperationException("synthetic-run-failure");
+                if (owner.EmbeddingResults is not null) return ValueTask.FromResult(owner.EmbeddingResults(owner.Batches.Count, texts));
                 IReadOnlyList<EmbeddingResult> results = texts.Select(_ =>
                 {
                     var values = new float[1024]; values[0] = 1; return new EmbeddingResult(values, Profile.ModelFingerprint);

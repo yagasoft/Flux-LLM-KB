@@ -70,32 +70,50 @@ public sealed class SqlEmbeddingGpuRequestStore(IDbContextFactory<FluxKnowledgeD
 
     public async ValueTask QueueAsync(StageWorkItem work, EmbeddingWorkBatch batch, CancellationToken cancellationToken)
     {
-        if (batch.Profile != runtime.Profile || batch.Chunks.Count is < 1 or > 4 || batch.CompletedChecksum is not null ||
+        if (batch.Profile != runtime.Profile || batch.Chunks.Count is < 1 or > EmbeddingGpuRuntime.MaximumRequestChunks || batch.CompletedChecksum is not null ||
             batch.Chunks.Select(chunk => chunk.Id).Distinct().Count() != batch.Chunks.Count)
             throw new InvalidOperationException("embedding-gpu-batch-invalid");
-        var inputs = JsonSerializer.Serialize(batch.Chunks.Select(chunk => new Input(chunk.Id, chunk.SearchInputHash)).ToArray());
-        var digest = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(inputs)));
+        var canonicalInputs = JsonSerializer.Serialize(batch.Chunks.Select(chunk => new Input(chunk.Id, chunk.SearchInputHash)).ToArray());
+        var canonicalDigest = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(canonicalInputs)));
         var id = await TransactionAsync(async context =>
         {
-            var previous = await context.EmbeddingGpuRequests.SingleOrDefaultAsync(request => request.ParentJobId == work.Job.JobId.Value &&
-                request.GenerationId == batch.GenerationId && request.InputDigest == digest && request.State < 2, cancellationToken).ConfigureAwait(false);
-            if (previous is not null)
+            var epoch = (await SqlPublishedPassageSelection.ReadStampAsync(context, cancellationToken).ConfigureAwait(false)).CorpusEpoch;
+            if (epoch != batch.CorpusEpoch) throw new InvalidOperationException("embedding-checkpoint-epoch-changed");
+            var draft = await context.IndexGenerations.SingleAsync(value => value.Id == batch.GenerationId, cancellationToken).ConfigureAwait(false);
+            SqlEmbeddingCheckpointStore.ValidateDraft(draft, work, batch.Profile, epoch);
+            // A producer can lose the handoff response while its exact request is
+            // already executing or has saved vectors. Acknowledge that identity;
+            // selecting or retrying another group still requires the strict fence.
+            var active = await context.EmbeddingGpuRequests.AsNoTracking()
+                .Where(request => request.ParentJobId == work.Job.JobId.Value && request.State < 2)
+                .OrderBy(request => request.CreatedAtUtc).ThenBy(request => request.MiniTaskId)
+                .Take(2).ToArrayAsync(cancellationToken).ConfigureAwait(false);
+            if (active.Length > 1) throw new InvalidOperationException("embedding-gpu-request-conflict");
+            if (active.Length == 1)
             {
+                var previous = active[0];
                 if (previous.PipelineRecordId != work.Job.PipelineRecordId.Value || previous.SourceRevision != work.Job.SourceRevision ||
-                    previous.CorpusEpoch != batch.CorpusEpoch || previous.InputsJson != inputs ||
-                    previous.ModelFingerprint != batch.Profile.ModelFingerprint || previous.Dimensions != batch.Profile.Dimensions)
+                    previous.GenerationId != batch.GenerationId || previous.CorpusEpoch != epoch || previous.NativeCleanupConfirmed ||
+                    previous.ModelFingerprint != batch.Profile.ModelFingerprint || previous.Dimensions != batch.Profile.Dimensions ||
+                    previous.InputDigest != Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(previous.InputsJson))))
                     throw new InvalidOperationException("embedding-gpu-request-conflict");
+                var original = await ReadBatchAsync(context, previous.PipelineRecordId, previous.SourceRevision,
+                    previous.GenerationId, previous.CorpusEpoch, previous.InputsJson, cancellationToken).ConfigureAwait(false);
+                if (!original.Chunks.SequenceEqual(batch.Chunks)) throw new InvalidOperationException("embedding-gpu-request-conflict");
+                // The scheduler validates the original parent lease identity and
+                // reuses its task without changing dispatch or native ownership.
                 return previous.MiniTaskId;
             }
+            var replay = await ReadRequiredReplayAsync(context, work, draft, runtime, cancellationToken).ConfigureAwait(false);
+            if (replay is not null && !replay.Value.Batch.Chunks.SequenceEqual(batch.Chunks))
+                throw new InvalidOperationException("embedding-gpu-request-conflict");
+            var inputs = replay?.InputsJson ?? canonicalInputs;
+            var digest = replay?.InputDigest ?? canonicalDigest;
             await SqlEmbeddingCheckpointStore.ValidateClaimAsync(context, work, clock.GetUtcNow(), cancellationToken).ConfigureAwait(false);
             if (await context.EmbeddingGpuRequests.CountAsync(request => request.ParentJobId == work.Job.JobId.Value &&
                 request.GenerationId == batch.GenerationId && request.InputDigest == digest && request.State == 2 && request.ResultDigest == null,
                 cancellationToken).ConfigureAwait(false) >= 3)
                 throw new InvalidOperationException("embedding-gpu-batch-retry-limit");
-            var epoch = (await SqlPublishedPassageSelection.ReadStampAsync(context, cancellationToken).ConfigureAwait(false)).CorpusEpoch;
-            if (epoch != batch.CorpusEpoch) throw new InvalidOperationException("embedding-checkpoint-epoch-changed");
-            var draft = await context.IndexGenerations.SingleAsync(value => value.Id == batch.GenerationId, cancellationToken).ConfigureAwait(false);
-            SqlEmbeddingCheckpointStore.ValidateDraft(draft, work, batch.Profile, epoch);
             var current = await ReadBatchAsync(context, work.Job.PipelineRecordId.Value, work.Job.SourceRevision,
                 batch.GenerationId, epoch, inputs, cancellationToken).ConfigureAwait(false);
             if (!current.Chunks.SequenceEqual(batch.Chunks)) throw new InvalidOperationException("embedding-checkpoint-input-changed");
@@ -382,7 +400,7 @@ public sealed class SqlEmbeddingGpuRequestStore(IDbContextFactory<FluxKnowledgeD
     public async ValueTask CommitAsync(GpuExecutorBatchHandle handle, Guid executorInstance,
         EmbeddingGpuExecutionWork work, IReadOnlyList<EmbeddingResult> results, CancellationToken cancellationToken)
     {
-        if (work.Batch.Profile != runtime.Profile || work.Batch.Chunks.Count is < 1 or > 4 ||
+        if (work.Batch.Profile != runtime.Profile || work.Batch.Chunks.Count is < 1 or > EmbeddingGpuRuntime.MaximumRequestChunks ||
             results.Count != work.Batch.Chunks.Count || work.Batch.Chunks.Select(chunk => chunk.Id).Distinct().Count() != work.Batch.Chunks.Count)
             throw new InvalidOperationException("embedding-gpu-batch-invalid");
         var payloads = results.Select(result => SqlEmbeddingCheckpointStore.ValidateResult(result, runtime.Profile)).ToArray();
@@ -510,11 +528,47 @@ public sealed class SqlEmbeddingGpuRequestStore(IDbContextFactory<FluxKnowledgeD
                     allowPaused && record.SourceRevision.SourceRoot.State == (int)SourceRootState.Paused || maintenance)), ct).ConfigureAwait(false);
     }
 
-    private async Task<EmbeddingWorkBatch> ReadBatchAsync(FluxKnowledgeDbContext context, Guid recordId, long revision,
+    // Retain the exact unfinished group across upgrades and failed attempts. A new
+    // grouping must never bypass its digest-based retry budget or overlap ownership.
+    internal static async Task<(EmbeddingWorkBatch Batch, string InputsJson, string InputDigest)?> ReadRequiredReplayAsync(
+        FluxKnowledgeDbContext context, StageWorkItem work, IndexGenerationEntity draft, EmbeddingGpuRuntime runtime, CancellationToken ct)
+    {
+        if (context.Database.CurrentTransaction is null) throw new InvalidOperationException("Embedding replay requires a fenced transaction.");
+        var epoch = draft.CorpusEpoch ?? throw new InvalidOperationException("embedding-checkpoint-epoch-changed");
+        var candidates = await context.EmbeddingGpuRequests.AsNoTracking().Where(value => value.ParentJobId == work.Job.JobId.Value &&
+                (value.State < 2 || value.ResultDigest == null && !context.EmbeddingGpuRequests.Any(success =>
+                    success.ParentJobId == value.ParentJobId && success.GenerationId == value.GenerationId && success.CorpusEpoch == value.CorpusEpoch &&
+                    success.PipelineRecordId == value.PipelineRecordId && success.SourceRevision == value.SourceRevision &&
+                    success.ModelFingerprint == value.ModelFingerprint && success.Dimensions == value.Dimensions &&
+                    success.InputDigest == value.InputDigest && success.State == 2 && success.ResultDigest != null && success.NativeCleanupConfirmed)))
+            .OrderBy(value => value.CreatedAtUtc).ThenBy(value => value.MiniTaskId).Take(5).ToArrayAsync(ct).ConfigureAwait(false);
+        if (candidates.Length == 0) return null;
+        var first = candidates[0];
+        if (candidates.Length == 5 || candidates.Count(value => value.State < 2) > 1 || candidates.Any(value =>
+                value.InputsJson != first.InputsJson || value.InputDigest != first.InputDigest ||
+                value.PipelineRecordId != work.Job.PipelineRecordId.Value || value.SourceRevision != work.Job.SourceRevision ||
+                value.GenerationId != draft.Id || value.CorpusEpoch != epoch ||
+                value.ModelFingerprint != runtime.Profile.ModelFingerprint || value.Dimensions != runtime.Profile.Dimensions ||
+                value.InputDigest != Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(value.InputsJson))) ||
+                value.State < 2 && (value.State != 0 || value.ExecutorInstanceId != null || value.NativeCleanupConfirmed)))
+            throw new InvalidOperationException("embedding-gpu-request-conflict");
+        var batch = await ReadBatchAsync(context, work.Job.PipelineRecordId.Value, work.Job.SourceRevision,
+            draft.Id, epoch, runtime.Profile, first.InputsJson, ct).ConfigureAwait(false);
+        var ids = batch.Chunks.Select(value => value.Id).ToArray();
+        if (await context.Vectors.AnyAsync(value => value.IndexGenerationId == draft.Id && ids.Contains(value.TextChunkId), ct).ConfigureAwait(false))
+            throw new InvalidOperationException("embedding-gpu-request-conflict");
+        return (batch, first.InputsJson, first.InputDigest);
+    }
+
+    private Task<EmbeddingWorkBatch> ReadBatchAsync(FluxKnowledgeDbContext context, Guid recordId, long revision,
         Guid generation, Guid epoch, string inputsJson, CancellationToken ct)
+        => ReadBatchAsync(context, recordId, revision, generation, epoch, runtime.Profile, inputsJson, ct);
+
+    private static async Task<EmbeddingWorkBatch> ReadBatchAsync(FluxKnowledgeDbContext context, Guid recordId, long revision,
+        Guid generation, Guid epoch, EmbeddingProfile profile, string inputsJson, CancellationToken ct)
     {
         var inputs = JsonSerializer.Deserialize<Input[]>(inputsJson) ?? throw new InvalidOperationException("embedding-gpu-inputs-invalid");
-        if (inputs.Length is < 1 or > 4 || inputs.Select(input => input.Id).Distinct().Count() != inputs.Length)
+        if (inputs.Length is < 1 or > EmbeddingGpuRuntime.MaximumRequestChunks || inputs.Select(input => input.Id).Distinct().Count() != inputs.Length)
             throw new InvalidOperationException("embedding-gpu-inputs-invalid");
         var ids = inputs.Select(input => input.Id).ToArray();
         var rows = await SqlEmbeddingCheckpointStore.Chunks(context, recordId, revision).Where(chunk => ids.Contains(chunk.Id)).ToArrayAsync(ct).ConfigureAwait(false);
@@ -528,7 +582,7 @@ public sealed class SqlEmbeddingGpuRequestStore(IDbContextFactory<FluxKnowledgeD
                 throw new InvalidOperationException("embedding-checkpoint-input-changed");
             chunks.Add(chunk);
         }
-        return new(generation, epoch, runtime.Profile, chunks);
+        return new(generation, epoch, profile, chunks);
     }
 
     private async ValueTask<T> TransactionAsync<T>(Func<FluxKnowledgeDbContext, Task<T>> action, CancellationToken ct)

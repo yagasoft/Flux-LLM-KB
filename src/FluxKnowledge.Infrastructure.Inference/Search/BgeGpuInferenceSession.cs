@@ -37,17 +37,26 @@ public sealed class BgeGpuInferenceSession(IBgeGpuModelFactory models) : IEmbedd
         try
         {
             ownership.RequireActive(BgeOfflineModels.GpuRuntimeKey, BgeOfflineModels.GpuSettingsFingerprint);
-            if (texts.Count is < 1 or > BgeInputBatch.MaximumBatch) throw new BgeInferenceException("bge-batch-invalid");
+            if (texts.Count is < 1 or > EmbeddingGpuRuntime.MaximumRequestChunks) throw new BgeInferenceException("bge-batch-invalid");
             foreach (var text in texts) ValidateText(text);
             using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, ownership.CancellationToken);
-            IReadOnlyList<EmbeddingResult> results;
+            var results = new List<EmbeddingResult>(texts.Count);
             using (var lease = await OpenMeasuredAsync(() => models.OpenEmbeddingAsync(ownership), ownership, "embedding").ConfigureAwait(false))
             {
                 ownership.RequireActive(BgeOfflineModels.GpuRuntimeKey, BgeOfflineModels.GpuSettingsFingerprint);
                 ValidateProfile(lease.Model);
-                results = await MeasureAsync(() => lease.Model.CreateEmbeddingsAsync(texts, linked.Token), ownership, "embedding", "inference").ConfigureAwait(false);
-                if (results.Count != texts.Count) throw new BgeInferenceException("bge-embedding-output-invalid");
-                foreach (var result in results) ValidateEmbedding(result);
+                for (var offset = 0; offset < texts.Count; offset += BgeInputBatch.MaximumBatch)
+                {
+                    ownership.RequireActive(BgeOfflineModels.GpuRuntimeKey, BgeOfflineModels.GpuSettingsFingerprint);
+                    linked.Token.ThrowIfCancellationRequested();
+                    var inputs = texts.Skip(offset).Take(BgeInputBatch.MaximumBatch).ToArray();
+                    var output = await MeasureAsync(() => lease.Model.CreateEmbeddingsAsync(inputs, linked.Token), ownership, "embedding", "inference").ConfigureAwait(false);
+                    ownership.RequireActive(BgeOfflineModels.GpuRuntimeKey, BgeOfflineModels.GpuSettingsFingerprint);
+                    linked.Token.ThrowIfCancellationRequested();
+                    if (output.Count != inputs.Length) throw new BgeInferenceException("bge-embedding-output-invalid");
+                    foreach (var result in output) ValidateEmbedding(result);
+                    results.AddRange(output);
+                }
             }
             linked.Token.ThrowIfCancellationRequested();
             return new(results, ownership.NativeCapacityReleased);

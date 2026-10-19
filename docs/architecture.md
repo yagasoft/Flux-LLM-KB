@@ -615,18 +615,32 @@ to exclude the observed pair expansion, retaining all eligibility checks. Its
 LOOP join fixes join order and trades additional point lookups on mostly
 ineligible corpora for predictable input-proportional work.
 
-The implemented embedding path accepts batches of at most four passages. SQL stores
-an unplaced draft owned by the existing Embed job and saves exact search-input and
-payload hashes. Each delivery performs one batch and requeues through the existing
+Background GPU embedding groups at most sixteen passages per owned request, using
+sequential tensor runs of at most four under one model load and disposal. Direct
+non-GPU checkpoints remain limited to four. The tensor/token limits, model profile,
+native runtime/settings identity and capacity estimate are unchanged. Ownership,
+cancellation and every output are checked between runs; a later failure returns
+no partial result. SQL stores an unplaced draft owned by the existing Embed job
+and saves exact search-input and payload hashes. Each delivery performs one bounded
+request and requeues through the existing
 fenced retry transition; reclaim reuses completed vectors. Final sealing rechecks
 the epoch, ownership, complete membership and payload integrity before the atomic
 Embed-to-Publish transition. Checksum validation reads bounded keyset pages, including
 when SQL retry buffering is enabled. Deletion withdraws its own pending draft in the
 first durable phase, then captures cleanup and releases its job reference in the
-second phase. BGE batch and synthetic disposable-SQL pipeline tests cover this path;
-the model/scheduler composition and controlled reset/drain are merged. Live
-rebuild recovery, two-caller retrieval, OCR handover and the frozen English
-holdout have since passed staging validation.
+second phase. BGE and disposable-SQL pipeline tests cover this path. The earlier
+four-input composition passed staging rebuild recovery, two-caller retrieval,
+OCR handover and the frozen English holdout. The larger background grouping
+requires its own bounded operational acceptance.
+
+Unfinished requests replay their exact ordered persisted inputs and digest,
+including a four-input request saved before a lost handoff. Failed settled groups
+retain their digest-based retry budget until a successful checkpoint; regrouping
+cannot reset it. Both checkpoint selection and queue admission recheck exclusivity
+under the publication fence. Conflicting groups or unresolved native ownership
+refuse. Sixteen maximum-width chunk IDs and hashes fit the existing SQL input
+contract, so no schema change is needed. Once larger requests exist, an older
+four-input binary is not a compatible downgrade without explicit reconciliation.
 
 The implemented foreground BGE wrapper now loads, runs and unloads embedding before
 opening the reranker. Native allocations register against the acknowledged owner;

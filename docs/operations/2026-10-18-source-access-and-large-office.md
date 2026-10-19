@@ -270,11 +270,44 @@ Later physical revisions now remain eligible for exact retained policy and
 settled-document recovery when no unsuppressed competitor exists. Admission,
 claim and commit recheck their respective current-binding proofs; derived owners
 and the earlier document contract remain restricted. The focused binding/history
-batch passes 28 checks. Canonical closeout, deployment and bounded operational
-acceptance of these changes remain open.
+batch passes 28 checks. Independent review and canonical squash closeout passed
+as `838ddb42`; each checkout passed 3,862 tests with 30 existing opt-in skips and
+zero warnings. Deployment and bounded operational acceptance remain open.
 
 The scan issue flood was independently grouped as access-denied reports on
 distinct paths. Broader stale-inheritance repair still requires the requested
 permission scope; only the original three leaves have been changed. Resolved
 event compaction, other format limits, native uncertainty and measurable GPU
 throughput remain separate follow-up work.
+
+## Bounded background embedding requests
+
+One reviewed 30-second observation of existing work on 19 October captured seven
+complete embedding batches and one incomplete batch. Median model load was
+2,174 ms, inference 434 ms and unload 186 ms. Canonical tests ran concurrently on
+the same host; these are phase observations, not a controlled throughput benchmark
+or queue-time attribution. Missing phases were excluded rather than counted as
+zero. The observation added no workload and changed no source or model files.
+
+The correction amortises loading across at most sixteen passages in one owned
+request, with sequential tensor runs still limited to four. It preserves model
+and native settings identity, token and memory bounds, ownership, cancellation,
+ordered outputs and atomic final checkpointing. Direct non-GPU work stays at four.
+Unfinished four-input requests retain their exact bytes and digest; failed groups
+retain the existing retry limit. Checkpoint and queue checks prevent regrouping
+over conflicting or unsettled native work. Mixed four/sixteen-input history remains
+readable by explicit recovery. Larger persisted requests require forward recovery
+or explicit reconciliation before any older-binary downgrade.
+
+An identical producer handoff can be acknowledged after the executor claims it
+or saves its checkpoint. This validates the persisted ordered inputs and digest
+and reuses the scheduler's exact parent-lease replay checks. It does not create
+another dispatch, change results or release native ownership. Selecting a
+different group continues to require the stricter unresolved-work checks.
+
+The model-side regressions pass 45 checks, and the combined model/checkpoint/
+request/recovery run passes 161 with no failures or skips. They cover lost-handoff
+replay before and after executor claim/checkpoint saving, unchanged ownership,
+mixed old/new completion, retry-budget preservation, conflicting/corrupt
+groups, uncertain ownership and existing input-size constraints. Independent
+final review, canonical closeout and bounded live progress validation remain open.

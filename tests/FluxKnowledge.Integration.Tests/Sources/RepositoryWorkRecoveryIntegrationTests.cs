@@ -289,7 +289,8 @@ public sealed class RepositoryWorkRecoveryIntegrationTests(NativeSqlServerFixtur
         await using var environment = await SqlToUsearchRebuildTests.PipelineEnvironment.CreateAsync(fixture, "Baseline", embed: false, clock: clock);
         await DiscardBaselineAsync(environment, clock);
         using var repository = new Repository();
-        repository.Write("Guide.md", string.Join("\n\n", Enumerable.Range(0, 12).Select(i => $"GPU recovery section {i}. " + new string('q', 900))));
+        // Keep the saved checkpoint, GPU request and remaining work in separate groups.
+        repository.Write("Guide.md", string.Join("\n\n", Enumerable.Range(0, 96).Select(i => $"GPU recovery section {i}. " + new string('q', 900))));
         repository.Git("add", ".");
         var commands = Commands(repository.Path, environment.Factory, clock);
         await Commit(commands, Mutation("root_create", new { path = repository.Path, displayName = "GPU withdrawal", discoveryMode = "git-tracked", indexSourceText = true }));
@@ -302,8 +303,10 @@ public sealed class RepositoryWorkRecoveryIntegrationTests(NativeSqlServerFixtur
         var worker = new StageWorkItem(dispatch, job);
         var checkpoints = new SqlEmbeddingCheckpointStore(environment.Factory, clock, runtime);
         var batch = await checkpoints.ReadNextAsync(worker, provider.Profile, default);
+        Assert.NotEmpty(batch.Chunks);
         await checkpoints.CommitAsync(worker, batch, await provider.CreateEmbeddingsAsync(batch.Chunks.Select(value => value.SearchText).ToArray(), default), default);
         var missing = await checkpoints.ReadNextAsync(worker, provider.Profile, default);
+        Assert.NotEmpty(missing.Chunks);
         var scheduler = new SqlGpuSchedulerStore(environment.Factory, timeProvider: clock);
         var requests = new SqlEmbeddingGpuRequestStore(environment.Factory, scheduler, new ChannelGpuSchedulerWakeSignal(), runtime, clock);
         await requests.QueueAsync(worker, missing, default);
@@ -377,6 +380,7 @@ public sealed class RepositoryWorkRecoveryIntegrationTests(NativeSqlServerFixtur
                 nextJob = Assert.IsType<ClaimedJob>(await new SqlJobClaimStore(environment.Factory).ClaimForDispatchAsync(nextDispatch, "returned-again", clock.Now, TimeSpan.FromMinutes(2), default));
             }
             var remaining = await new SqlEmbeddingCheckpointStore(environment.Factory, clock, runtime).ReadNextAsync(new(nextDispatch, nextJob), provider.Profile, default);
+            Assert.NotEmpty(remaining.Chunks);
             Assert.DoesNotContain(remaining.Chunks, value => batch.Chunks.Concat(missing.Chunks).Any(savedChunk => savedChunk.Id == value.Id));
         }
         else
