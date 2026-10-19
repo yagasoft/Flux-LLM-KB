@@ -1,5 +1,6 @@
 using FluxKnowledge.Application.Gpu;
 using FluxKnowledge.Application.Ports;
+using FluxKnowledge.Application.Sources;
 using FluxKnowledge.Domain.Gpu;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -20,7 +21,8 @@ public sealed class GpuSchedulerService(
     TimeProvider timeProvider,
     GpuSchedulerOptions options,
     ILogger<GpuSchedulerService>? logger = null,
-    IDatabaseStartupReadiness? databaseStartupReadiness = null) : BackgroundService
+    IDatabaseStartupReadiness? databaseStartupReadiness = null,
+    IDeploymentValidationHold? deploymentValidationHold = null) : BackgroundService
 {
     private readonly ILogger<GpuSchedulerService> _logger = logger ?? NullLogger<GpuSchedulerService>.Instance;
     private long? _observedWakeGeneration;
@@ -35,12 +37,23 @@ public sealed class GpuSchedulerService(
             var startup = true;
             var pendingAdmissionReason = (GpuSchedulerWakeReason)0;
             Guid? pendingAdmissionOperationId = null;
+            var deploymentRecoveryPending = false;
+            var pendingAdmissionRecoversDeployment = false;
+            var hold = deploymentValidationHold ?? DeploymentValidationHold.None;
+            DeploymentHoldAdmission ObserveHold()
+            {
+                var admission = hold.ReadAdmissionState();
+                deploymentRecoveryPending |= admission.IsHeld;
+                return admission;
+            }
             var nextDiagnosticAtUtc = timeProvider.GetUtcNow();
             while (!stoppingToken.IsCancellationRequested)
             {
                 var wake = new GpuSchedulerWakeSnapshot(0, 0, null);
                 try
                 {
+                    if (ObserveHold() is { IsHeld: true, PermittedCorpusRebuildOperationId: null })
+                        await hold.WaitUntilPipelineAllowedAsync(stoppingToken).ConfigureAwait(false);
                     var now = timeProvider.GetUtcNow();
                     if (_pendingCapacityUncertaintyTransition is not null || now >= nextDiagnosticAtUtc)
                     {
@@ -70,6 +83,13 @@ public sealed class GpuSchedulerService(
                     if (pendingAdmissionReason != 0)
                     {
                         reason = pendingAdmissionReason;
+                    }
+                    else if (deploymentRecoveryPending && !wakeWasConsumed && !ObserveHold().IsHeld)
+                    {
+                        // A no-work decision made beneath the validation hold is not a
+                        // recovery attempt for the ordinary queue after full release.
+                        reason = GpuSchedulerWakeReason.StartupRecovery;
+                        pendingAdmissionRecoversDeployment = true;
                     }
                     else if (startup)
                     {
@@ -147,20 +167,32 @@ public sealed class GpuSchedulerService(
                     if (reason != 0)
                     {
                         pendingAdmissionReason = reason;
-                        pendingAdmissionOperationId ??= wake.ConsumptionOperationId is { } wakeConsumptionOperationId
+                        pendingAdmissionOperationId ??= !pendingAdmissionRecoversDeployment && wake.ConsumptionOperationId is { } wakeConsumptionOperationId
                             ? CreateAdmissionOperationId(wakeConsumptionOperationId)
                             : Guid.NewGuid();
-                        await RunAdmissionRoundAsync(
-                                pendingAdmissionOperationId.Value,
-                                reason,
-                                stoppingToken)
-                            .ConfigureAwait(false);
-                        if (wake.ConsumptionOperationId is { } consumptionOperationId)
+                        if (ObserveHold() is { IsHeld: true, PermittedCorpusRebuildOperationId: null })
                         {
-                            await AcknowledgeWakeAsync(consumptionOperationId, stoppingToken).ConfigureAwait(false);
+                            await hold.WaitUntilPipelineAllowedAsync(stoppingToken).ConfigureAwait(false);
+                            continue;
                         }
+                        DeploymentHoldAdmission afterAdmission;
+                        try
+                        {
+                            await RunAdmissionRoundAsync(pendingAdmissionOperationId.Value, reason, stoppingToken).ConfigureAwait(false);
+                            if (wake.ConsumptionOperationId is { } consumptionOperationId)
+                                await AcknowledgeWakeAsync(consumptionOperationId, stoppingToken).ConfigureAwait(false);
+                        }
+                        finally
+                        {
+                            // Retain both the hold observation and any unknown operation
+                            // outcome. Reconciliation must keep its original operation ID.
+                            afterAdmission = ObserveHold();
+                        }
+                        if (pendingAdmissionRecoversDeployment && !afterAdmission.IsHeld)
+                            deploymentRecoveryPending = false;
                         pendingAdmissionReason = 0;
                         pendingAdmissionOperationId = null;
+                        pendingAdmissionRecoversDeployment = false;
                         startup = false;
                         continue;
                     }

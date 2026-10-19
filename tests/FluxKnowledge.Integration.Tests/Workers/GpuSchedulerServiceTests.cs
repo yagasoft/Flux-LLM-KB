@@ -17,7 +17,7 @@ using Xunit;
 
 namespace FluxKnowledge.Integration.Tests.Workers;
 
-public sealed class GpuSchedulerServiceTests(NativeSqlServerFixture fixture)
+public sealed partial class GpuSchedulerServiceTests(NativeSqlServerFixture fixture)
     : IClassFixture<NativeSqlServerFixture>
 {
     private readonly NativeSqlServerFixture _fixture = fixture;
@@ -1264,7 +1264,8 @@ public sealed class GpuSchedulerServiceTests(NativeSqlServerFixture fixture)
         IGpuSchedulerWakeSignal signal,
         TimeProvider clock,
         TimeSpan fallbackInterval,
-        ILogger<GpuSchedulerService>? logger = null)
+        ILogger<GpuSchedulerService>? logger = null,
+        FluxKnowledge.Application.Sources.IDeploymentValidationHold? deploymentHold = null)
     {
         var services = new ServiceCollection();
         services.AddSingleton(store);
@@ -1280,6 +1281,7 @@ public sealed class GpuSchedulerServiceTests(NativeSqlServerFixture fixture)
             TimeSpan.FromDays(1)));
         services.AddScoped<GpuSchedulerCoordinator>();
         services.AddSingleton<GpuSchedulerService>();
+        if (deploymentHold is not null) services.AddSingleton(deploymentHold);
         if (logger is not null)
         {
             services.AddSingleton(logger);
@@ -1370,6 +1372,7 @@ public sealed class GpuSchedulerServiceTests(NativeSqlServerFixture fixture)
         public TaskCompletionSource FirstAdmissionCommitted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource Acknowledged { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource SubsequentAdmissionStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public Action? AfterAdmissionCommitted { get; set; }
         public GpuSchedulerWakeSnapshot CurrentWake => _inFlightWake ?? _pendingWake;
 
         public ValueTask<GpuMiniTaskHandoffResult> GpuTaskHandoffAsync(GpuMiniTaskHandoffRequest request, CancellationToken cancellationToken) => throw new NotSupportedException();
@@ -1434,6 +1437,7 @@ public sealed class GpuSchedulerServiceTests(NativeSqlServerFixture fixture)
                 NewAdmissionDecisionCount++;
             }
 
+            AfterAdmissionCommitted?.Invoke();
             return new GpuSchedulerAdmissionRoundResult(
                 true,
                 GpuAdmissionDisposition.Defer,

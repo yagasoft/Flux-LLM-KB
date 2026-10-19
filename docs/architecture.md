@@ -633,6 +633,18 @@ four-input composition passed staging rebuild recovery, two-caller retrieval,
 OCR handover and the frozen English holdout. The larger background grouping
 requires its own bounded operational acceptance.
 
+The hosted GPU scheduler waits through an ordinary deployment validation hold
+before consuming wake state or attempting admission. Any observed hold, including
+one permitting the exact corpus rebuild, leaves a full-release recovery pending.
+Permitted rebuild admission remains subject to the existing SQL gate. After full
+release the scheduler first reconciles any in-flight or unknown admission using
+its original operation identity and reasons, then performs a fresh startup recovery
+round for the ordinary queue. This prevents an empty held-startup decision from
+stranding existing ready work. Cancellation leaves the hold and native ownership
+unchanged. This covers one validation hold and full release for the worker started
+by the ordinary updater. Repeated in-place live holds, or an entire arbitrary hold
+cycle hidden inside a single call, require separate recovery design and review.
+
 Unfinished requests replay their exact ordered persisted inputs and digest,
 including a four-input request saved before a lost handoff. Failed settled groups
 retain their digest-based retry budget until a successful checkpoint; regrouping

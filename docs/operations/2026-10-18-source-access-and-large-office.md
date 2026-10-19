@@ -254,7 +254,8 @@ Of thirteen explicitly selected Office candidates, nine admitted new v4 work and
 four refused ambiguous physical bindings without repeat admission. All nine
 produced retained text; the bounded 19 October 16:17 UTC snapshot confirmed one
 selected publication with five completed stages, while eight remained at
-embedding. This snapshot alone is not readback acceptance for that new document.
+embedding. Supported readback for that selected document subsequently passed at
+16:35 UTC; the other eight require their own fresh completion evidence.
 
 Disposable integration tests now prove positive file capture resolves edits,
 replacement content, renames and reversions despite an unavailable sibling.
@@ -272,7 +273,9 @@ claim and commit recheck their respective current-binding proofs; derived owners
 and the earlier document contract remain restricted. The focused binding/history
 batch passes 28 checks. Independent review and canonical squash closeout passed
 as `838ddb42`; each checkout passed 3,862 tests with 30 existing opt-in skips and
-zero warnings. Deployment and bounded operational acceptance remain open.
+zero warnings. The combined `8491d35e` release deployed this correction on
+19 October. A finite observation during ordinary reconciliation showed conflicting
+physical revision rows fall from 57 to 40; these are rows, not a distinct file count.
 
 The scan issue flood was independently grouped as access-denied reports on
 distinct paths. Broader stale-inheritance repair still requires the requested
@@ -310,4 +313,31 @@ request/recovery run passes 161 with no failures or skips. They cover lost-hando
 replay before and after executor claim/checkpoint saving, unchanged ownership,
 mixed old/new completion, retry-budget preservation, conflicting/corrupt
 groups, uncertain ownership and existing input-size constraints. Independent
-final review, canonical closeout and bounded live progress validation remain open.
+final review and canonical closeout passed as `8491d35e`: both checkouts passed
+3,883 tests, with 30 existing opt-in skips and zero build warnings. The paired
+incremental release completed at 18:18 UTC with unchanged configuration, released
+validation hold and healthy endpoints. A single unsaved read-only Preview accepted
+the exact approved cloud root: 11 matched files, no blocked files and five permission
+denials in an explicitly incomplete sample. No cloud-only content was recalled.
+
+## Scheduler recovery after deployment validation
+
+The subsequent finite reading found the larger Word document at 660 of 2,004
+durable vectors, with an earlier four-input request still waiting for admission.
+An advisory scheduler reading showed ready work, available capacity and no pending
+wake. This does not establish improved throughput or native settlement. The code
+and isolated regression reproduced a startup gap: an empty admission beneath the
+deployment hold consumed the startup recovery opportunity, while release supplied
+no new notification for work already queued.
+
+The focused correction waits through the ordinary hold and remembers observed
+holds, including permitted rebuild operation. It reconciles any pending admission
+with its original identity before starting a distinct recovery round after full
+release. The SQL admission fence, permitted rebuild restriction and all native
+ownership/result checks remain in place. Thirty-three scheduler checks pass,
+including seven new hold/release cases and a disposable SQL test that admits
+pre-existing work without adding a task or notification after release. Independent
+review, canonical integration, incremental deployment and bounded existing-work
+validation remain open for this correction. This covers one updater validation
+hold and full release for its newly started worker. Repeated in-place live holds,
+or an entire unobserved hold cycle inside one call, are outside this correction.
