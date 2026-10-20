@@ -1,6 +1,7 @@
 using FluxKnowledge.Application.Contracts;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Sources;
+using FluxKnowledge.Application.Workers;
 using FluxKnowledge.Domain.Sources;
 using Microsoft.Extensions.DependencyInjection;
 using Xunit;
@@ -9,6 +10,136 @@ namespace FluxKnowledge.Domain.Tests.Sources;
 
 public sealed class SourceReconciliationServiceTests
 {
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Ready_scans_do_not_starve_registration_of_already_retained_inputs(bool scanFails)
+    {
+        var claim = Claim();
+        var restart = new RecordingRestartStore();
+        var offeredBeforeAnotherScanClaim = false;
+        var control = new RecordingControlStore(
+            [
+                _ => ValueTask.FromResult<ClaimedSourceScan?>(claim),
+                _ =>
+                {
+                    offeredBeforeAnotherScanClaim = restart.Offers > 0;
+                    return ValueTask.FromResult<ClaimedSourceScan?>(null);
+                }
+            ]);
+        ISourceScanner scanner = scanFails ? new ThrowingScanner() :
+            new ResultScanner(new SourceScanResult(claim.SourceRoot.Id, claim.ScanRequest.Id, 1, 0, 0, 0));
+        await RunAsync(control, scanner, restart);
+
+        Assert.True(offeredBeforeAnotherScanClaim, "Already retained inputs must be offered before another ready source scan is claimed.");
+        var completion = Assert.Single(control.Completions);
+        Assert.Equal(scanFails ? "InvalidOperationException" : null, completion.FailureReason);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Registration_failure_does_not_recomplete_or_reclassify_a_persisted_scan(bool scanFails)
+    {
+        var claim = Claim();
+        var control = new RecordingControlStore(
+            [_ => ValueTask.FromResult<ClaimedSourceScan?>(claim), _ => ValueTask.FromResult<ClaimedSourceScan?>(null)]);
+        var restart = new RecordingRestartStore(_ => ValueTask.FromException<int>(new InvalidOperationException("registration failed")));
+        ISourceScanner scanner = scanFails ? new ThrowingScanner() :
+            new ResultScanner(new SourceScanResult(claim.SourceRoot.Id, claim.ScanRequest.Id, 1, 0, 0, 0));
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() => RunAsync(control, scanner, restart));
+
+        Assert.Equal("registration failed", error.Message);
+        Assert.Equal(1, control.ClaimAttempts);
+        var completion = Assert.Single(control.Completions);
+        Assert.Equal(scanFails ? "InvalidOperationException" : null, completion.FailureReason);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Cancellation_after_persisting_a_scan_stops_registration_and_further_claims(bool scanFails)
+    {
+        using var cancellation = new CancellationTokenSource();
+        var claim = Claim();
+        var control = new RecordingControlStore([_ => ValueTask.FromResult<ClaimedSourceScan?>(claim)], afterCompletion: cancellation.Cancel);
+        var restart = new RecordingRestartStore();
+        ISourceScanner scanner = scanFails ? new ThrowingScanner() :
+            new ResultScanner(new SourceScanResult(claim.SourceRoot.Id, claim.ScanRequest.Id, 1, 0, 0, 0));
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => RunAsync(control, scanner, restart, cancellationToken: cancellation.Token));
+
+        Assert.Equal(0, restart.Offers);
+        Assert.Equal(1, control.ClaimAttempts);
+        Assert.Single(control.Completions);
+    }
+
+    [Fact]
+    public async Task Offering_retained_inputs_after_a_scan_wakes_the_outbox()
+    {
+        var claim = Claim();
+        var offered = false;
+        var restart = new RecordingRestartStore(_ =>
+        {
+            if (offered) return ValueTask.FromResult(0);
+            offered = true;
+            return ValueTask.FromResult(1);
+        });
+        var outbox = new RecordingOutboxWakeSignal();
+        var control = new RecordingControlStore(
+            [_ => ValueTask.FromResult<ClaimedSourceScan?>(claim), _ => ValueTask.FromResult<ClaimedSourceScan?>(null)]);
+
+        await RunAsync(control, new ResultScanner(new SourceScanResult(claim.SourceRoot.Id, claim.ScanRequest.Id, 1, 0, 0, 0)), restart, outbox);
+
+        Assert.Equal(1, outbox.Notifications);
+        Assert.Equal(2, restart.Offers);
+        Assert.Single(control.Completions);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Unpersisted_scan_completion_does_not_offer_registration_before_the_next_claim(bool scanFails)
+    {
+        var claim = Claim();
+        var restart = new RecordingRestartStore();
+        var offersBeforeAnotherClaim = -1;
+        var control = new RecordingControlStore(
+            [
+                _ => ValueTask.FromResult<ClaimedSourceScan?>(claim),
+                _ =>
+                {
+                    offersBeforeAnotherClaim = restart.Offers;
+                    return ValueTask.FromResult<ClaimedSourceScan?>(null);
+                }
+            ], throwOnCompletion: true);
+        ISourceScanner scanner = scanFails ? new ThrowingScanner() :
+            new ResultScanner(new SourceScanResult(claim.SourceRoot.Id, claim.ScanRequest.Id, 1, 0, 0, 0));
+
+        await RunAsync(control, scanner, restart);
+
+        Assert.Equal(0, offersBeforeAnotherClaim);
+        Assert.Single(control.Completions);
+    }
+
+    private sealed class RecordingOutboxWakeSignal : IOutboxWakeSignal
+    {
+        public int Notifications { get; private set; }
+        public void Notify() => Notifications++;
+        public ValueTask WaitAsync(CancellationToken cancellationToken) => throw new NotSupportedException();
+    }
+
+    private sealed class RecordingRestartStore(Func<CancellationToken, ValueTask<int>>? onOffer = null) : ISourceActivityRestartStore
+    {
+        public int Offers { get; private set; }
+        public ValueTask<int> OfferUnlinkedInProcessActivitiesAsync(CancellationToken cancellationToken)
+        {
+            Offers++;
+            return onOffer?.Invoke(cancellationToken) ?? ValueTask.FromResult(0);
+        }
+    }
+
     [Fact]
     public async Task Waiting_deletion_is_revisited_without_waiting_for_or_polling_source_reconciliation()
     {
@@ -257,18 +388,22 @@ public sealed class SourceReconciliationServiceTests
         Assert.True(condition(), "The reconciliation loop did not complete its expected claim cycle.");
     }
 
-    private static async Task RunAsync(RecordingControlStore control, ISourceScanner scanner)
+    private static async Task RunAsync(RecordingControlStore control, ISourceScanner scanner,
+        ISourceActivityRestartStore? restart = null, IOutboxWakeSignal? outbox = null,
+        CancellationToken cancellationToken = default)
     {
         var services = new ServiceCollection();
         services.AddSingleton<ISourceScanControlStore>(control);
         services.AddSingleton(scanner);
+        if (restart is not null) services.AddSingleton(restart);
+        if (outbox is not null) services.AddSingleton(outbox);
         await using var provider = services.BuildServiceProvider();
-        var service = new SourceReconciliationService(
+        using var service = new SourceReconciliationService(
             provider.GetRequiredService<IServiceScopeFactory>(),
             new ChannelSourceScanWakeSignal(),
             TimeProvider.System);
 
-        await service.RunAvailableAsync(CancellationToken.None);
+        await service.RunAvailableAsync(cancellationToken);
     }
 
     private static ClaimedSourceScan Claim()
@@ -304,7 +439,8 @@ public sealed class SourceReconciliationServiceTests
 
     private sealed class RecordingControlStore(
         IEnumerable<Func<CancellationToken, ValueTask<ClaimedSourceScan?>>> claims,
-        bool throwOnCompletion = false) : ISourceScanControlStore
+        bool throwOnCompletion = false,
+        Action? afterCompletion = null) : ISourceScanControlStore
     {
         private readonly Queue<Func<CancellationToken, ValueTask<ClaimedSourceScan?>>> _claims = new(claims);
         private readonly bool _throwOnCompletion = throwOnCompletion;
@@ -331,6 +467,7 @@ public sealed class SourceReconciliationServiceTests
             CancellationToken cancellationToken)
         {
             Completions.Add(new Completion(claim, result, failureReason));
+            afterCompletion?.Invoke();
             return _throwOnCompletion
                 ? ValueTask.FromException(new InvalidOperationException("completion persistence failed"))
                 : ValueTask.CompletedTask;

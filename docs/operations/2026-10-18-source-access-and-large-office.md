@@ -381,5 +381,46 @@ changes, lost commit acknowledgement and an unrelated diagnostic backlog. A cold
 cleanup regression also proves that an unresolved prefix cannot starve a resolved
 tail. Query-plan diagnosis found repeated proof compilation taking 3.9 seconds
 against 8 ms execution; one shared proof now passes the unchanged two-second SQL
-budget. Temporary plan-capture instrumentation was removed. Final
-review, canonical integration and production application remain open for this slice.
+budget. Temporary plan-capture instrumentation was removed. Independent review,
+all 21 canonical steps and paired incremental deployment passed as `6371aada`;
+both checkouts passed 3,928 tests with 30 existing opt-in skips and zero warnings.
+The finite health checks and exact existing document proofs passed. Browser
+verification did not establish that the Events filters applied, and no
+post-release physical compaction was proved in the finite observation window;
+these remain explicit acceptance limits.
+
+## Captured input handoff and document publication recovery
+
+The subsequent exact graph confirmed all nine admitted Office v4 owners published.
+The separate large Word revision completed its 2,004-vector checkpoint and passed
+supported Corpus readback. Its completion predates the latest diagnostic release.
+
+An approved three-file access pilot restored normal inherited file permissions
+and explicit IIS read access. All three passed actual app-pool-token guarded opens
+and ordinary source capture. One passed publication and supported readback; the
+other two completed extraction through Embed but failed Publish with SQL command
+timeouts. No permitted stdout phase logs were available, so the timeout phase and
+underlying contention remain unproved. The wider prepared permission cohort is
+paused until the complete pilot succeeds. No full-root scan was launched.
+
+The coordinator offered unlinked retained inputs only after its scan queue emptied.
+It now offers them after each successfully persisted scan completion, including
+failed scans, before claiming another scan. Registration stays outside scan
+failure classification, preserves cancellation and deletion priority, and wakes
+the outbox only when work is offered. This improves scheduling fairness; the
+existing registration call is not a bounded work quantum.
+
+Explicit publication recovery previously accepted only original retained text.
+It now supports recognised derived document inputs using the same side-effect-free
+lineage validation as ordinary publication. Recovery retains its separate stricter
+checks for the current physical owner, one completed unleased branch, exact
+retained artifacts, four completed unleased preceding stages and existing Embed
+integrity. Confirmation covers relevant owner, member, processor, artifact and
+native versions; a changed binding refuses commit. Active or uncertain native
+ownership refuses recovery and remains untouched. Recovery requeues the same
+Publish delivery, without repeating parsing, embedding or GPU execution.
+
+These two application corrections require independent review, canonical closeout
+and a fresh reviewed incremental deployment before production use. The pilot's
+two terminal jobs require exact supported recovery and subsequent publication
+and readback proof; permission success alone is not indexing success.

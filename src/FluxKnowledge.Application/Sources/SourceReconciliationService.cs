@@ -132,23 +132,13 @@ public sealed class SourceReconciliationService(
             }
             if (claim is null)
             {
-                var restartStore = scope.ServiceProvider.GetService<ISourceActivityRestartStore>();
-                if (restartStore is null)
-                {
-                    return;
-                }
-
-                var offered = await restartStore.OfferUnlinkedInProcessActivitiesAsync(cancellationToken).ConfigureAwait(false);
-                if (offered > 0)
-                {
-                    scope.ServiceProvider.GetService<IOutboxWakeSignal>()?.Notify();
+                if (await OfferRetainedInputsAsync(scope.ServiceProvider, cancellationToken).ConfigureAwait(false) > 0)
                     continue;
-                }
-
                 return;
             }
 
             SourceScanResult result;
+            string? failureReason = null;
             try
             {
                 var scanner = scope.ServiceProvider.GetRequiredService<ISourceScanner>();
@@ -156,28 +146,34 @@ public sealed class SourceReconciliationService(
             }
             catch (Exception exception) when (!cancellationToken.IsCancellationRequested)
             {
-                var failed = new SourceScanResult(claim.SourceRoot.Id, claim.ScanRequest.Id, 0, 0, 0, 0);
-                try
-                {
-                    await control.CompleteAsync(claim, failed, Truncate(exception.GetType().Name), cancellationToken).ConfigureAwait(false);
-                }
-                catch (Exception) when (!cancellationToken.IsCancellationRequested)
-                {
-                    // The durable claim remains fenced for recovery; do not re-complete it.
-                }
-
-                continue;
+                result = new SourceScanResult(claim.SourceRoot.Id, claim.ScanRequest.Id, 0, 0, 0, 0);
+                failureReason = Truncate(exception.GetType().Name);
             }
 
             try
             {
-                await control.CompleteAsync(claim, result, null, cancellationToken).ConfigureAwait(false);
+                await control.CompleteAsync(claim, result, failureReason, cancellationToken).ConfigureAwait(false);
             }
             catch (Exception) when (!cancellationToken.IsCancellationRequested)
             {
                 // The durable claim remains fenced for recovery; do not reclassify successful work as failed.
+                continue;
             }
+
+            // Ready scans must not starve registration of already retained inputs.
+            // Keep this outside scan failure handling: registration cannot re-complete a scan.
+            await OfferRetainedInputsAsync(scope.ServiceProvider, cancellationToken).ConfigureAwait(false);
         }
+    }
+
+    private static async ValueTask<int> OfferRetainedInputsAsync(IServiceProvider services, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var restartStore = services.GetService<ISourceActivityRestartStore>();
+        if (restartStore is null) return 0;
+        var offered = await restartStore.OfferUnlinkedInProcessActivitiesAsync(cancellationToken).ConfigureAwait(false);
+        if (offered > 0) services.GetService<IOutboxWakeSignal>()?.Notify();
+        return offered;
     }
 
     private async Task<SourceScanResult> ScanWithRenewalAsync(ISourceScanner scanner, ISourceScanControlStore control,

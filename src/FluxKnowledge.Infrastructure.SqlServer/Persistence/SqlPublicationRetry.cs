@@ -14,7 +14,7 @@ using Microsoft.EntityFrameworkCore;
 namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
 
 /// <summary>Eligibility and evidence for one explicitly confirmed terminal Publish recovery.</summary>
-internal sealed record SqlPublicationRetry(JobEntity Job, OutboxMessageEntity Dispatch, PipelineRecordEntity Record,
+internal sealed partial record SqlPublicationRetry(JobEntity Job, OutboxMessageEntity Dispatch, PipelineRecordEntity Record,
     SourceRevisionEntity Source, SourceRootConfigurationEntity Root, SourceActivityEntity Activity,
     IReadOnlyList<NativeTargetVersion> Targets)
 {
@@ -40,7 +40,9 @@ internal sealed record SqlPublicationRetry(JobEntity Job, OutboxMessageEntity Di
         if (record is null || record.Revision != job.SourceRevision || record.IsDeleted || record.CompletionCriteriaMet ||
             record.CurrentStage != (int)PipelineStage.Publish || record.SourceRevisionId is null) Refuse();
         var source = await context.SourceRevisions.SingleOrDefaultAsync(value => value.Id == record!.SourceRevisionId, ct);
-        if (source is null || source.SuppressedAtUtc is not null || source.ParentSourceRevisionId is not null || source.OriginKind != 0) Refuse();
+        if (source is null || source.SuppressedAtUtc is not null || source.ContentSha256 != record.ContentHash) Refuse();
+        var derived = source.OriginKind is 2 or 3 && source.ParentSourceRevisionId is not null;
+        if (!derived && (source.ParentSourceRevisionId is not null || source.OriginKind != 0)) Refuse();
         var root = await context.SourceRootConfigurations.SingleOrDefaultAsync(value => value.Id == source!.SourceRootId, ct);
         if (root is null || root.State != (int)SourceRootState.Enabled) Refuse();
         if (await context.SourceRevisions.AnyAsync(value => value.Id != source!.Id && value.SourceRootId == source.SourceRootId &&
@@ -55,7 +57,7 @@ internal sealed record SqlPublicationRetry(JobEntity Job, OutboxMessageEntity Di
         if (state.CorpusRebuildOperationId is not null ||
             await context.CorpusRebuildSupersededJobs.AnyAsync(value => value.JobId == jobId, ct)) Refuse();
         var activities = await context.SourceActivities.Where(value => value.SourceRevisionId == source!.Id &&
-            value.ActivityKind == (int)SourceActivityKind.TextExtraction && value.ResultingPipelineRecordId == record!.Id &&
+            (derived || value.ActivityKind == (int)SourceActivityKind.TextExtraction) && value.ResultingPipelineRecordId == record!.Id &&
             value.ResultingPipelineRecordRevision == record.Revision).ToArrayAsync(ct);
         if (activities.Length != 1 || activities[0].State != (int)SourceActivityState.FailedTerminal) Refuse();
         var activity = activities[0];
@@ -93,6 +95,8 @@ internal sealed record SqlPublicationRetry(JobEntity Job, OutboxMessageEntity Di
             new($"embed-artifact:{embed.Id:D}", Hash(embed)), new($"canonical-artifact:{canonical!.Id:D}", Hash(canonical)),
             new($"publication-inputs:{job.Id:D}", vectorBinding), new("publication-epoch", state.CorpusEpoch.ToString("D"))
         };
+        if (derived)
+            targets.AddRange(await ReadDerivedTargetsAsync(context, record, source, activity, ct));
         return new(job, dispatch, record, source, root, activity, targets);
     }
 

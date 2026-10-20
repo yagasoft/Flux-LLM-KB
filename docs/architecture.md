@@ -510,6 +510,13 @@ preserves the old failure in an atomic audit and advances both lease generations
 It verifies immutable Embed inputs and current lifecycle state before restoring
 the exact text activity. Normal publication still rebuilds and validates the
 current corpus stamp; a receipt replay cannot reopen a later failed attempt.
+Recognised retained document inputs use the same read-only lineage proof as
+publication. Recovery additionally binds the unique physical owner, completed
+unleased one-child branch, member, activities, retained artifacts and four
+completed preceding stages. Changed bindings, competing publications or native
+ownership/uncertainty refuse recovery. Publish reuses existing extraction and
+Embed results; it does not start another GPU task. Native versions are hashed in
+stable order so larger documents retain the existing confirmation target bound.
 Explicit `embedding_retry` uses the same boundary for terminal Embed work. It
 validates current retained lifecycle, canonical/checkpoint integrity, epoch/profile
 and exact settled GPU input/result/cleanup/slot provenance. The atomic audit,

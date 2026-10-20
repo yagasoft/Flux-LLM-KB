@@ -22,7 +22,7 @@ using Xunit;
 namespace FluxKnowledge.Integration.Tests.IntegrationV1;
 
 [Collection("sql-full-text")]
-public sealed class PublicationRetryTests(NativeSqlServerFixture fixture) : IClassFixture<NativeSqlServerFixture>
+public sealed partial class PublicationRetryTests(NativeSqlServerFixture fixture) : IClassFixture<NativeSqlServerFixture>
 {
     [NativeSqlServerTheory]
     [InlineData(false)]

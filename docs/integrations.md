@@ -83,6 +83,11 @@ exact text activity for normal publication. Pause, deletion, suppression, live
 ownership, competing work, contradictory success or invalid inputs refuse
 without scheduling. Confirmation binds current versions and inputs; exact
 idempotent replay returns its original receipt even after a later failure.
+Recognised derived Office, document and media inputs are supported through their
+exact retained lineage. Their unique physical owner, completed unleased branch,
+member, activities, artifacts, preceding stages and native ownership metadata
+also bind the confirmation. This repeats Publish only; it does not repeat
+parsing, embedding or native GPU execution. Unknown or ambiguous lineage refuses.
 Another recovery requires a new preview and explicit authority. Deployment
 holds and corpus rebuilds fence recovery. Existing `job_retry` still applies to
 supported source-scan controls. Production terminal replay needs separate
