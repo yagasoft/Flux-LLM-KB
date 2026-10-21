@@ -215,3 +215,18 @@ by key. Seal and activation recompute authoritative membership. Actual SQL plan
 counters cover segment acquisition, removal/survivor selection, payload reads
 and exhaustion against increasing unrelated catalogues; a zero-row plan branch
 is not counted as payload work.
+
+The approved offline production rollout completed on 21 October 2026. Schema
+release `20261021T093233Z-220a136296d0` converted the index and the independently
+reviewed deletion set reclaimed 744,829,267,968 observed free bytes. Code-only
+release `20261021T133006Z-0e0a68ab22ef` delivered bounded ordinary refresh reads.
+Both canonical checkouts passed 4,240 checks with 30 existing opt-in skips and
+zero build warnings. Restarted readiness, index health, exact OneDrive Preview
+and two published Office Corpus readbacks passed; the existing companion was
+restored and Recovery references resealed. Source files and canonical SQL were
+preserved. Historical generation files protected by references and unreviewed
+staging remain. Two bounded MCP searches timed out, and overview activity could
+not obtain a consistent sample. Those are unresolved retrieval/visibility
+limitations, not successful semantic-search acceptance or complete backlog
+recovery. Further source-folder grants and helper activation remain subject to
+their separate exact approval.
