@@ -155,7 +155,7 @@ public sealed partial class SqlSegmentedIndexStore : IIndexProjectionRebuildStor
             else if (Describe(existing) != generation || existing.RetiredAtUtc is not null)
                 throw new InvalidOperationException("index-legacy-rebuild-identity-conflict");
             var built = context.IndexGenerationVectors.Where(value => value.GenerationId == generation.Id).Select(value => value.VectorId);
-            if (await BuildIds(context, candidate).Except(built).AnyAsync(token) || await built.Except(BuildIds(context, candidate)).AnyAsync(token))
+            if (await BuildIds(context, candidate, []).Except(built).AnyAsync(token) || await built.Except(BuildIds(context, candidate, [])).AnyAsync(token))
                 throw new InvalidOperationException("index-legacy-rebuild-membership-invalid");
             candidate.ResultGenerationId = generation.Id; candidate.State = 1;
             await context.SaveChangesAsync(token);

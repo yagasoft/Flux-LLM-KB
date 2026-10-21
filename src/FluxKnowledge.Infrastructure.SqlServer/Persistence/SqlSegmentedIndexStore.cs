@@ -370,14 +370,12 @@ public sealed partial class SqlSegmentedIndexStore(
         return selected.Length == 4 ? selected : [];
     }
 
-    private static IQueryable<long> BuildIds(FluxKnowledgeDbContext context, IndexPublicationCandidateEntity candidate, string[]? touchedSegments = null)
+    private static IQueryable<long> BuildIds(FluxKnowledgeDbContext context, IndexPublicationCandidateEntity candidate, string[] touchedSegments)
     {
         if (candidate.BuildPurpose != 0)
             return context.IndexCandidateMembers.Where(value => value.CandidateId == candidate.Id && value.Phase == 1).Select(value => value.VectorId);
         var survivors = context.CurrentIndexMembers.Where(current => current.CorpusEpoch == candidate.CorpusEpoch);
-        survivors = touchedSegments is null
-            ? survivors.Where(current => TouchedSegments(context, candidate).Contains(current.SegmentId))
-            : survivors.Where(current => EF.Constant(touchedSegments).Contains(current.SegmentId));
+        survivors = survivors.Where(current => EF.Constant(touchedSegments).Contains(current.SegmentId));
         return context.IndexCandidateMembers.Where(after => after.CandidateId == candidate.Id && after.Phase == 1 &&
             !context.CurrentIndexMembers.Any(current => current.CorpusEpoch == candidate.CorpusEpoch && current.VectorId == after.VectorId))
             .Select(value => value.VectorId)
@@ -440,9 +438,17 @@ public sealed partial class SqlSegmentedIndexStore(
             segment.Id != IndexSegmentDescriptor.ComputeId(segment.NativeFormat, segment.MembershipChecksum, segment.PhysicalIncarnation))
             throw new InvalidOperationException("index-segment-seal-invalid");
         var ids = vectors.Select(value => value.VectorId).ToArray();
-        var allowed = await context.Vectors.AsNoTracking().Where(value => ids.Contains(value.VectorId) && BuildIds(context, candidate).Contains(value.VectorId))
+        if (ids.Distinct().Count() != ids.Length) throw new InvalidOperationException("index-segment-membership-invalid");
+        // Recapture authority under this seal's fence, independently of read pages.
+        // Separate membership from payload lookup so SQL cannot expand a payload
+        // query over the affected/surviving-member UNION into a catalogue scan.
+        var touched = await TouchedSegments(context, candidate).Distinct().ToArrayAsync(cancellationToken);
+        var members = await BuildIds(context, candidate, touched).Where(id => ids.Contains(id)).ToArrayAsync(cancellationToken);
+        if (members.Length != ids.Length) throw new InvalidOperationException("index-segment-membership-invalid");
+        var checksums = vectors.ToDictionary(value => value.VectorId, value => value.PayloadChecksum);
+        var allowed = await context.Vectors.AsNoTracking().Where(value => ids.Contains(value.VectorId))
             .Select(value => new { value.VectorId, value.PayloadChecksum }).ToArrayAsync(cancellationToken);
-        if (allowed.Length != ids.Length || allowed.Any(value => vectors.Single(vector => vector.VectorId == value.VectorId).PayloadChecksum != value.PayloadChecksum))
+        if (allowed.Length != ids.Length || allowed.Any(value => checksums[value.VectorId] != value.PayloadChecksum))
             throw new InvalidOperationException("index-segment-membership-invalid");
         var existing = await context.IndexSegments.SingleOrDefaultAsync(value => value.Id == segment.Id, cancellationToken);
         if (existing is not null)

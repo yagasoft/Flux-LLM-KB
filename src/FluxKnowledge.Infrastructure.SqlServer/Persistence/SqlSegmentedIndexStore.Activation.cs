@@ -124,9 +124,11 @@ public sealed partial class SqlSegmentedIndexStore
             descriptor.CorpusStamp != new CorpusPublicationStamp(candidate.CorpusEpoch, candidate.PublicationCorpusVersion) ||
             descriptor.SegmentCount != manifest.Segments.Count || descriptor.VectorCount != manifest.Segments.Sum(value => value.VectorCount))
             throw new InvalidOperationException("index-manifest-seal-invalid");
-        var touched = TouchedSegments(context, candidate);
+        // These keys are fresh within the locked candidate/base transaction;
+        // read-page captures never serve as sealing authority.
+        var touched = await TouchedSegments(context, candidate).Distinct().ToArrayAsync(cancellationToken);
         var reused = await context.IndexGenerationSegments.AsNoTracking().Where(value => value.GenerationId == candidate.BaseGenerationId &&
-            !touched.Contains(value.SegmentId)).Select(value => value.SegmentId).ToArrayAsync(cancellationToken);
+            !EF.Constant(touched).Contains(value.SegmentId)).Select(value => value.SegmentId).ToArrayAsync(cancellationToken);
         var ids = manifest.Segments.Select(value => value.Id).ToArray();
         if (ids.Distinct().Count() != ids.Length || reused.Except(ids).Any()) throw new InvalidOperationException("index-manifest-reuse-invalid");
         var sealedSegments = await context.IndexSegments.AsNoTracking().Where(value => ids.Contains(value.Id)).ToArrayAsync(cancellationToken);
@@ -136,8 +138,10 @@ public sealed partial class SqlSegmentedIndexStore
             throw new InvalidOperationException("index-manifest-segment-proof-invalid");
         var replacements = ids.Except(reused).ToArray();
         var built = context.IndexSegmentVectors.Where(value => replacements.Contains(value.SegmentId)).Select(value => value.VectorId);
-        if (await BuildIds(context, candidate).Except(built).AnyAsync(cancellationToken) ||
-            await built.Except(BuildIds(context, candidate)).AnyAsync(cancellationToken) ||
+        // Equality requires exhausting both differences. COUNT_BIG avoids the
+        // EXISTS row goal that can repeatedly scan retained segment membership.
+        if (await BuildIds(context, candidate, touched).Except(built).LongCountAsync(cancellationToken) != 0 ||
+            await built.Except(BuildIds(context, candidate, touched)).LongCountAsync(cancellationToken) != 0 ||
             await built.GroupBy(value => value).AnyAsync(group => group.Count() != 1, cancellationToken))
             throw new InvalidOperationException("index-manifest-replacement-membership-invalid");
         var old = await context.IndexGenerations.SingleOrDefaultAsync(value => value.Id == descriptor.Id, cancellationToken);
