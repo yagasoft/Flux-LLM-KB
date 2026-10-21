@@ -478,4 +478,13 @@ if ($LASTEXITCODE -ne 0) { throw "The unattended IIS discovery contract failed: 
 $unattendedWindowsOutput = & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $SourceRoot 'tests/native/unattended-iis-discovery.ps1') -SourceRoot $SourceRoot 2>&1 | Out-String
 if ($LASTEXITCODE -ne 0) { throw "The Windows PowerShell unattended IIS discovery contract failed: $unattendedWindowsOutput" }
 
+foreach ($accessContract in @('source-access-install-contract.ps1','source-access-config-contract.ps1')) {
+    $accessOutput = & pwsh -NoProfile -File (Join-Path $SourceRoot "tests/native/$accessContract") -SourceRoot $SourceRoot 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) { throw "The isolated source-access contract failed ($accessContract): $accessOutput" }
+}
+foreach ($projectionContract in @('projection-operator-dependency-isolation.ps1','segmented-index-update-flow.ps1',
+    'segmented-index-payloads.ps1','segmented-index-configuration.ps1')) {
+    $projectionOutput=& pwsh -NoProfile -File (Join-Path $SourceRoot "tests/native/$projectionContract") -SourceRoot $SourceRoot 2>&1 | Out-String
+    if($LASTEXITCODE -ne 0){throw "The isolated projection contract failed ($projectionContract): $projectionOutput"}
+}
 Write-Output "Native deployment plan contract passed."

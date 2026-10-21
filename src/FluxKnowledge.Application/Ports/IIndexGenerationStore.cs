@@ -44,6 +44,8 @@ public sealed record IndexGenerationBaseSnapshot(
 public interface IIndexGenerationReadLeaseFactory
 {
     IDisposable Acquire(string generationDirectory);
+    IDisposable AcquireBuildDirectory(string directory, bool create = false) =>
+        throw new NotSupportedException("Guarded legacy projection building is unavailable.");
 }
 
 public sealed record IndexGenerationDescriptor(
@@ -53,7 +55,9 @@ public sealed record IndexGenerationDescriptor(
     string IndexPath,
     string MetadataChecksum,
     long VectorCount,
-    CorpusPublicationStamp? CorpusStamp = null);
+    CorpusPublicationStamp? CorpusStamp = null,
+    int FormatVersion = 1,
+    int SegmentCount = 0);
 
 public interface IIndexGenerationStore
 {

@@ -9,6 +9,9 @@ public interface IIndexGenerationPublisher
     ValueTask<IndexGenerationDescriptor> RebuildFromSqlAsync(
         Guid indexGenerationId,
         CancellationToken cancellationToken);
+
+    /// <summary>Release an exact sealed candidate after a known activation conflict; legacy placements have no candidate pin.</summary>
+    ValueTask AbandonAsync(IndexGenerationCandidateSnapshot candidate, CancellationToken cancellationToken) => ValueTask.CompletedTask;
 }
 
 /// <summary>Signals the one valid no-generation path; SQL must still prove an empty catalogue.</summary>
@@ -22,4 +25,5 @@ public sealed class NoEligibleVectorsException : InvalidOperationException
 public sealed record IndexGenerationCandidateSnapshot(
     IndexGenerationDescriptor Generation,
     IReadOnlyList<CanonicalVector> Vectors,
-    CorpusPublicationStamp? ExpectedCorpusStamp = null);
+    CorpusPublicationStamp? ExpectedCorpusStamp = null,
+    Guid? SegmentedCandidateId = null);

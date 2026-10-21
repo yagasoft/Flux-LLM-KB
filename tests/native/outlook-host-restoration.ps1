@@ -40,6 +40,9 @@ if($definition.Count -ne 1){throw 'Missing focused task-restoration operation.'}
 Invoke-Expression $definition[0].Extent.Text
 $script:observation=@{IdentityHash='task';LauncherSha256='launcher';RunnerSha256='runner';PayloadSha256='payload';SessionId=1;Enabled=$false;State='Disabled';Interactive=$true;IgnoreNew=$true;Hosts=0}
 $script:receipt=$null; $script:enables=0; $script:starts=0; $script:failEnable=$false; $script:failStart=$false
+$ReviewedLegacyIndexPayloads=@(); $script:formatCompatible=$true
+function Invoke-OutlookHostIndexAdmission { param($Action,$Binding)
+    if(!$script:formatCompatible){throw 'index-admission-payload-incompatible'}; & $Action }
 function Get-OutlookHostRestorationObservation { $script:observation.Clone() }
 function Get-OutlookHostRestorationReceipt { $script:receipt }
 function Save-OutlookHostRestorationReceipt($Path,$Receipt) { $script:receipt=$Receipt }
@@ -58,6 +61,10 @@ $script:observation.Hosts=2
 Assert-Refused {Invoke-OutlookHostRestoration -Binding $binding -ReceiptPath 'fake' -StartOnce}
 $script:observation.Hosts=0
 if($script:enables -or $script:starts){throw 'Refusal mutated the task.'}
+$script:formatCompatible=$false
+Assert-Refused {Invoke-OutlookHostRestoration -Binding $binding -ReceiptPath 'fake' -StartOnce}
+if($script:enables -or $script:starts -or $script:observation.Enabled){throw 'Incompatible task passed admission.'}
+$script:formatCompatible=$true; $script:receipt=$null
 $script:failEnable=$true
 Assert-Refused {Invoke-OutlookHostRestoration -Binding $binding -ReceiptPath 'fake'}
 if($script:observation.Enabled){throw 'Lost enable acknowledgement did not restore the original disabled state.'}

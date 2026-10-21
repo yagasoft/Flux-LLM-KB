@@ -1,13 +1,15 @@
 [CmdletBinding()]
 param([Parameter(Mandatory)][string]$SourceRoot)
 $ErrorActionPreference='Stop'
+# Native control-flow fixture; actual format admission has separate SQL integration coverage.
+function Invoke-DeploymentIndexAdmission { param($Roles,$Action) & $Action }
 Import-Module (Join-Path $SourceRoot 'scripts/deploy/incremental-source-deletion-cleanup-migration.psm1') -Force
 $tokens=$null; $errors=$null
 $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $SourceRoot 'scripts/deploy/update-native-iis-incremental.ps1'),[ref]$tokens,[ref]$errors)
 if ($errors.Count -ne 0) { throw 'The updater does not parse.' }
 foreach ($name in @('Assert-NotReparsePoint','Write-SourceDeletionAcceptanceReceipt','Read-SourceDeletionAcceptanceReceipt',
     'Assert-SourceDeletionAcceptanceBinding','Assert-SourceDeletionAcceptanceMaintenance','Enter-SourceDeletionAcceptanceMaintenance',
-    'Get-SourceDeletionCleanupOriginalTask')) {
+    'Get-SourceDeletionCleanupOriginalTask','Enable-IndexCompatibleOutlookTask')) {
     $definition=$ast.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name },$true)
     if ($null -eq $definition) { throw "Missing maintenance implementation: $name" }
     Invoke-Expression $definition.Extent.Text
@@ -46,8 +48,14 @@ function Stop-HybridIisAfterGpuDrain {
 $testRoot=Join-Path ([IO.Path]::GetTempPath()) ('flux-acceptance-maintenance-'+[Guid]::NewGuid().ToString('N'))
 [void][IO.Directory]::CreateDirectory($testRoot)
 $ValidationHoldPath=Join-Path $testRoot 'hold.json'
+$CanonicalLiveRoot=Join-Path $testRoot 'Live'
 $InteractiveHostTaskName='FluxKnowledge.OutlookHost'; $ReadinessTimeoutSeconds=1
 try {
+    foreach($blockedRoot in @((Join-Path $CanonicalLiveRoot 'Recovery'),(Join-Path $CanonicalLiveRoot 'Data/Index'))) {
+        [IO.Directory]::CreateDirectory($blockedRoot) | Out-Null
+        Assert-Rejected { Write-SourceDeletionAcceptanceReceipt -Path (Join-Path $blockedRoot 'must-not-write.json') -Value @{} } 'Maintenance receipt accepted live protected storage.'
+        Assert-True (!(Test-Path -LiteralPath (Join-Path $blockedRoot 'must-not-write.json'))) 'Refused receipt still touched protected storage.'
+    }
     foreach ($enabled in @($true,$false)) {
         $receiptPath=Join-Path $testRoot ('stopped-'+$enabled+'.json')
         $original=@{

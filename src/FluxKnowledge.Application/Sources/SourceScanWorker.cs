@@ -174,6 +174,7 @@ public sealed class SourceScanWorker(
     private static string ArtifactFailureReason(Exception exception) => exception switch
     {
         SourceContentUnavailableException => "source-content-not-available-locally",
+        SourceAccessDeniedException denied => denied.ReasonCode,
         SourceSnapshotChangedException => "source-snapshot-changed",
         UnauthorizedAccessException => "artifact-access-denied",
         InvalidDataException => "artifact-integrity-failed",

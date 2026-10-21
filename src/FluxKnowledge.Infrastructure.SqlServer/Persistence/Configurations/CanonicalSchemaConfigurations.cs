@@ -493,6 +493,7 @@ public sealed class IndexGenerationConfiguration : IEntityTypeConfiguration<Inde
             "([CorpusEpoch] IS NULL AND [CorpusVersion] IS NULL) OR ([CorpusEpoch] IS NOT NULL AND [CorpusEpoch] <> '00000000-0000-0000-0000-000000000000' AND [CorpusVersion] IS NOT NULL AND [CorpusVersion] >= 0)"));
         builder.HasKey(entity => entity.Id);
         builder.Property(entity => entity.Id).ValueGeneratedNever();
+        builder.Property(entity => entity.FormatVersion).HasDefaultValue(1);
         builder.Property(entity => entity.ModelFingerprint).HasMaxLength(256).IsRequired();
         builder.Property(entity => entity.IndexPath).HasMaxLength(2048).IsRequired();
         builder.Property(entity => entity.MetadataChecksum).HasMaxLength(64).IsUnicode(false).IsFixedLength().IsRequired();
@@ -565,6 +566,7 @@ public sealed class IndexStateConfiguration : IEntityTypeConfiguration<IndexStat
             });
         builder.HasKey(entity => entity.Id);
         builder.Property(entity => entity.Id).ValueGeneratedNever();
+        builder.Property(entity => entity.RequiredIndexFormat).HasDefaultValue(1);
         builder.Property(entity => entity.UpdatedAtUtc).HasColumnType("datetimeoffset(7)");
         builder.Property(entity => entity.EmptyCatalogueValidatedAtUtc).HasColumnType("datetimeoffset(7)");
         builder.Property(entity => entity.CorpusEpoch).HasDefaultValueSql("NEWID()");
@@ -1098,7 +1100,7 @@ public sealed class SourceDeletionCleanupItemConfiguration : IEntityTypeConfigur
     {
         builder.ToTable("SourceDeletionCleanupItems", table =>
         {
-            table.HasCheckConstraint("CK_SourceDeletionCleanupItems_StorageKind", "[StorageKind] IN (1, 2)");
+            table.HasCheckConstraint("CK_SourceDeletionCleanupItems_StorageKind", "[StorageKind] IN (1, 2, 3, 4)");
             table.HasCheckConstraint("CK_SourceDeletionCleanupItems_State", "[State] IN (0, 1, 2)");
             table.HasCheckConstraint("CK_SourceDeletionCleanupItems_ByteLength", "[ByteLength] IS NULL OR [ByteLength] >= 0");
             table.HasCheckConstraint("CK_SourceDeletionCleanupItems_ContentSha256", "[ContentSha256] IS NULL OR ([ContentSha256] NOT LIKE '%[^0-9a-f]%' AND LEN([ContentSha256]) = 64)");

@@ -3,6 +3,10 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
 public sealed class IndexGenerationEntity
 {
     public Guid Id { get; set; }
+    public int FormatVersion { get; set; } = 1;
+    public int SegmentCount { get; set; }
+    public Guid? RetirementOperationId { get; set; }
+    public DateTimeOffset? ReclaimedAtUtc { get; set; }
     public Guid? CorpusEpoch { get; set; }
     public long? CorpusVersion { get; set; }
     public Guid? EmbeddingJobId { get; set; }

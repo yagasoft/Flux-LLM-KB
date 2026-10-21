@@ -3,12 +3,16 @@ param(
     [string]$BindingPath='',
     [string]$ReceiptPath='',
     [switch]$StartOnce,
+    [ValidatePattern('^OutlookHost=[A-Fa-f0-9]{64}$')][string[]]$ReviewedLegacyIndexPayloads=@(),
     [switch]$Apply
 )
 $ErrorActionPreference='Stop'
+$CanonicalRecoveryRoot='I:\FluxKnowledge\Recovery'
 if($Apply -and $PSVersionTable.PSVersion.Major -lt 7){throw 'outlook-restoration-apply-requires-pwsh7'}
 
 function Initialize-OutlookHostRestorationHelpers([string]$DeployScriptRoot) {
+    Import-Module (Join-Path $DeployScriptRoot 'index-format-admission.psm1') -Force -ErrorAction Stop
+    Import-Module (Join-Path $DeployScriptRoot 'recovery-reference-writer.psm1') -Force -ErrorAction Stop
     # Reuse only the identity/path/hash helpers. Importing the whole migration
     # module would bootstrap an unrelated SQL reader requiring the newer runtime.
     $sources=[ordered]@{
@@ -37,6 +41,17 @@ function Read-OutlookHostRestorationBinding([string]$Path) {
         $result[$name]=$document.$name
     }
     return $result
+}
+
+function Invoke-OutlookHostIndexAdmission {
+    param([Parameter(Mandatory)][scriptblock]$Action, [Parameter(Mandatory)]$Binding)
+    $configurationPath='I:\FluxKnowledge\Config\appsettings.Production.json'
+    Assert-NotReparsePoint -Path $configurationPath -Message 'outlook-restoration-configuration-unsafe'
+    $configuration=Get-Content -LiteralPath $configurationPath -Raw | ConvertFrom-Json
+    Invoke-IndexFormatAdmission -ConnectionString $configuration.ConnectionStrings.FluxKnowledge `
+        -Payloads @(@{Role='OutlookHost';Root='C:\inetpub\FluxKnowledge\outlook-host';ExpectedSha256=$Binding.PayloadSha256}) `
+        -ReadPayloadFingerprint {param($root) Get-HybridPayloadFingerprint -Path $root} `
+        -ReviewedLegacyPayloads $ReviewedLegacyIndexPayloads -Action $Action
 }
 
 function Get-OutlookHostRestorationObservation {
@@ -79,16 +94,27 @@ function Get-OutlookHostRestorationReceipt($Path) {
     return $null
 }
 
+function Get-OutlookRecoveryReferenceConnectionString {
+    $configurationPath='I:\FluxKnowledge\Config\appsettings.Production.json'
+    Assert-NotReparsePoint -Path $configurationPath -Message 'outlook-restoration-configuration-unsafe'
+    (Get-Content -LiteralPath $configurationPath -Raw | ConvertFrom-Json).ConnectionStrings.FluxKnowledge
+}
+
 function Save-OutlookHostRestorationReceipt($Path,$Receipt) {
     $absolute=[IO.Path]::GetFullPath($Path)
-    if(!$absolute.StartsWith('I:\FluxKnowledge\Recovery\IncrementalUpdates\',[StringComparison]::OrdinalIgnoreCase)){
+    $packetRoot=(Join-Path $CanonicalRecoveryRoot 'IncrementalUpdates')+[IO.Path]::DirectorySeparatorChar
+    if(!$absolute.StartsWith($packetRoot,[StringComparison]::OrdinalIgnoreCase)){
         throw 'outlook-restoration-receipt-outside-existing-recovery-root'
     }
     Assert-RepositoryRecoveryReceiptPath $absolute
     if(!(Test-Path -LiteralPath (Split-Path -Parent $absolute) -PathType Container)){throw 'outlook-restoration-release-root-missing'}
     $temporary=$absolute+'.'+[guid]::NewGuid().ToString('N')+'.tmp'
-    [IO.File]::WriteAllText($temporary,($Receipt | ConvertTo-Json -Depth 8),[Text.UTF8Encoding]::new($false))
-    Move-Item -LiteralPath $temporary -Destination $absolute -Force -ErrorAction Stop
+    $writer=Start-RecoveryReferenceWrite -ConnectionString (Get-OutlookRecoveryReferenceConnectionString) -RecoveryRoot $CanonicalRecoveryRoot -OwnerExitSufficient
+    try {
+        [IO.File]::WriteAllText($temporary,($Receipt | ConvertTo-Json -Depth 8),[Text.UTF8Encoding]::new($false))
+        [IO.File]::Move($temporary,$absolute,$true)
+        Complete-RecoveryReferenceWrite -Lease $writer
+    } finally { Close-RecoveryReferenceWrite -Lease $writer }
 }
 
 function Invoke-OutlookHostRestoration {
@@ -100,16 +126,18 @@ function Invoke-OutlookHostRestoration {
     if(!$before.Interactive -or !$before.IgnoreNew -or $before.Hosts -gt 1){throw 'outlook-restoration-session-or-singleton-unavailable'}
     $saved=Get-OutlookHostRestorationReceipt $ReceiptPath
     if($saved){
+        $legacy=if($saved.Contains('ReviewedLegacyIndexPayloads')){@($saved.ReviewedLegacyIndexPayloads)}else{@()}
+        if(($legacy -join '|') -cne ($ReviewedLegacyIndexPayloads -join '|')){throw 'outlook-restoration-legacy-binding-drift'}
         if($saved.BindingHash -cne (Get-RepositoryRecoveryValueHash $Binding) -or $saved.StartOnce -ne [bool]$StartOnce){throw 'outlook-restoration-receipt-conflict'}
         if($saved.State -in @('start-uncertain','starting')){throw 'outlook-restoration-prior-start-outcome-uncertain'}
         if($saved.State -in @('enabled','start-requested','existing-host') -and $before.Enabled){return $saved}
         throw 'outlook-restoration-receipt-requires-inspection'
     }
-    $receipt=[ordered]@{Version=1;BindingHash=(Get-RepositoryRecoveryValueHash $Binding);StartOnce=[bool]$StartOnce;OriginalEnabled=[bool]$before.Enabled;State='enabling';UpdatedUtc=[DateTime]::UtcNow.ToString('O')}
+    $receipt=[ordered]@{Version=1;BindingHash=(Get-RepositoryRecoveryValueHash $Binding);StartOnce=[bool]$StartOnce;OriginalEnabled=[bool]$before.Enabled;ReviewedLegacyIndexPayloads=@($ReviewedLegacyIndexPayloads);State='enabling';UpdatedUtc=[DateTime]::UtcNow.ToString('O')}
     Save-OutlookHostRestorationReceipt $ReceiptPath $receipt
     $startAttempted=$false
     try {
-        if(!$before.Enabled){Enable-ScheduledTask -TaskName 'FluxKnowledge.OutlookHost' -TaskPath '\' -ErrorAction Stop | Out-Null}
+        if(!$before.Enabled){Invoke-OutlookHostIndexAdmission -Binding $Binding -Action {Enable-ScheduledTask -TaskName 'FluxKnowledge.OutlookHost' -TaskPath '\' -ErrorAction Stop | Out-Null}}
         $current=Get-OutlookHostRestorationObservation
         foreach($name in @('IdentityHash','LauncherSha256','RunnerSha256','PayloadSha256','SessionId')){
             if($current[$name] -cne $Binding[$name]){throw 'outlook-restoration-post-enable-drift'}
@@ -121,7 +149,7 @@ function Invoke-OutlookHostRestoration {
             else {
                 $receipt.State='starting'; Save-OutlookHostRestorationReceipt $ReceiptPath $receipt
                 $startAttempted=$true
-                Start-ScheduledTask -TaskName 'FluxKnowledge.OutlookHost' -TaskPath '\' -ErrorAction Stop
+                Invoke-OutlookHostIndexAdmission -Binding $Binding -Action {Start-ScheduledTask -TaskName 'FluxKnowledge.OutlookHost' -TaskPath '\' -ErrorAction Stop}
                 $receipt.State='start-requested'
             }
         }

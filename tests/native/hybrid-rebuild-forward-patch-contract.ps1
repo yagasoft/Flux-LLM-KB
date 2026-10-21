@@ -1,12 +1,15 @@
 [CmdletBinding()]
 param([string]$SourceRoot='', [string]$Mode='patch')
 $ErrorActionPreference='Stop'
+# Native control-flow fixture; SQL admission is tested against the actual helper separately.
+$ReviewedLegacyIndexPayloads=@()
+function Invoke-DeploymentIndexAdmission { param($Action,$Roles) & $Action }
 if (-not $SourceRoot) { $SourceRoot=Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSCommandPath)) }
 Import-Module (Join-Path $SourceRoot 'scripts/deploy/incremental-hybrid-passage-rebuild.psm1') -Force
 $tokens=$null;$errors=$null
 $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $SourceRoot 'scripts/deploy/update-native-iis-incremental.ps1'),[ref]$tokens,[ref]$errors)
 if ($errors.Count) { throw 'Patch updater parse failed.' }
-foreach($name in @('Invoke-HybridPassageIisPatch','Assert-NotReparsePoint')) {
+foreach($name in @('Invoke-HybridPassageIisPatch','Assert-NotReparsePoint','Assert-ReviewedLegacyIndexBinding','Start-IndexCompatibleWebAppPool','Enable-IndexCompatibleOutlookTask')) {
     $definition=@($ast.FindAll({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name},$true))
     if($definition.Count -ne 1){throw "Patch function missing: $name"}
     . ([scriptblock]::Create($definition[0].Extent.Text))

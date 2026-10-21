@@ -46,6 +46,59 @@ namespace FluxKnowledge.Web.Tests.Composition;
 
 public sealed class WebHostCompositionTests : IDisposable
 {
+    [Fact]
+    public void An_unknown_publication_mode_refuses_composition_before_startup()
+    {
+        var configuration = new ConfigurationBuilder().AddConfiguration(CreateProductionConfiguration())
+            .AddInMemoryCollection(new Dictionary<string, string?> { ["IndexPublication:Mode"] = "unknown" }).Build();
+        var failure = Assert.Throws<InvalidOperationException>(() =>
+            WebHostComposition.AddProductionFluxKnowledgeServicesForTests(new ServiceCollection(), configuration));
+        Assert.Equal("index-publication-mode-invalid", failure.Message);
+    }
+
+    [Fact]
+    public void Production_segmented_configuration_selects_the_segmented_publisher_and_cache_without_starting_work()
+    {
+        var configuration = new ConfigurationBuilder().AddConfiguration(CreateProductionConfiguration())
+            .AddInMemoryCollection(new Dictionary<string, string?> { ["IndexPublication:Mode"] = "Segmented" }).Build();
+        var services = new ServiceCollection(); services.AddLogging();
+        WebHostComposition.AddProductionFluxKnowledgeServicesForTests(services, configuration);
+        Assert.Contains(services, descriptor => descriptor.ServiceType == typeof(UsearchSegmentCache));
+        using var provider = services.BuildServiceProvider();
+        using var scope = provider.CreateScope();
+        Assert.IsType<SegmentedIndexPublisher>(scope.ServiceProvider.GetRequiredService<IIndexGenerationPublisher>());
+    }
+
+    [Fact]
+    public void Source_access_recovery_is_disabled_until_explicitly_configured()
+    {
+        var services = new ServiceCollection();
+        WebHostComposition.AddProductionFluxKnowledgeServicesForTests(services, CreateProductionConfiguration());
+        Assert.DoesNotContain(services, descriptor => descriptor.ServiceType == typeof(ISourceAccessRepairClient));
+    }
+
+    [Fact]
+    public void Explicit_source_access_configuration_registers_only_the_unprivileged_client()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var services = new ServiceCollection();
+        var config = new ConfigurationBuilder().AddConfiguration(CreateProductionConfiguration()).AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["SourceAccess:Enabled"] = "true", ["SourceAccess:PipeName"] = "FluxKnowledge.SourceAccess.isolated-composition"
+        }).Build();
+        WebHostComposition.AddProductionFluxKnowledgeServicesForTests(services, config);
+        using var provider = services.BuildServiceProvider();
+        Assert.IsType<WindowsSourceAccessRepairClient>(provider.GetRequiredService<ISourceAccessRepairClient>());
+    }
+
+    [Fact]
+    public void Enabled_source_access_requires_an_explicit_local_pipe_name()
+    {
+        var config = new ConfigurationBuilder().AddConfiguration(CreateProductionConfiguration()).AddInMemoryCollection(new Dictionary<string, string?>
+        { ["SourceAccess:Enabled"] = "true" }).Build();
+        Assert.Throws<InvalidOperationException>(() => WebHostComposition.AddProductionFluxKnowledgeServicesForTests(new ServiceCollection(), config));
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -88,6 +141,20 @@ public sealed class WebHostCompositionTests : IDisposable
             Assert.Equal(0, database.Attempts);
         }
         finally { await application.StopAsync().WaitAsync(TimeSpan.FromSeconds(5)); }
+    }
+
+    private sealed class LegacyFormatStore : ISegmentedIndexStore
+    {
+        public int Probes { get; private set; }
+        public ValueTask<bool> IsRequiredAsync(CancellationToken token) { Probes++; return ValueTask.FromResult(false); }
+        public ValueTask<SegmentedIndexCandidate> PrepareAsync(Guid id, CancellationToken token) => throw new NotSupportedException();
+        public IAsyncEnumerable<CanonicalVector> ReadBuildVectorsAsync(Guid id, CancellationToken token) => throw new NotSupportedException();
+        public ValueTask SealSegmentAsync(Guid id, IndexSegmentDescriptor segment, IReadOnlyList<CanonicalVector> vectors, CancellationToken token) => throw new NotSupportedException();
+        public ValueTask SealManifestAsync(Guid id, IndexManifestDescriptor manifest, CancellationToken token) => throw new NotSupportedException();
+        public ValueTask<IndexManifestDescriptor> ReadManifestAsync(Guid id, CancellationToken token) => throw new NotSupportedException();
+        public ValueTask<SegmentedProjectionState> ReadProjectionAsync(CancellationToken token) => throw new NotSupportedException();
+        public ValueTask<bool> TryActivateRefreshAsync(IndexGenerationCandidateSnapshot snapshot, CancellationToken token) => throw new NotSupportedException();
+        public ValueTask AbandonAsync(Guid id, CancellationToken token) => throw new NotSupportedException();
     }
 
     private sealed class ControlledStartupReadiness : IDatabaseStartupReadiness
@@ -413,6 +480,9 @@ public sealed class WebHostCompositionTests : IDisposable
             builder.Services,
             CreateProductionConfiguration());
         builder.Services.AddSingleton<IDerivedIndexRecoveryStore>(new ValidatedEmptyCatalogueRecoveryStore());
+        var format = new LegacyFormatStore();
+        builder.Services.AddSingleton<ISegmentedIndexStore>(format);
+        builder.Services.AddSingleton<IDeploymentValidationHold>(DeploymentValidationHold.None);
         builder.Services.AddSingleton<ISqlServerReadinessValidator>(new ReadyReadinessValidator());
         var readiness = new ControlledStartupReadiness();
         builder.Services.AddSingleton<IDatabaseStartupReadiness>(readiness);
@@ -428,6 +498,7 @@ public sealed class WebHostCompositionTests : IDisposable
 
         Assert.Equal(DerivedIndexRecoveryState.Healthy,
             (await WaitForRecoveryStateAsync(application.Services)).State);
+        Assert.True(format.Probes > 0);
         Assert.Equal(HttpStatusCode.OK,
             (await application.GetTestClient().GetAsync("/health/ready")).StatusCode);
     }

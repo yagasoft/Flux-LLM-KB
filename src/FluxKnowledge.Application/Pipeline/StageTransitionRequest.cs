@@ -24,7 +24,8 @@ public sealed record IndexingStageOutput(
     IReadOnlyList<CanonicalVector>? ActivateMembership = null,
     CorpusPublicationStamp? ExpectedCorpusStamp = null,
     bool UsePersistedEmbeddingDraft = false,
-    CodeDisclosureProof? DisclosureProof = null);
+    CodeDisclosureProof? DisclosureProof = null,
+    Guid? SegmentedCandidateId = null);
 
 public sealed record StageTransitionRequest(
     ClaimedDispatchMessage DispatchMessage,

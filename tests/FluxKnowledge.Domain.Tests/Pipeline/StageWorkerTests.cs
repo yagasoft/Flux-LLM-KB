@@ -299,15 +299,17 @@ public sealed class StageWorkerTests
     }
 
     [Theory]
-    [InlineData(0)]
-    [InlineData(1)]
-    [InlineData(2)]
-    [InlineData(3)]
-    public async Task Publish_rebuilds_conflicting_snapshots_and_defers_after_three_conflicts(int conflicts)
+    [InlineData(0, false)]
+    [InlineData(1, false)]
+    [InlineData(2, false)]
+    [InlineData(3, false)]
+    [InlineData(1, true)]
+    [InlineData(3, true)]
+    public async Task Publish_rebuilds_conflicting_snapshots_and_defers_after_three_conflicts(int conflicts, bool duringBuild)
     {
         var draft = new IndexGenerationDescriptor(Guid.NewGuid(), new string('a', 64), 4, "draft", new string('b', 64), 1);
-        var transitions = new RecordingTransitionStore { ConflictsRemaining = conflicts };
-        var publisher = new RecordingGenerationPublisher(draft);
+        var transitions = new RecordingTransitionStore { ConflictsRemaining = duringBuild ? 0 : conflicts };
+        var publisher = new RecordingGenerationPublisher(draft) { BuildConflictsRemaining = duringBuild ? conflicts : 0 };
         var worker = new PublishStageWorker(new StubIndexGenerationStore([], draft),
             new StubPipelineReader(new string('a', 64), draft.Id.ToString("N")), publisher,
             CreateTransitionService(transitions), new FixedTimeProvider());
@@ -316,6 +318,7 @@ public sealed class StageWorkerTests
         await worker.ExecuteAsync(work, CancellationToken.None);
 
         Assert.Equal(Math.Min(conflicts + 1, 3), publisher.BuildCalls);
+        Assert.Equal(duringBuild ? 0 : conflicts, publisher.Abandoned.Count);
         if (conflicts < 3)
         {
             Assert.Single(transitions.Transitions);
@@ -333,15 +336,41 @@ public sealed class StageWorkerTests
         Assert.Empty(transitions.Failures);
     }
 
+    [Fact]
+    public async Task Publish_defers_low_storage_without_failing_or_repeating_the_build()
+    {
+        var draft = new IndexGenerationDescriptor(Guid.NewGuid(), new string('a', 64), 4, "draft", new string('b', 64), 1);
+        var transitions = new RecordingTransitionStore();
+        var publisher = new RecordingGenerationPublisher(draft) { CapacityUnavailable = true };
+        var worker = new PublishStageWorker(new StubIndexGenerationStore([], draft),
+            new StubPipelineReader(new string('a', 64), draft.Id.ToString("N")), publisher,
+            CreateTransitionService(transitions), new FixedTimeProvider());
+        var work = CreateWork(PipelineStage.Publish, PipelineOperations.Publish);
+        await worker.ExecuteAsync(work, CancellationToken.None);
+        Assert.Equal(1, publisher.BuildCalls);
+        Assert.Empty(transitions.Failures);
+        Assert.Empty(transitions.Transitions);
+        var retry = Assert.Single(transitions.Retries);
+        Assert.Equal("index-storage-capacity-deferred", retry.Reason);
+        Assert.Equal(Now.AddMinutes(1), retry.DueAtUtc);
+    }
+
     private sealed class RecordingGenerationPublisher(IndexGenerationDescriptor draft) : IIndexGenerationPublisher
     {
         public int BuildCalls { get; private set; }
+        public int BuildConflictsRemaining { get; init; }
+        public bool CapacityUnavailable { get; init; }
+        public List<Guid> Abandoned { get; } = [];
         public ValueTask<IndexGenerationCandidateSnapshot> BuildAndPlaceAsync(Guid id, CancellationToken cancellationToken)
         {
             Assert.Equal(draft.Id, id);
             BuildCalls++;
-            return ValueTask.FromResult(new IndexGenerationCandidateSnapshot(draft with { Id = Guid.NewGuid() }, []));
+            if (CapacityUnavailable) throw new IndexStorageCapacityException();
+            if (BuildCalls <= BuildConflictsRemaining) throw new PublicationSnapshotConflictException("The corpus changed during build.");
+            return ValueTask.FromResult(new IndexGenerationCandidateSnapshot(draft with { Id = Guid.NewGuid() }, [], SegmentedCandidateId: Guid.NewGuid()));
         }
+        public ValueTask AbandonAsync(IndexGenerationCandidateSnapshot candidate, CancellationToken cancellationToken)
+        { Abandoned.Add(candidate.SegmentedCandidateId!.Value); return ValueTask.CompletedTask; }
         public ValueTask<IndexGenerationDescriptor> RebuildFromSqlAsync(Guid id, CancellationToken cancellationToken) =>
             throw new NotSupportedException();
     }

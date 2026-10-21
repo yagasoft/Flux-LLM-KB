@@ -17,8 +17,9 @@ public sealed class SqlDatabaseStartupReadiness : IDatabaseStartupReadiness
     private Task? _ready;
 
     public SqlDatabaseStartupReadiness(IDbContextFactory<FluxKnowledgeDbContext> factory,
-        TimeProvider clock, ILogger<SqlDatabaseStartupReadiness> logger, IHostApplicationLifetime? lifetime = null)
-        : this(ct => ProbeOnceAsync(factory, ct), (delay, ct) => Task.Delay(delay, clock, ct),
+        TimeProvider clock, ILogger<SqlDatabaseStartupReadiness> logger, IHostApplicationLifetime? lifetime = null,
+        bool? segmentedPublicationEnabled = null)
+        : this(ct => ProbeOnceAsync(factory, ct, segmentedPublicationEnabled), (delay, ct) => Task.Delay(delay, clock, ct),
             lifetime?.ApplicationStopping ?? CancellationToken.None, logger) { }
 
     internal SqlDatabaseStartupReadiness(Func<CancellationToken, Task> probe,
@@ -62,6 +63,13 @@ public sealed class SqlDatabaseStartupReadiness : IDatabaseStartupReadiness
                 await _delay(delay, _stoppingToken).ConfigureAwait(false);
                 delay = TimeSpan.FromSeconds(Math.Min(delay.TotalSeconds * 2, 15));
             }
+            catch (InvalidOperationException failure) when (failure.Message is
+                "index-startup-required-format-unknown" or "index-startup-segmented-publication-disabled")
+            {
+                _logger.LogError("SQL startup refused index compatibility: {ReasonCode}. Process {ProcessId}; durable work has not started.",
+                    failure.Message, Environment.ProcessId);
+                throw;
+            }
             catch (Exception failure) when (failure is not OperationCanceledException)
             {
                 _logger.LogError("SQL startup failed closed after {FailureType}. Process {ProcessId}.",
@@ -75,7 +83,8 @@ public sealed class SqlDatabaseStartupReadiness : IDatabaseStartupReadiness
         failure.Errors.Cast<SqlError>().All(error => error.Number is
             -2 or 2 or 53 or 64 or 233 or 258 or 4060 or 10053 or 10054 or 10060 or 10061 or 17142 or 18401);
 
-    public static async Task ProbeOnceAsync(IDbContextFactory<FluxKnowledgeDbContext> factory, CancellationToken ct)
+    public static async Task ProbeOnceAsync(IDbContextFactory<FluxKnowledgeDbContext> factory, CancellationToken ct,
+        bool? segmentedPublicationEnabled = null)
     {
         await using var context = await factory.CreateDbContextAsync(ct).ConfigureAwait(false);
         var connection = new SqlConnectionStringBuilder(context.Database.GetConnectionString())
@@ -86,9 +95,16 @@ public sealed class SqlDatabaseStartupReadiness : IDatabaseStartupReadiness
         {
             await using var sql = new SqlConnection(connection.ConnectionString);
             await sql.OpenAsync(ct).ConfigureAwait(false);
-            await using var command = new SqlCommand("SELECT 1;", sql) { CommandTimeout = 2 };
-            if (await command.ExecuteScalarAsync(ct).ConfigureAwait(false) is not int value || value != 1)
-                throw new InvalidOperationException("database-startup-probe-invalid");
+            await using var command = new SqlCommand("""
+                IF COL_LENGTH(N'dbo.IndexState', N'RequiredIndexFormat') IS NULL
+                    SELECT CONVERT(int,1) FROM [dbo].[IndexState] WHERE [Id]=1;
+                ELSE
+                    EXEC sys.sp_executesql N'SELECT [RequiredIndexFormat] FROM [dbo].[IndexState] WHERE [Id]=1;';
+                """, sql) { CommandTimeout = 2 };
+            if (await command.ExecuteScalarAsync(ct).ConfigureAwait(false) is not int value || value is not (1 or 2))
+                throw new InvalidOperationException("index-startup-required-format-unknown");
+            if (value == 2 && segmentedPublicationEnabled == false)
+                throw new InvalidOperationException("index-startup-segmented-publication-disabled");
         }
         catch (SqlException) when (ct.IsCancellationRequested)
         {

@@ -38,11 +38,18 @@ public static class CorpusRebuildCommand
             }
             var connectionString = Environment.GetEnvironmentVariable("ConnectionStrings__FluxKnowledge");
             if (string.IsNullOrWhiteSpace(connectionString)) throw new InvalidOperationException();
+            var factory = new Factory(connectionString);
+            if (args[0] != "status") await SqlCorpusRebuildStore.RequireLegacyFormatAsync(factory, ct).ConfigureAwait(false);
             using var tokenizer = new BgePassageTokenizer(stores);
             var safety = new LiveRootStorageSafety(LiveRootLayout.Production, FileSystemLiveRootPathInspector.Instance);
-            return await ExecuteAsync(args, new Factory(connectionString), new(tokenizer),
+            return await ExecuteAsync(args, factory, new(tokenizer),
                 new UsearchGenerationValidator(safety), output, error, ct,
                 OperatingSystem.IsWindows() ? new WindowsInteractiveGpuOwnerProbe() : null).ConfigureAwait(false);
+        }
+        catch (CorpusRebuildRefusalException exception)
+        {
+            await error.WriteLineAsync(exception.Message).ConfigureAwait(false);
+            return 1;
         }
         catch (Exception exception) when (exception is InvalidOperationException or IOException or SqlException or ArgumentException)
         {
@@ -58,6 +65,7 @@ public static class CorpusRebuildCommand
         if (!IsValid(args)) return await UsageAsync(error).ConfigureAwait(false);
         try
         {
+            if (args[0] != "status") await SqlCorpusRebuildStore.RequireLegacyFormatAsync(factory, ct).ConfigureAwait(false);
             var store = new SqlCorpusRebuildStore(factory, queryOwnerProbe: queryOwnerProbe);
             var operationId = args[0] == "commit" ? Guid.Empty : Guid.Parse(args[2]);
             object result;

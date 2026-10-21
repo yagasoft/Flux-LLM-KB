@@ -16,6 +16,7 @@ namespace FluxKnowledge.Integration.Tests.Sources;
 
 public sealed class DerivedChildRevisionIntegrationTests(NativeSqlServerFixture fixture) : IClassFixture<NativeSqlServerFixture>, IAsyncLifetime
 {
+    private readonly FluxKnowledge.Testing.TestResources _resources = new();
     public Task InitializeAsync() => SqlTestData.ClearPipelineAsync(fixture);
     public Task DisposeAsync() => Task.CompletedTask;
 
@@ -302,7 +303,7 @@ public sealed class DerivedChildRevisionIntegrationTests(NativeSqlServerFixture 
     {
         var factory = new ContextFactory(fixture.ConnectionString);
         var writer = new SqlRetainedArtifactWriter(factory, root);
-        var retained = await new SqlRetainedSourceReader(factory, root).ReadBytesAsync(claim.SourceRevisionId, CancellationToken.None);
+        var retained = await _resources.Own(new SqlRetainedSourceReader(factory, root)).ReadBytesAsync(claim.SourceRevisionId, CancellationToken.None);
         return kind switch
         {
             "ooxml" => await new OoxmlStructuralTextProcessor(writer).ProcessAsync(claim, retained, new RetainedProcessorOptions(), CancellationToken.None),
@@ -318,7 +319,7 @@ public sealed class DerivedChildRevisionIntegrationTests(NativeSqlServerFixture 
         var registry = new LocalSourceCapabilityHandlerRegistry(kind == "ooxml"
             ? [new OoxmlStructuralTextCapabilityHandler()] : [new MediaMetadataCapabilityHandler()]);
         return new RetainedProcessorActivationService(new SourceCapabilityService(new SqlSourceActivityStore(factory, TimeProvider.System), registry),
-            CreateStore(), new SqlRetainedSourceReader(factory, root), new ZipArchiveRetainedProcessor(writer),
+            CreateStore(), _resources.Own(new SqlRetainedSourceReader(factory, root)), new ZipArchiveRetainedProcessor(writer),
             new RetainedProcessorOptions { OoxmlDocumentStructuralExtractEnabled = kind == "ooxml", MediaMetadataEnabled = kind == "media" },
             TimeProvider.System, ooxmlProcessor: kind == "ooxml" ? new OoxmlStructuralTextProcessor(writer) : null,
             mediaMetadataProcessor: kind == "media" ? new MediaMetadataRetainedProcessor(writer, new AllowingDisclosure()) : null);
@@ -405,12 +406,13 @@ public sealed class DerivedChildRevisionIntegrationTests(NativeSqlServerFixture 
         Directory.CreateDirectory(root);
         return root;
     }
-    private static void DeletePrivateRoot(string root)
+    private void DeletePrivateRoot(string root)
     {
         var resolved = Path.GetFullPath(root);
         Assert.StartsWith(Path.GetFullPath(Path.GetTempPath()), resolved, StringComparison.OrdinalIgnoreCase);
         Assert.StartsWith("flux-derived-revision-", Path.GetFileName(resolved), StringComparison.Ordinal);
         Assert.Equal(0, (int)(File.GetAttributes(resolved) & FileAttributes.ReparsePoint));
+        _resources.Dispose();
         Directory.Delete(resolved, recursive: true);
     }
     private static async ValueTask ReleaseAsync(RetainedProcessorCompletion completion)

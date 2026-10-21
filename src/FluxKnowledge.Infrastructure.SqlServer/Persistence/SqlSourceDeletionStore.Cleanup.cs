@@ -45,19 +45,21 @@ public sealed partial class SqlSourceDeletionStore
                     await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken).ConfigureAwait(false);
                     var operation = await ReadOperationForUpdateAsync(context, workItem.OperationId, cancellationToken).ConfigureAwait(false);
                     if (operation is null || operation.LastCommittedLeaseId == workItem.LeaseId ||
-                        !OwnsActiveLease(operation, workItem, timeProvider.GetUtcNow()) || operation.Phase != "cleanup-files") return;
+                        !OwnsActiveLease(operation, workItem, timeProvider.GetUtcNow()) || operation.Phase is not ("cleanup-files" or "cleanup-memberships")) return;
                     if (!await context.SourceRootConfigurations.AnyAsync(root => root.Id == operation.SourceRootId &&
                         root.State == (int)SourceRootState.Deleting, cancellationToken).ConfigureAwait(false)) return;
                     var item = await context.SourceDeletionCleanupItems.SingleOrDefaultAsync(value =>
                         value.Id == cleanupItemId && value.SourceDeletionOperationId == operation.Id && value.State == 0,
                         cancellationToken).ConfigureAwait(false);
                     if (item is null) return;
+                    if (operation.Phase == "cleanup-memberships" && item.StorageKind is not (3 or 4)) return;
+                    if (operation.Phase == "cleanup-files" && item.StorageKind is not (1 or 2)) return;
                     item.State = result.Completed ? 1 : 2;
                     item.ReasonCode = result.ReasonCode;
                     item.UpdatedAtUtc = timeProvider.GetUtcNow();
                     if (result.Completed && result.ReasonCode == "source-delete-shared-artifact-preserved")
                         operation.SharedArtifactCount++;
-                    await CommitUnitAsync(context, transaction, operation, result.Completed ? "cleanup-files" : "attention",
+                    await CommitUnitAsync(context, transaction, operation, result.Completed ? operation.Phase : "attention",
                         cancellationToken, result.Completed ? null : result.ReasonCode ?? "source-delete-file-cleanup-failed",
                         progressed: result.Completed, nextState: result.Completed ? 0 : 4,
                         continueImmediately: result.Completed).ConfigureAwait(false);

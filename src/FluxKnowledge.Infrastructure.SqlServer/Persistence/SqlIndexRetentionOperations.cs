@@ -6,6 +6,7 @@ using System.Text.Json;
 using FluxKnowledge.Application.Gpu;
 using FluxKnowledge.Application.IntegrationV1;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
+using FluxKnowledge.Integrations.Windows;
 using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Storage;
@@ -64,6 +65,8 @@ public sealed class SqlIndexRetentionOperations(IDbContextFactory<FluxKnowledgeD
     {
         if (manifestId == Guid.Empty || ids.Count == 0 || ids.Distinct().Count() != ids.Count || ids.Intersect(protectedIds).Any()) Refuse("index-retention-plan-invalid");
         SafeComponents(outputDirectory);
+        if (Overlaps(outputDirectory, storage.IndexRoot) || Overlaps(outputDirectory, storage.RecoveryRoot))
+            Refuse("index-retention-plan-outside-owned-storage-required");
         if (Directory.Exists(outputDirectory) && Directory.EnumerateFileSystemEntries(outputDirectory).Any()) Refuse("index-retention-plan-exists");
         Directory.CreateDirectory(outputDirectory);
         var entries = new List<IndexRetentionEntry>();
@@ -96,6 +99,7 @@ public sealed class SqlIndexRetentionOperations(IDbContextFactory<FluxKnowledgeD
     {
         ValidateManifest(manifest);
         var root = SnapshotRoot(manifest.ManifestId);
+        await using var recoveryWriter = await RecoveryReferences().BeginWriteAsync(storage.RecoveryRoot, ct, ownerExitSufficient: true).ConfigureAwait(false);
         Directory.CreateDirectory(root);
         foreach (var entry in manifest.Entries)
         {
@@ -118,6 +122,7 @@ public sealed class SqlIndexRetentionOperations(IDbContextFactory<FluxKnowledgeD
             if (ManifestHash(existing) != ManifestHash(manifest)) Refuse("index-retention-snapshot-conflict");
         }
         else await File.WriteAllTextAsync(path, JsonSerializer.Serialize(manifest, JsonOptions), ct).ConfigureAwait(false);
+        await recoveryWriter.CompleteAsync(ct).ConfigureAwait(false);
     }
 
     internal async Task AcquireOwnershipAsync(FluxKnowledgeDbContext db, CancellationToken ct)
@@ -178,6 +183,7 @@ public sealed class SqlIndexRetentionOperations(IDbContextFactory<FluxKnowledgeD
         }
         else
         {
+            await RequireLegacyRestoreAsync(db, ct).ConfigureAwait(false);
             var deletion = await db.NativeOperationReceipts.AsNoTracking().SingleOrDefaultAsync(value => value.OperationId == payload.DeletionReceiptId && value.Action == "index_retention", ct).ConfigureAwait(false)
                 ?? throw new NativeOperationException("index-retention-deletion-receipt-invalid");
             await AuthenticateReceiptAsync(db, "index_retention", payload with { DeletionReceiptId = null }, deletion.OperationId, ct).ConfigureAwait(false);
@@ -201,10 +207,12 @@ public sealed class SqlIndexRetentionOperations(IDbContextFactory<FluxKnowledgeD
         using var budget = CancellationTokenSource.CreateLinkedTokenSource(ct);
         budget.CancelAfter(TimeSpan.FromSeconds(manifest.UnitDeadlineSeconds));
         ct = budget.Token;
+        await using var recoveryWriter = await RecoveryReferences().BeginWriteAsync(storage.RecoveryRoot, ct, ownerExitSufficient: true).ConfigureAwait(false);
         await using var db = await NewOperatorContextAsync(ct).ConfigureAwait(false);
         await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct).ConfigureAwait(false);
         await AcquireOwnershipAsync(db, ct).ConfigureAwait(false);
         await SqlPublishedPassageSelection.AcquireFenceAsync(db, ct).ConfigureAwait(false);
+        if (restore) await RequireLegacyRestoreAsync(db, ct).ConfigureAwait(false);
         await AuthenticateReceiptAsync(db, action, payload, receipt.OperationId, ct).ConfigureAwait(false);
         if (await DatabaseIdentityAsync(db, ct).ConfigureAwait(false) != manifest.DatabaseIncarnation) Refuse("index-retention-database-changed");
         await VerifySnapshotAsync(manifest, entry, ct).ConfigureAwait(false);
@@ -219,6 +227,7 @@ public sealed class SqlIndexRetentionOperations(IDbContextFactory<FluxKnowledgeD
                 .Select(value => value.Receipt.OperationId).ToArrayAsync(ct).ConfigureAwait(false);
             var correlations = restored.Select(value => "index-retention:" + value.ToString("D")).ToArray();
             var filesRestored = await db.AuditEvents.AnyAsync(value => value.EventType == "index_retention.files_completed" && correlations.Contains(value.CorrelationId!), ct).ConfigureAwait(false);
+            await recoveryWriter.CompleteAsync(ct).ConfigureAwait(false);
             return receipt with { Outcome = filesRestored ? "restored" : "restoration-files-pending", ReasonCode = "index-retention-restoration-started" };
         }
         await CheckClosureAsync(db, entry.Generation, manifest.ManifestId, ct).ConfigureAwait(false);
@@ -235,6 +244,7 @@ public sealed class SqlIndexRetentionOperations(IDbContextFactory<FluxKnowledgeD
         {
             if (restore) await VerifyRestorePathsAsync(entry, ct, requireAll: true).ConfigureAwait(false);
             else if (Directory.Exists(entry.Generation.IndexPath) || File.Exists(entry.Generation.IndexPath)) Refuse("index-retention-finalized-state-changed");
+            await recoveryWriter.CompleteAsync(ct).ConfigureAwait(false);
             return receipt with { Outcome = "completed" };
         }
         FailureInjector?.Invoke("before-files");
@@ -243,6 +253,7 @@ public sealed class SqlIndexRetentionOperations(IDbContextFactory<FluxKnowledgeD
             CorrelationId = originalCorrelation, DetailsJson = JsonSerializer.Serialize(new { payload.ManifestId, payload.GenerationId, restore }), OccurredAtUtc = DateTimeOffset.UtcNow });
         await db.SaveChangesAsync(ct).ConfigureAwait(false);
         await transaction.CommitAsync(ct).ConfigureAwait(false);
+        await recoveryWriter.CompleteAsync(ct).ConfigureAwait(false);
         FailureInjector?.Invoke("after-file-receipt");
         return receipt with { Outcome = "completed" };
     }
@@ -283,6 +294,7 @@ public sealed class SqlIndexRetentionOperations(IDbContextFactory<FluxKnowledgeD
 
     private async Task CheckClosureAsync(FluxKnowledgeDbContext db, IndexGenerationEntity generation, Guid manifestId, CancellationToken ct)
     {
+        RequireLegacyGeneration(generation);
         var id = generation.Id;
         var path = Canonical(generation.IndexPath);
         if (generation.EmbeddingJobId is not null || generation.ValidatedAtUtc is null || generation.RowVersion.Length != 8 ||
@@ -519,7 +531,8 @@ public sealed class SqlIndexRetentionOperations(IDbContextFactory<FluxKnowledgeD
         if (manifest.ProtectedGenerationIds.Contains(payload.GenerationId)) Refuse("index-retention-protected");
         return (manifest, entry);
     }
-    private static void ValidateManifest(IndexRetentionManifest manifest)
+    private void ValidateManifest(IndexRetentionManifest manifest) => ValidateSnapshotManifest(manifest, storage.IndexRoot);
+    internal static void ValidateSnapshotManifest(IndexRetentionManifest manifest, string indexRoot)
     {
         if (manifest.SchemaVersion != 1 || manifest.ManifestId == Guid.Empty || manifest.DatabaseIncarnation == Guid.Empty ||
             manifest.UnitDeadlineSeconds != 20 || manifest.ProtectedGenerationIds is null || manifest.Entries is not { Count: > 0 } ||
@@ -529,10 +542,26 @@ public sealed class SqlIndexRetentionOperations(IDbContextFactory<FluxKnowledgeD
                 value.MemberCount != value.Generation.VectorCount || value.MemberCount > manifest.MaximumMembersPerUnit ||
                 !IsHash(value.MemberSha256) || !IsHash(value.VectorBindingSha256) || value.Files is not { Count: > 0 } ||
                 value.Files.Any(file => file is null || string.IsNullOrWhiteSpace(file.Name) || file.Name != Path.GetFileName(file.Name) ||
-                    file.Name is "." or ".." || file.Name.Equals("members.bin", StringComparison.OrdinalIgnoreCase) ||
+                    file.Name is "." or ".." || file.Name.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 || file.Name.Equals("members.bin", StringComparison.OrdinalIgnoreCase) ||
                     file.Name.Equals("manifest.json", StringComparison.OrdinalIgnoreCase) || file.Name.EndsWith(".tmp", StringComparison.OrdinalIgnoreCase) ||
                     file.Name.EndsWith(".journal.json", StringComparison.OrdinalIgnoreCase) || file.Bytes < 0 || !IsHash(file.Sha256)) ||
                 value.Files.Select(file => file.Name).Distinct(StringComparer.OrdinalIgnoreCase).Count() != value.Files.Count)) Refuse("index-retention-manifest-invalid");
+        foreach (var entry in manifest.Entries) RequireLegacyGeneration(entry.Generation, indexRoot);
+    }
+
+    private void RequireLegacyGeneration(IndexGenerationEntity generation) => RequireLegacyGeneration(generation, storage.IndexRoot);
+    private static void RequireLegacyGeneration(IndexGenerationEntity generation, string indexRoot)
+    {
+        var expected = Path.Combine(Path.GetFullPath(indexRoot), "generations", generation.Id.ToString("N"));
+        if (generation.FormatVersion != 1 || generation.SegmentCount != 0 || generation.RetirementOperationId is not null ||
+            generation.ReclaimedAtUtc is not null || !string.Equals(generation.IndexPath, expected, StringComparison.OrdinalIgnoreCase))
+            Refuse("index-retention-legacy-format-required");
+    }
+
+    private static async Task RequireLegacyRestoreAsync(FluxKnowledgeDbContext db, CancellationToken ct)
+    {
+        if (!await db.IndexState.AnyAsync(value => value.RequiredIndexFormat == 1, ct).ConfigureAwait(false))
+            Refuse("index-retention-restore-format-mismatch");
     }
     private static bool IsHash(string? value) => value is { Length: 64 } && value.All(Uri.IsHexDigit);
     private async Task VerifySnapshotAsync(IndexRetentionManifest manifest, IndexRetentionEntry entry, CancellationToken ct)
@@ -542,7 +571,9 @@ public sealed class SqlIndexRetentionOperations(IDbContextFactory<FluxKnowledgeD
         foreach (var file in entry.Files) await MatchFileAsync(Path.Combine(directory, file.Name), file.Bytes, file.Sha256, ct).ConfigureAwait(false);
     }
     private static bool SameRow(IndexGenerationEntity first, IndexGenerationEntity second, bool includeVersion) =>
-        first.Id == second.Id && first.CorpusEpoch == second.CorpusEpoch && first.CorpusVersion == second.CorpusVersion &&
+        first.Id == second.Id && first.FormatVersion == second.FormatVersion && first.SegmentCount == second.SegmentCount &&
+        first.RetirementOperationId == second.RetirementOperationId && first.ReclaimedAtUtc == second.ReclaimedAtUtc &&
+        first.CorpusEpoch == second.CorpusEpoch && first.CorpusVersion == second.CorpusVersion &&
         first.EmbeddingJobId == second.EmbeddingJobId && first.ModelFingerprint == second.ModelFingerprint && first.Dimensions == second.Dimensions &&
         first.IndexPath == second.IndexPath && first.MetadataChecksum == second.MetadataChecksum && first.VectorCount == second.VectorCount &&
         first.CreatedAtUtc == second.CreatedAtUtc && first.ValidatedAtUtc == second.ValidatedAtUtc && first.RetiredAtUtc == second.RetiredAtUtc &&
@@ -612,6 +643,7 @@ public sealed class SqlIndexRetentionOperations(IDbContextFactory<FluxKnowledgeD
         return new(new DbContextOptionsBuilder<FluxKnowledgeDbContext>().UseSqlServer(connectionString).Options);
     }
     private string SnapshotRoot(Guid id) { var path = Path.Combine(storage.RecoveryRoot, "IndexRetention", id.ToString("N")); Owned(path); return path; }
+    private SqlIndexRecoveryReferences RecoveryReferences() => new(factory, TimeProvider.System, queryOwnerProbe ?? new WindowsInteractiveGpuOwnerProbe());
     private string SnapshotEntry(Guid manifestId, Guid id) { var path = Path.Combine(SnapshotRoot(manifestId), id.ToString("N")); Owned(path); return path; }
     private string Canonical(string path)
     {

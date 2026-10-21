@@ -1,6 +1,8 @@
 [CmdletBinding()]
 param([Parameter(Mandatory)][string]$SourceRoot,[Parameter(Mandatory)][string]$SqlPath)
 $ErrorActionPreference='Stop'
+# Native control-flow fixture; actual format admission has separate SQL integration coverage.
+function Invoke-DeploymentIndexAdmission { param($Roles,$Action) & $Action }
 Import-Module (Join-Path $SourceRoot 'scripts/deploy/incremental-source-deletion-cleanup-migration.psm1') -Force
 Import-Module (Join-Path $SourceRoot 'scripts/deploy/incremental-iis-payload-swap.psm1') -Force
 Import-Module (Join-Path $SourceRoot 'scripts/deploy/incremental-hybrid-passage-rebuild.psm1') -Force
@@ -9,7 +11,7 @@ if ((Get-FileHash -LiteralPath $SqlPath -Algorithm SHA256).Hash -cne $contract.U
 $tokens=$null; $errors=$null
 $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $SourceRoot 'scripts/deploy/update-native-iis-incremental.ps1'),[ref]$tokens,[ref]$errors)
 if ($errors.Count -ne 0) { throw 'The updater does not parse.' }
-foreach ($name in @('New-DeploymentValidationHold','Assert-SourceDeletionCleanupReleaseBinding','Get-SourceDeletionCleanupCandidateDatabase')) {
+foreach ($name in @('New-DeploymentValidationHold','Assert-SourceDeletionCleanupReleaseBinding','Get-SourceDeletionCleanupCandidateDatabase','Start-IndexCompatibleWebAppPool')) {
     $function=$ast.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name },$true)
     Invoke-Expression $function.Extent.Text
 }

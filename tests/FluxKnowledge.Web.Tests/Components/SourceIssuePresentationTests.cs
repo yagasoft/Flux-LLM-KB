@@ -12,6 +12,16 @@ namespace FluxKnowledge.Web.Tests.Components;
 
 public sealed class SourceIssuePresentationTests
 {
+    [Theory]
+    [InlineData("SourceAccessRepairNotApproved", "physical source root")]
+    [InlineData("SourceAccessRepairUnavailable", "Windows task and policy")]
+    [InlineData("SourceAccessExplicitDeny", "preserves that rule")]
+    [InlineData("SourceAccessPermissionsUnsupported", "will not reset inheritance")]
+    [InlineData("SourceAccessOutsideApprovedRoot", "will not extend its scope")]
+    [InlineData("SourceAccessIdentityChanged", "renew its access policy")]
+    [InlineData("SourceAccessRepairUnconfirmed", "unresolved diagnostic")]
+    public void Automatic_access_recovery_gives_an_actionable_current_reason(string reason, string action) =>
+        Assert.Contains(action, SourceIssuePresentation.Guidance(reason), StringComparison.Ordinal);
     [Fact]
     public void Expansion_refusal_explains_current_and_historical_budgets_without_offering_an_override()
     {

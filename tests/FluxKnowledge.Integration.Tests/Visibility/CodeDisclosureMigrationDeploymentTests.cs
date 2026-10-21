@@ -18,7 +18,7 @@ public sealed class CodeDisclosureMigrationDeploymentTests(NativeSqlServerFixtur
         const string target = "20261003220411_AddCanonicalCodeDisclosureProof";
         await db.GetService<IMigrator>().MigrateAsync(baseline);
         var script = db.GetService<IMigrator>().GenerateScript(baseline, target, MigrationsSqlGenerationOptions.Idempotent);
-        var source = new DirectoryInfo(AppContext.BaseDirectory);
+        var source = new DirectoryInfo(FluxKnowledge.Testing.RepositoryFiles.Root());
         const string relative = "tests/native/code-disclosure-migration-sql.ps1";
         while (source is not null && !File.Exists(Path.Combine(source.FullName, relative))) source = source.Parent;
         Assert.NotNull(source);

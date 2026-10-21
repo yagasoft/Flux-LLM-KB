@@ -25,6 +25,7 @@ namespace FluxKnowledge.Web.Tests.Components;
 
 public sealed class TarArchiveProcessorPrivacyTests(NativeSqlServerFixture fixture) : IClassFixture<NativeSqlServerFixture>
 {
+    private readonly FluxKnowledge.Testing.TestResources _resources = new();
     private const string MemberNameSentinel = "confidential-member-sentinel.txt";
 
     [NativeSqlServerFact]
@@ -52,7 +53,7 @@ public sealed class TarArchiveProcessorPrivacyTests(NativeSqlServerFixture fixtu
             await using var statusSubscription = statusFeed.Subscribe();
             var activation = new RetainedProcessorActivationService(
                 new SourceCapabilityService(new SqlSourceActivityStore(factory, TimeProvider.System), new LocalSourceCapabilityHandlerRegistry([zip, processor])),
-                new SqlRetainedProcessorBranchStore(factory, TimeProvider.System), new SqlRetainedSourceReader(factory, privateRoot, policy), zip,
+                new SqlRetainedProcessorBranchStore(factory, TimeProvider.System), _resources.Own(new SqlRetainedSourceReader(factory, privateRoot, policy)), zip,
                 new RetainedProcessorOptions { ArchiveTarExpandEnabled = true }, TimeProvider.System, processor, statusFeed);
 
             Assert.Equal(1, (await activation.RunOnceAsync(CancellationToken.None)).CompletedBranches);
@@ -73,6 +74,7 @@ public sealed class TarArchiveProcessorPrivacyTests(NativeSqlServerFixture fixtu
         }
         finally
         {
+            _resources.Dispose();
             if (Directory.Exists(privateRoot)) Directory.Delete(privateRoot, recursive: true);
             if (Directory.Exists(fallbackRoot)) Directory.Delete(fallbackRoot, recursive: true);
         }

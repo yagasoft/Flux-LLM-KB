@@ -28,7 +28,7 @@ public sealed class CodeDisclosureProofIntegrationTests(NativeSqlServerFixture f
     public async Task Whole_current_source_returns_the_method_despite_a_remote_protected_expression()
     {
         const string relative = "src/FluxKnowledge.Infrastructure.SqlServer/Persistence/SqlSourceScanStore.cs";
-        var directory = new DirectoryInfo(AppContext.BaseDirectory);
+        var directory = new DirectoryInfo(FluxKnowledge.Testing.RepositoryFiles.Root());
         while (directory is not null && !File.Exists(Path.Combine(directory.FullName, relative))) directory = directory.Parent;
         Assert.NotNull(directory);
         var text = (await File.ReadAllTextAsync(Path.Combine(directory.FullName, relative))).Replace("\r\n", "\n", StringComparison.Ordinal);
@@ -230,13 +230,24 @@ public sealed class CodeDisclosureProofIntegrationTests(NativeSqlServerFixture f
             fixture, "The retained migration answer is forty two.", new PassageBuilder(new MigrationWords()));
         await using var db = await pipeline.Factory.CreateDbContextAsync();
         var before = await CanonicalSnapshotAsync(db);
+        var oldVersion = (await db.IndexState.AsNoTracking().SingleAsync()).RowVersion;
         // This generated disposable catalog alone is moved to the prior schema.
         await db.GetService<IMigrator>().MigrateAsync("20260927202655_AddCorpusRebuildSupersession");
         await db.Database.MigrateAsync();
         Assert.Equal(before, await CanonicalSnapshotAsync(db));
+        var upgraded = await db.IndexState.AsNoTracking().SingleAsync();
+        // The later segmented migration initialises these derived fields and
+        // therefore advances SQL rowversion; canonical corpus state stays equal.
+        Assert.Equal(1, upgraded.RequiredIndexFormat);
+        Assert.Equal(0, upgraded.ProjectionChangeFloorVersion);
+        Assert.NotEqual(oldVersion, upgraded.RowVersion);
         Assert.Empty(await db.CanonicalCodeDisclosureProofs.ToArrayAsync());
         await db.Database.MigrateAsync();
         Assert.Equal(before, await CanonicalSnapshotAsync(db));
+        var repeated = await db.IndexState.AsNoTracking().SingleAsync();
+        Assert.Equal(upgraded.RowVersion, repeated.RowVersion);
+        Assert.Equal(upgraded.RequiredIndexFormat, repeated.RequiredIndexFormat);
+        Assert.Equal(upgraded.ProjectionChangeFloorVersion, repeated.ProjectionChangeFloorVersion);
         Assert.Empty(await db.Database.GetPendingMigrationsAsync());
     }
 
@@ -275,7 +286,11 @@ public sealed class CodeDisclosureProofIntegrationTests(NativeSqlServerFixture f
         Chunks = await db.TextChunks.AsNoTracking().OrderBy(value => value.Id)
             .Select(value => new { value.Id, value.ArtifactId, value.Content, value.ContentHash, value.SearchInputHash }).ToArrayAsync(),
         Vectors = await db.Vectors.AsNoTracking().OrderBy(value => value.VectorId).ToArrayAsync(),
-        Index = await db.IndexState.AsNoTracking().ToArrayAsync(),
+        Index = await db.IndexState.AsNoTracking().Select(value => new
+        {
+            value.Id, value.CorpusEpoch, value.CorpusRebuildOperationId, value.CorpusVersion,
+            value.ActiveIndexGenerationId, value.EmptyCatalogueValidatedAtUtc, value.UpdatedAtUtc
+        }).ToArrayAsync(),
         Jobs = await db.Jobs.AsNoTracking().OrderBy(value => value.Id).ToArrayAsync()
     });
 

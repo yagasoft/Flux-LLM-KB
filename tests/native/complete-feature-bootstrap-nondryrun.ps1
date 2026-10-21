@@ -192,6 +192,9 @@ if ([string]::IsNullOrWhiteSpace($SourceRoot)) {
     $SourceRoot = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSCommandPath))
 }
 $SourceRoot = (Resolve-Path -LiteralPath $SourceRoot).Path
+$ArtifactsRoot = if ([string]::IsNullOrWhiteSpace($env:FluxKnowledgeArtifactsPath)) {
+    Join-Path $SourceRoot 'artifacts'
+} else { [IO.Path]::GetFullPath($env:FluxKnowledgeArtifactsPath) }
 $closeout = Join-Path $SourceRoot 'scripts\dev\complete-feature.ps1'
 $bootstrapScript = Join-Path $SourceRoot 'scripts\deploy\native-go-live-bootstrap.sql'
 Assert-True (Test-Path -LiteralPath $closeout -PathType Leaf) 'Closeout script is missing.'
@@ -239,8 +242,8 @@ $priorFailure = [Environment]::GetEnvironmentVariable('FLUXKNOWLEDGE_TEST_SQLCLI
 $priorChildStdout = [Environment]::GetEnvironmentVariable('FLUXKNOWLEDGE_TEST_SQL_CHILD_STDOUT', [EnvironmentVariableTarget]::Process)
 try {
     New-Item -ItemType Directory -Path $temporaryRoot | Out-Null
-    $portableProvider = Join-Path $SourceRoot 'artifacts\bin\FluxKnowledge.Web\release\Microsoft.Data.SqlClient.dll'
-    $windowsProvider = Join-Path $SourceRoot 'artifacts\bin\FluxKnowledge.Web\release\runtimes\win\lib\net9.0\Microsoft.Data.SqlClient.dll'
+    $portableProvider = Join-Path $ArtifactsRoot 'bin\FluxKnowledge.Web\release\Microsoft.Data.SqlClient.dll'
+    $windowsProvider = Join-Path $ArtifactsRoot 'bin\FluxKnowledge.Web\release\runtimes\win\lib\net9.0\Microsoft.Data.SqlClient.dll'
     Assert-True ((Test-Path -LiteralPath $portableProvider -PathType Leaf) -and
         (Test-Path -LiteralPath $windowsProvider -PathType Leaf)) `
         'The release output does not contain the packaged portable and Windows SqlClient provider assets.'
@@ -258,7 +261,7 @@ try {
         $rootOnlyFailure.Exception.Message -ceq 'native-go-live-windows-sql-client-missing') `
         'The portable publish-root SqlClient provider was accepted without the exact Windows runtime asset.'
 
-    $windowsLayout = Join-Path $SourceRoot 'artifacts\bin\FluxKnowledge.Web\release'
+    $windowsLayout = Join-Path $ArtifactsRoot 'bin\FluxKnowledge.Web\release'
     $windowsAsset = $windowsProvider
     $dependencyAsset = Join-Path $windowsLayout 'Microsoft.SqlServer.Server.dll'
     $nativeSniAsset = Get-NativeGoLiveWindowsSqlClientNativeSniAsset -MergedMainRoot $windowsLayout

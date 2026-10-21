@@ -16,6 +16,7 @@ namespace FluxKnowledge.Integration.Tests.Sources;
 /// <summary>Disposable SQL proof that OOXML replay is retained-artifact-only and source-neutral.</summary>
 public sealed class OoxmlReplayIntegrationTests(NativeSqlServerFixture fixture) : IClassFixture<NativeSqlServerFixture>, IAsyncLifetime
 {
+    private readonly FluxKnowledge.Testing.TestResources _resources = new();
     private const string ForceRetryReasonCode = "activation-force-retryable";
     private const string ForceOverrideReasonCode = "activation-force-policy-override";
     private readonly NativeSqlServerFixture _fixture = fixture;
@@ -119,6 +120,7 @@ public sealed class OoxmlReplayIntegrationTests(NativeSqlServerFixture fixture) 
         }
         finally
         {
+            _resources.Dispose();
             if (Directory.Exists(privateRoot)) Directory.Delete(privateRoot, recursive: true);
             if (Directory.Exists(outlookPrivateRoot)) Directory.Delete(outlookPrivateRoot, recursive: true);
         }
@@ -154,6 +156,7 @@ public sealed class OoxmlReplayIntegrationTests(NativeSqlServerFixture fixture) 
         }
         finally
         {
+            _resources.Dispose();
             if (Directory.Exists(privateRoot)) Directory.Delete(privateRoot, recursive: true);
         }
     }
@@ -188,6 +191,7 @@ public sealed class OoxmlReplayIntegrationTests(NativeSqlServerFixture fixture) 
         }
         finally
         {
+            _resources.Dispose();
             if (Directory.Exists(privateRoot)) Directory.Delete(privateRoot, recursive: true);
         }
     }
@@ -235,6 +239,7 @@ public sealed class OoxmlReplayIntegrationTests(NativeSqlServerFixture fixture) 
         }
         finally
         {
+            _resources.Dispose();
             if (Directory.Exists(privateRoot)) Directory.Delete(privateRoot, recursive: true);
         }
     }
@@ -301,6 +306,7 @@ public sealed class OoxmlReplayIntegrationTests(NativeSqlServerFixture fixture) 
         }
         finally
         {
+            _resources.Dispose();
             if (Directory.Exists(privateRoot)) Directory.Delete(privateRoot, recursive: true);
         }
     }
@@ -346,6 +352,7 @@ public sealed class OoxmlReplayIntegrationTests(NativeSqlServerFixture fixture) 
         }
         finally
         {
+            _resources.Dispose();
             if (Directory.Exists(privateRoot)) Directory.Delete(privateRoot, recursive: true);
         }
     }
@@ -379,7 +386,7 @@ public sealed class OoxmlReplayIntegrationTests(NativeSqlServerFixture fixture) 
                 new OoxmlForceRequestCommand(action.ActionId, Guid.NewGuid(), action.RequestFingerprint, action.BlockedRowVersionToken),
                 CancellationToken.None);
 
-            var retainedReader = new ReadBytesFaultingReader(new SqlRetainedSourceReader(factory, privateRoot));
+            var retainedReader = new ReadBytesFaultingReader(_resources.Own(new SqlRetainedSourceReader(factory, privateRoot)));
             var result = await CreateActivation(privateRoot, ooxmlEnabled: true, retainedReader: retainedReader).RunOnceAsync(CancellationToken.None);
 
             Assert.Equal(1, result.ClaimedBranches);
@@ -393,6 +400,7 @@ public sealed class OoxmlReplayIntegrationTests(NativeSqlServerFixture fixture) 
         }
         finally
         {
+            _resources.Dispose();
             if (Directory.Exists(privateRoot)) Directory.Delete(privateRoot, recursive: true);
         }
     }
@@ -425,6 +433,7 @@ public sealed class OoxmlReplayIntegrationTests(NativeSqlServerFixture fixture) 
         }
         finally
         {
+            _resources.Dispose();
             if (Directory.Exists(privateRoot)) Directory.Delete(privateRoot, recursive: true);
         }
     }
@@ -472,6 +481,7 @@ public sealed class OoxmlReplayIntegrationTests(NativeSqlServerFixture fixture) 
         }
         finally
         {
+            _resources.Dispose();
             if (Directory.Exists(privateRoot)) Directory.Delete(privateRoot, recursive: true);
         }
     }
@@ -545,6 +555,7 @@ public sealed class OoxmlReplayIntegrationTests(NativeSqlServerFixture fixture) 
         }
         finally
         {
+            _resources.Dispose();
             if (Directory.Exists(privateRoot)) Directory.Delete(privateRoot, recursive: true);
         }
     }
@@ -583,6 +594,7 @@ public sealed class OoxmlReplayIntegrationTests(NativeSqlServerFixture fixture) 
         }
         finally
         {
+            _resources.Dispose();
             if (Directory.Exists(privateRoot)) Directory.Delete(privateRoot, recursive: true);
         }
     }
@@ -660,7 +672,7 @@ public sealed class OoxmlReplayIntegrationTests(NativeSqlServerFixture fixture) 
         var ooxml = new OoxmlStructuralTextProcessor(writer);
         return new RetainedProcessorActivationService(
             new SourceCapabilityService(new SqlSourceActivityStore(factory, TimeProvider.System), new LocalSourceCapabilityHandlerRegistry([zip, new OoxmlStructuralTextCapabilityHandler()])),
-            new SqlRetainedProcessorBranchStore(factory, TimeProvider.System), retainedReader ?? new SqlRetainedSourceReader(factory, privateRoot, policy), zip,
+            new SqlRetainedProcessorBranchStore(factory, TimeProvider.System), retainedReader ?? _resources.Own(new SqlRetainedSourceReader(factory, privateRoot, policy)), zip,
             new RetainedProcessorOptions { OoxmlDocumentStructuralExtractEnabled = ooxmlEnabled, ArchiveZipExpandEnabled = zipEnabled }, TimeProvider.System,
             ooxmlProcessor: ooxml);
     }

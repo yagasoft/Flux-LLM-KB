@@ -104,7 +104,7 @@ public sealed class NativeCodexHookCacheRepairTests
 
         public async Task<(int ExitCode, string Output, string Error)> RunAsync(bool apply, string? cacheOverride = null)
         {
-            var directory = new DirectoryInfo(AppContext.BaseDirectory);
+            var directory = new DirectoryInfo(FluxKnowledge.Testing.RepositoryFiles.Root());
             while (directory is not null && !File.Exists(Path.Combine(directory.FullName, "FluxKnowledge.slnx"))) directory = directory.Parent;
             Assert.NotNull(directory);
             var script = Path.Combine(directory.FullName, "scripts", "deploy", "repair-native-codex-hook-cache.ps1");

@@ -101,6 +101,27 @@ public sealed class StagingHostCompositionTests : IDisposable
     }
 
     [Fact]
+    public async Task Segmented_staging_uses_actual_process_ownership_and_synthetic_inference_without_model_loaders()
+    {
+        var settings = StagingHostSettings.Create(_ownedRoot, Connection, "http://127.0.0.1:5140", indexPublicationMode: "Segmented");
+        Directory.CreateDirectory(settings.SourcesRoot);
+        var services = new ServiceCollection(); services.AddLogging();
+        WebHostComposition.AddStagingFluxKnowledgeServices(services, settings);
+        await using var provider = services.BuildServiceProvider();
+        Assert.IsType<FluxKnowledge.Integrations.Windows.WindowsInteractiveGpuOwnerProbe>(provider.GetRequiredService<IGpuInteractiveOwnerProbe>());
+        Assert.IsType<StagingPassageInference>(provider.GetRequiredService<IScheduledPassageInference>());
+        Assert.Same(provider.GetRequiredService<IScheduledPassageInference>(), provider.GetRequiredService<IEmbeddingProvider>());
+        Assert.IsAssignableFrom<IBatchedEmbeddingProvider>(provider.GetRequiredService<IEmbeddingProvider>());
+        using var scope = provider.CreateScope();
+        Assert.IsType<FluxKnowledge.Infrastructure.Usearch.SegmentedIndexPublisher>(scope.ServiceProvider.GetRequiredService<IIndexGenerationPublisher>());
+        Assert.IsType<SqlSegmentRetirementOperations>(scope.ServiceProvider.GetRequiredService<IIndexSourceDeletionMaintenance>());
+        Assert.Same(scope.ServiceProvider.GetRequiredService<IIndexSourceDeletionMaintenance>(),
+            scope.ServiceProvider.GetRequiredService<IIndexProjectionMaintenance>());
+        Assert.DoesNotContain(services, descriptor => descriptor.ImplementationType?.Name.StartsWith("Bge", StringComparison.Ordinal) == true ||
+            descriptor.ImplementationType == typeof(GpuSchedulerService) || descriptor.ImplementationType?.Name.Contains("NativeWorker", StringComparison.Ordinal) == true);
+    }
+
+    [Fact]
     public void Stage_source_admission_refuses_external_workspaces_before_reading_them()
     {
         var settings = CreateCompositionSettings();

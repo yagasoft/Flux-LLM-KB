@@ -14,6 +14,7 @@ namespace FluxKnowledge.Integration.Tests.Sources;
 /// <summary>Disposable SQL proof that media manifests only use app-owned retained bytes and generic branch fencing.</summary>
 public sealed class MediaMetadataReplayIntegrationTests(NativeSqlServerFixture fixture) : IClassFixture<NativeSqlServerFixture>, IAsyncLifetime
 {
+    private readonly FluxKnowledge.Testing.TestResources _resources = new();
     private readonly NativeSqlServerFixture _fixture = fixture;
 
     public Task InitializeAsync() => ClearMediaDataAsync();
@@ -542,7 +543,7 @@ public sealed class MediaMetadataReplayIntegrationTests(NativeSqlServerFixture f
         {
             var seeded = await SeedPngAsync(privateRoot, "cancelled");
             using var cancellation = new CancellationTokenSource();
-            var reader = new CancellingReader(new SqlRetainedSourceReader(new ContextFactory(_fixture.ConnectionString), privateRoot), cancellation);
+            var reader = new CancellingReader(_resources.Own(new SqlRetainedSourceReader(new ContextFactory(_fixture.ConnectionString), privateRoot)), cancellation);
 
             await Assert.ThrowsAsync<OperationCanceledException>(() =>
                 CreateActivation(privateRoot, enabled: true, retainedReader: reader).RunOnceAsync(cancellation.Token).AsTask());
@@ -575,7 +576,7 @@ public sealed class MediaMetadataReplayIntegrationTests(NativeSqlServerFixture f
         var zip = new ZipArchiveRetainedProcessor(writer);
         return new RetainedProcessorActivationService(
             new SourceCapabilityService(new SqlSourceActivityStore(factory, TimeProvider.System), new LocalSourceCapabilityHandlerRegistry([zip, new MediaMetadataCapabilityHandler()])),
-            new SqlRetainedProcessorBranchStore(factory, TimeProvider.System), retainedReader ?? new SqlRetainedSourceReader(factory, privateRoot), zip,
+            new SqlRetainedProcessorBranchStore(factory, TimeProvider.System), retainedReader ?? _resources.Own(new SqlRetainedSourceReader(factory, privateRoot)), zip,
             new RetainedProcessorOptions { MediaMetadataEnabled = enabled }, TimeProvider.System,
             mediaMetadataProcessor: media ?? new MediaMetadataRetainedProcessor(writer, new AllowingDisclosure()));
     }
@@ -641,7 +642,11 @@ public sealed class MediaMetadataReplayIntegrationTests(NativeSqlServerFixture f
         await context.SourceRootConfigurations.Where(value => value.CanonicalPath.StartsWith("C:\\phase5-media-")).ExecuteDeleteAsync();
     }
     private static string CreatePrivateRoot() { var root = Path.Combine(Path.GetTempPath(), $"flux-media-retained-{Guid.NewGuid():N}"); Directory.CreateDirectory(root); return root; }
-    private static void DeletePrivateRoot(string root) { if (Directory.Exists(root)) Directory.Delete(root, recursive: true); }
+    private void DeletePrivateRoot(string root)
+    {
+        _resources.Dispose();
+        if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+    }
     private static byte[] Png() => Convert.FromBase64String("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Jj7kAAAAASUVORK5CYII=");
     private static byte[] IsoBmff(string brand)
     {

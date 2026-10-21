@@ -9,7 +9,7 @@ $ast = [Management.Automation.Language.Parser]::ParseFile(
 if ($errors.Count) { throw 'The incremental updater does not parse.' }
 foreach ($name in @('Assert-CanonicalPath', 'Get-IncrementalIisHostingSettings', 'Test-IisHostingSettingsMatch',
     'Set-IncrementalIisHostingSettings', 'Restore-IncrementalIisHostingSettings', 'Wait-IncrementalIisPreloadStartup',
-    'Test-IncrementalRollbackHoldRelease')) {
+    'Test-IncrementalRollbackHoldRelease', 'Start-IndexCompatibleWebAppPool')) {
     $definitions = @($ast.FindAll({ param($node)
         $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name
     }, $true))
@@ -165,7 +165,16 @@ function Assert-RetainedPipelineStateUnchanged { param($Baseline,$Current)
     if ($Baseline.Identity -cne $Current.Identity) { throw 'Retained identity changed.' } }
 function Invoke-CandidatePayloadActivation { param($CandidateRoot,$ApplicationRoot)
     Copy-Item -LiteralPath $CandidateRoot -Destination $ApplicationRoot -Recurse }
-function Start-WebAppPool { param($Name) $script:poolState='Started'; $script:starts++ }
+function Invoke-DeploymentIndexAdmission { param($Roles,[scriptblock]$Action)
+    if (($Roles -join '|') -cne 'Web') { throw 'Unexpected admitted role.' }
+    $script:admissions++
+    try { $script:admissionActive=$true; & $Action }
+    finally { $script:admissionActive=$false }
+}
+function Start-WebAppPool { param($Name)
+    if (!$script:admissionActive -or $Name -cne 'FluxKnowledge') { throw 'Pool start bypassed format admission.' }
+    $script:poolState='Started'; $script:starts++
+}
 function Wait-IncrementalIisPreloadStartup { param($AfterUtc,$TimeoutSeconds)
     if ($script:probes -ne 0 -or $script:poolState -cne 'Started') { throw 'HTTP probes masked preload startup.' }
     $script:preloadWaits++; [pscustomobject]@{ WorkerId=97; EventRecordId=1 } }
@@ -185,6 +194,7 @@ try {
         [IO.File]::WriteAllText((Join-Path $candidateRoot 'marker.txt'),'candidate')
         $script:physicalPath=$CanonicalDeployRoot; $script:current=$script:original.Clone()
         $script:poolState='Started'; $script:starts=0; $script:probes=0; $script:preloadWaits=0
+        $script:admissions=0; $script:admissionActive=$false
         $script:driftDuringStop=$scenario -ceq 'drift'; $script:failProbeOnce=$scenario -ceq 'probe-failure'
         $script:failCommit=if ($scenario -ceq 'lost-acknowledgement') { 'after' } else { '' }
         $EnableUnattendedDiscovery=$true; $RecoverStoppedPool=$false; $DeferReadinessForScopedRemediation=$false
@@ -219,6 +229,7 @@ try {
                 throw 'The actual rollback restarted without verified prior hosting settings.'
             }
         }
+        if ($script:admissions -ne $script:starts) { throw 'A candidate or rollback start lost its format-admission boundary.' }
     }
 }
 finally {

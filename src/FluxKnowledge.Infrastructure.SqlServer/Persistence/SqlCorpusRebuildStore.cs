@@ -17,6 +17,18 @@ public sealed partial class SqlCorpusRebuildStore(IDbContextFactory<FluxKnowledg
     TimeProvider? timeProvider = null, Func<CancellationToken, ValueTask>? afterProjectionReset = null,
     Func<CancellationToken, ValueTask>? afterCommit = null, IGpuInteractiveOwnerProbe? queryOwnerProbe = null)
 {
+    public static async Task RequireLegacyFormatAsync(IDbContextFactory<FluxKnowledgeDbContext> factory, CancellationToken ct)
+    {
+        await using var context = await factory.CreateDbContextAsync(ct).ConfigureAwait(false);
+        await RequireLegacyFormatAsync(context, ct).ConfigureAwait(false);
+    }
+
+    private static async Task RequireLegacyFormatAsync(FluxKnowledgeDbContext context, CancellationToken ct)
+    {
+        if (await context.IndexState.Where(value => value.Id == 1).Select(value => value.RequiredIndexFormat).SingleAsync(ct).ConfigureAwait(false) != 1)
+            throw new CorpusRebuildRefusalException("corpus-rebuild-requires-index-format-1");
+    }
+
     public async ValueTask<CorpusRebuildPlan> ReadPlanAsync(Guid operationId, EmbeddingProfile profile,
         string passagePolicyFingerprint, CancellationToken cancellationToken)
     {
@@ -41,6 +53,7 @@ public sealed partial class SqlCorpusRebuildStore(IDbContextFactory<FluxKnowledg
         IReadOnlyDictionary<Guid, CorpusRebuildInput>? reservedInputs = null,
         CorpusRebuildPlan? superseded = null, CorpusRebuildSupersession? supersession = null)
     {
+        await RequireLegacyFormatAsync(context, ct).ConfigureAwait(false);
         var replacementJobIds = supersession?.JobIds.ToArray() ?? [];
         var unstartedRequestIds = supersession?.UnstartedRequestIds.ToArray() ?? [];
         if (superseded is null && await context.IndexState.AnyAsync(state => state.CorpusRebuildOperationId != null, ct).ConfigureAwait(false))

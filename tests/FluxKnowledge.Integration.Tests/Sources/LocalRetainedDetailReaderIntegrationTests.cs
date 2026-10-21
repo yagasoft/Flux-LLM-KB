@@ -13,6 +13,7 @@ namespace FluxKnowledge.Integration.Tests.Sources;
 
 public sealed class LocalRetainedDetailReaderIntegrationTests(NativeSqlServerFixture fixture) : IClassFixture<NativeSqlServerFixture>
 {
+    private readonly FluxKnowledge.Testing.TestResources _resources = new();
     private readonly NativeSqlServerFixture _fixture = fixture;
 
     [NativeSqlServerFact]
@@ -49,6 +50,7 @@ public sealed class LocalRetainedDetailReaderIntegrationTests(NativeSqlServerFix
         }
         finally
         {
+            _resources.Dispose();
             if (Directory.Exists(artifactRoot)) Directory.Delete(artifactRoot, recursive: true);
         }
     }
@@ -74,6 +76,7 @@ public sealed class LocalRetainedDetailReaderIntegrationTests(NativeSqlServerFix
         }
         finally
         {
+            _resources.Dispose();
             if (Directory.Exists(artifactRoot)) Directory.Delete(artifactRoot, recursive: true);
         }
     }
@@ -93,6 +96,7 @@ public sealed class LocalRetainedDetailReaderIntegrationTests(NativeSqlServerFix
         }
         finally
         {
+            _resources.Dispose();
             if (Directory.Exists(artifactRoot)) Directory.Delete(artifactRoot, recursive: true);
         }
     }
@@ -114,6 +118,7 @@ public sealed class LocalRetainedDetailReaderIntegrationTests(NativeSqlServerFix
         }
         finally
         {
+            _resources.Dispose();
             if (Directory.Exists(artifactRoot)) Directory.Delete(artifactRoot, recursive: true);
         }
     }
@@ -140,13 +145,14 @@ public sealed class LocalRetainedDetailReaderIntegrationTests(NativeSqlServerFix
         }
         finally
         {
+            _resources.Dispose();
             if (Directory.Exists(artifactRoot)) Directory.Delete(artifactRoot, recursive: true);
         }
     }
 
     private ILocalRetainedDetailReader CreateReader(string artifactRoot) => new SqlLocalRetainedDetailReader(
         new TestDbContextFactory(_fixture.ConnectionString),
-        new SqlRetainedSourceReader(new TestDbContextFactory(_fixture.ConnectionString), artifactRoot),
+        _resources.Own(new SqlRetainedSourceReader(new TestDbContextFactory(_fixture.ConnectionString), artifactRoot)),
         new LocalPrivateContentDisclosure());
 
     private async Task<(Guid BranchId, Guid RevisionId, Guid ChildRevisionId)> SeedAsync(

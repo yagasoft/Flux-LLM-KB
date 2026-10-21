@@ -87,8 +87,13 @@ public sealed class SqlCorpusGenerationLeaseStore(
                 value.Id == state.ActiveIndexGenerationId && value.RetiredAtUtc == null && value.IndexPath != string.Empty &&
                 EF.Functions.Collate(value.ModelFingerprint, "Latin1_General_100_BIN2") == modelFingerprint && value.Dimensions == dimensions &&
                 value.CorpusEpoch == state.CorpusEpoch && value.CorpusVersion == state.CorpusVersion, cancellationToken).ConfigureAwait(false);
-            if (generation is null || generation.VectorCount <= 0 || generation.ValidatedAtUtc is null ||
-                await context.IndexGenerationVectors.LongCountAsync(value => value.GenerationId == generation.Id, cancellationToken).ConfigureAwait(false) != generation.VectorCount)
+            var validMembership = generation is not null && (generation.FormatVersion == 1
+                ? state.RequiredIndexFormat == 1 && await context.IndexGenerationVectors.LongCountAsync(value => value.GenerationId == generation.Id, cancellationToken).ConfigureAwait(false) == generation.VectorCount
+                : generation.FormatVersion == 2 && state.RequiredIndexFormat == 2 &&
+                    await context.IndexGenerationSegments.CountAsync(value => value.GenerationId == generation.Id, cancellationToken).ConfigureAwait(false) == generation.SegmentCount &&
+                    (await (from member in context.IndexGenerationSegments join segment in context.IndexSegments on member.SegmentId equals segment.Id
+                        where member.GenerationId == generation.Id && segment.State == 1 select (long?)segment.VectorCount).SumAsync(cancellationToken).ConfigureAwait(false) ?? 0) == generation.VectorCount);
+            if (generation is null || generation.VectorCount < 0 || generation.FormatVersion == 1 && generation.VectorCount == 0 || generation.ValidatedAtUtc is null || !validMembership)
             { Phase("generation-validation", generation is null ? "generation-unavailable" : "membership-invalid"); return null; }
             Phase("generation-validation", "completed");
             await using var sessionCommand = new SqlCommand("SELECT @@SPID", connection, (SqlTransaction)transaction.GetDbTransaction());
@@ -108,7 +113,7 @@ public sealed class SqlCorpusGenerationLeaseStore(
                 new SqlConnectionStringBuilder(connectionString) { Pooling = false }.ConnectionString,
                 new IndexGenerationDescriptor(generation.Id, generation.ModelFingerprint,
                 generation.Dimensions, generation.IndexPath, generation.MetadataChecksum, generation.VectorCount,
-                new CorpusPublicationStamp(state.CorpusEpoch, state.CorpusVersion)));
+                new CorpusPublicationStamp(state.CorpusEpoch, state.CorpusVersion), generation.FormatVersion, generation.SegmentCount));
             return lease;
         }
         finally

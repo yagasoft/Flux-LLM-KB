@@ -2,6 +2,7 @@
 param([Parameter(Mandatory)][string]$SourceRoot,[Parameter(Mandatory)][string]$SqlPath)
 $ErrorActionPreference='Stop'
 Import-Module (Join-Path $SourceRoot 'scripts/deploy/incremental-source-deletion-cleanup-migration.psm1') -Force
+Import-Module (Join-Path $SourceRoot 'scripts/deploy/incremental-segmented-index-schema.psm1') -Force
 $text=[Environment]::GetEnvironmentVariable('FLUXKNOWLEDGE_SOURCE_CLEANUP_DISPOSABLE_SQL')
 $text=[regex]::Replace($text,'(?i)(^|;)\s*Trust Server Certificate\s*=','$1TrustServerCertificate=')
 $text=[regex]::Replace($text,'(?i)(^|;)\s*Connect Retry Count\s*=','$1ConnectRetryCount=')

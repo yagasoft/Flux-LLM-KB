@@ -68,7 +68,9 @@ public sealed partial class SqlSourceDeletionStore
         select vector;
 
     private static Task<bool> HasOwnedMembershipsAsync(FluxKnowledgeDbContext context, Guid rootId, CancellationToken ct) =>
-        OwnedVectors(context, rootId).AnyAsync(vector => context.IndexGenerationVectors.Any(member => member.VectorId == vector.VectorId), ct);
+        OwnedVectors(context, rootId).AnyAsync(vector => context.IndexGenerationVectors.Any(member => member.VectorId == vector.VectorId) ||
+            context.IndexSegmentVectors.Any(member => member.VectorId == vector.VectorId) ||
+            context.CurrentIndexMembers.Any(member => member.VectorId == vector.VectorId), ct);
 
     private async Task<SourceDeletionRunResult> DeleteMembershipUnitAsync(FluxKnowledgeDbContext context,
         IDbContextTransaction transaction, SourceDeletionOperationEntity operation, CancellationToken ct)
@@ -79,12 +81,20 @@ public sealed partial class SqlSourceDeletionStore
             .FirstOrDefaultAsync(ct).ConfigureAwait(false);
         if (vector is null)
         {
+            if (await context.SourceDeletionCleanupItems.AnyAsync(value => value.SourceDeletionOperationId == operation.Id &&
+                (value.StorageKind == 3 || value.StorageKind == 4) && value.State != 1, ct))
+                return await CommitUnitAsync(context, transaction, operation, operation.Phase, ct,
+                    "source-delete-segment-retirement-pending", progressed: false, continueImmediately: false);
             if (await HasOwnedMembershipsAsync(context, operation.SourceRootId, ct).ConfigureAwait(false))
                 return await RefuseAsync(context, transaction, operation, "source-delete-membership-changed", ct).ConfigureAwait(false);
             return await CommitUnitAsync(context, transaction, operation, "purge-records", ct).ConfigureAwait(false);
         }
         if (!vector.IsDeleted)
             return await RefuseAsync(context, transaction, operation, "source-delete-vector-not-withdrawn", ct).ConfigureAwait(false);
+        if (await context.IndexSegmentVectors.AnyAsync(value => value.VectorId == vector.VectorId, ct) ||
+            await context.CurrentIndexMembers.AnyAsync(value => value.VectorId == vector.VectorId, ct))
+            return await CommitUnitAsync(context, transaction, operation, operation.Phase, ct,
+                "source-delete-segment-retirement-pending", progressed: false, continueImmediately: false);
         var activeGeneration = await context.IndexState.Where(value => value.Id == 1)
             .Select(value => value.ActiveIndexGenerationId).SingleAsync(ct).ConfigureAwait(false);
         if (await context.IndexGenerationVectors.Where(member => member.VectorId == vector.VectorId)

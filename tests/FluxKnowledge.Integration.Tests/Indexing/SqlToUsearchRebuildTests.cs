@@ -477,20 +477,22 @@ public sealed partial class SqlToUsearchRebuildTests(NativeSqlServerFixture fixt
         await using (var context = await environment.Factory.CreateDbContextAsync())
             Assert.True(await context.CorpusQueryLeases.AnyAsync(value => value.Id == lease.LeaseId));
         var deletionStore = new SqlSourceDeletionStore(environment.Factory, TimeProvider.System);
+        var deletionId = Guid.NewGuid();
         await using (var context = await environment.Factory.CreateDbContextAsync())
         {
             context.SourceDeletionOperations.Add(new SourceDeletionOperationEntity
             {
-                Id = Guid.NewGuid(), SourceRootId = Guid.NewGuid(), State = 0, Phase = "accepted",
+                Id = deletionId, SourceRootId = Guid.NewGuid(), State = 0, Phase = "accepted",
                 CreatedAtUtc = DateTimeOffset.UtcNow, UpdatedAtUtc = DateTimeOffset.UtcNow
             });
             await context.SaveChangesAsync();
         }
         var work = await deletionStore.ClaimNextAsync(CancellationToken.None);
         Assert.NotNull(work);
+        Assert.Equal(deletionId, work.OperationId);
         Assert.False((await deletionStore.PurgeAsync(work, null, CancellationToken.None)).Completed);
         await using (var context = await environment.Factory.CreateDbContextAsync())
-            Assert.Equal("source-delete-search-queries-active", (await context.SourceDeletionOperations.SingleAsync()).ReasonCode);
+            Assert.Equal("source-delete-search-queries-active", (await context.SourceDeletionOperations.SingleAsync(value => value.Id == deletionId)).ReasonCode);
         await native.DisposeAsync();
         await using (var exclusive = await recovery.TryAcquireExclusiveLeaseAsync(TimeSpan.Zero, CancellationToken.None))
         {
@@ -2152,6 +2154,7 @@ public sealed partial class SqlToUsearchRebuildTests(NativeSqlServerFixture fixt
             Reader = _provider.GetRequiredService<UsearchAnnIndex>(); Embeddings = _provider.GetRequiredService<IEmbeddingProvider>();
         }
         public string IndexRoot { get; }
+        public IServiceProvider Services => _provider;
         public string ArtifactRoot => _artifactRoot;
         public IDbContextFactory<FluxKnowledgeDbContext> Factory { get; }
         public SqlPipelineStore Store { get; }
@@ -2165,12 +2168,25 @@ public sealed partial class SqlToUsearchRebuildTests(NativeSqlServerFixture fixt
 
         public static async Task<PipelineEnvironment> CreateAsync(NativeSqlServerFixture fixture, string text,
             PassageBuilder? passageBuilder = null, bool publish = true, bool embed = true, TimeProvider? clock = null,
-            bool appendReuse = false)
+            bool appendReuse = false, bool segmented = false, int segmentMaximumVectors = 2, long segmentMaximumPayloadBytes = 64 * 1024 * 1024,
+            Action<IServiceCollection>? configureServices = null, int initialIndexFormat = 2, string? indexRootOverride = null)
         {
             await SqlTestData.ClearPipelineAsync(fixture);
+            if (segmented) passageBuilder ??= new PassageBuilder(new SegmentedFixtureWords());
+            if (segmented)
+            {
+                await using var context = await SqlTestData.CreateFactory(fixture).CreateDbContextAsync();
+                var state = await context.IndexState.SingleAsync();
+                state.RequiredIndexFormat = initialIndexFormat;
+                state.ProjectionChangeFloorVersion = state.CorpusVersion;
+                await context.SaveChangesAsync();
+            }
             var ingress = Path.Combine(Path.GetTempPath(), $"FluxKnowledgeIngress_{Guid.NewGuid():N}");
             var artifact = Path.Combine(Path.GetTempPath(), $"FluxKnowledgeRetained_{Guid.NewGuid():N}");
-            var index = Path.Combine(Path.GetTempPath(), $"FluxKnowledgeIndexes_{Guid.NewGuid():N}");
+            var index = indexRootOverride ?? Path.Combine(Path.GetTempPath(), $"FluxKnowledgeIndexes_{Guid.NewGuid():N}");
+            if (indexRootOverride is not null && !Path.GetFullPath(indexRootOverride).StartsWith(
+                Path.TrimEndingDirectorySeparator(Path.GetFullPath(Path.GetTempPath())) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("An overridden fixture index must remain beneath its disposable temp root.");
             Directory.CreateDirectory(ingress);
             Directory.CreateDirectory(artifact);
             var services = new ServiceCollection();
@@ -2185,13 +2201,28 @@ public sealed partial class SqlToUsearchRebuildTests(NativeSqlServerFixture fixt
             services.AddSingleton<IEmbeddingProvider, DeterministicTokenHashEmbeddingProvider>();
             if (appendReuse)
                 services.AddSingleton<IIndexGenerationReadLeaseFactory>(new WindowsIndexGenerationReadLeaseFactory(index));
+            if (segmented)
+            {
+                services.AddSingleton<IIndexSegmentReadLeaseFactory>(new WindowsIndexSegmentReadLeaseFactory(index));
+                services.AddSingleton(new IndexSegmentBuildOptions(segmentMaximumVectors, segmentMaximumPayloadBytes));
+                services.AddSingleton<FluxKnowledge.Application.Gpu.IGpuInteractiveOwnerProbe, FluxKnowledge.Integrations.Windows.WindowsInteractiveGpuOwnerProbe>();
+                services.AddScoped<ISegmentedIndexStore, SqlSegmentedIndexStore>();
+                services.AddSingleton<IDerivedIndexRecoveryStore, SqlDerivedIndexRecoveryStore>();
+                services.AddSingleton<IIndexSegmentOwnerStore, SqlIndexSegmentOwnerStore>();
+                services.AddScoped<ICorpusGenerationLeaseStore, SqlCorpusGenerationLeaseStore>();
+            }
             services.AddSingleton<FluxKnowledge.Application.Visibility.ILocalPrivateContentDisclosure,
                 FluxKnowledge.Infrastructure.SqlServer.Visibility.LocalPrivateContentDisclosure>();
             services.AddSingleton<FluxKnowledge.Application.Visibility.CsharpDisclosureProofBuilder>();
-            services.AddFluxKnowledgeUsearch(new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?> { ["Usearch:RootPath"] = index }).Build());
+            services.AddFluxKnowledgeUsearch(new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Usearch:RootPath"] = index,
+                ["IndexPublication:Mode"] = segmented ? "Segmented" : "Legacy"
+            }).Build());
             services.AddScoped<IStageWorker, CanonicalIndexStageWorker>();
             if (embed) services.AddScoped<IStageWorker, EmbedStageWorker>();
             if (publish) services.AddScoped<IStageWorker, PublishStageWorker>();
+            configureServices?.Invoke(services);
             var provider = services.BuildServiceProvider();
             var environment = new PipelineEnvironment(provider, ingress, artifact, index, provider.GetRequiredService<IDbContextFactory<FluxKnowledgeDbContext>>());
             await environment.AddAndPumpAtPathAsync(text, "initial.txt");
@@ -2285,13 +2316,12 @@ public sealed partial class SqlToUsearchRebuildTests(NativeSqlServerFixture fixt
             return (await Store.GetGenerationAsync(id!.Value, CancellationToken.None))!;
         }
 
-        public ValueTask DisposeAsync()
+        public async ValueTask DisposeAsync()
         {
-            _provider.Dispose();
+            await _provider.DisposeAsync();
             if (Directory.Exists(_ingressRoot)) Directory.Delete(_ingressRoot, true);
             if (Directory.Exists(_artifactRoot)) Directory.Delete(_artifactRoot, true);
             if (Directory.Exists(IndexRoot)) Directory.Delete(IndexRoot, true);
-            return ValueTask.CompletedTask;
         }
     }
 

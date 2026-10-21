@@ -312,19 +312,31 @@ public sealed class SqlPipelineStore(
     {
         await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
         await SqlPublishedPassageSelection.AcquireFenceAsync(context, cancellationToken);
+        if (await context.IndexState.Where(value => value.Id == 1).Select(value => value.RequiredIndexFormat).SingleAsync(cancellationToken) != 1)
+            throw new InvalidOperationException("legacy-publication-format-not-admitted");
         var expectedStamp = await SqlPublishedPassageSelection.ReadStampAsync(context, cancellationToken);
         var previousMembership = await SqlPublishedPassageSelection.ReadVectorIdsAsync(context, cancellationToken);
         var appendBase = await ReadPublicationBaseAsync(context, expectedStamp, previousMembership, cancellationToken);
-        var origins = await (from vector in context.Vectors
-            join chunk in context.TextChunks on vector.TextChunkId equals chunk.Id
-            join artifact in context.Artifacts on chunk.ArtifactId equals artifact.Id
-            where vector.IndexGenerationId == draftGenerationId
-            select artifact.PipelineRecordId).Distinct().ToArrayAsync(cancellationToken);
-        // A general corpus rebuild has no source draft. A draft must belong to one source.
-        if (origins.Length > 1) throw new InvalidOperationException("A publication draft spans multiple pipeline records.");
-        if (origins.Length == 1)
+        await PreviewDraftAsync(context, draftGenerationId, timeProvider.GetUtcNow(), cancellationToken);
+        var vectors = await SqlPublishedPassageSelection.ReadVectorsAsync(context, cancellationToken);
+        var publishedStamp = expectedStamp with
         {
-            var record = await context.PipelineRecords.SingleAsync(record => record.Id == origins[0], cancellationToken);
+            CorpusVersion = checked(expectedStamp.CorpusVersion +
+                (previousMembership.SequenceEqual(vectors.Select(vector => vector.VectorId)) ? 0 : 1))
+        };
+        // Preview invokes the commit selection, including branch precedence and retirement,
+        // but rolls back every mutation before returning detached immutable vector data.
+        await transaction.RollbackAsync(cancellationToken);
+        return new IndexPublicationSnapshot(vectors, expectedStamp, publishedStamp, appendBase);
+    }
+
+    internal static async Task PreviewDraftAsync(FluxKnowledgeDbContext context, Guid draftGenerationId,
+        DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        var origin = await ResolveDraftOriginAsync(context, draftGenerationId, cancellationToken);
+        if (origin is { } originId)
+        {
+            var record = await context.PipelineRecords.SingleAsync(record => record.Id == originId, cancellationToken);
             if (!record.CompletionCriteriaMet)
             {
                 if (record.IsDeleted || record.CurrentStage != (int)PipelineStage.Publish)
@@ -353,23 +365,38 @@ public sealed class SqlPipelineStore(
                             publication.DispatchGeneration == parent.DispatchGeneration + 1 && publication.Stage == (int)PipelineStage.Publish && publication.Operation == PipelineOperations.Publish &&
                             current.PipelineRecordId == record.Id && current.SourceRevision == record.Revision && current.Stage == (int)PipelineStage.Publish && current.Operation == PipelineOperations.Publish
                         select current).SingleAsync(cancellationToken);
-                    await SqlRepositoryWorkRecovery.ValidateAsync(context, job, timeProvider.GetUtcNow(), cancellationToken);
+                    await SqlRepositoryWorkRecovery.ValidateAsync(context, job, now, cancellationToken);
                 }
-                await SqlStageTransitionStore.PublishDocumentIfApplicableAsync(context, record, timeProvider.GetUtcNow(), cancellationToken);
+                await SqlStageTransitionStore.PublishDocumentIfApplicableAsync(context, record, now, cancellationToken);
                 record.CompletionCriteriaMet = true;
                 await context.SaveChangesAsync(cancellationToken);
             }
         }
-        var vectors = await SqlPublishedPassageSelection.ReadVectorsAsync(context, cancellationToken);
-        var publishedStamp = expectedStamp with
-        {
-            CorpusVersion = checked(expectedStamp.CorpusVersion +
-                (previousMembership.SequenceEqual(vectors.Select(vector => vector.VectorId)) ? 0 : 1))
-        };
-        // Preview invokes the commit selection, including branch precedence and retirement,
-        // but rolls back every mutation before returning detached immutable vector data.
-        await transaction.RollbackAsync(cancellationToken);
-        return new IndexPublicationSnapshot(vectors, expectedStamp, publishedStamp, appendBase);
+    }
+
+    internal static async Task<Guid?> ResolveDraftOriginAsync(FluxKnowledgeDbContext context, Guid draftGenerationId, CancellationToken cancellationToken)
+    {
+        var origins = await (from vector in context.Vectors join chunk in context.TextChunks on vector.TextChunkId equals chunk.Id
+            join artifact in context.Artifacts on chunk.ArtifactId equals artifact.Id where vector.IndexGenerationId == draftGenerationId
+            select artifact.PipelineRecordId).Distinct().ToArrayAsync(cancellationToken);
+        if (origins.Length > 1) throw new InvalidOperationException("A publication draft spans multiple pipeline records.");
+        if (origins.Length == 1) return origins[0];
+        // An empty draft still belongs to a real source. Prove its completed Embed delivery rather than treating it as a general rebuild.
+        var reference = draftGenerationId.ToString("D");
+        return await (from draft in context.IndexGenerations
+            from delivery in context.OutboxMessages join artifact in context.Artifacts on delivery.CompletedArtifactId equals artifact.Id
+            join job in context.Jobs on delivery.JobId equals job.Id join record in context.PipelineRecords on artifact.PipelineRecordId equals record.Id
+            where draft.Id == draftGenerationId && draft.VectorCount == 0 && draft.IndexPath == string.Empty && draft.ValidatedAtUtc == null &&
+                artifact.Stage == (int)PipelineStage.Embed && artifact.ContentType == EmbedDraftDefaults.ArtifactContentType && artifact.SearchText == reference &&
+                artifact.ContentHash == EmbedDraftDefaults.EmptyArtifactContentHash && artifact.SourceRevision == record.Revision &&
+                delivery.Stage == (int)PipelineStage.Embed && delivery.Operation == PipelineOperations.Embed && delivery.DispatchedAtUtc != null &&
+                delivery.PipelineRecordId == record.Id && delivery.SourceRevision == record.Revision &&
+                job.PipelineRecordId == record.Id && job.SourceRevision == record.Revision && job.Stage == (int)PipelineStage.Embed &&
+                job.Operation == PipelineOperations.Embed && job.PublicState == (int)Domain.Jobs.PublicJobState.Completed &&
+                (draft.EmbeddingJobId == null || draft.EmbeddingJobId == job.Id) &&
+                !context.TextChunks.Any(chunk => context.Artifacts.Any(canonical => canonical.Id == chunk.ArtifactId &&
+                    canonical.PipelineRecordId == record.Id && canonical.SourceRevision == record.Revision && canonical.Stage == (int)PipelineStage.CanonicalIndex))
+            select (Guid?)record.Id).Distinct().SingleOrDefaultAsync(cancellationToken);
     }
 
     private static async Task<IndexGenerationBaseSnapshot?> ReadPublicationBaseAsync(FluxKnowledgeDbContext context,
@@ -400,7 +427,8 @@ public sealed class SqlPipelineStore(
                 generation.ModelFingerprint, generation.Dimensions, generation.IndexPath,
                 generation.MetadataChecksum, generation.VectorCount,
                 generation.CorpusEpoch.HasValue && generation.CorpusVersion.HasValue
-                    ? new CorpusPublicationStamp(generation.CorpusEpoch.Value, generation.CorpusVersion.Value) : null))
+                    ? new CorpusPublicationStamp(generation.CorpusEpoch.Value, generation.CorpusVersion.Value) : null,
+                generation.FormatVersion, generation.SegmentCount))
             .SingleOrDefaultAsync(cancellationToken);
     }
 
@@ -435,6 +463,8 @@ public sealed class SqlPipelineStore(
         entity.IndexPath = generation.IndexPath;
         entity.MetadataChecksum = generation.MetadataChecksum;
         entity.VectorCount = generation.VectorCount;
+        entity.FormatVersion = generation.FormatVersion;
+        entity.SegmentCount = generation.SegmentCount;
         entity.ValidatedAtUtc = timeProvider.GetUtcNow();
         await context.SaveChangesAsync(cancellationToken);
     }

@@ -19,4 +19,8 @@
     <PackageReference Include="xunit.runner.visualstudio" PrivateAssets="all" />
     <PackageReference Include="SkiaSharp" />
   </ItemGroup>
+  <ItemGroup>
+    <Compile Include="../FluxKnowledge.Testing/RepositoryFiles.cs" Link="Support/RepositoryFiles.cs" />
+    <Compile Include="../FluxKnowledge.Testing/TestResources.cs" Link="Support/TestResources.cs" />
+  </ItemGroup>
 </Project>

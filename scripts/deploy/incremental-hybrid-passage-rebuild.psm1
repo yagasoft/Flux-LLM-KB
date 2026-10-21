@@ -92,6 +92,7 @@ SELECT CONVERT(bit, CASE WHEN
 
 function Invoke-HybridRebuildOperator {
     param([string]$OperatorRoot, [string]$ConnectionString, [string[]]$Arguments,
+        [string[]]$ReviewedLegacyPayloads = @(),
         [ValidateRange(1, 3600)][int]$TimeoutSeconds = 900)
     $start = [Diagnostics.ProcessStartInfo]::new('dotnet')
     $start.UseShellExecute = $false
@@ -102,7 +103,11 @@ function Invoke-HybridRebuildOperator {
     $start.ArgumentList.Add('corpus-rebuild')
     foreach ($argument in $Arguments) { $start.ArgumentList.Add($argument) }
     $start.Environment['ConnectionStrings__FluxKnowledge'] = $ConnectionString
-    $process = [Diagnostics.Process]::Start($start)
+    Import-Module (Join-Path $PSScriptRoot 'index-format-admission.psm1') -Force -ErrorAction Stop
+    $formats = if ($Arguments[0] -ceq 'status') { @(1,2) } else { @(1) }
+    $process = Invoke-IndexFormatAdmission -ConnectionString $ConnectionString -Payloads @(@{Role='Cli';Root=$OperatorRoot}) `
+        -ReadPayloadFingerprint { param($root) Get-HybridPayloadFingerprint -Path $root } `
+        -ReviewedLegacyPayloads $ReviewedLegacyPayloads -OperationFormats $formats -Action { [Diagnostics.Process]::Start($start) }
     try {
         $output = $process.StandardOutput.ReadToEndAsync()
         $errorOutput = $process.StandardError.ReadToEndAsync()

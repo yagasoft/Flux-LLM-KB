@@ -4,6 +4,13 @@ public sealed record UsearchIndexOptions(string RootPath)
 {
     public const string ConfigurationSectionName = "Usearch";
 
+    public static bool IsSegmentedPublicationEnabled(string? mode) => mode switch
+    {
+        null or "Legacy" => false,
+        "Segmented" => true,
+        _ => throw new InvalidOperationException("index-publication-mode-invalid")
+    };
+
     public static UsearchIndexOptions FromConfiguredRoot(
         string? rootPath,
         string? repositoryRoot = null,

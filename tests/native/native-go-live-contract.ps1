@@ -8,6 +8,9 @@ if ([string]::IsNullOrWhiteSpace($SourceRoot)) {
     $SourceRoot = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSCommandPath))
 }
 $SourceRoot = (Resolve-Path -LiteralPath $SourceRoot).Path
+$ArtifactsRoot = if ([string]::IsNullOrWhiteSpace($env:FluxKnowledgeArtifactsPath)) {
+    Join-Path $SourceRoot 'artifacts'
+} else { [IO.Path]::GetFullPath($env:FluxKnowledgeArtifactsPath) }
 $deploymentScript = Join-Path $SourceRoot 'scripts\deploy\update-native-windows.ps1'
 $modulePath = Join-Path $SourceRoot 'scripts\deploy\native-go-live.psm1'
 $closeoutPath = Join-Path $SourceRoot 'scripts\dev\complete-feature.ps1'
@@ -279,7 +282,7 @@ $module = Import-Module $modulePath -Force -PassThru
 try {
     Assert-True ('Invoke-NativeGoLive' -notin @($module.ExportedCommands.Keys)) 'Invoke-NativeGoLive must remain private.'
     Assert-True ($null -eq (& $module { Get-Command New-NativeGoLiveTestRequest -ErrorAction SilentlyContinue })) 'A test bypass remains.'
-    $integrationsAssembly = Join-Path $SourceRoot 'artifacts\bin\FluxKnowledge.Integrations\release\FluxKnowledge.Integrations.dll'
+    $integrationsAssembly = Join-Path $ArtifactsRoot 'bin\FluxKnowledge.Integrations\release\FluxKnowledge.Integrations.dll'
     if (-not (Test-Path -LiteralPath $integrationsAssembly -PathType Leaf)) {
         $buildOutput = & dotnet build (Join-Path $SourceRoot 'src\FluxKnowledge.Integrations\FluxKnowledge.Integrations.csproj') `
             -c Release --no-restore 2>&1 | Out-String

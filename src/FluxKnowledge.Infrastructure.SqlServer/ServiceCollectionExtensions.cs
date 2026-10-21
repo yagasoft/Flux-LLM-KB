@@ -55,6 +55,8 @@ public static class ServiceCollectionExtensions
         services.TryAddSingleton<TimeProvider>(TimeProvider.System);
         if (OperatingSystem.IsWindows()) services.TryAddSingleton<IGpuInteractiveOwnerProbe, WindowsInteractiveGpuOwnerProbe>();
         services.AddSingleton<IDerivedIndexRecoveryStore, SqlDerivedIndexRecoveryStore>();
+        services.AddScoped<ISegmentedIndexStore, SqlSegmentedIndexStore>();
+        services.AddSingleton<IIndexSegmentOwnerStore, SqlIndexSegmentOwnerStore>();
         services.AddSingleton<ICodeDisclosureProofStore, SqlCodeDisclosureProofStore>();
         services.AddScoped<ICorpusGenerationLeaseStore, SqlCorpusGenerationLeaseStore>();
         services.AddScoped<ILexicalSearch, SqlFullTextSearch>();

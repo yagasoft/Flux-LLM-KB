@@ -158,7 +158,7 @@ if ($triggerBatches.Count -ne 4 -or
     throw "The incremental IIS updater does not isolate ALTER TRIGGER statements and post-trigger migration work into their required SQL batches."
 }
 $holdCreatedAt = $deploymentScriptText.IndexOf('New-DeploymentValidationHold -Path $ValidationHoldPath -ReleaseId $releaseId')
-$candidateStartedAt = $deploymentScriptText.IndexOf('Start-WebAppPool -Name $SiteName', $holdCreatedAt)
+$candidateStartedAt = $deploymentScriptText.IndexOf('Start-IndexCompatibleWebAppPool -Name $SiteName', $holdCreatedAt)
 $probedAt = $deploymentScriptText.IndexOf('Invoke-RequiredLoopbackProbes -Origin $loopbackOrigin.Origin -TimeoutSeconds $ReadinessTimeoutSeconds', $candidateStartedAt)
 $stateComparedAt = $deploymentScriptText.IndexOf('Assert-RetainedPipelineStateUnchanged', $probedAt)
 $holdReleasedAt = $deploymentScriptText.IndexOf('Remove-DeploymentValidationHold -Path $ValidationHoldPath -ReleaseId $releaseId', $stateComparedAt)

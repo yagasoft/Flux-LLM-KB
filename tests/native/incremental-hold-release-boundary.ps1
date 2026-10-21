@@ -20,6 +20,11 @@ $afterSwap = [scriptblock]::Create((@($outer.Body.Statements | Where-Object {
 $recover = [scriptblock]::Create(($outer.CatchClauses[0].Body.Statements.Extent.Text -join "`n"))
 $finish = [scriptblock]::Create(($outer.Finally.Statements.Extent.Text -join "`n"))
 function Assert-True([bool]$Condition, [string]$Message) { if (!$Condition) { throw $Message } }
+# Native control-flow port; actual SQL admission is covered by index-format-admission.ps1.
+function Invoke-DeploymentIndexAdmission { param($Roles,$Action) & $Action }
+$enableDefinition=$ast.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'Enable-IndexCompatibleOutlookTask'},$true)
+Assert-True ($null -ne $enableDefinition) 'The admitted task callback is missing.'
+Invoke-Expression $enableDefinition.Extent.Text
 function Remove-DeploymentValidationHold {
     param($Path, $ReleaseId)
     $calls.Removes++
@@ -35,6 +40,14 @@ function Restore-InteractiveHostPayload { param($PreviousRoot, $LiveRoot)
     [IO.File]::WriteAllText((Join-Path $LiveRoot 'version'), [IO.File]::ReadAllText((Join-Path $PreviousRoot 'version')))
 }
 function Enable-ScheduledTask { param($TaskName) $calls.Enables++ }
+function Complete-RecoveryReferenceWrite { param($Lease)
+    Assert-True ([object]::ReferenceEquals($Lease, $recoveryWriter)) 'The wrong Recovery writer was completed.'
+    $calls.WriterCompletions++
+}
+function Close-RecoveryReferenceWrite { param($Lease)
+    Assert-True ([object]::ReferenceEquals($Lease, $recoveryWriter)) 'The wrong Recovery writer was closed.'
+    $calls.WriterClosures++
+}
 function Invoke-RequiredLoopbackProbes { param($Origin, $TimeoutSeconds)
     if ($failurePoint -ceq 'post-release-probe') { throw 'injected post-release probe failure' }
 }
@@ -65,13 +78,14 @@ try {
         $ApplyCorpusChunkFullTextMigration = $false; $ApplyCodeDisclosureProofMigration = $false
         $RecoverStoppedPool = $false; $EnableUnattendedDiscovery = $false; $DeferReadinessForScopedRemediation = $false
         $sourceDeletionCleanupState = $null; $corpusMigrationState = $null; $codeDisclosureMigrationState = $null
+        $sourceAccessChange = $null; $recoveryWriter = [object]::new()
         $holdReleaseAttempted = $false; $holdReleased = $false
         $interactiveHostMutationStarted = $true; $interactiveHostTaskWasEnabled = $true; $interactiveHostRollbackVerified = $false
         $deploymentValidation = @{ HoldCreated = $true; PayloadRollbackVerified = $true; RollbackVerified = $true }
         $hostingChange = @{ RollbackVerified = $true; PreloadReceipt = $null }
         $swap = @{ PreviousPayload = 'disposable-previous' }; $applyAnyMigration = $false
         $loopbackOrigin = @{ Origin = 'http://127.0.0.1:1' }; $ReadinessTimeoutSeconds = 1
-        $calls = @{ Removes = 0; Restores = 0; Enables = 0; CleanupChecks = 0 }
+        $calls = @{ Removes = 0; Restores = 0; Enables = 0; CleanupChecks = 0; WriterCompletions = 0; WriterClosures = 0 }
         $mutex = [Threading.Mutex]::new($false)
         $leaseAcquired = $mutex.WaitOne(0)
         $reported = $null
@@ -90,6 +104,8 @@ try {
         finally { try { . $finish } catch { $reported = $_.Exception.Message } }
         $web = [IO.File]::ReadAllText((Join-Path $CanonicalDeployRoot 'version'))
         $companion = [IO.File]::ReadAllText((Join-Path $InteractiveHostRoot 'version'))
+        Assert-True ($calls.WriterClosures -eq 1 -and $calls.WriterCompletions -eq $(if ($failurePoint -ceq 'none') { 1 } else { 0 })) `
+            'The owned Recovery writer must close on every outcome and complete only after successful release validation.'
         if ($failurePoint -ceq 'before-boundary') {
             Assert-True ($web -ceq 'old' -and $companion -ceq 'old' -and $calls.Restores -eq 1 -and
                 !$holdReleaseAttempted -and $calls.CleanupChecks -eq 1 -and !(Test-Path -LiteralPath $ValidationHoldPath)) `

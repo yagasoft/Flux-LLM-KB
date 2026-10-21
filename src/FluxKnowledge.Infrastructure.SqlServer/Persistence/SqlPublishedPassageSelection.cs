@@ -2,6 +2,7 @@ using System.Runtime.CompilerServices;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Domain.Pipeline;
 using FluxKnowledge.Domain.Sources;
+using FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
 using Microsoft.EntityFrameworkCore;
 
 namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
@@ -10,13 +11,23 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
 internal static class SqlPublishedPassageSelection
 {
     // Caller holds the singleton publication fence and commits this with the eligibility mutation.
-    internal static async Task AdvanceVersionAsync(FluxKnowledgeDbContext context, DateTimeOffset now, CancellationToken cancellationToken)
+    internal static async Task AdvanceVersionAsync(FluxKnowledgeDbContext context, DateTimeOffset now, CancellationToken cancellationToken,
+        IReadOnlyCollection<IndexAffectedScope>? affectedScopes = null)
     {
         if (context.Database.CurrentTransaction is null)
             throw new InvalidOperationException("Corpus version changes require a publication transaction.");
         var state = await context.IndexState.SingleAsync(value => value.Id == 1, cancellationToken).ConfigureAwait(false);
         state.CorpusVersion = checked(state.CorpusVersion + 1);
         state.UpdatedAtUtc = now;
+        if (state.RequiredIndexFormat == 2)
+        {
+            var scopes = affectedScopes is { Count: > 0 } ? affectedScopes.Distinct().ToArray() : [new IndexAffectedScope(4, Guid.Empty)];
+            context.IndexProjectionChanges.AddRange(scopes.Select(scope => new IndexProjectionChangeEntity
+            {
+                CorpusEpoch = state.CorpusEpoch, CorpusVersion = state.CorpusVersion,
+                ScopeKind = scope.Kind, ScopeId = scope.Id, CreatedAtUtc = now
+            }));
+        }
     }
 
     private const string Bindings = """
@@ -71,6 +82,9 @@ internal static class SqlPublishedPassageSelection
     internal static async Task<IReadOnlyList<long>> ReadVectorIdsAsync(
         FluxKnowledgeDbContext context, CancellationToken cancellationToken) =>
         await QueryVectors(context).OrderBy(vector => vector.VectorId).Select(vector => vector.VectorId).ToArrayAsync(cancellationToken);
+
+    internal static Task<bool> HasEligibleVectorsAsync(FluxKnowledgeDbContext context, CancellationToken cancellationToken) =>
+        QueryVectors(context).AnyAsync(cancellationToken);
 
     internal static async Task<IReadOnlyList<CanonicalVector>> ReadVectorsAsync(
         FluxKnowledgeDbContext context, CancellationToken cancellationToken)

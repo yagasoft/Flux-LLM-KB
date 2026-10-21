@@ -31,6 +31,20 @@ param(
     [switch]$DeferReadinessForScopedRemediation,
     [switch]$RecoverStoppedPool,
     [switch]$EnableUnattendedDiscovery,
+    [string]$SourceAccessPipeName = '',
+    [switch]$DisableSourceAccessRecovery,
+    [switch]$ApplySegmentedIndexProjection,
+    [switch]$OfflineProjectionMaintenance,
+    [switch]$ResumeOfflineProjectionMaintenance,
+    [string]$ProjectionPayloadRoot='',
+    [string]$ProjectionOperationRoot='',
+    [string]$SegmentedIndexPlanPath='',
+    [string]$ExpectedSegmentedIndexPlanSha256='',
+    [string]$ProjectionStoppedOwnersReceipt='',
+    [string]$ExpectedProjectionStoppedOwnersReceiptSha256='',
+    [ValidatePattern('^(Web|OutlookHost|Cli)=[A-Fa-f0-9]{64}$')]
+    [string[]]$ReviewedLegacyIndexPayloads = @(),
+    [switch]$InspectIndexAdmissionPayloads,
     [switch]$PlanOnly,
     [switch]$Apply
 )
@@ -333,7 +347,7 @@ function Remove-DeploymentValidationHold {
     if (-not [string]::Equals($actual, $expected, [StringComparison]::Ordinal)) {
         throw "The deployment-validation hold is not owned by this release."
     }
-    Remove-Item -LiteralPath $Path -Force -ErrorAction Stop
+    Invoke-DeploymentIndexAdmission -Action { Remove-Item -LiteralPath $Path -Force -ErrorAction Stop }
 }
 
 function ConvertTo-DeploymentValidationConnectionString {
@@ -360,6 +374,51 @@ function Get-DeploymentSqlConnectionString {
         throw "The production connection string required for SQL deployment validation is missing."
     }
     return ConvertTo-DeploymentValidationConnectionString -ConnectionString $connectionString
+}
+
+function Invoke-DeploymentIndexAdmission {
+    param([Parameter(Mandatory)][scriptblock]$Action, [string[]]$Roles = @('Web','OutlookHost'))
+    $configuration = Get-Content -LiteralPath "$CanonicalLiveRoot\Config\appsettings.Production.json" -Raw | ConvertFrom-Json -AsHashtable
+    $mode = if ($configuration.ContainsKey('IndexPublication') -and $configuration.IndexPublication.ContainsKey('Mode')) { $configuration.IndexPublication.Mode } else { 'Legacy' }
+    $payloads = @($Roles | ForEach-Object { @{Role=$_; Root=$(if ($_ -ceq 'Web') { $CanonicalDeployRoot } else { $InteractiveHostRoot })} })
+    Invoke-IndexFormatAdmission -ConnectionString (Get-DeploymentSqlConnectionString) -Payloads $payloads `
+        -ReadPayloadFingerprint { param($root) Get-HybridPayloadFingerprint -Path $root } `
+        -ReviewedLegacyPayloads $ReviewedLegacyIndexPayloads -WebIndexMode $mode -Action $Action
+}
+
+function Start-IndexCompatibleWebAppPool {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Name)
+    Invoke-DeploymentIndexAdmission -Roles @('Web') -Action { Start-WebAppPool -Name $Name }
+}
+
+function Enable-IndexCompatibleOutlookTask {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$TaskName, [ValidateSet('\')][string]$TaskPath = '\')
+    Invoke-DeploymentIndexAdmission -Roles @('OutlookHost') -Action { Enable-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath -ErrorAction Stop }
+}
+
+function Assert-ReviewedLegacyIndexBinding {
+    param([Parameter(Mandatory)][System.Collections.IDictionary]$Binding)
+    $saved = if ($Binding.Contains('ReviewedLegacyIndexPayloads')) { @($Binding.ReviewedLegacyIndexPayloads) } else { @() }
+    if (($saved -join '|') -cne ($ReviewedLegacyIndexPayloads -join '|')) { throw 'index-admission-reviewed-legacy-binding-changed' }
+}
+
+function Get-DeploymentIndexAdmissionPlan {
+    $bindings = @()
+    if ($InspectIndexAdmissionPayloads) {
+        foreach ($payload in @(@{Role='Web';Root=$CanonicalDeployRoot},@{Role='OutlookHost';Root=$InteractiveHostRoot})) {
+            if (Test-Path -LiteralPath $payload.Root -PathType Container) {
+                $bindings += Get-IndexEntryBinding -Role $payload.Role -Root $payload.Root `
+                    -ReadPayloadFingerprint { param($root) Get-HybridPayloadFingerprint -Path $root } -ReviewedLegacyPayloads $ReviewedLegacyIndexPayloads
+            }
+        }
+    }
+    return @{ CurrentPayloads=$bindings; ReviewedLegacyIndexPayloads=@($ReviewedLegacyIndexPayloads);
+        PayloadInspectionPerformed=[bool]$InspectIndexAdmissionPayloads;
+        Inspection='PlanOnly -InspectIndexAdmissionPayloads reads the current payload identities for operational review';
+        RequiredFormat='read from SQL inside both fences immediately before each action';
+        UnknownLegacy='requires exact reviewed Role=SHA256 assertion; v1 only' }
 }
 
 function Get-AppliedMigrationIds {
@@ -462,13 +521,29 @@ function Get-SourceDeletionCleanupCandidateDatabase {
     }
     $database=& $ReadState
     if ($MigrationMode) { Assert-SourceDeletionCleanupMigrationBaseline $database }
-    else { Assert-SourceDeletionCleanupApplicationSchema $database }
+    else {
+        $projectionContract=Get-SegmentedIndexMigrationContract
+        if(@($database.History)[-1] -ceq $projectionContract.Migrations[-1]) {
+            if(!$database.SchemaValid){throw 'Source deletion cleanup schema is incomplete beneath the index projection migrations.'}
+            $projection=Get-SegmentedIndexDatabaseState -ConnectionString (Get-DeploymentSqlConnectionString)
+            Assert-SegmentedIndexApplicationSchema $projection
+            if(($projection.History -join '|') -cne ($database.History -join '|')) {throw 'Index projection schema changed during candidate admission.'}
+        } else {Assert-SourceDeletionCleanupApplicationSchema $database}
+    }
     $database
 }
 
 function Write-SourceDeletionAcceptanceReceipt {
     param([Parameter(Mandatory)][string]$Path,[Parameter(Mandatory)]$Value)
     if (![IO.Path]::IsPathFullyQualified($Path)) { throw 'Maintenance receipts require an absolute path.' }
+    $absolute=[IO.Path]::GetFullPath($Path)
+    foreach($protected in @((Join-Path $CanonicalLiveRoot 'Recovery'),(Join-Path $CanonicalLiveRoot 'Data/Index'))) {
+        $boundary=[IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($protected))
+        if($absolute.Equals($boundary,[StringComparison]::OrdinalIgnoreCase) -or
+            $absolute.StartsWith($boundary+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)) {
+            throw 'Maintenance receipts must stay outside live Index and Recovery storage.'
+        }
+    }
     $parent=Split-Path -Parent $Path
     while ($parent) {
         Assert-NotReparsePoint -Path $parent -Message 'Maintenance receipt ancestor is unsafe.'
@@ -1111,6 +1186,7 @@ function Invoke-HybridPassageIisUpdate {
             Assert-NotReparsePoint -Path $file -Message 'hybrid-resume-file-unsafe'
         }
         $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json -AsHashtable
+        Assert-ReviewedLegacyIndexBinding $state
         foreach ($required in @('Version','ReleaseId','Commit','OperationId','DatabaseServer','DatabaseName','OriginalHistory',
             'SchemaAttempted','ResetCommitted','HoldReleased','HoldReleaseAttempted','CandidateHash','OperatorHash',
             'OriginalConfigHash','ActivatedConfigHash','PreservedInputFingerprint','InteractiveHostWasEnabled')) {
@@ -1168,6 +1244,7 @@ function Invoke-HybridPassageIisUpdate {
         if ($LASTEXITCODE -ne 0 -or (Get-FileHash -LiteralPath $upPath -Algorithm SHA256).Hash -cne $contract.UpSha256) { throw 'hybrid-schema-script-hash-mismatch' }
         $state = @{
             Version=1; ReleaseId=$releaseId; Commit=$Commit; OperationId=[Guid]::NewGuid().ToString('D')
+            ReviewedLegacyIndexPayloads=@($ReviewedLegacyIndexPayloads)
             DatabaseServer=$database.DataSource; DatabaseName=$database.InitialCatalog
             OriginalHistory=$(if ($replacement) { $replacement.OriginalHistory } else { $history }); InitialHistory=$history
             SchemaAttempted=$false; ResetCommitted=$false; HoldReleased=$false; HoldReleaseAttempted=$false
@@ -1191,7 +1268,7 @@ function Invoke-HybridPassageIisUpdate {
         throw 'hybrid-resume-schema-boundary-ambiguous'
     }
     # This check opens verified file leases only. It performs no native inference or acquisition.
-    $models = Invoke-HybridRebuildOperator -OperatorRoot $operatorRoot -ConnectionString $connectionString -Arguments @('verify-models')
+    $models = Invoke-HybridRebuildOperator -OperatorRoot $operatorRoot -ConnectionString $connectionString -ReviewedLegacyPayloads $ReviewedLegacyIndexPayloads -Arguments @('verify-models')
     if (-not $models.Verified -or -not $models.Offline) { throw 'hybrid-offline-model-verification-failed' }
     $holdOwner = @{ ReleaseId=$releaseId; OperationId=$state.OperationId }
     if ($state.ContainsKey('Replacement')) {
@@ -1214,7 +1291,7 @@ function Invoke-HybridPassageIisUpdate {
     }
     if ($state.HoldReleased -or ($state.HoldReleaseAttempted -and -not (Test-Path -LiteralPath $ValidationHoldPath))) {
         if (Test-Path -LiteralPath $ValidationHoldPath) { throw 'hybrid-release-outcome-ambiguous' }
-        $receipt = Invoke-HybridRebuildOperator -OperatorRoot $operatorRoot -ConnectionString $connectionString -Arguments @('status','--operation',$state.OperationId)
+        $receipt = Invoke-HybridRebuildOperator -OperatorRoot $operatorRoot -ConnectionString $connectionString -ReviewedLegacyPayloads $ReviewedLegacyIndexPayloads -Arguments @('status','--operation',$state.OperationId)
         if (-not $receipt.Committed -or -not $receipt.Completed -or $currentHistory[-1] -cne $contract.Target -or
             ($state.ContainsKey('ResetManifestHash') -and $state.ResetManifestHash -cne $receipt.ManifestHash) -or
             $configurationHash -cne $state.ActivatedConfigHash -or
@@ -1235,14 +1312,14 @@ function Invoke-HybridPassageIisUpdate {
                 Wait-InteractiveHostStopped -TaskName $InteractiveHostTaskName -TimeoutSeconds $ReadinessTimeoutSeconds
                 if ($ResumeRelease -and $state.SchemaAttempted -and (Get-WebAppPoolState -Name $SiteName).Value -eq 'Stopped' -and
                     @(Get-AppliedMigrationIds)[-1] -ceq $contract.Target) {
-                    $receipt = Invoke-HybridRebuildOperator -OperatorRoot $operatorRoot -ConnectionString $connectionString -Arguments @('status','--operation',$state.OperationId)
+                    $receipt = Invoke-HybridRebuildOperator -OperatorRoot $operatorRoot -ConnectionString $connectionString -ReviewedLegacyPayloads $ReviewedLegacyIndexPayloads -Arguments @('status','--operation',$state.OperationId)
                     if ($receipt.Committed) {
                         if ($state.ContainsKey('ResetManifestHash') -and $state.ResetManifestHash -cne $receipt.ManifestHash) { throw 'hybrid-reset-receipt-mismatch' }
                         # Only the verified compatible payload starts here. Its existing recovery loop
                         # may prove dead owners and settle reservations; deny-all admission stays in place.
                         Activate-HybridCompatiblePayload -CandidateRoot $candidateRoot -PreviousRoot $previousRoot -ReleaseRoot $releaseRoot `
                             -ConfigurationCandidate $configurationCandidate -ConfigurationPath $configurationPath -State $state
-                        Start-WebAppPool -Name $SiteName
+                        Start-IndexCompatibleWebAppPool -Name $SiteName
                         Wait-IisAppPoolState -Name $SiteName -ExpectedState 'Started' -TimeoutSeconds $ReadinessTimeoutSeconds
                         $live = Invoke-FixedLoopbackProbe -Uri "$($loopbackOrigin.Origin)/health/live" -TimeoutSeconds $ReadinessTimeoutSeconds
                         $live.Dispose()
@@ -1258,18 +1335,18 @@ function Invoke-HybridPassageIisUpdate {
                 Assert-HybridMigrationHistory -OriginalHistory $state.OriginalHistory -CurrentHistory $current
                 if ($current[-1] -cne $contract.Target) { throw 'hybrid-schema-target-not-recorded' }
             } -ResetAndPrepare {
-                $receipt = Invoke-HybridRebuildOperator -OperatorRoot $operatorRoot -ConnectionString $connectionString -Arguments @('status','--operation',$state.OperationId)
+                $receipt = Invoke-HybridRebuildOperator -OperatorRoot $operatorRoot -ConnectionString $connectionString -ReviewedLegacyPayloads $ReviewedLegacyIndexPayloads -Arguments @('status','--operation',$state.OperationId)
                 if (-not $receipt.Committed) {
                     if (-not (Test-Path -LiteralPath $manifestPath)) {
                         $planArgs = @('plan','--operation',$state.OperationId)
                         if ($state.ContainsKey('Replacement')) { $planArgs += @('--replace',$state.Replacement.OperationId,'--epoch',$state.Replacement.TargetEpoch,'--manifest-hash',$state.Replacement.ManifestHash) }
-                        $plan = Invoke-HybridRebuildOperator -OperatorRoot $operatorRoot -ConnectionString $connectionString -Arguments $planArgs
+                        $plan = Invoke-HybridRebuildOperator -OperatorRoot $operatorRoot -ConnectionString $connectionString -ReviewedLegacyPayloads $ReviewedLegacyIndexPayloads -Arguments $planArgs
                         Write-HybridRebuildJson -Path $manifestPath -Value $plan
                     }
                     Assert-NotReparsePoint -Path $manifestPath -Message 'hybrid-manifest-file-unsafe'
-                    try { $receipt = Invoke-HybridRebuildOperator -OperatorRoot $operatorRoot -ConnectionString $connectionString -Arguments @('commit','--manifest',$manifestPath) }
+                    try { $receipt = Invoke-HybridRebuildOperator -OperatorRoot $operatorRoot -ConnectionString $connectionString -ReviewedLegacyPayloads $ReviewedLegacyIndexPayloads -Arguments @('commit','--manifest',$manifestPath) }
                     catch {
-                        $receipt = Invoke-HybridRebuildOperator -OperatorRoot $operatorRoot -ConnectionString $connectionString -Arguments @('status','--operation',$state.OperationId)
+                        $receipt = Invoke-HybridRebuildOperator -OperatorRoot $operatorRoot -ConnectionString $connectionString -ReviewedLegacyPayloads $ReviewedLegacyIndexPayloads -Arguments @('status','--operation',$state.OperationId)
                         if (-not $receipt.Committed) { throw }
                     }
                     $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json -AsHashtable
@@ -1288,23 +1365,23 @@ function Invoke-HybridPassageIisUpdate {
                     Move-HybridReplacementHold -Path $ValidationHoldPath -Binding $state.Replacement -ReleaseId $releaseId -OperationId $state.OperationId
                     $holdOwner.ReleaseId = $releaseId; $holdOwner.OperationId = $state.OperationId
                 }
-                [void](Invoke-HybridRebuildOperator -OperatorRoot $operatorRoot -ConnectionString $connectionString -Arguments @('prepare','--operation',$state.OperationId))
+                [void](Invoke-HybridRebuildOperator -OperatorRoot $operatorRoot -ConnectionString $connectionString -ReviewedLegacyPayloads $ReviewedLegacyIndexPayloads -Arguments @('prepare','--operation',$state.OperationId))
             } -ActivateAndStart {
                 Activate-HybridCompatiblePayload -CandidateRoot $candidateRoot -PreviousRoot $previousRoot -ReleaseRoot $releaseRoot `
                     -ConfigurationCandidate $configurationCandidate -ConfigurationPath $configurationPath -State $state
-                Set-HybridDeploymentHold -Path $ValidationHoldPath -ReleaseId $releaseId -OperationId $state.OperationId -Permit $true
-                Start-WebAppPool -Name $SiteName
+                Invoke-DeploymentIndexAdmission -Roles @('Web') -Action { Set-HybridDeploymentHold -Path $ValidationHoldPath -ReleaseId $releaseId -OperationId $state.OperationId -Permit $true }
+                Start-IndexCompatibleWebAppPool -Name $SiteName
                 Wait-IisAppPoolState -Name $SiteName -ExpectedState 'Started' -TimeoutSeconds $ReadinessTimeoutSeconds
                 $live = Invoke-FixedLoopbackProbe -Uri "$($loopbackOrigin.Origin)/health/live" -TimeoutSeconds $ReadinessTimeoutSeconds
                 $live.Dispose()
             } -RunAndFinish {
                 $timer = [Diagnostics.Stopwatch]::StartNew()
                 while ($true) {
-                    $status = Invoke-HybridRebuildOperator -OperatorRoot $operatorRoot -ConnectionString $connectionString -Arguments @('status','--operation',$state.OperationId)
+                    $status = Invoke-HybridRebuildOperator -OperatorRoot $operatorRoot -ConnectionString $connectionString -ReviewedLegacyPayloads $ReviewedLegacyIndexPayloads -Arguments @('status','--operation',$state.OperationId)
                     if ($status.Completed) { break }
                     if ($status.FailedEmbeddingJobs -gt 0 -or $status.FailedPublishJobs -gt 0) { throw 'hybrid-rebuild-job-failed-hold-retained' }
                     if ($status.PendingItems -eq 0 -and $status.RunningItems -eq 0) {
-                        try { [void](Invoke-HybridRebuildOperator -OperatorRoot $operatorRoot -ConnectionString $connectionString -Arguments @('finish','--operation',$state.OperationId)); break }
+                        try { [void](Invoke-HybridRebuildOperator -OperatorRoot $operatorRoot -ConnectionString $connectionString -ReviewedLegacyPayloads $ReviewedLegacyIndexPayloads -Arguments @('finish','--operation',$state.OperationId)); break }
                         catch { if ($_.Exception.Message -cne 'corpus-rebuild-full-text-not-ready') { throw } }
                     }
                     if ($timer.Elapsed.TotalSeconds -ge $RebuildTimeoutSeconds) { throw 'hybrid-rebuild-wait-timeout-hold-retained' }
@@ -1317,7 +1394,7 @@ function Invoke-HybridPassageIisUpdate {
                 $state.HoldReleaseAttempted = $true
                 Write-HybridRebuildJson -Path $statePath -Value $state
                 Assert-HybridDeploymentHoldOwner -Path $ValidationHoldPath -ReleaseId $releaseId -OperationId $state.OperationId
-                Remove-Item -LiteralPath $ValidationHoldPath -Force
+                Invoke-DeploymentIndexAdmission -Action { Remove-Item -LiteralPath $ValidationHoldPath -Force }
             }
         }
         catch {
@@ -1327,15 +1404,15 @@ function Invoke-HybridPassageIisUpdate {
             }
             # No schema command, reset, configuration or payload change has occurred.
             if ($attempt.OwnsHold) {
-                if ($attempt.StoppedApplication -and (Get-WebAppPoolState -Name $SiteName).Value -ne 'Started') { Start-WebAppPool -Name $SiteName }
+                if ($attempt.StoppedApplication -and (Get-WebAppPoolState -Name $SiteName).Value -ne 'Started') { Start-IndexCompatibleWebAppPool -Name $SiteName }
                 Remove-DeploymentValidationHold -Path $ValidationHoldPath -ReleaseId $releaseId
-                if ($attempt.DisabledInteractiveHost -and $state.InteractiveHostWasEnabled) { Enable-ScheduledTask -TaskName $InteractiveHostTaskName | Out-Null }
+                if ($attempt.DisabledInteractiveHost -and $state.InteractiveHostWasEnabled) { Enable-IndexCompatibleOutlookTask -TaskName $InteractiveHostTaskName | Out-Null }
             }
             throw
         }
     }
     Invoke-RequiredLoopbackProbes -Origin $loopbackOrigin.Origin -TimeoutSeconds $ReadinessTimeoutSeconds
-    if ($state.InteractiveHostWasEnabled) { Enable-ScheduledTask -TaskName $InteractiveHostTaskName | Out-Null }
+    if ($state.InteractiveHostWasEnabled) { Enable-IndexCompatibleOutlookTask -TaskName $InteractiveHostTaskName | Out-Null }
     [ordered]@{ ok=$true; mode='hybrid-rebuild-applied'; commit=$Commit; release_root=$releaseRoot; operation_id=$state.OperationId;
         reset_manifest_hash=$state.ResetManifestHash; schema_target=$contract.Target; deployment_validation_hold='released-after-rebuild-and-preserved-input-validation';
         runtime='offline-BGE-shared-scheduler-load-run-unload'; rollback='forward-only; original payload/configuration retained for inspection' } | ConvertTo-Json
@@ -1367,6 +1444,7 @@ function Invoke-HybridPassageIisPatch {
             if (Test-Path -LiteralPath $path) { Assert-NotReparsePoint -Path $path -Message 'hybrid-patch-payload-root-unsafe' }
         }
         $binding=Get-Content -LiteralPath $bindingPath -Raw | ConvertFrom-Json -AsHashtable
+        Assert-ReviewedLegacyIndexBinding $binding
         $progress=Get-Content -LiteralPath $progressPath -Raw | ConvertFrom-Json -AsHashtable
         foreach ($field in @('Version','ReleaseId','Commit','OperationId','TargetEpoch','ManifestHash','Predecessor',
             'CandidateHash','OperatorHash','ConfigurationHash','PreservedInputFingerprint')) {
@@ -1415,6 +1493,7 @@ function Invoke-HybridPassageIisPatch {
         }
         $binding=@{
             Version=1; ReleaseId=$releaseId; Commit=$Commit; OperationId=$predecessor.OperationId
+            ReviewedLegacyIndexPayloads=@($ReviewedLegacyIndexPayloads)
             TargetEpoch=$predecessor.TargetEpoch; ManifestHash=$predecessor.ManifestHash; Predecessor=$predecessor
             CandidateHash=$candidateHash; OperatorHash=$operatorHash
             ConfigurationHash=(Get-FileHash -LiteralPath $candidateConfig).Hash
@@ -1440,9 +1519,9 @@ function Invoke-HybridPassageIisPatch {
         else { Set-HybridDeploymentHold -Path $ValidationHoldPath -ReleaseId $newOwner.ReleaseId -OperationId $newOwner.OperationId -Permit $false }
         if ((Get-HybridPreservedInputFingerprint) -cne $binding.PreservedInputFingerprint) { throw 'hybrid-patch-preserved-inputs-changed' }
     }
-    $models=Invoke-HybridRebuildOperator -OperatorRoot $operatorRoot -ConnectionString $connectionString -Arguments @('verify-models')
+    $models=Invoke-HybridRebuildOperator -OperatorRoot $operatorRoot -ConnectionString $connectionString -ReviewedLegacyPayloads $ReviewedLegacyIndexPayloads -Arguments @('verify-models')
     if (-not $models.Verified -or -not $models.Offline) { throw 'hybrid-patch-offline-model-verification-failed' }
-    $status=Invoke-HybridRebuildOperator -OperatorRoot $operatorRoot -ConnectionString $connectionString -Arguments @('status','--operation',$binding.OperationId)
+    $status=Invoke-HybridRebuildOperator -OperatorRoot $operatorRoot -ConnectionString $connectionString -ReviewedLegacyPayloads $ReviewedLegacyIndexPayloads -Arguments @('status','--operation',$binding.OperationId)
     if (-not $status.Committed -or $status.ManifestHash -cne $binding.ManifestHash -or
         [string]$status.TargetEpoch -cne [string]$binding.TargetEpoch) { throw 'hybrid-patch-operation-receipt-mismatch' }
     if ($status.FailedEmbeddingJobs -gt 0 -or $status.FailedPublishJobs -gt 0) { throw 'hybrid-patch-existing-job-failure' }
@@ -1466,7 +1545,7 @@ function Invoke-HybridPassageIisPatch {
                     # The committed worker may have died while holding a native batch.
                     # Start only this verified payload under deny-all so its existing
                     # owner-recovery loop can release capacity, then drain it normally.
-                    Start-WebAppPool -Name $SiteName
+                    Start-IndexCompatibleWebAppPool -Name $SiteName
                     Wait-IisAppPoolState -Name $SiteName -ExpectedState 'Started' -TimeoutSeconds $ReadinessTimeoutSeconds
                     $recoveryLive=Invoke-FixedLoopbackProbe -Uri "$($loopbackOrigin.Origin)/health/live" -TimeoutSeconds $ReadinessTimeoutSeconds
                     $recoveryLive.Dispose()
@@ -1518,18 +1597,18 @@ function Invoke-HybridPassageIisPatch {
             if ((Get-HybridPayloadFingerprint -Path $CanonicalDeployRoot) -cne $binding.CandidateHash -or
                 (Get-HybridPayloadFingerprint -Path $previousRoot) -cne $predecessor.CandidateHash) { throw 'hybrid-patch-activation-unproven' }
             Move-HybridReplacementHold -Path $ValidationHoldPath -Binding $predecessor -ReleaseId $releaseId -OperationId $binding.OperationId
-            Set-HybridDeploymentHold -Path $ValidationHoldPath -ReleaseId $newOwner.ReleaseId -OperationId $newOwner.OperationId -Permit $true
-            Start-WebAppPool -Name $SiteName
+            Invoke-DeploymentIndexAdmission -Roles @('Web') -Action { Set-HybridDeploymentHold -Path $ValidationHoldPath -ReleaseId $newOwner.ReleaseId -OperationId $newOwner.OperationId -Permit $true }
+            Start-IndexCompatibleWebAppPool -Name $SiteName
             Wait-IisAppPoolState -Name $SiteName -ExpectedState 'Started' -TimeoutSeconds $ReadinessTimeoutSeconds
             $live=Invoke-FixedLoopbackProbe -Uri "$($loopbackOrigin.Origin)/health/live" -TimeoutSeconds $ReadinessTimeoutSeconds
             $live.Dispose()
             $timer=[Diagnostics.Stopwatch]::StartNew()
             while ($true) {
-                $status=Invoke-HybridRebuildOperator -OperatorRoot $operatorRoot -ConnectionString $connectionString -Arguments @('status','--operation',$binding.OperationId)
+                $status=Invoke-HybridRebuildOperator -OperatorRoot $operatorRoot -ConnectionString $connectionString -ReviewedLegacyPayloads $ReviewedLegacyIndexPayloads -Arguments @('status','--operation',$binding.OperationId)
                 if ($status.Completed) { break }
                 if ($status.FailedEmbeddingJobs -gt 0 -or $status.FailedPublishJobs -gt 0) { throw 'hybrid-patch-rebuild-job-failed-hold-retained' }
                 if ($status.PendingItems -eq 0 -and $status.RunningItems -eq 0) {
-                    try { [void](Invoke-HybridRebuildOperator -OperatorRoot $operatorRoot -ConnectionString $connectionString -Arguments @('finish','--operation',$binding.OperationId)); break }
+                    try { [void](Invoke-HybridRebuildOperator -OperatorRoot $operatorRoot -ConnectionString $connectionString -ReviewedLegacyPayloads $ReviewedLegacyIndexPayloads -Arguments @('finish','--operation',$binding.OperationId)); break }
                     catch { if ($_.Exception.Message -cne 'corpus-rebuild-full-text-not-ready') { throw } }
                 }
                 if ($timer.Elapsed.TotalSeconds -ge $RebuildTimeoutSeconds) { throw 'hybrid-patch-wait-timeout-hold-retained' }
@@ -1540,7 +1619,7 @@ function Invoke-HybridPassageIisPatch {
             Invoke-RequiredLoopbackProbes -Origin $loopbackOrigin.Origin -TimeoutSeconds $ReadinessTimeoutSeconds
             $progress.HoldReleaseAttempted=$true; Write-HybridRebuildJson -Path $progressPath -Value $progress
             Assert-HybridDeploymentHoldOwner -Path $ValidationHoldPath -ReleaseId $newOwner.ReleaseId -OperationId $newOwner.OperationId
-            Remove-Item -LiteralPath $ValidationHoldPath -Force
+            Invoke-DeploymentIndexAdmission -Action { Remove-Item -LiteralPath $ValidationHoldPath -Force }
             $progress.HoldReleased=$true; Write-HybridRebuildJson -Path $progressPath -Value $progress
         }
         catch {
@@ -1554,7 +1633,7 @@ function Invoke-HybridPassageIisPatch {
             throw "Hybrid forward patch requires exact-release recovery $releaseId; no schema/reset/checkpoint change or old-payload restore. Failure: $($_.Exception.Message)"
         }
     }
-    if ($predecessor.InteractiveHostWasEnabled) { Enable-ScheduledTask -TaskName $InteractiveHostTaskName | Out-Null }
+    if ($predecessor.InteractiveHostWasEnabled) { Enable-IndexCompatibleOutlookTask -TaskName $InteractiveHostTaskName | Out-Null }
     [ordered]@{ ok=$true; mode='hybrid-forward-patch-applied'; commit=$Commit; release_root=$releaseRoot;
         operation_id=$binding.OperationId; target_epoch=$binding.TargetEpoch; manifest_hash=$binding.ManifestHash;
         deployment_validation_hold='released-after-same-operation-rebuild-and-input-validation' } | ConvertTo-Json
@@ -1688,6 +1767,7 @@ function Invoke-RepositoryRecoveryIisUpdate {
         }
         $receiptPath=Join-Path $releaseRoot 'repository-recovery-receipt.json'
         $saved=Read-RepositoryRecoveryReleaseReceipt $receiptPath; $binding=$saved.Binding
+        Assert-ReviewedLegacyIndexBinding $binding
         $continuationOperator=if ($saved.ContainsKey('PreparedContinuation') -and $null -ne $saved.PreparedContinuation) { $saved.PreparedContinuation.operator_commit } else { '' }
         $activationOperator=if ($saved.ContainsKey('ActivationContinuation') -and $null -ne $saved.ActivationContinuation) { $saved.ActivationContinuation.operator_commit } else { '' }
         if ($binding.ReleaseId -cne $ExistingRelease -or
@@ -1728,6 +1808,7 @@ function Invoke-RepositoryRecoveryIisUpdate {
         $task=Get-RepositoryRecoveryTaskObservation
         Assert-RepositoryRecoveryDatabaseMatch (Get-RepositoryRecoveryDatabaseState -ConnectionString (Get-RepositoryRecoveryCompanionConnectionString)) $original
         $binding=[ordered]@{ ReleaseId=$releaseId; OperationId=[Guid]::NewGuid().ToString('D'); Commit=$Commit; Paths=$paths;
+            ReviewedLegacyIndexPayloads=@($ReviewedLegacyIndexPayloads);
             OriginalDatabase=$original; TargetDatabase=(Get-RepositoryRecoveryTargetState $original); MigrationSha256=$contract.UpSha256;
             OriginalTask=$task; OriginalIis=(Get-IncrementalIisHostingSettings); ConfigurationSha256=(Get-FileHash -LiteralPath $configurationPath).Hash;
             CompanionConfigurationSha256=(Get-FileHash -LiteralPath $companionConfigurationPath).Hash;
@@ -1811,7 +1892,7 @@ function Invoke-RepositoryRecoveryIisUpdate {
         Start={ & $assertEnvironment
             Assert-RepositoryRecoveryPayloadHash $paths.ApplicationRoot $binding.Payloads.CandidateWeb
             Assert-RepositoryRecoveryPayloadHash $paths.CompanionRoot $binding.Payloads.CandidateCompanion
-            $runtime.StartedUtc=[DateTime]::UtcNow; Start-WebAppPool -Name $SiteName
+            $runtime.StartedUtc=[DateTime]::UtcNow; Start-IndexCompatibleWebAppPool -Name $SiteName
             Wait-IisAppPoolState -Name $SiteName -ExpectedState Started -TimeoutSeconds $ReadinessTimeoutSeconds }.GetNewClosure()
         Validate={ & $assertEnvironment
             Invoke-RequiredLoopbackProbes -Origin $loopbackOrigin.Origin -TimeoutSeconds $ReadinessTimeoutSeconds
@@ -1833,7 +1914,7 @@ function Invoke-RepositoryRecoveryIisUpdate {
         ReleaseHold={ Remove-DeploymentValidationHold -Path $ValidationHoldPath -ReleaseId $binding.ReleaseId }.GetNewClosure()
         PostReleaseProbes={ Invoke-RequiredLoopbackProbes -Origin $loopbackOrigin.Origin -TimeoutSeconds $ReadinessTimeoutSeconds }.GetNewClosure()
         RestoreTaskPolicy={ [void](Assert-RepositoryRecoveryTaskIdentity $binding $false)
-            if ($binding.OriginalTask.Enabled) { Enable-ScheduledTask -TaskName $InteractiveHostTaskName -TaskPath '\' -ErrorAction Stop | Out-Null } }.GetNewClosure()
+            if ($binding.OriginalTask.Enabled) { Enable-IndexCompatibleOutlookTask -TaskName $InteractiveHostTaskName -TaskPath '\' -ErrorAction Stop | Out-Null } }.GetNewClosure()
         AssertCompleted={ & $assertEnvironment; [void](Assert-RepositoryRecoveryTaskIdentity $binding $true)
             if (Test-Path -LiteralPath $ValidationHoldPath) { throw 'repository-recovery-completion-hold-present' }
             Assert-RepositoryRecoveryPayloadHash $paths.ApplicationRoot $binding.Payloads.CandidateWeb
@@ -1931,7 +2012,7 @@ function Assert-IncrementalIisPreflight {
     elseif ($RecoverStoppedPool) {
         Assert-StoppedPoolRecoveryBaseline
     }
-    elseif ((Get-WebAppPoolState -Name $SiteName).Value -ne "Started" -and [string]::IsNullOrWhiteSpace($ResumeHybridRebuildRelease) -and
+    elseif (!$ApplySegmentedIndexProjection -and (Get-WebAppPoolState -Name $SiteName).Value -ne "Started" -and [string]::IsNullOrWhiteSpace($ResumeHybridRebuildRelease) -and
         [string]::IsNullOrWhiteSpace($ResumeHybridPatchRelease)) {
         throw "The fixed FluxKnowledge IIS application pool must be started before an incremental update."
     }
@@ -1966,6 +2047,18 @@ if ($SiteName -cne "FluxKnowledge") {
 }
 if ($PlanOnly -and $Apply) {
     throw "-PlanOnly cannot be combined with -Apply."
+}
+if(($OfflineProjectionMaintenance -or $ResumeOfflineProjectionMaintenance) -and !$ApplySegmentedIndexProjection){throw 'index-update-explicit-projection-mode-required'}
+if($ResumeOfflineProjectionMaintenance -and !$Apply){throw 'index-update-offline-resume-requires-apply'}
+$sourceAccessRequested = ![string]::IsNullOrEmpty($SourceAccessPipeName) -or $DisableSourceAccessRecovery
+if ($sourceAccessRequested -and $PSVersionTable.PSVersion.Major -lt 7) { throw 'Source-access configuration requires pwsh 7 or later.' }
+if ($sourceAccessRequested -and ($EnterSourceDeletionAcceptanceMaintenance -or $ApplyMigrations -or
+    $ApplyResumableSourceDeletionCleanupMigration -or $ApplyCorpusChunkFullTextMigration -or
+    $ApplyCodeDisclosureProofMigration -or $ApplyRepositoryRecoveryAuthorityMigration -or $ApplyHybridPassageRebuild -or
+    $EnableUnattendedDiscovery -or $RecoverStoppedPool -or $DeferReadinessForScopedRemediation -or
+    $ReconcileRepositoryRecoveryRelease -or $ResumeRepositoryRecoveryPreparedRelease -or $ResumeRepositoryRecoveryActivationRelease -or
+    $ResumeHybridRebuildRelease -or $ReplaceHybridRebuildRelease -or $PatchHybridRebuildRelease -or $ResumeHybridPatchRelease)) {
+    throw 'Source-access configuration requires an ordinary incremental update without other operational modes.'
 }
 if ($EnterSourceDeletionAcceptanceMaintenance -and ($ApplyResumableSourceDeletionCleanupMigration -or $ApplyMigrations -or
     $ApplyCorpusChunkFullTextMigration -or $ApplyCodeDisclosureProofMigration -or $ApplyRepositoryRecoveryAuthorityMigration -or
@@ -2065,9 +2158,18 @@ if ($EnterSourceDeletionAcceptanceMaintenance) {
 }
 . (Join-Path $PSScriptRoot "loopback-deployment-safety.ps1")
 Import-Module (Join-Path $PSScriptRoot "incremental-iis-payload-swap.psm1") -Force -ErrorAction Stop
+Import-Module (Join-Path $PSScriptRoot 'index-format-admission.psm1') -Force -ErrorAction Stop
+Import-Module (Join-Path $PSScriptRoot 'recovery-reference-writer.psm1') -Force -ErrorAction Stop
+Import-Module (Join-Path $PSScriptRoot 'incremental-source-access-config.psm1') -Force -ErrorAction Stop
+$sourceAccessChange = $null
+if ($sourceAccessRequested) {
+    $sourceAccessChange = New-SourceAccessConfigurationChange -Path (Join-Path $CanonicalLiveRoot 'Config/appsettings.Production.json') `
+        -PipeName $SourceAccessPipeName -Disable:$DisableSourceAccessRecovery
+}
 Import-Module (Join-Path $PSScriptRoot 'incremental-corpus-fulltext-migration.psm1') -Force -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'incremental-code-disclosure-migration.psm1') -Force -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'incremental-source-deletion-cleanup-migration.psm1') -Force -ErrorAction Stop
+Import-Module (Join-Path $PSScriptRoot 'incremental-segmented-index-schema.psm1') -Force -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'incremental-hybrid-passage-rebuild.psm1') -Force -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'incremental-repository-recovery-migration.psm1') -Force -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'incremental-repository-recovery-release.psm1') -Force -ErrorAction Stop
@@ -2075,6 +2177,34 @@ $loopbackOrigin = Get-FixedLoopbackOrigin -SiteUrl $SiteUrl
 if ($loopbackOrigin.Origin -cne "http://127.0.0.1:5137") {
     throw "Incremental IIS deployment requires the fixed http://127.0.0.1:5137 origin."
 }
+
+if($ApplySegmentedIndexProjection) {
+    $allowed=@('SourceRoot','SiteName','SiteUrl','DeployRoot','ReadinessTimeoutSeconds','RebuildTimeoutSeconds','PlanOnly','Apply',
+        'OfflineProjectionMaintenance','ResumeOfflineProjectionMaintenance',
+        'ApplySegmentedIndexProjection','ProjectionPayloadRoot','ProjectionOperationRoot','SegmentedIndexPlanPath',
+        'ExpectedSegmentedIndexPlanSha256','ProjectionStoppedOwnersReceipt','ExpectedProjectionStoppedOwnersReceiptSha256')
+    if(@($PSBoundParameters.Keys | Where-Object {$_ -cnotin $allowed}).Count){throw 'index-update-incompatible-deployment-mode'}
+    if(!$PlanOnly -and !$Apply){throw 'index-update-plan-or-explicit-apply-required'}
+    Import-Module WebAdministration -ErrorAction Stop
+    Import-Module (Join-Path $PSScriptRoot 'incremental-segmented-index-update.psm1') -Force -ErrorAction Stop
+    Import-Module (Join-Path $PSScriptRoot 'incremental-projection-operator.psm1') -Force -ErrorAction Stop
+    . (Join-Path $PSScriptRoot 'incremental-segmented-index-iis.ps1')
+    Assert-IncrementalIisPreflight
+    if($PlanOnly) {
+        if($SegmentedIndexPlanPath -or $ExpectedSegmentedIndexPlanSha256 -or $ProjectionStoppedOwnersReceipt -or $ExpectedProjectionStoppedOwnersReceiptSha256){throw 'index-update-plan-inputs-invalid'}
+        $root=if($SourceRoot){$SourceRoot}else{Split-Path -Parent (Split-Path -Parent $PSScriptRoot)}
+        New-SegmentedIndexIisPlan -Root $root -PayloadRoot $ProjectionPayloadRoot -OperationRoot $ProjectionOperationRoot `
+            -OfflineMaintenance:$OfflineProjectionMaintenance | ConvertTo-Json -Depth 15
+    } else {
+        if($ProjectionPayloadRoot -or $ProjectionOperationRoot){throw 'index-update-apply-requires-reviewed-plan'}
+        Invoke-SegmentedIndexIisUpdate -PlanPath $SegmentedIndexPlanPath -ExpectedPlanSha256 $ExpectedSegmentedIndexPlanSha256 `
+            -StopReceiptPath $ProjectionStoppedOwnersReceipt -ExpectedStopReceiptSha256 $ExpectedProjectionStoppedOwnersReceiptSha256 `
+            -OfflineMaintenance:$OfflineProjectionMaintenance -ResumeOfflineMaintenance:$ResumeOfflineProjectionMaintenance | ConvertTo-Json -Depth 8
+    }
+    exit 0
+}
+if($OfflineProjectionMaintenance -or $ResumeOfflineProjectionMaintenance -or $ProjectionPayloadRoot -or $ProjectionOperationRoot -or $SegmentedIndexPlanPath -or $ExpectedSegmentedIndexPlanSha256 -or
+    $ProjectionStoppedOwnersReceipt -or $ExpectedProjectionStoppedOwnersReceiptSha256){throw 'index-update-explicit-projection-mode-required'}
 
 if ($EnterSourceDeletionAcceptanceMaintenance) {
     if (!$PlanOnly -and !$Apply) { throw 'Maintenance entry requires PlanOnly or explicit Apply after review.' }
@@ -2308,10 +2438,17 @@ if ($PlanOnly) {
         cpu_search_owner_file = Get-CpuSearchOwnerFilePlan
         migrations = [bool]$applyAnyMigration
         migration_plan = $migrationPlan
+        index_format_admission = Get-DeploymentIndexAdmissionPlan
         clean_slate = $false
         preserved = @("Config", "Data", "Runtime", "Recovery", "CodexPlugin")
         recover_stopped_pool = [bool]$RecoverStoppedPool
         unattended_discovery_hosting = $hostingPlan
+        source_access_configuration = if ($sourceAccessChange) { @{
+            enabled=$sourceAccessChange.Enabled; pipe=$sourceAccessChange.PipeName;
+            before_sha256=$sourceAccessChange.BeforeHash; after_sha256=$sourceAccessChange.AfterHash;
+            activation='after exact worker exit, under deployment hold; verify before hold release';
+            rollback='restore exact prior config before predecessor start; unknown drift retains hold; no rollback after release attempt'
+        } } else { $null }
         payload_acl = "inherit-from-live-root"
         rollback = if ($ApplyResumableSourceDeletionCleanupMigration -or $ApplyRepositoryRecoveryAuthorityMigration) { 'preserve-schema-and-evidence; verified-prior-payloads-stopped-task-disabled-hold-retained' } elseif ($RecoverStoppedPool) { 'restore-prior-payloads-with-pool-stopped-and-hold-retained' } elseif ($PatchHybridRebuildRelease -or $ResumeHybridPatchRelease) { 'forward-only after activation intent; predecessor payload/packet retained, hold denied on failure' } elseif ($ApplyHybridPassageRebuild) { 'before-schema: original payload; after-schema: held forward recovery with retained original payload/configuration' } else { "automatic-application-and-interactive-host-payload-restore" }
         gpu_drain = 'deny admissions; allow active OCR page and native cleanup to finish; prove exact IIS worker exit before each payload swap stop'
@@ -2328,7 +2465,7 @@ if ($PlanOnly) {
         else {
             $null
         }
-    } | ConvertTo-Json -Depth $(if ($ApplyRepositoryRecoveryAuthorityMigration) { 8 } else { 3 })
+    } | ConvertTo-Json -Depth 8
     exit 0
 }
 if (-not $Apply) {
@@ -2395,6 +2532,7 @@ if ($LASTEXITCODE -ne 0 -or $commit -notmatch "^[0-9a-f]{40}$") {
 Import-Module WebAdministration -ErrorAction Stop
 $mutex = [Threading.Mutex]::new($false, "Global\FluxKnowledge.IncrementalIisUpdate.v1")
 $leaseAcquired = $false
+$recoveryWriter = $null
 $deploymentValidation = $null
 $releaseId = $null
 $interactiveHostMutationStarted = $false
@@ -2415,20 +2553,27 @@ try {
     if (-not $leaseAcquired) {
         throw "Another incremental IIS deployment is already in progress."
     }
+    # Register before every Recovery write, including continuation/failure packets.
+    # This scope launches external children; parent exit is insufficient on failure.
+    $recoveryWriter = Start-RecoveryReferenceWrite -ConnectionString (Get-DeploymentSqlConnectionString) -RecoveryRoot $CanonicalRecoveryRoot
 
     if ($ApplyRepositoryRecoveryAuthorityMigration -and $ReconcileRepositoryRecoveryRelease) {
         Invoke-RepositoryRecoveryIisUpdate -SourceRoot $SourceRoot -Commit $commit -ExistingRelease $ReconcileRepositoryRecoveryRelease
+        Complete-RecoveryReferenceWrite -Lease $recoveryWriter
         return
     }
     if ($ApplyRepositoryRecoveryAuthorityMigration -and $ResumeRepositoryRecoveryPreparedRelease) {
         Invoke-RepositoryRecoveryIisUpdate -SourceRoot $SourceRoot -Commit $commit -ExistingRelease $ResumeRepositoryRecoveryPreparedRelease -ResumePrepared
+        Complete-RecoveryReferenceWrite -Lease $recoveryWriter
         return
     }
     if ($ApplyRepositoryRecoveryAuthorityMigration -and $ResumeRepositoryRecoveryActivationRelease) {
         Invoke-RepositoryRecoveryIisUpdate -SourceRoot $SourceRoot -Commit $commit -ExistingRelease $ResumeRepositoryRecoveryActivationRelease -ResumeActivation -CancelledQueryTaskId $AcknowledgeCancelledQueryTaskId -ExpectedCancelledQueryTaskSha256 $ExpectedCancelledQueryTaskSha256
+        Complete-RecoveryReferenceWrite -Lease $recoveryWriter
         return
     }
     Assert-IncrementalIisPreflight
+    if ($sourceAccessChange) { Assert-SourceAccessConfigurationChange -Change $sourceAccessChange -Original }
     if ($EnableUnattendedDiscovery) {
         $hostingChange.Original = Get-IncrementalIisHostingSettings
         if (!$hostingChange.Original.ModuleEnabled) { throw 'Application Initialization must be enabled before unattended discovery.' }
@@ -2436,15 +2581,18 @@ try {
     Ensure-CpuSearchOwnerFile
     if ($ApplyRepositoryRecoveryAuthorityMigration) {
         Invoke-RepositoryRecoveryIisUpdate -SourceRoot $SourceRoot -Commit $commit
+        Complete-RecoveryReferenceWrite -Lease $recoveryWriter
         return
     }
     if ($ApplyHybridPassageRebuild) {
         if ($PatchHybridRebuildRelease -or $ResumeHybridPatchRelease) {
             Invoke-HybridPassageIisPatch -SourceRoot $SourceRoot -Commit $commit -PredecessorRelease $PatchHybridRebuildRelease -ResumeRelease $ResumeHybridPatchRelease `
                 -ExpectedCandidateHash $ExpectedPatchCandidateHash -ExpectedOperatorHash $ExpectedPatchOperatorHash
+            Complete-RecoveryReferenceWrite -Lease $recoveryWriter
             return
         }
         Invoke-HybridPassageIisUpdate -SourceRoot $SourceRoot -Commit $commit -ResumeRelease $ResumeHybridRebuildRelease -ReplaceRelease $ReplaceHybridRebuildRelease
+        Complete-RecoveryReferenceWrite -Lease $recoveryWriter
         return
     }
     if (-not (Test-Path -LiteralPath $IncrementalRecoveryRoot -PathType Container)) {
@@ -2460,6 +2608,10 @@ try {
         throw "The incremental recovery release directory already exists."
     }
     New-Item -ItemType Directory -Path $releaseRoot -Force | Out-Null
+    if ($sourceAccessChange) {
+        [IO.File]::WriteAllBytes((Join-Path $releaseRoot 'source-access-config-before.json'),$sourceAccessChange.Before)
+        [IO.File]::WriteAllBytes((Join-Path $releaseRoot 'source-access-config-after.json'),$sourceAccessChange.After)
+    }
     Assert-NotReparsePoint `
         -Path $releaseRoot `
         -Message "The incremental recovery release directory cannot be a reparse point."
@@ -2548,6 +2700,7 @@ try {
     $manifest = [ordered]@{
         commit = $commit
         staged_at_utc = [DateTime]::UtcNow.ToString("O")
+        reviewed_legacy_index_payloads = @($ReviewedLegacyIndexPayloads)
         application_root = $CanonicalDeployRoot
         migrations = [bool]$applyAnyMigration
         clean_slate = $false
@@ -2562,6 +2715,7 @@ try {
         -RestartPreviousApplication:(-not ($RecoverStoppedPool -or $ApplyResumableSourceDeletionCleanupMigration)) `
         -ActivateCandidate {
             Invoke-CandidatePayloadActivation -CandidateRoot $candidateRoot -ApplicationRoot $CanonicalDeployRoot
+            if ($sourceAccessChange) { Set-SourceAccessConfigurationChange -Change $sourceAccessChange }
             if ($EnableUnattendedDiscovery) {
                 $hostingChange.Attempted = $true
                 $hostingChange.RollbackVerified = $false
@@ -2627,7 +2781,7 @@ try {
                     (Get-HybridPayloadFingerprint $InteractiveHostRoot) -cne $sourceDeletionCleanupState.Binding.CompanionPayloadSha256) { throw 'Source deletion candidate payload differs from its durable binding.' }
             }
             $startAttemptUtc = [DateTime]::UtcNow
-            Start-WebAppPool -Name $SiteName
+            Start-IndexCompatibleWebAppPool -Name $SiteName
             Wait-IisAppPoolState -Name $SiteName -ExpectedState "Started" -TimeoutSeconds $ReadinessTimeoutSeconds
             if ($hostingChange.Attempted -and !$hostingChange.RollbackVerified) {
                 $hostingChange.PreloadReceipt = Wait-IncrementalIisPreloadStartup -AfterUtc $startAttemptUtc `
@@ -2637,6 +2791,7 @@ try {
             }
         } `
         -ValidateApplication {
+            if ($sourceAccessChange) { Assert-SourceAccessConfigurationChange -Change $sourceAccessChange }
             if ($EnableUnattendedDiscovery -and
                 !(Test-IisHostingSettingsMatch (Get-IncrementalIisHostingSettings) $hostingChange.Desired)) {
                 throw 'The activated unattended discovery hosting settings changed.'
@@ -2659,6 +2814,7 @@ try {
             }
         } `
         -ValidateRollbackApplication {
+            if ($sourceAccessChange) { Assert-SourceAccessConfigurationChange -Change $sourceAccessChange -Original }
             if ($hostingChange.Attempted -and
                 !(Test-IisHostingSettingsMatch (Get-IncrementalIisHostingSettings) $hostingChange.Original)) {
                 throw 'The prior IIS hosting settings were not restored; hold retained.'
@@ -2701,6 +2857,7 @@ try {
             $deploymentValidation.PayloadRollbackVerified = $true
         } `
         -PrepareRollbackApplication {
+            if ($sourceAccessChange -and $sourceAccessChange.Attempted) { Restore-SourceAccessConfigurationChange -Change $sourceAccessChange }
             if ($hostingChange.Attempted) {
                 Restore-IncrementalIisHostingSettings -Original $hostingChange.Original -Desired $hostingChange.Desired
                 $hostingChange.RollbackVerified = $true
@@ -2738,9 +2895,10 @@ try {
         Invoke-RequiredLoopbackProbes -Origin $loopbackOrigin.Origin -TimeoutSeconds $ReadinessTimeoutSeconds
     }
     if ($interactiveHostTaskWasEnabled) {
-        Enable-ScheduledTask -TaskName $InteractiveHostTaskName -ErrorAction Stop | Out-Null
+        Enable-IndexCompatibleOutlookTask -TaskName $InteractiveHostTaskName -ErrorAction Stop | Out-Null
     }
 
+    Complete-RecoveryReferenceWrite -Lease $recoveryWriter
     [ordered]@{
         ok = $true
         mode = "applied"
@@ -2748,6 +2906,7 @@ try {
         release_root = $releaseRoot
         rollback_payload = $swap.PreviousPayload
         unattended_discovery_hosting = if ($EnableUnattendedDiscovery) { Get-IncrementalIisHostingSettings } else { $null }
+        source_access_configuration_sha256 = if ($sourceAccessChange) { $sourceAccessChange.AfterHash } else { $null }
         unattended_discovery_startup = $hostingChange.PreloadReceipt
         migrations = [bool]$applyAnyMigration
         migration = if ($applyAnyMigration) { [ordered]@{ target = $migrationPlan.Up.To; script_sha256 = $migrationPlan.Up.Sha256 } } else { $null }
@@ -2816,11 +2975,12 @@ catch {
         throw "Deployment failed after the interactive-host payload was mutated. The prior payload was restored and the scheduled task remains disabled for operator review. Original failure: $($deploymentFailure.Exception.Message)"
     }
     if ($interactiveHostTaskWasEnabled -and -not $interactiveHostMutationStarted -and -not $ApplyResumableSourceDeletionCleanupMigration) {
-        Enable-ScheduledTask -TaskName $InteractiveHostTaskName -ErrorAction SilentlyContinue | Out-Null
+        Enable-IndexCompatibleOutlookTask -TaskName $InteractiveHostTaskName -ErrorAction SilentlyContinue | Out-Null
     }
     throw
 }
 finally {
+    try {
     if ($leaseAcquired -and -not $holdReleaseAttempted -and $null -ne $deploymentValidation -and
         (Test-IncrementalRollbackHoldRelease -Validation $deploymentValidation `
             -ApplyMigrations ([bool]$ApplyMigrations) `
@@ -2832,11 +2992,14 @@ finally {
             -InteractiveHostMutationStarted $interactiveHostMutationStarted `
             -InteractiveHostRollbackVerified $interactiveHostRollbackVerified `
             -RecoverStoppedPool ([bool]$RecoverStoppedPool) `
-            -HostingRollbackVerified ([bool]$hostingChange.RollbackVerified))) {
+            -HostingRollbackVerified ([bool]$hostingChange.RollbackVerified -and (!$sourceAccessChange -or $sourceAccessChange.RollbackVerified)))) {
         Remove-DeploymentValidationHold -Path $ValidationHoldPath -ReleaseId $releaseId
     }
-    if ($leaseAcquired) {
-        $mutex.ReleaseMutex()
+    } finally {
+        try { if ($null -ne $recoveryWriter) { Close-RecoveryReferenceWrite -Lease $recoveryWriter } }
+        finally {
+            if ($leaseAcquired) { $mutex.ReleaseMutex() }
+            $mutex.Dispose()
+        }
     }
-    $mutex.Dispose()
 }

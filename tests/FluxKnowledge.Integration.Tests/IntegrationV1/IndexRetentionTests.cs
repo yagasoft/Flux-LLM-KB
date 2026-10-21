@@ -20,6 +20,57 @@ namespace FluxKnowledge.Integration.Tests.IntegrationV1;
 [Collection("sql-full-text")]
 public sealed class IndexRetentionTests(NativeSqlServerFixture fixture, ITestOutputHelper output) : IClassFixture<NativeSqlServerFixture>
 {
+    [NativeSqlServerTheory]
+    [InlineData("segmented")]
+    [InlineData("segment-count")]
+    [InlineData("different-layout")]
+    public async Task Legacy_retention_rejects_other_formats_and_layouts_before_staging(string changed)
+    {
+        await using var scenario = await Scenario.CreateAsync(fixture);
+        var plan = await scenario.PlanAsync();
+        var generation = plan.Entries.Single().Generation;
+        if (changed == "segmented") generation.FormatVersion = 2;
+        if (changed == "segment-count") generation.SegmentCount = 1;
+        if (changed == "different-layout") generation.IndexPath = Path.Combine(scenario.Environment.IndexRoot, "manifests", generation.Id.ToString("N"));
+        var error = await Assert.ThrowsAsync<NativeOperationException>(() => scenario.Retention.StageAsync(plan, scenario.PlanDirectory, CancellationToken.None));
+        Assert.Equal("index-retention-legacy-format-required", error.ReasonCode);
+        Assert.False(Directory.Exists(Path.Combine(scenario.RecoveryRoot, "IndexRetention")));
+    }
+
+    [NativeSqlServerFact]
+    public async Task A_format_changed_after_a_legacy_plan_cannot_be_staged()
+    {
+        await using var scenario = await Scenario.CreateAsync(fixture);
+        var plan = await scenario.PlanAsync();
+        await using var db = await scenario.Environment.Factory.CreateDbContextAsync();
+        var row = await db.IndexGenerations.SingleAsync(value => value.Id == scenario.Historical.Id);
+        row.FormatVersion = 2;
+        await db.SaveChangesAsync();
+        var error = await Assert.ThrowsAsync<NativeOperationException>(() => scenario.Retention.StageAsync(plan, scenario.PlanDirectory, CancellationToken.None));
+        Assert.Equal("operation-fenced", error.ReasonCode);
+        Assert.True(Directory.Exists(scenario.Historical.IndexPath));
+    }
+
+    [NativeSqlServerFact]
+    public async Task Legacy_restore_is_refused_after_a_segmented_cutover()
+    {
+        await using var scenario = await Scenario.CreateAsync(fixture);
+        var plan = await scenario.PlanAsync();
+        await scenario.Retention.StageAsync(plan, scenario.PlanDirectory, CancellationToken.None);
+        var service = scenario.Service();
+        var command = scenario.Mutation(plan);
+        var preview = await service.PreviewAsync(command, scenario.Actor, CancellationToken.None);
+        var deleted = await service.CommitAsync(command, preview.ConfirmationId, "format-delete", scenario.Actor, CancellationToken.None);
+        await using var db = await scenario.Environment.Factory.CreateDbContextAsync();
+        (await db.IndexState.SingleAsync()).RequiredIndexFormat = 2;
+        await db.SaveChangesAsync();
+        var error = await Assert.ThrowsAsync<NativeOperationException>(async () => await service.PreviewAsync(
+            scenario.Mutation(plan, deleted.OperationId), scenario.Actor, CancellationToken.None));
+        Assert.Equal("index-retention-restore-format-mismatch", error.ReasonCode);
+        Assert.False(await db.IndexGenerations.AnyAsync(value => value.Id == scenario.Historical.Id));
+        Assert.False(Directory.Exists(scenario.Historical.IndexPath));
+    }
+
     [NativeSqlServerFact]
     public async Task Completed_release_receipt_uses_the_real_phase_field()
     {
@@ -467,7 +518,7 @@ public sealed class IndexRetentionTests(NativeSqlServerFixture fixture, ITestOut
         {
             var environment = await SqlToUsearchRebuildTests.PipelineEnvironment.CreateAsync(fixture, "Canonical retained acceptance.");
             var recovery = Path.Combine(environment.IndexRoot, "recovery-evidence");
-            var planDirectory = Path.Combine(environment.IndexRoot, "private-plan");
+            var planDirectory = Path.Combine(Path.GetTempPath(), "FluxKnowledgeRetentionPlan_" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(recovery);
             await using var db = await environment.Factory.CreateDbContextAsync();
             var state = await db.IndexState.SingleAsync();
@@ -501,7 +552,11 @@ public sealed class IndexRetentionTests(NativeSqlServerFixture fixture, ITestOut
             return new(new SqlNativeOperationStore(Environment.Factory, TimeProvider.System, indexRetention: Retention),
                 new SqlNativeCorpusActionStore(Environment.Factory, new UnusedPathPolicy(), new LocalPrivateContentDisclosure(), indexRetention: Retention));
         }
-        public ValueTask DisposeAsync() => Environment.DisposeAsync();
+        public async ValueTask DisposeAsync()
+        {
+            try { await Environment.DisposeAsync(); }
+            finally { if (Directory.Exists(PlanDirectory)) Directory.Delete(PlanDirectory, true); }
+        }
     }
     private sealed class UnusedPathPolicy : ISourceRootPathPolicy
     {

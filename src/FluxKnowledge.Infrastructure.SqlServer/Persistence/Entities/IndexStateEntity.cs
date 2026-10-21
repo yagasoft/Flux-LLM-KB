@@ -3,6 +3,8 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
 public sealed class IndexStateEntity
 {
     public int Id { get; set; }
+    public int RequiredIndexFormat { get; set; } = 1;
+    public long ProjectionChangeFloorVersion { get; set; }
     public Guid CorpusEpoch { get; set; }
     public Guid? CorpusRebuildOperationId { get; set; }
     public long CorpusVersion { get; set; }

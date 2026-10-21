@@ -669,7 +669,7 @@ public sealed class SqlNativeOperationStore(
             }
             if (root!.State != (int)SourceRootState.Deleting)
             {
-                await SqlPublishedPassageSelection.AdvanceVersionAsync(context, now, cancellationToken).ConfigureAwait(false);
+                await SqlPublishedPassageSelection.AdvanceVersionAsync(context, now, cancellationToken, [new(3, rootIdValue)]).ConfigureAwait(false);
                 root.State = (int)SourceRootState.Deleting;
                 root.ConfigurationRevision++;
                 root.UpdatedAtUtc = now;

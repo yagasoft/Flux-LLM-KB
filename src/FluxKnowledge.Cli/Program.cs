@@ -8,8 +8,11 @@ internal static class CliProgram
     {
         return args.FirstOrDefault() switch
         {
+            "source-access" => await SourceAccessCommand.ExecuteAsync(args.Skip(1).ToArray(), Console.Out, Console.Error),
             "corpus-rebuild" => await CorpusRebuildCommand.ExecuteFromEnvironmentAsync(args.Skip(1).ToArray(), Console.Out, Console.Error),
             "index-retention" => await IndexRetentionCommand.ExecuteFromEnvironmentAsync(args.Skip(1).ToArray(), Console.Out, Console.Error),
+            "index-projection" => await IndexProjectionCommand.ExecuteFromEnvironmentAsync(args.Skip(1).ToArray(), Console.Out, Console.Error),
+            "index-recovery" => await IndexRecoveryCommand.ExecuteFromEnvironmentAsync(args.Skip(1).ToArray(), Console.Out, Console.Error),
             "csharp-code" => await LocalRetainedCsharpCodeCommand.ExecuteFromEnvironmentAsync(
                 args.Skip(1).ToArray(),
                 Console.Out,
@@ -40,7 +43,7 @@ internal static class CliProgram
 
     private static int WriteUsage()
     {
-        Console.Error.WriteLine("Usage: FluxKnowledge.Cli <knowledge|code|corpus|operations|codex|csharp-code|validate-sql|models|documents|corpus-rebuild|index-retention>");
+        Console.Error.WriteLine("Usage: FluxKnowledge.Cli <knowledge|code|corpus|operations|codex|csharp-code|validate-sql|models|documents|corpus-rebuild|index-retention|index-projection|index-recovery|source-access>");
         return 2;
     }
 }

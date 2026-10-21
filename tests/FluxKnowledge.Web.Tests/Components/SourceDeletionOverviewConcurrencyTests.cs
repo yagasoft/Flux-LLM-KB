@@ -245,11 +245,26 @@ public sealed class SourceDeletionOverviewConcurrencyTests(NativeSqlServerFixtur
                 Interlocked.Increment(ref writes);
             }
         });
-        var readers = Enumerable.Range(0, 4).Select(async _ =>
+        var readers = Enumerable.Range(0, 4).Select(async readerIndex =>
         {
             var accepted = 0;
+            var inconsistent = 0;
+            var budgetExceeded = 0;
             for (var i = 0; i < 8; i++)
-                if ((await Reader(factory).ReadOverviewAsync(default)).Activity.IsConsistent) accepted++;
+            {
+                try
+                {
+                    if ((await Reader(factory).ReadOverviewAsync(default)).Activity.IsConsistent) accepted++;
+                    else inconsistent++;
+                }
+                catch (OverviewReadBudgetExceededException)
+                {
+                    // A bounded unavailable sample is allowed; each reader must
+                    // still make progress within its original eight attempts.
+                    budgetExceeded++;
+                }
+            }
+            output.WriteLine($"Reader {readerIndex}: accepted={accepted}, inconsistent={inconsistent}, budget-exceeded={budgetExceeded}.");
             return accepted;
         }).ToArray();
         pause.Release.TrySetResult();

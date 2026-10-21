@@ -23,6 +23,7 @@ namespace FluxKnowledge.Integration.Tests.Sources;
 
 public sealed class ZipArchiveReplayIntegrationTests(NativeSqlServerFixture fixture) : IClassFixture<NativeSqlServerFixture>
 {
+    private readonly FluxKnowledge.Testing.TestResources _resources = new();
     private readonly NativeSqlServerFixture _fixture = fixture;
 
     [NativeSqlServerTheory]
@@ -81,6 +82,7 @@ public sealed class ZipArchiveReplayIntegrationTests(NativeSqlServerFixture fixt
         }
         finally
         {
+            _resources.Dispose();
             if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
         }
     }
@@ -257,6 +259,7 @@ public sealed class ZipArchiveReplayIntegrationTests(NativeSqlServerFixture fixt
         }
         finally
         {
+            _resources.Dispose();
             if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
         }
     }
@@ -312,6 +315,7 @@ public sealed class ZipArchiveReplayIntegrationTests(NativeSqlServerFixture fixt
         }
         finally
         {
+            _resources.Dispose();
             if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
         }
     }
@@ -348,6 +352,7 @@ public sealed class ZipArchiveReplayIntegrationTests(NativeSqlServerFixture fixt
         }
         finally
         {
+            _resources.Dispose();
             if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
         }
     }
@@ -384,6 +389,7 @@ public sealed class ZipArchiveReplayIntegrationTests(NativeSqlServerFixture fixt
         }
         finally
         {
+            _resources.Dispose();
             if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
         }
     }
@@ -414,6 +420,7 @@ public sealed class ZipArchiveReplayIntegrationTests(NativeSqlServerFixture fixt
         }
         finally
         {
+            _resources.Dispose();
             if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
         }
     }
@@ -496,6 +503,7 @@ public sealed class ZipArchiveReplayIntegrationTests(NativeSqlServerFixture fixt
         }
         finally
         {
+            _resources.Dispose();
             if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
         }
     }
@@ -643,6 +651,7 @@ public sealed class ZipArchiveReplayIntegrationTests(NativeSqlServerFixture fixt
         }
         finally
         {
+            _resources.Dispose();
             if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
         }
     }
@@ -760,6 +769,7 @@ public sealed class ZipArchiveReplayIntegrationTests(NativeSqlServerFixture fixt
         }
         finally
         {
+            _resources.Dispose();
             if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
         }
     }
@@ -1009,6 +1019,7 @@ public sealed class ZipArchiveReplayIntegrationTests(NativeSqlServerFixture fixt
         }
         finally
         {
+            _resources.Dispose();
             if (Directory.Exists(privateRoot)) Directory.Delete(privateRoot, recursive: true);
             if (Directory.Exists(globalRoot)) Directory.Delete(globalRoot, recursive: true);
         }
@@ -1039,6 +1050,7 @@ public sealed class ZipArchiveReplayIntegrationTests(NativeSqlServerFixture fixt
         }
         finally
         {
+            _resources.Dispose();
             if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
         }
     }
@@ -1118,6 +1130,7 @@ public sealed class ZipArchiveReplayIntegrationTests(NativeSqlServerFixture fixt
         }
         finally
         {
+            _resources.Dispose();
             if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
         }
     }
@@ -1144,6 +1157,7 @@ public sealed class ZipArchiveReplayIntegrationTests(NativeSqlServerFixture fixt
         }
         finally
         {
+            _resources.Dispose();
             if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
         }
     }
@@ -1173,6 +1187,7 @@ public sealed class ZipArchiveReplayIntegrationTests(NativeSqlServerFixture fixt
         }
         finally
         {
+            _resources.Dispose();
             if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
         }
     }
@@ -1206,6 +1221,7 @@ public sealed class ZipArchiveReplayIntegrationTests(NativeSqlServerFixture fixt
         }
         finally
         {
+            _resources.Dispose();
             if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
         }
     }
@@ -1242,6 +1258,7 @@ public sealed class ZipArchiveReplayIntegrationTests(NativeSqlServerFixture fixt
         }
         finally
         {
+            _resources.Dispose();
             if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
         }
     }
@@ -1263,7 +1280,7 @@ public sealed class ZipArchiveReplayIntegrationTests(NativeSqlServerFixture fixt
             var processor = new ZipArchiveRetainedProcessor(new WriteThenFailWriter(new SqlRetainedArtifactWriter(factory, root)));
             var first = new RetainedProcessorActivationService(
                 new SourceCapabilityService(new SqlSourceActivityStore(factory, TimeProvider.System), new LocalSourceCapabilityHandlerRegistry([processor])),
-                new SqlRetainedProcessorBranchStore(factory, TimeProvider.System), new SqlRetainedSourceReader(factory, root), processor,
+                new SqlRetainedProcessorBranchStore(factory, TimeProvider.System), _resources.Own(new SqlRetainedSourceReader(factory, root)), processor,
                 new RetainedProcessorOptions { ArchiveZipExpandEnabled = true }, TimeProvider.System);
 
             var transient = await first.RunOnceAsync(CancellationToken.None);
@@ -1288,6 +1305,7 @@ public sealed class ZipArchiveReplayIntegrationTests(NativeSqlServerFixture fixt
         }
         finally
         {
+            _resources.Dispose();
             if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
         }
     }
@@ -1304,7 +1322,7 @@ public sealed class ZipArchiveReplayIntegrationTests(NativeSqlServerFixture fixt
         return new RetainedProcessorActivationService(
             new SourceCapabilityService(new SqlSourceActivityStore(factory, TimeProvider.System), registry),
             new SqlRetainedProcessorBranchStore(factory, TimeProvider.System),
-            new SqlRetainedSourceReader(factory, root, policy),
+            _resources.Own(new SqlRetainedSourceReader(factory, root, policy)),
             processor,
             new RetainedProcessorOptions { ArchiveZipExpandEnabled = true },
             TimeProvider.System);

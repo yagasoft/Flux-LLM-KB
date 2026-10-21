@@ -15,6 +15,7 @@ namespace FluxKnowledge.Integration.Tests.Sources;
 
 public sealed class TarArchiveReplayIntegrationTests(NativeSqlServerFixture fixture) : IClassFixture<NativeSqlServerFixture>
 {
+    private readonly FluxKnowledge.Testing.TestResources _resources = new();
     private readonly NativeSqlServerFixture _fixture = fixture;
 
     [NativeSqlServerFact]
@@ -56,6 +57,7 @@ public sealed class TarArchiveReplayIntegrationTests(NativeSqlServerFixture fixt
         }
         finally
         {
+            _resources.Dispose();
             if (Directory.Exists(privateRoot)) Directory.Delete(privateRoot, recursive: true);
         }
     }
@@ -87,6 +89,7 @@ public sealed class TarArchiveReplayIntegrationTests(NativeSqlServerFixture fixt
         }
         finally
         {
+            _resources.Dispose();
             if (Directory.Exists(privateRoot)) Directory.Delete(privateRoot, recursive: true);
         }
     }
@@ -135,6 +138,7 @@ public sealed class TarArchiveReplayIntegrationTests(NativeSqlServerFixture fixt
         }
         finally
         {
+            _resources.Dispose();
             if (Directory.Exists(privateRoot)) Directory.Delete(privateRoot, recursive: true);
         }
     }
@@ -169,6 +173,7 @@ public sealed class TarArchiveReplayIntegrationTests(NativeSqlServerFixture fixt
         }
         finally
         {
+            _resources.Dispose();
             if (Directory.Exists(privateRoot)) Directory.Delete(privateRoot, recursive: true);
         }
     }
@@ -206,6 +211,7 @@ public sealed class TarArchiveReplayIntegrationTests(NativeSqlServerFixture fixt
         }
         finally
         {
+            _resources.Dispose();
             if (Directory.Exists(privateRoot)) Directory.Delete(privateRoot, recursive: true);
         }
     }
@@ -218,7 +224,7 @@ public sealed class TarArchiveReplayIntegrationTests(NativeSqlServerFixture fixt
         var tar = new TarArchiveRetainedProcessor(writer);
         return new RetainedProcessorActivationService(
             new SourceCapabilityService(new SqlSourceActivityStore(factory, TimeProvider.System), new LocalSourceCapabilityHandlerRegistry([zip, tar])),
-            new SqlRetainedProcessorBranchStore(factory, TimeProvider.System), new SqlRetainedSourceReader(factory, privateRoot), zip,
+            new SqlRetainedProcessorBranchStore(factory, TimeProvider.System), _resources.Own(new SqlRetainedSourceReader(factory, privateRoot)), zip,
             new RetainedProcessorOptions { ArchiveTarExpandEnabled = enabled }, TimeProvider.System, tar);
     }
 

@@ -48,10 +48,11 @@ public sealed class HybridRebuildDeploymentTests(NativeSqlServerFixture fixture)
 
     private async Task RunScriptAsync(string mode, string? migrationScript = null)
     {
-        var root = new DirectoryInfo(AppContext.BaseDirectory);
+        var root = new DirectoryInfo(FluxKnowledge.Testing.RepositoryFiles.Root());
         while (root is not null && !File.Exists(Path.Combine(root.FullName, "scripts", "deploy", "update-native-iis-incremental.ps1"))) root=root.Parent;
         Assert.NotNull(root);
-        var start = new ProcessStartInfo("pwsh") { UseShellExecute=false, CreateNoWindow=true, RedirectStandardOutput=true, RedirectStandardError=true };
+        var start = new ProcessStartInfo("pwsh") { UseShellExecute=false, CreateNoWindow=true, RedirectStandardOutput=true, RedirectStandardError=true,
+            WorkingDirectory = root.FullName };
         var script = mode switch
         {
             "replacement" => "hybrid-rebuild-replacement-contract.ps1",

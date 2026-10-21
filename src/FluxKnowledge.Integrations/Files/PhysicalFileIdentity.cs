@@ -137,12 +137,15 @@ public static class PhysicalFileIdentity
             return new PhysicalDirectoryLease(null, GetDirectory(canonicalPath));
         }
 
+        // Attribute-only opens do not prevent directory renames. List access
+        // makes the omitted delete-sharing bit protect an empty build parent too.
+        const uint fileListDirectory = 0x1;
         const uint fileReadAttributes = 0x80;
         const uint fileFlagBackupSemantics = 0x02000000;
         const uint fileFlagOpenReparsePoint = 0x00200000;
         var handle = CreateFile(
             canonicalPath,
-            fileReadAttributes,
+            fileListDirectory | fileReadAttributes,
             0x3,
             IntPtr.Zero,
             3,

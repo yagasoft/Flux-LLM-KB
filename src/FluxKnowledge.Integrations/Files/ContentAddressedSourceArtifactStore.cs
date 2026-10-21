@@ -14,6 +14,7 @@ public sealed class ContentAddressedSourceArtifactStore : ISourceArtifactStore, 
     private readonly Func<CancellationToken, ValueTask>? _beforeArtifactWrite;
     private readonly Action? _beforeShardCreation;
     private readonly ISourceArtifactPublicationGate? _publicationGate;
+    private readonly ISourceAccessRepairClient? _sourceAccessRepairClient;
 
     public ContentAddressedSourceArtifactStore(
         string configuredRoot,
@@ -21,7 +22,8 @@ public sealed class ContentAddressedSourceArtifactStore : ISourceArtifactStore, 
         Func<CancellationToken, ValueTask>? beforeSourceRead = null,
         Func<CancellationToken, ValueTask>? beforeArtifactWrite = null,
         Action? beforeShardCreation = null,
-        ISourceArtifactPublicationGate? publicationGate = null)
+        ISourceArtifactPublicationGate? publicationGate = null,
+        ISourceAccessRepairClient? sourceAccessRepairClient = null)
     {
         var effectiveProtectedRoots = protectedRoots?.ToArray();
         _root = ValidateRoot(configuredRoot, effectiveProtectedRoots);
@@ -33,6 +35,7 @@ public sealed class ContentAddressedSourceArtifactStore : ISourceArtifactStore, 
         _beforeArtifactWrite = beforeArtifactWrite;
         _beforeShardCreation = beforeShardCreation;
         _publicationGate = publicationGate;
+        _sourceAccessRepairClient = sourceAccessRepairClient;
     }
 
     public async ValueTask<SourceArtifactReceipt> PutFileAsync(
@@ -48,7 +51,9 @@ public sealed class ContentAddressedSourceArtifactStore : ISourceArtifactStore, 
         }
 
         EnsureRootCurrent();
-        EnsureSnapshotCurrent(snapshot);
+        // Recover original-source access before taking any SQL publication fence.
+        // Later capture/commit revalidation is strictly observational.
+        EnsureSnapshotCurrent(snapshot, snapshot.SourcePath is null ? null : _sourceAccessRepairClient, cancellationToken);
         var hash = snapshot.ContentSha256.ToLowerInvariant();
         var relativePath = Path.Combine("sha256", hash[..2], $"{hash}.bin");
         var publicationLease = await AcquirePublicationLeaseAsync(hash, cancellationToken).ConfigureAwait(false);
@@ -282,9 +287,10 @@ public sealed class ContentAddressedSourceArtifactStore : ISourceArtifactStore, 
         }
     }
 
-    private static void EnsureSnapshotCurrent(SourceDiscoveredFile snapshot)
+    private static void EnsureSnapshotCurrent(SourceDiscoveredFile snapshot, ISourceAccessRepairClient? accessRepair = null,
+        CancellationToken cancellationToken = default)
     {
-        using var source = OpenSource(snapshot);
+        using var source = OpenSource(snapshot, accessRepair, cancellationToken);
         if (RandomAccess.GetLength(source.Handle) != snapshot.ByteLength ||
             File.GetLastWriteTimeUtc(source.Handle) != snapshot.LastWriteAtUtc)
         {
@@ -292,9 +298,12 @@ public sealed class ContentAddressedSourceArtifactStore : ISourceArtifactStore, 
         }
     }
 
-    private static WindowsSourcePathAccess.SourceReadLease OpenSource(SourceDiscoveredFile snapshot) =>
-        WindowsSourcePathAccess.OpenRead(snapshot.SourcePath?.RootPath ?? Path.GetDirectoryName(snapshot.CanonicalPath)!,
-            snapshot.CanonicalPath, snapshot.SourcePath?.RootIdentityFingerprint, snapshot.StableSourceIdentity);
+    private static WindowsSourcePathAccess.SourceReadLease OpenSource(SourceDiscoveredFile snapshot, ISourceAccessRepairClient? accessRepair = null,
+        CancellationToken cancellationToken = default) =>
+        SourceAccessRecovery.Run(snapshot.SourcePath?.RootPath ?? Path.GetDirectoryName(snapshot.CanonicalPath)!,
+            snapshot.SourcePath?.RootIdentityFingerprint, accessRepair, () => WindowsSourcePathAccess.OpenRead(
+                snapshot.SourcePath?.RootPath ?? Path.GetDirectoryName(snapshot.CanonicalPath)!, snapshot.CanonicalPath,
+                snapshot.SourcePath?.RootIdentityFingerprint, snapshot.StableSourceIdentity), cancellationToken);
 
     private void EnsureRootCurrent()
     {

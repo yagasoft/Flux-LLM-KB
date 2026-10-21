@@ -14,7 +14,7 @@ public sealed partial class SqlStageTransitionStore
     {
         ArgumentNullException.ThrowIfNull(request);
         var publicationRetry = request.CurrentJob.Stage == PipelineStage.Publish && request.CurrentJob.Operation == PipelineOperations.Publish &&
-            request.Reason == "publication-snapshot-conflict";
+            request.Reason is "publication-snapshot-conflict" or "index-storage-capacity-deferred";
         var embeddingContinuation = request.CurrentJob.Stage == PipelineStage.Embed && request.CurrentJob.Operation == PipelineOperations.Embed &&
             request.Reason == "embedding-batch-persisted";
         var sourceDeferral = request.SourceDeferral is not null && request.Reason == SqlRepositoryWorkRecovery.Waiting;
@@ -23,7 +23,7 @@ public sealed partial class SqlStageTransitionStore
             request.DispatchMessage.PipelineRecordId != request.CurrentJob.PipelineRecordId ||
             request.DispatchMessage.SourceRevision != request.CurrentJob.SourceRevision ||
             string.IsNullOrWhiteSpace(request.Actor))
-            throw new ArgumentException("Only a fenced publication conflict or embedding continuation may be deferred here.", nameof(request));
+            throw new ArgumentException("Only a fenced publication deferral, embedding continuation or source deferral may be retried here.", nameof(request));
         await using var executionContext = await _contextFactory.CreateDbContextAsync(cancellationToken);
         await executionContext.Database.CreateExecutionStrategy().ExecuteAsync(async () =>
         {

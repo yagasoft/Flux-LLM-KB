@@ -20,6 +20,14 @@ pwsh -NoProfile -File tests/native/complete-feature-dryrun.ps1
 pwsh -NoProfile -File tests/native/native-deployment-plan.ps1
 ```
 
+Build outputs may be redirected with `FluxKnowledgeArtifactsPath`; source-contract
+tests locate their compiled checkout independently of the output directory.
+Protected source-access storage tests require a local fixed volume whose root
+permissions support their isolated fixtures. Set
+`FLUXKNOWLEDGE_TEST_SOURCE_ACCESS_VOLUME_ROOT` to that volume root (for example,
+`I:\`) when the temporary-directory volume is unsuitable. This selects only test
+storage and does not change source or application permissions.
+
 Browser checks use `scripts/dev/test-browser.ps1` and the guarded disposable
 browser helper. Use an existing browser installation where available. The
 normal suite reports browser tests as skipped unless that route is enabled.

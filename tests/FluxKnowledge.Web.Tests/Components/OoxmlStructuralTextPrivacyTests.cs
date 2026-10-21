@@ -24,6 +24,7 @@ namespace FluxKnowledge.Web.Tests.Components;
 
 public sealed class OoxmlStructuralTextPrivacyTests(NativeSqlServerFixture fixture) : IClassFixture<NativeSqlServerFixture>
 {
+    private readonly FluxKnowledge.Testing.TestResources _resources = new();
     private readonly NativeSqlServerFixture _fixture = fixture;
 
     [NativeSqlServerFact]
@@ -50,7 +51,7 @@ public sealed class OoxmlStructuralTextPrivacyTests(NativeSqlServerFixture fixtu
             await using var subscription = feed.Subscribe();
             var activation = new RetainedProcessorActivationService(
                 new SourceCapabilityService(new SqlSourceActivityStore(dbFactory, TimeProvider.System), new LocalSourceCapabilityHandlerRegistry([zip, new OoxmlStructuralTextCapabilityHandler()])),
-                new SqlRetainedProcessorBranchStore(dbFactory, TimeProvider.System), new SqlRetainedSourceReader(dbFactory, privateRoot), zip,
+                new SqlRetainedProcessorBranchStore(dbFactory, TimeProvider.System), _resources.Own(new SqlRetainedSourceReader(dbFactory, privateRoot)), zip,
                 new RetainedProcessorOptions { OoxmlDocumentStructuralExtractEnabled = true }, TimeProvider.System, statusEvents: feed, ooxmlProcessor: ooxml);
 
             Assert.Equal(1, (await activation.RunOnceAsync(CancellationToken.None)).CompletedBranches);
@@ -72,6 +73,7 @@ public sealed class OoxmlStructuralTextPrivacyTests(NativeSqlServerFixture fixtu
         }
         finally
         {
+            _resources.Dispose();
             if (Directory.Exists(privateRoot)) Directory.Delete(privateRoot, recursive: true);
         }
     }

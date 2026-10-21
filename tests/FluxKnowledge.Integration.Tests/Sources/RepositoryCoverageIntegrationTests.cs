@@ -73,12 +73,14 @@ public sealed class RepositoryCoverageIntegrationTests(NativeSqlServerFixture fi
         }
         var scanStore = new SqlSourceScanStore(environment.Factory, clock);
         var rootId = await ScanAndPublish(environment, scanStore, clock);
+        using var retainedReader = new SqlRetainedSourceReader(environment.Factory, environment.ArtifactRoot);
+        using var codeReader = new SqlRetainedSourceReader(environment.Factory, environment.ArtifactRoot);
         var activation = new RetainedProcessorActivationService(
             new SourceCapabilityService(new SqlSourceActivityStore(environment.Factory, clock), new LocalSourceCapabilityHandlerRegistry([new RetainedCsharpCodeCapabilityHandler()])),
-            new SqlRetainedProcessorBranchStore(environment.Factory, clock), new SqlRetainedSourceReader(environment.Factory, environment.ArtifactRoot),
+            new SqlRetainedProcessorBranchStore(environment.Factory, clock), retainedReader,
             new ZipArchiveRetainedProcessor(new SqlRetainedArtifactWriter(environment.Factory, environment.ArtifactRoot)),
             new RetainedProcessorOptions { CsharpCodeEnabled = true, ArchiveZipExpandEnabled = false }, clock,
-            csharpProcessor: new RetainedCsharpCodeProcessor(new SqlRetainedSourceReader(environment.Factory, environment.ArtifactRoot), new LocalPrivateContentDisclosure()));
+            csharpProcessor: new RetainedCsharpCodeProcessor(codeReader, new LocalPrivateContentDisclosure()));
         await Commit(service, Mutation("source_sync", new { rootId }));
         var promotion = activation.RunOnceAsync(default).AsTask();
         var reconciliation = ScanAndPublish(environment, scanStore, clock);

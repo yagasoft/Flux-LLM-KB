@@ -140,7 +140,7 @@ public sealed class RetainedCsharpCodeReplayIntegrationTests(NativeSqlServerFixt
             await File.WriteAllBytesAsync(Path.Combine(root, relative), bytes);
             var seeded = await SeedDeferredCsharpAsync(hash, bytes.Length, relative);
             var factory = SqlTestData.CreateFactory(fixture);
-            var reader = new SqlRetainedSourceReader(factory, root);
+            using var reader = new SqlRetainedSourceReader(factory, root);
             var activation = new RetainedProcessorActivationService(
                 new SourceCapabilityService(new SqlSourceActivityStore(factory, TimeProvider.System), new LocalSourceCapabilityHandlerRegistry([new RetainedCsharpCodeCapabilityHandler()])),
                 new SqlRetainedProcessorBranchStore(factory, TimeProvider.System), reader,
@@ -184,7 +184,7 @@ public sealed class RetainedCsharpCodeReplayIntegrationTests(NativeSqlServerFixt
                 seeds.Add(await SeedDeferredCsharpAsync(hash, bytes.Length, relative));
             }
             var factory = SqlTestData.CreateFactory(fixture);
-            var reader = new SqlRetainedSourceReader(factory, root);
+            using var reader = new SqlRetainedSourceReader(factory, root);
             var activation = new RetainedProcessorActivationService(
                 new SourceCapabilityService(new SqlSourceActivityStore(factory, TimeProvider.System), new LocalSourceCapabilityHandlerRegistry([new RetainedCsharpCodeCapabilityHandler()])),
                 new SqlRetainedProcessorBranchStore(factory, TimeProvider.System), reader,

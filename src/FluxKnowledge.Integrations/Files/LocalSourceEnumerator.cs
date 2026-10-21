@@ -12,12 +12,15 @@ public sealed class LocalSourceEnumerator : IAuthoritativeSourceFileEnumerator, 
 {
     private readonly Func<SafeFileHandle, string> _readIdentity;
     private readonly Action<string>? _beforeDirectoryRecheck;
+    private readonly ISourceAccessRepairClient? _sourceAccessRepairClient;
     private IReadOnlyList<SourceEnumerationEvidence> _lastEvidence = [];
 
-    public LocalSourceEnumerator(Func<SafeFileHandle, string>? readIdentity = null, Action<string>? beforeDirectoryRecheck = null)
+    public LocalSourceEnumerator(Func<SafeFileHandle, string>? readIdentity = null, Action<string>? beforeDirectoryRecheck = null,
+        ISourceAccessRepairClient? sourceAccessRepairClient = null)
     {
         _readIdentity = readIdentity ?? PhysicalFileIdentity.Get;
         _beforeDirectoryRecheck = beforeDirectoryRecheck;
+        _sourceAccessRepairClient = sourceAccessRepairClient;
     }
 
     public IReadOnlyList<SourceEnumerationEvidence> LastEvidence => _lastEvidence;
@@ -56,7 +59,9 @@ public sealed class LocalSourceEnumerator : IAuthoritativeSourceFileEnumerator, 
             deadline.CancelAfter(limits.MaximumDuration);
         }
         var budget = new CrawlBudget(limits, errors, deadline.Token, cancellationToken);
-        using var rootLease = TryOpenRoot(sourceRoot, errors);
+        // Preview is always read-only, including when recovery is enabled for normal scans.
+        var accessRepair = limits is null ? _sourceAccessRepairClient : null;
+        using var rootLease = TryOpenRoot(sourceRoot, errors, accessRepair, cancellationToken);
         if (rootLease is null) yield break;
         var candidates = new List<string>();
         GitTrackedSourceDiscovery.Inventory? inventory = null;
@@ -77,7 +82,7 @@ public sealed class LocalSourceEnumerator : IAuthoritativeSourceFileEnumerator, 
             { errors.Add(new("git", ".", exception.GetType().Name)); }
         }
         if (sourceRoot.DiscoveryMode == SourceDiscoveryMode.Filesystem)
-            CollectFiles(sourceRoot, sourceRoot.CanonicalPath, rootLease.Identity.IdentityFingerprint, candidates, errors, budget);
+            CollectFiles(sourceRoot, sourceRoot.CanonicalPath, rootLease.Identity.IdentityFingerprint, candidates, errors, budget, accessRepair);
         else if (sourceRoot.DiscoveryMode != SourceDiscoveryMode.GitTracked)
             errors.Add(new("policy", ".", "UnknownDiscoveryMode"));
 
@@ -95,7 +100,7 @@ public sealed class LocalSourceEnumerator : IAuthoritativeSourceFileEnumerator, 
                     if ((File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0) throw new UnauthorizedAccessException("Git file is a reparse point.");
                 }
                 file = await ReadSnapshotAsync(path, relativePath, sourceRoot, rootLease.Identity.IdentityFingerprint,
-                    budget, deadline.Token).ConfigureAwait(false);
+                    budget, deadline.Token, accessRepair).ConfigureAwait(false);
             }
             catch (FileNotFoundException) when (inventory is not null) { continue; }
             catch (DirectoryNotFoundException) when (inventory is not null) { continue; }
@@ -145,13 +150,14 @@ public sealed class LocalSourceEnumerator : IAuthoritativeSourceFileEnumerator, 
     }
 
     private void CollectFiles(SourceRootConfiguration root, string directory, string rootIdentity,
-        ICollection<string> files, ICollection<SourceEnumerationEvidence> errors, CrawlBudget budget)
+        ICollection<string> files, ICollection<SourceEnumerationEvidence> errors, CrawlBudget budget, ISourceAccessRepairClient? accessRepair)
     {
         if (!budget.CheckTime()) return;
         var relative = Path.GetRelativePath(root.CanonicalPath, directory);
         try
         {
-            using var lease = WindowsSourcePathAccess.OpenDirectoryPath(directory, enumerate: true);
+            using var lease = SourceAccessRecovery.Run(root.CanonicalPath, rootIdentity, accessRepair,
+                () => WindowsSourcePathAccess.OpenDirectoryPath(directory, enumerate: true), budget.CallerCancellation);
             if (lease.IdentityAt(root.CanonicalPath).IdentityFingerprint != rootIdentity)
                 throw new SourceSnapshotChangedException("The admitted source root changed.");
             if (lease.Metadata.NamespaceIncomplete)
@@ -169,7 +175,7 @@ public sealed class LocalSourceEnumerator : IAuthoritativeSourceFileEnumerator, 
                     pattern.Replace('\\', '/').EndsWith("/**", StringComparison.Ordinal) &&
                     GlobMatches(entryRelative.Replace('\\', '/'), pattern.Replace('\\', '/')[..^3])))
                 {
-                    CollectFiles(root, path, rootIdentity, files, errors, budget);
+                    CollectFiles(root, path, rootIdentity, files, errors, budget, accessRepair);
                 }
             }
             _beforeDirectoryRecheck?.Invoke(directory);
@@ -197,11 +203,13 @@ public sealed class LocalSourceEnumerator : IAuthoritativeSourceFileEnumerator, 
     }
 
     private async Task<SourceDiscoveredFile> ReadSnapshotAsync(string path, string relativePath,
-        SourceRootConfiguration root, string rootIdentity, CrawlBudget budget, CancellationToken cancellationToken)
+        SourceRootConfiguration root, string rootIdentity, CrawlBudget budget, CancellationToken cancellationToken,
+        ISourceAccessRepairClient? accessRepair)
     {
         const int bufferSize = 128 * 1024;
         const int signatureLimit = 8192;
-        using var lease = WindowsSourcePathAccess.OpenRead(root.CanonicalPath, path, rootIdentity);
+        using var lease = SourceAccessRecovery.Run(root.CanonicalPath, rootIdentity, accessRepair,
+            () => WindowsSourcePathAccess.OpenRead(root.CanonicalPath, path, rootIdentity), cancellationToken);
         var length = RandomAccess.GetLength(lease.Handle);
         budget.ReserveRead(length); // Reject before the first content read, not after hashing the file.
         var lastWrite = File.GetLastWriteTimeUtc(lease.Handle);
@@ -232,7 +240,8 @@ public sealed class LocalSourceEnumerator : IAuthoritativeSourceFileEnumerator, 
             SourcePath: new(root.CanonicalPath, rootIdentity));
     }
 
-    private static WindowsSourcePathAccess.DirectoryPathLease? TryOpenRoot(SourceRootConfiguration root, ICollection<SourceEnumerationEvidence> errors)
+    private static WindowsSourcePathAccess.DirectoryPathLease? TryOpenRoot(SourceRootConfiguration root,
+        ICollection<SourceEnumerationEvidence> errors, ISourceAccessRepairClient? accessRepair, CancellationToken cancellationToken)
     {
         WindowsSourcePathAccess.DirectoryPathLease? lease = null;
         try
@@ -250,7 +259,8 @@ public sealed class LocalSourceEnumerator : IAuthoritativeSourceFileEnumerator, 
             }
             if (root.DiscoveryMode == SourceDiscoveryMode.GitTracked)
                 PhysicalFileIdentity.EnsureNoReparsePointTraversal(root.CanonicalPath);
-            lease = WindowsSourcePathAccess.OpenDirectoryPath(root.CanonicalPath);
+            lease = SourceAccessRecovery.Run(root.CanonicalPath, root.PhysicalIdentityFingerprint, accessRepair,
+                () => WindowsSourcePathAccess.OpenDirectoryPath(root.CanonicalPath), cancellationToken);
             if (!string.IsNullOrWhiteSpace(root.PhysicalIdentityFingerprint) &&
                 lease.Identity.IdentityFingerprint != root.PhysicalIdentityFingerprint)
             {
@@ -272,6 +282,7 @@ public sealed class LocalSourceEnumerator : IAuthoritativeSourceFileEnumerator, 
         var (kind, reason) = exception switch
         {
             SourcePathSecurityException security => ("security", security.ReasonCode),
+            SourceAccessDeniedException denied => ("permission", denied.ReasonCode),
             SourceContentUnavailableException => ("unavailable", "SourceContentNotAvailableLocally"),
             UnauthorizedAccessException when nativeCode == 5 => ("permission", "SourceAccessDenied"),
             UnauthorizedAccessException => ("security", "SourcePathSafetyRefused"),

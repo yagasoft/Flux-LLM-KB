@@ -30,14 +30,16 @@ public static class ServiceCollectionExtensions
         return AddFluxKnowledgeUsearchCore(
             services,
             storageSafety: null,
-            FileSystemUsearchDirectoryCreator.Instance);
+            FileSystemUsearchDirectoryCreator.Instance,
+            segmentedEnabled: UsearchIndexOptions.IsSegmentedPublicationEnabled(configuration["IndexPublication:Mode"]));
     }
 
     internal static IServiceCollection AddProductionFluxKnowledgeUsearch(
         this IServiceCollection services,
         UsearchIndexOptions validatedOptions,
         LiveRootStorageSafety storageSafety,
-        IUsearchDirectoryCreator? directoryCreator = null)
+        IUsearchDirectoryCreator? directoryCreator = null,
+        bool segmentedEnabled = false)
     {
         ArgumentNullException.ThrowIfNull(services);
         ArgumentNullException.ThrowIfNull(validatedOptions);
@@ -58,14 +60,16 @@ public static class ServiceCollectionExtensions
             services,
             storageSafety,
             directoryCreator ?? FileSystemUsearchDirectoryCreator.Instance,
-            registerRecoveryBackgroundService: true);
+            registerRecoveryBackgroundService: true,
+            segmentedEnabled: segmentedEnabled);
     }
 
     private static IServiceCollection AddFluxKnowledgeUsearchCore(
         IServiceCollection services,
         LiveRootStorageSafety? storageSafety,
         IUsearchDirectoryCreator directoryCreator,
-        bool registerRecoveryBackgroundService = true)
+        bool registerRecoveryBackgroundService = true,
+        bool segmentedEnabled = false)
     {
         services.AddSingleton(_ => new UsearchGenerationValidator(storageSafety));
         services.AddSingleton(DerivedIndexRecoveryOptions.Default);
@@ -95,7 +99,21 @@ public static class ServiceCollectionExtensions
             directoryCreator,
             provider.GetService<Microsoft.Extensions.Logging.ILogger<UsearchGenerationBuilder>>(),
             provider.GetService<IIndexGenerationReadLeaseFactory>()));
-        services.AddScoped<IIndexGenerationPublisher>(provider => provider.GetRequiredService<UsearchGenerationBuilder>());
+        services.AddScoped<IIndexGenerationPublisher>(provider => segmentedEnabled && provider.GetService<ISegmentedIndexStore>() is { } segmentedStore
+            ? new SegmentedIndexPublisher(provider.GetRequiredService<UsearchGenerationBuilder>(), segmentedStore,
+                provider.GetRequiredService<IDerivedIndexRecoveryStore>(),
+                new UsearchSegmentBuilder(provider.GetRequiredService<UsearchIndexOptions>(), provider.GetRequiredService<IIndexSegmentReadLeaseFactory>(),
+                    provider.GetService<IndexSegmentBuildOptions>()),
+                new UsearchManifestValidator(provider.GetRequiredService<UsearchIndexOptions>(), provider.GetRequiredService<IIndexSegmentReadLeaseFactory>()),
+                segmentedEnabled)
+            : provider.GetRequiredService<UsearchGenerationBuilder>());
+        if (segmentedEnabled)
+        {
+            services.AddSingleton(provider => new UsearchSegmentCache(provider.GetRequiredService<UsearchIndexOptions>(),
+                provider.GetRequiredService<IIndexSegmentReadLeaseFactory>(), provider.GetRequiredService<IIndexSegmentOwnerStore>(),
+                provider.GetRequiredService<TimeProvider>()));
+            services.AddHostedService<UsearchSegmentCacheMaintenance>();
+        }
         services.AddSingleton<UsearchAnnIndex>();
         services.AddSingleton<IAnnIndex>(provider => provider.GetRequiredService<UsearchAnnIndex>());
         services.AddScoped<ICorpusAnnLeaseFactory, UsearchCorpusAnnLeaseFactory>();

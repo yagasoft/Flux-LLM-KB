@@ -104,9 +104,9 @@ public class UsearchGenerationValidator : IIndexGenerationVerifier
         VerifyCosineMetric(index, vectors);
     }
 
-    private static void VerifyCosineMetric(
+    internal static void VerifyCosineMetric(
         USearchIndex index,
-        IReadOnlyList<CanonicalVector> vectors)
+        IReadOnlyList<CanonicalVector> vectors, int? searchCount = null)
     {
         var vector = vectors[0];
         var stored = ToFloatValues(vector.Values);
@@ -122,21 +122,22 @@ public class UsearchGenerationValidator : IIndexGenerationVerifier
         };
         foreach (var query in queries)
         {
-            var count = index.Search(query, Math.Max(1, vectors.Count), out var keys, out var distances);
+            if (query.All(static value => value == 0F)) query[0] = 1F;
+            var limit = Math.Max(1, Math.Min(8, searchCount ?? vectors.Count));
+            var count = index.Search(query, limit, out var keys, out var distances);
             // Approximate traversal is not an enumeration contract. Exact membership
             // is proved above by cardinality and bitwise Get for every distinct SQL ID.
-            var position = Array.IndexOf(keys, (ulong)vector.VectorId, 0, count);
-            if (position < 0)
+            if (count < 1 || count > limit || keys.Length < count || distances.Length < count)
+                throw new IndexGenerationValidationException("USearch metric probe returned invalid results.");
+            for (var position = 0; position < count; position++)
             {
-                throw new IndexGenerationValidationException("USearch metric probe did not return the stored vector.");
-            }
-
-            var expectedDistance = CosineDistance(query, stored);
-            if (!float.IsFinite(distances[position]) ||
-                !float.IsFinite(expectedDistance) ||
-                MathF.Abs(distances[position] - expectedDistance) > 0.001F)
-            {
-                throw new IndexGenerationValidationException("The reopened USearch index metric is not cosine distance.");
+                if (index.Get(keys[position], out float[] actual) != 1 || actual.Length != query.Length)
+                    throw new IndexGenerationValidationException("USearch metric probe returned an unknown vector.");
+                var expectedDistance = CosineDistance(query, actual);
+                if (!float.IsFinite(distances[position]) ||
+                    !float.IsFinite(expectedDistance) ||
+                    MathF.Abs(distances[position] - expectedDistance) > 0.001F)
+                    throw new IndexGenerationValidationException("The reopened USearch index metric is not cosine distance.");
             }
         }
     }

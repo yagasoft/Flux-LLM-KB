@@ -16,7 +16,7 @@ public sealed class RepositoryRecoveryMigrationDeploymentTests(NativeSqlServerFi
     public async Task Retained_stream_verifies_production_cardinality_with_bounded_memory()
     {
         var work = await SqlTestData.SeedWorkItemAsync(fixture, DateTimeOffset.UnixEpoch, PublicJobState.WorkerQueued, null);
-        var source = new DirectoryInfo(AppContext.BaseDirectory);
+        var source = new DirectoryInfo(FluxKnowledge.Testing.RepositoryFiles.Root());
         const string relative = "tests/native/repository-recovery-retained-scale.ps1";
         while (source is not null && !File.Exists(Path.Combine(source.FullName, relative))) source = source.Parent;
         Assert.NotNull(source);
@@ -98,7 +98,7 @@ public sealed class RepositoryRecoveryMigrationDeploymentTests(NativeSqlServerFi
         const string target = "20261004175522_AddRepositoryRecoveryAuthority";
         await db.GetService<IMigrator>().MigrateAsync(baseline);
         var script = db.GetService<IMigrator>().GenerateScript(baseline, target);
-        var source = new DirectoryInfo(AppContext.BaseDirectory);
+        var source = new DirectoryInfo(FluxKnowledge.Testing.RepositoryFiles.Root());
         const string relative = "tests/native/repository-recovery-migration-sql.ps1";
         while (source is not null && !File.Exists(Path.Combine(source.FullName, relative))) source = source.Parent;
         Assert.NotNull(source);

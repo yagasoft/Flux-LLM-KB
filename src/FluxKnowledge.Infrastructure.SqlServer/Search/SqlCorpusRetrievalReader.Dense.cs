@@ -85,6 +85,14 @@ public sealed partial class SqlCorpusRetrievalReader
                    LEFT(CASE WHEN [publication].[OwnerSourceRevisionId] IS NOT NULL THEN [owner].[CanonicalPath] ELSE [retained].[CanonicalPath] END, LEN({prefix})) COLLATE Latin1_General_100_CI_AS = {prefix}))
             ORDER BY [vector].[VectorId]
             """);
+            if (generation.FormatVersion == 2)
+            {
+                pageQuery = FormattableStringFactory.Create(pageQuery.Format
+                    .Replace("[IndexGenerationVectors] AS [member]", "[CurrentIndexMembers] AS [member]", StringComparison.Ordinal)
+                    .Replace("[member].[GenerationId] = [generation].[Id]", "[member].[CorpusEpoch] = [generation].[CorpusEpoch] AND EXISTS (SELECT 1 FROM [IndexGenerationSegments] AS [manifest] WHERE [manifest].[GenerationId] = [generation].[Id] AND [manifest].[SegmentId] = [member].[SegmentId])", StringComparison.Ordinal)
+                    .Replace("[member].[GenerationId] = ", "[generation].[Id] = ", StringComparison.Ordinal), pageQuery.GetArguments());
+            }
+            else if (generation.FormatVersion != 1) throw new InvalidOperationException("corpus-dense-format-unsupported");
             if (kind != "all")
             {
                 // Seek the existing (GenerationId, VectorId) key in order. Every
@@ -93,6 +101,7 @@ public sealed partial class SqlCorpusRetrievalReader
                 // before returning TOP, while the bounded page keeps memory fixed.
                 pageQuery = FormattableStringFactory.Create(pageQuery.Format
                     .Replace("[IndexGenerationVectors] AS [member]", "[IndexGenerationVectors] AS [member] WITH (FORCESEEK)", StringComparison.Ordinal)
+                    .Replace("[CurrentIndexMembers] AS [member]", "[CurrentIndexMembers] AS [member] WITH (FORCESEEK)", StringComparison.Ordinal)
                     .Replace("[vector].[VectorId] >", "[member].[VectorId] >", StringComparison.Ordinal)
                     .Replace("ORDER BY [vector].[VectorId]", "ORDER BY [member].[VectorId]", StringComparison.Ordinal)
                     + " OPTION (LOOP JOIN, FORCE ORDER, MAXDOP 1)", pageQuery.GetArguments());

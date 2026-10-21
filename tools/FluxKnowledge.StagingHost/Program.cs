@@ -61,6 +61,14 @@ if (args.Length == 3)
         !await database.Vectors.AnyAsync() && !await database.IndexGenerations.AnyAsync() &&
         !await database.IndexGenerationVectors.AnyAsync())
         await new EmptyCatalogueBootstrapper().ProveAndMarkAsync(database, CancellationToken.None);
+    if (settings.IndexPublicationMode == "Segmented" && indexState.RequiredIndexFormat != 2)
+    {
+        if (indexState.RequiredIndexFormat != 1 || await database.Vectors.AnyAsync() || await database.IndexGenerations.AnyAsync() ||
+            await database.PipelineRecords.AnyAsync()) throw new InvalidOperationException("Staging format admission requires an empty catalogue or explicit conversion.");
+        indexState.RequiredIndexFormat = 2;
+        indexState.ProjectionChangeFloorVersion = indexState.CorpusVersion;
+        await database.SaveChangesAsync();
+    }
     Console.WriteLine("Staging schema migration completed.");
     return;
 }

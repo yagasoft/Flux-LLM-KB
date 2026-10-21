@@ -25,6 +25,7 @@ namespace FluxKnowledge.Web.Tests.Components;
 /// <summary>Proves that a real retained-only media run cannot surface private inputs through public projections.</summary>
 public sealed class MediaMetadataProcessorPrivacyTests(NativeSqlServerFixture fixture) : IClassFixture<NativeSqlServerFixture>
 {
+    private readonly FluxKnowledge.Testing.TestResources _resources = new();
     private readonly NativeSqlServerFixture _fixture = fixture;
 
     [NativeSqlServerFact]
@@ -50,7 +51,7 @@ public sealed class MediaMetadataProcessorPrivacyTests(NativeSqlServerFixture fi
             await using var subscription = feed.Subscribe();
             var activation = new RetainedProcessorActivationService(
                 new SourceCapabilityService(new SqlSourceActivityStore(factory, TimeProvider.System), new LocalSourceCapabilityHandlerRegistry([zip, new MediaMetadataCapabilityHandler()])),
-                new SqlRetainedProcessorBranchStore(factory, TimeProvider.System), new SqlRetainedSourceReader(factory, privateRoot), zip,
+                new SqlRetainedProcessorBranchStore(factory, TimeProvider.System), _resources.Own(new SqlRetainedSourceReader(factory, privateRoot)), zip,
                 new RetainedProcessorOptions { MediaMetadataEnabled = true }, TimeProvider.System, statusEvents: feed, mediaMetadataProcessor: media);
 
             Assert.Equal(1, (await activation.RunOnceAsync(CancellationToken.None)).CompletedBranches);
@@ -71,6 +72,7 @@ public sealed class MediaMetadataProcessorPrivacyTests(NativeSqlServerFixture fi
         }
         finally
         {
+            _resources.Dispose();
             if (Directory.Exists(privateRoot)) Directory.Delete(privateRoot, recursive: true);
         }
     }
@@ -97,7 +99,7 @@ public sealed class MediaMetadataProcessorPrivacyTests(NativeSqlServerFixture fi
             await using var subscription = feed.Subscribe();
             var activation = new RetainedProcessorActivationService(
                 new SourceCapabilityService(new SqlSourceActivityStore(factory, TimeProvider.System), new LocalSourceCapabilityHandlerRegistry([zip, new MediaMetadataCapabilityHandler()])),
-                new SqlRetainedProcessorBranchStore(factory, TimeProvider.System), new SqlRetainedSourceReader(factory, privateRoot), zip,
+                new SqlRetainedProcessorBranchStore(factory, TimeProvider.System), _resources.Own(new SqlRetainedSourceReader(factory, privateRoot)), zip,
                 new RetainedProcessorOptions { MediaMetadataEnabled = true }, TimeProvider.System, statusEvents: feed, mediaMetadataProcessor: media);
 
             Assert.Equal(1, (await activation.RunOnceAsync(CancellationToken.None)).CompletedBranches);
@@ -113,7 +115,7 @@ public sealed class MediaMetadataProcessorPrivacyTests(NativeSqlServerFixture fi
             var childArtifact = await verification.SourceArtifacts.SingleAsync(value => value.SourceRevisionId == childId);
             var audit = await verification.AuditEvents.SingleAsync(value => value.SourceRevisionId == revisionId && value.EventType == "retained_processor.completed");
             var manifest = await File.ReadAllTextAsync(Path.Combine(privateRoot, childArtifact.StoreRelativePath));
-            var detail = await new SqlLocalRetainedDetailReader(factory, new SqlRetainedSourceReader(factory, privateRoot), new LocalPrivateContentDisclosure())
+            var detail = await new SqlLocalRetainedDetailReader(factory, _resources.Own(new SqlRetainedSourceReader(factory, privateRoot)), new LocalPrivateContentDisclosure())
                 .ReadAsync(branchId, CancellationToken.None);
             var trustedDetailJson = JsonSerializer.Serialize(detail);
             var publicJson = JsonSerializer.Serialize(new { sources, source, corpus, events, rest, audit, status });
@@ -130,6 +132,7 @@ public sealed class MediaMetadataProcessorPrivacyTests(NativeSqlServerFixture fi
         }
         finally
         {
+            _resources.Dispose();
             if (Directory.Exists(privateRoot)) Directory.Delete(privateRoot, recursive: true);
         }
     }

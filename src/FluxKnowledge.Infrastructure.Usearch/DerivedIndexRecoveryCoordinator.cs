@@ -101,6 +101,12 @@ public sealed class DerivedIndexRecoveryCoordinator : IDerivedIndexRecoveryStatu
         {
             await using var scope = _scopeFactory.CreateAsyncScope();
             recoveryStore = scope.ServiceProvider.GetRequiredService<IDerivedIndexRecoveryStore>();
+            if (scope.ServiceProvider.GetService<ISegmentedIndexStore>() is { } segmented &&
+                await segmented.IsRequiredAsync(cancellationToken))
+            {
+                await ProbeSegmentedAsync(scope.ServiceProvider, segmented, beforeAttempt, cancellationToken);
+                return;
+            }
             if (beforeAttempt.State == DerivedIndexRecoveryState.Healthy)
             {
                 if (await TryCompleteHealthyProbeAsync(scope.ServiceProvider, recoveryStore, beforeAttempt, cancellationToken)) return;
@@ -263,6 +269,47 @@ public sealed class DerivedIndexRecoveryCoordinator : IDerivedIndexRecoveryStatu
         }
     }
 
+    private async ValueTask ProbeSegmentedAsync(IServiceProvider services, ISegmentedIndexStore store,
+        DerivedIndexRecoverySnapshot before, CancellationToken cancellationToken)
+    {
+        var projection = await store.ReadProjectionAsync(cancellationToken);
+        if (!projection.MaintenanceActive && projection.Generation is { CorpusStamp: { } stamp } && stamp != projection.Stamp &&
+            stamp.CorpusEpoch == projection.Stamp.CorpusEpoch && stamp.CorpusVersion < projection.Stamp.CorpusVersion && _deploymentHold?.IsHeld != true)
+        {
+            var publisher = services.GetRequiredService<IIndexGenerationPublisher>();
+            var candidate = await publisher.BuildAndPlaceAsync(Guid.Empty, cancellationToken);
+            if (await store.TryActivateRefreshAsync(candidate, cancellationToken))
+                projection = await store.ReadProjectionAsync(cancellationToken);
+            else await publisher.AbandonAsync(candidate, cancellationToken);
+        }
+        if (projection.ValidatedEmptyCatalogue && !projection.MaintenanceActive)
+        {
+            await CompleteProbeAsync(before, null, cancellationToken, isValidatedEmptyCatalogue: true);
+            return;
+        }
+        if (projection.MaintenanceActive || projection.Generation is not { } generation || generation.CorpusStamp != projection.Stamp)
+        {
+            var updating = new DerivedIndexRecoverySnapshot(DerivedIndexRecoveryState.IndexUpdating, projection.Generation?.Id,
+                before.LastCompletedAtUtc, null, null, 0, IsProjectionUnavailable: true);
+            if (ReferenceEquals(Interlocked.CompareExchange(ref _snapshot, updating, before), before))
+                await PublishAsync(cancellationToken);
+            return;
+        }
+        var owner = services.GetRequiredService<FluxKnowledge.Application.Gpu.IGpuInteractiveOwnerProbe>();
+        var lease = await services.GetRequiredService<ICorpusGenerationLeaseStore>().TryAcquireAsync(Guid.NewGuid(), owner.Current,
+            generation.ModelFingerprint, generation.Dimensions, cancellationToken);
+        if (lease is null) return; // A concurrent mutation/maintenance will be re-probed, never repaired from a stale capture.
+        await using var native = await services.GetRequiredService<ICorpusAnnLeaseFactory>().OpenAsync(lease, cancellationToken);
+        if (before.State != DerivedIndexRecoveryState.Healthy)
+        {
+            // Lazy opening alone proves only the manifest. Startup/recovery must exercise every native segment
+            // before clearing an issue; ordinary healthy probes retain the cheap stamped check.
+            var query = new float[generation.Dimensions]; query[0] = 1;
+            _ = await native.SearchAsync(query, 1, cancellationToken);
+        }
+        if (await native.IsCurrentAsync(cancellationToken)) await CompleteProbeAsync(before, generation.Id, cancellationToken);
+    }
+
     private async ValueTask<bool> TryCompleteHealthyProbeAsync(IServiceProvider services,
         IDerivedIndexRecoveryStore recoveryStore, DerivedIndexRecoverySnapshot expectedSnapshot,
         CancellationToken cancellationToken)
@@ -353,6 +400,7 @@ public sealed class DerivedIndexRecoveryCoordinator : IDerivedIndexRecoveryStatu
     private async ValueTask RecordFaultAsync(IDerivedIndexRecoveryStore? recoveryStore, Exception exception, Guid? activeGenerationId,
         bool detectionRecorded, CancellationToken cancellationToken)
     {
+        activeGenerationId ??= Snapshot.ActiveGenerationId;
         var classifiedException = exception is RecoveryCandidatePlacementException { InnerException: not null } placement
             ? placement.InnerException!
             : exception;
@@ -362,6 +410,7 @@ public sealed class DerivedIndexRecoveryCoordinator : IDerivedIndexRecoveryStatu
             DerivedIndexRecoverySqlSchemaException => DerivedIndexRecoveryFailureCategory.SqlSchemaInvalid,
             DerivedIndexRecoverySqlConfigurationException => DerivedIndexRecoveryFailureCategory.ConfigurationInvalid,
             SqlMembershipValidationException => DerivedIndexRecoveryFailureCategory.SqlMembershipInvalid,
+            FileNotFoundException or DirectoryNotFoundException => DerivedIndexRecoveryFailureCategory.MissingDerivedIndex,
             IndexGenerationValidationException => DerivedIndexRecoveryFailureCategory.InvalidDerivedIndex,
             InvalidOperationException => DerivedIndexRecoveryFailureCategory.ConfigurationInvalid,
             _ when IsSqlCatalogueConfigurationFailure(classifiedException) => DerivedIndexRecoveryFailureCategory.ConfigurationInvalid,

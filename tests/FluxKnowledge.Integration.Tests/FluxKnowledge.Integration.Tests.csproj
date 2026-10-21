@@ -28,4 +28,8 @@
     <PackageReference Include="xunit" />
     <PackageReference Include="xunit.runner.visualstudio" PrivateAssets="all" />
   </ItemGroup>
+  <ItemGroup>
+    <Compile Include="../FluxKnowledge.Testing/RepositoryFiles.cs" Link="Support/RepositoryFiles.cs" />
+    <Compile Include="../FluxKnowledge.Testing/TestResources.cs" Link="Support/TestResources.cs" />
+  </ItemGroup>
 </Project>

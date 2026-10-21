@@ -419,6 +419,43 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Migrations
                         });
                 });
 
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.CurrentIndexMemberEntity", b =>
+                {
+                    b.Property<Guid>("CorpusEpoch")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<long>("VectorId")
+                        .HasColumnType("bigint");
+
+                    b.Property<Guid?>("OwnerSourceRevisionId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("SegmentId")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .IsUnicode(false)
+                        .HasColumnType("char(64)")
+                        .IsFixedLength();
+
+                    b.Property<Guid>("SourceIdentityId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid?>("SourceRootId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.HasKey("CorpusEpoch", "VectorId");
+
+                    b.HasIndex("SegmentId", "VectorId");
+
+                    b.HasIndex("CorpusEpoch", "OwnerSourceRevisionId", "VectorId");
+
+                    b.HasIndex("CorpusEpoch", "SourceIdentityId", "VectorId");
+
+                    b.HasIndex("CorpusEpoch", "SourceRootId", "VectorId");
+
+                    b.ToTable("CurrentIndexMembers", (string)null);
+                });
+
             modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.DeferredCapabilityEntity", b =>
                 {
                     b.Property<Guid>("Id")
@@ -1308,6 +1345,43 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Migrations
                         });
                 });
 
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.IndexCandidateMemberEntity", b =>
+                {
+                    b.Property<Guid>("CandidateId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<int>("Phase")
+                        .HasColumnType("int");
+
+                    b.Property<long>("VectorId")
+                        .HasColumnType("bigint");
+
+                    b.Property<Guid?>("OwnerSourceRevisionId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("PayloadChecksum")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .IsUnicode(false)
+                        .HasColumnType("char(64)")
+                        .IsFixedLength();
+
+                    b.Property<Guid>("SourceIdentityId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid?>("SourceRootId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.HasKey("CandidateId", "Phase", "VectorId");
+
+                    b.HasIndex("VectorId");
+
+                    b.ToTable("IndexCandidateMembers", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_IndexCandidateMembers_Phase", "[Phase] IN (0, 1) AND [VectorId] > 0");
+                        });
+                });
+
             modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.IndexGenerationEntity", b =>
                 {
                     b.Property<Guid>("Id")
@@ -1328,6 +1402,11 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Migrations
                     b.Property<Guid?>("EmbeddingJobId")
                         .HasColumnType("uniqueidentifier");
 
+                    b.Property<int>("FormatVersion")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("int")
+                        .HasDefaultValue(1);
+
                     b.Property<string>("IndexPath")
                         .IsRequired()
                         .HasMaxLength(2048)
@@ -1345,14 +1424,23 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Migrations
                         .HasMaxLength(256)
                         .HasColumnType("nvarchar(256)");
 
+                    b.Property<DateTimeOffset?>("ReclaimedAtUtc")
+                        .HasColumnType("datetimeoffset");
+
                     b.Property<DateTimeOffset?>("RetiredAtUtc")
                         .HasColumnType("datetimeoffset(7)");
+
+                    b.Property<Guid?>("RetirementOperationId")
+                        .HasColumnType("uniqueidentifier");
 
                     b.Property<byte[]>("RowVersion")
                         .IsConcurrencyToken()
                         .IsRequired()
                         .ValueGeneratedOnAddOrUpdate()
                         .HasColumnType("rowversion");
+
+                    b.Property<int>("SegmentCount")
+                        .HasColumnType("int");
 
                     b.Property<DateTimeOffset?>("ValidatedAtUtc")
                         .HasColumnType("datetimeoffset(7)");
@@ -1372,6 +1460,33 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Migrations
                         });
                 });
 
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.IndexGenerationSegmentEntity", b =>
+                {
+                    b.Property<Guid>("GenerationId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("SegmentId")
+                        .HasMaxLength(64)
+                        .IsUnicode(false)
+                        .HasColumnType("char(64)")
+                        .IsFixedLength();
+
+                    b.Property<int>("Ordinal")
+                        .HasColumnType("int");
+
+                    b.HasKey("GenerationId", "SegmentId");
+
+                    b.HasIndex("SegmentId");
+
+                    b.HasIndex("GenerationId", "Ordinal")
+                        .IsUnique();
+
+                    b.ToTable("IndexGenerationSegments", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_IndexGenerationSegments_Ordinal", "[Ordinal] >= 0");
+                        });
+                });
+
             modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.IndexGenerationVectorEntity", b =>
                 {
                     b.Property<Guid>("GenerationId")
@@ -1385,6 +1500,458 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Migrations
                     b.HasIndex("VectorId");
 
                     b.ToTable("IndexGenerationVectors", (string)null);
+                });
+
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.IndexProjectionChangeEntity", b =>
+                {
+                    b.Property<Guid>("CorpusEpoch")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<long>("CorpusVersion")
+                        .HasColumnType("bigint");
+
+                    b.Property<int>("ScopeKind")
+                        .HasColumnType("int");
+
+                    b.Property<Guid>("ScopeId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTimeOffset>("CreatedAtUtc")
+                        .HasColumnType("datetimeoffset(7)");
+
+                    b.HasKey("CorpusEpoch", "CorpusVersion", "ScopeKind", "ScopeId");
+
+                    b.ToTable("IndexProjectionChanges", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_IndexProjectionChanges_Scope", "[CorpusVersion] >= 0 AND [ScopeKind] BETWEEN 1 AND 4");
+                        });
+                });
+
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.IndexPublicationCandidateEntity", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("AffectedScopesJson")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("AfterChecksum")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .IsUnicode(false)
+                        .HasColumnType("char(64)")
+                        .IsFixedLength();
+
+                    b.Property<long>("AfterCount")
+                        .HasColumnType("bigint");
+
+                    b.Property<Guid?>("BaseGenerationId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("BeforeChecksum")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .IsUnicode(false)
+                        .HasColumnType("char(64)")
+                        .IsFixedLength();
+
+                    b.Property<long>("BeforeCount")
+                        .HasColumnType("bigint");
+
+                    b.Property<int>("BuildPurpose")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("int")
+                        .HasDefaultValue(0);
+
+                    b.Property<DateTimeOffset?>("CompletedAtUtc")
+                        .HasColumnType("datetimeoffset(7)");
+
+                    b.Property<Guid>("CorpusEpoch")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTimeOffset>("CreatedAtUtc")
+                        .HasColumnType("datetimeoffset(7)");
+
+                    b.Property<Guid?>("DraftGenerationId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<long>("ExpectedCorpusVersion")
+                        .HasColumnType("bigint");
+
+                    b.Property<int>("ExpectedIndexFormat")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("int")
+                        .HasDefaultValue(2);
+
+                    b.Property<long>("LastAppendOrdinal")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("LastPageChecksum")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .IsUnicode(false)
+                        .HasColumnType("char(64)")
+                        .IsFixedLength();
+
+                    b.Property<Guid>("OwnerInstanceId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid?>("OwnerJobId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<long>("OwnerLeaseGeneration")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("OwnerLeaseOwner")
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)");
+
+                    b.Property<string>("OwnerMachineFingerprint")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .IsUnicode(false)
+                        .HasColumnType("char(64)")
+                        .IsFixedLength();
+
+                    b.Property<int>("OwnerProcessId")
+                        .HasColumnType("int");
+
+                    b.Property<DateTimeOffset>("OwnerStartedAtUtc")
+                        .HasColumnType("datetimeoffset(7)");
+
+                    b.Property<long>("PublicationCorpusVersion")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("RepackedSegmentsJson")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(1024)
+                        .HasColumnType("nvarchar(1024)")
+                        .HasDefaultValue("[]");
+
+                    b.Property<Guid?>("ResultGenerationId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid?>("RetiredDraftGenerationId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid?>("RetiredOwnerJobId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<byte[]>("RowVersion")
+                        .IsConcurrencyToken()
+                        .IsRequired()
+                        .ValueGeneratedOnAddOrUpdate()
+                        .HasColumnType("rowversion");
+
+                    b.Property<int>("State")
+                        .HasColumnType("int");
+
+                    b.Property<bool>("WorklistComplete")
+                        .HasColumnType("bit");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("BaseGenerationId");
+
+                    b.HasIndex("DraftGenerationId");
+
+                    b.HasIndex("OwnerJobId");
+
+                    b.HasIndex("ResultGenerationId");
+
+                    b.HasIndex("State", "CreatedAtUtc");
+
+                    b.ToTable("IndexPublicationCandidates", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_IndexPublicationCandidates_Purpose", "[BuildPurpose] BETWEEN 0 AND 2 AND [ExpectedIndexFormat] IN (1, 2) AND ([BuildPurpose] <> 0 OR [ExpectedIndexFormat] = 2)");
+
+                            t.HasCheckConstraint("CK_IndexPublicationCandidates_State", "[State] BETWEEN 0 AND 3 AND [ExpectedCorpusVersion] >= 0 AND [PublicationCorpusVersion] >= [ExpectedCorpusVersion]");
+                        });
+                });
+
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.IndexRecoveryAuditEntity", b =>
+                {
+                    b.Property<int>("Id")
+                        .HasColumnType("int");
+
+                    b.Property<int>("ClassifierVersion")
+                        .HasColumnType("int");
+
+                    b.Property<Guid>("DatabaseIncarnation")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("FailurePath")
+                        .HasMaxLength(2048)
+                        .HasColumnType("nvarchar(2048)");
+
+                    b.Property<string>("IndexRoot")
+                        .IsRequired()
+                        .HasMaxLength(2048)
+                        .HasColumnType("nvarchar(2048)");
+
+                    b.Property<string>("InventoryChecksum")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("nvarchar(64)");
+
+                    b.Property<bool>("IsValid")
+                        .HasColumnType("bit");
+
+                    b.Property<string>("RecoveryRoot")
+                        .IsRequired()
+                        .HasMaxLength(2048)
+                        .HasColumnType("nvarchar(2048)");
+
+                    b.Property<string>("RootFingerprint")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)");
+
+                    b.Property<byte[]>("RowVersion")
+                        .IsConcurrencyToken()
+                        .IsRequired()
+                        .ValueGeneratedOnAddOrUpdate()
+                        .HasColumnType("rowversion");
+
+                    b.Property<DateTimeOffset?>("SealedAtUtc")
+                        .HasColumnType("datetimeoffset(7)");
+
+                    b.HasKey("Id");
+
+                    b.ToTable("IndexRecoveryAudit", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_IndexRecoveryAudit_Singleton", "[Id]=1");
+                        });
+
+                    b.HasData(
+                        new
+                        {
+                            Id = 1,
+                            ClassifierVersion = 0,
+                            DatabaseIncarnation = new Guid("00000000-0000-0000-0000-000000000000"),
+                            IndexRoot = "",
+                            InventoryChecksum = "",
+                            IsValid = false,
+                            RecoveryRoot = "",
+                            RootFingerprint = "",
+                            RowVersion = new byte[0]
+                        });
+                });
+
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.IndexRecoveryPinEntity", b =>
+                {
+                    b.Property<string>("Id")
+                        .HasMaxLength(64)
+                        .IsUnicode(false)
+                        .HasColumnType("char(64)")
+                        .IsFixedLength();
+
+                    b.Property<Guid?>("GenerationId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("IndexPath")
+                        .HasMaxLength(2048)
+                        .HasColumnType("nvarchar(2048)");
+
+                    b.Property<string>("Packet")
+                        .IsRequired()
+                        .HasMaxLength(2048)
+                        .HasColumnType("nvarchar(2048)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("GenerationId");
+
+                    b.ToTable("IndexRecoveryPins", (string)null);
+                });
+
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.IndexRecoveryWriterEntity", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTimeOffset>("CreatedAtUtc")
+                        .HasColumnType("datetimeoffset(7)");
+
+                    b.Property<bool>("OwnerExitSufficient")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bit")
+                        .HasDefaultValue(false);
+
+                    b.Property<string>("OwnerMachineFingerprint")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .IsUnicode(false)
+                        .HasColumnType("char(64)")
+                        .IsFixedLength();
+
+                    b.Property<int>("OwnerProcessId")
+                        .HasColumnType("int");
+
+                    b.Property<DateTimeOffset>("OwnerStartedAtUtc")
+                        .HasColumnType("datetimeoffset(7)");
+
+                    b.Property<string>("RecoveryRoot")
+                        .IsRequired()
+                        .HasMaxLength(2048)
+                        .HasColumnType("nvarchar(2048)");
+
+                    b.HasKey("Id");
+
+                    b.ToTable("IndexRecoveryWriters", (string)null);
+                });
+
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.IndexSegmentEntity", b =>
+                {
+                    b.Property<string>("Id")
+                        .HasMaxLength(64)
+                        .IsUnicode(false)
+                        .HasColumnType("char(64)")
+                        .IsFixedLength();
+
+                    b.Property<DateTimeOffset>("CreatedAtUtc")
+                        .HasColumnType("datetimeoffset(7)");
+
+                    b.Property<int>("Dimensions")
+                        .HasColumnType("int");
+
+                    b.Property<string>("DirectoryPath")
+                        .IsRequired()
+                        .HasMaxLength(2048)
+                        .HasColumnType("nvarchar(2048)");
+
+                    b.Property<string>("FileChecksum")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .IsUnicode(false)
+                        .HasColumnType("char(64)")
+                        .IsFixedLength();
+
+                    b.Property<long>("FileLength")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("MembershipChecksum")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .IsUnicode(false)
+                        .HasColumnType("char(64)")
+                        .IsFixedLength();
+
+                    b.Property<string>("ModelFingerprint")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)");
+
+                    b.Property<string>("NativeFormat")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("nvarchar(128)");
+
+                    b.Property<Guid?>("ProducingCandidateId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTimeOffset?>("ReclaimedAtUtc")
+                        .HasColumnType("datetimeoffset(7)");
+
+                    b.Property<Guid?>("RetirementOperationId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<byte[]>("RowVersion")
+                        .IsConcurrencyToken()
+                        .IsRequired()
+                        .ValueGeneratedOnAddOrUpdate()
+                        .HasColumnType("rowversion");
+
+                    b.Property<DateTimeOffset?>("SealedAtUtc")
+                        .HasColumnType("datetimeoffset(7)");
+
+                    b.Property<int>("State")
+                        .HasColumnType("int");
+
+                    b.Property<long>("VectorCount")
+                        .HasColumnType("bigint");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ProducingCandidateId");
+
+                    b.HasIndex("State", "CreatedAtUtc");
+
+                    b.ToTable("IndexSegments", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_IndexSegments_Profile", "[Dimensions] > 0 AND [VectorCount] > 0 AND [FileLength] > 0");
+
+                            t.HasCheckConstraint("CK_IndexSegments_State", "[State] BETWEEN 0 AND 3");
+                        });
+                });
+
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.IndexSegmentOwnerEntity", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTimeOffset>("CreatedAtUtc")
+                        .HasColumnType("datetimeoffset(7)");
+
+                    b.Property<Guid>("OwnerInstanceId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("OwnerMachineFingerprint")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .IsUnicode(false)
+                        .HasColumnType("char(64)")
+                        .IsFixedLength();
+
+                    b.Property<int>("OwnerProcessId")
+                        .HasColumnType("int");
+
+                    b.Property<DateTimeOffset>("OwnerStartedAtUtc")
+                        .HasColumnType("datetimeoffset(7)");
+
+                    b.Property<byte[]>("RowVersion")
+                        .IsConcurrencyToken()
+                        .IsRequired()
+                        .ValueGeneratedOnAddOrUpdate()
+                        .HasColumnType("rowversion");
+
+                    b.Property<string>("SegmentId")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .IsUnicode(false)
+                        .HasColumnType("char(64)")
+                        .IsFixedLength();
+
+                    b.Property<int>("State")
+                        .HasColumnType("int");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("SegmentId", "OwnerInstanceId")
+                        .IsUnique();
+
+                    b.ToTable("IndexSegmentOwners", (string)null);
+                });
+
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.IndexSegmentVectorEntity", b =>
+                {
+                    b.Property<string>("SegmentId")
+                        .HasMaxLength(64)
+                        .IsUnicode(false)
+                        .HasColumnType("char(64)")
+                        .IsFixedLength();
+
+                    b.Property<long>("VectorId")
+                        .HasColumnType("bigint");
+
+                    b.HasKey("SegmentId", "VectorId");
+
+                    b.HasIndex("VectorId");
+
+                    b.ToTable("IndexSegmentVectors", (string)null);
                 });
 
             modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.IndexStateEntity", b =>
@@ -1408,6 +1975,14 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Migrations
 
                     b.Property<DateTimeOffset?>("EmptyCatalogueValidatedAtUtc")
                         .HasColumnType("datetimeoffset(7)");
+
+                    b.Property<long>("ProjectionChangeFloorVersion")
+                        .HasColumnType("bigint");
+
+                    b.Property<int>("RequiredIndexFormat")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("int")
+                        .HasDefaultValue(1);
 
                     b.Property<byte[]>("RowVersion")
                         .IsConcurrencyToken()
@@ -1439,6 +2014,8 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Migrations
                             Id = 1,
                             CorpusEpoch = new Guid("00000000-0000-0000-0000-000000000000"),
                             CorpusVersion = 0L,
+                            ProjectionChangeFloorVersion = 0L,
+                            RequiredIndexFormat = 1,
                             RowVersion = new byte[0],
                             UpdatedAtUtc = new DateTimeOffset(new DateTime(1970, 1, 1, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0))
                         });
@@ -3290,7 +3867,7 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Migrations
 
                             t.HasCheckConstraint("CK_SourceDeletionCleanupItems_State", "[State] IN (0, 1, 2)");
 
-                            t.HasCheckConstraint("CK_SourceDeletionCleanupItems_StorageKind", "[StorageKind] IN (1, 2)");
+                            t.HasCheckConstraint("CK_SourceDeletionCleanupItems_StorageKind", "[StorageKind] IN (1, 2, 3, 4)");
                         });
                 });
 
@@ -4889,6 +5466,15 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Migrations
                         .IsRequired();
                 });
 
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.CurrentIndexMemberEntity", b =>
+                {
+                    b.HasOne("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.IndexSegmentVectorEntity", null)
+                        .WithMany()
+                        .HasForeignKey("SegmentId", "VectorId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
             modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.DeferredCapabilityEntity", b =>
                 {
                     b.HasOne("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.SourceRevisionEntity", null)
@@ -5038,12 +5624,36 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Migrations
                     b.Navigation("ParentJob");
                 });
 
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.IndexCandidateMemberEntity", b =>
+                {
+                    b.HasOne("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.IndexPublicationCandidateEntity", null)
+                        .WithMany()
+                        .HasForeignKey("CandidateId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
             modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.IndexGenerationEntity", b =>
                 {
                     b.HasOne("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.JobEntity", null)
                         .WithMany()
                         .HasForeignKey("EmbeddingJobId")
                         .OnDelete(DeleteBehavior.Restrict);
+                });
+
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.IndexGenerationSegmentEntity", b =>
+                {
+                    b.HasOne("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.IndexGenerationEntity", null)
+                        .WithMany()
+                        .HasForeignKey("GenerationId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.IndexSegmentEntity", null)
+                        .WithMany()
+                        .HasForeignKey("SegmentId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
                 });
 
             modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.IndexGenerationVectorEntity", b =>
@@ -5063,6 +5673,61 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Migrations
                     b.Navigation("Generation");
 
                     b.Navigation("Vector");
+                });
+
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.IndexPublicationCandidateEntity", b =>
+                {
+                    b.HasOne("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.IndexGenerationEntity", null)
+                        .WithMany()
+                        .HasForeignKey("BaseGenerationId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.IndexGenerationEntity", null)
+                        .WithMany()
+                        .HasForeignKey("DraftGenerationId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.JobEntity", null)
+                        .WithMany()
+                        .HasForeignKey("OwnerJobId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.IndexGenerationEntity", null)
+                        .WithMany()
+                        .HasForeignKey("ResultGenerationId")
+                        .OnDelete(DeleteBehavior.Restrict);
+                });
+
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.IndexSegmentEntity", b =>
+                {
+                    b.HasOne("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.IndexPublicationCandidateEntity", null)
+                        .WithMany()
+                        .HasForeignKey("ProducingCandidateId")
+                        .OnDelete(DeleteBehavior.Restrict);
+                });
+
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.IndexSegmentOwnerEntity", b =>
+                {
+                    b.HasOne("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.IndexSegmentEntity", null)
+                        .WithMany()
+                        .HasForeignKey("SegmentId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.IndexSegmentVectorEntity", b =>
+                {
+                    b.HasOne("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.IndexSegmentEntity", null)
+                        .WithMany()
+                        .HasForeignKey("SegmentId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.VectorEntity", null)
+                        .WithMany()
+                        .HasForeignKey("VectorId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
                 });
 
             modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.IndexStateEntity", b =>

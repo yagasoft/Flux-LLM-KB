@@ -18,7 +18,7 @@ public sealed class SourceDeletionCleanupMigrationDeploymentTests(NativeSqlServe
         const string baseline = "20261004175522_AddRepositoryRecoveryAuthority";
         const string target = "20261014134909_AddResumableSourceDeletionCleanup";
         var script = db.GetService<IMigrator>().GenerateScript(baseline, target, MigrationsSqlGenerationOptions.Idempotent);
-        var source = new DirectoryInfo(AppContext.BaseDirectory);
+        var source = new DirectoryInfo(FluxKnowledge.Testing.RepositoryFiles.Root());
         const string relative = "tests/native/source-deletion-cleanup-migration-sql.ps1";
         while (source is not null && !File.Exists(Path.Combine(source.FullName, relative))) source = source.Parent;
         Assert.NotNull(source);

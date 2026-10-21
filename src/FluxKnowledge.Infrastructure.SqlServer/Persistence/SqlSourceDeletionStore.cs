@@ -240,10 +240,18 @@ public sealed partial class SqlSourceDeletionStore(
                 return await DeleteMembershipUnitAsync(context, transaction, operation, cancellationToken).ConfigureAwait(false);
             if (operation.Phase == "purge-records")
             {
+                if (await context.SourceDeletionCleanupItems.AnyAsync(value => value.SourceDeletionOperationId == operation.Id &&
+                    (value.StorageKind == 3 || value.StorageKind == 4) && value.State != 1, cancellationToken))
+                    return await CommitUnitAsync(context, transaction, operation, operation.Phase, cancellationToken,
+                        "source-delete-segment-retirement-pending", progressed: false, continueImmediately: false);
                 if (await HasOwnedMembershipsAsync(context, root.Id, cancellationToken).ConfigureAwait(false))
                     return await RefuseAsync(context, transaction, operation, "source-delete-membership-changed", cancellationToken).ConfigureAwait(false);
+                if (!await DetachTerminalCandidateProvenanceAsync(context, root.Id, recordIds, cancellationToken))
+                    return await CommitUnitAsync(context, transaction, operation, operation.Phase, cancellationToken,
+                        "source-delete-publication-execution-unconfirmed", progressed: false, continueImmediately: false);
                 await DeleteOwnedGraphAsync(context, root.Id, revisionIds, recordIds, cancellationToken).ConfigureAwait(false);
-                if ((await SqlPublishedPassageSelection.ReadVectorIdsAsync(context, cancellationToken).ConfigureAwait(false)).Count == 0)
+                if (await context.IndexState.Where(value => value.Id == 1).Select(value => value.RequiredIndexFormat).SingleAsync(cancellationToken) == 1 &&
+                    (await SqlPublishedPassageSelection.ReadVectorIdsAsync(context, cancellationToken).ConfigureAwait(false)).Count == 0)
                     await ClearProjectionAndValidateEmptyCatalogueAsync(context, cancellationToken).ConfigureAwait(false);
                 return await CommitUnitAsync(context, transaction, operation, "cleanup-files", cancellationToken).ConfigureAwait(false);
             }
@@ -273,6 +281,24 @@ public sealed partial class SqlSourceDeletionStore(
                 return await CommitUnitAsync(context, transaction, operation, "rebuild-index", cancellationToken).ConfigureAwait(false);
             }
 
+            var indexState = await context.IndexState.SingleAsync(value => value.Id == 1, cancellationToken);
+            if (indexState.RequiredIndexFormat == 2)
+            {
+                if (survivorGeneration is null || survivorGeneration.Generation.FormatVersion != 2 ||
+                    survivorGeneration.SegmentedCandidateId is null || survivorGeneration.Vectors.Count != 0)
+                    return await RefuseAsync(context, transaction, operation, "source-delete-index-candidate-invalid", cancellationToken);
+                IndexPublicationCandidateEntity candidate;
+                try { candidate = await SqlSegmentedIndexStore.ValidateRefreshBeforeAsync(context, survivorGeneration, cancellationToken); }
+                catch (FluxKnowledge.Application.Pipeline.PublicationSnapshotConflictException)
+                {
+                    return await CommitUnitAsync(context, transaction, operation, "rebuild-index", cancellationToken,
+                        "source-delete-index-candidate-stale", progressed: false, continueImmediately: false);
+                }
+                await CaptureCleanupTargetsAsync(context, operation, revisionIds, recordIds, targetVectorIds, cancellationToken);
+                await SqlSegmentedIndexStore.ActivateAsync(context, candidate, indexState, timeProvider.GetUtcNow(), cancellationToken);
+                return await CommitUnitAsync(context, transaction, operation, "cleanup-memberships", cancellationToken);
+            }
+            if (indexState.RequiredIndexFormat != 1) throw new InvalidOperationException("index-format-unsupported");
             var currentMembership = await SqlPublishedPassageSelection.ReadVectorsAsync(context, cancellationToken).ConfigureAwait(false);
             if (survivorGeneration is null && currentMembership.Count != 0)
             {
@@ -389,10 +415,10 @@ public sealed partial class SqlSourceDeletionStore(
                 ? []
                 : await (
                     from generation in context.IndexGenerations
-                    where ownedGenerationIds.Contains(generation.Id) ||
+                    where generation.FormatVersion == 1 && (ownedGenerationIds.Contains(generation.Id) ||
                           context.IndexGenerationVectors.Any(membership =>
                               membership.GenerationId == generation.Id &&
-                              targetVectorIds.Contains(membership.VectorId))
+                              targetVectorIds.Contains(membership.VectorId)))
                     select generation)
                 .Distinct()
                 .ToArrayAsync(cancellationToken).ConfigureAwait(false);
@@ -410,6 +436,39 @@ public sealed partial class SqlSourceDeletionStore(
                 UpdatedAtUtc = timeProvider.GetUtcNow()
             });
         }
+        if (await context.IndexState.Where(value => value.Id == 1).Select(value => value.RequiredIndexFormat).SingleAsync(cancellationToken) == 2)
+        {
+            var segments = await context.IndexSegmentVectors.Where(value => targetVectorIds.Contains(value.VectorId))
+                .Select(value => value.SegmentId).Distinct().ToArrayAsync(cancellationToken);
+            var manifests = await context.IndexGenerationSegments.Where(value => segments.Contains(value.SegmentId))
+                .Select(value => value.GenerationId).Distinct().ToArrayAsync(cancellationToken);
+            foreach (var id in manifests) AddIndexTarget(3, id.ToString("N"));
+            foreach (var id in segments) AddIndexTarget(4, id);
+        }
+        void AddIndexTarget(int kind, string path) => context.SourceDeletionCleanupItems.Add(new()
+        {
+            Id = Guid.NewGuid(), SourceDeletionOperationId = operation.Id, StorageKind = kind, RelativePath = path,
+            CreatedAtUtc = timeProvider.GetUtcNow(), UpdatedAtUtc = timeProvider.GetUtcNow()
+        });
+    }
+
+    private static async Task<bool> DetachTerminalCandidateProvenanceAsync(FluxKnowledgeDbContext context, Guid rootId,
+        IReadOnlyCollection<Guid> recordIds, CancellationToken cancellationToken)
+    {
+        var jobs = context.Jobs.Where(value => recordIds.Contains(value.PipelineRecordId)).Select(value => value.Id);
+        var drafts = context.IndexGenerations.Where(value => value.EmbeddingJobId != null && jobs.Contains(value.EmbeddingJobId.Value)).Select(value => value.Id);
+        var owned = context.IndexPublicationCandidates.Where(value => value.OwnerJobId != null && jobs.Contains(value.OwnerJobId.Value) ||
+            value.DraftGenerationId != null && drafts.Contains(value.DraftGenerationId.Value) ||
+            context.IndexCandidateMembers.Any(member => member.CandidateId == value.Id && member.SourceRootId == rootId));
+        if (await owned.AnyAsync(value => value.State < 2, cancellationToken)) return false;
+        // Only terminal candidate rows are detached. Shared segments keep their producing candidate and immutable provenance.
+        await owned.Where(value => value.OwnerJobId != null).ExecuteUpdateAsync(update => update
+            .SetProperty(value => value.RetiredOwnerJobId, value => value.OwnerJobId)
+            .SetProperty(value => value.OwnerJobId, (Guid?)null), cancellationToken);
+        await owned.Where(value => value.DraftGenerationId != null && drafts.Contains(value.DraftGenerationId.Value)).ExecuteUpdateAsync(update => update
+            .SetProperty(value => value.RetiredDraftGenerationId, value => value.DraftGenerationId)
+            .SetProperty(value => value.DraftGenerationId, (Guid?)null), cancellationToken);
+        return true;
     }
 
     private async Task ActivateSurvivorGenerationAsync(

@@ -1,6 +1,9 @@
 [CmdletBinding()]
 param([Parameter(Mandatory)][string]$SourceRoot)
 $ErrorActionPreference='Stop'
+$ReviewedLegacyIndexPayloads=@()
+# Native control-flow port; the actual SQL/metadata gate has its own integration fixture.
+function Invoke-DeploymentIndexAdmission { param($Roles,$Action) & $Action }
 Import-Module (Join-Path $SourceRoot 'scripts/deploy/incremental-hybrid-passage-rebuild.psm1') -Force
 Import-Module (Join-Path $SourceRoot 'scripts/deploy/incremental-iis-payload-swap.psm1') -Force
 Import-Module (Join-Path $SourceRoot 'scripts/deploy/incremental-repository-recovery-release.psm1') -Force
@@ -194,7 +197,8 @@ try {
     $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $SourceRoot 'scripts/deploy/update-native-iis-incremental.ps1'), [ref]$tokens, [ref]$errors)
     Assert-True ($errors.Count -eq 0) 'Updater syntax failed.'
     $wanted=@('Get-RepositoryRecoveryTaskObservation','Assert-RepositoryRecoveryTaskIdentity','Assert-RepositoryRecoveryPayloadHash','Assert-RepositoryRecoveryNewWorker',
-        'Invoke-RepositoryRecoveryIisUpdate','Test-IisHostingSettingsMatch')
+        'Invoke-RepositoryRecoveryIisUpdate','Test-IisHostingSettingsMatch','Assert-ReviewedLegacyIndexBinding',
+        'Start-IndexCompatibleWebAppPool','Enable-IndexCompatibleOutlookTask')
     foreach ($definition in $ast.FindAll({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -cin $wanted }, $true)) {
         Invoke-Expression $definition.Extent.Text
     }

@@ -41,7 +41,20 @@ public sealed class UsearchAnnIndex(
                 return [];
             }
 
-            if (!await EnsureOpenAsync(activeId.Value, store, validator, cancellationToken))
+            var descriptor = await store.GetGenerationAsync(activeId.Value, cancellationToken);
+            if (descriptor is { FormatVersion: 2 })
+            {
+                var owner = scope.ServiceProvider.GetRequiredService<FluxKnowledge.Application.Gpu.IGpuInteractiveOwnerProbe>();
+                var captured = await scope.ServiceProvider.GetRequiredService<ICorpusGenerationLeaseStore>().TryAcquireAsync(Guid.NewGuid(), owner.Current,
+                    descriptor.ModelFingerprint, descriptor.Dimensions, cancellationToken);
+                if (captured is null) throw new FluxKnowledge.Application.Pipeline.PublicationSnapshotConflictException("The segmented index is updating.");
+                await using var native = await scope.ServiceProvider.GetRequiredService<ICorpusAnnLeaseFactory>().OpenAsync(captured, cancellationToken);
+                return await native.SearchAsync(query, limit, cancellationToken);
+            }
+            if (descriptor is not null && descriptor.FormatVersion != 1)
+                throw new IndexGenerationValidationException("corpus-index-format-unsupported");
+
+            if (!await EnsureOpenAsync(activeId.Value, descriptor, store, validator, cancellationToken))
             {
                 continue;
             }
@@ -97,12 +110,12 @@ public sealed class UsearchAnnIndex(
 
     private async ValueTask<bool> EnsureOpenAsync(
         Guid activeId,
+        IndexGenerationDescriptor? generation,
         IIndexGenerationStore store,
         UsearchGenerationValidator validator,
         CancellationToken cancellationToken)
     {
         ThrowIfDisposed();
-        var generation = await store.GetGenerationAsync(activeId, cancellationToken);
         if (generation is null)
         {
             NotifyRecovery(DerivedIndexRecoveryFailureCategory.MissingDerivedIndex, activeId);

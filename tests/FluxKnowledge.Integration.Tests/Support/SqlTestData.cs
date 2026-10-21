@@ -63,6 +63,8 @@ internal static class SqlTestData
                 .UseSqlServer(fixture.ConnectionString)
                 .Options);
         await context.AuditEvents.ExecuteDeleteAsync();
+        await context.SourceDeletionCleanupItems.ExecuteDeleteAsync();
+        await context.SourceDeletionOperations.ExecuteDeleteAsync();
         await context.DocumentPublications.ExecuteDeleteAsync();
         await context.CorpusQueryLeases.ExecuteDeleteAsync();
         await context.OperatorActionOperationLedger.ExecuteDeleteAsync();
@@ -102,7 +104,21 @@ internal static class SqlTestData
         var state = await context.IndexState.SingleAsync(candidate => candidate.Id == 1);
         state.ActiveIndexGenerationId = null;
         state.CorpusRebuildOperationId = null;
+        state.RequiredIndexFormat = 1;
+        state.ProjectionChangeFloorVersion = state.CorpusVersion;
         await context.SaveChangesAsync();
+        await context.CurrentIndexMembers.ExecuteDeleteAsync();
+        await context.IndexRecoveryWriters.ExecuteDeleteAsync();
+        await context.IndexRecoveryPins.ExecuteDeleteAsync();
+        await context.IndexRecoveryAudit.ExecuteUpdateAsync(setters => setters.SetProperty(value => value.IsValid, false)
+            .SetProperty(value => value.FailurePath, (string?)null));
+        await context.IndexSegmentOwners.ExecuteDeleteAsync();
+        await context.IndexGenerationSegments.ExecuteDeleteAsync();
+        await context.IndexSegmentVectors.ExecuteDeleteAsync();
+        await context.IndexSegments.ExecuteDeleteAsync();
+        await context.IndexCandidateMembers.ExecuteDeleteAsync();
+        await context.IndexPublicationCandidates.ExecuteDeleteAsync();
+        await context.IndexProjectionChanges.ExecuteDeleteAsync();
         await context.CorpusRebuildWorkItems.ExecuteDeleteAsync();
         await context.CorpusRebuildSupersededJobs.ExecuteDeleteAsync();
         await context.CorpusRebuildOperations.ExecuteUpdateAsync(setters => setters.SetProperty(value => value.SupersedesOperationId, (Guid?)null));

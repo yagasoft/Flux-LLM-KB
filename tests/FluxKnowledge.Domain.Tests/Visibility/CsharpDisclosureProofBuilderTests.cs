@@ -113,7 +113,7 @@ public sealed class CsharpDisclosureProofBuilderTests
     [Fact]
     public void Actual_root_scan_method_and_original_complete_line_guard_are_disclosed()
     {
-        var folder = new DirectoryInfo(AppContext.BaseDirectory);
+        var folder = new DirectoryInfo(FluxKnowledge.Testing.RepositoryFiles.Root());
         const string relative = "src/FluxKnowledge.Infrastructure.SqlServer/Persistence/SqlSourceScanStore.cs";
         while (folder is not null && !File.Exists(Path.Combine(folder.FullName, relative))) folder = folder.Parent;
         Assert.NotNull(folder);

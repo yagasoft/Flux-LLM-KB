@@ -45,11 +45,12 @@ public sealed class PublishStageWorker(
         for (var attempt = 0; attempt < 3; attempt++)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            setPhase("snapshot-vector-loading-and-placement");
-            var candidate = await publisher.BuildAndPlaceAsync(generation.Id, cancellationToken);
-            var placed = candidate.Generation;
+            IndexGenerationCandidateSnapshot? candidate = null;
             try
             {
+                setPhase("snapshot-vector-loading-and-placement");
+                candidate = await publisher.BuildAndPlaceAsync(generation.Id, cancellationToken);
+                var placed = candidate.Generation;
                 setPhase("activation");
                 await transitions.TransitionAsync(new StageTransitionRequest(
                     workItem.DispatchMessage, workItem.Job,
@@ -59,12 +60,28 @@ public sealed class PublishStageWorker(
                     null, null, nameof(PublishStageWorker), new IndexingStageOutput(
                         ActivateGeneration: placed,
                         ActivateMembership: candidate.Vectors,
-                        ExpectedCorpusStamp: candidate.ExpectedCorpusStamp)), cancellationToken);
+                        ExpectedCorpusStamp: candidate.ExpectedCorpusStamp,
+                        SegmentedCandidateId: candidate.SegmentedCandidateId)), cancellationToken);
+                return;
+            }
+            catch (IndexStorageCapacityException)
+            {
+                await transitions.RetryAsync(new StageRetryRequest(workItem.DispatchMessage, workItem.Job,
+                    timeProvider.GetUtcNow().AddMinutes(1), "index-storage-capacity-deferred", nameof(PublishStageWorker)), cancellationToken);
                 return;
             }
             catch (PublicationSnapshotConflictException exception)
             {
-                PublicationDiagnostics.Failure(logger, workItem.Job.JobId.Value, "activation-snapshot-conflict", exception);
+                PublicationDiagnostics.Failure(logger, workItem.Job.JobId.Value, "publication-snapshot-conflict", exception);
+                if (candidate is not null)
+                {
+                    try { await publisher.AbandonAsync(candidate, cancellationToken); }
+                    catch (Exception cleanup) when (!cancellationToken.IsCancellationRequested)
+                    {
+                        // Retain the durable pin on an uncertain acknowledgement; do not turn contention into a permanent failure.
+                        PublicationDiagnostics.Failure(logger, workItem.Job.JobId.Value, "candidate-abandonment", cleanup);
+                    }
+                }
                 // Valid vectors and immutable placements are reusable; only membership changed.
             }
         }

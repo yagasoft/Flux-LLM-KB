@@ -17,6 +17,27 @@ namespace FluxKnowledge.Integration.Tests.Workers;
 
 public sealed class SqlStartupBootstrapTests(NativeSqlServerFixture fixture) : IClassFixture<NativeSqlServerFixture>
 {
+    [NativeSqlServerTheory]
+    [InlineData(1, false)]
+    [InlineData(2, true)]
+    [InlineData(2, false)]
+    [InlineData(3, true)]
+    public async Task Startup_requires_the_configured_publisher_to_support_the_current_sql_format(int format, bool segmented)
+    {
+        await SqlTestData.ClearPipelineAsync(fixture);
+        var factory = SqlTestData.CreateFactory(fixture);
+        await using var db = await factory.CreateDbContextAsync();
+        await db.IndexState.ExecuteUpdateAsync(setters => setters.SetProperty(value => value.RequiredIndexFormat, format));
+        if (format is not (1 or 2) || format == 2 && !segmented)
+        {
+            var failure = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                SqlDatabaseStartupReadiness.ProbeOnceAsync(factory, CancellationToken.None, segmented));
+            Assert.Equal(format == 2 ? "index-startup-segmented-publication-disabled" : "index-startup-required-format-unknown", failure.Message);
+        }
+        else await SqlDatabaseStartupReadiness.ProbeOnceAsync(factory, CancellationToken.None, segmented);
+        Assert.Empty(await db.GpuCapacitySlots.ToArrayAsync());
+    }
+
     [NativeSqlServerFact]
     public async Task Read_only_probe_targets_the_disposable_database_without_mutating_capacity()
     {

@@ -7,6 +7,13 @@
     <AnalysisLevel>latest</AnalysisLevel>
     <Deterministic>true</Deterministic>
     <UseArtifactsOutput>true</UseArtifactsOutput>
-    <ArtifactsPath>$(MSBuildThisFileDirectory)artifacts/</ArtifactsPath>
+    <ArtifactsPath Condition="'$(FluxKnowledgeArtifactsPath)' == ''">$(MSBuildThisFileDirectory)artifacts/</ArtifactsPath>
+    <ArtifactsPath Condition="'$(FluxKnowledgeArtifactsPath)' != ''">$(FluxKnowledgeArtifactsPath)</ArtifactsPath>
   </PropertyGroup>
+  <ItemGroup Condition="'$(MSBuildProjectName)' == 'FluxKnowledge.Web' Or '$(MSBuildProjectName)' == 'FluxKnowledge.Cli' Or '$(MSBuildProjectName)' == 'FluxKnowledge.OutlookHost'">
+    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+      <_Parameter1>FluxKnowledge.IndexFormats</_Parameter1>
+      <_Parameter2>1,2</_Parameter2>
+    </AssemblyAttribute>
+  </ItemGroup>
 </Project>

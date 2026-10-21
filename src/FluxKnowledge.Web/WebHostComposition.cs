@@ -25,6 +25,7 @@ using FluxKnowledge.Infrastructure.SqlServer.Visibility;
 using FluxKnowledge.Infrastructure.SqlServer.Workers;
 using FluxKnowledge.Infrastructure.Usearch;
 using FluxKnowledge.Integrations.Files;
+using FluxKnowledge.Integrations.Windows;
 using FluxKnowledge.Integrations.Documents;
 using FluxKnowledge.Integrations.Models;
 using FluxKnowledge.Integrations.Outlook;
@@ -112,6 +113,22 @@ public static class WebHostComposition
             new StagingSourceRootPathPolicy(new SourceRootPathPolicy(
                 new LocalIngressOptions([settings.SourcesRoot]),
                 new SourceRootPathPolicyOptions(settings.Layout.AppOwnedLocations.Append(@"I:\FluxKnowledge").Append(@"J:\Models").ToArray())), settings.SourcesRoot));
+        if (settings.IndexPublicationMode == "Segmented")
+        {
+            // Actual process identity is needed for durable index ownership; this registers no GPU executor or model loader.
+            services.AddSingleton(_ => new StagingPassageInference(new DeterministicTokenHashEmbeddingProvider()));
+            services.AddSingleton<IScheduledPassageInference>(provider => provider.GetRequiredService<StagingPassageInference>());
+            services.AddSingleton<IEmbeddingProvider>(provider => provider.GetRequiredService<StagingPassageInference>());
+            services.AddSingleton(StagingPassageInference.CreatePassageBuilder());
+            services.AddScoped<IHybridPassageCandidateReader>(provider =>
+                (IHybridPassageCandidateReader)provider.GetRequiredService<ICorpusRetrievalReader>());
+            services.AddScoped<IHybridPassageRetrieval>(provider => new HybridPassageRetrievalEngine(
+                provider.GetRequiredService<ICorpusRetrievalReader>(), provider.GetRequiredService<IHybridPassageCandidateReader>(),
+                provider.GetRequiredService<ICorpusGenerationLeaseStore>(), provider.GetRequiredService<ICorpusAnnLeaseFactory>(),
+                provider.GetRequiredService<IScheduledPassageInference>(), provider.GetRequiredService<IGpuInteractiveOwnerProbe>(),
+                provider.GetRequiredService<ICorpusEvidenceCodec>(), provider.GetRequiredService<ILocalPrivateContentDisclosure>(),
+                provider.GetRequiredService<TimeProvider>(), TimeSpan.FromSeconds(25)));
+        }
         return services;
     }
 
@@ -177,6 +194,15 @@ public static class WebHostComposition
         ArgumentNullException.ThrowIfNull(configuration);
 
         NativeGoLiveRuntimeConfiguration? nativeRuntimeOptions = null;
+        var accessEnabledValue = configuration["SourceAccess:Enabled"];
+        if (accessEnabledValue is not null && !bool.TryParse(accessEnabledValue, out _))
+            throw new InvalidOperationException("SourceAccess:Enabled must be true or false.");
+        if (bool.TryParse(accessEnabledValue, out var accessEnabled) && accessEnabled)
+        {
+            if (!OperatingSystem.IsWindows() || string.IsNullOrWhiteSpace(configuration["SourceAccess:PipeName"]))
+                throw new InvalidOperationException("Enabled source-access recovery requires Windows and an explicit local PipeName.");
+            services.AddSingleton<ISourceAccessRepairClient>(new WindowsSourceAccessRepairClient(configuration["SourceAccess:PipeName"]!));
+        }
         if (strictProductionPaths)
         {
             nativeRuntimeOptions = ReadNativeGoLiveRuntimeOptions(configuration);
@@ -233,6 +259,7 @@ public static class WebHostComposition
         var ingressOptions = nativeRuntimeOptions?.LocalIngress ?? new LocalIngressOptions(allowedRoots);
         _ = LocalIngressOptionsValidator.ValidateAndCanonicalise(ingressOptions);
         var operatorOrigin = configuration["LocalOperator:CanonicalOrigin"] ?? "http://127.0.0.1:5137";
+        var segmentedPublicationEnabled = UsearchIndexOptions.IsSegmentedPublicationEnabled(configuration["IndexPublication:Mode"]);
         var productionStorageSafety = strictProductionPaths
             ? new LiveRootStorageSafety(
                 liveRoot,
@@ -248,7 +275,10 @@ public static class WebHostComposition
         if (stagingSql is null) services.AddFluxKnowledgeSqlServer(configuration);
         else services.AddStagingFluxKnowledgeSqlServer(stagingSql);
         if (strictProductionPaths || stagingSql is not null)
-            services.AddSingleton<IDatabaseStartupReadiness, SqlDatabaseStartupReadiness>();
+            services.AddSingleton<IDatabaseStartupReadiness>(provider => new SqlDatabaseStartupReadiness(
+                provider.GetRequiredService<IDbContextFactory<FluxKnowledgeDbContext>>(), provider.GetRequiredService<TimeProvider>(),
+                provider.GetRequiredService<ILogger<SqlDatabaseStartupReadiness>>(), provider.GetService<IHostApplicationLifetime>(),
+                segmentedPublicationEnabled));
         services.AddSingleton(new LocalOperatorOriginPolicy(operatorOrigin));
         services.AddSingleton<ILocalPrivateContentDisclosure, LocalPrivateContentDisclosure>();
         services.AddSingleton<CsharpDisclosureProofBuilder>();
@@ -256,12 +286,24 @@ public static class WebHostComposition
         if (OperatingSystem.IsWindows())
             services.TryAddSingleton<IIndexGenerationReadLeaseFactory>(provider =>
                 new WindowsIndexGenerationReadLeaseFactory(provider.GetRequiredService<UsearchIndexOptions>().RootPath));
+        if (segmentedPublicationEnabled)
+        {
+            services.TryAddSingleton<IGpuInteractiveOwnerProbe, WindowsInteractiveGpuOwnerProbe>();
+            services.AddSingleton<IIndexSegmentReadLeaseFactory>(new WindowsIndexSegmentReadLeaseFactory(indexRoot));
+            services.AddSingleton(provider => new SqlSegmentRetirementOperations(
+                provider.GetRequiredService<IDbContextFactory<FluxKnowledgeDbContext>>(),
+                new WindowsIndexProjectionFileStore(indexRoot), indexRoot, liveRoot.RecoveryRoot,
+                provider.GetRequiredService<TimeProvider>(), provider.GetRequiredService<IGpuInteractiveOwnerProbe>()));
+            services.AddScoped<IIndexSourceDeletionMaintenance>(provider => provider.GetRequiredService<SqlSegmentRetirementOperations>());
+            services.AddScoped<IIndexProjectionMaintenance>(provider => provider.GetRequiredService<SqlSegmentRetirementOperations>());
+        }
         if (strictProductionPaths)
         {
             services.AddProductionFluxKnowledgeUsearch(
                 new UsearchIndexOptions(indexRoot),
                 productionStorageSafety!,
-                productionStorageBindings?.UsearchDirectoryCreator);
+                productionStorageBindings?.UsearchDirectoryCreator,
+                segmentedEnabled: segmentedPublicationEnabled);
         }
         else
         {
@@ -339,7 +381,8 @@ public static class WebHostComposition
         services.AddSingleton<ISourceArtifactStore>(provider => new ContentAddressedSourceArtifactStore(
             artifactRoot,
             protectedRoots,
-            publicationGate: provider.GetRequiredService<ISourceArtifactPublicationGate>()));
+            publicationGate: provider.GetRequiredService<ISourceArtifactPublicationGate>(),
+            sourceAccessRepairClient: provider.GetService<ISourceAccessRepairClient>()));
         services.AddSingleton<ISourceDeletionFileStore>(_ => new WindowsSourceDeletionFileStore(
             artifactRoot,
             indexRoot));

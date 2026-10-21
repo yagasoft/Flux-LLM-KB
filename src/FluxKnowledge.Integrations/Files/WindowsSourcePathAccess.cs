@@ -48,7 +48,7 @@ internal static class WindowsSourcePathAccess
         return new(information.Attributes, information.Tag, state);
     }
 
-    internal static DirectoryPathLease OpenDirectoryPath(string path, bool enumerate = false)
+    internal static DirectoryPathLease OpenDirectoryPath(string path, bool enumerate = false, bool readPermissions = false)
     {
         if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("Source physical-path validation requires Windows.");
         var canonical = Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
@@ -57,13 +57,13 @@ internal static class WindowsSourcePathAccess
         var lease = new DirectoryPathLease(canonical);
         try
         {
-            var handle = CreateFile(volume, ReadAttributes | Synchronize | (canonical == volume && enumerate ? 1u : 0),
+            var handle = CreateFile(volume, ReadAttributes | Synchronize | (readPermissions ? 0x20000u : 0) | (canonical == volume && enumerate ? 1u : 0),
                 3, IntPtr.Zero, 3, 0x02300000, IntPtr.Zero);
             if (handle.IsInvalid)
             {
                 var error = Marshal.GetLastPInvokeError();
                 handle.Dispose();
-                throw NativeError("Source volume cannot be opened.", error);
+                throw NativeError("Source volume cannot be opened.", error, volume, true);
             }
             lease.Add(volume, handle);
             var relative = Path.GetRelativePath(volume, canonical);
@@ -74,9 +74,9 @@ internal static class WindowsSourcePathAccess
                 for (var index = 0; index < components.Length; index++)
                 {
                     current = Path.Combine(current, components[index]);
-                    var access = ReadAttributes | Synchronize | (enumerate && index == components.Length - 1 ? 1u : 0);
+                    var access = ReadAttributes | Synchronize | (readPermissions ? 0x20000u : 0) | (enumerate && index == components.Length - 1 ? 1u : 0);
                     // Type-neutral no-recall open; Add verifies Directory on the returned handle.
-                    var child = OpenRelative(lease.Handle, components[index], access, 3, SynchronousIo);
+                    var child = OpenRelative(lease.Handle, components[index], access, 3, SynchronousIo, current, true);
                     lease.Add(current, child);
                 }
             }
@@ -98,10 +98,10 @@ internal static class WindowsSourcePathAccess
             if (rootFingerprint is not null && rootIdentity.IdentityFingerprint != rootFingerprint)
                 throw new SourceSnapshotChangedException("The admitted source root identity changed.");
             var name = Path.GetFileName(canonicalPath);
-            using (var metadataHandle = OpenRelative(parent.Handle, name, ReadAttributes, 7, NonDirectoryFile))
+            using (var metadataHandle = OpenRelative(parent.Handle, name, ReadAttributes, 7, NonDirectoryFile, canonicalPath))
                 EnsureContentAvailable(ReadMetadata(metadataHandle));
             // The same handle supplies readiness, final path, identity and every content byte.
-            handle = OpenRelative(parent.Handle, name, ReadAttributes | Synchronize | 1, 1, NonDirectoryFile);
+            handle = OpenRelative(parent.Handle, name, ReadAttributes | Synchronize | 1, 1, NonDirectoryFile, canonicalPath);
             EnsureContentAvailable(ReadMetadata(handle));
             var finalPath = PhysicalFileIdentity.GetFinalPath(handle);
             if (!string.Equals(finalPath, canonicalPath, StringComparison.OrdinalIgnoreCase) || !IsWithin(rootIdentity.CanonicalPath, finalPath))
@@ -118,7 +118,72 @@ internal static class WindowsSourcePathAccess
         string.Equals(root, path, StringComparison.OrdinalIgnoreCase) ||
         path.StartsWith(Path.EndsInDirectorySeparator(root) ? root : root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
 
-    private static SafeFileHandle OpenRelative(SafeFileHandle parent, string name, uint access, uint share, uint options)
+    // Broker-only open. No data bytes are requested; callers must hold independent
+    // policy authority before requesting WRITE_DAC on this exact physical target.
+    internal static PermissionTargetLease OpenPermissionTarget(ApprovedSourceAccessRoot root, string relativePath, bool directory)
+    {
+        var target = SourceAccessPolicy.ResolveTarget(root.Path, relativePath, directory);
+        var parent = OpenDirectoryPath(Path.GetDirectoryName(target)!);
+        SafeFileHandle? handle = null;
+        try
+        {
+            if (!string.Equals(target, root.Path, StringComparison.OrdinalIgnoreCase) &&
+                parent.IdentityAt(root.Path).IdentityFingerprint != root.IdentityFingerprint)
+                throw new SourceSnapshotChangedException("The approved source root identity changed.");
+            handle = OpenRelative(parent.Handle, Path.GetFileName(target), ReadAttributes | Synchronize | 0x60000,
+                directory ? 3u : 1u, directory ? SynchronousIo : NonDirectoryFile, target, directory);
+            var metadata = ReadMetadata(handle);
+            ValidateTag(metadata);
+            if (metadata.IsDirectory != directory) throw new SourceSnapshotChangedException("The permission target type changed.");
+            if (!directory)
+            {
+                EnsureContentAvailable(metadata);
+                if (PhysicalFileIdentity.GetLinkCount(handle) != 1)
+                    throw new SourcePathSecurityException("SourceMultipleLinks", "A read grant cannot be confined to one hard-link path.");
+            }
+            var identity = PhysicalFileIdentity.Get(handle);
+            if (!string.Equals(PhysicalFileIdentity.GetFinalPath(handle), target, StringComparison.OrdinalIgnoreCase))
+                throw new SourcePathSecurityException("SourcePhysicalPathMismatch", "The permission target escaped its held parent.");
+            if (string.Equals(target, root.Path, StringComparison.OrdinalIgnoreCase) && Fingerprint(identity) != root.IdentityFingerprint)
+                throw new SourceSnapshotChangedException("The approved source root identity changed.");
+            return new(parent, handle, target, identity, directory, root);
+        }
+        catch { handle?.Dispose(); parent.Dispose(); throw; }
+    }
+
+    private static string Fingerprint(string identity) =>
+        Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(identity["ntfs:".Length..])));
+
+    internal sealed class PermissionTargetLease(DirectoryPathLease parent, SafeFileHandle handle, string path, string identity,
+        bool directory, ApprovedSourceAccessRoot root) : IDisposable
+    {
+        private readonly long _length = directory ? 0 : RandomAccess.GetLength(handle);
+        private readonly DateTime _lastWrite = File.GetLastWriteTimeUtc(handle);
+        internal SafeFileHandle Handle { get; } = handle;
+        internal string Identity { get; } = identity;
+        internal void ValidateCurrent()
+        {
+            parent.ValidateCurrent();
+            using var currentParent = OpenDirectoryPath(parent.Path);
+            if (currentParent.Identity != parent.Identity ||
+                (!string.Equals(path, root.Path, StringComparison.OrdinalIgnoreCase) &&
+                    currentParent.IdentityAt(root.Path).IdentityFingerprint != root.IdentityFingerprint) ||
+                (string.Equals(path, root.Path, StringComparison.OrdinalIgnoreCase) && Fingerprint(Identity) != root.IdentityFingerprint))
+                throw new SourceSnapshotChangedException("The approved root or held permission parent changed.");
+            var metadata = ReadMetadata(Handle);
+            ValidateTag(metadata);
+            if (!directory) EnsureContentAvailable(metadata);
+            if (metadata.IsDirectory != directory || PhysicalFileIdentity.Get(Handle) != Identity ||
+                !string.Equals(PhysicalFileIdentity.GetFinalPath(Handle), path, StringComparison.OrdinalIgnoreCase) ||
+                !directory && (PhysicalFileIdentity.GetLinkCount(Handle) != 1 || RandomAccess.GetLength(Handle) != _length ||
+                    File.GetLastWriteTimeUtc(Handle) != _lastWrite))
+                throw new SourceSnapshotChangedException("The permission target changed during repair.");
+        }
+        public void Dispose() { Handle.Dispose(); parent.Dispose(); }
+    }
+
+    internal static SafeFileHandle OpenRelative(SafeFileHandle parent, string name, uint access, uint share, uint options,
+        string? canonicalPath = null, bool directory = false)
     {
         if (name is "." or ".." || name.IndexOfAny(['\\', '/', ':']) >= 0)
             throw new SourcePathSecurityException("SourcePathComponentInvalid", "Source path component is not a single local name.");
@@ -134,17 +199,18 @@ internal static class WindowsSourcePathAccess
             if (status < 0 || handle.IsInvalid)
             {
                 handle.Dispose();
-                throw NativeError("The source cannot be opened without redirection or cloud recall.", unchecked((int)RtlNtStatusToDosError(status)));
+                throw NativeError("The source cannot be opened without redirection or cloud recall.", unchecked((int)RtlNtStatusToDosError(status)), canonicalPath, directory);
             }
             return handle;
         }
         finally { Marshal.FreeHGlobal(unicodePointer); Marshal.FreeHGlobal(text); }
     }
 
-    private static Exception NativeError(string message, int code) => code switch
+    private static Exception NativeError(string message, int code, string? canonicalPath = null, bool directory = false) => code switch
     {
         2 => new FileNotFoundException(message),
         3 => new DirectoryNotFoundException(message),
+        5 when canonicalPath is not null => new SourceAccessDeniedException(canonicalPath, directory, new Win32Exception(code)),
         5 => new UnauthorizedAccessException(message, new Win32Exception(code)),
         // ERROR_FLT_INVALID_NAME_REQUEST: a filter can refuse even a no-recall metadata open.
         // Keep the refusal; do not retry through a less restricted path or claim the file is absent.
@@ -157,12 +223,26 @@ internal static class WindowsSourcePathAccess
     internal sealed class DirectoryPathLease(string path) : IDisposable
     {
         private readonly List<(string Path, SafeFileHandle Handle, PhysicalDirectoryIdentity Identity)> _chain = [];
+        internal IReadOnlyList<(string Path, SafeFileHandle Handle, PhysicalDirectoryIdentity Identity)> HeldComponents => _chain;
         public string Path { get; } = path;
         public SafeFileHandle Handle => _chain[^1].Handle;
         public PhysicalDirectoryIdentity Identity => _chain[^1].Identity;
         public Metadata Metadata => ReadMetadata(Handle);
         public PhysicalDirectoryIdentity IdentityAt(string canonicalPath) =>
             _chain.First(item => string.Equals(item.Path, canonicalPath, StringComparison.OrdinalIgnoreCase)).Identity;
+
+        internal void ValidateCurrent()
+        {
+            foreach (var item in _chain)
+            {
+                var metadata = ReadMetadata(item.Handle);
+                ValidateTag(metadata);
+                if (!metadata.IsDirectory ||
+                    !string.Equals(PhysicalFileIdentity.GetFinalPath(item.Handle), item.Path, StringComparison.OrdinalIgnoreCase) ||
+                    Fingerprint(PhysicalFileIdentity.Get(item.Handle)) != item.Identity.IdentityFingerprint)
+                    throw new SourceSnapshotChangedException("A held source ancestor changed.");
+            }
+        }
 
         internal void Add(string canonicalPath, SafeFileHandle handle)
         {

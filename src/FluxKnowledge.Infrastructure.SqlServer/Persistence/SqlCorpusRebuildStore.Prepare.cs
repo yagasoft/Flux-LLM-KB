@@ -95,6 +95,7 @@ public sealed partial class SqlCorpusRebuildStore
     private static async Task<CorpusRebuildPlan> ReadCommittedPlanAsync(FluxKnowledgeDbContext context, Guid operationId, CancellationToken ct,
         bool allowCompleted = false)
     {
+        await RequireLegacyFormatAsync(context, ct).ConfigureAwait(false);
         var operation = await context.CorpusRebuildOperations.AsNoTracking().SingleOrDefaultAsync(value => value.Id == operationId, ct).ConfigureAwait(false)
             ?? throw new CorpusRebuildRefusalException("corpus-rebuild-operation-not-found");
         var plan = JsonSerializer.Deserialize<CorpusRebuildPlan>(operation.ManifestJson)

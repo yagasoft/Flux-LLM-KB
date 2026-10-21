@@ -15,4 +15,8 @@
   <ItemGroup>
     <Content Include="../FluxKnowledge.Integration.Tests/Fixtures/WorkspaceCodexContext/cohort.json" Link="Fixtures/WorkspaceCodexContext/cohort.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
+  <ItemGroup>
+    <Compile Include="../FluxKnowledge.Testing/RepositoryFiles.cs" Link="Support/RepositoryFiles.cs" />
+    <Compile Include="../FluxKnowledge.Testing/TestResources.cs" Link="Support/TestResources.cs" />
+  </ItemGroup>
 </Project>

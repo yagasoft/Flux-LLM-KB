@@ -292,24 +292,57 @@ public sealed partial class PipelineActivitySqlTests(NativeSqlServerFixture fixt
         var root = await AddActivityRootAsync(now);
         var factory = new TestDbContextFactory(_fixture.ConnectionString);
         await using var reader = factory.CreateDbContext();
-        var stable = await SqlPipelineActivityQuery.ReadFenceAsync(reader, CancellationToken.None);
-        Assert.True(stable.Accepts(await SqlPipelineActivityQuery.ReadFenceAsync(reader, CancellationToken.None)));
+        await WaitForFullTextIdleAsync();
+        var stable = await ReadStableBaselineAsync();
         await using var writer = factory.CreateDbContext();
         await using (var transaction = await writer.Database.BeginTransactionAsync())
         {
             (await writer.SourceRootConfigurations.SingleAsync(r => r.Id == root)).UpdatedAtUtc = now.AddSeconds(1);
             await writer.SaveChangesAsync();
             var allocated = await SqlPipelineActivityQuery.ReadFenceAsync(reader, CancellationToken.None);
+            Assert.True(allocated.Version > stable.Version,
+                $"The deliberate write must advance the fence: before={stable.Version}, allocated={allocated.Version}.");
             Assert.False(allocated.IsStable);
             await transaction.CommitAsync();
             var committed = await SqlPipelineActivityQuery.ReadFenceAsync(reader, CancellationToken.None);
             Assert.False(allocated.Accepts(committed));
             Assert.False(stable.Accepts(committed));
         }
-        var before = await SqlPipelineActivityQuery.ReadFenceAsync(reader, CancellationToken.None);
+        var before = await ReadStableBaselineAsync();
         (await writer.SourceRootConfigurations.SingleAsync(r => r.Id == root)).UpdatedAtUtc = now.AddSeconds(2);
         await writer.SaveChangesAsync();
-        Assert.False(before.Accepts(await SqlPipelineActivityQuery.ReadFenceAsync(reader, CancellationToken.None)));
+        var after = await SqlPipelineActivityQuery.ReadFenceAsync(reader, CancellationToken.None);
+        Assert.True(after.Version > before.Version,
+            $"The deliberate write must advance the fence: before={before.Version}, after={after.Version}.");
+        Assert.False(before.Accepts(after));
+
+        async Task<ActivityReadFence> ReadStableBaselineAsync()
+        {
+            // Asynchronous fixture activity may still advance @@DBTS. Wait only
+            // before deliberate writes; never retry a rejection assertion.
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            var samples = new List<string>();
+            try
+            {
+                while (true)
+                {
+                    var first = await SqlPipelineActivityQuery.ReadFenceAsync(reader, deadline.Token);
+                    var second = await SqlPipelineActivityQuery.ReadFenceAsync(reader, deadline.Token);
+                    samples.Add($"{first.Version}/{first.IsStable} -> {second.Version}/{second.IsStable}");
+                    if (first.Accepts(second))
+                    {
+                        output.WriteLine("Baseline fence: " + string.Join("; ", samples));
+                        return second;
+                    }
+                    await Task.Delay(50, deadline.Token);
+                }
+            }
+            catch (OperationCanceledException exception) when (deadline.IsCancellationRequested)
+            {
+                throw new TimeoutException("The owned test database did not provide a stable baseline fence: "
+                    + string.Join("; ", samples), exception);
+            }
+        }
     }
 
     [NativeSqlServerFact]

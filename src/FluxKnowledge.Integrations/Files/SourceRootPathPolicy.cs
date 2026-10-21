@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using System.Security.Principal;
 using System.Text;
 using System.Text.Json;
 using FluxKnowledge.Application.Contracts;
@@ -78,6 +79,7 @@ public sealed class SourceRootPathPolicy : ISourceRootPathPolicy
         var evidenceJson = JsonSerializer.Serialize(new
         {
             canEnumerate = true,
+            indexingIdentitySid = WindowsIdentity.GetCurrent().User?.Value,
             pathFingerprint = fingerprint,
             physicalIdentityFingerprint = identityFingerprint,
             volume = drive.Name.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),

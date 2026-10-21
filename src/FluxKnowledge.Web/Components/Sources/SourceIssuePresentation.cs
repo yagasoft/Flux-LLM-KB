@@ -16,7 +16,17 @@ internal static class SourceIssuePresentation
 
     internal static string Guidance(string? reason) => reason switch
     {
-        "SourceAccessDenied" => "Windows denied access to the application account. An administrator should review read and traversal permissions for this approved item, then rescan. FluxKnowledge does not change source permissions.",
+        "index-storage-capacity-deferred" => "Publication is waiting for free index storage and will retry automatically. Free app-owned storage through reviewed retention; the source file remains eligible and its previous publication is preserved.",
+        "SourceAccessDenied" => "Windows denied access to the indexing identity. Ask an administrator to approve scoped automatic source-access recovery or grant read access to this item. Source trust does not change Windows permissions.",
+        "SourceAccessRepairNotApproved" => "This physical source root has no approved automatic access policy. An administrator must approve the root and indexing identity before the helper can grant read access.",
+        "SourceAccessRepairUnavailable" => "The source-access helper is unavailable. Restore its configured Windows task and policy. IIS has no permission-changing privileges; normal reconciliation will retry.",
+        "SourceAccessExplicitDeny" => "An applicable Windows deny rule prevents read access. Automatic recovery preserves that rule. An administrator must review the affected item and the indexing identity's group restrictions.",
+        "SourceAccessPermissionsUnsupported" => "These Windows permissions cannot be safely amended automatically. An administrator must review the item's ACL; recovery will not reset inheritance or remove unrelated rules.",
+        "SourceAccessOutsideApprovedRoot" => "A required path component lies outside the approved repair root, or the path is unsafe. Review the exact path and parent traversal permissions; automatic recovery will not extend its scope.",
+        "SourceAccessIdentityChanged" => "The approved physical source identity changed. Confirm the current folder and renew its access policy before retrying; a reused path is not sufficient authority.",
+        "SourceAccessContentUnavailable" => "The cloud provider could not supply a guarded local read. No download was requested. Make the item available in the sync client before retrying.",
+        "SourceAccessRepairUnconfirmed" => "Read access could not be confirmed after the repair request. Review the helper's unresolved diagnostic and the current file/provider state before targeted recovery.",
+        "SourceAccessRepairLimit" => "This read reached the bounded component-repair limit. Normal reconciliation can continue with the remaining components; review repeatedly denied parents if progress stops.",
         "SourcePathDenied" or "SourceDirectoryDenied" or "SourceRootAccessDenied" => "This older scan did not distinguish permissions from path-security refusals. A scan with the updated diagnostics is needed before changing permissions.",
         "SourceReparseTypeNotSupported" or "SourcePathSafetyRefused" => "An unsupported reparse point or unsafe redirection was refused. Use the real authorised local folder; symbolic links and junctions remain excluded.",
         "SourcePhysicalPathMismatch" or "SourcePathOutsideRoot" or "SourceRootIdentityMismatch" or "SourceRootIdentityMissing" or "SourceRootIdentityMalformed" => "The path or physical identity no longer matches the admitted source. Review the real folder and re-admit it; do not bypass the identity check.",

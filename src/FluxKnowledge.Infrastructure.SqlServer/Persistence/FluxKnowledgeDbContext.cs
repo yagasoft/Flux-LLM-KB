@@ -20,6 +20,17 @@ public sealed class FluxKnowledgeDbContext(DbContextOptions<FluxKnowledgeDbConte
     public DbSet<IndexGenerationEntity> IndexGenerations => Set<IndexGenerationEntity>();
     public DbSet<IndexGenerationVectorEntity> IndexGenerationVectors => Set<IndexGenerationVectorEntity>();
     public DbSet<IndexStateEntity> IndexState => Set<IndexStateEntity>();
+    public DbSet<IndexSegmentEntity> IndexSegments => Set<IndexSegmentEntity>();
+    public DbSet<IndexSegmentVectorEntity> IndexSegmentVectors => Set<IndexSegmentVectorEntity>();
+    public DbSet<IndexGenerationSegmentEntity> IndexGenerationSegments => Set<IndexGenerationSegmentEntity>();
+    public DbSet<CurrentIndexMemberEntity> CurrentIndexMembers => Set<CurrentIndexMemberEntity>();
+    public DbSet<IndexProjectionChangeEntity> IndexProjectionChanges => Set<IndexProjectionChangeEntity>();
+    public DbSet<IndexPublicationCandidateEntity> IndexPublicationCandidates => Set<IndexPublicationCandidateEntity>();
+    public DbSet<IndexCandidateMemberEntity> IndexCandidateMembers => Set<IndexCandidateMemberEntity>();
+    public DbSet<IndexSegmentOwnerEntity> IndexSegmentOwners => Set<IndexSegmentOwnerEntity>();
+    public DbSet<IndexRecoveryAuditEntity> IndexRecoveryAudit => Set<IndexRecoveryAuditEntity>();
+    public DbSet<IndexRecoveryPinEntity> IndexRecoveryPins => Set<IndexRecoveryPinEntity>();
+    public DbSet<IndexRecoveryWriterEntity> IndexRecoveryWriters => Set<IndexRecoveryWriterEntity>();
     public DbSet<CorpusRebuildOperationEntity> CorpusRebuildOperations => Set<CorpusRebuildOperationEntity>();
     public DbSet<CorpusRebuildWorkItemEntity> CorpusRebuildWorkItems => Set<CorpusRebuildWorkItemEntity>();
     public DbSet<CorpusRebuildSupersededJobEntity> CorpusRebuildSupersededJobs => Set<CorpusRebuildSupersededJobEntity>();

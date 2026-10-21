@@ -1,12 +1,15 @@
 [CmdletBinding()]
 param([string]$SourceRoot='', [string]$MigrationScript='')
 $ErrorActionPreference='Stop'
+# Native control-flow fixture; SQL admission is tested against the actual helper separately.
+$ReviewedLegacyIndexPayloads=@()
+function Invoke-DeploymentIndexAdmission { param($Action,$Roles) & $Action }
 if (-not $SourceRoot) { $SourceRoot=Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSCommandPath)) }
 Import-Module (Join-Path $SourceRoot 'scripts/deploy/incremental-hybrid-passage-rebuild.psm1') -Force
 $tokens=$null; $errors=$null
 $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $SourceRoot 'scripts/deploy/update-native-iis-incremental.ps1'), [ref]$tokens, [ref]$errors)
 if ($errors.Count) { throw 'Updater parse failed.' }
-foreach ($name in @('Invoke-HybridPassageIisUpdate','Assert-NotReparsePoint','New-DeploymentValidationHold','Remove-DeploymentValidationHold')) {
+foreach ($name in @('Invoke-HybridPassageIisUpdate','Assert-NotReparsePoint','Assert-ReviewedLegacyIndexBinding','Start-IndexCompatibleWebAppPool','Enable-IndexCompatibleOutlookTask','New-DeploymentValidationHold','Remove-DeploymentValidationHold')) {
     $definition=@($ast.FindAll({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name},$true))
     if ($definition.Count -ne 1) { throw 'Required updater function missing.' }
     . ([scriptblock]::Create($definition[0].Extent.Text))

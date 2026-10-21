@@ -138,12 +138,18 @@ public sealed class RetainedTextPipelineIntegrationTests(NativeSqlServerFixture 
         await File.WriteAllTextAsync(originalPath, "different bytes");
         File.Move(originalPath, originalPath + ".renamed");
 
-        var source = await new SqlRetainedSourceReader(new ContextFactory(_fixture.ConnectionString), root)
-            .ReadUtf8Async(new SourceRevisionId(revisionId), CancellationToken.None);
+        try
+        {
+            using var reader = new SqlRetainedSourceReader(new ContextFactory(_fixture.ConnectionString), root);
+            var source = await reader.ReadUtf8Async(new SourceRevisionId(revisionId), CancellationToken.None);
 
-        Assert.Equal("retained text", source.Text);
-        Assert.Equal(hash, source.ContentHash);
-        Directory.Delete(root, recursive: true);
+            Assert.Equal("retained text", source.Text);
+            Assert.Equal(hash, source.ContentHash);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
     }
 
     [NativeSqlServerFact]
@@ -157,10 +163,16 @@ public sealed class RetainedTextPipelineIntegrationTests(NativeSqlServerFixture 
         await File.WriteAllTextAsync(Path.Combine(root, relative), "tampered");
         var revisionId = await SeedRevisionAsync(hash, bytes.Length, relative);
 
-        await Assert.ThrowsAsync<InvalidDataException>(() => new SqlRetainedSourceReader(new ContextFactory(_fixture.ConnectionString), root)
-            .ReadUtf8Async(new SourceRevisionId(revisionId), CancellationToken.None).AsTask());
-
-        Directory.Delete(root, recursive: true);
+        try
+        {
+            using var reader = new SqlRetainedSourceReader(new ContextFactory(_fixture.ConnectionString), root);
+            await Assert.ThrowsAsync<InvalidDataException>(() => reader
+                .ReadUtf8Async(new SourceRevisionId(revisionId), CancellationToken.None).AsTask());
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
     }
 
     [NativeSqlServerFact]
@@ -190,8 +202,8 @@ public sealed class RetainedTextPipelineIntegrationTests(NativeSqlServerFixture 
             }
 
             var revisionId = await SeedRevisionAsync(hash, bytes.Length, relative);
-            await Assert.ThrowsAsync<IOException>(() => new SqlRetainedSourceReader(
-                    new ContextFactory(_fixture.ConnectionString), root)
+            using var reader = new SqlRetainedSourceReader(new ContextFactory(_fixture.ConnectionString), root);
+            await Assert.ThrowsAsync<IOException>(() => reader
                 .ReadUtf8Async(new SourceRevisionId(revisionId), CancellationToken.None).AsTask());
         }
         finally
@@ -322,8 +334,8 @@ public sealed class RetainedTextPipelineIntegrationTests(NativeSqlServerFixture 
         try
         {
             var revisionId = await SeedRevisionAsync(hash, bytes.Length, relative);
-            await Assert.ThrowsAsync<InvalidDataException>(() => new SqlRetainedSourceReader(
-                    new ContextFactory(_fixture.ConnectionString), root)
+            using var reader = new SqlRetainedSourceReader(new ContextFactory(_fixture.ConnectionString), root);
+            await Assert.ThrowsAsync<InvalidDataException>(() => reader
                 .ReadUtf8Async(new SourceRevisionId(revisionId), CancellationToken.None).AsTask());
         }
         finally
@@ -354,8 +366,8 @@ public sealed class RetainedTextPipelineIntegrationTests(NativeSqlServerFixture 
             var revisionId = await SeedRevisionAsync(hash, bytes.Length, relative);
             await BindCompletedOoxmlChildAsync(revisionId, hash, processorGeneration: processorGeneration);
 
-            var source = await new SqlRetainedSourceReader(new ContextFactory(_fixture.ConnectionString), root)
-                .ReadUtf8Async(new SourceRevisionId(revisionId), CancellationToken.None);
+            using var reader = new SqlRetainedSourceReader(new ContextFactory(_fixture.ConnectionString), root);
+            var source = await reader.ReadUtf8Async(new SourceRevisionId(revisionId), CancellationToken.None);
 
             Assert.Equal(byteLength, source.Text.Length);
         }

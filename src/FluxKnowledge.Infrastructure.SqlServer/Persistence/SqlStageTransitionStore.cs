@@ -113,7 +113,11 @@ public sealed partial class SqlStageTransitionStore : IStageTransitionStore
             .ConfigureAwait(false);
 
         if (repositoryWork || request.Artifact.Stage >= PipelineStage.Embed || request.IndexingOutput?.ActivateGeneration is not null || request.IndexingOutput?.UsePersistedEmbeddingDraft == true)
+        {
+            if (request.Artifact.Stage == PipelineStage.Publish || request.IndexingOutput?.ActivateGeneration is not null)
+                await SqlSegmentedIndexStore.AcquireSharedTransactionAsync(context, cancellationToken).ConfigureAwait(false);
             await SqlPublishedPassageSelection.AcquireFenceAsync(context, cancellationToken).ConfigureAwait(false);
+        }
 
         var validated = await ValidateClaimAsync(context, request, cancellationToken)
             .ConfigureAwait(false);
@@ -146,6 +150,7 @@ public sealed partial class SqlStageTransitionStore : IStageTransitionStore
         }
 
         IndexStateEntity? publicationState = null;
+        IndexPublicationCandidateEntity? segmentedCandidate = null;
         IReadOnlyList<long>? previousPublishedIds = null;
         if (request.Artifact.Stage == PipelineStage.Publish || request.IndexingOutput?.ActivateGeneration is not null)
         {
@@ -156,7 +161,17 @@ public sealed partial class SqlStageTransitionStore : IStageTransitionStore
                 throw new PublicationSnapshotConflictException("New generation activation requires expected and publication corpus stamps.");
             if (request.IndexingOutput?.ExpectedCorpusStamp is { } expectedStamp && expectedStamp != stamp)
                 throw new PublicationSnapshotConflictException("The corpus epoch or version changed; rebuild the publication candidate.");
-            previousPublishedIds = await SqlPublishedPassageSelection.ReadVectorIdsAsync(context, cancellationToken).ConfigureAwait(false);
+            if (publicationState.RequiredIndexFormat == 2)
+            {
+                if (request.IndexingOutput?.ActivateGeneration is not { FormatVersion: 2 } segmented ||
+                    request.IndexingOutput.SegmentedCandidateId is not { } candidateId)
+                    throw new InvalidOperationException("segmented-publication-candidate-required");
+                segmentedCandidate = await SqlSegmentedIndexStore.ValidateActivationBeforeAsync(context, candidateId, segmented,
+                    request.CurrentJob.PipelineRecordId.Value, request.CurrentJob.SourceRevision, cancellationToken).ConfigureAwait(false);
+            }
+            else if (publicationState.RequiredIndexFormat == 1 && request.IndexingOutput?.ActivateGeneration?.FormatVersion is null or 1)
+                previousPublishedIds = await SqlPublishedPassageSelection.ReadVectorIdsAsync(context, cancellationToken).ConfigureAwait(false);
+            else throw new InvalidOperationException("index-publication-format-mismatch");
         }
 
         if (request.CurrentJob.Operation == PipelineOperations.ExtractVisio)
@@ -340,7 +355,12 @@ public sealed partial class SqlStageTransitionStore : IStageTransitionStore
             validated.PipelineRecord.CompletionCriteriaMet = true;
         }
 
-        if (publicationState is not null)
+        if (segmentedCandidate is not null)
+        {
+            await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+            await SqlSegmentedIndexStore.ActivateAsync(context, segmentedCandidate, publicationState!, _timeProvider.GetUtcNow(), cancellationToken).ConfigureAwait(false);
+        }
+        else if (publicationState is not null)
         {
             await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
             var publishedIds = await SqlPublishedPassageSelection.ReadVectorIdsAsync(context, cancellationToken).ConfigureAwait(false);
@@ -351,7 +371,7 @@ public sealed partial class SqlStageTransitionStore : IStageTransitionStore
             }
         }
 
-        if (request.IndexingOutput?.ActivateGeneration is { } activeGeneration)
+        if (segmentedCandidate is null && request.IndexingOutput?.ActivateGeneration is { } activeGeneration)
         {
             await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
             var expectedMembership = request.IndexingOutput.ActivateMembership

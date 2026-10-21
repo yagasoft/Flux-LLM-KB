@@ -136,6 +136,7 @@ public sealed partial class SqlSourceScanStore(
             string.Equals(value.CanonicalPath, file.CanonicalPath, StringComparison.Ordinal));
         var eventType = "source.unchanged";
         var selectionChanged = false;
+        var selectionScopes = new List<IndexAffectedScope>();
         if (revision is null)
         {
             var latest = revisions.FirstOrDefault();
@@ -154,6 +155,7 @@ public sealed partial class SqlSourceScanStore(
         else if (revision.SuppressedAtUtc is not null && currentGitRoot is null)
         {
             selectionChanged = true;
+            selectionScopes.Add(new(2, revision.Id));
             revision.SuppressedAtUtc = null;
             revision.RetentionEvidenceJson = null;
             eventType = "source.updated";
@@ -230,6 +232,7 @@ public sealed partial class SqlSourceScanStore(
                 previous.RetentionEvidenceJson = JsonSerializer.Serialize(new
                 { reason = "superseded-by-verified-physical-capture", successorSourceRevisionId = revision.Id });
                 selectionChanged = true;
+                selectionScopes.Add(new(2, previous.Id));
                 OperatorEventAppender.Add(context, OperatorEventDraft.SourceRemoved(sourceRoot.Id.Value, previous.Id,
                     $"source:{previous.Id:N}", new { revision = previous.Revision, reason = "superseded-by-verified-physical-capture" }));
             }
@@ -252,7 +255,7 @@ public sealed partial class SqlSourceScanStore(
                 : OperatorEventDraft.SourceUpdated(sourceRoot.Id.Value, null, revision.Id, correlationId, new { revision = revision.Revision, classification = revision.Classification }));
         }
         if (selectionChanged)
-            await SqlPublishedPassageSelection.AdvanceVersionAsync(context, timeProvider.GetUtcNow(), cancellationToken).ConfigureAwait(false);
+            await SqlPublishedPassageSelection.AdvanceVersionAsync(context, timeProvider.GetUtcNow(), cancellationToken, selectionScopes).ConfigureAwait(false);
         await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
         if (currentPhysicalRoot is not null)
         {
@@ -434,6 +437,7 @@ public sealed partial class SqlSourceScanStore(
             .ToListAsync(cancellationToken).ConfigureAwait(false);
         var now = timeProvider.GetUtcNow();
         var suppressionChanged = false;
+        var suppressionScopes = new List<IndexAffectedScope>();
         foreach (var revision in active)
         {
             if (convergedRevisionIds.Contains(new SourceRevisionId(revision.Id)))
@@ -459,6 +463,7 @@ public sealed partial class SqlSourceScanStore(
                             revision.SuppressedAtUtc = null;
                             revision.RetentionEvidenceJson = null;
                             suppressionChanged = true;
+                            suppressionScopes.Add(new(2, revision.Id));
                             OperatorEventAppender.Add(context, OperatorEventDraft.SourceUpdated(root.Id, null, revision.Id,
                                 $"source:{revision.Id:N}", new { revision = revision.Revision, reason = "authoritative-rediscovery" }));
                         }
@@ -472,6 +477,7 @@ public sealed partial class SqlSourceScanStore(
 
             revision.SuppressedAtUtc = now;
             suppressionChanged = true;
+            suppressionScopes.Add(new(2, revision.Id));
             revision.RetainUntilUtc = now.AddDays(30);
             revision.RetentionEvidenceJson = "{\"reason\":\"unseen-during-authoritative-scan\"}";
             OperatorEventAppender.Add(context, OperatorEventDraft.SourceRemoved(
@@ -482,7 +488,7 @@ public sealed partial class SqlSourceScanStore(
         }
 
         if (suppressionChanged)
-            await SqlPublishedPassageSelection.AdvanceVersionAsync(context, now, cancellationToken).ConfigureAwait(false);
+            await SqlPublishedPassageSelection.AdvanceVersionAsync(context, now, cancellationToken, suppressionScopes).ConfigureAwait(false);
         await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
         if (inventory is not null)
             await SqlRepositoryWorkRecovery.ReconcileAsync(context, root.Id, now, embeddingRuntime, cancellationToken).ConfigureAwait(false);

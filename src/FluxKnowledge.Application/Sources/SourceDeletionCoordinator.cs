@@ -11,7 +11,8 @@ public sealed class SourceDeletionCoordinator(
     ISourceDeletionFileStore? fileStore = null,
     ISourceArtifactPublicationGate? artifactPublicationGate = null,
     IDerivedIndexRecoveryStore? queryCleanupGate = null,
-    ILogger<SourceDeletionCoordinator>? logger = null)
+    ILogger<SourceDeletionCoordinator>? logger = null,
+    IIndexSourceDeletionMaintenance? indexMaintenance = null)
 {
     private readonly ILogger<SourceDeletionCoordinator> _logger = logger ?? NullLogger<SourceDeletionCoordinator>.Instance;
 
@@ -41,6 +42,12 @@ public sealed class SourceDeletionCoordinator(
 
             try
             {
+                if (workItem.Phase == "cleanup-memberships" && indexMaintenance is not null &&
+                    await indexMaintenance.AdvanceAsync(workItem, cancellationToken) is { } blocked)
+                {
+                    await store.DeferAsync(workItem, blocked, cancellationToken);
+                    return progressed;
+                }
                 if (string.Equals(workItem.Phase, "rebuild-index", StringComparison.Ordinal))
                 {
                     IndexGenerationCandidateSnapshot? candidate = null;
@@ -48,7 +55,7 @@ public sealed class SourceDeletionCoordinator(
                     {
                         try
                         {
-                            candidate = await generationPublisher.BuildAndPlaceAsync(Guid.NewGuid(), cancellationToken).ConfigureAwait(false);
+                            candidate = await generationPublisher.BuildAndPlaceAsync(Guid.Empty, cancellationToken).ConfigureAwait(false);
                         }
                         catch (NoEligibleVectorsException)
                         {
@@ -58,6 +65,8 @@ public sealed class SourceDeletionCoordinator(
                     }
 
                     var rebuilt = await store.PurgeAsync(workItem, candidate, cancellationToken).ConfigureAwait(false);
+                    if (candidate is not null && rebuilt.Phase == "rebuild-index" && generationPublisher is not null)
+                        await generationPublisher.AbandonAsync(candidate, cancellationToken);
                     if (rebuilt.ContinueImmediately)
                     {
                         progressed = true;

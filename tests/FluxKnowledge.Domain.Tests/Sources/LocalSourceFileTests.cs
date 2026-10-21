@@ -21,7 +21,7 @@ public sealed class LocalSourceFileTests : IDisposable
         var storeRoot = Path.Combine(_root, "store");
         var bytes = "retained bytes"u8.ToArray();
         var hash = Convert.ToHexStringLower(SHA256.HashData(bytes));
-        var store = new ContentAddressedSourceArtifactStore(storeRoot);
+        using var store = new ContentAddressedSourceArtifactStore(storeRoot);
 
         var receipt = await store.PutAsync(
             bytes,
@@ -42,7 +42,7 @@ public sealed class LocalSourceFileTests : IDisposable
     [Fact]
     public async Task Artifact_store_rejects_a_declared_checksum_that_does_not_match_the_retained_bytes()
     {
-        var store = new ContentAddressedSourceArtifactStore(Path.Combine(_root, "store"));
+        using var store = new ContentAddressedSourceArtifactStore(Path.Combine(_root, "store"));
 
         await Assert.ThrowsAsync<InvalidDataException>(() => store.PutAsync(
             "contents"u8.ToArray(),
@@ -100,7 +100,7 @@ public sealed class LocalSourceFileTests : IDisposable
         var escapedRoot = Path.Combine(_root, "escaped");
         var sha256 = Path.Combine(storeRoot, "sha256");
         Directory.CreateDirectory(escapedRoot);
-        var store = new ContentAddressedSourceArtifactStore(storeRoot);
+        using var store = new ContentAddressedSourceArtifactStore(storeRoot);
         try
         {
             try
@@ -144,7 +144,7 @@ public sealed class LocalSourceFileTests : IDisposable
         var hash = Convert.ToHexStringLower(SHA256.HashData(bytes));
         var shard = Path.Combine(storeRoot, "sha256", hash[..2]);
         var replacementSucceeded = false;
-        var store = new ContentAddressedSourceArtifactStore(
+        using var store = new ContentAddressedSourceArtifactStore(
             storeRoot,
             beforeArtifactWrite: _ =>
             {
@@ -186,7 +186,7 @@ public sealed class LocalSourceFileTests : IDisposable
         var hash = Convert.ToHexStringLower(SHA256.HashData(bytes));
         var sha256 = Path.Combine(storeRoot, "sha256");
         var replacementSucceeded = false;
-        var store = new ContentAddressedSourceArtifactStore(
+        using var store = new ContentAddressedSourceArtifactStore(
             storeRoot,
             beforeShardCreation: () =>
             {
@@ -418,7 +418,7 @@ public sealed class LocalSourceFileTests : IDisposable
         var snapshot = Assert.Single(await new LocalSourceEnumerator().EnumerateAsync(configuration, CancellationToken.None).ToListAsync());
         await File.WriteAllTextAsync(source, "after");
         var storeRoot = Path.Combine(_root, "store");
-        var store = new ContentAddressedSourceArtifactStore(storeRoot);
+        using var store = new ContentAddressedSourceArtifactStore(storeRoot);
 
         await Assert.ThrowsAsync<SourceSnapshotChangedException>(() => store.PutFileAsync(
             snapshot,
@@ -435,7 +435,7 @@ public sealed class LocalSourceFileTests : IDisposable
         await File.WriteAllTextAsync(source, "before");
         var configuration = SourceRootConfiguration.Create(Path.GetFullPath(_root), "Test root", false, false, 1024);
         var snapshot = Assert.Single(await new LocalSourceEnumerator().EnumerateAsync(configuration, CancellationToken.None).ToListAsync());
-        var store = new ContentAddressedSourceArtifactStore(Path.Combine(_root, "store"));
+        using var store = new ContentAddressedSourceArtifactStore(Path.Combine(_root, "store"));
         var metadata = new SourceArtifactMetadata(snapshot.ContentSha256, "text/plain", snapshot.ByteLength);
         _ = await store.PutFileAsync(snapshot, metadata, CancellationToken.None);
 
@@ -454,7 +454,7 @@ public sealed class LocalSourceFileTests : IDisposable
         var configuration = SourceRootConfiguration.Create(Path.GetFullPath(_root), "Test root", false, false, 1024);
         var snapshot = Assert.Single(await new LocalSourceEnumerator().EnumerateAsync(configuration, CancellationToken.None).ToListAsync());
         var storeRoot = Path.Combine(_root, "store");
-        var store = new ContentAddressedSourceArtifactStore(
+        using var store = new ContentAddressedSourceArtifactStore(
             storeRoot,
             beforeSourceRead: async cancellationToken =>
             {
