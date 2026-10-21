@@ -20,13 +20,19 @@ jobs:
       - name: Build
         run: dotnet build FluxKnowledge.slnx -c Release --no-restore -warnaserror
       - name: Test native contracts
-        run: dotnet test FluxKnowledge.slnx -c Release --no-build --filter "Category!=Browser" --logger "console;verbosity=minimal"
+        run: dotnet test FluxKnowledge.slnx -m:1 -c Release --no-build --filter "Category!=Browser" --logger "console;verbosity=minimal"
       - name: Verify repository and documentation
         shell: pwsh
         run: ./tests/native/repository-contract.ps1
       - name: Verify native closeout plan
         shell: pwsh
         run: ./tests/native/complete-feature-dryrun.ps1
+      - name: Verify disposable closeout failure paths
+        shell: pwsh
+        run: ./tests/native/complete-feature-integration.ps1
+      - name: Verify test timing summary
+        shell: pwsh
+        run: ./tests/native/test-timing-summary-contract.ps1
       - name: Verify native deployment plan
         shell: pwsh
         run: ./tests/native/native-deployment-plan.ps1

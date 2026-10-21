@@ -19,7 +19,7 @@ $nativeGoLiveBootstrapEnvironmentName = "FLUXKNOWLEDGE_NATIVE_GO_LIVE_SQL_BOOTST
 function Get-MainWorktreePath {
     param([string]$Worktree)
 
-    $lines = git -C $Worktree worktree list --porcelain
+    $lines = (Invoke-CheckedGit $Worktree @('worktree', 'list', '--porcelain')) -split '[\r\n]+'
     $currentPath = $null
     foreach ($line in $lines) {
         if ($line -like "worktree *") {
@@ -148,14 +148,97 @@ function Complete-FeatureStepRecord {
 function Write-SummaryAndExit {
     param([int]$ExitCode)
 
-    [ordered]@{
+    $failedRecord = @($script:Steps | Where-Object { $_.name -eq $script:FailedStep } | Select-Object -Last 1)
+    $summary = [ordered]@{
         ok = ($ExitCode -eq 0)
         failed_step = $script:FailedStep
+        log_path = if ($failedRecord.Count) { $failedRecord[0].log_path } else { $null }
         log_root = $script:LogRoot
+        candidate_root = $script:CandidateRoot
+        candidate_tree = $script:CandidateTree
+        verified_commit = $script:VerifiedCommit
+        results_root = $script:ResultsRoot
         steps = $script:Steps
     } | ConvertTo-Json -Depth 8
+    $summary | Set-Content -LiteralPath (Join-Path $script:LogRoot 'summary.json') -Encoding utf8
+    if ($script:CloseoutLock) { $script:CloseoutLock.Dispose() }
+    $summary
 
     exit $ExitCode
+}
+
+function Invoke-CheckedGit {
+    param([string]$Root, [string[]]$Arguments)
+    $info = [Diagnostics.ProcessStartInfo]::new()
+    $info.FileName = 'git'
+    $info.UseShellExecute = $false
+    $info.CreateNoWindow = $true
+    $info.RedirectStandardOutput = $true
+    $info.RedirectStandardError = $true
+    foreach ($argument in (@('-C', $Root) + $Arguments)) { $info.ArgumentList.Add($argument) }
+    [void]$info.Environment.Remove('FLUXKNOWLEDGE_NATIVE_GO_LIVE_SQL_BOOTSTRAP')
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $info
+    try {
+        [void]$process.Start()
+        $stdout = $process.StandardOutput.ReadToEndAsync()
+        $stderr = $process.StandardError.ReadToEndAsync()
+        if (-not $process.WaitForExit($StepTimeoutSeconds * 1000)) {
+            Stop-FeatureProcessTree -ProcessId $process.Id
+            throw "Git ($($Arguments[0])) timed out after $StepTimeoutSeconds seconds; process tree was stopped."
+        }
+        $output = Get-FeatureTaskResult $stdout
+        $errorOutput = Get-FeatureTaskResult $stderr
+        if ($process.ExitCode -ne 0) { throw "Git failed ($($Arguments[0])): $errorOutput" }
+        return $output.Trim()
+    } finally {
+        $process.Dispose()
+    }
+}
+
+function Assert-CloseoutWorktree {
+    param([string]$Root, [string]$Head = '', [string]$Tree = '', [string]$ExpectedBranch = '',
+        [switch]$AllowStaged)
+    if ($ExpectedBranch -and (Invoke-CheckedGit $Root @('symbolic-ref', 'HEAD')) -cne $ExpectedBranch) {
+        throw 'Closeout worktree changed branch.'
+    }
+    if ($Head -and (Invoke-CheckedGit $Root @('rev-parse', 'HEAD')) -cne $Head) {
+        throw 'Closeout HEAD changed; preserve concurrent work and rebuild the candidate.'
+    }
+    if ($Tree -and (Invoke-CheckedGit $Root @('write-tree')) -cne $Tree) {
+        throw 'Closeout index differs from the verified candidate tree.'
+    }
+    if ($AllowStaged) {
+        [void](Invoke-CheckedGit $Root @('diff', '--exit-code', '--'))
+        $untracked = Invoke-CheckedGit $Root @('ls-files', '--others', '--exclude-standard')
+        if ($untracked) { throw 'Untracked candidate content cannot be verified.' }
+    } else {
+        $status = Invoke-CheckedGit $Root @('status', '--porcelain', '--untracked-files=all',
+            '--', '.', ':(exclude).superpowers/sdd/')
+        if ($status) { throw "Closeout worktree is dirty: $status" }
+    }
+}
+
+function Invoke-CloseoutAction {
+    param([string]$Name, [string]$Cwd, [scriptblock]$Action, [switch]$RunInDryRun)
+    $startedAt = [DateTime]::UtcNow
+    $record = [ordered]@{
+        name = $Name; cwd = $Cwd; command = $Name
+        started_at = $startedAt.ToString('o'); finished_at = $null; duration_seconds = $null
+        exit_code = 0; log_path = (New-StepLogPath $Name); skipped = [bool]($DryRun -and -not $RunInDryRun)
+    }
+    $script:Steps += $record
+    try {
+        if ($record.skipped) { 'DRY RUN' | Set-Content -LiteralPath $record.log_path }
+        else { & $Action *>&1 | Out-File -LiteralPath $record.log_path -Encoding utf8 }
+    } catch {
+        $record.exit_code = 1
+        $script:FailedStep = $Name
+        $_.ToString() | Out-File -LiteralPath $record.log_path -Append -Encoding utf8
+        throw
+    } finally {
+        Complete-FeatureStepRecord -Record $record -StartedAt $startedAt
+    }
 }
 
 function Invoke-FeatureStep {
@@ -267,6 +350,7 @@ $CleanupWorktreeCommand = @'
 $MainRoot = $env:FLUXKNOWLEDGE_CLOSEOUT_MAIN_ROOT
 $FeatureWorktree = $env:FLUXKNOWLEDGE_CLOSEOUT_FEATURE_WORKTREE
 $Branch = $env:FLUXKNOWLEDGE_CLOSEOUT_BRANCH
+$expectedFeatureSha = $env:FLUXKNOWLEDGE_CLOSEOUT_FEATURE_SHA
 
 function Normalize-CleanupPath {
     param([string]$Path)
@@ -315,6 +399,13 @@ function Test-DirectoryEmpty {
 }
 
 Set-Location $MainRoot
+if (-not $expectedFeatureSha) { throw 'Cleanup requires the pinned feature commit.' }
+$actualFeatureSha = git -C $FeatureWorktree rev-parse HEAD
+if ($LASTEXITCODE -ne 0 -or $actualFeatureSha -cne $expectedFeatureSha) { throw 'Feature HEAD moved before cleanup.' }
+$actualFeatureBranch = git -C $FeatureWorktree symbolic-ref HEAD
+if ($LASTEXITCODE -ne 0 -or $actualFeatureBranch -cne "refs/heads/$Branch") { throw 'Feature branch changed before cleanup.' }
+$featureStatus = git -C $FeatureWorktree status --porcelain --untracked-files=all -- . ':(exclude).superpowers/sdd/'
+if ($LASTEXITCODE -ne 0 -or $featureStatus) { throw 'Feature work changed before cleanup.' }
 git worktree remove "$FeatureWorktree"
 $removeExit = $LASTEXITCODE
 if ($removeExit -ne 0) {
@@ -326,12 +417,7 @@ if ($removeExit -ne 0) {
     }
 }
 
-git worktree prune
-if ($LASTEXITCODE -ne 0) {
-    exit $LASTEXITCODE
-}
-
-git branch -D $Branch
+git update-ref -d "refs/heads/$Branch" $expectedFeatureSha
 exit $LASTEXITCODE
 '@
 
@@ -1138,20 +1224,39 @@ function Invoke-CloseoutCleanup {
     $previousMainRoot = $env:FLUXKNOWLEDGE_CLOSEOUT_MAIN_ROOT
     $previousFeatureWorktree = $env:FLUXKNOWLEDGE_CLOSEOUT_FEATURE_WORKTREE
     $previousBranch = $env:FLUXKNOWLEDGE_CLOSEOUT_BRANCH
+    $previousFeatureSha = $env:FLUXKNOWLEDGE_CLOSEOUT_FEATURE_SHA
     try {
         $env:FLUXKNOWLEDGE_CLOSEOUT_MAIN_ROOT = $MainRoot
         $env:FLUXKNOWLEDGE_CLOSEOUT_FEATURE_WORKTREE = $FeatureWorktree
         $env:FLUXKNOWLEDGE_CLOSEOUT_BRANCH = $Branch
+        $env:FLUXKNOWLEDGE_CLOSEOUT_FEATURE_SHA = $script:FeatureSha
         Invoke-FeatureStep -Name "cleanup-worktree" -Cwd $MainRoot -Command $CleanupWorktreeCommand
     } finally {
         $env:FLUXKNOWLEDGE_CLOSEOUT_MAIN_ROOT = $previousMainRoot
         $env:FLUXKNOWLEDGE_CLOSEOUT_FEATURE_WORKTREE = $previousFeatureWorktree
         $env:FLUXKNOWLEDGE_CLOSEOUT_BRANCH = $previousBranch
+        $env:FLUXKNOWLEDGE_CLOSEOUT_FEATURE_SHA = $previousFeatureSha
     }
 }
 
 function Invoke-FinalPushAndCleanup {
-    Invoke-FeatureStep -Name "push-main" -Cwd $MainRoot -Command 'git push origin main'
+    Invoke-CloseoutAction -Name 'verify-before-push' -Cwd $MainRoot -Action {
+        Assert-CloseoutWorktree $MainRoot -Head $script:VerifiedCommit -Tree $script:CandidateTree -ExpectedBranch 'refs/heads/main'
+        Assert-CloseoutWorktree $FeatureWorktree -Head $script:FeatureSha -ExpectedBranch "refs/heads/$Branch"
+    }
+    Invoke-FeatureStep -Name "push-main" -Cwd $MainRoot -Command "git push origin '$($script:VerifiedCommit):refs/heads/main'"
+    Invoke-CloseoutAction -Name 'verify-published-main' -Cwd $MainRoot -Action {
+        Assert-CloseoutWorktree $MainRoot -Head $script:VerifiedCommit -Tree $script:CandidateTree -ExpectedBranch 'refs/heads/main'
+        $remote = Invoke-CheckedGit $MainRoot @('ls-remote', '--exit-code', 'origin', 'refs/heads/main')
+        if (($remote -split '\s+')[0] -cne $script:VerifiedCommit) { throw 'Remote main differs from the verified commit.' }
+    }
+    Invoke-CloseoutAction -Name 'cleanup-candidate' -Cwd $MainRoot -Action {
+        if (Invoke-CheckedGit $script:CandidateRoot @('branch', '--show-current')) {
+            throw 'Candidate ownership changed before cleanup.'
+        }
+        Assert-CloseoutWorktree $script:CandidateRoot -Head $script:VerifiedCommit -Tree $script:CandidateTree
+        [void](Invoke-CheckedGit $MainRoot @('worktree', 'remove', $script:CandidateRoot))
+    }
     Invoke-CloseoutCleanup
 }
 
@@ -1161,14 +1266,23 @@ if (-not $MainRoot) {
     $MainRoot = Get-MainWorktreePath -Worktree $FeatureWorktree
 }
 $MainRoot = (Resolve-Path -LiteralPath $MainRoot).Path
-$Branch = (git -C $FeatureWorktree branch --show-current).Trim()
+$Branch = Invoke-CheckedGit $FeatureWorktree @('branch', '--show-current')
 if (-not $Branch.StartsWith("codex/", [System.StringComparison]::Ordinal)) {
     throw "Refusing to complete non-codex branch '$Branch'."
 }
-$script:LogRoot = Join-Path $MainRoot ".agents\run-logs"
+$runId = '{0:yyyyMMdd-HHmmss}-{1}' -f [DateTime]::UtcNow, [Guid]::NewGuid().ToString('N')
+$script:LogRoot = Join-Path $MainRoot ".agents\run-logs\closeout-$runId"
 New-Item -ItemType Directory -Force -Path $script:LogRoot | Out-Null
 $script:Steps = @()
 $script:FailedStep = $null
+$script:CloseoutLock = $null
+$script:CandidateRoot = Join-Path (Split-Path -Parent $FeatureWorktree) ("candidate-" + [Guid]::NewGuid().ToString('N'))
+$script:CandidateTree = $null
+$script:VerifiedCommit = $null
+$script:ResultsRoot = Join-Path $script:LogRoot 'test-results'
+New-Item -ItemType Directory -Force -Path $script:ResultsRoot | Out-Null
+$previousArtifactsPath = $env:FluxKnowledgeArtifactsPath
+$previousTimingsRoot = $env:FLUXKNOWLEDGE_TEST_TIMINGS_ROOT
 $safeCommitMessage = $CommitMessage.Replace("'", "''")
 $safeBranch = $Branch.Replace("'", "''")
 $goLiveModulePath = Join-Path (Split-Path -Parent $PSScriptRoot) "deploy\native-go-live.psm1"
@@ -1182,35 +1296,87 @@ try {
     if ($GoLive -and -not $DryRun) {
         Assert-NativeGoLiveBootstrapEnvironmentPresent
     }
-    Invoke-FeatureStep -Name "verify-main-clean" -Cwd $MainRoot -Command 'if ((git status --porcelain) -ne $null) { git status --short; exit 1 }' -RunInDryRun
-    Invoke-FeatureStep -Name "dotnet-tool-restore" -Cwd $FeatureWorktree -Command 'dotnet tool restore'
-    Invoke-FeatureStep -Name "dotnet-restore-locked" -Cwd $FeatureWorktree -Command 'dotnet restore FluxKnowledge.slnx --locked-mode'
-    Invoke-FeatureStep -Name "dotnet-build-release" -Cwd $FeatureWorktree -Command 'dotnet build FluxKnowledge.slnx -c Release --no-restore -warnaserror'
-    # Isolate project processes so SQL/capacity fixtures retain their real budgets.
-    # Deliberate concurrency inside each test project remains enabled.
-    Invoke-FeatureStep -Name "dotnet-test-native" -Cwd $FeatureWorktree -Command 'dotnet test FluxKnowledge.slnx -m:1 -c Release --no-build --logger "console;verbosity=minimal"' -TimeoutSeconds $TestStepTimeoutSeconds
-    Invoke-FeatureStep -Name "native-repository-contract" -Cwd $FeatureWorktree -Command 'pwsh -NoProfile -File .\tests\native\repository-contract.ps1 -SourceRoot .'
-    Invoke-FeatureStep -Name "native-closeout-contract" -Cwd $FeatureWorktree -Command 'pwsh -NoProfile -File .\tests\native\complete-feature-dryrun.ps1 -SourceRoot .'
-    Invoke-FeatureStep -Name "native-go-live-bootstrap-nondryrun-contract" -Cwd $FeatureWorktree -Command 'pwsh -NoProfile -File .\tests\native\complete-feature-bootstrap-nondryrun.ps1 -SourceRoot .'
-    Invoke-FeatureStep -Name "native-go-live-contract" -Cwd $FeatureWorktree -Command 'pwsh -NoProfile -File .\tests\native\native-go-live-contract.ps1 -SourceRoot .'
-    Invoke-FeatureStep -Name "native-go-live-one-shot-admission-contract" -Cwd $FeatureWorktree -Command 'dotnet test .\tests\FluxKnowledge.Integration.Tests\FluxKnowledge.Integration.Tests.csproj -c Release --no-build --filter "FullyQualifiedName~NativeGoLiveOneShotAdmissionTests" --logger "console;verbosity=minimal"'
-    Invoke-FeatureStep -Name "native-go-live-recovery-removal-contract" -Cwd $FeatureWorktree -Command 'pwsh -NoProfile -File .\tests\native\native-go-live-recovery-removal-contract.ps1 -SourceRoot .'
-    Invoke-FeatureStep -Name "native-deployment-contract" -Cwd $FeatureWorktree -Command 'pwsh -NoProfile -File .\tests\native\native-deployment-plan.ps1 -SourceRoot .'
-    Invoke-FeatureStep -Name "feature-commit" -Cwd $FeatureWorktree -Command "git add -A -- . ':(exclude).superpowers/sdd/'; if ((git status --porcelain) -ne `$null) { git commit -m '$safeCommitMessage' }"
+    Invoke-CloseoutAction -Name 'verify-main-clean' -Cwd $MainRoot -RunInDryRun -Action {
+        Assert-CloseoutWorktree $MainRoot -ExpectedBranch 'refs/heads/main'
+        $common = Invoke-CheckedGit $MainRoot @('rev-parse', '--path-format=absolute', '--git-common-dir')
+        $featureCommon = Invoke-CheckedGit $FeatureWorktree @('rev-parse', '--path-format=absolute', '--git-common-dir')
+        if ($common -ine $featureCommon) { throw 'Main and feature must belong to the same repository.' }
+        if (-not $DryRun) {
+            $script:CloseoutLock = [IO.File]::Open((Join-Path $common 'fluxknowledge-closeout.lock'),
+                [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+        }
+    }
+    Invoke-FeatureStep -Name "feature-commit" -Cwd $FeatureWorktree -Command "git add -A -- . ':(exclude).superpowers/sdd/'; if (`$LASTEXITCODE -ne 0) { exit `$LASTEXITCODE }; `$status = git status --porcelain -- . ':(exclude).superpowers/sdd/'; if (`$LASTEXITCODE -ne 0) { exit `$LASTEXITCODE }; if (`$status) { git commit -m '$safeCommitMessage' }"
     Invoke-FeatureStep -Name "sync-main" -Cwd $MainRoot -Command 'git pull --ff-only origin main'
-    Invoke-FeatureStep -Name "squash-merge" -Cwd $MainRoot -Command "git merge --squash '$safeBranch'"
-    Invoke-FeatureStep -Name "dotnet-tool-restore-main" -Cwd $MainRoot -Command 'dotnet tool restore'
-    Invoke-FeatureStep -Name "dotnet-restore-locked-main" -Cwd $MainRoot -Command 'dotnet restore FluxKnowledge.slnx --locked-mode'
-    Invoke-FeatureStep -Name "dotnet-build-release-main" -Cwd $MainRoot -Command 'dotnet build FluxKnowledge.slnx -c Release --no-restore -warnaserror'
-    Invoke-FeatureStep -Name "dotnet-test-native-main" -Cwd $MainRoot -Command 'dotnet test FluxKnowledge.slnx -m:1 -c Release --no-build --logger "console;verbosity=minimal"' -TimeoutSeconds $TestStepTimeoutSeconds
-    Invoke-FeatureStep -Name "main-commit" -Cwd $MainRoot -Command "if ((git status --porcelain) -ne `$null) { git commit -m '$safeCommitMessage' } else { 'No staged changes to commit.' }"
+    Invoke-CloseoutAction -Name 'pin-inputs' -Cwd $MainRoot -RunInDryRun -Action {
+        Assert-CloseoutWorktree $MainRoot -ExpectedBranch 'refs/heads/main'
+        $script:BaseSha = Invoke-CheckedGit $MainRoot @('rev-parse', 'HEAD')
+        $script:FeatureSha = Invoke-CheckedGit $FeatureWorktree @('rev-parse', 'HEAD')
+        if ($DryRun) {
+            $script:CandidateTree = Invoke-CheckedGit $MainRoot @('rev-parse', 'HEAD^{tree}')
+            $script:VerifiedCommit = $script:BaseSha
+        }
+        if (-not $DryRun) {
+            Assert-CloseoutWorktree $FeatureWorktree -Head $script:FeatureSha -ExpectedBranch "refs/heads/$Branch"
+        }
+    }
+    $safeCandidate = $script:CandidateRoot.Replace("'", "''")
+    Invoke-FeatureStep -Name 'create-candidate' -Cwd $MainRoot -Command "git worktree add --detach '$safeCandidate' '$($script:BaseSha)'"
+    Invoke-FeatureStep -Name 'squash-merge' -Cwd $script:CandidateRoot -Command "git merge --squash '$($script:FeatureSha)'"
+    Invoke-CloseoutAction -Name 'capture-candidate-tree' -Cwd $script:CandidateRoot -Action {
+        Assert-CloseoutWorktree $script:CandidateRoot -Head $script:BaseSha -AllowStaged
+        $script:CandidateTree = Invoke-CheckedGit $script:CandidateRoot @('write-tree')
+    }
+    # Never inherit another checkout's binaries, even when the caller redirects output.
+    # Worker-copy targets append bin to this root; keep its trailing separator.
+    $env:FluxKnowledgeArtifactsPath = (Join-Path $script:CandidateRoot 'artifacts') + [IO.Path]::DirectorySeparatorChar
+    $env:FLUXKNOWLEDGE_TEST_TIMINGS_ROOT = $script:ResultsRoot
+    $safeResults = $script:ResultsRoot.Replace("'", "''")
+    Invoke-FeatureStep -Name 'dotnet-tool-restore-candidate' -Cwd $script:CandidateRoot -Command 'dotnet tool restore'
+    Invoke-FeatureStep -Name 'dotnet-restore-locked-candidate' -Cwd $script:CandidateRoot -Command 'dotnet restore FluxKnowledge.slnx --locked-mode'
+    Invoke-FeatureStep -Name 'dotnet-build-release-candidate' -Cwd $script:CandidateRoot -Command 'dotnet build FluxKnowledge.slnx -c Release --no-restore -warnaserror'
+    # Retain project isolation and intentional concurrency within each project.
+    # The admission tests are included here; there is no separate repeat.
+    Invoke-FeatureStep -Name 'dotnet-test-native-candidate' -Cwd $script:CandidateRoot -Command "dotnet test FluxKnowledge.slnx -m:1 -c Release --no-build --logger 'console;verbosity=minimal' --logger trx --results-directory '$safeResults'" -TimeoutSeconds $TestStepTimeoutSeconds
+    Invoke-FeatureStep -Name "native-repository-contract" -Cwd $script:CandidateRoot -Command 'pwsh -NoProfile -File .\tests\native\repository-contract.ps1 -SourceRoot .'
+    Invoke-FeatureStep -Name "native-closeout-contract" -Cwd $script:CandidateRoot -Command 'pwsh -NoProfile -File .\tests\native\complete-feature-dryrun.ps1 -SourceRoot .'
+    Invoke-FeatureStep -Name 'native-closeout-integration-contract' -Cwd $script:CandidateRoot -Command 'pwsh -NoProfile -File .\tests\native\complete-feature-integration.ps1 -SourceRoot .'
+    Invoke-FeatureStep -Name "native-go-live-bootstrap-nondryrun-contract" -Cwd $script:CandidateRoot -Command 'pwsh -NoProfile -File .\tests\native\complete-feature-bootstrap-nondryrun.ps1 -SourceRoot .'
+    Invoke-FeatureStep -Name "native-go-live-contract" -Cwd $script:CandidateRoot -Command 'pwsh -NoProfile -File .\tests\native\native-go-live-contract.ps1 -SourceRoot .'
+    Invoke-FeatureStep -Name "native-go-live-recovery-removal-contract" -Cwd $script:CandidateRoot -Command 'pwsh -NoProfile -File .\tests\native\native-go-live-recovery-removal-contract.ps1 -SourceRoot .'
+    Invoke-FeatureStep -Name "native-deployment-contract" -Cwd $script:CandidateRoot -Command 'pwsh -NoProfile -File .\tests\native\native-deployment-plan.ps1 -SourceRoot .'
+    Invoke-FeatureStep -Name 'native-test-timing-contract' -Cwd $script:CandidateRoot -Command 'pwsh -NoProfile -File .\tests\native\test-timing-summary-contract.ps1 -SourceRoot .'
+    Invoke-CloseoutAction -Name 'verify-candidate-tree' -Cwd $script:CandidateRoot -Action {
+        Assert-CloseoutWorktree $script:CandidateRoot -Head $script:BaseSha -Tree $script:CandidateTree -AllowStaged
+    }
+    Invoke-FeatureStep -Name 'candidate-commit' -Cwd $script:CandidateRoot -Command "git diff --cached --quiet; if (`$LASTEXITCODE -eq 1) { git commit -m '$safeCommitMessage' } elseif (`$LASTEXITCODE -ne 0) { exit `$LASTEXITCODE }"
+    Invoke-CloseoutAction -Name 'verify-candidate-commit' -Cwd $script:CandidateRoot -Action {
+        $script:VerifiedCommit = Invoke-CheckedGit $script:CandidateRoot @('rev-parse', 'HEAD')
+        Assert-CloseoutWorktree $script:CandidateRoot -Head $script:VerifiedCommit -Tree $script:CandidateTree
+        if ($script:VerifiedCommit -cne $script:BaseSha -and
+            (Invoke-CheckedGit $script:CandidateRoot @('rev-parse', 'HEAD^')) -cne $script:BaseSha) {
+            throw 'Candidate commit has an unexpected parent.'
+        }
+        Assert-CloseoutWorktree $MainRoot -Head $script:BaseSha -ExpectedBranch 'refs/heads/main'
+        Assert-CloseoutWorktree $FeatureWorktree -Head $script:FeatureSha -ExpectedBranch "refs/heads/$Branch"
+    }
+    Invoke-CloseoutAction -Name 'promote-candidate' -Cwd $MainRoot -Action {
+        Assert-CloseoutWorktree $MainRoot -Head $script:BaseSha -ExpectedBranch 'refs/heads/main'
+        [void](Invoke-CheckedGit $MainRoot @('merge', '--ff-only', $script:VerifiedCommit))
+    }
+    Invoke-CloseoutAction -Name 'verify-promoted-main' -Cwd $MainRoot -Action {
+        Assert-CloseoutWorktree $MainRoot -Head $script:VerifiedCommit -Tree $script:CandidateTree -ExpectedBranch 'refs/heads/main'
+        Assert-CloseoutWorktree $script:CandidateRoot -Head $script:VerifiedCommit -Tree $script:CandidateTree
+    }
 
-    $headSha = (git -C $MainRoot rev-parse HEAD).Trim()
+    $headSha = if ($DryRun) { $script:BaseSha } else { $script:VerifiedCommit }
+    $goLiveModulePath = Join-Path $script:CandidateRoot 'scripts\deploy\native-go-live.psm1'
+    $goLiveBootstrapScript = Join-Path $script:CandidateRoot 'scripts\deploy\native-go-live-bootstrap.sql'
     if ($GoLive) {
         $mergedMainRoot = Join-Path $closeoutRoot "payload-$headSha"
         $safeMergedMainRoot = $mergedMainRoot.Replace("'", "''")
         $publishCommand = "if (Test-Path -LiteralPath '$safeMergedMainRoot') { Remove-Item -LiteralPath '$safeMergedMainRoot' -Recurse -Force }; dotnet publish .\src\FluxKnowledge.Web\FluxKnowledge.Web.csproj -c Release --no-build --no-restore -o '$safeMergedMainRoot'"
-        Invoke-FeatureStep -Name "publish-merged-main" -Cwd $MainRoot -Command $publishCommand
+        Invoke-FeatureStep -Name "publish-merged-main" -Cwd $script:CandidateRoot -Command $publishCommand
         if ($DryRun) {
             Add-DirectNativeGoLiveStep -Name "native-go-live" -Command "Invoke-NativeGoLive" -Skipped
             Add-DirectNativeGoLiveStep -Name "native-go-live-bootstrap" -Command "Install-NativeGoLiveBootstrap" -Skipped
@@ -1242,4 +1408,8 @@ try {
     Write-SummaryAndExit -ExitCode 0
 } catch {
     Write-SummaryAndExit -ExitCode 1
+} finally {
+    $env:FluxKnowledgeArtifactsPath = $previousArtifactsPath
+    $env:FLUXKNOWLEDGE_TEST_TIMINGS_ROOT = $previousTimingsRoot
+    if ($script:CloseoutLock) { $script:CloseoutLock.Dispose() }
 }

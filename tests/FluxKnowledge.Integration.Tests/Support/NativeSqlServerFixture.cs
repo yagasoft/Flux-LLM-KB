@@ -20,6 +20,7 @@ public sealed class NativeSqlServerFixture : IAsyncLifetime
     private string? _serverConnectionString;
     private string? _fileRoot;
     private bool _databaseCreateAttempted;
+    private readonly SqlFixtureTimings _timings = new(Environment.GetEnvironmentVariable(SqlFixtureTimings.EnvironmentVariable));
 
     public string DatabaseName { get; } = $"{TestCatalogPrefix}{Guid.NewGuid():N}";
     internal string? InitialMigration { get; init; }
@@ -54,31 +55,34 @@ public sealed class NativeSqlServerFixture : IAsyncLifetime
         ValidateGeneratedCatalog(DatabaseName);
 
         await using var serverConnection = new SqlConnection(_serverConnectionString);
-        await serverConnection.OpenAsync().ConfigureAwait(false);
-        await EnsureSafeServerDefaultsAsync(serverConnection).ConfigureAwait(false);
+        await _timings.MeasureAsync("connect-and-safety", DatabaseName, async () =>
+        {
+            await serverConnection.OpenAsync().ConfigureAwait(false);
+            await EnsureSafeServerDefaultsAsync(serverConnection).ConfigureAwait(false);
+        }).ConfigureAwait(false);
 
         await RunCreateSequenceAsync(
-            async () =>
+            () => _timings.MeasureAsync("create", DatabaseName, async () =>
             {
                 await using var create = new SqlCommand(BuildCreateDatabaseSql(DatabaseName, _fileRoot), serverConnection);
                 await create.ExecuteNonQueryAsync().ConfigureAwait(false);
                 _databaseCreateAttempted = true;
-            },
-            () => VerifyCreatedDatabaseFilesAsync(serverConnection),
-            async () =>
+            }),
+            () => _timings.MeasureAsync("verify-files", DatabaseName, () => VerifyCreatedDatabaseFilesAsync(serverConnection)),
+            () => _timings.MeasureAsync("migrate", DatabaseName, async () =>
             {
                 var options = new DbContextOptionsBuilder<FluxKnowledgeDbContext>()
                     .UseSqlServer(ConnectionString)
                     .Options;
                 await using var context = new FluxKnowledgeDbContext(options);
                 await context.GetService<IMigrator>().MigrateAsync(InitialMigration).ConfigureAwait(false);
-            },
-            DropDatabaseAsync).ConfigureAwait(false);
+            }),
+            () => _timings.MeasureAsync("cleanup", DatabaseName, DropDatabaseAsync)).ConfigureAwait(false);
     }
 
     public async Task DisposeAsync()
     {
-        await DropDatabaseAsync().ConfigureAwait(false);
+        await _timings.MeasureAsync("cleanup", DatabaseName, DropDatabaseAsync).ConfigureAwait(false);
     }
 
     // Interrupts every connection in this test's catalogue, never another catalogue.
@@ -523,6 +527,7 @@ public sealed class NativeSqlServerFixture : IAsyncLifetime
 
     internal sealed class PreviousMigrationDatabase : IAsyncDisposable
     {
+        private readonly SqlFixtureTimings _timings = new(Environment.GetEnvironmentVariable(SqlFixtureTimings.EnvironmentVariable));
         private readonly string _serverConnectionString;
         private readonly string _databaseName;
         private readonly string _targetMigration;
@@ -555,7 +560,9 @@ public sealed class NativeSqlServerFixture : IAsyncLifetime
                 .UseSqlServer(ConnectionString)
                 .Options);
 
-        internal async Task InitializeAsync()
+        internal Task InitializeAsync() => _timings.MeasureAsync("previous-initialize", _databaseName, InitializeCoreAsync);
+
+        private async Task InitializeCoreAsync()
         {
             await using var serverConnection = new SqlConnection(_serverConnectionString);
             await serverConnection.OpenAsync().ConfigureAwait(false);
@@ -583,7 +590,9 @@ public sealed class NativeSqlServerFixture : IAsyncLifetime
             }
         }
 
-        public async ValueTask DisposeAsync()
+        public ValueTask DisposeAsync() => new(_timings.MeasureAsync("previous-cleanup", _databaseName, DisposeCoreAsync));
+
+        private async Task DisposeCoreAsync()
         {
             if (!_created)
             {

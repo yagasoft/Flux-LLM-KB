@@ -14,7 +14,7 @@ Never provide the application's production database connection to tests.
 dotnet tool restore
 dotnet restore FluxKnowledge.slnx --locked-mode
 dotnet build FluxKnowledge.slnx -c Release --no-restore -warnaserror
-dotnet test FluxKnowledge.slnx -c Release --no-build --filter "Category!=Browser"
+dotnet test FluxKnowledge.slnx -m:1 -c Release --no-build --filter "Category!=Browser"
 pwsh -NoProfile -File tests/native/repository-contract.ps1
 pwsh -NoProfile -File tests/native/complete-feature-dryrun.ps1
 pwsh -NoProfile -File tests/native/native-deployment-plan.ps1
@@ -216,6 +216,50 @@ feature closeout. Its default path verifies, commits, integrates and pushes the
 change without deploying. It emits step evidence including `failed_step` and
 `log_path`; resolve failures before rerunning. `-KeepWorktree` preserves the
 checkout. `-GoLive` is a separate operational action with the gates above.
+
+During development, build the affected project and use its existing
+`dotnet test --filter "FullyQualifiedName~ClassOrMethod"` support for focused
+checks. Keep projects sequential with `-m:1`; the SQL, native-process and capacity
+fixtures still share finite resources. Do not run another full suite solely
+because a new chat message arrived.
+
+Closeout commits the feature changes, synchronises canonical `main`, and prepares
+a detached squash-merged candidate beside the feature checkout. It restores and
+builds that candidate once, then runs the full solution once and all native
+contracts there. Candidate-owned build outputs override any inherited
+`FluxKnowledgeArtifactsPath`. There is no separate admission-test repeat: those
+tests remain in the full integration project.
+
+After verification, the script checks that the candidate's tracked content,
+index and base commit have not changed, commits it, and checks the resulting
+tree again to detect hook changes. It fast-forwards `main` to that pinned commit,
+verifies its tree and clean state, and pushes the exact SHA. A repository-local
+closeout lock prevents overlapping script runs. Continue to coordinate shared
+SQL and other writers; the lock cannot stop arbitrary editors or Git commands.
+All four projects retain their existing isolation and opt-in skips.
+
+Per-run JSON summaries, step logs, TRX files and SQL fixture phase timings remain
+under `.agents/run-logs/closeout-<run-id>/`, outside the disposable candidate.
+Inspect them with:
+
+```powershell
+pwsh -NoProfile -File scripts/dev/summarise-test-timings.ps1 -ResultsRoot <results-root>
+```
+
+For focused timing, set `FLUXKNOWLEDGE_TEST_TIMINGS_ROOT` to a private results
+directory and add `--logger trx --results-directory <results-root>` to
+`dotnet test`. SQL timings cover connection/safety checks, creation, file
+verification, migrations and cleanup. Summed timings can overlap when tests run
+concurrently and are not a wall-clock breakdown.
+
+A failed gate preserves the feature and candidate with its logs; canonical
+`main` is not changed by a failed candidate verification. Failures after promotion
+can leave a verified local commit awaiting push. An ordinary rerun handles the
+empty squash and does not invent another commit. No retry grants or replays a
+production action: `-GoLive` always needs current, explicit operational authority.
+Cleanup happens after the required final push and checks, and refuses changed
+feature work or a candidate whose detached state, commit, tree or clean state
+changed during publication.
 
 The canonical plugin-validator test uses the bundled validator by default.
 If that file is absent, set `FLUXKNOWLEDGE_PLUGIN_VALIDATOR_PATH` for the test

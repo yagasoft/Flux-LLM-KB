@@ -30,7 +30,7 @@ $featureCommit = [regex]::Match(
     'Invoke-FeatureStep\s+-Name\s+["'']feature-commit["'']\s+-Cwd\s+\$FeatureWorktree\s+-Command\s+"(?<command>(?:[^"]|"")*)"')
 Assert-True $featureCommit.Success 'The closeout feature-commit step is missing.'
 $featureCommitCommand = $featureCommit.Groups['command'].Value.
-    Replace('`$null', '$null').
+    Replace('`$', '$').
     Replace("'`$safeCommitMessage'", "'contract staging hygiene'")
 
 $temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) "FluxKnowledgeSddScratch-$([Guid]::NewGuid().ToString('N'))"

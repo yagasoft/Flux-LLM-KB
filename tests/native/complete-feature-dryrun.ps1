@@ -73,7 +73,8 @@ Assert-False ($text -match 'post-deploy-validation-record-commit') 'Live evidenc
 foreach ($switch in @('ConfirmCleanSlate', 'ConfirmConfigureVss', 'ConfirmDestroySql', 'ConfirmRegisterCodex')) {
     Assert-True ($text -match ("\[switch\]\`$$switch\b")) "Closeout must require $switch."
 }
-Assert-True (([regex]::Matches($text, 'git push origin main')).Count -eq 1) 'Closeout must have one final main push.'
+Assert-True (([regex]::Matches($text, 'git push origin ')).Count -eq 1 -and
+    $text.Contains('$script:VerifiedCommit):refs/heads/main')) 'Closeout must push the pinned verified commit once.'
 Assert-False ($text -match 'Invoke-FeatureStep\s+-Name\s+["'']native-go-live["'']') 'GoLive must not use the child step runner.'
 Assert-False ($text -match 'FLUXKNOWLEDGE_CLOSEOUT_(?:DEPLOY|BACKUP|APPLY_MIGRATIONS)') 'Obsolete deployment transport remains.'
 Assert-True ($text -match '\$bootstrapEnvironmentName\s*=\s*["'']FLUXKNOWLEDGE_NATIVE_GO_LIVE_SQL_BOOTSTRAP["'']' -and
@@ -146,26 +147,33 @@ try {
     $ordinarySteps = @($ordinarySummary.steps | ForEach-Object { $_.name })
     $expectedOrdinarySteps = @(
         'verify-main-clean',
-        'dotnet-tool-restore',
-        'dotnet-restore-locked',
-        'dotnet-build-release',
-        'dotnet-test-native',
-        'native-repository-contract',
-        'native-closeout-contract',
-        'native-go-live-bootstrap-nondryrun-contract',
-        'native-go-live-contract',
-        'native-go-live-one-shot-admission-contract',
-        'native-go-live-recovery-removal-contract',
-        'native-deployment-contract',
         'feature-commit',
         'sync-main',
+        'pin-inputs',
+        'create-candidate',
         'squash-merge',
-        'dotnet-tool-restore-main',
-        'dotnet-restore-locked-main',
-        'dotnet-build-release-main',
-        'dotnet-test-native-main',
-        'main-commit',
+        'capture-candidate-tree',
+        'dotnet-tool-restore-candidate',
+        'dotnet-restore-locked-candidate',
+        'dotnet-build-release-candidate',
+        'dotnet-test-native-candidate',
+        'native-repository-contract',
+        'native-closeout-contract',
+        'native-closeout-integration-contract',
+        'native-go-live-bootstrap-nondryrun-contract',
+        'native-go-live-contract',
+        'native-go-live-recovery-removal-contract',
+        'native-deployment-contract',
+        'native-test-timing-contract',
+        'verify-candidate-tree',
+        'candidate-commit',
+        'verify-candidate-commit',
+        'promote-candidate',
+        'verify-promoted-main',
+        'verify-before-push',
         'push-main',
+        'verify-published-main',
+        'cleanup-candidate',
         'cleanup-worktree')
     Assert-True (($ordinarySteps -join '|') -ceq ($expectedOrdinarySteps -join '|')) `
         "The ordinary closeout sequence is unexpected: $($ordinarySteps -join ', ')."
@@ -205,7 +213,7 @@ try {
     Assert-True ($goLive.ExitCode -eq 0) "The acknowledged go-live dry-run failed: $($goLive.Output)"
     $goLiveSummary = $goLive.Output | ConvertFrom-Json
     $goLiveSteps = @($goLiveSummary.steps | ForEach-Object { $_.name })
-    $mainCommitIndex = [Array]::IndexOf($goLiveSteps, 'main-commit')
+    $mainCommitIndex = [Array]::IndexOf($goLiveSteps, 'verify-promoted-main')
     $publishIndex = [Array]::IndexOf($goLiveSteps, 'publish-merged-main')
     $bootstrapIndex = [Array]::IndexOf($goLiveSteps, 'native-go-live-bootstrap')
     $goLiveIndex = [Array]::IndexOf($goLiveSteps, 'native-go-live')
