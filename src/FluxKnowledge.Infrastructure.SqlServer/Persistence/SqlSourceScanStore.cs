@@ -588,7 +588,8 @@ public sealed partial class SqlSourceScanStore(
                 $"SELECT * FROM [SourceRootConfigurations] WITH (UPDLOCK, HOLDLOCK) WHERE [Id] = {claim.SourceRoot.Id.Value}")
                 .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
             var now = timeProvider.GetUtcNow();
-            if (root is null || root.State != (int)SourceRootState.Enabled || root.CrawlMode != (int)SourceDiscoveryMode.GitTracked ||
+            if (root is null || root.State != (int)SourceRootState.Enabled || root.CrawlMode != (int)claim.SourceRoot.DiscoveryMode ||
+                root.CrawlMode is not ((int)SourceDiscoveryMode.Filesystem) and not ((int)SourceDiscoveryMode.GitTracked) ||
                 root.ConfigurationRevision != claim.SourceRoot.ConfigurationRevision ||
                 !await OwnsRootScanAsync(context, root.Id, new(claim.ScanRequest.Id,
                     new(claim.ControlJobId, claim.LeaseOwner, claim.LeaseGeneration)), now, cancellationToken).ConfigureAwait(false)) return false;

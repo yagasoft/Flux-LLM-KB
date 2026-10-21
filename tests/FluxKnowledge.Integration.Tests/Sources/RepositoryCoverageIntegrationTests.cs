@@ -389,6 +389,39 @@ public sealed class RepositoryCoverageIntegrationTests(NativeSqlServerFixture fi
     }
 
     [NativeSqlServerFact]
+    public async Task Filesystem_lease_renewal_retains_current_authority_and_refuses_stale_generation_mode_and_expiry()
+    {
+        using var repository = new Repository();
+        var factory = SqlTestData.CreateFactory(fixture); var clock = new Clock();
+        var commands = Commands(repository.Path, factory, clock);
+        await Commit(commands, Mutation("root_create", new { path = repository.Path, displayName = "Filesystem renewal" }));
+        var store = new SqlSourceScanStore(factory, clock);
+        var claim = Assert.IsType<ClaimedSourceScan>(await store.ClaimNextReleasedAsync("filesystem-renewing", clock.Now, TimeSpan.FromMinutes(15), default));
+        Assert.Equal(SourceDiscoveryMode.Filesystem, claim.SourceRoot.DiscoveryMode);
+        for (var step = 0; step < 3; step++)
+        {
+            clock.Advance(TimeSpan.FromMinutes(6));
+            Assert.True(await store.RenewLeaseAsync(claim, TimeSpan.FromMinutes(15), default));
+        }
+        Assert.False(await store.RenewLeaseAsync(claim with { LeaseGeneration = claim.LeaseGeneration + 1 }, TimeSpan.FromMinutes(15), default));
+        await using (var drift = await factory.CreateDbContextAsync())
+        {
+            var root = await drift.SourceRootConfigurations.SingleAsync(value => value.Id == claim.SourceRoot.Id.Value);
+            root.CrawlMode = (int)SourceDiscoveryMode.GitTracked;
+            await drift.SaveChangesAsync();
+        }
+        Assert.False(await store.RenewLeaseAsync(claim, TimeSpan.FromMinutes(15), default));
+        await using (var restore = await factory.CreateDbContextAsync())
+        {
+            var root = await restore.SourceRootConfigurations.SingleAsync(value => value.Id == claim.SourceRoot.Id.Value);
+            root.CrawlMode = (int)SourceDiscoveryMode.Filesystem;
+            await restore.SaveChangesAsync();
+        }
+        clock.Advance(TimeSpan.FromMinutes(16));
+        Assert.False(await store.RenewLeaseAsync(claim, TimeSpan.FromMinutes(15), default));
+    }
+
+    [NativeSqlServerFact]
     public async Task Git_lease_renewal_allows_long_scans_and_pause_fences_old_workers_before_resume()
     {
         using var repository = new Repository(); repository.Write("Guide.md", "Renewed scan fact"); repository.Git("add", ".");

@@ -22,12 +22,17 @@ namespace FluxKnowledge.Integration.Tests.Sources;
 [Collection("sql-full-text")]
 public sealed class CloudSourcePipelineTests(NativeSqlServerFixture fixture) : IClassFixture<NativeSqlServerFixture>
 {
-    [NativeSqlServerFact]
-    public async Task Cloud_sample_previews_registers_publishes_and_reads_back_without_ingesting_unavailable_sibling()
+    [NativeSqlServerTheory]
+    [InlineData(".txt")]
+    [InlineData(".dart")]
+    [InlineData(".svg")]
+    [InlineData(".unlisted")]
+    public async Task Cloud_sample_previews_registers_publishes_and_reads_back_without_ingesting_unavailable_sibling(string extension)
     {
         using var cloud = new CloudSourceFixture();
         var directory = cloud.Directory("documents");
-        cloud.File("documents/available.txt", "Cloud telescope evidence remains locally available.");
+        var availableName = "available" + extension;
+        cloud.File("documents/" + availableName, "Cloud telescope evidence remains locally available.");
         cloud.File("documents/offline.txt", "Unavailable private sibling.", dehydrate: true);
         cloud.MakeCloudDirectory(directory);
         await using var environment = await SqlToUsearchRebuildTests.PipelineEnvironment.CreateAsync(fixture, "Unrelated baseline");
@@ -35,6 +40,9 @@ public sealed class CloudSourcePipelineTests(NativeSqlServerFixture fixture) : I
         var enumerator = new LocalSourceEnumerator();
         var previewReader = new SourceRootProjectionReader(environment.Factory, policy,
             enumerator, new LocalSourceCapabilityHandlerRegistry([]));
+        int rootsBeforePreview;
+        await using (var before = environment.Factory.CreateDbContext())
+            rootsBeforePreview = await before.SourceRootConfigurations.CountAsync();
         var preview = await previewReader.PreviewAsync(new(directory, "Cloud sample", false, [], [], 1024, "test"), default);
         Assert.Equal(1, preview.PlannedInProcessCount);
         var unavailable = await Assert.ThrowsAnyAsync<IOException>(() => new Utf8FileSourceReader(new LocalIngressOptions([directory]))
@@ -42,7 +50,8 @@ public sealed class CloudSourcePipelineTests(NativeSqlServerFixture fixture) : I
         Assert.True(unavailable is SourceContentUnavailableException, unavailable.ToString());
         Assert.True(preview.UnavailableFileCount == 1, JsonSerializer.Serialize(enumerator.LastEvidence));
         Assert.True(preview.IsPartial);
-        await using (var before = environment.Factory.CreateDbContext()) Assert.Empty(await before.SourceRootConfigurations.ToListAsync());
+        await using (var after = environment.Factory.CreateDbContext())
+            Assert.Equal(rootsBeforePreview, await after.SourceRootConfigurations.CountAsync());
 
         var commands = new NativeCorpusCommandService(
             new NativeOperationService(new SqlNativeOperationStore(environment.Factory, TimeProvider.System), []),
@@ -50,7 +59,7 @@ public sealed class CloudSourcePipelineTests(NativeSqlServerFixture fixture) : I
         var mutation = new NativeCorpusMutation("root_create", JsonSerializer.SerializeToElement(new
         {
             path = directory, displayName = "Cloud sample", recursive = false, maximumFileBytes = 1024,
-            includePatterns = new[] { "available.txt", "offline.txt" }
+            includePatterns = new[] { availableName, "offline.txt" }
         }));
         var admission = await commands.PreviewAsync(mutation, "test", default);
         await commands.CommitAsync(mutation, admission.ConfirmationId, $"cloud:{Guid.NewGuid():N}", "test", default);
@@ -73,7 +82,7 @@ public sealed class CloudSourcePipelineTests(NativeSqlServerFixture fixture) : I
         Assert.Contains("telescope evidence remains locally available", read.Text);
         await using var verification = environment.Factory.CreateDbContext();
         var revision = Assert.Single(await verification.SourceRevisions.Where(value => value.SourceRootId == claim.SourceRoot.Id.Value).ToListAsync());
-        Assert.EndsWith("available.txt", revision.CanonicalPath, StringComparison.OrdinalIgnoreCase);
+        Assert.EndsWith(availableName, revision.CanonicalPath, StringComparison.OrdinalIgnoreCase);
         Assert.Null(revision.SuppressedAtUtc);
         var scan = await verification.SourceScanRequests.SingleAsync(value => value.Id == claim.ScanRequest.Id.Value);
         Assert.True(scan.ErrorFileCount >= 1);

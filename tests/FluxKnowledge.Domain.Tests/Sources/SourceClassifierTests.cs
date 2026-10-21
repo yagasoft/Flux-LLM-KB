@@ -226,12 +226,50 @@ public sealed class SourceClassifierTests
         Assert.Null(result.Text);
     }
 
-    [Fact]
-    public void Classify_represents_an_unknown_extension_without_text_projection()
+    [Theory]
+    [InlineData("component.dart")]
+    [InlineData("page.cshtml")]
+    [InlineData("view.xaml")]
+    [InlineData("settings.config")]
+    [InlineData("style.scss")]
+    [InlineData("diagram.svg")]
+    [InlineData("records.jsonl")]
+    [InlineData("opaque.payload")]
+    [InlineData("LICENSE")]
+    public void Classify_accepts_complete_strict_utf8_without_an_extension_allowlist(string fileName)
     {
-        var result = SourceClassifier.Classify("opaque.payload", "text"u8.ToArray(), 4);
+        var bytes = Encoding.UTF8.GetBytes("Workspace text Ω\n<script>inert text</script>");
+        var result = SourceClassifier.Classify(fileName, bytes, bytes.Length);
 
-        Assert.Equal(SourceClassification.Unknown, result.Classification);
+        Assert.Equal(SourceClassification.AcceptedUtf8Text, result.Classification);
+        Assert.Equal(Encoding.UTF8.GetString(bytes), result.Text);
+        Assert.Null(result.Reason);
+    }
+
+    [Theory]
+    [InlineData("255044462d312e37", SourceClassification.DeferredCapability)]
+    [InlineData("74657874007061796c6f6164", SourceClassification.DeferredPolicy)]
+    [InlineData("c328", SourceClassification.DeferredPolicy)]
+    public void Unlisted_extensions_do_not_bypass_binary_or_decoding_checks(string hex, SourceClassification expected)
+    {
+        var bytes = Convert.FromHexString(hex);
+        var result = SourceClassifier.Classify("unlisted.payload", bytes, bytes.Length);
+
+        Assert.Equal(expected, result.Classification);
         Assert.Null(result.Text);
+        Assert.NotNull(result.Reason);
+    }
+
+    [Fact]
+    public void Unlisted_text_still_requires_complete_bytes_within_the_effective_budget()
+    {
+        var bytes = "workspace text"u8.ToArray();
+
+        Assert.Equal("Read byte count does not match the discovered file size.",
+            SourceClassifier.Classify("unlisted.payload", bytes, bytes.Length, hasFullBoundedBuffer: false).Reason);
+        Assert.Equal("Read byte count does not match the discovered file size.",
+            SourceClassifier.Classify("unlisted.payload", bytes, bytes.Length + 1).Reason);
+        Assert.Equal("File exceeds the effective UTF-8 text ingestion limit.",
+            SourceClassifier.Classify("unlisted.payload", bytes, bytes.Length, maximumAcceptedTextBytes: bytes.Length - 1).Reason);
     }
 }

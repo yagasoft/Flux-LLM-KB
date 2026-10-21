@@ -11,12 +11,14 @@ namespace FluxKnowledge.Domain.Tests.Sources;
 public sealed class SourceScanLeaseRenewalTests
 {
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task Active_Git_scan_renews_past_original_expiry_or_cancels_when_ownership_is_lost(bool loseOwnership)
+    [InlineData(SourceDiscoveryMode.GitTracked, false)]
+    [InlineData(SourceDiscoveryMode.GitTracked, true)]
+    [InlineData(SourceDiscoveryMode.Filesystem, false)]
+    [InlineData(SourceDiscoveryMode.Filesystem, true)]
+    public async Task Active_scan_renews_past_original_expiry_or_cancels_when_ownership_is_lost(SourceDiscoveryMode discoveryMode, bool loseOwnership)
     {
         var clock = new ManualClock();
-        var root = SourceRootConfiguration.Create("C:\\disposable", "Git", true, false, 1024, discoveryMode: SourceDiscoveryMode.GitTracked);
+        var root = SourceRootConfiguration.Create("I:\\disposable", "Renewal", true, false, 1024, discoveryMode: discoveryMode);
         var claim = new ClaimedSourceScan(Guid.NewGuid(), "owner", 1, root,
             SourceScanRequest.Restore(SourceScanRequestId.New(), root.Id, "test", clock.GetUtcNow(), SourceScanRequestState.Running, clock.GetUtcNow()));
         var control = new Control(claim, clock, loseOwnership);

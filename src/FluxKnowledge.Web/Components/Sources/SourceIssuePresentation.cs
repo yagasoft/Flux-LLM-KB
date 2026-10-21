@@ -16,6 +16,7 @@ internal static class SourceIssuePresentation
 
     internal static string Guidance(string? reason) => reason switch
     {
+        "File extension is unknown to local source ingestion." => "An earlier extension allowlist refused this item. Complete, valid UTF-8 text can use exact retained-policy recovery; recognised binary formats still require a supported parser. No source edit or full scan is needed.",
         "index-storage-capacity-deferred" => "Publication is waiting for free index storage and will retry automatically. Free app-owned storage through reviewed retention; the source file remains eligible and its previous publication is preserved.",
         "SourceAccessDenied" => "Windows denied access to the indexing identity. Ask an administrator to approve scoped automatic source-access recovery or grant read access to this item. Source trust does not change Windows permissions.",
         "SourceAccessRepairNotApproved" => "This physical source root has no approved automatic access policy. An administrator must approve the root and indexing identity before the helper can grant read access.",

@@ -5,6 +5,7 @@ using FluxKnowledge.Application.Workers;
 using FluxKnowledge.Domain.Sources;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 
 namespace FluxKnowledge.Application.Sources;
 
@@ -36,7 +37,8 @@ public sealed class SourceReconciliationService(
     TimeProvider timeProvider,
     SourceWatchCoordinator? watchCoordinator = null,
     IDeploymentValidationHold? deploymentValidationHold = null,
-    IDatabaseStartupReadiness? databaseStartupReadiness = null) : BackgroundService
+    IDatabaseStartupReadiness? databaseStartupReadiness = null,
+    ILogger<SourceReconciliationService>? logger = null) : BackgroundService
 {
     private static readonly TimeSpan DefaultCadence = TimeSpan.FromMinutes(15);
     private static readonly TimeSpan WatchCadence = TimeSpan.FromSeconds(2);
@@ -148,6 +150,8 @@ public sealed class SourceReconciliationService(
             {
                 result = new SourceScanResult(claim.SourceRoot.Id, claim.ScanRequest.Id, 0, 0, 0, 0);
                 failureReason = Truncate(exception.GetType().Name);
+                logger?.LogWarning(exception, "Source scan {ScanRequestId} for root {SourceRootId} failed; its request remains retryable.",
+                    claim.ScanRequest.Id.Value, claim.SourceRoot.Id.Value);
             }
 
             try
@@ -181,8 +185,7 @@ public sealed class SourceReconciliationService(
     {
         using var ownedScan = CancellationTokenSource.CreateLinkedTokenSource(token);
         using var stopRenewal = CancellationTokenSource.CreateLinkedTokenSource(token);
-        var renewal = claim.SourceRoot.DiscoveryMode == SourceDiscoveryMode.GitTracked
-            ? RenewWhileActiveAsync(control, claim, ownedScan, stopRenewal.Token) : Task.CompletedTask;
+        var renewal = RenewWhileActiveAsync(control, claim, ownedScan, stopRenewal.Token);
         try
         {
             var result = await scanner.ScanAsync(claim.SourceRoot, claim.ScanRequest, ownedScan.Token).ConfigureAwait(false);

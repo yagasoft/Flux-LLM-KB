@@ -20,16 +20,22 @@ namespace FluxKnowledge.Integration.Tests.Sources;
 
 public sealed class DefaultRetainedPolicyIntegrationTests(NativeSqlServerFixture fixture) : IClassFixture<NativeSqlServerFixture>
 {
-    [NativeSqlServerFact]
-    public async Task Exact_policy_successor_registers_after_restart_without_changing_immutable_classification_or_history()
+    [NativeSqlServerTheory]
+    [InlineData(".rdl")]
+    [InlineData(".dart")]
+    [InlineData(".cshtml")]
+    [InlineData(".svg")]
+    [InlineData(".unlisted")]
+    public async Task Exact_policy_successor_registers_after_restart_without_changing_immutable_classification_or_history(string extension)
     {
-        var seeded = await SeedAsync();
+        var seeded = await SeedAsync(extension: extension);
         using var reader = new SqlRetainedSourceReader(SqlTestData.CreateFactory(fixture), seeded.ArtifactRoot);
         var service = Service(reader);
         var mutation = Mutation(seeded);
         var preview = await service.PreviewAsync(mutation, "test", CancellationToken.None);
-        var first = await service.CommitAsync(mutation, preview.ConfirmationId, "policy-first", "test", CancellationToken.None);
-        var replay = await service.CommitAsync(mutation, preview.ConfirmationId, "policy-first", "test", CancellationToken.None);
+        var idempotencyKey = "policy-first" + extension;
+        var first = await service.CommitAsync(mutation, preview.ConfirmationId, idempotencyKey, "test", CancellationToken.None);
+        var replay = await service.CommitAsync(mutation, preview.ConfirmationId, idempotencyKey, "test", CancellationToken.None);
         Assert.Equal(first.OperationId, replay.OperationId);
         Assert.True(replay.WasReplay);
         var registration = new SqlRetainedTextRegistrationStore(SqlTestData.CreateFactory(fixture), TimeProvider.System, seeded.ArtifactRoot);

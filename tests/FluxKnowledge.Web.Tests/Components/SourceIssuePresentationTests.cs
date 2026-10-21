@@ -35,6 +35,7 @@ public sealed class SourceIssuePresentationTests
     }
 
     [Theory]
+    [InlineData("File extension is unknown to local source ingestion.", "exact retained-policy recovery")]
     [InlineData("image-document-dimensions-exceeded", "previous execution is confirmed settled")]
     [InlineData("image-document-decoded-memory-budget-exceeded", "256 MiB")]
     [InlineData("image-ocr-raster-page-output-too-large", "16 MiB")]

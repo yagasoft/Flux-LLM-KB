@@ -6,6 +6,15 @@ configuration application. Source scope, protected locations, physical identity,
 checksum validation, no-follow/no-recall reads and unsupported reparse rejection
 remain enforced.
 
+The 22 October follow-up removes the extension allowlist for complete, valid
+UTF-8 text. Dart, Razor, XAML, configuration, SVG, unlisted suffixes and files
+without suffixes use the same inert text pipeline. Binary signatures, control
+bytes, strict decoding, the effective read budget and explicit code restrictions
+remain enforced. This does not add binary parsers or execute embedded markup.
+Existing extension refusals use the exact retained `policy_reprocess` action
+below; the change does not initiate a workspace rescan or clear unresolved items.
+Its deployment and bounded production acceptance are recorded separately.
+
 Retained Office extraction accepts blank spreadsheet cells and uses finite XML
 capacity limits. Media metadata streams retained input up to 1 GiB under a
 96 MiB read budget. ZIP/TAR defaults are 128 MiB compressed input, 256 MiB total

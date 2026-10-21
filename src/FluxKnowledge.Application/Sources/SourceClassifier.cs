@@ -19,7 +19,7 @@ public sealed record SourceClassificationResult(
     public bool IsAccepted => Classification == SourceClassification.AcceptedUtf8Text;
 }
 
-/// <summary>Classifies local bytes before any extension-based text processing occurs.</summary>
+/// <summary>Identifies binary capabilities and validates inert workspace text independently of its suffix.</summary>
 public static class SourceClassifier
 {
     public const long MaximumAcceptedTextBytes = SourcePolicyDefaults.MaximumTextBytes;
@@ -101,11 +101,8 @@ public static class SourceClassifier
             return DeferredPolicy("Source code ingestion is not enabled for this root.");
         }
 
-        if (!TextExtensions.Contains(extension))
-        {
-            return new SourceClassificationResult(SourceClassification.Unknown, null, "File extension is unknown to local source ingestion.");
-        }
-
+        // An unfamiliar suffix does not make complete, strictly decoded text unsafe.
+        // Binary signatures and control bytes were checked before reaching this fallback.
         if (declaredByteLength > maximumAcceptedTextBytes)
         {
             return DeferredPolicy("File exceeds the effective UTF-8 text ingestion limit.");

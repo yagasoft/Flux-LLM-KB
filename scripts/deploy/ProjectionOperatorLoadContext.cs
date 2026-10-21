@@ -18,7 +18,7 @@ public sealed class ProjectionOperatorLoadContext : AssemblyLoadContext
     private readonly HashSet<string> _native = new(StringComparer.OrdinalIgnoreCase);
     public ProjectionOperatorLoadContext(string entry, string framework) : base("FluxKnowledge.ProjectionOperator." + Guid.NewGuid().ToString("N"), false)
     {
-        _root = Path.GetDirectoryName(Path.GetFullPath(entry)) + Path.DirectorySeparatorChar;
+        _root = ComparisonPath(Path.GetDirectoryName(Path.GetFullPath(entry))) + Path.DirectorySeparatorChar;
         _resolver = new AssemblyDependencyResolver(entry);
         _framework = Path.GetFullPath(framework);
         using var file = File.OpenRead(Path.ChangeExtension(entry, ".deps.json"));
@@ -42,9 +42,21 @@ public sealed class ProjectionOperatorLoadContext : AssemblyLoadContext
     }
     private string Contained(string path)
     {
-        if (!Path.GetFullPath(path).StartsWith(_root, StringComparison.OrdinalIgnoreCase))
+        if (!ComparisonPath(path).StartsWith(_root, StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("index-projection-operator-dependency-outside-payload");
         return path;
+    }
+    private static string ComparisonPath(string path)
+    {
+        // The Windows resolver can add the extended prefix for long dependencies.
+        // Compare equivalent drive/UNC spellings, then collapse dot segments;
+        // retain the original path for loading and reject other device namespaces.
+        if (OperatingSystem.IsWindows() && path.StartsWith(@"\\?\", StringComparison.Ordinal))
+        {
+            if (path.StartsWith(@"\\?\UNC\", StringComparison.OrdinalIgnoreCase)) path = @"\\" + path.Substring(8);
+            else if (path.Length >= 7 && char.IsAsciiLetter(path[4]) && path[5] == ':' && path[6] == '\\') path = path.Substring(4);
+        }
+        return Path.GetFullPath(path);
     }
     protected override Assembly Load(AssemblyName name)
     {

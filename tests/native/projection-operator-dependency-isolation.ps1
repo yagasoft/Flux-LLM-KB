@@ -36,8 +36,29 @@ try {
     # Core framework and undeclared OS libraries retain their normal host paths.
     if($context.LoadFromAssemblyName([object].Assembly.GetName()) -ne [object].Assembly){throw 'Core framework fallback changed.'}
     if($native.Invoke($context,@('kernel32')) -ne [IntPtr]::Zero){throw 'OS fallback changed.'}
+    # Windows' dependency resolver can return an extended path for a long payload.
+    # Both spellings must name the same boundary; neither may admit a sibling or escape.
+    if([OperatingSystem]::IsWindows()) {
+        $contained=$context.GetType().GetMethod('Contained',[Reflection.BindingFlags]'Instance,NonPublic')
+        $inside=Join-Path $payload 'Private.dll'
+        $extended='\\?\'+$inside
+        foreach($path in @($inside,$extended)) {
+            if($contained.Invoke($context,[object[]]@([string]$path)) -cne $path){throw 'Contained loader path changed.'}
+        }
+        $extendedContext=[FluxKnowledge.Deployment.ProjectionOperatorLoadContext]::new(('\\?\'+$entry),$root)
+        if($contained.Invoke($extendedContext,[object[]]@([string]$inside)) -cne $inside){throw 'Extended loader root rejected its ordinary dependency.'}
+        foreach($path in @((Join-Path ($payload+'-sibling') 'Private.dll'),(Join-Path $payload '../Private.dll'),
+            ('\\?\'+(Join-Path $payload '../Private.dll')), '\\?\GLOBALROOT\Device\FakeVolume\Private.dll', ('\\.\'+$inside))) {
+            try {
+                [void]$contained.Invoke($context,[object[]]@([string]$path))
+                $failures.Add('A loader dependency escaped the reviewed payload boundary.')
+            } catch {
+                if($_.Exception.GetBaseException().Message -cne 'index-projection-operator-dependency-outside-payload'){throw}
+            }
+        }
+    }
     if($failures.Count){throw ($failures -join ' ')}
-    'PASS: missing declared managed/native assets refuse host substitution; framework/OS fallback remains available.'
+    'PASS: dependency isolation, equivalent Windows path spellings and payload escape refusals; framework/OS fallback remains available.'
 } finally {
     $resolved=[IO.Path]::GetFullPath($root)
     if(!$resolved.StartsWith([IO.Path]::GetFullPath([IO.Path]::GetTempPath()),[StringComparison]::OrdinalIgnoreCase) -or

@@ -72,7 +72,13 @@ function Invoke-IncrementalProjectionOperator {
 }
 if(!$ResumeOfflineMaintenance) {
 $web=Join-Path $payloadRoot 'Web';$companion=Join-Path $payloadRoot 'OutlookHost'
-$cli=Join-Path (Join-Path $payloadRoot 'Cli') ('native-long-path-'+('n'*64))
+# Exercise the same native path boundary independently of the test TEMP prefix.
+$cliParent=Join-Path $payloadRoot 'Cli';$longPrefix='native-long-path-'
+$padding=230-($cliParent.Length+1+$longPrefix.Length)
+if($padding -lt 1 -or $padding -gt 200){throw 'Use a shorter TEMP path for the native loader fixture.'}
+$cli=Join-Path $cliParent ($longPrefix+('n'*$padding))
+if((Join-Path $cli 'FluxKnowledge.Cli.dll').Length -ge 260 -or
+    (Join-Path $cli 'runtimes/win-x64/native/libusearch_c.dll').Length -le 260){throw 'Native loader fixture does not straddle the Windows path boundary.'}
 foreach($path in @($web,$companion)){[void][IO.Directory]::CreateDirectory($path)}
 $cliHash=Get-HybridPayloadFingerprint $OperatorRoot
 Copy-SegmentedIndexPayload -Source $OperatorRoot -Destination $cli -ExpectedSha256 $cliHash
