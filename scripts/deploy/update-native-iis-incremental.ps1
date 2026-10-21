@@ -2061,10 +2061,12 @@ if ($sourceAccessRequested -and $PSVersionTable.PSVersion.Major -lt 7) { throw '
 if ($sourceAccessRequested -and ($EnterSourceDeletionAcceptanceMaintenance -or $ApplyMigrations -or
     $ApplyResumableSourceDeletionCleanupMigration -or $ApplyCorpusChunkFullTextMigration -or
     $ApplyCodeDisclosureProofMigration -or $ApplyRepositoryRecoveryAuthorityMigration -or $ApplyHybridPassageRebuild -or
-    $EnableUnattendedDiscovery -or $RecoverStoppedPool -or $DeferReadinessForScopedRemediation -or
+    $ApplySegmentedIndexProjection -or $EnableUnattendedDiscovery -or
+    ($RecoverStoppedPool -and (!$OfflineCodeMaintenanceReceipt -or $ExpectedOfflineCodeMaintenanceReceiptSha256 -cnotmatch '^[A-Fa-f0-9]{64}$')) -or
+    $DeferReadinessForScopedRemediation -or
     $ReconcileRepositoryRecoveryRelease -or $ResumeRepositoryRecoveryPreparedRelease -or $ResumeRepositoryRecoveryActivationRelease -or
     $ResumeHybridRebuildRelease -or $ReplaceHybridRebuildRelease -or $PatchHybridRebuildRelease -or $ResumeHybridPatchRelease)) {
-    throw 'Source-access configuration requires an ordinary incremental update without other operational modes.'
+    throw 'Source-access configuration requires an ordinary incremental update or a bound version 2 stopped-maintenance receipt, without other operational modes.'
 }
 if ($EnterSourceDeletionAcceptanceMaintenance -and ($ApplyResumableSourceDeletionCleanupMigration -or $ApplyMigrations -or
     $ApplyCorpusChunkFullTextMigration -or $ApplyCodeDisclosureProofMigration -or $ApplyRepositoryRecoveryAuthorityMigration -or

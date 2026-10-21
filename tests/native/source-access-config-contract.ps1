@@ -81,6 +81,66 @@ $change.AfterHash
     $tokens=$null; $errors=$null
     $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $SourceRoot 'scripts/deploy/update-native-iis-incremental.ps1'),[ref]$tokens,[ref]$errors)
     if ($errors.Count) { throw 'Updater does not parse.' }
+    # Exercise the real top-level mode gates before configuration callbacks.
+    # A valid version 2 receipt is checked by offline-code-maintenance.ps1;
+    # this gate must admit that route without admitting an unbound recovery.
+    $modeGate=@($ast.EndBlock.Statements|Where-Object {
+        $_ -is [Management.Automation.Language.IfStatementAst] -and
+        $_.Extent.Text.Contains('Source-access configuration requires an ordinary incremental update')
+    })
+    $receiptGate=@($ast.EndBlock.Statements|Where-Object {
+        $_ -is [Management.Automation.Language.IfStatementAst] -and
+        $_.Extent.Text.StartsWith('if ($OfflineCodeMaintenanceReceipt -or')
+    })
+    $requested=@($ast.EndBlock.Statements|Where-Object {
+        $_ -is [Management.Automation.Language.AssignmentStatementAst] -and
+        $_.Left.Extent.Text -ceq '$sourceAccessRequested'
+    })
+    if($modeGate.Count -ne 1 -or $receiptGate.Count -ne 1 -or $requested.Count -ne 1){throw 'Updater mode gates are ambiguous.'}
+    $gates=@([scriptblock]::Create($modeGate[0].Extent.Text),[scriptblock]::Create($receiptGate[0].Extent.Text))
+    $assignment=[scriptblock]::Create($requested[0].Extent.Text)
+    $parameterNames=@($ast.ParamBlock.Parameters|ForEach-Object {$_.Name.VariablePath.UserPath})
+    $paired=@{RecoverStoppedPool=$true;OfflineCodeMaintenanceReceipt='isolated-receipt.json';ExpectedOfflineCodeMaintenanceReceiptSha256=('A'*64)}
+    $modeCases=@(
+        @{Name='ordinary activation';Overrides=@{};Refuse=$false},
+        @{Name='ordinary disable';Overrides=@{SourceAccessPipeName='';DisableSourceAccessRecovery=$true};Refuse=$false},
+        @{Name='bound stopped activation';Overrides=$paired.Clone();Refuse=$false},
+        @{Name='unbound stopped activation';Overrides=@{RecoverStoppedPool=$true};Refuse=$true},
+        @{Name='receipt without hash';Overrides=@{RecoverStoppedPool=$true;OfflineCodeMaintenanceReceipt='isolated-receipt.json'};Refuse=$true},
+        @{Name='hash without receipt';Overrides=@{RecoverStoppedPool=$true;ExpectedOfflineCodeMaintenanceReceiptSha256=('A'*64)};Refuse=$true},
+        @{Name='malformed receipt hash';Overrides=@{RecoverStoppedPool=$true;OfflineCodeMaintenanceReceipt='isolated-receipt.json';ExpectedOfflineCodeMaintenanceReceiptSha256='not-a-hash'};Refuse=$true},
+        @{Name='receipt without stopped recovery';Overrides=@{OfflineCodeMaintenanceReceipt='isolated-receipt.json';ExpectedOfflineCodeMaintenanceReceiptSha256=('A'*64)};Refuse=$true},
+        @{Name='ordinary projection combination';Overrides=@{ApplySegmentedIndexProjection=$true};Refuse=$true}
+    )
+    foreach($mode in @('EnterSourceDeletionAcceptanceMaintenance','ApplyMigrations',
+        'ApplyResumableSourceDeletionCleanupMigration','ApplyCorpusChunkFullTextMigration',
+        'ApplyCodeDisclosureProofMigration','ApplyRepositoryRecoveryAuthorityMigration',
+        'ApplyHybridPassageRebuild','ApplySegmentedIndexProjection','EnableUnattendedDiscovery',
+        'DeferReadinessForScopedRemediation','ReconcileRepositoryRecoveryRelease',
+        'ResumeRepositoryRecoveryPreparedRelease','ResumeRepositoryRecoveryActivationRelease',
+        'ResumeHybridRebuildRelease','ReplaceHybridRebuildRelease','PatchHybridRebuildRelease',
+        'ResumeHybridPatchRelease','DisableSourceAccessRecovery')){
+        $overrides=$paired.Clone();$overrides[$mode]=$true
+        $modeCases+=@{Name=('bound activation with '+$mode);Overrides=$overrides;Refuse=$true}
+    }
+    foreach($case in $modeCases){
+        $refused=$false
+        try {
+            & {
+                param($Case,$ParameterNames,$Assignment,$Gates)
+                foreach($name in $ParameterNames){Set-Variable -Name $name -Value $null}
+                $SourceAccessPipeName='FluxKnowledge.SourceAccess.isolated-config'
+                foreach($entry in $Case.Overrides.GetEnumerator()){Set-Variable -Name $entry.Key -Value $entry.Value}
+                . $Assignment
+                foreach($gate in $Gates){. $gate}
+            } $case $parameterNames $assignment $gates
+        } catch {
+            if($_.Exception.Message -notlike 'Source-access configuration requires*' -and
+                $_.Exception.Message -notlike 'Offline maintenance requires*'){throw}
+            $refused=$true
+        }
+        if($refused -ne $case.Refuse){throw ('Updater mode gate rejected or admitted the wrong route: '+$case.Name)}
+    }
     $swap=@($ast.FindAll({param($node) $node -is [Management.Automation.Language.CommandAst] -and $node.GetCommandName() -ceq 'Invoke-IncrementalApplicationPayloadSwap'},$true))[-1]
     $callbacks=@{}
     for ($index=0;$index -lt $swap.CommandElements.Count-1;$index++) {
@@ -152,7 +212,7 @@ $change.AfterHash
         . $finish
         if ((Test-Path -LiteralPath $ValidationHoldPath) -ne ($failure -cne 'validation')) { throw 'The actual finalisation gate mishandled uncertain configuration.' }
     }
-    [pscustomobject]@{passed=14;production_calls=0} | ConvertTo-Json
+    [pscustomobject]@{passed=(14+$modeCases.Count);production_calls=0} | ConvertTo-Json
 } finally {
     $resolved=[IO.Path]::GetFullPath($fixture)
     if (!$resolved.StartsWith([IO.Path]::GetFullPath([IO.Path]::GetTempPath()),[StringComparison]::OrdinalIgnoreCase)) { throw 'Fixture escaped temporary root.' }
