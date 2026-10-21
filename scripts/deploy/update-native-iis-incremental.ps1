@@ -2136,8 +2136,8 @@ if ($RecoverStoppedPool -and ($ApplyMigrations -or $ApplyCorpusChunkFullTextMigr
 if ($OfflineCodeMaintenanceReceipt -or $ExpectedOfflineCodeMaintenanceReceiptSha256) {
     if (!$RecoverStoppedPool -or !$OfflineCodeMaintenanceReceipt -or $ExpectedOfflineCodeMaintenanceReceiptSha256 -cnotmatch '^[A-Fa-f0-9]{64}$' -or
         $ApplyResumableSourceDeletionCleanupMigration -or $ApplyRepositoryRecoveryAuthorityMigration -or $ApplyCodeDisclosureProofMigration -or
-        $ApplySegmentedIndexProjection -or $EnableUnattendedDiscovery -or $SourceAccessPipeName -or $DisableSourceAccessRecovery) {
-        throw 'Offline code maintenance requires only stopped-pool recovery and an exact reviewed receipt hash.'
+        $ApplySegmentedIndexProjection -or $EnableUnattendedDiscovery -or $DisableSourceAccessRecovery) {
+        throw 'Offline maintenance requires stopped-pool recovery and an exact reviewed receipt; only version 2 admits bound source-access activation.'
     }
 }
 if ($DeferReadinessForScopedRemediation -and $ApplyMigrations) {

@@ -11,6 +11,7 @@ if(@($ast.ParamBlock.Parameters | Where-Object {$_.Name.VariablePath.UserPath -c
 . (Join-Path $SourceRoot 'scripts/deploy/offline-code-maintenance.ps1')
 Import-Module (Join-Path $SourceRoot 'scripts/deploy/incremental-segmented-index-update.psm1') -Force
 Import-Module (Join-Path $SourceRoot 'scripts/deploy/incremental-iis-payload-swap.psm1') -Force
+Import-Module (Join-Path $SourceRoot 'scripts/deploy/incremental-source-access-config.psm1') -Force
 function Expect-Failure([scriptblock]$Action,[string]$Message){try{& $Action}catch{if($_.Exception.Message -match $Message){return};throw};throw ('Expected refusal: '+$Message)}
 $root=Join-Path ([IO.Path]::GetTempPath()) ('FluxOfflineCode_'+[guid]::NewGuid().ToString('N'))
 [void][IO.Directory]::CreateDirectory($root)
@@ -40,6 +41,62 @@ Write-SegmentedUpdateJson $OfflineCodeMaintenanceReceipt $receipt
 $ExpectedOfflineCodeMaintenanceReceiptSha256=(Get-FileHash -LiteralPath $OfflineCodeMaintenanceReceipt).Hash
 $offlineCodeState=$null;$checks=0
 Assert-OfflineCodeMaintenance -RequireStopped -OriginalPayloads;$checks++
+$sourceAccessChange=New-SourceAccessConfigurationChange -Path (Join-Path $root 'Config/appsettings.Production.json') -PipeName 'FluxKnowledge.SourceAccess.isolated-offline'
+Expect-Failure {Assert-OfflineCodeMaintenance -RequireStopped} 'source-access.*version2';$checks++
+$helperRoot=Join-Path ([IO.Path]::GetPathRoot($root)) ('FluxKnowledgeSourceAccess-Staging-'+[guid]::NewGuid().ToString('N'))
+[void][IO.Directory]::CreateDirectory($helperRoot)
+$helper=@{InstallRoot=$helperRoot;TaskName='FluxKnowledge.SourceAccess-Staging-Fixture';SourceRoot=$root;
+    RootIdentityFingerprint=('f'*64);PipeName=$sourceAccessChange.PipeName;IndexerSid='S-1-5-18';
+    RootReadRequestPath=(Join-Path $root 'root-read-request.json')}
+Write-SegmentedUpdateJson (Join-Path $helperRoot 'policy.json') @{PipeName=$helper.PipeName;IndexerSid=$helper.IndexerSid;
+    Roots=@(@{Path=$root;IdentityFingerprint=$helper.RootIdentityFingerprint})}
+Write-SegmentedUpdateJson $helper.RootReadRequestPath @{RootPath=$root;IndexerSid=$helper.IndexerSid}
+$helper.RootReadRequestSha256=(Get-FileHash -LiteralPath $helper.RootReadRequestPath).Hash
+$helper.PolicySha256=(Get-FileHash -LiteralPath (Join-Path $helperRoot 'policy.json')).Hash
+foreach($key in @('PayloadSha256','InstallationReceiptSha256','FileSecuritySha256','TaskDefinitionSha256','TaskSecuritySha256')){$helper[$key]='D'*64}
+$helperProof=@{Valid=$true;Checks=0;Observation=$helper.Clone();Identity=$helper.RootIdentityFingerprint}
+function Get-OfflineSourceAccessHelperObservation {param($Binding)
+    $helperProof.Checks++
+    $value=$helperProof.Observation.Clone()
+    if(!$helperProof.Valid){$value.PayloadSha256='E'*64}
+    return $value
+}
+function Get-OfflineSourceAccessRootInspection {param($Binding) @{RootIdentityFingerprint=$helperProof.Identity}}
+$receipt.Version=2
+$receipt.SourceAccessConfiguration=@{BeforeSha256=$sourceAccessChange.BeforeHash;AfterSha256=$sourceAccessChange.AfterHash;
+    Enabled=$true;PipeName=$sourceAccessChange.PipeName;Helper=$helper}
+function Save-FixtureReceipt {
+    Write-SegmentedUpdateJson $OfflineCodeMaintenanceReceipt $receipt
+    $script:ExpectedOfflineCodeMaintenanceReceiptSha256=(Get-FileHash -LiteralPath $OfflineCodeMaintenanceReceipt).Hash
+}
+Save-FixtureReceipt
+Assert-OfflineCodeMaintenance -RequireStopped -OriginalPayloads;$checks++
+$receipt.SourceAccessConfiguration.AfterSha256='e'*64;Save-FixtureReceipt
+Expect-Failure {Assert-OfflineCodeMaintenance -RequireStopped} 'source-access.*binding';$checks++
+$receipt.SourceAccessConfiguration.AfterSha256=$sourceAccessChange.AfterHash
+$receipt.SourceAccessConfiguration.PipeName='FluxKnowledge.SourceAccess.unapproved';Save-FixtureReceipt
+Expect-Failure {Assert-OfflineCodeMaintenance -RequireStopped} 'source-access.*binding';$checks++
+$receipt.SourceAccessConfiguration.PipeName=$sourceAccessChange.PipeName;Save-FixtureReceipt
+$helperProof.Valid=$false
+Expect-Failure {Assert-OfflineCodeMaintenance -RequireStopped} 'helper-changed';$helperProof.Valid=$true;$checks++
+$helperProof.Identity='changed-root'
+Expect-Failure {Assert-OfflineCodeMaintenance -RequireStopped} 'root-identity-changed';$helperProof.Identity=$helper.RootIdentityFingerprint;$checks++
+foreach($key in @('PolicySha256','InstallationReceiptSha256','FileSecuritySha256','TaskDefinitionSha256','TaskSecuritySha256')) {
+    $saved=$helperProof.Observation[$key];$helperProof.Observation[$key]='E'*64
+    Expect-Failure {Assert-OfflineCodeMaintenance -RequireStopped} 'helper-changed';$helperProof.Observation[$key]=$saved;$checks++
+}
+Set-SourceAccessConfigurationChange $sourceAccessChange
+Assert-OfflineCodeMaintenance -RequireStopped;$checks++
+$candidateConfig=[IO.File]::ReadAllBytes($sourceAccessChange.Path)
+[IO.File]::WriteAllText($sourceAccessChange.Path,'{"partial":true}')
+Expect-Failure {Assert-OfflineCodeMaintenance -RequireStopped} 'configuration-changed';$checks++
+[IO.File]::WriteAllBytes($sourceAccessChange.Path,$candidateConfig)
+Restore-SourceAccessConfigurationChange $sourceAccessChange
+Assert-OfflineCodeMaintenance -RequireStopped;$checks++
+if($helperProof.Checks -lt 4){throw 'Helper binding was not rechecked across configuration phases.'}
+$sourceAccessChange=$null
+Expect-Failure {Assert-OfflineCodeMaintenance -RequireStopped} 'source-access.*binding';$checks++
+$receipt.Remove('SourceAccessConfiguration');$receipt.Version=1;Save-FixtureReceipt
 $savedReceiptBytes=[IO.File]::ReadAllBytes($OfflineCodeMaintenanceReceipt)
 [IO.File]::AppendAllText($OfflineCodeMaintenanceReceipt,' ');Expect-Failure {Assert-OfflineCodeMaintenance -RequireStopped} 'receipt-hash';[IO.File]::WriteAllBytes($OfflineCodeMaintenanceReceipt,$savedReceiptBytes);$checks++
 $configurationPath=Join-Path $root 'Config/appsettings.Production.json'
@@ -51,6 +108,11 @@ $proof.Processes=@(@{ProcessId=124;CreationDate=[DateTime]::UtcNow;Name='dotnet.
 Expect-Failure {Assert-OfflineCodeMaintenance -RequireStopped} 'companion-exit';$proof.Processes=@();$checks++
 $proof.Task.Enabled=$true;Expect-Failure {Assert-OfflineCodeMaintenance -RequireStopped} 'companion-owner';$proof.Task.Enabled=$false;$checks++
 [IO.File]::WriteAllText($ValidationHoldPath,'"another-owner"');Expect-Failure {Assert-OfflineCodeMaintenance -RequireStopped} 'hold-changed';[IO.File]::WriteAllText($ValidationHoldPath,'"fixture-maintenance"');$checks++
+$sourceAccessChange=New-SourceAccessConfigurationChange -Path $configurationPath -PipeName $helper.PipeName
+$receipt.Version=2
+$receipt.SourceAccessConfiguration=@{BeforeSha256=$sourceAccessChange.BeforeHash;AfterSha256=$sourceAccessChange.AfterHash;
+    Enabled=$true;PipeName=$sourceAccessChange.PipeName;Helper=$helper}
+Save-FixtureReceipt
 $statePath=Join-Path $root 'state.json'
 $candidate=Join-Path $root 'candidate';$previous=Join-Path $root 'previous';$failed=Join-Path $root 'failed'
 [void][IO.Directory]::CreateDirectory($candidate);[IO.File]::WriteAllText((Join-Path $candidate 'marker'),'new-web')
@@ -83,13 +145,24 @@ $ApplyResumableSourceDeletionCleanupMigration=$false;$SiteName='DisposableOfflin
 foreach($parameter in $ast.ParamBlock.Parameters){$name=$parameter.Name.VariablePath.UserPath;if(!(Get-Variable -Name $name -ErrorAction SilentlyContinue)){Set-Variable -Name $name -Value $null}}
 $hostingChange=@{Attempted=$false};$deploymentValidation=@{HoldCreated=$true;Baseline='fixture'}
 function New-DeploymentValidationHold {param($Path,$ReleaseId);if((Read-SegmentedUpdateJson $Path) -cne $ReleaseId){throw 'Wrong held owner'}}
+function Invoke-CandidatePayloadActivation {param($CandidateRoot,$ApplicationRoot)}
+# A failure after the real setter but before start can restore the exact old
+# config under the same stopped proof. No start intent or hold release occurs.
+Expect-Failure {& (Get-Callback 'ActivateCandidate');throw 'synthetic between-config-and-start'} 'between-config-and-start'
+& (Get-Callback 'StopApplication')
+& (Get-Callback 'PrepareRollbackApplication')
+Assert-SourceAccessConfigurationChange $sourceAccessChange -Original
+if($offlineCodeState.StartIntentUtc -or !$proof.Stopped -or (Read-SegmentedUpdateJson $ValidationHoldPath) -cne $releaseId){throw 'Pre-start recovery lost its stopped hold.'};$checks++
+$sourceAccessChange=New-SourceAccessConfigurationChange -Path $configurationPath -PipeName $helper.PipeName
+function Invoke-CandidatePayloadActivation {param($CandidateRoot,$ApplicationRoot) Copy-Item -LiteralPath $CandidateRoot -Destination $ApplicationRoot -Recurse}
 function Start-IndexCompatibleWebAppPool {param($Name);if($Name -cne $SiteName){throw 'Wrong pool'};$proof.Stopped=$false;throw 'synthetic ambiguous start'}
 Expect-Failure {Invoke-IncrementalApplicationPayloadSwap -ApplicationRoot $CanonicalDeployRoot -CandidateRoot $candidate -PreviousRoot $previous -FailedRoot $failed -RestartPreviousApplication $false `
-    -StopApplication (Get-Callback 'StopApplication') -ActivateCandidate {Copy-Item -LiteralPath $candidate -Destination $CanonicalDeployRoot -Recurse} `
+    -StopApplication (Get-Callback 'StopApplication') -ActivateCandidate (Get-Callback 'ActivateCandidate') `
     -StartApplication (Get-Callback 'StartApplication') `
     -ValidateApplication {throw 'must not validate'} } 'fresh-stop-required'
 if((Get-HybridPayloadFingerprint $CanonicalDeployRoot) -cne $offlineCodeState.CandidateWebSha256 -or !(Test-Path -LiteralPath $previous) -or
     (Test-Path -LiteralPath $failed) -or (Read-SegmentedUpdateJson $ValidationHoldPath) -cne $releaseId){throw 'An ambiguous start rolled back payloads or released the hold.'};$checks++
+Assert-SourceAccessConfigurationChange $sourceAccessChange
 Expect-Failure {Assert-OfflineCodeMaintenance -RequireStopped} 'fresh-stop-required';$checks++
 Assert-OfflineCodeMaintenance -CandidatePayloads;$checks++
 $database.Projection='drift-before-release';Expect-Failure {Assert-OfflineCodeMaintenance -CandidatePayloads} 'database-changed';$checks++
@@ -97,4 +170,7 @@ $outer=$swap.Parent;while($outer -and $outer -isnot [Management.Automation.Langu
 $outerCatch=[scriptblock]::Create(($outer.CatchClauses[0].Body.Statements.Extent.Text -join "`n"))
 $holdReleaseAttempted=$true;$holdReleased=$true;$releaseRoot=$root
 Expect-Failure {try{throw 'synthetic post-release failure'}catch{& $outerCatch}} 'Deployment hold release was attempted';$checks++
+# Only remove this exact disposable helper fixture; no production helper is used.
+if([IO.Path]::GetFileName($helperRoot) -cnotmatch '^FluxKnowledgeSourceAccess-Staging-[a-f0-9]{32}$'){throw 'Unsafe fixture cleanup.'}
+Remove-Item -LiteralPath $helperRoot -Recurse -Force
 @{Status='PASS';Checks=$checks;ProductionAccess=$false;Root=$root}|ConvertTo-Json

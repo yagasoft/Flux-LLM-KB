@@ -85,6 +85,14 @@ activation need explicit approval for their exact target and scope.
    printing configuration contents. Exact old bytes are retained privately and
    restored before predecessor startup if activation fails before hold release;
    unknown drift retains the hold. There is no database migration or model acquisition.
+   If historical GPU uncertainty prevents the ordinary drain, an explicitly
+   reviewed version 2 `OfflineCodeMaintenanceReceipt` may bind this activation
+   under `RecoverStoppedPool`. It requires fresh physical writer-exit proof and
+   exact source-access before/after hashes, pipe, helper payload/policy, protected
+   filesystem/task descriptors and root identity. These bindings are rechecked
+   before activation and hold release. Version 1 remains code-only. A start intent
+   consumes the stop proof; ambiguous startup needs a fresh stopped recovery.
+   Neither route settles historical GPU records or admits arbitrary configuration.
 7. Validate read-only Preview and a bounded set of actual indexing-account reads
    through normal discovery, capture, publication and supported readback. Do not
    start whole-source ingestion to prove access recovery.
