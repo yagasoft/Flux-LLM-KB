@@ -22,6 +22,7 @@ public sealed class NativeSqlServerFixture : IAsyncLifetime
     private bool _databaseCreateAttempted;
 
     public string DatabaseName { get; } = $"{TestCatalogPrefix}{Guid.NewGuid():N}";
+    internal string? InitialMigration { get; init; }
 
     public string ConnectionString
     {
@@ -70,7 +71,7 @@ public sealed class NativeSqlServerFixture : IAsyncLifetime
                     .UseSqlServer(ConnectionString)
                     .Options;
                 await using var context = new FluxKnowledgeDbContext(options);
-                await context.Database.MigrateAsync().ConfigureAwait(false);
+                await context.GetService<IMigrator>().MigrateAsync(InitialMigration).ConfigureAwait(false);
             },
             DropDatabaseAsync).ConfigureAwait(false);
     }

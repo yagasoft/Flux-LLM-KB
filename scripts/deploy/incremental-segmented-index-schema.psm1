@@ -113,9 +113,10 @@ IF @r<0 THROW 51000,'index-schema-index-owner-busy',1;
                 $before.AuditSingletonCount -ne 0 -or $before.WriterCount -ne -1) {throw 'index-schema-partial-or-unreviewed-state'}
             # Keep all seven EF transactions nested inside one original outer
             # transaction. A failed batch/session cannot commit a partial upgrade.
-            # A later ALTER CHECK must compile after columns added earlier in
-            # the same EF migration; retain one outer transaction across batches.
-            foreach($batch in [regex]::Split($sql,'(?m)^GO\s*\r?$|(?=^ALTER TABLE \[[^\]]+\] ADD CONSTRAINT)') | Where-Object {! [string]::IsNullOrWhiteSpace($_)}) {
+            # Constraints and DML must compile after preceding ALTER ADDs when
+            # these tables have never exposed the new columns. Keep the original
+            # outer transaction across all generated migration batches.
+            foreach($batch in [regex]::Split($sql,'(?m)^GO\s*\r?$|(?=^ALTER TABLE \[[^\]]+\] ADD CONSTRAINT|^UPDATE \[IndexState\])') | Where-Object {! [string]::IsNullOrWhiteSpace($_)}) {
                 & $AssertQuiescent
                 $command.CommandText=@'
 IF APPLOCK_MODE(N'public',N'FluxKnowledge.RecoveryReferences',N'Session')<>N'Exclusive'

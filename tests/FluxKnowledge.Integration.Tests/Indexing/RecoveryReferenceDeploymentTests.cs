@@ -26,20 +26,30 @@ public sealed class RecoveryReferenceDeploymentTests(NativeSqlServerFixture fixt
     }
 
     [NativeSqlServerFact]
+    public async Task The_exact_schema_bootstrap_handles_tables_that_have_never_had_the_new_columns()
+    {
+        var baseline = new NativeSqlServerFixture { InitialMigration = "20261014134909_AddResumableSourceDeletionCleanup" };
+        await baseline.InitializeAsync();
+        try { await RunDeploymentScriptAsync("segmented-index-schema.ps1", baseline); }
+        finally { await baseline.DisposeAsync(); }
+    }
+
+    [NativeSqlServerFact]
     public async Task Updater_continuations_and_Outlook_receipts_use_the_actual_guarded_writer_lifetime()
     {
         await SqlTestData.ClearPipelineAsync(fixture);
         await RunDeploymentScriptAsync("recovery-reference-deployment.ps1");
     }
 
-    private async Task RunDeploymentScriptAsync(string script)
+    private async Task RunDeploymentScriptAsync(string script, NativeSqlServerFixture? target = null)
     {
+        target ??= fixture;
         var source = SourceRoot();
         var start = new ProcessStartInfo("pwsh") { UseShellExecute = false, CreateNoWindow = true,
             RedirectStandardOutput = true, RedirectStandardError = true };
         foreach (var value in new[] { "-NoProfile", "-File", Path.Combine(source, "tests", "native", script),
-            "-SourceRoot", source, "-ExpectedDatabase", fixture.DatabaseName }) start.ArgumentList.Add(value);
-        start.Environment["FLUXKNOWLEDGE_RECOVERY_REFERENCE_TEST_SQL"] = fixture.ConnectionString;
+            "-SourceRoot", source, "-ExpectedDatabase", target.DatabaseName }) start.ArgumentList.Add(value);
+        start.Environment["FLUXKNOWLEDGE_RECOVERY_REFERENCE_TEST_SQL"] = target.ConnectionString;
         using var child = Process.Start(start)!;
         var output = child.StandardOutput.ReadToEndAsync(); var error = child.StandardError.ReadToEndAsync();
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(60));
