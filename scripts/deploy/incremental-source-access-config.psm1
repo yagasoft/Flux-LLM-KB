@@ -24,7 +24,7 @@ function New-SourceAccessConfigurationChange {
     $before=Get-SourceAccessConfigurationBytes $Path
     $configuration=[Text.Encoding]::UTF8.GetString($before).TrimStart([char]0xfeff) | ConvertFrom-Json -AsHashtable -DateKind String
     if ($configuration -isnot [Collections.IDictionary]) { throw 'Source-access configuration must be a JSON object.' }
-    if (!$configuration.Contains('SourceAccess')) { $configuration.SourceAccess=@{} }
+    if (!$configuration.Contains('SourceAccess')) { $configuration.SourceAccess=[ordered]@{} }
     if ($configuration.SourceAccess -isnot [Collections.IDictionary]) { throw 'SourceAccess must be a JSON object.' }
     $configuration.SourceAccess.Enabled=!$Disable
     if (!$Disable) { $configuration.SourceAccess.PipeName=$PipeName }

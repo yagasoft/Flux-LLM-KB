@@ -38,6 +38,45 @@ try {
     Restore-SourceAccessConfigurationChange -Change $bomChange
     if ([Convert]::ToHexString([IO.File]::ReadAllBytes($path)) -cne [Convert]::ToHexString($withBom)) { throw 'BOM rollback changed original bytes.' }
 
+    # Plan, maintenance receipt and Apply run in separate PowerShell processes.
+    # A previously absent section must produce the same exact bytes in each one.
+    $missingSection=[Text.Encoding]::UTF8.GetBytes('{"Worker":{"Enabled":true},"Other":{"Unchanged":42}}')
+    [IO.File]::WriteAllBytes($path,$missingSection)
+    $probe=Join-Path $fixture 'configuration-probe.ps1'
+    [IO.File]::WriteAllText($probe,@'
+param([string]$ModulePath,[string]$ConfigurationPath,[string]$ExpectedHash='',[switch]$Apply)
+$ErrorActionPreference='Stop'
+Import-Module $ModulePath -Force
+$change=New-SourceAccessConfigurationChange -Path $ConfigurationPath -PipeName 'FluxKnowledge.SourceAccess.isolated-config'
+if ($ExpectedHash -and $change.AfterHash -cne $ExpectedHash) { throw 'Cross-process configuration hash differs from the reviewed plan.' }
+if ($Apply) { Set-SourceAccessConfigurationChange $change; Assert-SourceAccessConfigurationChange $change }
+$change.AfterHash
+'@)
+    $modulePath=Join-Path $SourceRoot 'scripts/deploy/incremental-source-access-config.psm1'
+    $plannedHash=''
+    for ($attempt=0;$attempt -lt 8;$attempt++) {
+        $start=[Diagnostics.ProcessStartInfo]::new((Get-Process -Id $PID).Path)
+        $start.UseShellExecute=$false; $start.CreateNoWindow=$true
+        $start.RedirectStandardOutput=$true; $start.RedirectStandardError=$true
+        foreach ($argument in @('-NoProfile','-NonInteractive','-File',$probe,'-ModulePath',$modulePath,'-ConfigurationPath',$path,'-ExpectedHash',$plannedHash)) {
+            $start.ArgumentList.Add($argument)
+        }
+        if ($attempt -eq 7) { $start.ArgumentList.Add('-Apply') }
+        $process=[Diagnostics.Process]::Start($start)
+        try {
+            $stdout=$process.StandardOutput.ReadToEndAsync(); $stderr=$process.StandardError.ReadToEndAsync()
+            if (!$process.WaitForExit(10000)) { $process.Kill($true); throw 'Isolated configuration probe timed out.' }
+            if ($process.ExitCode -ne 0) { throw "Isolated configuration probe failed: $($stderr.GetAwaiter().GetResult())" }
+            $actualHash=$stdout.GetAwaiter().GetResult().Trim()
+            if ($actualHash -cnotmatch '^[A-F0-9]{64}$') { throw 'Isolated configuration probe returned an invalid hash.' }
+            if (!$plannedHash) { $plannedHash=$actualHash }
+        } finally { $process.Dispose() }
+    }
+    $writtenHash=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([IO.File]::ReadAllBytes($path)))
+    if ($writtenHash -cne $plannedHash) { throw 'Apply did not write the exact cross-process reviewed configuration.' }
+    $active=Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+    if (!$active.Worker.Enabled -or $active.Other.Unchanged -ne 42 -or !$active.SourceAccess.Enabled) { throw 'Cross-process activation changed unrelated configuration.' }
+
     # Execute the actual updater callbacks with isolated effects, not copied wiring.
     $tokens=$null; $errors=$null
     $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $SourceRoot 'scripts/deploy/update-native-iis-incremental.ps1'),[ref]$tokens,[ref]$errors)
@@ -113,7 +152,7 @@ try {
         . $finish
         if ((Test-Path -LiteralPath $ValidationHoldPath) -ne ($failure -cne 'validation')) { throw 'The actual finalisation gate mishandled uncertain configuration.' }
     }
-    [pscustomobject]@{passed=13;production_calls=0} | ConvertTo-Json
+    [pscustomobject]@{passed=14;production_calls=0} | ConvertTo-Json
 } finally {
     $resolved=[IO.Path]::GetFullPath($fixture)
     if (!$resolved.StartsWith([IO.Path]::GetFullPath([IO.Path]::GetTempPath()),[StringComparison]::OrdinalIgnoreCase)) { throw 'Fixture escaped temporary root.' }
