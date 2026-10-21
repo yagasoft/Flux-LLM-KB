@@ -471,6 +471,8 @@ $stoppedPoolOutput = & pwsh -NoProfile -File (Join-Path $SourceRoot 'tests/nativ
 if ($LASTEXITCODE -ne 0) {
     throw "The stopped-pool IIS recovery contract failed: $stoppedPoolOutput"
 }
+$offlineCodeOutput = & pwsh -NoProfile -File (Join-Path $SourceRoot 'tests/native/offline-code-maintenance.ps1') -SourceRoot $SourceRoot 2>&1 | Out-String
+if ($LASTEXITCODE -ne 0) { throw "The offline code maintenance contract failed: $offlineCodeOutput" }
 
 $unattendedOutput = & pwsh -NoProfile -File (Join-Path $SourceRoot 'tests/native/unattended-iis-discovery.ps1') -SourceRoot $SourceRoot 2>&1 | Out-String
 if ($LASTEXITCODE -ne 0) { throw "The unattended IIS discovery contract failed: $unattendedOutput" }

@@ -189,3 +189,29 @@ Scale the same one-source change against 1x and 10x unrelated synthetic corpus s
 Use repeated staging measurements to distinguish noise from meaningful regressions before fixing a production segment/cache policy. No speedup or latency target is claimed from this design. Global query fan-out/cold opens and genuinely corpus-wide changes still scale with corpus size. Safety, migration and performance evidence plus independent Astra review are required before canonical closeout and any separately approved production action.
 
 Implementation sequence: [incremental index publication plan](incremental-index-publication-plan.md).
+
+## Offline code updates after conversion
+
+Once format 2 is active, a code correction must preserve the current projection.
+The canonical incremental updater accepts `-RecoverStoppedPool` with
+`-OfflineCodeMaintenanceReceipt` and its exact
+`-ExpectedOfflineCodeMaintenanceReceiptSha256`. The independently reviewed
+receipt binds a completed physical stop, database incarnation, schema, current
+generation and corpus stamp, both configurations, original payloads, companion
+task and the existing deny-all hold. It cannot combine with migration, conversion,
+hosting or source-access configuration changes. Historical GPU reservations are
+preserved; this mode does not claim their settlement.
+
+The updater records intent before atomically transferring the hold, then uses
+its normal paired payload backup, swap, format admission and held validation.
+It rechecks the index binding immediately before start and hold release. An
+attempted or ambiguous start consumes the old stop proof: failures retain the
+matching candidate pair, predecessor and hold for a fresh reviewed stop and
+forward recovery. They cannot silently restore a predecessor after startup.
+
+Ordinary delta builds capture the affected segment keys once, then select a
+sorted, bounded page of affected vector IDs before fetching canonical payloads
+by key. Seal and activation recompute authoritative membership. Actual SQL plan
+counters cover segment acquisition, removal/survivor selection, payload reads
+and exhaustion against increasing unrelated catalogues; a zero-row plan branch
+is not counted as payload work.

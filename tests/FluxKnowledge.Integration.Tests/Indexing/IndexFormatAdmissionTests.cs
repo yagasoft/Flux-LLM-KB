@@ -11,6 +11,25 @@ namespace FluxKnowledge.Integration.Tests.Indexing;
 public sealed class IndexFormatAdmissionTests(NativeSqlServerFixture fixture) : IClassFixture<NativeSqlServerFixture>
 {
     [NativeSqlServerFact]
+    public async Task Offline_code_update_binds_actual_schema_and_current_projection_without_conversion()
+    {
+        await using var environment = await SqlToUsearchRebuildTests.PipelineEnvironment.CreateAsync(fixture,
+            "The existing segmented projection must survive a code-only update.", segmented: true);
+        var root = SourceRoot();
+        var start = new ProcessStartInfo("pwsh") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
+        foreach (var value in new[] { "-NoProfile", "-File", Path.Combine(root, "tests", "native", "offline-code-sql-binding.ps1"),
+            "-SourceRoot", root, "-ExpectedDatabase", fixture.DatabaseName }) start.ArgumentList.Add(value);
+        start.Environment["FLUXKNOWLEDGE_OFFLINE_CODE_TEST_SQL"] = fixture.ConnectionString;
+        using var process = Process.Start(start)!;
+        var output = process.StandardOutput.ReadToEndAsync(); var errors = process.StandardError.ReadToEndAsync();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+        try { await process.WaitForExitAsync(timeout.Token); }
+        catch { if (!process.HasExited) { process.Kill(true); await process.WaitForExitAsync(); } throw; }
+        Assert.True(process.ExitCode == 0, (await output) + (await errors));
+        Assert.Contains("PASS:", await output);
+    }
+
+    [NativeSqlServerFact]
     public async Task Actual_admission_refuses_incompatible_predecessors_and_excludes_format_changes_until_start_returns()
     {
         await using var environment = await SqlToUsearchRebuildTests.PipelineEnvironment.CreateAsync(fixture,

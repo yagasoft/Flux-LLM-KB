@@ -30,6 +30,8 @@ param(
     [ValidateRange(30, 3600)][int]$RebuildTimeoutSeconds = 1800,
     [switch]$DeferReadinessForScopedRemediation,
     [switch]$RecoverStoppedPool,
+    [string]$OfflineCodeMaintenanceReceipt = '',
+    [string]$ExpectedOfflineCodeMaintenanceReceiptSha256 = '',
     [switch]$EnableUnattendedDiscovery,
     [string]$SourceAccessPipeName = '',
     [switch]$DisableSourceAccessRecovery,
@@ -957,6 +959,10 @@ function Get-HybridIisWorkerIds {
 
 function Stop-HybridIisAfterGpuDrain {
     param([scriptblock]$OnStopRequested, [switch]$PassThru)
+    if ($OfflineCodeMaintenanceReceipt) {
+        Assert-OfflineCodeMaintenance -RequireStopped
+        return # Physical exit proof only. Historical GPU reservations remain intact.
+    }
     $stopProof=@{ Identities=@() }
     Invoke-WithHybridGpuDrain -ConnectionString (Get-DeploymentSqlConnectionString) -TimeoutSeconds $RebuildTimeoutSeconds -StopApplication {
         param($sessionId)
@@ -2127,6 +2133,13 @@ if ($RecoverStoppedPool -and ($ApplyMigrations -or $ApplyCorpusChunkFullTextMigr
     $DeferReadinessForScopedRemediation)) {
     throw 'Stopped-pool recovery cannot combine with migration, rebuild, hybrid recovery or readiness deferral.'
 }
+if ($OfflineCodeMaintenanceReceipt -or $ExpectedOfflineCodeMaintenanceReceiptSha256) {
+    if (!$RecoverStoppedPool -or !$OfflineCodeMaintenanceReceipt -or $ExpectedOfflineCodeMaintenanceReceiptSha256 -cnotmatch '^[A-Fa-f0-9]{64}$' -or
+        $ApplyResumableSourceDeletionCleanupMigration -or $ApplyRepositoryRecoveryAuthorityMigration -or $ApplyCodeDisclosureProofMigration -or
+        $ApplySegmentedIndexProjection -or $EnableUnattendedDiscovery -or $SourceAccessPipeName -or $DisableSourceAccessRecovery) {
+        throw 'Offline code maintenance requires only stopped-pool recovery and an exact reviewed receipt hash.'
+    }
+}
 if ($DeferReadinessForScopedRemediation -and $ApplyMigrations) {
     throw "-DeferReadinessForScopedRemediation cannot be combined with -ApplyMigrations."
 }
@@ -2170,6 +2183,9 @@ Import-Module (Join-Path $PSScriptRoot 'incremental-corpus-fulltext-migration.ps
 Import-Module (Join-Path $PSScriptRoot 'incremental-code-disclosure-migration.psm1') -Force -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'incremental-source-deletion-cleanup-migration.psm1') -Force -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'incremental-segmented-index-schema.psm1') -Force -ErrorAction Stop
+Import-Module (Join-Path $PSScriptRoot 'incremental-segmented-index-update.psm1') -Force -ErrorAction Stop
+. (Join-Path $PSScriptRoot 'offline-code-maintenance.ps1')
+$offlineCodeState = $null
 Import-Module (Join-Path $PSScriptRoot 'incremental-hybrid-passage-rebuild.psm1') -Force -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'incremental-repository-recovery-migration.psm1') -Force -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'incremental-repository-recovery-release.psm1') -Force -ErrorAction Stop
@@ -2442,6 +2458,12 @@ if ($PlanOnly) {
         clean_slate = $false
         preserved = @("Config", "Data", "Runtime", "Recovery", "CodexPlugin")
         recover_stopped_pool = [bool]$RecoverStoppedPool
+        offline_code_maintenance = if ($OfflineCodeMaintenanceReceipt) {
+            Assert-OfflineCodeMaintenance -RequireStopped -OriginalPayloads
+            @{ receipt=$OfflineCodeMaintenanceReceipt; sha256=$ExpectedOfflineCodeMaintenanceReceiptSha256;
+                index='preserve current format2 generation; no conversion'; gpu='preserve historical reservations';
+                recovery='before start: stopped rollback; after start intent: retain matching pair and hold for fresh stop/forward recovery' }
+        } else { $null }
         unattended_discovery_hosting = $hostingPlan
         source_access_configuration = if ($sourceAccessChange) { @{
             enabled=$sourceAccessChange.Enabled; pipe=$sourceAccessChange.PipeName;
@@ -2450,8 +2472,8 @@ if ($PlanOnly) {
             rollback='restore exact prior config before predecessor start; unknown drift retains hold; no rollback after release attempt'
         } } else { $null }
         payload_acl = "inherit-from-live-root"
-        rollback = if ($ApplyResumableSourceDeletionCleanupMigration -or $ApplyRepositoryRecoveryAuthorityMigration) { 'preserve-schema-and-evidence; verified-prior-payloads-stopped-task-disabled-hold-retained' } elseif ($RecoverStoppedPool) { 'restore-prior-payloads-with-pool-stopped-and-hold-retained' } elseif ($PatchHybridRebuildRelease -or $ResumeHybridPatchRelease) { 'forward-only after activation intent; predecessor payload/packet retained, hold denied on failure' } elseif ($ApplyHybridPassageRebuild) { 'before-schema: original payload; after-schema: held forward recovery with retained original payload/configuration' } else { "automatic-application-and-interactive-host-payload-restore" }
-        gpu_drain = 'deny admissions; allow active OCR page and native cleanup to finish; prove exact IIS worker exit before each payload swap stop'
+        rollback = if ($OfflineCodeMaintenanceReceipt) { 'before start: stopped rollback; after start intent: matching pair retained for fresh stopped forward recovery; after hold release: reconcile current state' } elseif ($ApplyResumableSourceDeletionCleanupMigration -or $ApplyRepositoryRecoveryAuthorityMigration) { 'preserve-schema-and-evidence; verified-prior-payloads-stopped-task-disabled-hold-retained' } elseif ($RecoverStoppedPool) { 'restore-prior-payloads-with-pool-stopped-and-hold-retained' } elseif ($PatchHybridRebuildRelease -or $ResumeHybridPatchRelease) { 'forward-only after activation intent; predecessor payload/packet retained, hold denied on failure' } elseif ($ApplyHybridPassageRebuild) { 'before-schema: original payload; after-schema: held forward recovery with retained original payload/configuration' } else { "automatic-application-and-interactive-host-payload-restore" }
+        gpu_drain = if ($OfflineCodeMaintenanceReceipt) { 'fresh reviewed stopped-owner proof; no GPU settlement claimed' } else { 'deny admissions; allow active OCR page and native cleanup to finish; prove exact IIS worker exit before each payload swap stop' }
         deployment_validation_hold = $true
         candidate_validation = if ($PatchHybridRebuildRelease -or $ResumeHybridPatchRelease) { 'same-operation-epoch-checkpoint-continuity-preserved-inputs-and-loopback-probes' } elseif ($ApplyHybridPassageRebuild) { 'held-exact-rebuild-finalisation-preserved-inputs-and-loopback-probes' } elseif ($DeferReadinessForScopedRemediation) {
             "held-live-and-index-health probes, exact-ready-503 and unchanged-retained-pipeline-state"
@@ -2663,12 +2685,19 @@ try {
         Assert-StoppedPoolRecoveryBaseline
         $recoveryOriginalPayloadHash = Get-HybridPayloadFingerprint -Path $CanonicalDeployRoot
         $recoveryOriginalInteractiveHostHash = Get-HybridPayloadFingerprint -Path $InteractiveHostRoot
+        if ($OfflineCodeMaintenanceReceipt) {
+            $offlineCodeState=New-OfflineCodeMaintenanceState -StatePath (Join-Path (Split-Path -Parent $OfflineCodeMaintenanceReceipt) ('offline-code-update-'+$releaseId+'.json')) -ReleaseId $releaseId `
+                -CandidateWebSha256 (Get-HybridPayloadFingerprint $candidateRoot) -CandidateCompanionSha256 (Get-HybridPayloadFingerprint $interactiveHostCandidateRoot)
+            Move-OfflineCodeMaintenanceHold -StatePath $offlineCodeState.StatePath -State $offlineCodeState
+        }
         Stop-HybridIisAfterGpuDrain
         [void](New-DeploymentValidationHold -Path $ValidationHoldPath -ReleaseId $releaseId)
         $deploymentValidation.HoldCreated = $true
         $deploymentValidation.Baseline = Get-RetainedPipelineStateBaseline
         [ordered]@{ observed_at_utc=[DateTime]::UtcNow.ToString('O'); pool='Stopped';
-            application_hash=$recoveryOriginalPayloadHash; interactive_host_hash=$recoveryOriginalInteractiveHostHash } |
+            application_hash=$recoveryOriginalPayloadHash; interactive_host_hash=$recoveryOriginalInteractiveHostHash;
+            offline_code_state=if($offlineCodeState){$offlineCodeState.StatePath}else{$null};
+            offline_code_receipt_sha256=if($offlineCodeState){$offlineCodeState.ReceiptSha256}else{$null} } |
             ConvertTo-Json | Set-Content -LiteralPath (Join-Path $releaseRoot 'stopped-pool-recovery-baseline.json') -Encoding utf8
     }
     $interactiveHostTask = Get-ScheduledTask -TaskName $InteractiveHostTaskName -ErrorAction Stop
@@ -2773,6 +2802,7 @@ try {
             }
         } `
         -StartApplication {
+            if ($OfflineCodeMaintenanceReceipt) { Start-OfflineCodeMaintenanceIntent -StatePath $offlineCodeState.StatePath -State $offlineCodeState }
             if ($ApplyResumableSourceDeletionCleanupMigration) {
                 Assert-SourceDeletionCleanupReleaseBinding -State $sourceDeletionCleanupState
                 Assert-SourceDeletionCleanupActivation -State $sourceDeletionCleanupState `
@@ -2881,6 +2911,11 @@ try {
         }
 
     if (!$ApplyResumableSourceDeletionCleanupMigration) {
+        if ($OfflineCodeMaintenanceReceipt) {
+            Assert-OfflineCodeMaintenance -CandidatePayloads
+            $offlineCodeState.ReleaseIntentUtc=[DateTime]::UtcNow.ToString('O')
+            Write-SegmentedUpdateJson $offlineCodeState.StatePath $offlineCodeState
+        }
         # From this attempt onwards workers may have observed the hold disappear.
         $holdReleaseAttempted = $true
         Remove-DeploymentValidationHold -Path $ValidationHoldPath -ReleaseId $releaseId
@@ -2935,6 +2970,9 @@ catch {
     $deploymentFailure = $_
     if ($holdReleaseAttempted -or $holdReleased -or ($ApplyResumableSourceDeletionCleanupMigration -and $null -ne $sourceDeletionCleanupState -and $sourceDeletionCleanupState.ForwardRecoveryRequired)) {
         throw "Deployment hold release was attempted; outcome requires reconciliation after a failure. Current matching payloads and schema are retained; do not replay migration or predecessor rollback. Inspect recovery release $releaseRoot. Failure: $($_.Exception.Message)"
+    }
+    if ($OfflineCodeMaintenanceReceipt -and $offlineCodeState -and $offlineCodeState.StartIntentUtc) {
+        throw "Offline code maintenance start was attempted; retain matching payloads, predecessor and hold for a fresh reviewed stop and forward recovery. Recovery=$releaseRoot. Failure: $($_.Exception.Message)"
     }
     if ($interactiveHostMutationStarted) {
         try {

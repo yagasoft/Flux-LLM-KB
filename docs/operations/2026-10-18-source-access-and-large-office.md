@@ -424,3 +424,22 @@ These two application corrections require independent review, canonical closeout
 and a fresh reviewed incremental deployment before production use. The pilot's
 two terminal jobs require exact supported recovery and subsequent publication
 and readback proof; permission success alone is not indexing success.
+
+## 21 October index-storage recovery
+
+The three access pilots subsequently passed publication and supported readback.
+The specifically approved stale-permission cohort completed 25,385 existing files
+including those pilots; source contents and OneDrive configuration were preserved.
+This proves the scoped access repair, not publication of every newly readable file.
+The generic source-access client/helper is implemented and remains default-off;
+additional folder grants and privileged helper activation still need their exact
+approved operational scope.
+
+The independently reviewed offline segmented-index migration and verification
+completed. Physical cleanup removed 3,010 proven obsolete files and increased free
+space by 744,829,267,968 bytes. Canonical SQL, the working projection, preceding
+monolith and necessary Recovery evidence were retained. A subsequent power loss
+did not undo those completed operations. Current delivery is correcting the
+small-removal refresh query and completing readiness and bounded readback; it does
+not repeat migration, cleanup or full-source ingestion. Historical uncertain GPU
+tasks and other unresolved item causes remain separate, actionable work.

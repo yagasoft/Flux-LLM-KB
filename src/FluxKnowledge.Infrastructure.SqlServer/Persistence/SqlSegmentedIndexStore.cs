@@ -370,16 +370,22 @@ public sealed partial class SqlSegmentedIndexStore(
         return selected.Length == 4 ? selected : [];
     }
 
-    private static IQueryable<long> BuildIds(FluxKnowledgeDbContext context, IndexPublicationCandidateEntity candidate) =>
-        candidate.BuildPurpose != 0
-        ? context.IndexCandidateMembers.Where(value => value.CandidateId == candidate.Id && value.Phase == 1).Select(value => value.VectorId)
-        : context.IndexCandidateMembers.Where(after => after.CandidateId == candidate.Id && after.Phase == 1 &&
+    private static IQueryable<long> BuildIds(FluxKnowledgeDbContext context, IndexPublicationCandidateEntity candidate, string[]? touchedSegments = null)
+    {
+        if (candidate.BuildPurpose != 0)
+            return context.IndexCandidateMembers.Where(value => value.CandidateId == candidate.Id && value.Phase == 1).Select(value => value.VectorId);
+        var survivors = context.CurrentIndexMembers.Where(current => current.CorpusEpoch == candidate.CorpusEpoch);
+        survivors = touchedSegments is null
+            ? survivors.Where(current => TouchedSegments(context, candidate).Contains(current.SegmentId))
+            : survivors.Where(current => EF.Constant(touchedSegments).Contains(current.SegmentId));
+        return context.IndexCandidateMembers.Where(after => after.CandidateId == candidate.Id && after.Phase == 1 &&
             !context.CurrentIndexMembers.Any(current => current.CorpusEpoch == candidate.CorpusEpoch && current.VectorId == after.VectorId))
             .Select(value => value.VectorId)
-        .Union(context.CurrentIndexMembers.Where(current => current.CorpusEpoch == candidate.CorpusEpoch && TouchedSegments(context, candidate).Contains(current.SegmentId) &&
+        .Union(survivors.Where(current =>
             !context.IndexCandidateMembers.Any(before => before.CandidateId == candidate.Id && before.Phase == 0 && before.VectorId == current.VectorId &&
                 !context.IndexCandidateMembers.Any(after => after.CandidateId == candidate.Id && after.Phase == 1 && after.VectorId == current.VectorId)))
             .Select(value => value.VectorId));
+    }
 
     public async IAsyncEnumerable<CanonicalVector> ReadBuildVectorsAsync(Guid candidateId, [EnumeratorCancellation] CancellationToken cancellationToken)
     {
@@ -387,11 +393,17 @@ public sealed partial class SqlSegmentedIndexStore(
         var candidate = await context.IndexPublicationCandidates.AsNoTracking().SingleAsync(value => value.Id == candidateId, cancellationToken);
         if ((candidate.State != 0 && !(candidate.BuildPurpose != 0 && candidate.State == 1)) || !candidate.WorklistComplete)
             throw new InvalidOperationException("index-worklist-unsealed");
+        // Expose exact segment keys to the read plan. Seal and activation still
+        // recompute authoritative membership against the candidate's base.
+        var touched = candidate.BuildPurpose == 0
+            ? await TouchedSegments(context, candidate).ToArrayAsync(cancellationToken) : [];
         long last = 0;
         while (true)
         {
-            var page = await QueryBuildVectors(context, candidate, last).ToArrayAsync(cancellationToken);
-            if (page.Length == 0) yield break;
+            var ids = await QueryBuildVectorIds(context, candidate, last, touched).ToArrayAsync(cancellationToken);
+            if (ids.Length == 0) yield break;
+            var page = await QueryBuildVectors(context, ids).ToArrayAsync(cancellationToken);
+            if (page.Length != ids.Length) throw new PublicationSnapshotConflictException("index-build-vector-page-changed");
             foreach (var value in page)
                 yield return new(value.VectorId, value.TextChunkId, value.ModelFingerprint, value.Dimensions, value.Values,
                     value.TextChunkContentHash, value.PayloadChecksum, value.SourceRevision);
@@ -399,9 +411,14 @@ public sealed partial class SqlSegmentedIndexStore(
         }
     }
 
-    internal static IQueryable<VectorEntity> QueryBuildVectors(FluxKnowledgeDbContext context, IndexPublicationCandidateEntity candidate, long last) =>
-        context.Vectors.AsNoTracking().Where(value => value.VectorId > last && BuildIds(context, candidate).Contains(value.VectorId))
-            .OrderBy(value => value.VectorId).Take(PageSize);
+    internal static IQueryable<long> QueryBuildVectorIds(FluxKnowledgeDbContext context, IndexPublicationCandidateEntity candidate, long last, string[] touchedSegments) =>
+        BuildIds(context, candidate, touchedSegments).Where(id => id > last).OrderBy(id => id).Take(PageSize);
+
+    // Materialise the bounded ID page before touching payloads. An outer Vectors
+    // query over the removal/survivor UNION can scan the entire catalogue,
+    // especially when the final page is empty.
+    internal static IQueryable<VectorEntity> QueryBuildVectors(FluxKnowledgeDbContext context, long[] ids) =>
+        context.Vectors.AsNoTracking().Where(value => ids.Contains(value.VectorId)).OrderBy(value => value.VectorId);
 
     public async ValueTask SealSegmentAsync(Guid candidateId, IndexSegmentDescriptor segment, IReadOnlyList<CanonicalVector> vectors, CancellationToken cancellationToken)
     {

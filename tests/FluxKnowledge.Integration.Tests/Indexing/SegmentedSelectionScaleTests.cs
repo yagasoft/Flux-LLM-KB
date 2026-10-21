@@ -81,10 +81,14 @@ public sealed class SegmentedSelectionScaleTests(NativeSqlServerFixture fixture,
     [InlineData(0)]
     [InlineData(1)]
     [InlineData(2)]
+    [InlineData(3)]
+    [InlineData(4)]
+    [InlineData(5)]
     public async Task A_one_source_delta_does_not_scan_ten_times_more_unrelated_rows(int selection)
     {
         await using var environment = await SqlToUsearchRebuildTests.PipelineEnvironment.CreateAsync(fixture,
-            "The selected source has one small unchanged passage.", publish: selection != 2, segmented: true);
+            selection >= 3 ? string.Join(' ', Enumerable.Range(0, 750).Select(index => $"passage_{index}"))
+                : "The selected source has one small unchanged passage.", publish: selection != 2, segmented: true);
         await using var db = await environment.Factory.CreateDbContextAsync();
         var selectedSource = await db.PipelineRecords.Select(value => value.SourceIdentityId).SingleAsync();
         var selectedDraft = selection == 2 ? await db.IndexGenerations.Where(value => value.IndexPath == string.Empty).Select(value => value.Id).SingleAsync() : Guid.Empty;
@@ -98,6 +102,31 @@ public sealed class SegmentedSelectionScaleTests(NativeSqlServerFixture fixture,
             var prepared = await scope.ServiceProvider.GetRequiredService<ISegmentedIndexStore>().PrepareAsync(selectedDraft, CancellationToken.None);
             candidate = await db.IndexPublicationCandidates.AsNoTracking().SingleAsync(value => value.Id == prepared.Id);
         }
+        if (selection >= 3)
+        {
+            // A removed member requires rebuilding its mixed segment's survivor.
+            // Other segments, including the scale rows below, must not be read.
+            var segmentCount = selection == 4 ? 2 : 1;
+            var segments = await db.CurrentIndexMembers.Where(value => value.SourceIdentityId == selectedSource)
+                .GroupBy(value => value.SegmentId).Where(group => group.Count() == 2).OrderBy(group => group.Key).Select(group => group.Key).Take(segmentCount).ToArrayAsync();
+            Assert.Equal(segmentCount, segments.Length);
+            var members = await db.CurrentIndexMembers.Where(value => value.SourceIdentityId == selectedSource).OrderBy(value => value.VectorId).ToArrayAsync();
+            var removed = selection == 5 ? members : segments.Select(segment => members.First(value => value.SegmentId == segment)).ToArray();
+            candidate.Id = Guid.NewGuid();
+            candidate.BaseGenerationId = await db.IndexState.Select(value => value.ActiveIndexGenerationId).SingleAsync();
+            candidate.BeforeChecksum = candidate.AfterChecksum = candidate.OwnerMachineFingerprint = new string('0', 64);
+            candidate.BeforeCount = removed.Length;
+            candidate.WorklistComplete = true;
+            candidate.CreatedAtUtc = candidate.OwnerStartedAtUtc = DateTimeOffset.UtcNow;
+            db.IndexPublicationCandidates.Add(candidate);
+            foreach (var member in removed) db.IndexCandidateMembers.Add(new()
+            {
+                CandidateId = candidate.Id, Phase = 0, VectorId = member.VectorId,
+                PayloadChecksum = await db.Vectors.Where(value => value.VectorId == member.VectorId).Select(value => value.PayloadChecksum).SingleAsync(),
+                SourceIdentityId = member.SourceIdentityId, OwnerSourceRevisionId = member.OwnerSourceRevisionId, SourceRootId = member.SourceRootId
+            });
+            await db.SaveChangesAsync();
+        }
         var table = selection == 1 ? "[CurrentIndexMembers]" : "[Vectors]";
         await db.Database.OpenConnectionAsync();
         // Additional canonical and ledger rows belong to the unrelated source only.
@@ -109,49 +138,69 @@ public sealed class SegmentedSelectionScaleTests(NativeSqlServerFixture fixture,
         _ = await MeasureAsync();
         var large = await MeasureAsync();
         output.WriteLine($"selection={selection} table={table} unrelated_vectors=1000/10000 selected_rows={small.Rows}/{large.Rows} rows_read={small.Reads}/{large.Reads} elapsed_ms={small.Milliseconds:F2}/{large.Milliseconds:F2} operators={large.Operators}");
-        Assert.Equal(1, small.Rows);
-        Assert.Equal(1, large.Rows);
-        Assert.InRange(small.Reads, 1, 24);
+        var expectedRows = selection == 5 ? 0 : selection == 4 ? 2 : 1;
+        Assert.Equal(expectedRows, small.Rows);
+        Assert.Equal(expectedRows, large.Rows);
+        Assert.InRange(small.Reads, 1, 24 * Math.Max(1, candidate.BeforeCount));
         Assert.InRange(large.Reads, 1, small.Reads + 24);
         Assert.DoesNotContain("Scan", large.Operators, StringComparison.Ordinal);
 
         async Task<(int Rows, long Reads, double Milliseconds, string Operators)> MeasureAsync()
         {
             var timer = Stopwatch.StartNew();
-            var page = await ReadPageAsync(0);
-            Assert.NotEmpty(page.Ids);
+            var touched = new List<string>();
+            (List<long> Ids, long Reads, string Operators) capture = selection >= 2 ? await ExecutePageAsync(SqlSegmentedIndexStore.TouchedSegments(db, candidate).CreateDbCommand(),
+                "[CurrentIndexMembers]", requireTable: false, segments: touched) : (new List<long>(), 0L, "");
+            var page = await ReadPageAsync(0, touched.ToArray());
             // Include the exhaustion query: a small first TOP page can conceal a full scan here.
-            var exhausted = await ReadPageAsync(page.Ids[^1]);
+            (List<long> Ids, long Reads, string Operators) exhausted = page.Ids.Count == 0 ? (new List<long>(), 0L, "") : await ReadPageAsync(page.Ids[^1], touched.ToArray());
             Assert.Empty(exhausted.Ids);
             timer.Stop();
-            return (page.Ids.Count, page.Reads + exhausted.Reads, timer.Elapsed.TotalMilliseconds, page.Operators + "," + exhausted.Operators);
+            return (page.Ids.Count, capture.Reads + page.Reads + exhausted.Reads, timer.Elapsed.TotalMilliseconds, capture.Operators + "," + page.Operators + "," + exhausted.Operators);
         }
 
-        async Task<(List<long> Ids, long Reads, string Operators)> ReadPageAsync(long last)
+        async Task<(List<long> Ids, long Reads, string Operators)> ReadPageAsync(long last, string[] touched)
+        {
+            if (selection >= 2)
+            {
+                var selected = await ExecutePageAsync(SqlSegmentedIndexStore.QueryBuildVectorIds(db, candidate, last, touched).CreateDbCommand(),
+                    "[CurrentIndexMembers]", requireTable: false);
+                if (selected.Ids.Count == 0) return selected;
+                var payloads = await ExecutePageAsync(SqlSegmentedIndexStore.QueryBuildVectors(db, selected.Ids.ToArray()).CreateDbCommand(), "[Vectors]");
+                Assert.Equal(selected.Ids, payloads.Ids);
+                return (payloads.Ids, selected.Reads + payloads.Reads, selected.Operators + "," + payloads.Operators);
+            }
+            return await ExecutePageAsync(selection == 1
+                ? SqlSegmentedIndexStore.QueryCurrent(db, candidate, last).CreateDbCommand()
+                : SqlSegmentedIndexStore.QueryEligible(db, scopes, last).CreateDbCommand(), table);
+        }
+
+        async Task<(List<long> Ids, long Reads, string Operators)> ExecutePageAsync(System.Data.Common.DbCommand command, string measuredTable, bool requireTable = true, List<string>? segments = null)
         {
             // Execute EF's actual parameterised command. XML returns actual operator
             // row counters as a result set rather than relying on provider messages.
-            await using var command = selection switch
-            {
-                1 => SqlSegmentedIndexStore.QueryCurrent(db, candidate, last).CreateDbCommand(),
-                2 => SqlSegmentedIndexStore.QueryBuildVectors(db, candidate, last).CreateDbCommand(),
-                _ => SqlSegmentedIndexStore.QueryEligible(db, scopes, last).CreateDbCommand()
-            };
+            await using var ownedCommand = command;
             command.CommandText = "SET STATISTICS XML ON;\n" + command.CommandText + ";\nSET STATISTICS XML OFF;";
             await using var reader = await command.ExecuteReaderAsync();
             var ids = new List<long>();
-            while (await reader.ReadAsync()) ids.Add(reader.GetInt64(reader.GetOrdinal("VectorId")));
+            while (await reader.ReadAsync())
+                if (segments is not null) segments.Add(reader.GetString(0));
+                else ids.Add(reader.GetInt64(reader.GetOrdinal("VectorId")));
             XDocument? plan = null;
             while (await reader.NextResultAsync())
                 if (reader.FieldCount == 1 && await reader.ReadAsync()) plan = XDocument.Parse(reader.GetString(0));
             Assert.NotNull(plan);
             XNamespace ns = "http://schemas.microsoft.com/sqlserver/2004/07/showplan";
             var operators = plan.Descendants(ns + "RelOp").Where(op => op.Elements().Any(access =>
-                (string?)access.Element(ns + "Object")?.Attribute("Table") == table)).ToArray();
-            Assert.NotEmpty(operators);
-            var reads = operators.Sum(op => op.Descendants(ns + "RunTimeCountersPerThread")
-                .Sum(counter => long.Parse((string?)counter.Attribute("ActualRowsRead") ?? (string?)counter.Attribute("ActualRows") ?? "0", CultureInfo.InvariantCulture)));
-            return (ids, reads, string.Join(',', operators.Select(op => (string?)op.Attribute("PhysicalOp"))));
+                (string?)access.Element(ns + "Object")?.Attribute("Table") == measuredTable)).ToArray();
+            if (requireTable) Assert.NotEmpty(operators);
+            var reads = operators.Sum(RowsRead);
+            // Empty UNION branches can retain an executed scan operator while
+            // reading zero rows. Count every read; report operators doing work.
+            return (ids, reads, string.Join(',', operators.Where(op => RowsRead(op) > 0).Select(op => (string?)op.Attribute("PhysicalOp"))));
+
+            long RowsRead(XElement op) => op.Descendants(ns + "RunTimeCountersPerThread")
+                .Sum(counter => long.Parse((string?)counter.Attribute("ActualRowsRead") ?? (string?)counter.Attribute("ActualRows") ?? "0", CultureInfo.InvariantCulture));
         }
 
         Task SeedUnrelatedAsync(int count) => db.Database.ExecuteSqlInterpolatedAsync($"""
