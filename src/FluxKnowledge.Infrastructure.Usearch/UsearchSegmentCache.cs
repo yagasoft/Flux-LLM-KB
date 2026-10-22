@@ -182,6 +182,15 @@ public sealed class UsearchSegmentCacheMaintenance(UsearchSegmentCache cache, Ti
     private string? _failure;
     private string? _storageFailure;
     private DateTimeOffset _nextStorageMaintenance;
+
+    public override async Task StopAsync(CancellationToken cancellationToken)
+    {
+        await base.StopAsync(cancellationToken);
+        // Durable disposal acknowledgements need the still-live SQL/DI services.
+        // Container disposal is too late to create another EF context.
+        await cache.DisposeAsync();
+    }
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         while (!stoppingToken.IsCancellationRequested)
