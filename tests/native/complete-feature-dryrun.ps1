@@ -160,6 +160,7 @@ try {
         'native-repository-contract',
         'native-closeout-contract',
         'native-closeout-integration-contract',
+        'native-closeout-parallel-contract',
         'native-go-live-bootstrap-nondryrun-contract',
         'native-go-live-contract',
         'native-go-live-recovery-removal-contract',

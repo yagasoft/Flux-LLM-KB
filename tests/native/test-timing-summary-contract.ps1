@@ -25,7 +25,9 @@ try {
 '@ | Set-Content -LiteralPath (Join-Path $temporaryRoot 'synthetic.trx')
     @(
         '{"phase":"create","catalog":"synthetic","seconds":1,"succeeded":true}',
-        '{"phase":"migrate","catalog":"synthetic","seconds":4,"succeeded":false}'
+        '{"phase":"migrate","catalog":"synthetic","seconds":3,"succeeded":true,"started_at_utc":"2026-10-22T00:00:02Z","finished_at_utc":"2026-10-22T00:00:05Z"}',
+        '{"phase":"migrate","catalog":"synthetic","seconds":4,"succeeded":false,"started_at_utc":"2026-10-22T00:00:00Z","finished_at_utc":"2026-10-22T00:00:04Z"}',
+        '{"phase":"migrate","catalog":"synthetic","seconds":1,"succeeded":true,"started_at_utc":"2026-10-22T00:00:07Z","finished_at_utc":"2026-10-22T00:00:08Z"}'
     ) | Set-Content -LiteralPath (Join-Path $temporaryRoot 'sql-fixtures-1.jsonl')
     $summary = & (Join-Path $SourceRoot 'scripts\dev\summarise-test-timings.ps1') -ResultsRoot $temporaryRoot | ConvertFrom-Json
     if ($summary.projects.Count -ne 1 -or $summary.projects[0].elapsed_seconds -ne 10 -or
@@ -33,7 +35,11 @@ try {
         $summary.slowest_tests[0].name -ne 'Synthetic.Tests.Slow' -or
         $summary.slowest_classes[0].summed_seconds -ne 11 -or
         $summary.sql_fixture_phases[0].phase -ne 'migrate' -or
-        $summary.sql_fixture_phases[0].failed -ne 1 -or $summary.sql_catalogues -ne 1) {
+        $summary.sql_fixture_phases[0].failed -ne 1 -or $summary.sql_catalogues -ne 1 -or
+        $summary.sql_fixture_phases[0].summed_seconds -ne 8 -or
+        $summary.sql_fixture_phases[0].interval_union_seconds -ne 6 -or
+        $summary.sql_fixture_phases[0].timed_records -ne 3 -or
+        $null -ne $summary.sql_fixture_phases[1].interval_union_seconds) {
         throw 'Timing summary lost outcomes, ranking, overlapping durations or fixture phases.'
     }
     Write-Output 'Test timing summary contract passed.'

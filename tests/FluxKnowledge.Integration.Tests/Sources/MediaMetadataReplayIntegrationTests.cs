@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.Security.Cryptography;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Sources;
@@ -159,13 +160,15 @@ public sealed class MediaMetadataReplayIntegrationTests(NativeSqlServerFixture f
         var privateRoot = CreatePrivateRoot();
         try
         {
-            var seeded = await SeedPngAsync(privateRoot, "read-limit");
-            var media = new MediaMetadataRetainedProcessor(new SqlRetainedArtifactWriter(new ContextFactory(_fixture.ConnectionString), privateRoot), new AllowingDisclosure(), new ReadLimitParser());
+            var seeded = await SeedBytesAsync(privateRoot, PngWithReadBudgetPadding(), ".png", "read-limit");
+            var parser = new ReadLimitParser();
+            var media = new MediaMetadataRetainedProcessor(new SqlRetainedArtifactWriter(new ContextFactory(_fixture.ConnectionString), privateRoot), new AllowingDisclosure(), parser);
 
             var result = await CreateActivation(privateRoot, enabled: true, media).RunOnceAsync(CancellationToken.None);
 
             Assert.Equal(1, result.FailedBranches);
             await AssertNoDerivedChildAfterFailureAsync(seeded.RevisionId, "media-metadata-read-limit");
+            Assert.InRange(parser.ReadCalls, 1, 256);
         }
         finally { DeletePrivateRoot(privateRoot); }
     }
@@ -320,13 +323,15 @@ public sealed class MediaMetadataReplayIntegrationTests(NativeSqlServerFixture f
         finally { DeletePrivateRoot(privateRoot); }
     }
 
-    [NativeSqlServerFact]
-    public async Task Successful_media_replay_persists_one_canonical_manifest_with_immutable_parent_provenance_and_standard_text_index_link()
+    [NativeSqlServerTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Successful_media_replay_persists_one_canonical_manifest_with_immutable_parent_provenance_and_standard_text_index_link(bool padded)
     {
         var privateRoot = CreatePrivateRoot();
         try
         {
-            var seeded = await SeedPngAsync(privateRoot, "manifest");
+            var seeded = await SeedBytesAsync(privateRoot, padded ? PngWithReadBudgetPadding() : Png(), ".png", "manifest");
 
             Assert.Equal(1, (await CreateActivation(privateRoot, enabled: true).RunOnceAsync(CancellationToken.None)).CompletedBranches);
             Assert.Equal(0, (await CreateActivation(privateRoot, enabled: true).RunOnceAsync(CancellationToken.None)).CompletedBranches);
@@ -648,6 +653,29 @@ public sealed class MediaMetadataReplayIntegrationTests(NativeSqlServerFixture f
         if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
     }
     private static byte[] Png() => Convert.FromBase64String("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Jj7kAAAAASUVORK5CYII=");
+    private static byte[] PngWithReadBudgetPadding()
+    {
+        // Keep the real 96 MiB read budget, but consume it in 1 MiB reads rather
+        // than millions of tiny reads. An unknown ancillary chunk keeps the PNG
+        // valid; the normal-parser theory above also verifies its manifest.
+        var png = Png();
+        var bytes = new byte[1024 * 1024];
+        var chunkOffset = png.Length - 12; // Insert before IEND.
+        var payloadLength = bytes.Length - png.Length - 12;
+        png.AsSpan(0, chunkOffset).CopyTo(bytes);
+        BinaryPrimitives.WriteInt32BigEndian(bytes.AsSpan(chunkOffset, 4), payloadLength);
+        "pADd"u8.CopyTo(bytes.AsSpan(chunkOffset + 4));
+        var crc = uint.MaxValue;
+        foreach (var value in bytes.AsSpan(chunkOffset + 4, payloadLength + 4))
+        {
+            crc ^= value;
+            for (var bit = 0; bit < 8; bit++)
+                crc = (crc >> 1) ^ ((crc & 1) == 0 ? 0 : 0xedb88320u);
+        }
+        BinaryPrimitives.WriteUInt32BigEndian(bytes.AsSpan(chunkOffset + 8 + payloadLength, 4), ~crc);
+        png.AsSpan(chunkOffset).CopyTo(bytes.AsSpan(bytes.Length - 12));
+        return bytes;
+    }
     private static byte[] IsoBmff(string brand)
     {
         var bytes = new byte[16];
@@ -740,6 +768,7 @@ public sealed class MediaMetadataReplayIntegrationTests(NativeSqlServerFixture f
 
     private sealed class ReadLimitParser : IMediaMetadataParser
     {
+        public int ReadCalls { get; private set; }
         public MediaMetadataParserPreflight Preflight() => new(true, null);
         public MediaMetadataParseResult Parse(Stream stream, MediaMetadataFormat format, CancellationToken cancellationToken)
         {
@@ -747,7 +776,11 @@ public sealed class MediaMetadataReplayIntegrationTests(NativeSqlServerFixture f
             while (true)
             {
                 stream.Position = 0;
-                while (stream.Read(buffer) > 0) { }
+                while (true)
+                {
+                    ReadCalls++;
+                    if (stream.Read(buffer) == 0) break;
+                }
             }
         }
     }

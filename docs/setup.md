@@ -238,6 +238,32 @@ closeout lock prevents overlapping script runs. Continue to coordinate shared
 SQL and other writers; the lock cannot stop arbitrary editors or Git commands.
 All four projects retain their existing isolation and opt-in skips.
 
+The disposable workflow regression harness runs independent scenarios in up to
+four separate processes, each with its own repository, environment and temporary
+files. Its deliberate timeout probes run alone afterwards. For a sequential
+comparison or debugging, run `tests/native/complete-feature-integration.ps1
+-MaxParallelScenarios 1`. A failed aggregate retains per-scenario logs and exit
+codes; this concurrency does not parallelise the solution's SQL/native projects.
+Windows process jobs contain each worker and its descendants before scenario
+code starts. Cancellation, launcher failures, inherited output pipes and log
+failures have bounded cleanup checks; a worker leaving descendants fails.
+
+Ordinary disposable SQL fixtures restore unique catalogues from one empty backup
+created by the current test process's real migration chain. Each catalogue keeps
+its own exact MDF/LDF paths and receives a fresh corpus epoch before use. Schema,
+migration history, full-text definitions and seed-state parity are checked against
+direct migrations. Explicit migration targets and previous-schema fixtures still
+run real migrations. Set `FLUXKNOWLEDGE_TEST_SQL_USE_MIGRATIONS=1` to use direct
+migrations throughout a diagnostic run.
+
+Templates use the existing restricted test principal and validated disposable SQL
+storage root, with no extra permissions or `WITH REPLACE`. There is no cross-run
+backup reuse. Backup identities include a hash, byte length and loaded migration
+assembly identity. An attempted restore with an uncertain outcome fails closed
+and preserves its catalogue, backup and `template-restore-<catalogue>.json` receipt
+in that owned storage root. Required recovery receipts are independent of optional
+timing output. Inspect preserved evidence before any explicit cleanup.
+
 Per-run JSON summaries, step logs, TRX files and SQL fixture phase timings remain
 under `.agents/run-logs/closeout-<run-id>/`, outside the disposable candidate.
 Inspect them with:
@@ -249,8 +275,11 @@ pwsh -NoProfile -File scripts/dev/summarise-test-timings.ps1 -ResultsRoot <resul
 For focused timing, set `FLUXKNOWLEDGE_TEST_TIMINGS_ROOT` to a private results
 directory and add `--logger trx --results-directory <results-root>` to
 `dotnet test`. SQL timings cover connection/safety checks, creation, file
-verification, migrations and cleanup. Summed timings can overlap when tests run
-concurrently and are not a wall-clock breakdown.
+verification, migrations, template restores, pipeline resets and cleanup. Cleanup
+also separates server time in forced disconnection from the drop statement.
+Timestamped records let the summary report each phase's interval union alongside
+its sum; earlier records retain their sums. Both phases and tests can overlap, so
+these values must not be added as a wall-clock breakdown.
 
 A failed gate preserves the feature and candidate with its logs; canonical
 `main` is not changed by a failed candidate verification. Failures after promotion

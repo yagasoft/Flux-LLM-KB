@@ -20,10 +20,18 @@ public sealed class NativeSqlServerFixture : IAsyncLifetime
     private string? _serverConnectionString;
     private string? _fileRoot;
     private bool _databaseCreateAttempted;
+    private readonly string? _configuredServer;
+    private readonly string? _configuredRoot;
     private readonly SqlFixtureTimings _timings = new(Environment.GetEnvironmentVariable(SqlFixtureTimings.EnvironmentVariable));
 
     public string DatabaseName { get; } = $"{TestCatalogPrefix}{Guid.NewGuid():N}";
     internal string? InitialMigration { get; init; }
+    internal bool UseDirectMigrations { get; init; }
+
+    public NativeSqlServerFixture() { }
+    internal NativeSqlServerFixture(string server, string root) { _configuredServer = server; _configuredRoot = root; }
+
+    internal Task MeasureAsync(string phase, Func<Task> action) => _timings.MeasureAsync(phase, DatabaseName, action);
 
     public string ConnectionString
     {
@@ -47,8 +55,10 @@ public sealed class NativeSqlServerFixture : IAsyncLifetime
 
     public async Task InitializeAsync()
     {
-        _serverConnectionString = await ResolveDisposableServerConnectionStringAsync().ConfigureAwait(false);
-        _fileRoot = ValidateTestFileRoot(Environment.GetEnvironmentVariable(FileRootEnvironmentVariable));
+        _serverConnectionString = _configuredServer is null
+            ? await ResolveDisposableServerConnectionStringAsync().ConfigureAwait(false)
+            : ValidateRestrictedTestConnection(_configuredServer);
+        _fileRoot = ValidateTestFileRoot(_configuredRoot ?? Environment.GetEnvironmentVariable(FileRootEnvironmentVariable));
         if (!Directory.Exists(_fileRoot)) throw new InvalidOperationException("The owned disposable SQL file root is not provisioned.");
 
         ValidateServerConnectionString(_serverConnectionString);
@@ -60,6 +70,14 @@ public sealed class NativeSqlServerFixture : IAsyncLifetime
             await serverConnection.OpenAsync().ConfigureAwait(false);
             await EnsureSafeServerDefaultsAsync(serverConnection).ConfigureAwait(false);
         }).ConfigureAwait(false);
+
+        if (!UseDirectMigrations && InitialMigration is null && Environment.GetEnvironmentVariable("FLUXKNOWLEDGE_TEST_SQL_USE_MIGRATIONS") != "1")
+        {
+            var template = await NativeSqlDatabaseTemplate.GetAsync(_serverConnectionString, _fileRoot).ConfigureAwait(false);
+            await _timings.MeasureAsync("restore-template", DatabaseName, () => template.RestoreAsync(DatabaseName)).ConfigureAwait(false);
+            _databaseCreateAttempted = true;
+            return;
+        }
 
         await RunCreateSequenceAsync(
             () => _timings.MeasureAsync("create", DatabaseName, async () =>
@@ -141,7 +159,7 @@ public sealed class NativeSqlServerFixture : IAsyncLifetime
         ValidateGeneratedCatalog(name);
         root = ValidateTestFileRoot(root);
         return $"""
-            IF DB_NAME() <> N'master'
+            IF DB_NAME() <> N'master' OR @@TRANCOUNT <> 0
                 OR NOT EXISTS (SELECT 1 FROM sys.databases WHERE [name]=N'{name}' AND owner_sid=SUSER_SID())
                 OR (SELECT COUNT(*) FROM sys.master_files WHERE database_id=DB_ID(N'{name}')) <> 2
                 OR NOT EXISTS (SELECT 1 FROM sys.master_files WHERE database_id=DB_ID(N'{name}') AND [type]=0 AND physical_name=N'{Path.Combine(root, name + ".mdf")}')
@@ -424,11 +442,11 @@ public sealed class NativeSqlServerFixture : IAsyncLifetime
     private async Task VerifyCreatedDatabaseFilesAsync(SqlConnection connection)
         => await VerifyOwnedDatabaseAsync(_serverConnectionString!, DatabaseName, _fileRoot!).ConfigureAwait(false);
 
-    private static async Task VerifyOwnedDatabaseAsync(string serverConnectionString, string name, string root)
+    internal static async Task VerifyOwnedDatabaseAsync(string serverConnectionString, string name, string root)
     {
         ValidateGeneratedCatalog(name);
         root = ValidateTestFileRoot(root);
-        await using var connection = new SqlConnection(new SqlConnectionStringBuilder(serverConnectionString) { InitialCatalog = name }.ConnectionString);
+        await using var connection = new SqlConnection(new SqlConnectionStringBuilder(serverConnectionString) { InitialCatalog = name, Pooling = false }.ConnectionString);
         await connection.OpenAsync().ConfigureAwait(false);
         const string sql =
             """
@@ -470,24 +488,70 @@ public sealed class NativeSqlServerFixture : IAsyncLifetime
         }
 
         ValidateGeneratedCatalog(DatabaseName);
-        SqlConnection.ClearAllPools();
-        await using var serverConnection = new SqlConnection(_serverConnectionString);
+        await using var serverConnection = new SqlConnection(new SqlConnectionStringBuilder(_serverConnectionString) { InitialCatalog = "master", Pooling = false }.ConnectionString);
         await serverConnection.OpenAsync().ConfigureAwait(false);
-        await VerifyOwnedDatabaseAsync(_serverConnectionString, DatabaseName, _fileRoot!).ConfigureAwait(false);
-        await using var drop = new SqlCommand(
-            $"""
-             IF DB_ID(N'{DatabaseName}') IS NOT NULL
-             BEGIN
-                 ALTER DATABASE [{DatabaseName}] SET SINGLE_USER WITH ROLLBACK IMMEDIATE;
-                 DROP DATABASE [{DatabaseName}];
-             END;
-             """,
-             serverConnection);
-        await drop.ExecuteNonQueryAsync().ConfigureAwait(false);
+        await _timings.MeasureAsync("verify-before-drop", DatabaseName, async () =>
+        {
+            await using var guard = new SqlCommand(BuildSessionControlGuardSql(DatabaseName, _fileRoot!), serverConnection);
+            await guard.ExecuteNonQueryAsync().ConfigureAwait(false);
+        }).ConfigureAwait(false);
+        await _timings.MeasureAsync("clear-owned-pool", DatabaseName, () =>
+        {
+            ClearOwnedPool(ConnectionString);
+            return Task.CompletedTask;
+        }).ConfigureAwait(false);
+        await _timings.MeasureAsync("drop-database", DatabaseName,
+            () => ExecuteDropAsync(serverConnection, DatabaseName, _fileRoot!, _timings)).ConfigureAwait(false);
         _databaseCreateAttempted = false;
     }
 
-    private static void ValidateGeneratedCatalog(string databaseName)
+    internal static async Task ExecuteDropAsync(SqlConnection connection, string name, string root, SqlFixtureTimings timings)
+    {
+        var guard = BuildSessionControlGuardSql(name, root);
+        // Keep both statements in one batch on the same master connection, so a
+        // profiling round trip cannot hand the single-user slot to another session.
+        var sql = guard + $"""
+
+            ALTER DATABASE [{name}] SET SINGLE_USER WITH ROLLBACK IMMEDIATE;
+            DROP DATABASE [{name}];
+            """;
+        if (timings.Enabled)
+            sql = guard + $"""
+
+                DECLARE @started datetime2(7) = SYSUTCDATETIME(), @restricted datetime2(7), @dropped datetime2(7);
+                ALTER DATABASE [{name}] SET SINGLE_USER WITH ROLLBACK IMMEDIATE;
+                SET @restricted = SYSUTCDATETIME();
+                DROP DATABASE [{name}];
+                SET @dropped = SYSUTCDATETIME();
+                SELECT @started, @restricted, @dropped;
+                """;
+        await using var command = new SqlCommand(sql, connection);
+        await timings.MeasureAsync("forced-drop", name, async () =>
+        {
+            if (!timings.Enabled)
+            {
+                await command.ExecuteNonQueryAsync().ConfigureAwait(false);
+                return;
+            }
+            await using var reader = await command.ExecuteReaderAsync().ConfigureAwait(false);
+            if (await reader.ReadAsync().ConfigureAwait(false))
+            {
+                var started = new DateTimeOffset(DateTime.SpecifyKind(reader.GetDateTime(0), DateTimeKind.Utc));
+                var restricted = new DateTimeOffset(DateTime.SpecifyKind(reader.GetDateTime(1), DateTimeKind.Utc));
+                var dropped = new DateTimeOffset(DateTime.SpecifyKind(reader.GetDateTime(2), DateTimeKind.Utc));
+                timings.RecordInterval("single-user-server", name, started, restricted, succeeded: true);
+                timings.RecordInterval("drop-catalogue-server", name, restricted, dropped, succeeded: true);
+            }
+        }).ConfigureAwait(false);
+    }
+
+    private static void ClearOwnedPool(string connectionString)
+    {
+        using var owned = new SqlConnection(connectionString);
+        SqlConnection.ClearPool(owned);
+    }
+
+    internal static void ValidateGeneratedCatalog(string databaseName)
     {
         if (!databaseName.StartsWith(TestCatalogPrefix, StringComparison.Ordinal) ||
             databaseName.Length != TestCatalogPrefix.Length + 32 ||
@@ -600,20 +664,20 @@ public sealed class NativeSqlServerFixture : IAsyncLifetime
             }
 
             ValidateGeneratedCatalog(_databaseName);
-            SqlConnection.ClearAllPools();
-            await using var serverConnection = new SqlConnection(_serverConnectionString);
+            await using var serverConnection = new SqlConnection(new SqlConnectionStringBuilder(_serverConnectionString) { InitialCatalog = "master", Pooling = false }.ConnectionString);
             await serverConnection.OpenAsync().ConfigureAwait(false);
-            await VerifyOwnedDatabaseAsync(_serverConnectionString, _databaseName, _fileRoot).ConfigureAwait(false);
-            await using var drop = new SqlCommand(
-                $"""
-                 IF DB_ID(N'{_databaseName}') IS NOT NULL
-                 BEGIN
-                     ALTER DATABASE [{_databaseName}] SET SINGLE_USER WITH ROLLBACK IMMEDIATE;
-                     DROP DATABASE [{_databaseName}];
-                 END;
-                 """,
-                serverConnection);
-            await drop.ExecuteNonQueryAsync().ConfigureAwait(false);
+            await _timings.MeasureAsync("verify-before-drop", _databaseName, async () =>
+            {
+                await using var guard = new SqlCommand(BuildSessionControlGuardSql(_databaseName, _fileRoot), serverConnection);
+                await guard.ExecuteNonQueryAsync().ConfigureAwait(false);
+            }).ConfigureAwait(false);
+            await _timings.MeasureAsync("clear-owned-pool", _databaseName, () =>
+            {
+                ClearOwnedPool(ConnectionString);
+                return Task.CompletedTask;
+            }).ConfigureAwait(false);
+            await _timings.MeasureAsync("drop-database", _databaseName,
+                () => ExecuteDropAsync(serverConnection, _databaseName, _fileRoot, _timings)).ConfigureAwait(false);
             _created = false;
         }
 

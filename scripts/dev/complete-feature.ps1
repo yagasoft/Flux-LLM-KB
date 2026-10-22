@@ -1341,6 +1341,7 @@ try {
     Invoke-FeatureStep -Name "native-repository-contract" -Cwd $script:CandidateRoot -Command 'pwsh -NoProfile -File .\tests\native\repository-contract.ps1 -SourceRoot .'
     Invoke-FeatureStep -Name "native-closeout-contract" -Cwd $script:CandidateRoot -Command 'pwsh -NoProfile -File .\tests\native\complete-feature-dryrun.ps1 -SourceRoot .'
     Invoke-FeatureStep -Name 'native-closeout-integration-contract' -Cwd $script:CandidateRoot -Command 'pwsh -NoProfile -File .\tests\native\complete-feature-integration.ps1 -SourceRoot .'
+    Invoke-FeatureStep -Name 'native-closeout-parallel-contract' -Cwd $script:CandidateRoot -Command 'pwsh -NoProfile -File .\tests\native\complete-feature-parallel-contract.ps1 -SourceRoot .'
     Invoke-FeatureStep -Name "native-go-live-bootstrap-nondryrun-contract" -Cwd $script:CandidateRoot -Command 'pwsh -NoProfile -File .\tests\native\complete-feature-bootstrap-nondryrun.ps1 -SourceRoot .'
     Invoke-FeatureStep -Name "native-go-live-contract" -Cwd $script:CandidateRoot -Command 'pwsh -NoProfile -File .\tests\native\native-go-live-contract.ps1 -SourceRoot .'
     Invoke-FeatureStep -Name "native-go-live-recovery-removal-contract" -Cwd $script:CandidateRoot -Command 'pwsh -NoProfile -File .\tests\native\native-go-live-recovery-removal-contract.ps1 -SourceRoot .'

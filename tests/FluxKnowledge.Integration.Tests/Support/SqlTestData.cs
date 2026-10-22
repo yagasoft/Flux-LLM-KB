@@ -56,7 +56,10 @@ internal static class SqlTestData
         await context.SourceProcessorBranches.ExecuteDeleteAsync();
     }
 
-    public static async Task ClearPipelineAsync(NativeSqlServerFixture fixture)
+    public static Task ClearPipelineAsync(NativeSqlServerFixture fixture) =>
+        fixture.MeasureAsync("reset-pipeline", () => ClearPipelineCoreAsync(fixture));
+
+    private static async Task ClearPipelineCoreAsync(NativeSqlServerFixture fixture)
     {
         await using var context = new FluxKnowledgeDbContext(
             new DbContextOptionsBuilder<FluxKnowledgeDbContext>()

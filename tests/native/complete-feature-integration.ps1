@@ -5,7 +5,8 @@ param(
     [string[]]$Scenario = @('success', 'suite-failure', 'contract-failure', 'unstaged-drift',
         'staged-drift', 'main-drift', 'main-dirty', 'feature-drift', 'commit-hook-drift',
         'merge-conflict', 'push-failure', 'lock-contention', 'git-timeout', 'cleanup-branch-switch',
-        'candidate-cleanup-head-drift', 'candidate-cleanup-branch-switch', 'timeout')
+        'candidate-cleanup-head-drift', 'candidate-cleanup-branch-switch', 'timeout'),
+    [ValidateRange(1, 4)][int]$MaxParallelScenarios = 4
 )
 
 $ErrorActionPreference = 'Stop'
@@ -15,6 +16,26 @@ $closeout = if ($CloseoutScript) { (Resolve-Path -LiteralPath $CloseoutScript).P
     else { Join-Path $SourceRoot 'scripts\dev\complete-feature.ps1' }
 $temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) "FluxKnowledgeWorkflow-$([Guid]::NewGuid().ToString('N'))"
 $pwsh = (Get-Command pwsh -CommandType Application | Select-Object -First 1).Source
+if ($MaxParallelScenarios -gt 1 -and $Scenario.Count -gt 1) {
+    Import-Module (Join-Path $PSScriptRoot 'WorkflowScenarioRunner.psm1') -Force
+    $passed = $false
+    try {
+        Invoke-WorkflowScenarios -ScriptPath $PSCommandPath -SourceRoot $SourceRoot -CloseoutScript $closeout `
+            -Scenario $Scenario -MaxParallelScenarios $MaxParallelScenarios -OutputRoot $temporaryRoot |
+            ForEach-Object { Write-Output $_.Stdout.TrimEnd() }
+        $passed = $true
+    } finally {
+        if ($passed -and (Test-Path -LiteralPath $temporaryRoot)) {
+            $resolved = (Resolve-Path -LiteralPath $temporaryRoot).Path
+            if ($resolved -ne [IO.Path]::GetFullPath($temporaryRoot) -or
+                (Split-Path -Leaf $resolved) -notlike 'FluxKnowledgeWorkflow-*') { throw 'Unsafe aggregate cleanup path.' }
+            Remove-Item -LiteralPath $resolved -Recurse -Force
+        } elseif (Test-Path -LiteralPath $temporaryRoot) {
+            Write-Warning "Workflow scenario evidence preserved at $temporaryRoot"
+        }
+    }
+    return
+}
 $savedEnvironment = @{}
 foreach ($name in @('PATH', 'FLUXKNOWLEDGE_WORKFLOW_CASE', 'FLUXKNOWLEDGE_WORKFLOW_LOG',
     'FLUXKNOWLEDGE_WORKFLOW_MAIN', 'FLUXKNOWLEDGE_WORKFLOW_FEATURE',
@@ -103,7 +124,7 @@ exit 0
         Set-Content -LiteralPath (Join-Path $main 'README.md') -Value 'base content'
         $nativeRoot = New-Item -ItemType Directory -Path (Join-Path $main 'tests\native')
         foreach ($contract in @('repository-contract', 'complete-feature-dryrun',
-            'complete-feature-integration', 'complete-feature-bootstrap-nondryrun', 'native-go-live-contract',
+            'complete-feature-integration', 'complete-feature-parallel-contract', 'complete-feature-bootstrap-nondryrun', 'native-go-live-contract',
             'native-go-live-recovery-removal-contract', 'native-deployment-plan', 'test-timing-summary-contract')) {
             @'
 param([string]$SourceRoot)

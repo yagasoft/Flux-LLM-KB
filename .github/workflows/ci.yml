@@ -30,6 +30,9 @@ jobs:
       - name: Verify disposable closeout failure paths
         shell: pwsh
         run: ./tests/native/complete-feature-integration.ps1
+      - name: Verify scenario process isolation
+        shell: pwsh
+        run: ./tests/native/complete-feature-parallel-contract.ps1
       - name: Verify test timing summary
         shell: pwsh
         run: ./tests/native/test-timing-summary-contract.ps1

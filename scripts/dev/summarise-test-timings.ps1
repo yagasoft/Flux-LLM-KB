@@ -41,6 +41,23 @@ $fixtureRecords = @(
         Get-Content -LiteralPath $file.FullName | ForEach-Object { $_ | ConvertFrom-Json }
     }
 )
+function Get-IntervalUnionSeconds($Records) {
+    $intervals = @($Records | Where-Object { $_.started_at_utc -and $_.finished_at_utc } | ForEach-Object {
+        $start = ([DateTimeOffset]$_.started_at_utc).UtcTicks
+        $end = ([DateTimeOffset]$_.finished_at_utc).UtcTicks
+        if ($end -lt $start) { throw 'Invalid SQL fixture timing interval.' }
+        [pscustomobject]@{ Start=$start; End=$end }
+    } | Sort-Object Start)
+    if (-not $intervals.Count) { return $null }
+    $start = $intervals[0].Start
+    $end = $intervals[0].End
+    $total = [long]0
+    foreach ($interval in $intervals | Select-Object -Skip 1) {
+        if ($interval.Start -le $end) { $end = [math]::Max($end, $interval.End) }
+        else { $total += $end - $start; $start = $interval.Start; $end = $interval.End }
+    }
+    return [TimeSpan]::FromTicks($total + $end - $start).TotalSeconds
+}
 $fixturePhases = @(
     $fixtureRecords | Group-Object phase | ForEach-Object {
         [pscustomobject]@{
@@ -48,6 +65,8 @@ $fixturePhases = @(
             count = $_.Count
             summed_seconds = ($_.Group | Measure-Object seconds -Sum).Sum
             failed = @($_.Group | Where-Object { -not $_.succeeded }).Count
+            timed_records = @($_.Group | Where-Object { $_.started_at_utc -and $_.finished_at_utc }).Count
+            interval_union_seconds = Get-IntervalUnionSeconds $_.Group
         }
     } | Sort-Object summed_seconds -Descending
 )

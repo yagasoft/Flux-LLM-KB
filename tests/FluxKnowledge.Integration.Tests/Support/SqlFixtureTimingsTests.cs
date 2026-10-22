@@ -54,7 +54,12 @@ public sealed class SqlFixtureTimingsTests
             Assert.True(json.RootElement.GetProperty("seconds").GetDouble() >= 0);
             Assert.Equal(!fail, json.RootElement.GetProperty("succeeded").GetBoolean());
             Assert.DoesNotContain(expected.Message, text);
-            Assert.Equal(4, json.RootElement.EnumerateObject().Count());
+            var started = json.RootElement.GetProperty("started_at_utc").GetDateTimeOffset();
+            var finished = json.RootElement.GetProperty("finished_at_utc").GetDateTimeOffset();
+            Assert.Equal(TimeSpan.Zero, started.Offset);
+            Assert.True(finished >= started);
+            Assert.Equal(json.RootElement.GetProperty("seconds").GetDouble(), (finished - started).TotalSeconds, 5);
+            Assert.Equal(6, json.RootElement.EnumerateObject().Count());
         }
         finally
         {
