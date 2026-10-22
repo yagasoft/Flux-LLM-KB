@@ -3,13 +3,15 @@ param(
     [Parameter(Mandatory)][ValidatePattern('^[A-Za-z0-9_-]{1,64}$')][string]$StageName,
     [Parameter(Mandatory)][ValidatePattern('^FluxKnowledge_Staging_[A-Za-z0-9_]{1,64}$')][string]$Catalog,
     [Parameter(Mandatory)][ValidatePattern('^fluxknowledge_staging_[a-z0-9_]{1,64}$')][string]$Login,
+    [ValidateSet('E:\Codex Workspaces\Staging\FluxKnowledge', 'I:\Codex Workspaces\Staging\FluxKnowledge')]
+    [string]$StageBaseRoot = 'E:\Codex Workspaces\Staging\FluxKnowledge',
     [ValidateRange(1024,65535)][int]$Port = 5140,
     [Parameter(ParameterSetName = 'Plan')][switch]$PlanOnly,
     [Parameter(Mandatory, ParameterSetName = 'Apply')][switch]$Apply
 )
 
 $ErrorActionPreference = 'Stop'
-$stageRoot = Join-Path 'E:\Codex Workspaces\Staging\FluxKnowledge' $StageName
+$stageRoot = Join-Path $StageBaseRoot $StageName
 $dataRoot = Join-Path $stageRoot 'Data\Sql\Data'
 $logRoot = Join-Path $stageRoot 'Data\Sql\Log'
 $dataFile = Join-Path $dataRoot 'FluxKnowledge.mdf'

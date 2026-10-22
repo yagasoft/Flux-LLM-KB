@@ -1,4 +1,3 @@
-using System.Text.Json;
 using FluxKnowledge.Application.Contracts;
 using FluxKnowledge.Application.Sources;
 using FluxKnowledge.Domain.Jobs;
@@ -25,7 +24,8 @@ internal sealed class SqlPipelineActivityReader(IDeploymentValidationHold? hold,
             .ToArrayAsync(cancellationToken).ConfigureAwait(false);
         var sourceStates = await SourceRootProjectionReader.ReadStateSummariesAsync(context,
             roots.Select(r => r.Id).ToArray(), cancellationToken).ConfigureAwait(false);
-        var branches = JsonSerializer.Serialize(sourceStates.Values.SelectMany(s => s.SelectedBranches).Distinct());
+        await using var branches = await SqlSelectedBranchReadScope.CreateAsync(context,
+            sourceStates.Values.SelectMany(s => s.SelectedBranches).Distinct().ToArray(), cancellationToken).ConfigureAwait(false);
         var admission = hold?.ReadAdmissionState() ?? new(false, null);
         var gpuEvidence = await SqlGpuActivityReadEvidence.ReadAsync(context, cancellationToken).ConfigureAwait(false);
         var jobRows = await SqlPipelineActivityQuery.Jobs(context, now, admission, branches, gpuEvidence)
@@ -102,6 +102,7 @@ internal sealed class SqlPipelineActivityReader(IDeploymentValidationHold? hold,
                 scans.Where(s => s.Key.SourceRootId == root.Id && s.Key.State == (int)SourceScanJobState.Running && !s.Key.Confirmed).Sum(s => s.Count) +
                     processors.Where(p => p.Key.SourceRootId == root.Id && !p.Key.Confirmed).Sum(p => p.Count));
         }).ToArray();
+        await branches.CompleteAsync(cancellationToken).ConfigureAwait(false);
         return new(startedAt, clock.GetUtcNow(), sources, jobs, gpu,
             scans.Where(s => s.Key.Confirmed).Sum(s => s.Count), processors.Where(p => p.Key.Confirmed).Sum(p => p.Count),
             scans.Where(s => s.Key.State == (int)SourceScanJobState.Running && !s.Key.Confirmed).Sum(s => s.Count) + processors.Where(p => !p.Key.Confirmed).Sum(p => p.Count))
@@ -119,7 +120,8 @@ internal sealed class SqlPipelineActivityReader(IDeploymentValidationHold? hold,
         var names = await context.SourceRootConfigurations.AsNoTracking()
             .ToDictionaryAsync(r => r.Id, r => r.DisplayName, cancellationToken).ConfigureAwait(false);
         var states = await SourceRootProjectionReader.ReadStateSummariesAsync(context, names.Keys.ToArray(), cancellationToken).ConfigureAwait(false);
-        var branches = JsonSerializer.Serialize(states.Values.SelectMany(s => s.SelectedBranches).Distinct());
+        await using var branches = await SqlSelectedBranchReadScope.CreateAsync(context,
+            states.Values.SelectMany(s => s.SelectedBranches).Distinct().ToArray(), cancellationToken).ConfigureAwait(false);
         var admission = hold?.ReadAdmissionState() ?? new(false, null);
         var now = clock.GetUtcNow();
         var gpuEvidence = await SqlGpuActivityReadEvidence.ReadAsync(context, cancellationToken).ConfigureAwait(false);
@@ -154,6 +156,7 @@ internal sealed class SqlPipelineActivityReader(IDeploymentValidationHold? hold,
                 "Prior result and native cleanup require separate evidence before recovery.", row.CreatedAtUtc)).ToArray();
         }
         var after = await SqlPipelineActivityQuery.ReadFenceAsync(context, cancellationToken).ConfigureAwait(false);
+        await branches.CompleteAsync(cancellationToken).ConfigureAwait(false);
         if (!before.Accepts(after)) return null;
         return new(total, page, pageSize, items);
     }

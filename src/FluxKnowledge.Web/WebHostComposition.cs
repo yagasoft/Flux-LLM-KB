@@ -100,8 +100,17 @@ public static class WebHostComposition
 
     internal static IServiceCollection AddStagingFluxKnowledgeServices(IServiceCollection services, StagingHostSettings settings)
     {
+        var existingHostedServices = services.Where(descriptor => descriptor.ServiceType == typeof(IHostedService)).ToHashSet();
         AddFluxKnowledgeServicesCore(services, settings.Configuration, settings.Layout,
             strictProductionPaths: false, productionStorageBindings: null, stagingSql: settings.Sql);
+        if (settings.DashboardReadBenchmark)
+        {
+            // Benchmark the real read path against stable rows. Core application services
+            // include autonomous writers beyond Worker:Enabled; retain pre-existing host
+            // infrastructure and leave ordinary staging/production composition unchanged.
+            foreach (var descriptor in services.Where(descriptor => descriptor.ServiceType == typeof(IHostedService) &&
+                         !existingHostedServices.Contains(descriptor)).ToArray()) services.Remove(descriptor);
+        }
         services.AddDataProtection().SetApplicationName("FluxKnowledge.Staging." + settings.CatalogName)
             .PersistKeysToFileSystem(new DirectoryInfo(Path.Combine(settings.Layout.ConfigRoot, "browser-data-protection")));
         // Dashboard projections need the SQL status reader, but no scheduler, executor,

@@ -22,6 +22,41 @@ public sealed class StagingHostCompositionTests : IDisposable
     private const string Connection = "Server=localhost;Initial Catalog=FluxKnowledge_Staging_CompositionTests;User ID=stage_test;Password=synthetic-only;Encrypt=True;TrustServerCertificate=True";
     private readonly string _ownedRoot = Root + "-" + Guid.NewGuid().ToString("N");
 
+    [Theory]
+    [InlineData(@"I:\Codex Workspaces\Staging\FluxKnowledge\DashboardTests")]
+    [InlineData(@"E:\Codex Workspaces\Staging\FluxKnowledge\DashboardTests")]
+    public void Accepts_exact_supported_staging_bases(string root) =>
+        Assert.Equal(root, StagingHostSettings.Create(root, Connection, "http://127.0.0.1:5147").Layout.Root);
+
+    [Fact]
+    public void Dashboard_benchmark_disables_application_writers_and_preserves_existing_host_services()
+    {
+        var settingsFile = Path.Combine(_ownedRoot, "Config", "staging.json");
+        Directory.CreateDirectory(Path.GetDirectoryName(settingsFile)!);
+        File.WriteAllText(settingsFile, System.Text.Json.JsonSerializer.Serialize(new
+        {
+            SqlConnectionString = Connection, Origin = "http://127.0.0.1:5147", DashboardReadBenchmark = true
+        }));
+        var settings = StagingHostSettings.Load(settingsFile);
+        Directory.CreateDirectory(settings.SourcesRoot);
+        Assert.Equal("false", settings.Configuration["Worker:Enabled"]);
+        var services = new ServiceCollection();
+        services.AddLogging();
+        services.AddSingleton<IHostedService, ExistingHostService>();
+        WebHostComposition.AddStagingFluxKnowledgeServices(services, settings);
+        Assert.Single(services, service => service.ServiceType == typeof(IHostedService) && service.ImplementationType == typeof(ExistingHostService));
+        Assert.All(services.Where(service => service.ServiceType == typeof(IHostedService) && service.ImplementationType != typeof(ExistingHostService)),
+            service => Assert.Equal(typeof(KeyManagementOptions).Assembly, service.ImplementationType?.Assembly));
+        Assert.Contains(services, service => service.ServiceType == typeof(FluxKnowledge.Web.Components.Status.IProjectionReader));
+        Assert.Contains(services, service => service.ServiceType == typeof(IDatabaseStartupReadiness));
+    }
+
+    private sealed class ExistingHostService : IHostedService
+    {
+        public Task StartAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+    }
+
     private StagingHostSettings CreateCompositionSettings()
     {
         var settings = StagingHostSettings.Create(_ownedRoot, Connection, "http://127.0.0.1:5140");

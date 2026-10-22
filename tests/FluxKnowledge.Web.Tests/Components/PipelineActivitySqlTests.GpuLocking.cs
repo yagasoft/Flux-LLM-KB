@@ -31,10 +31,12 @@ public sealed partial class PipelineActivitySqlTests
         else
         {
             var evidence = await SqlGpuActivityReadEvidence.ReadAsync(context, CancellationToken.None);
+            await using var branches = await SqlSelectedBranchReadScope.CreateAsync(context, [], CancellationToken.None);
             if (surface == "jobs")
-                _ = await SqlPipelineActivityQuery.Jobs(context, now, new(false, null), "[]", evidence).ToArrayAsync();
+                _ = await SqlPipelineActivityQuery.Jobs(context, now, new(false, null), branches, evidence).ToArrayAsync();
             else
-                _ = await SqlPipelineActivityQuery.GpuTasks(context, now, new(false, null), "[]", evidence).ToArrayAsync();
+                _ = await SqlPipelineActivityQuery.GpuTasks(context, now, new(false, null), branches, evidence).ToArrayAsync();
+            await branches.CompleteAsync(CancellationToken.None);
         }
         Assert.Equal(GpuTables.Order(), commands.Tables.Order());
     }

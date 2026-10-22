@@ -97,7 +97,7 @@ public sealed class SqlProjectionReadBudgetTests
         }
     }
 
-    private static SqlException SqlFailure(params int[] numbers)
+    internal static SqlException SqlFailure(params int[] numbers)
     {
         const BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic;
         var errors = (SqlErrorCollection)Activator.CreateInstance(typeof(SqlErrorCollection), flags, null, null, null)!;

@@ -48,8 +48,16 @@ public sealed class SqlProjectionReader(
     {
         for (var attempt = 0; attempt < 2; attempt++)
         {
-            await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
-            var result = await _activityReader.ReadAttentionAsync(context, unit, sourceRootId, page, cancellationToken).ConfigureAwait(false);
+            await using var execution = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+            var result = await execution.Database.CreateExecutionStrategy().ExecuteAsync(
+                state: (Unit: unit, SourceRootId: sourceRootId, Page: page),
+                operation: async (_, state, token) =>
+                {
+                    // A transient retry needs a fresh connection and its selected-branch table.
+                    await using var context = await contextFactory.CreateDbContextAsync(token).ConfigureAwait(false);
+                    return await _activityReader.ReadAttentionAsync(context, state.Unit, state.SourceRootId, state.Page, token).ConfigureAwait(false);
+                },
+                verifySucceeded: null, cancellationToken: cancellationToken).ConfigureAwait(false);
             if (result is not null) return result;
         }
         throw new InvalidOperationException("Status changed during both attention reads.");
@@ -57,16 +65,16 @@ public sealed class SqlProjectionReader(
 
     public async ValueTask<OverviewProjection> ReadOverviewAsync(CancellationToken cancellationToken)
     {
-        // One deadline includes the deletion precheck, lock acquisition and all
-        // coordinated attempts/retry delays. Idle reads keep their caller token.
+        // One deadline bounds every overview, including setup, SQL waits, and
+        // all attempts/retry delays, whether or not source deletion is active.
         using var budget = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         budget.CancelAfter(TimeSpan.FromSeconds(2));
         try
         {
             await using var execution = await contextFactory.CreateDbContextAsync(budget.Token).ConfigureAwait(false);
             return await execution.Database.CreateExecutionStrategy().ExecuteAsync(
-                state: cancellationToken,
-                operation: (_, callerToken, boundedToken) => ReadOverviewCoreAsync(callerToken, boundedToken),
+                state: this,
+                operation: static (_, reader, boundedToken) => reader.ReadOverviewCoreAsync(boundedToken),
                 verifySucceeded: null,
                 cancellationToken: budget.Token).ConfigureAwait(false);
         }
@@ -85,13 +93,12 @@ public sealed class SqlProjectionReader(
         }
     }
 
-    private async Task<OverviewProjection> ReadOverviewCoreAsync(CancellationToken cancellationToken, CancellationToken coordinationToken)
+    private async Task<OverviewProjection> ReadOverviewCoreAsync(CancellationToken cancellationToken)
     {
-        await using var context = await contextFactory.CreateDbContextAsync(coordinationToken).ConfigureAwait(false);
+        await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         var startedAt = _clock.GetUtcNow();
         var deleting = await context.SourceDeletionOperations.AsNoTracking()
-            .AnyAsync(operation => operation.State == 0 || operation.State == 1, coordinationToken).ConfigureAwait(false);
-        if (deleting) cancellationToken = coordinationToken;
+            .AnyAsync(operation => operation.State == 0 || operation.State == 1, cancellationToken).ConfigureAwait(false);
         await using var transaction = deleting
             ? await context.Database.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken).ConfigureAwait(false)
             : null;

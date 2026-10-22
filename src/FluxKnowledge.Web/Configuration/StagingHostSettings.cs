@@ -15,12 +15,14 @@ namespace FluxKnowledge.Web.Configuration;
 internal sealed class StagingHostSettings
 {
     internal const string BaseRoot = @"E:\Codex Workspaces\Staging\FluxKnowledge";
-    private StagingHostSettings(LiveRootLayout layout, StagingSqlBinding sql, Uri origin, string indexPublicationMode)
+    internal const string WorkingBaseRoot = @"I:\Codex Workspaces\Staging\FluxKnowledge";
+    private StagingHostSettings(LiveRootLayout layout, StagingSqlBinding sql, Uri origin, string indexPublicationMode, bool dashboardReadBenchmark)
     {
         Layout = layout;
         Sql = sql;
         Origin = origin;
         IndexPublicationMode = indexPublicationMode;
+        DashboardReadBenchmark = dashboardReadBenchmark;
     }
 
     internal LiveRootLayout Layout { get; }
@@ -30,15 +32,17 @@ internal sealed class StagingHostSettings
     internal string CatalogName => Sql.CatalogName;
     internal string RuntimeConnectionString => Sql.Options.ConnectionString;
     internal string IndexPublicationMode { get; }
+    internal bool DashboardReadBenchmark { get; }
 
     internal static StagingHostSettings Create(string root, string connection, string origin,
-        ILiveRootPathInspector? inspector = null, string indexPublicationMode = "Legacy")
+        ILiveRootPathInspector? inspector = null, string indexPublicationMode = "Legacy", bool dashboardReadBenchmark = false)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(root);
         if (indexPublicationMode is not ("Legacy" or "Segmented")) throw new ArgumentException("Unknown staging index publication mode.");
         if (!Path.IsPathFullyQualified(root) ||
             !string.Equals(Path.TrimEndingDirectorySeparator(root), Path.TrimEndingDirectorySeparator(Path.GetFullPath(root)), StringComparison.OrdinalIgnoreCase) ||
-            !string.Equals(Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(root)), BaseRoot, StringComparison.OrdinalIgnoreCase) ||
+            !(string.Equals(Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(root)), BaseRoot, StringComparison.OrdinalIgnoreCase) ||
+              string.Equals(Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(root)), WorkingBaseRoot, StringComparison.OrdinalIgnoreCase)) ||
             !Regex.IsMatch(Path.GetFileName(Path.TrimEndingDirectorySeparator(root)), @"\A[A-Za-z0-9_-]{1,64}\z"))
             throw new ArgumentException("Staging must use one unambiguous owned directory beneath the staging base.");
         if (!Uri.TryCreate(origin, UriKind.Absolute, out var uri) || uri.Scheme != "http" ||
@@ -50,7 +54,7 @@ internal sealed class StagingHostSettings
         foreach (var path in layout.AppOwnedLocations.Append(Path.Combine(root, "Sources")))
             if (!layout.ValidateOwnedPath(path, pathInspector).IsValid)
                 throw new ArgumentException("Staging path is linked, escaped or ambiguous.");
-        return new(layout, new StagingSqlBinding(layout, connection), uri, indexPublicationMode);
+        return new(layout, new StagingSqlBinding(layout, connection), uri, indexPublicationMode, dashboardReadBenchmark);
     }
 
     internal static StagingHostSettings Load(string file)
@@ -66,7 +70,8 @@ internal sealed class StagingHostSettings
         {
             UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow
         }) ?? throw new ArgumentException("Staging settings are empty.");
-        return Create(root, document.SqlConnectionString, document.Origin, indexPublicationMode: document.IndexPublicationMode);
+        return Create(root, document.SqlConnectionString, document.Origin, indexPublicationMode: document.IndexPublicationMode,
+            dashboardReadBenchmark: document.DashboardReadBenchmark);
     }
 
     internal void ValidateBeforeStart()
@@ -110,7 +115,7 @@ internal sealed class StagingHostSettings
         ["OutlookCaptureRecovery:Enabled"] = "false",
         ["Search:HybridPassagesEnabled"] = "false",
         ["IndexPublication:Mode"] = IndexPublicationMode,
-        ["Worker:Enabled"] = "true",
+        ["Worker:Enabled"] = DashboardReadBenchmark ? "false" : "true",
         ["Codex:PromptContextEnabled"] = "false",
         ["Logging:LogLevel:Default"] = "Warning",
         ["Logging:LogLevel:Microsoft.Hosting.Lifetime"] = "Information",
@@ -118,7 +123,8 @@ internal sealed class StagingHostSettings
         ["Logging:LogLevel:Microsoft.EntityFrameworkCore"] = "Warning"
     }).Build();
 
-    private sealed record SettingsDocument(string SqlConnectionString, string Origin, string IndexPublicationMode = "Legacy");
+    private sealed record SettingsDocument(string SqlConnectionString, string Origin, string IndexPublicationMode = "Legacy",
+        bool DashboardReadBenchmark = false);
 }
 
 internal sealed class StagingSourceRootPathPolicy(ISourceRootPathPolicy inner, string sourcesRoot) : ISourceRootPathPolicy

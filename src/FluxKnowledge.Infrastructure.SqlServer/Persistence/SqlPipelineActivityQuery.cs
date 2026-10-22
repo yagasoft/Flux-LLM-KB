@@ -9,8 +9,9 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
 public static class SqlPipelineActivityQuery
 {
     public static IQueryable<PipelineJobActivityRow> Jobs(FluxKnowledgeDbContext context, DateTimeOffset now,
-        DeploymentHoldAdmission admission, string selectedBranches, SqlGpuActivityReadEvidence gpuEvidence)
+        DeploymentHoldAdmission admission, SqlSelectedBranchReadScope selectedBranches, SqlGpuActivityReadEvidence gpuEvidence)
     {
+        selectedBranches.EnsureFor(context);
         var sql = $$"""
             SELECT j.Id, j.PipelineRecordId, s.SourceRootId, j.Stage, j.PublicState,
               CAST(CASE WHEN {{HistoricalBinding}} THEN 1 ELSE 0 END AS bit) AS IsHistorical,
@@ -45,12 +46,13 @@ public static class SqlPipelineActivityQuery
             LEFT JOIN SourceRevisions owner ON owner.Id = s.ParentSourceRevisionId
             WHERE j.PublicState <> 4
             """;
-        return context.Database.SqlQueryRaw<PipelineJobActivityRow>(sql, Parameters(now, admission, selectedBranches, gpuEvidence));
+        return context.Database.SqlQueryRaw<PipelineJobActivityRow>(sql, Parameters(now, admission, gpuEvidence));
     }
 
     public static IQueryable<GpuTaskActivityRow> GpuTasks(FluxKnowledgeDbContext context, DateTimeOffset now,
-        DeploymentHoldAdmission admission, string selectedBranches, SqlGpuActivityReadEvidence gpuEvidence)
+        DeploymentHoldAdmission admission, SqlSelectedBranchReadScope selectedBranches, SqlGpuActivityReadEvidence gpuEvidence)
     {
+        selectedBranches.EnsureFor(context);
         var sql = $$"""
             SELECT t.Id, j.PipelineRecordId, s.SourceRootId, t.CreatedAtUtc,
               CASE
@@ -77,7 +79,7 @@ public static class SqlPipelineActivityQuery
             LEFT JOIN SourceRevisions owner ON owner.Id = s.ParentSourceRevisionId
             WHERE t.State IN (0,1,3)
             """;
-        return context.Database.SqlQueryRaw<GpuTaskActivityRow>(sql, Parameters(now, admission, selectedBranches, gpuEvidence));
+        return context.Database.SqlQueryRaw<GpuTaskActivityRow>(sql, Parameters(now, admission, gpuEvidence));
     }
 
     // Every condition here proves applicability; timestamps are deliberately not used.
@@ -87,8 +89,7 @@ public static class SqlPipelineActivityQuery
         OR s.SuppressedAtUtc IS NOT NULL OR (s.OriginKind <> 0 AND owner.SuppressedAtUtc IS NOT NULL) OR r.State = 2
         OR EXISTS (SELECT 1 FROM CorpusRebuildSupersededJobs superseded WHERE superseded.JobId = j.Id)
         OR (s.OriginKind IN (2,3) AND EXISTS (
-          SELECT 1 FROM SourceProcessorBranches selected
-          INNER JOIN OPENJSON(@selectedBranches) WITH (Id uniqueidentifier '$') chosen ON chosen.Id = selected.Id
+          SELECT 1 FROM #FluxPipelineSelectedBranches selected
           WHERE selected.SourceRevisionId = s.ParentSourceRevisionId
             AND NOT EXISTS (SELECT 1 FROM SourceProcessorBranchMembers member
               INNER JOIN SourceActivities activity ON activity.Id = member.ChildSourceActivityId
@@ -123,14 +124,13 @@ public static class SqlPipelineActivityQuery
             AND proof.{{(pendingDelivery ? "HasPending" : "HasActive")}} = 1)
         """;
 
-    private static object[] Parameters(DateTimeOffset now, DeploymentHoldAdmission admission, string branches,
+    private static object[] Parameters(DateTimeOffset now, DeploymentHoldAdmission admission,
         SqlGpuActivityReadEvidence gpuEvidence) =>
     [
         new SqlParameter("@nowUtc", SqlDbType.DateTimeOffset) { Value = now },
         new SqlParameter("@deploymentHeld", SqlDbType.Bit) { Value = admission.IsHeld },
         new SqlParameter("@permittedRebuildOperationId", SqlDbType.UniqueIdentifier)
             { Value = (object?)admission.PermittedCorpusRebuildOperationId ?? DBNull.Value },
-        new SqlParameter("@selectedBranches", SqlDbType.NVarChar, -1) { Value = branches },
         new SqlParameter("@ownedGpuTasks", SqlDbType.NVarChar, -1) { Value = gpuEvidence.OwnedTasksJson }
     ];
 }

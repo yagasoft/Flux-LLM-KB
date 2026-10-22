@@ -1,6 +1,9 @@
 using System.Net;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
 using FluxKnowledge.Infrastructure.SqlServer.Visibility;
+using FluxKnowledge.Infrastructure.SqlServer.Configuration;
+using FluxKnowledge.Infrastructure.SqlServer.Provisioning;
+using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Web;
 using FluxKnowledge.Web.Components;
 using FluxKnowledge.Web.Components.Status;
@@ -91,6 +94,8 @@ builder.Services.AddScoped<CircuitHandler, StatusEventCircuitHandler>();
 builder.Services.AddFluxKnowledgeMcp();
 builder.Services.AddMcpServer().WithHttpTransport(options => options.Stateless = true).WithTools<NativeV1McpTools>();
 var app = builder.Build();
+if (settings.DashboardReadBenchmark)
+    await app.Services.GetRequiredService<IDatabaseStartupReadiness>().WaitAsync(startupDeadline.Token);
 app.UseNativeRequestResources();
 app.Use(async (context, next) =>
 {
@@ -117,10 +122,15 @@ app.MapFluxKnowledgeLocalRetainedDetails();
 app.MapFluxKnowledgeLocalRetainedCsharpCode();
 app.MapFluxKnowledgeNativeV1();
 app.MapMcp("/mcp");
-app.MapGet("/staging", () => Results.Ok(new
+app.MapGet("/staging", async (ISqlServerReadinessValidator validator, SqlServerOptions options, CancellationToken ct) =>
 {
-    environment = "isolated-staging", validation = "functional-deterministic-embedding",
-    catalogue = settings.CatalogName, sourcesRoot = settings.SourcesRoot,
-    gpu = "disabled", ocr = "disabled", mail = "disabled"
-}));
+    var readiness = await validator.ValidateAsync(options, ct);
+    return Results.Ok(new
+    {
+        environment = "isolated-staging", validation = "functional-deterministic-embedding",
+        catalogue = settings.CatalogName, sourcesRoot = settings.SourcesRoot,
+        gpu = "disabled", ocr = "disabled", mail = "disabled", dashboardReadBenchmark = settings.DashboardReadBenchmark,
+        sqlReady = readiness.IsReady
+    });
+});
 await app.RunAsync();

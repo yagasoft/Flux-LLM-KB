@@ -11,6 +11,9 @@ load production configuration, register scheduled tasks or configure Codex hooks
 and `-Apply` path. It derives files under one named directory in
 `E:\Codex Workspaces\Staging\FluxKnowledge`, creates a separate SQL database and
 runtime login, and writes private configuration and a non-secret receipt.
+Use `-StageBaseRoot 'I:\Codex Workspaces\Staging\FluxKnowledge'` for new work on
+the working drive. Only those exact E: and I: bases are accepted; existing E:
+stages and the default remain compatible.
 Inspect the plan and obtain the applicable technical review before Apply.
 An existing root, database or login is a stop condition; failed provisioning
 preserves its files and receipt for inspection.
@@ -54,6 +57,20 @@ origin and a 25-second HTTP deadline:
 
 The normal CLI remains pinned to its production port. Stop only the recorded
 staging process when updating staging; preserve its data and evidence.
+
+For reproducible dashboard SQL measurements, set `DashboardReadBenchmark: true`
+in the private staging settings. This optional mode keeps the actual SQL status
+reader, readiness checks and HTTP/SignalR host, but disables all autonomous
+application hosted services, including writers independent of `Worker:Enabled`.
+The `/staging` response reports this mode. The default is `false`; ordinary
+functional staging still runs its source pipeline. Benchmark fixtures must use
+fixed temporal inputs or validated expiry/deadline margins, and verify their
+state before and after each measurement series. Run controlled writers separately.
+Benchmark startup performs the real read-only SQL startup probe and `/staging`
+reports `sqlReady` from the restricted database validator. Full `/health/ready`
+can remain 503 while index recovery services are deliberately paused; this is
+not a claim of full pipeline readiness. The dashboard read path still uses its
+real SQL projection, consistency fence and deadline.
 
 ## Disposable SQL tests
 
