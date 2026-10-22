@@ -18,6 +18,14 @@ sends the exact denied component inside the admitted source to a local named
 pipe. The helper authenticates the actual caller token and checks effective read
 access using that token, including deny-only and restricted groups.
 
+The pipe grants the exact indexing SID only data read/write, attributes read,
+descriptor read and synchronisation (`0x120083`). Windows requires attributes
+read even when the client's explicit desired-access mask omits it. Tests use a
+caller that cannot rely on the pipe owner's administrative grant. Instance
+creation, write attributes and permission/owner changes remain excluded. The
+persistent server disconnects completed or broken connections before accepting
+another; an empty or owner-refused request grants no source access.
+
 The administrator policy binds each root's canonical path and physical identity
 to one indexing SID. The helper can add only missing `0x100081` rights: read data
 or list a directory, read attributes and synchronise. Directory grants are

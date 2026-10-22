@@ -25,7 +25,9 @@ internal static class SourceAccessPipeServer
         while (!cancellationToken.IsCancellationRequested)
         {
             await ServeConnectionAsync(pipe, policy, broker, cancellationToken).ConfigureAwait(false);
-            if (pipe.IsConnected) pipe.Disconnect();
+            // A client EOF can mark the stream broken. It must still be
+            // disconnected before the same server instance accepts again.
+            pipe.Disconnect();
         }
     }
 

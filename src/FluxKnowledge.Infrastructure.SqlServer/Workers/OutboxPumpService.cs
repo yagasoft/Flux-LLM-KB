@@ -2,6 +2,7 @@ using FluxKnowledge.Application.Pipeline;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Sources;
 using FluxKnowledge.Application.Workers;
+using FluxKnowledge.Domain.Pipeline;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -96,6 +97,16 @@ public sealed class OutboxPumpService(
             {
                 await transitions.RetryAsync(new(dispatch, job, timeProvider.GetUtcNow().AddMinutes(1),
                     "repository-source-deferred", nameof(OutboxPumpService), exception.Deferral), cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception exception) when (job.Stage == dispatch.Stage && job.Operation == dispatch.Operation &&
+                (job.Stage == PipelineStage.Normalise && job.Operation == PipelineOperations.NormaliseText ||
+                 job.Stage == PipelineStage.CanonicalIndex && job.Operation == PipelineOperations.CanonicalIndex) &&
+                new SqlRetainedProcessorFailureClassifier().TryClassify(exception, out _))
+            {
+                // The transaction may have committed before its acknowledgement failed.
+                // Preserve delivery state: completed work stays completed; otherwise the
+                // existing lease-expiry claims recover it with a new generation.
+                throw;
             }
             catch (Exception exception)
             {

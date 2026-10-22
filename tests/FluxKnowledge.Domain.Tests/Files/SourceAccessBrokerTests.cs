@@ -443,6 +443,71 @@ public sealed class SourceAccessBrokerTests
     }
 
     [Fact]
+    public async Task Empty_and_owner_refused_connections_do_not_terminate_the_persistent_server()
+    {
+        using var fixture = new Fixture();
+        fixture.OldFile("after-disconnect.txt");
+        var policy = fixture.Policy() with { PipeName = "FluxKnowledge.SourceAccess." + Guid.NewGuid().ToString("N") };
+        var owner = WindowsIdentity.GetCurrent().User!;
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        var server = SourceAccessPipeServer.RunAsync(policy, fixture.Broker(), cancellation.Token, owner);
+        try
+        {
+            using (var empty = new NamedPipeClientStream(".", policy.PipeName, PipeDirection.InOut,
+                       PipeOptions.Asynchronous, TokenImpersonationLevel.Identification))
+                await empty.ConnectAsync(cancellation.Token);
+            Assert.Equal(SourceAccessRepairOutcome.Unavailable, new WindowsSourceAccessRepairClient(policy.PipeName)
+                .TryRepair(fixture.Request("after-disconnect.txt"), cancellation.Token));
+            using var token = RestrictedToken();
+            WindowsIdentity.RunImpersonated(token, () => Assert.Equal(SourceAccessRepairOutcome.Repaired,
+                new WindowsSourceAccessRepairClient(policy.PipeName, owner)
+                    .TryRepair(fixture.Request("after-disconnect.txt"), cancellation.Token)));
+            Assert.False(server.IsCompleted);
+            Assert.Empty(Directory.GetFiles(fixture.Journal));
+        }
+        finally
+        {
+            cancellation.Cancel();
+            try { await server; } catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { }
+        }
+    }
+
+    [Fact]
+    public async Task Indexer_can_connect_and_repair_using_only_the_minimal_indexer_pipe_ace()
+    {
+        using var fixture = new Fixture();
+        var path = fixture.OldFile("minimal-pipe-grant.txt");
+        var policy = fixture.Policy() with { PipeName = "FluxKnowledge.SourceAccess." + Guid.NewGuid().ToString("N") };
+        var owner = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
+        using var token = RestrictedToken();
+        using var indexer = new WindowsIdentity(token.DangerousGetHandle());
+        Assert.Equal(policy.IndexerSid, indexer.User!.Value);
+        Assert.False(new WindowsPrincipal(indexer).IsInRole(WindowsBuiltInRole.Administrator));
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        using var pipe = SourceAccessPipeServer.Create(policy, owner);
+        var security = pipe.GetAccessControl();
+        var rules = security.GetAccessRules(true, true, typeof(SecurityIdentifier)).Cast<PipeAccessRule>().ToArray();
+        Assert.Equal(owner, security.GetOwner(typeof(SecurityIdentifier)));
+        var indexerGrant = Assert.Single(rules, rule => rule.IdentityReference.Value == policy.IndexerSid);
+        Assert.Equal(SourceAccessPipeProtocol.ClientRights, indexerGrant.PipeAccessRights);
+        Assert.Equal(0, (int)(indexerGrant.PipeAccessRights & (PipeAccessRights.CreateNewInstance |
+            PipeAccessRights.ChangePermissions | PipeAccessRights.TakeOwnership | PipeAccessRights.WriteAttributes)));
+        Assert.Equal(AccessControlType.Allow, indexerGrant.AccessControlType);
+        var server = SourceAccessPipeServer.ServeOneAsync(policy with
+            { PipeName = policy.PipeName + ".request" }, fixture.Broker(), owner, cancellation.Token);
+        // Create checked the same descriptor contract; use a fresh first-instance endpoint for the actual request.
+        WindowsIdentity.RunImpersonated(token, () =>
+        {
+            Assert.ThrowsAny<UnauthorizedAccessException>(() => WindowsSourcePathAccess.OpenRead(fixture.Source, path).Dispose());
+            Assert.Equal(SourceAccessRepairOutcome.Repaired,
+                new WindowsSourceAccessRepairClient(policy.PipeName + ".request", owner)
+                    .TryRepair(fixture.Request("minimal-pipe-grant.txt"), cancellation.Token));
+            Assert.Equal("Private source fixture", ReadGuarded(fixture.Source, path));
+        });
+        await server;
+    }
+
+    [Fact]
     public async Task Malformed_connection_is_refused_and_the_next_valid_connection_still_succeeds()
     {
         using var fixture = new Fixture();

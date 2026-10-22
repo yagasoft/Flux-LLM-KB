@@ -12,8 +12,10 @@ internal static class SourceAccessPipeProtocol
 {
     internal const int MaximumFrameLength = 256 * 1024;
     internal static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(3);
+    // Windows also requires ReadAttributes when opening a client pipe, even
+    // when CreateFile's explicit desired-access mask omits that bit.
     internal const PipeAccessRights ClientRights = PipeAccessRights.ReadData | PipeAccessRights.WriteData |
-        PipeAccessRights.ReadPermissions | PipeAccessRights.Synchronize;
+        PipeAccessRights.ReadAttributes | PipeAccessRights.ReadPermissions | PipeAccessRights.Synchronize;
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
