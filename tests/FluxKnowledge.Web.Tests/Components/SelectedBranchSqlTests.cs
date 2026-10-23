@@ -86,6 +86,10 @@ public sealed class SelectedBranchSqlTests(NativeSqlServerFixture fixture) : ICl
                 PublicState = (int)PublicJobState.GpuQueued, IsHistorical = historical, SourceAdmitted = true,
                 HasReadyGpu = true, HasUncertainGpu = true, HasPendingDispatch = true, IsDue = true, RecordedAtUtc = now
             }, row);
+            await branches.MaterializeGpuFactsAsync(now, evidence, CancellationToken.None);
+            var materialized = await SqlPipelineActivityQuery.Jobs(context, now, new(false, null), branches, evidence)
+                .SingleAsync(candidate => candidate.PipelineRecordId == recordId);
+            Assert.Equivalent(row, materialized);
             var gpu = await SqlPipelineActivityQuery.GpuTasks(context, now, new(false, null), branches, evidence)
                 .Where(row => row.PipelineRecordId == recordId).ToArrayAsync();
             Assert.Equal(3, gpu.Length);

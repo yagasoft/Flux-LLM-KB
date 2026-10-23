@@ -12,6 +12,24 @@ public static class SqlPipelineActivityQuery
         DeploymentHoldAdmission admission, SqlSelectedBranchReadScope selectedBranches, SqlGpuActivityReadEvidence gpuEvidence)
     {
         selectedBranches.EnsureFor(context);
+        var facts = selectedBranches.HasGpuFacts;
+        var active = facts ? "COALESCE(gpu.HasActiveGpu, 0) = 1" : $$"""
+            EXISTS (SELECT 1 FROM GpuMiniTasks t WHERE t.ParentJobId = j.Id
+                AND t.SourceRevision = j.SourceRevision AND {{OwnedTask("t", false)}})
+            """;
+        var ready = facts ? "COALESCE(gpu.HasReadyGpu, 0) = 1" : """
+            EXISTS (SELECT 1 FROM GpuMiniTasks t WHERE t.ParentJobId = j.Id
+                AND t.SourceRevision = j.SourceRevision AND t.State = 0 AND (t.DeferredUntilUtc IS NULL OR t.DeferredUntilUtc <= @nowUtc))
+            """;
+        var uncertain = facts ? "COALESCE(gpu.HasUncertainGpu, 0) = 1" : """
+            EXISTS (SELECT 1 FROM GpuMiniTasks t WHERE t.ParentJobId = j.Id
+                AND t.SourceRevision = j.SourceRevision AND t.State = 3)
+            """;
+        var waiting = facts ? "COALESCE(gpu.HasWaitingGpu, 0) = 1" : $$"""
+            EXISTS (SELECT 1 FROM GpuMiniTasks t WHERE t.ParentJobId = j.Id
+                AND t.SourceRevision = j.SourceRevision AND
+                ((t.State = 0 AND t.DeferredUntilUtc > @nowUtc) OR {{OwnedTask("t", true)}}))
+            """;
         var sql = $$"""
             SELECT j.Id, j.PipelineRecordId, s.SourceRootId, j.Stage, j.PublicState,
               CAST(CASE WHEN {{HistoricalBinding}} THEN 1 ELSE 0 END AS bit) AS IsHistorical,
@@ -20,17 +38,10 @@ public static class SqlPipelineActivityQuery
                 AND {{SqlCorpusRebuildEligibility.DeploymentAdmission("j.Id")}} THEN 1 ELSE 0 END AS bit) AS SourceAdmitted,
               CAST(CASE WHEN j.LeaseOwner IS NOT NULL AND j.LeaseGeneration > 0 AND j.LeaseExpiresAtUtc > @nowUtc
                 THEN 1 ELSE 0 END AS bit) AS HasWorkerLease,
-              CAST(CASE WHEN EXISTS (SELECT 1 FROM GpuMiniTasks t WHERE t.ParentJobId = j.Id
-                AND t.SourceRevision = j.SourceRevision AND {{OwnedTask("t", false)}}) THEN 1 ELSE 0 END AS bit) AS HasActiveGpu,
-              CAST(CASE WHEN EXISTS (SELECT 1 FROM GpuMiniTasks t WHERE t.ParentJobId = j.Id
-                AND t.SourceRevision = j.SourceRevision AND t.State = 0 AND (t.DeferredUntilUtc IS NULL OR t.DeferredUntilUtc <= @nowUtc))
-                THEN 1 ELSE 0 END AS bit) AS HasReadyGpu,
-              CAST(CASE WHEN EXISTS (SELECT 1 FROM GpuMiniTasks t WHERE t.ParentJobId = j.Id
-                AND t.SourceRevision = j.SourceRevision AND t.State = 3) THEN 1 ELSE 0 END AS bit) AS HasUncertainGpu,
-              CAST(CASE WHEN EXISTS (SELECT 1 FROM GpuMiniTasks t WHERE t.ParentJobId = j.Id
-                AND t.SourceRevision = j.SourceRevision AND
-                  ((t.State = 0 AND t.DeferredUntilUtc > @nowUtc) OR {{OwnedTask("t", true)}}))
-                THEN 1 ELSE 0 END AS bit) AS HasWaitingGpu,
+              CAST(CASE WHEN {{active}} THEN 1 ELSE 0 END AS bit) AS HasActiveGpu,
+              CAST(CASE WHEN {{ready}} THEN 1 ELSE 0 END AS bit) AS HasReadyGpu,
+              CAST(CASE WHEN {{uncertain}} THEN 1 ELSE 0 END AS bit) AS HasUncertainGpu,
+              CAST(CASE WHEN {{waiting}} THEN 1 ELSE 0 END AS bit) AS HasWaitingGpu,
               CAST(CASE WHEN EXISTS (SELECT 1 FROM OutboxMessages dispatch WHERE dispatch.JobId = j.Id
                 AND dispatch.PipelineRecordId = j.PipelineRecordId AND dispatch.SourceRevision = j.SourceRevision
                 AND dispatch.Stage = j.Stage AND dispatch.Operation COLLATE Latin1_General_100_BIN2 = j.Operation COLLATE Latin1_General_100_BIN2
@@ -44,6 +55,7 @@ public static class SqlPipelineActivityQuery
             LEFT JOIN SourceRevisions s ON s.Id = p.SourceRevisionId
             LEFT JOIN SourceRootConfigurations r ON r.Id = s.SourceRootId
             LEFT JOIN SourceRevisions owner ON owner.Id = s.ParentSourceRevisionId
+            {{(facts ? "LEFT JOIN #FluxPipelineGpuFacts gpu ON gpu.ParentJobId = j.Id AND gpu.SourceRevision = j.SourceRevision" : "")}}
             WHERE j.PublicState <> 4
             """;
         return context.Database.SqlQueryRaw<PipelineJobActivityRow>(sql, Parameters(now, admission, gpuEvidence));

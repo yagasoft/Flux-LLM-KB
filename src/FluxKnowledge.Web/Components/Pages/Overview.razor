@@ -1,4 +1,5 @@
 @page "/"
+@attribute [StreamRendering]
 @implements IAsyncDisposable
 @using System.Globalization
 @using FluxKnowledge.Application.Contracts
@@ -22,7 +23,7 @@
 }
 <div class="pipeline-overview">
     <header class="overview-header">
-        <div><h1>Pipeline overview</h1><p>Current activity, source progress and work needing attention.</p></div>
+        <div><h1>Pipeline overview</h1><p>Activity in the last committed sample, source progress and work needing attention.</p></div>
         <button type="button" @onclick="RefreshAsync">Refresh status</button>
     </header>
     <p class="visually-hidden" role="status" aria-live="polite">@_announcement</p>
@@ -36,7 +37,7 @@
     </div>
     @if (ProjectionState.LastSuccessfulReadAtUtc is { } observed)
     {
-        <p class="status-freshness">Status as of <time datetime="@observed.ToString("O")">@Time(observed)</time>. Updates automatically every 10 seconds and when status changes.</p>
+        <p class="status-freshness">Status as of <time datetime="@observed.ToString("O")">@Time(observed)</time>. Activity is confirmed in this committed sample; changes appear in later samples. Updates automatically every 10 seconds and when status changes.</p>
     }
     <section aria-labelledby="current-activity-heading" class="activity-banner">
         <div class="activity-heading">
@@ -186,6 +187,10 @@
         {
             <p><strong>@diagnostics.State</strong> · @diagnostics.Reason This describes the derived search index; source processing and historical outcomes are shown separately above.</p>
             <details class="diagnostic-details"><summary>Copyable index diagnostics</summary>
+                @if (ProjectionState.Current.RuntimeObservedAtUtc is { } runtimeObserved)
+                {
+                    <p>Runtime recovery observed: @Time(runtimeObserved). This process observation is separate from the database sample.</p>
+                }
                 <label>Active generation <input class="diagnostic-value" readonly value="@diagnostics.ActiveGenerationDiagnostic" /></label>
                 @if (diagnostics.RecoveryGenerationDiagnostic is { } recoveryGeneration)
                 {
@@ -256,6 +261,10 @@
     private async Task RefreshAsync()
     {
         await ProjectionState.ReloadAsync(_stopping.Token);
+        await ApplyCurrentScopeAsync();
+    }
+    private async Task ApplyCurrentScopeAsync()
+    {
         if (SelectedRoot is { } selected && !ProjectionState.Current.Activity.Sources.Any(s => s.Id == selected))
         {
             _sourceScope = "";
@@ -293,26 +302,38 @@
         {
             await foreach (var changed in subscription.Reader.ReadAllAsync(cancellationToken))
             {
-                var relevant = OverviewProjectionState.AffectsOverview(changed.Projection);
-                while (subscription.Reader.TryRead(out var pending)) relevant |= OverviewProjectionState.AffectsOverview(pending.Projection);
-                if (relevant) await InvokeAsync(async () => { await RefreshAsync(); StateHasChanged(); });
+                var relevant = OverviewProjectionState.AffectsOverview(changed.Projection) || changed.Projection == "overview-snapshot";
+                while (subscription.Reader.TryRead(out var pending))
+                    relevant |= OverviewProjectionState.AffectsOverview(pending.Projection) || pending.Projection == "overview-snapshot";
+                if (relevant) await InvokeAsync(async () =>
+                {
+                    if (ProjectionState.UsesSharedSnapshots) { ProjectionState.SynchronizeFromShared(); await ApplyCurrentScopeAsync(); }
+                    else await RefreshAsync();
+                    StateHasChanged();
+                });
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
     }
     private async Task RefreshPeriodicallyAsync(CancellationToken cancellationToken)
     {
-        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(10));
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(ProjectionState.UsesSharedSnapshots ? 1 : 10));
         try
         {
             while (await timer.WaitForNextTickAsync(cancellationToken))
-                await InvokeAsync(async () => { await RefreshAsync(); StateHasChanged(); });
+                await InvokeAsync(async () =>
+                {
+                    if (ProjectionState.UsesSharedSnapshots) { ProjectionState.SynchronizeFromShared(); await ApplyCurrentScopeAsync(); }
+                    else await RefreshAsync();
+                    StateHasChanged();
+                });
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
     }
     public async ValueTask DisposeAsync()
     {
         await _stopping.CancelAsync();
+        ProjectionState.ReleaseSharedSubscription();
         if (_subscription is not null) await _subscription.DisposeAsync();
         if (_observeTask is not null) await _observeTask;
         if (_timerTask is not null) await _timerTask;

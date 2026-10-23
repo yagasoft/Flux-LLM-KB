@@ -847,19 +847,44 @@ after discovery in the same actively processing source. The UI reports no inferr
 percentage, completion time or undiscovered remaining total. Search-index health
 describes the rebuildable projection separately from pipeline health.
 
-The read-only projection records its read window and uses a conservative database
-rowversion fence: intervening versioned writes or pending versioned transactions
-reject the sample. Immutable evidence and graph deletion rely on the existing
-atomic versioned record/branch/lifecycle/index companion writes. This is not snapshot
-isolation for arbitrary direct SQL. Rejected/failed refreshes retain the last good
-sample with an explicit stale warning; initial failure remains unknown. During
-source deletion, overview reads acquire the publication fence before deletion
-operation locks, then retain the same DBTS acceptance guard. One two-second
-budget bounds coordination and its retry delays. An exhausted internal budget
-releases its locks and reports busy/unavailable without advancing the successful
-read timestamp; caller cancellation and genuine SQL failures remain distinct.
-Source events and a non-overlapping ten-second timer refresh the overview. Attention detail
-is read-only and paged in batches of 25, with its own loaded time and source scope.
+With explicit `Dashboard:ReadConsistency=Snapshot` activation, one read-only SQL
+snapshot transaction supplies the whole overview, including scheduler ownership,
+activity and counts. One comparison time applies throughout. The displayed time
+identifies the start of that committed sample; it is not a promise of current
+ownership or permission to mutate. A writer may commit while the earlier image is
+read, and an uncommitted ownership change leaves the previous committed image
+visible. Mutations retain their current-state validation. Local deployment
+admission and recovery observations have separate metadata; admission changes
+mark the sample stale and queue a refresh.
+
+Selected branches and independent per-job GPU facts are materialised once on the
+same connection and transaction. GPU facts retain exact task/batch/generation
+proof and revision identity; active, ready, waiting and uncertain facts can
+coexist. Both temporary tables are dropped under the read deadline, with bounded
+failure cleanup and fresh reconstruction after retries. No permanent dashboard
+index or schema migration is required.
+
+One process-wide coordinator publishes immutable samples for the trusted local
+operator scope. Scoped presentation retains source filters and attention state.
+It coalesces simultaneous reads, bounds SQL attempts to two seconds, separates
+caller cancellation from shared work, and refreshes every ten seconds while
+subscribers exist. Data events invalidate the displayed sample and preserve
+events received during a read for one follow-up; connection hints reuse a fresh
+sample to avoid duplicate hydration reads. Manual refresh joins existing work.
+Prerendering streams the loading shell and reuses a warm sample immediately.
+Failed reads keep the original successful timestamp and an explicit stale notice;
+initial failure stays unknown. No subscriber means no automatic SQL refresh.
+
+`LegacyFenced`, the unconfigured default, retains the conservative database
+rowversion fence and deletion publication/operation locks. Intervening versioned
+writes or pending transactions reject that sample. Immutable evidence and graph
+deletion rely on their existing atomic versioned companion writes; this mode is
+not snapshot isolation for arbitrary direct SQL. The shared cache does not make
+its rejected samples usable. Both modes retain the two-second deadline, including
+coordination and execution-strategy retry delays.
+
+Attention detail remains independently read-only and paged in batches of 25,
+with its own loaded time, source scope and existing conservative fence.
 An initially pending transaction rejects before reading potentially locked rows.
 Only an end-fence mismatch permits one complete fresh attention read; names,
 scope bindings, time, totals and rows are recalculated together. A second mismatch
@@ -874,6 +899,19 @@ For explicit stopped-pool recovery, the same updater starts only the candidate;
 failed held validation restores exact prior bytes without predecessor startup and
 retains the hold. It refuses migration/rebuild/deferral combinations and preserves
 the existing boundary against automatic rollback after hold release.
+The separately reviewed physical-stop receipt keeps historical GPU uncertainty
+intact. Version 1 binds code-only maintenance, version 2 additionally binds source
+access, and version 3 admits only the dashboard snapshot option/configuration.
+Version 3 pins the database incarnation, initial snapshot/RCSI/ADR settings,
+configuration before/after hashes, commit and paired payload hashes, alongside
+unchanged schema/history/current projection and exact writer-exit evidence.
+The updater records durable intent before enabling snapshot isolation and inspects
+the resulting state even after interruption. Startup requires fully ON. Before
+startup, recovery restores the original configuration and payload pair while
+leaving the option ON; transition/unknown state requires reconciliation. After
+start intent or hold-release uncertainty, matching candidate bytes and the hold
+remain for a fresh reviewed stop and forward recovery. No receipt settles native
+work or permits automatic option reversal, RCSI/ADR changes or session killing.
 Clean-slate installation uses a separate guarded one-shot GoLive path with independent clean-slate, VSS,
 SQL destruction and native Codex registration acknowledgements. The GoLive path
 does not offer automatic recovery or resume after an interrupted destructive run.

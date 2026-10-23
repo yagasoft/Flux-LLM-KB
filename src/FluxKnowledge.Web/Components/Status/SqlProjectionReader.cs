@@ -38,8 +38,10 @@ public sealed class SqlProjectionReader(
     IDerivedIndexRecoveryStatus recoveryStatus,
     GpuSchedulerStore schedulerStore,
     IDeploymentValidationHold? validationHold = null,
-    TimeProvider? timeProvider = null) : IProjectionReader
+    TimeProvider? timeProvider = null,
+    OverviewReadOptions? readOptions = null) : IProjectionReader
 {
+    private OverviewReadOptions ReadOptions { get; } = readOptions ?? new();
     private readonly TimeProvider _clock = timeProvider ?? TimeProvider.System;
     private readonly SqlPipelineActivityReader _activityReader = new(validationHold, timeProvider ?? TimeProvider.System);
 
@@ -97,10 +99,12 @@ public sealed class SqlProjectionReader(
     {
         await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         var startedAt = _clock.GetUtcNow();
-        var deleting = await context.SourceDeletionOperations.AsNoTracking()
+        var admission = validationHold?.ReadAdmissionState() ?? new(false, null);
+        var snapshot = ReadOptions.UseSnapshotIsolation;
+        var deleting = !snapshot && await context.SourceDeletionOperations.AsNoTracking()
             .AnyAsync(operation => operation.State == 0 || operation.State == 1, cancellationToken).ConfigureAwait(false);
-        await using var transaction = deleting
-            ? await context.Database.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken).ConfigureAwait(false)
+        await using var transaction = snapshot || deleting
+            ? await context.Database.BeginTransactionAsync(snapshot ? IsolationLevel.Snapshot : IsolationLevel.ReadCommitted, cancellationToken).ConfigureAwait(false)
             : null;
         if (deleting)
         {
@@ -112,7 +116,8 @@ public sealed class SqlProjectionReader(
                 WHERE [State] IN (0, 1)
                 """).ToArrayAsync(cancellationToken).ConfigureAwait(false);
         }
-        var before = await SqlPipelineActivityQuery.ReadFenceAsync(context, cancellationToken).ConfigureAwait(false);
+        var before = snapshot ? new ActivityReadFence { IsStable = true }
+            : await SqlPipelineActivityQuery.ReadFenceAsync(context, cancellationToken).ConfigureAwait(false);
         if (!before.IsStable)
             return new(0, 0, 0, 0, 0, 0, 0, "none", new("Unknown", null, null, null, null, 0))
             {
@@ -135,10 +140,11 @@ public sealed class SqlProjectionReader(
                 select generation == null ? null : generation.Id.ToString("N"))
             .SingleOrDefaultAsync(cancellationToken)
             .ConfigureAwait(false) ?? "none";
-        var outlookProfileCount = await context.OutlookCaptureProfiles.AsNoTracking()
-            .CountAsync(profile => profile.State != (int)OutlookCaptureState.Stale, cancellationToken).ConfigureAwait(false);
-        var outlookEnabledProfileCount = await context.OutlookCaptureProfiles.AsNoTracking()
-            .CountAsync(profile => profile.IsEnabled, cancellationToken).ConfigureAwait(false);
+        var outlookProfiles = await context.OutlookCaptureProfiles.AsNoTracking().GroupBy(profile => 1)
+            .Select(group => new { Count = group.Count(profile => profile.State != (int)OutlookCaptureState.Stale),
+                Enabled = group.Count(profile => profile.IsEnabled) }).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+        var outlookProfileCount = outlookProfiles?.Count ?? 0;
+        var outlookEnabledProfileCount = outlookProfiles?.Enabled ?? 0;
         var outlookFolderCount = await context.OutlookCaptureFolders.AsNoTracking()
             .CountAsync(folder => folder.State != (int)OutlookCaptureState.Disabled, cancellationToken).ConfigureAwait(false);
         var outlookExportCounts = await context.OutlookCaptureExports.AsNoTracking()
@@ -148,12 +154,16 @@ public sealed class SqlProjectionReader(
             .ConfigureAwait(false);
 
         var recovery = recoveryStatus.Snapshot;
-        var gpuSchedulerStatus = await ReadGpuSchedulerStatusAsync(cancellationToken)
-            .ConfigureAwait(false);
-        var activity = await _activityReader.ReadAsync(context, startedAt, cancellationToken).ConfigureAwait(false);
-        var after = await SqlPipelineActivityQuery.ReadFenceAsync(context, cancellationToken).ConfigureAwait(false);
+        var runtimeObservedAt = _clock.GetUtcNow();
+        var gpuSchedulerStatus = snapshot
+            ? ToGpuSchedulerStatusProjection(await SqlGpuSchedulerStatusReader.ReadAsync(context, startedAt, cancellationToken).ConfigureAwait(false))
+            : await ReadGpuSchedulerStatusAsync(cancellationToken).ConfigureAwait(false);
+        var activity = await _activityReader.ReadAsync(context, startedAt, cancellationToken, admission, snapshot).ConfigureAwait(false);
+        var after = snapshot ? before
+            : await SqlPipelineActivityQuery.ReadFenceAsync(context, cancellationToken).ConfigureAwait(false);
         activity = activity with { ObservedAtUtc = _clock.GetUtcNow(), IsConsistent = before.Accepts(after) };
         if (transaction is not null) await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        var admissionAfter = validationHold?.ReadAdmissionState() ?? new(false, null);
         return new OverviewProjection(
             GetCount(PublicJobState.WorkerQueued),
             GetCount(PublicJobState.WorkerProcessing),
@@ -173,6 +183,11 @@ public sealed class SqlProjectionReader(
         {
             GpuSchedulerStatus = gpuSchedulerStatus,
             Activity = activity,
+            ReadConsistency = snapshot ? "Snapshot" : "LegacyFenced",
+            RuntimeObservedAtUtc = runtimeObservedAt,
+            DeploymentHeld = admission.IsHeld,
+            PermittedRebuildOperationId = admission.PermittedCorpusRebuildOperationId,
+            RuntimeAdmissionChanged = admission != admissionAfter,
             SourceIndexing = new SourceIndexingSummary(
                 activity.Sources.Count,
                 activity.Sources.Sum(source => source.PublishedFiles),

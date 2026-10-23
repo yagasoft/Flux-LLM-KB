@@ -39,7 +39,7 @@ $receipt=@{Version=1;Database=$database.Clone();WebSha256=(Get-HybridPayloadFing
 $OfflineCodeMaintenanceReceipt=Join-Path $root 'receipt.json'
 Write-SegmentedUpdateJson $OfflineCodeMaintenanceReceipt $receipt
 $ExpectedOfflineCodeMaintenanceReceiptSha256=(Get-FileHash -LiteralPath $OfflineCodeMaintenanceReceipt).Hash
-$offlineCodeState=$null;$checks=0
+$offlineCodeState=$null;$dashboardSnapshotChange=$null;$checks=0
 Assert-OfflineCodeMaintenance -RequireStopped -OriginalPayloads;$checks++
 $sourceAccessChange=New-SourceAccessConfigurationChange -Path (Join-Path $root 'Config/appsettings.Production.json') -PipeName 'FluxKnowledge.SourceAccess.isolated-offline'
 Expect-Failure {Assert-OfflineCodeMaintenance -RequireStopped} 'source-access.*version2';$checks++

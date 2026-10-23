@@ -26,6 +26,11 @@ public sealed record OverviewProjection(
     public OutlookCaptureSummary OutlookCapture { get; init; } = OutlookCaptureSummary.Empty;
 
     public PipelineActivitySummary Activity { get; init; } = PipelineActivitySummary.Unknown;
+    public string ReadConsistency { get; init; } = "LegacyFenced";
+    public DateTimeOffset? RuntimeObservedAtUtc { get; init; }
+    public bool DeploymentHeld { get; init; }
+    public Guid? PermittedRebuildOperationId { get; init; }
+    public bool RuntimeAdmissionChanged { get; init; }
 }
 
 public sealed record OutlookCaptureSummary(

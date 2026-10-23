@@ -73,9 +73,6 @@ if (validateNativeGoLiveComposition)
 }
 builder.Services.AddRazorComponents()
     .AddInteractiveServerComponents();
-builder.Services.AddSingleton<StatusEventFeed>();
-builder.Services.AddSingleton<FluxKnowledge.Application.Ports.IStatusEventPublisher>(
-    provider => provider.GetRequiredService<StatusEventFeed>());
 builder.Services.AddScoped<OverviewProjectionState>();
 builder.Services.AddScoped<CircuitHandler, StatusEventCircuitHandler>();
 builder.Services.AddFluxKnowledgeMcp();

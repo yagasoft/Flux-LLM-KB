@@ -1063,67 +1063,8 @@ public sealed partial class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecu
     public async ValueTask<GpuSchedulerStatusSnapshot> ReadGpuSchedulerStatusAsync(
         CancellationToken cancellationToken)
     {
-        await using var context = await _contextFactory
-            .CreateDbContextAsync(cancellationToken)
-            .ConfigureAwait(false);
-        var tasks = context.GpuMiniTasks.AsNoTracking();
-        var readyState = (int)GpuMiniTaskExecutionState.Ready;
-        var activeState = (int)GpuMiniTaskExecutionState.Active;
-        var uncertainState = (int)GpuMiniTaskExecutionState.OutcomeUncertain;
-        var completedState = (int)GpuMiniTaskExecutionState.Completed;
-        var activeBatchStates = new[] { (int)GpuBatchState.Active, (int)GpuBatchState.AtSafeBoundary };
-        var activeBatch = await context.GpuBatches.AsNoTracking()
-            .Where(batch => activeBatchStates.Contains(batch.State))
-            .OrderBy(batch => batch.CreatedAtUtc)
-            .Select(batch => new { batch.PriorityLane })
-            .FirstOrDefaultAsync(cancellationToken)
-            .ConfigureAwait(false);
-        var laneCounts = await tasks
-            .Where(task => task.ExecutionState != completedState && task.ExecutionState != (int)GpuMiniTaskExecutionState.Cancelled)
-            .GroupBy(task => task.PriorityLane)
-            .ToDictionaryAsync(group => (GpuPriorityLane)group.Key, group => group.Count(), cancellationToken)
-            .ConfigureAwait(false);
-        var oldestUncertainHeartbeat = await context.GpuCapacitySlots.AsNoTracking()
-            .Where(slot => slot.State == (int)GpuCapacitySlotState.Uncertain && slot.LastHeartbeatAtUtc != null)
-            .Select(slot => slot.LastHeartbeatAtUtc)
-            .MinAsync(cancellationToken)
-            .ConfigureAwait(false);
-        var now = _timeProvider.GetUtcNow();
-        TimeSpan? uncertainAge = oldestUncertainHeartbeat is not { } heartbeat
-            ? null
-            : now > heartbeat
-                ? now - heartbeat
-                : TimeSpan.Zero;
-
-        return new GpuSchedulerStatusSnapshot(
-            await tasks.CountAsync(task => task.ExecutionState == readyState, cancellationToken).ConfigureAwait(false),
-            await tasks.CountAsync(task => task.ExecutionState == activeState, cancellationToken).ConfigureAwait(false),
-            await tasks.CountAsync(
-                    task => task.ExecutionState == readyState && task.DeferredUntilUtc != null,
-                    cancellationToken)
-                .ConfigureAwait(false),
-            await tasks.CountAsync(task => task.ExecutionState == uncertainState, cancellationToken).ConfigureAwait(false),
-            laneCounts,
-            activeBatch is not null,
-            activeBatch is null ? null : (GpuPriorityLane)activeBatch.PriorityLane,
-            await context.GpuCapacitySlots.CountAsync(
-                    slot => slot.State == (int)GpuCapacitySlotState.Available,
-                    cancellationToken)
-                .ConfigureAwait(false),
-            await context.GpuCapacitySlots.CountAsync(
-                    slot => slot.State == (int)GpuCapacitySlotState.Reserved,
-                    cancellationToken)
-                .ConfigureAwait(false),
-            await context.GpuCapacitySlots.CountAsync(
-                    slot => slot.State == (int)GpuCapacitySlotState.Uncertain,
-                    cancellationToken)
-                .ConfigureAwait(false),
-            await context.GpuSchedulerStates.AsNoTracking()
-                .Where(state => state.Id == 1)
-                .Select(state => state.NextDeferredAtUtc)
-                .SingleAsync(cancellationToken)
-                .ConfigureAwait(false),
-            uncertainAge);
+        await using var context = await _contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        return await SqlGpuSchedulerStatusReader.ReadAsync(context, _timeProvider.GetUtcNow(), cancellationToken).ConfigureAwait(false);
     }
 
     private async Task<GpuMiniTaskHandoffResult> HandoffWithinTransactionAsync(

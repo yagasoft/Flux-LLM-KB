@@ -32,6 +32,7 @@ param(
     [switch]$RecoverStoppedPool,
     [string]$OfflineCodeMaintenanceReceipt = '',
     [string]$ExpectedOfflineCodeMaintenanceReceiptSha256 = '',
+    [switch]$EnableDashboardSnapshots,
     [switch]$EnableUnattendedDiscovery,
     [string]$SourceAccessPipeName = '',
     [switch]$DisableSourceAccessRecovery,
@@ -2057,6 +2058,16 @@ if ($PlanOnly -and $Apply) {
 if(($OfflineProjectionMaintenance -or $ResumeOfflineProjectionMaintenance) -and !$ApplySegmentedIndexProjection){throw 'index-update-explicit-projection-mode-required'}
 if($ResumeOfflineProjectionMaintenance -and !$Apply){throw 'index-update-offline-resume-requires-apply'}
 $sourceAccessRequested = ![string]::IsNullOrEmpty($SourceAccessPipeName) -or $DisableSourceAccessRecovery
+if($EnableDashboardSnapshots -and ($PSVersionTable.PSVersion.Major -lt 7 -or !$RecoverStoppedPool -or
+    !$OfflineCodeMaintenanceReceipt -or $ExpectedOfflineCodeMaintenanceReceiptSha256 -cnotmatch '^[A-Fa-f0-9]{64}$' -or
+    $sourceAccessRequested -or $EnterSourceDeletionAcceptanceMaintenance -or $ApplyMigrations -or
+    $ApplyResumableSourceDeletionCleanupMigration -or $ApplyCorpusChunkFullTextMigration -or $ApplyCodeDisclosureProofMigration -or
+    $ApplyRepositoryRecoveryAuthorityMigration -or $ApplyHybridPassageRebuild -or $ApplySegmentedIndexProjection -or
+    $EnableUnattendedDiscovery -or $DeferReadinessForScopedRemediation -or $ReconcileRepositoryRecoveryRelease -or
+    $ResumeRepositoryRecoveryPreparedRelease -or $ResumeRepositoryRecoveryActivationRelease -or
+    $ResumeHybridRebuildRelease -or $ReplaceHybridRebuildRelease -or $PatchHybridRebuildRelease -or $ResumeHybridPatchRelease)) {
+    throw 'Dashboard snapshot activation requires only a bound version 3 stopped-maintenance receipt in pwsh 7 or later.'
+}
 if ($sourceAccessRequested -and $PSVersionTable.PSVersion.Major -lt 7) { throw 'Source-access configuration requires pwsh 7 or later.' }
 if ($sourceAccessRequested -and ($EnterSourceDeletionAcceptanceMaintenance -or $ApplyMigrations -or
     $ApplyResumableSourceDeletionCleanupMigration -or $ApplyCorpusChunkFullTextMigration -or
@@ -2176,6 +2187,11 @@ Import-Module (Join-Path $PSScriptRoot "incremental-iis-payload-swap.psm1") -For
 Import-Module (Join-Path $PSScriptRoot 'index-format-admission.psm1') -Force -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'recovery-reference-writer.psm1') -Force -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'incremental-source-access-config.psm1') -Force -ErrorAction Stop
+Import-Module (Join-Path $PSScriptRoot 'incremental-dashboard-snapshots.psm1') -Force -ErrorAction Stop
+$dashboardSnapshotChange=$null
+if($EnableDashboardSnapshots) {
+    $dashboardSnapshotChange=New-DashboardSnapshotConfigurationChange -Path (Join-Path $CanonicalLiveRoot 'Config/appsettings.Production.json')
+}
 $sourceAccessChange = $null
 if ($sourceAccessRequested) {
     $sourceAccessChange = New-SourceAccessConfigurationChange -Path (Join-Path $CanonicalLiveRoot 'Config/appsettings.Production.json') `
@@ -2467,6 +2483,11 @@ if ($PlanOnly) {
                 recovery='before start: stopped rollback; after start intent: retain matching pair and hold for fresh stop/forward recovery' }
         } else { $null }
         unattended_discovery_hosting = $hostingPlan
+        dashboard_snapshots = if($dashboardSnapshotChange){@{
+            database_option='ALLOW_SNAPSHOT_ISOLATION ON only, require fully ON before start; RCSI/ADR unchanged';
+            before_sha256=$dashboardSnapshotChange.BeforeHash;after_sha256=$dashboardSnapshotChange.AfterHash;
+            rollback='restore exact original configuration/payload pair before start; leave option ON; retain hold after any ambiguous activation/start/release'
+        }}else{$null}
         source_access_configuration = if ($sourceAccessChange) { @{
             enabled=$sourceAccessChange.Enabled; pipe=$sourceAccessChange.PipeName;
             before_sha256=$sourceAccessChange.BeforeHash; after_sha256=$sourceAccessChange.AfterHash;
@@ -2598,6 +2619,7 @@ try {
     }
     Assert-IncrementalIisPreflight
     if ($sourceAccessChange) { Assert-SourceAccessConfigurationChange -Change $sourceAccessChange -Original }
+    if ($dashboardSnapshotChange) { Assert-DashboardSnapshotConfigurationChange $dashboardSnapshotChange -Original }
     if ($EnableUnattendedDiscovery) {
         $hostingChange.Original = Get-IncrementalIisHostingSettings
         if (!$hostingChange.Original.ModuleEnabled) { throw 'Application Initialization must be enabled before unattended discovery.' }
@@ -2635,6 +2657,10 @@ try {
     if ($sourceAccessChange) {
         [IO.File]::WriteAllBytes((Join-Path $releaseRoot 'source-access-config-before.json'),$sourceAccessChange.Before)
         [IO.File]::WriteAllBytes((Join-Path $releaseRoot 'source-access-config-after.json'),$sourceAccessChange.After)
+    }
+    if($dashboardSnapshotChange) {
+        [IO.File]::WriteAllBytes((Join-Path $releaseRoot 'dashboard-config-before.json'),$dashboardSnapshotChange.Before)
+        [IO.File]::WriteAllBytes((Join-Path $releaseRoot 'dashboard-config-after.json'),$dashboardSnapshotChange.After)
     }
     Assert-NotReparsePoint `
         -Path $releaseRoot `
@@ -2696,6 +2722,14 @@ try {
         [void](New-DeploymentValidationHold -Path $ValidationHoldPath -ReleaseId $releaseId)
         $deploymentValidation.HoldCreated = $true
         $deploymentValidation.Baseline = Get-RetainedPipelineStateBaseline
+        if($EnableDashboardSnapshots) {
+            $snapshotReceipt=Read-SegmentedUpdateJson $OfflineCodeMaintenanceReceipt $ExpectedOfflineCodeMaintenanceReceiptSha256
+            Invoke-DashboardSnapshotActivation -State $offlineCodeState -Binding $snapshotReceipt.DashboardSnapshot `
+                -ReadState { Get-DashboardSnapshotDatabaseState -ConnectionString (Get-DeploymentSqlConnectionString) } `
+                -Enable { Enable-DashboardSnapshotDatabaseOption -ConnectionString (Get-DeploymentSqlConnectionString) -Binding $snapshotReceipt.DashboardSnapshot } `
+                -WriteState { Write-SegmentedUpdateJson $offlineCodeState.StatePath $offlineCodeState }
+            Assert-OfflineCodeMaintenance -RequireStopped -OriginalPayloads
+        }
         [ordered]@{ observed_at_utc=[DateTime]::UtcNow.ToString('O'); pool='Stopped';
             application_hash=$recoveryOriginalPayloadHash; interactive_host_hash=$recoveryOriginalInteractiveHostHash;
             offline_code_state=if($offlineCodeState){$offlineCodeState.StatePath}else{$null};
@@ -2747,6 +2781,7 @@ try {
         -ActivateCandidate {
             Invoke-CandidatePayloadActivation -CandidateRoot $candidateRoot -ApplicationRoot $CanonicalDeployRoot
             if ($sourceAccessChange) { Set-SourceAccessConfigurationChange -Change $sourceAccessChange }
+            if ($dashboardSnapshotChange) { Set-DashboardSnapshotConfigurationChange $dashboardSnapshotChange }
             if ($EnableUnattendedDiscovery) {
                 $hostingChange.Attempted = $true
                 $hostingChange.RollbackVerified = $false
@@ -2824,6 +2859,7 @@ try {
         } `
         -ValidateApplication {
             if ($sourceAccessChange) { Assert-SourceAccessConfigurationChange -Change $sourceAccessChange }
+            if ($dashboardSnapshotChange) { Assert-DashboardSnapshotConfigurationChange $dashboardSnapshotChange }
             if ($EnableUnattendedDiscovery -and
                 !(Test-IisHostingSettingsMatch (Get-IncrementalIisHostingSettings) $hostingChange.Desired)) {
                 throw 'The activated unattended discovery hosting settings changed.'
@@ -2847,6 +2883,7 @@ try {
         } `
         -ValidateRollbackApplication {
             if ($sourceAccessChange) { Assert-SourceAccessConfigurationChange -Change $sourceAccessChange -Original }
+            if ($dashboardSnapshotChange) { Assert-DashboardSnapshotConfigurationChange $dashboardSnapshotChange -Original }
             if ($hostingChange.Attempted -and
                 !(Test-IisHostingSettingsMatch (Get-IncrementalIisHostingSettings) $hostingChange.Original)) {
                 throw 'The prior IIS hosting settings were not restored; hold retained.'
@@ -2890,6 +2927,7 @@ try {
         } `
         -PrepareRollbackApplication {
             if ($sourceAccessChange -and $sourceAccessChange.Attempted) { Restore-SourceAccessConfigurationChange -Change $sourceAccessChange }
+            if ($dashboardSnapshotChange -and $dashboardSnapshotChange.Attempted) { Restore-DashboardSnapshotConfigurationChange $dashboardSnapshotChange }
             if ($hostingChange.Attempted) {
                 Restore-IncrementalIisHostingSettings -Original $hostingChange.Original -Desired $hostingChange.Desired
                 $hostingChange.RollbackVerified = $true
@@ -2944,6 +2982,7 @@ try {
         rollback_payload = $swap.PreviousPayload
         unattended_discovery_hosting = if ($EnableUnattendedDiscovery) { Get-IncrementalIisHostingSettings } else { $null }
         source_access_configuration_sha256 = if ($sourceAccessChange) { $sourceAccessChange.AfterHash } else { $null }
+        dashboard_configuration_sha256 = if ($dashboardSnapshotChange) { $dashboardSnapshotChange.AfterHash } else { $null }
         unattended_discovery_startup = $hostingChange.PreloadReceipt
         migrations = [bool]$applyAnyMigration
         migration = if ($applyAnyMigration) { [ordered]@{ target = $migrationPlan.Up.To; script_sha256 = $migrationPlan.Up.Sha256 } } else { $null }
@@ -3032,7 +3071,8 @@ finally {
             -InteractiveHostMutationStarted $interactiveHostMutationStarted `
             -InteractiveHostRollbackVerified $interactiveHostRollbackVerified `
             -RecoverStoppedPool ([bool]$RecoverStoppedPool) `
-            -HostingRollbackVerified ([bool]$hostingChange.RollbackVerified -and (!$sourceAccessChange -or $sourceAccessChange.RollbackVerified)))) {
+            -HostingRollbackVerified ([bool]$hostingChange.RollbackVerified -and (!$sourceAccessChange -or $sourceAccessChange.RollbackVerified) -and
+                (!$dashboardSnapshotChange -or $dashboardSnapshotChange.RollbackVerified)))) {
         Remove-DeploymentValidationHold -Path $ValidationHoldPath -ReleaseId $releaseId
     }
     } finally {

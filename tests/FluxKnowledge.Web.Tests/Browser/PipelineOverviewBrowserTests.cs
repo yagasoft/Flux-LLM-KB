@@ -115,7 +115,7 @@ public sealed class PipelineOverviewBrowserTests
             var failure = new InvalidOperationException("Synthetic private provider diagnostic");
             reader.AttentionFailure = failure;
             await page.GetByRole(AriaRole.Button, new() { Name = "View GPU task records" }).ClickAsync();
-            await Assertions.Expect(page.GetByRole(AriaRole.Alert)).ToContainTextAsync("Attention records could not be refreshed");
+            await Assertions.Expect(page.Locator("#pipeline-attention").GetByRole(AriaRole.Alert)).ToContainTextAsync("Attention records could not be refreshed");
             await Assertions.Expect(page.Locator("#pipeline-attention caption")).ToContainTextAsync("pipeline job records");
             await Assertions.Expect(page.Locator("#pipeline-attention tbody tr")).ToHaveCountAsync(25);
             await Assertions.Expect(page.GetByText(failure.Message)).ToHaveCountAsync(0);
@@ -138,7 +138,7 @@ public sealed class PipelineOverviewBrowserTests
             Assert.Equal("gpu", second.Fields["Unit"]);
             Assert.Equal(ControlledOverviewReader.FirstRoot, second.Fields["SourceRootId"]);
             Assert.NotEqual(first.Fields["RequestId"], second.Fields["RequestId"]);
-            await Assertions.Expect(page.GetByRole(AriaRole.Alert)).ToHaveCountAsync(0);
+            await Assertions.Expect(page.Locator("#pipeline-attention").GetByRole(AriaRole.Alert)).ToHaveCountAsync(0);
             await Assertions.Expect(page.Locator(".source-progress-card")).ToHaveCountAsync(1);
             await Assertions.Expect(page.Locator(".source-progress-card")).ToContainTextAsync("Acceptance source");
             await Assertions.Expect(page.Locator("#pipeline-attention tbody tr")).ToHaveCountAsync(0);

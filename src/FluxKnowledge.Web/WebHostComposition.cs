@@ -202,6 +202,12 @@ public static class WebHostComposition
         ArgumentNullException.ThrowIfNull(services);
         ArgumentNullException.ThrowIfNull(configuration);
 
+        // The coordinator and every Web publisher use one process-local feed,
+        // including composition-only hosts and model-free validation.
+        services.TryAddSingleton<StatusEventFeed>();
+        services.TryAddSingleton<FluxKnowledge.Application.Ports.IStatusEventPublisher>(
+            provider => provider.GetRequiredService<StatusEventFeed>());
+
         NativeGoLiveRuntimeConfiguration? nativeRuntimeOptions = null;
         var accessEnabledValue = configuration["SourceAccess:Enabled"];
         if (accessEnabledValue is not null && !bool.TryParse(accessEnabledValue, out _))
@@ -525,6 +531,8 @@ public static class WebHostComposition
         {
             services.AddSingleton<IHostedService, PaddleOcrVlmCompletionRecoveryService>();
         }
+        services.AddSingleton(OverviewReadOptions.FromConfiguration(configuration));
+        services.AddSingleton<OverviewSnapshotCoordinator>();
         services.AddScoped<IProjectionReader, SqlProjectionReader>();
         services.AddScoped<ICorpusProjectionReader, SqlCorpusProjectionReader>();
         services.AddScoped<IOperatorEventProjectionReader, SqlOperatorEventProjectionReader>();

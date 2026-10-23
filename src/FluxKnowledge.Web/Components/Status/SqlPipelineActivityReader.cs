@@ -12,9 +12,10 @@ namespace FluxKnowledge.Web.Components.Status;
 internal sealed class SqlPipelineActivityReader(IDeploymentValidationHold? hold, TimeProvider clock)
 {
     public async ValueTask<PipelineActivitySummary> ReadAsync(FluxKnowledgeDbContext context,
-        DateTimeOffset startedAt, CancellationToken cancellationToken)
+        DateTimeOffset startedAt, CancellationToken cancellationToken, DeploymentHoldAdmission? capturedAdmission = null,
+        bool materializeGpuFacts = false)
     {
-        var now = clock.GetUtcNow();
+        var now = startedAt;
         var roots = await context.SourceRootConfigurations.AsNoTracking().OrderBy(r => r.DisplayName).ThenBy(r => r.Id)
             .Select(r => new RootRow(r.Id, r.DisplayName, r.CanonicalPath, r.State, r.LastScanCompletedAtUtc,
                 context.SourceScanRequests.Where(request => request.SourceRootId == r.Id &&
@@ -26,8 +27,10 @@ internal sealed class SqlPipelineActivityReader(IDeploymentValidationHold? hold,
             roots.Select(r => r.Id).ToArray(), cancellationToken).ConfigureAwait(false);
         await using var branches = await SqlSelectedBranchReadScope.CreateAsync(context,
             sourceStates.Values.SelectMany(s => s.SelectedBranches).Distinct().ToArray(), cancellationToken).ConfigureAwait(false);
-        var admission = hold?.ReadAdmissionState() ?? new(false, null);
+        var admission = capturedAdmission ?? hold?.ReadAdmissionState() ?? new(false, null);
         var gpuEvidence = await SqlGpuActivityReadEvidence.ReadAsync(context, cancellationToken).ConfigureAwait(false);
+        if (materializeGpuFacts)
+            await branches.MaterializeGpuFactsAsync(now, gpuEvidence, cancellationToken).ConfigureAwait(false);
         var jobRows = await SqlPipelineActivityQuery.Jobs(context, now, admission, branches, gpuEvidence)
             .GroupBy(row => new
             {

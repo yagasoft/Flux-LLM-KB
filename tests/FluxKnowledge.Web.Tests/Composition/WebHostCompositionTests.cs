@@ -47,6 +47,19 @@ namespace FluxKnowledge.Web.Tests.Composition;
 public sealed class WebHostCompositionTests : IDisposable
 {
     [Fact]
+    public async Task Dashboard_coordinator_and_publishers_share_one_composed_event_feed()
+    {
+        var services = new ServiceCollection();
+        services.AddLogging();
+        WebHostComposition.AddProductionFluxKnowledgeServicesForTests(services, CreateProductionConfiguration());
+        Assert.Single(services, descriptor => descriptor.ServiceType == typeof(StatusEventFeed));
+        await using var provider = services.BuildServiceProvider(new ServiceProviderOptions
+        { ValidateOnBuild = true, ValidateScopes = true });
+        Assert.Same(provider.GetRequiredService<StatusEventFeed>(), provider.GetRequiredService<IStatusEventPublisher>());
+        Assert.Equal(0, provider.GetRequiredService<OverviewSnapshotCoordinator>().Metrics.Attempts);
+    }
+
+    [Fact]
     public void An_unknown_publication_mode_refuses_composition_before_startup()
     {
         var configuration = new ConfigurationBuilder().AddConfiguration(CreateProductionConfiguration())

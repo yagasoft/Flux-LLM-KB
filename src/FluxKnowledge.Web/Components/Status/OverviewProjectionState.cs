@@ -3,13 +3,28 @@ using System.Data.Common;
 
 namespace FluxKnowledge.Web.Components.Status;
 
-public sealed class OverviewProjectionState(IProjectionReader reader, ILogger<OverviewProjectionState>? logger = null)
+public sealed class OverviewProjectionState(IProjectionReader reader, ILogger<OverviewProjectionState>? logger = null,
+    OverviewSnapshotCoordinator? shared = null, TimeProvider? timeProvider = null)
 {
     private readonly SemaphoreSlim _reloadGate = new(1, 1);
+    private readonly TimeProvider _clock = timeProvider ?? TimeProvider.System;
+    private IDisposable? _sharedSubscription;
+    private bool _isStale;
+    private string? _refreshIssue;
+    public bool UsesSharedSnapshots => shared is not null;
     public bool HasSnapshot { get; private set; }
-    public bool IsStale { get; private set; }
+    public bool IsStale
+    {
+        get => _isStale || shared is not null && LastSuccessfulReadAtUtc is { } sampled &&
+            _clock.GetUtcNow() - sampled >= TimeSpan.FromSeconds(10);
+        private set => _isStale = value;
+    }
     public DateTimeOffset? LastSuccessfulReadAtUtc { get; private set; }
-    public string? RefreshIssue { get; private set; }
+    public string? RefreshIssue
+    {
+        get => _refreshIssue ?? (IsStale ? "The last committed sample is more than 10 seconds old. Refreshing status." : null);
+        private set => _refreshIssue = value;
+    }
 
     public OverviewProjection Current { get; private set; } = new(
         0,
@@ -27,6 +42,12 @@ public sealed class OverviewProjectionState(IProjectionReader reader, ILogger<Ov
 
     public async ValueTask ReloadAsync(CancellationToken cancellationToken)
     {
+        if (shared is not null)
+        {
+            await shared.RefreshAsync(cancellationToken, force: true).ConfigureAwait(false);
+            SynchronizeFromShared();
+            return;
+        }
         if (!await _reloadGate.WaitAsync(0, cancellationToken).ConfigureAwait(false)) return;
         try
         {
@@ -67,15 +88,41 @@ public sealed class OverviewProjectionState(IProjectionReader reader, ILogger<Ov
         var subscription = statusEvents.Subscribe();
         try
         {
-            await ReloadAsync(cancellationToken).ConfigureAwait(false);
+            if (shared is null) await ReloadAsync(cancellationToken).ConfigureAwait(false);
+            else
+            {
+                ReleaseSharedSubscription();
+                _sharedSubscription = shared.Subscribe();
+                SynchronizeFromShared();
+                if (!HasSnapshot) await shared.RefreshAsync(cancellationToken).ConfigureAwait(false);
+                else _ = shared.RefreshAsync(CancellationToken.None).AsTask();
+                SynchronizeFromShared();
+            }
             return subscription;
         }
         catch
         {
+            ReleaseSharedSubscription();
             await subscription.DisposeAsync();
             throw;
         }
     }
+
+    public void SynchronizeFromShared()
+    {
+        if (shared is null) return;
+        var value = shared.Current;
+        if (value.Projection is { } projection)
+        {
+            Current = projection;
+            HasSnapshot = true;
+            LastSuccessfulReadAtUtc = OverviewSnapshotCoordinator.SampleTime(value);
+        }
+        IsStale = value.RefreshIssue is not null;
+        RefreshIssue = value.RefreshIssue;
+    }
+
+    public void ReleaseSharedSubscription() => Interlocked.Exchange(ref _sharedSubscription, null)?.Dispose();
 
     public ValueTask HandleStatusChangedAsync(StatusChanged statusChanged, CancellationToken cancellationToken)
     {

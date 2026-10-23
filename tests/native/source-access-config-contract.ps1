@@ -153,6 +153,7 @@ $change.AfterHash
     function global:Invoke-RequiredLoopbackProbes { param($Origin,$TimeoutSeconds) }
     function global:Get-RetainedPipelineStateBaseline { return 1 }
     function global:Assert-RetainedPipelineStateUnchanged { param($Baseline,$Current) }
+    $dashboardSnapshotChange=$null
     $sourceAccessChange=New-SourceAccessConfigurationChange -Path $path -PipeName 'FluxKnowledge.SourceAccess.isolated-config'
     $candidateRoot=$fixture; $CanonicalDeployRoot=$fixture; $EnableUnattendedDiscovery=$false
     $ApplyResumableSourceDeletionCleanupMigration=$false; $RecoverStoppedPool=$false; $ApplyCodeDisclosureProofMigration=$false

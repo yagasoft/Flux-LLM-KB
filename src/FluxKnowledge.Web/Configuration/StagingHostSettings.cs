@@ -16,13 +16,15 @@ internal sealed class StagingHostSettings
 {
     internal const string BaseRoot = @"E:\Codex Workspaces\Staging\FluxKnowledge";
     internal const string WorkingBaseRoot = @"I:\Codex Workspaces\Staging\FluxKnowledge";
-    private StagingHostSettings(LiveRootLayout layout, StagingSqlBinding sql, Uri origin, string indexPublicationMode, bool dashboardReadBenchmark)
+    private StagingHostSettings(LiveRootLayout layout, StagingSqlBinding sql, Uri origin, string indexPublicationMode, bool dashboardReadBenchmark,
+        string dashboardReadConsistency)
     {
         Layout = layout;
         Sql = sql;
         Origin = origin;
         IndexPublicationMode = indexPublicationMode;
         DashboardReadBenchmark = dashboardReadBenchmark;
+        DashboardReadConsistency = dashboardReadConsistency;
     }
 
     internal LiveRootLayout Layout { get; }
@@ -33,6 +35,7 @@ internal sealed class StagingHostSettings
     internal string RuntimeConnectionString => Sql.Options.ConnectionString;
     internal string IndexPublicationMode { get; }
     internal bool DashboardReadBenchmark { get; }
+    internal string DashboardReadConsistency { get; }
 
     internal static StagingHostSettings Create(string root, string connection, string origin,
         ILiveRootPathInspector? inspector = null, string indexPublicationMode = "Legacy", bool dashboardReadBenchmark = false)
@@ -54,7 +57,7 @@ internal sealed class StagingHostSettings
         foreach (var path in layout.AppOwnedLocations.Append(Path.Combine(root, "Sources")))
             if (!layout.ValidateOwnedPath(path, pathInspector).IsValid)
                 throw new ArgumentException("Staging path is linked, escaped or ambiguous.");
-        return new(layout, new StagingSqlBinding(layout, connection), uri, indexPublicationMode, dashboardReadBenchmark);
+        return new(layout, new StagingSqlBinding(layout, connection), uri, indexPublicationMode, dashboardReadBenchmark, "LegacyFenced");
     }
 
     internal static StagingHostSettings Load(string file)
@@ -70,8 +73,12 @@ internal sealed class StagingHostSettings
         {
             UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow
         }) ?? throw new ArgumentException("Staging settings are empty.");
-        return Create(root, document.SqlConnectionString, document.Origin, indexPublicationMode: document.IndexPublicationMode,
+        var loaded = Create(root, document.SqlConnectionString, document.Origin, indexPublicationMode: document.IndexPublicationMode,
             dashboardReadBenchmark: document.DashboardReadBenchmark);
+        if (document.DashboardReadConsistency is not ("LegacyFenced" or "Snapshot"))
+            throw new ArgumentException("Invalid staging dashboard read consistency.");
+        return new(loaded.Layout, loaded.Sql, loaded.Origin, loaded.IndexPublicationMode, loaded.DashboardReadBenchmark,
+            document.DashboardReadConsistency);
     }
 
     internal void ValidateBeforeStart()
@@ -116,15 +123,17 @@ internal sealed class StagingHostSettings
         ["Search:HybridPassagesEnabled"] = "false",
         ["IndexPublication:Mode"] = IndexPublicationMode,
         ["Worker:Enabled"] = DashboardReadBenchmark ? "false" : "true",
+        ["Dashboard:ReadConsistency"] = DashboardReadConsistency,
         ["Codex:PromptContextEnabled"] = "false",
         ["Logging:LogLevel:Default"] = "Warning",
+        ["Logging:LogLevel:FluxKnowledge.Web.Components.Status.OverviewSnapshotCoordinator"] = DashboardReadBenchmark ? "Information" : "Warning",
         ["Logging:LogLevel:Microsoft.Hosting.Lifetime"] = "Information",
         ["Logging:LogLevel:FluxKnowledge.Infrastructure.SqlServer.Persistence.SqlDatabaseStartupReadiness"] = "Information",
         ["Logging:LogLevel:Microsoft.EntityFrameworkCore"] = "Warning"
     }).Build();
 
     private sealed record SettingsDocument(string SqlConnectionString, string Origin, string IndexPublicationMode = "Legacy",
-        bool DashboardReadBenchmark = false);
+        bool DashboardReadBenchmark = false, string DashboardReadConsistency = "LegacyFenced");
 }
 
 internal sealed class StagingSourceRootPathPolicy(ISourceRootPathPolicy inner, string sourcesRoot) : ISourceRootPathPolicy

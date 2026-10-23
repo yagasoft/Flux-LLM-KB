@@ -16,6 +16,8 @@ public sealed class SqlSelectedBranchReadScope : IAsyncDisposable
     private readonly Guid _connectionId;
     private bool _dropped;
     private bool _disposed;
+    private bool _gpuFactsAttempted;
+    internal bool HasGpuFacts { get; private set; }
 
     private SqlSelectedBranchReadScope(FluxKnowledgeDbContext context)
     {
@@ -61,11 +63,50 @@ public sealed class SqlSelectedBranchReadScope : IAsyncDisposable
             throw new InvalidOperationException("Selected branches require their original live read connection.");
     }
 
+    /// <summary>Build the four independent job facts once within the caller's read attempt.</summary>
+    public async ValueTask MaterializeGpuFactsAsync(DateTimeOffset now, SqlGpuActivityReadEvidence evidence,
+        CancellationToken cancellationToken)
+    {
+        EnsureFor(_context);
+        if (_gpuFactsAttempted) throw new InvalidOperationException("GPU facts require a fresh read scope for each attempt.");
+        _gpuFactsAttempted = true;
+        await _context.Database.ExecuteSqlRawAsync("""
+            CREATE TABLE #FluxPipelineGpuFacts (
+                ParentJobId uniqueidentifier NOT NULL, SourceRevision bigint NOT NULL,
+                HasActiveGpu bit NOT NULL, HasReadyGpu bit NOT NULL,
+                HasUncertainGpu bit NOT NULL, HasWaitingGpu bit NOT NULL,
+                PRIMARY KEY CLUSTERED (ParentJobId, SourceRevision));
+            """, cancellationToken).ConfigureAwait(false);
+        await _context.Database.ExecuteSqlRawAsync("""
+            INSERT INTO #FluxPipelineGpuFacts
+                (ParentJobId, SourceRevision, HasActiveGpu, HasReadyGpu, HasUncertainGpu, HasWaitingGpu)
+            SELECT t.ParentJobId, t.SourceRevision,
+                MAX(CASE WHEN t.State = 1 AND proof.HasActive = 1 THEN 1 ELSE 0 END),
+                MAX(CASE WHEN t.State = 0 AND (t.DeferredUntilUtc IS NULL OR t.DeferredUntilUtc <= @nowUtc) THEN 1 ELSE 0 END),
+                MAX(CASE WHEN t.State = 3 THEN 1 ELSE 0 END),
+                MAX(CASE WHEN (t.State = 0 AND t.DeferredUntilUtc > @nowUtc)
+                    OR (t.State = 1 AND proof.HasPending = 1) THEN 1 ELSE 0 END)
+            FROM GpuMiniTasks t
+            LEFT JOIN (
+                SELECT Id, BatchId, AdmissionGeneration,
+                    MAX(CONVERT(int, HasActive)) AS HasActive, MAX(CONVERT(int, HasPending)) AS HasPending
+                FROM OPENJSON(@ownedGpuTasks) WITH (
+                    Id uniqueidentifier '$.Id', BatchId uniqueidentifier '$.BatchId', AdmissionGeneration bigint '$.AdmissionGeneration',
+                    HasActive bit '$.HasActive', HasPending bit '$.HasPending')
+                GROUP BY Id, BatchId, AdmissionGeneration
+            ) proof ON proof.Id = t.Id AND proof.BatchId = t.BatchId AND proof.AdmissionGeneration = t.AdmissionGeneration
+            WHERE t.ParentJobId IS NOT NULL AND t.State IN (0, 1, 3)
+            GROUP BY t.ParentJobId, t.SourceRevision;
+            """, [new SqlParameter("@nowUtc", SqlDbType.DateTimeOffset) { Value = now },
+                new SqlParameter("@ownedGpuTasks", SqlDbType.NVarChar, -1) { Value = evidence.OwnedTasksJson }], cancellationToken).ConfigureAwait(false);
+        HasGpuFacts = true;
+    }
+
     /// <summary>Normal completion uses the read deadline; cleanup errors remain read failures.</summary>
     public async ValueTask CompleteAsync(CancellationToken cancellationToken)
     {
         EnsureFor(_context);
-        await _context.Database.ExecuteSqlRawAsync("DROP TABLE #FluxPipelineSelectedBranches;", cancellationToken).ConfigureAwait(false);
+        await _context.Database.ExecuteSqlRawAsync("DROP TABLE IF EXISTS #FluxPipelineGpuFacts; DROP TABLE #FluxPipelineSelectedBranches;", cancellationToken).ConfigureAwait(false);
         _dropped = true;
     }
 
@@ -81,7 +122,7 @@ public sealed class SqlSelectedBranchReadScope : IAsyncDisposable
                 using var cleanup = new CancellationTokenSource(TimeSpan.FromMilliseconds(500));
                 try
                 {
-                    await _context.Database.ExecuteSqlRawAsync("DROP TABLE IF EXISTS #FluxPipelineSelectedBranches;", cleanup.Token).ConfigureAwait(false);
+                    await _context.Database.ExecuteSqlRawAsync("DROP TABLE IF EXISTS #FluxPipelineGpuFacts; DROP TABLE IF EXISTS #FluxPipelineSelectedBranches;", cleanup.Token).ConfigureAwait(false);
                 }
                 catch (Exception exception) when (exception is DbException or OperationCanceledException or InvalidOperationException) { }
             }

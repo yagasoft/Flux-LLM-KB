@@ -54,6 +54,7 @@ public sealed partial class PipelineActivitySqlTests
         await WaitForFullTextIdleAsync();
         var now = DateTimeOffset.UtcNow;
         var seed = await SeedGpuReadLockAsync(now);
+        await WaitForLegacyReadQuietAsync();
         var interleaving = new AfterGpuQueryInterceptor(async () =>
         {
             await using var writer = new TestDbContextFactory(_fixture.ConnectionString).CreateDbContext();
@@ -78,6 +79,7 @@ public sealed partial class PipelineActivitySqlTests
         var after = await SqlPipelineActivityQuery.ReadFenceAsync(context, deadline.Token);
         Assert.True(interleaving.MutatedAfterConsumption);
         Assert.False(before.Accepts(after));
+        await WaitForLegacyReadQuietAsync();
         var trace = new ReadFenceTraceInterceptor();
         var fresh = await ActivityReader(new TestDbContextFactory(_fixture.ConnectionString, trace)).ReadOverviewAsync(deadline.Token);
         output.WriteLine("Fresh fence: " + string.Join("; ", trace.Samples));
@@ -92,6 +94,7 @@ public sealed partial class PipelineActivitySqlTests
     {
         await WaitForFullTextIdleAsync();
         var seed = await SeedGpuReadLockAsync(DateTimeOffset.UtcNow);
+        await WaitForLegacyReadQuietAsync();
         await using var writer = new TestDbContextFactory(_fixture.ConnectionString).CreateDbContext();
         await using var transaction = await writer.Database.BeginTransactionAsync();
         await writer.GpuExecutorDispatches.Where(d => d.BatchId == seed.Batch)
@@ -104,11 +107,39 @@ public sealed partial class PipelineActivitySqlTests
             Assert.False(sample.Activity.IsAvailable);
         }
         finally { await transaction.RollbackAsync(CancellationToken.None); }
+        await WaitForLegacyReadQuietAsync();
         var fresh = await ActivityReader().ReadOverviewAsync(deadline.Token);
         Assert.True(fresh.Activity.IsConsistent);
         Assert.Equal(1, PipelineActivityView.From(fresh.Activity, seed.Root).ActiveGpuTasks);
     }
 
+    private async Task WaitForLegacyReadQuietAsync()
+    {
+        // A completed injected mutation and an earlier idle FT observation do
+        // not prove a quiet fixture. An unrelated +1 @@DBTS movement was seen;
+        // its origin is unresolved. Preserve the single asserted fresh read.
+        await WaitForFullTextIdleAsync();
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        await using var context = new TestDbContextFactory(_fixture.ConnectionString).CreateDbContext();
+        var previous = await SqlPipelineActivityQuery.ReadFenceAsync(context, deadline.Token);
+        var quiet = System.Diagnostics.Stopwatch.StartNew();
+        try
+        {
+            while (quiet.Elapsed < TimeSpan.FromMilliseconds(500))
+            {
+                await Task.Delay(50, deadline.Token);
+                var next = await SqlPipelineActivityQuery.ReadFenceAsync(context, deadline.Token);
+                if (!previous.Accepts(next))
+                {
+                    output.WriteLine($"Fixture movement before asserted legacy read: {previous.Version}/{previous.IsStable} -> {next.Version}/{next.IsStable}");
+                    quiet.Restart();
+                }
+                previous = next;
+            }
+        }
+        catch (OperationCanceledException exception) when (deadline.IsCancellationRequested)
+        { throw new TimeoutException("The owned legacy fixture did not have a 500 ms stable fence window.", exception); }
+    }
     private async Task WaitForFullTextIdleAsync()
     {
         // Migrations start asynchronous Full-Text populations. Those advance

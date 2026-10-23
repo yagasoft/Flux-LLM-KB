@@ -1,5 +1,11 @@
 # Dot-sourced by the canonical updater. Version 1 is code-only; version 2
-# additionally binds one source-access activation. Neither settles GPU work.
+# additionally binds one source-access activation. Version 3 binds only dashboard
+# snapshot activation/configuration. None settles GPU work or changes schema.
+function Get-OfflineDashboardCandidateCommit {
+    $value=(& git -C $SourceRoot rev-parse HEAD 2>&1|Out-String).Trim()
+    if($LASTEXITCODE -ne 0 -or $value -cnotmatch '^[a-f0-9]{40}$'){throw 'offline-dashboard-immutable-candidate-required'}
+    return $value
+}
 function Get-OfflineSourceAccessHelperObservation {
     param([hashtable]$Binding)
     $root=Assert-SegmentedUpdatePath $Binding.InstallRoot
@@ -52,7 +58,33 @@ function Assert-OfflineSourceAccessHelperBinding {
 }
 
 function Get-OfflineMaintenanceConfigurationHash {
-    param([hashtable]$Receipt,[switch]$Candidate)
+    param([hashtable]$Receipt,[switch]$Candidate,[hashtable]$State)
+    if($Receipt.Version -ne 3 -and $dashboardSnapshotChange){throw 'offline-dashboard-requires-version3'}
+    if($Receipt.Version -eq 3) {
+        $binding=$Receipt.DashboardSnapshot
+        if(!$EnableDashboardSnapshots -or !$dashboardSnapshotChange -or $sourceAccessChange -or $Receipt.ContainsKey('SourceAccessConfiguration') -or
+            !$binding -or $binding.Capability -cne 'dashboard-committed-sample-v1' -or
+            $binding.DatabaseIdentity -cne $Receipt.Database.Identity -or
+            $binding.BeforeSha256 -cne $Receipt.ConfigurationSha256 -or $binding.BeforeSha256 -cne $dashboardSnapshotChange.BeforeHash -or
+            $binding.AfterSha256 -cne $dashboardSnapshotChange.AfterHash -or
+            $binding.CandidateCommit -cne (Get-OfflineDashboardCandidateCommit) -or
+            $binding.CandidateWebSha256 -cnotmatch '^[A-F0-9]{64}$' -or $binding.CandidateCompanionSha256 -cnotmatch '^[A-F0-9]{64}$') {
+            throw 'offline-dashboard-configuration-binding-changed'
+        }
+        if($State -and ($State.CandidateWebSha256 -cne $binding.CandidateWebSha256 -or
+            $State.CandidateCompanionSha256 -cne $binding.CandidateCompanionSha256)){throw 'offline-dashboard-candidate-binding-changed'}
+        if($State -and $State.ContainsKey('DashboardSnapshotActivation')) {
+            Assert-DashboardSnapshotActivation -State $State -Binding $binding -ReadState {
+                Get-DashboardSnapshotDatabaseState -ConnectionString (Get-DeploymentSqlConnectionString)
+            }
+        } else {
+            Assert-DashboardSnapshotDatabaseBinding -Binding $binding -Observed (Get-DashboardSnapshotDatabaseState -ConnectionString (Get-DeploymentSqlConnectionString))
+            if($Candidate){throw 'offline-dashboard-activation-required-before-start'}
+        }
+        $applied=$dashboardSnapshotChange.Attempted -and !$dashboardSnapshotChange.RollbackVerified
+        if($Candidate -and !$applied){throw 'offline-dashboard-candidate-configuration-not-applied'}
+        return $(if($applied){$binding.AfterSha256}else{$binding.BeforeSha256})
+    }
     if($Receipt.Version -eq 1) {
         if($sourceAccessChange){throw 'offline-source-access-requires-version2'}
         return $Receipt.ConfigurationSha256
@@ -100,7 +132,7 @@ FOR JSON PATH,WITHOUT_ARRAY_WRAPPER;
 function Assert-OfflineCodeMaintenance {
     param([switch]$RequireStopped,[switch]$OriginalPayloads,[switch]$CandidatePayloads)
     $receipt=Read-SegmentedUpdateJson $OfflineCodeMaintenanceReceipt $ExpectedOfflineCodeMaintenanceReceiptSha256
-    if($receipt.Version -notin @(1,2) -or !$receipt.Stop.Completed -or $receipt.Stop.Phase -cne 'iis-writers-stopped' -or
+    if($receipt.Version -notin @(1,2,3) -or !$receipt.Stop.Completed -or $receipt.Stop.Phase -cne 'iis-writers-stopped' -or
         !$receipt.Stop.ExitProof.ContainsKey('ExitedIdentities') -or $receipt.Database.RequiredFormat -ne 2){throw 'offline-code-reviewed-receipt-required'}
     $verified=[DateTime]::Parse($receipt.Stop.ExitProof.VerifiedAtUtc).ToUniversalTime()
     if($verified -le [DateTime]::Parse($receipt.Stop.StartedUtc).ToUniversalTime() -or $verified -gt [DateTime]::UtcNow.AddSeconds(5)){
@@ -135,7 +167,7 @@ function Assert-OfflineCodeMaintenance {
     foreach($key in @('Identity','SchemaSha256','History','Projection','RequiredFormat')) {
         if($database[$key] -cne $receipt.Database[$key]){throw ('offline-code-database-changed: '+$key)}
     }
-    $configurationHash=Get-OfflineMaintenanceConfigurationHash $receipt -Candidate:$CandidatePayloads
+    $configurationHash=Get-OfflineMaintenanceConfigurationHash $receipt -Candidate:$CandidatePayloads -State $state
     foreach($binding in @(@{Path=(Join-Path $CanonicalLiveRoot 'Config/appsettings.Production.json');Hash=$configurationHash},
         @{Path=(Join-Path (Split-Path -Parent $InteractiveHostRoot) 'appsettings.Production.json');Hash=$receipt.CompanionConfigurationSha256})) {
         [void](Assert-SegmentedUpdatePath $binding.Path)
@@ -152,6 +184,9 @@ function New-OfflineCodeMaintenanceState {
     param([string]$StatePath,[string]$ReleaseId,[string]$CandidateWebSha256,[string]$CandidateCompanionSha256)
     if([IO.File]::Exists($StatePath)){throw 'offline-code-state-already-exists; reconcile instead of replaying'}
     Assert-OfflineCodeMaintenance -RequireStopped -OriginalPayloads
+    $receipt=Read-SegmentedUpdateJson $OfflineCodeMaintenanceReceipt $ExpectedOfflineCodeMaintenanceReceiptSha256
+    if($receipt.Version -eq 3 -and ($CandidateWebSha256 -cne $receipt.DashboardSnapshot.CandidateWebSha256 -or
+        $CandidateCompanionSha256 -cne $receipt.DashboardSnapshot.CandidateCompanionSha256)){throw 'offline-dashboard-candidate-binding-changed'}
     $state=@{Version=1;StatePath=$StatePath;ReleaseId=$ReleaseId;ReceiptSha256=$ExpectedOfflineCodeMaintenanceReceiptSha256;
         ReceiptPath=$OfflineCodeMaintenanceReceipt;CandidateWebSha256=$CandidateWebSha256;CandidateCompanionSha256=$CandidateCompanionSha256;
         HoldTransferIntentUtc=$null;HoldTransferred=$false;StartIntentUtc=$null;ReleaseIntentUtc=$null}

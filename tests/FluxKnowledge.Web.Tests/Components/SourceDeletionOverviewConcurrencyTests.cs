@@ -22,7 +22,7 @@ using Xunit.Abstractions;
 
 namespace FluxKnowledge.Web.Tests.Components;
 
-public sealed class SourceDeletionOverviewConcurrencyTests(NativeSqlServerFixture fixture, ITestOutputHelper output)
+public sealed partial class SourceDeletionOverviewConcurrencyTests(NativeSqlServerFixture fixture, ITestOutputHelper output)
     : IClassFixture<NativeSqlServerFixture>, IAsyncLifetime
 {
     private readonly Guid _root = Guid.NewGuid();
