@@ -151,6 +151,16 @@ rather than relabelling immutable history. The handle prevents writes and rename
 hard-link and access-control changes are checked but are not atomically excluded
 with the SQL commit.
 
+Owned filesystem scans carry the discovery hashing handle directly into retained
+publication and SQL convergence. The final snapshot already contains scan
+ownership and keeps its object identity through the receipt. Existing retained
+blobs receive their own length/checksum verification without a second original
+content pass. Missing blobs keep the streaming copy/hash and verified atomic
+publication path, using the same held source handle. Captures are consumed once,
+processed sequentially and released before activity planning, with cancellation
+and iterator-disposal backstops. Preview, Git inventories and unowned snapshot
+callers retain their existing contracts and source revalidation.
+
 Physical revisions may retain a history parent. Retained policy admission and
 exact settled-document recovery use origin and unique current binding to identify
 the physical owner, rather than requiring its history parent to be empty. Derived

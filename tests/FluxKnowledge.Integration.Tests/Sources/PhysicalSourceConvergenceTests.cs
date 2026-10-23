@@ -5,6 +5,7 @@ using FluxKnowledge.Application.IntegrationV1;
 using FluxKnowledge.Application.IntegrationV1.Corpus;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Search;
+using FluxKnowledge.Application.Sources;
 using FluxKnowledge.Domain.Sources;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
@@ -25,6 +26,42 @@ public sealed class PhysicalSourceConvergenceTests(NativeSqlServerFixture fixtur
 {
     public Task InitializeAsync() => SqlTestData.ClearPhase3SourceDataAsync(fixture);
     public Task DisposeAsync() => Task.CompletedTask;
+
+    [NativeSqlServerFact]
+    public async Task Owned_worker_reuses_unchanged_revisions_artifacts_and_activities_without_rereading_originals()
+    {
+        long copiedBytes = 0, discoveredBytes = 0;
+        await using var source = await Source.CreateAsync(fixture.ConnectionString, sourceCopyRead: count => copiedBytes += count);
+        var enumerator = new LocalSourceEnumerator { SourceBytesRead = count => discoveredBytes += count };
+        var worker = new SourceScanWorker(enumerator, source.Scans, source.Artifacts,
+            new SqlSourceActivityStore(source.Factory, TimeProvider.System));
+        var first = await worker.ScanAsync(source.Claim.SourceRoot, source.Claim.ScanRequest, default);
+        Assert.Equal(2, first.DiscoveredCount);
+        Assert.Equal(0, first.BlockedCount);
+        Assert.Equal(discoveredBytes, copiedBytes);
+        Guid[] revisions, artifacts, activities;
+        await using (var before = source.Factory.CreateDbContext())
+        {
+            revisions = await before.SourceRevisions.OrderBy(value => value.Id).Select(value => value.Id).ToArrayAsync();
+            artifacts = await before.SourceArtifacts.OrderBy(value => value.Id).Select(value => value.Id).ToArrayAsync();
+            activities = await before.SourceActivities.OrderBy(value => value.Id).Select(value => value.Id).ToArrayAsync();
+        }
+        var expectedBytes = discoveredBytes;
+        copiedBytes = discoveredBytes = 0;
+
+        var second = await worker.ScanAsync(source.Claim.SourceRoot, source.Claim.ScanRequest, default);
+
+        Assert.Equal(2, second.DiscoveredCount);
+        Assert.Equal(0, second.BlockedCount);
+        Assert.Equal(expectedBytes, discoveredBytes);
+        Assert.Equal(0, copiedBytes);
+        await using var after = source.Factory.CreateDbContext();
+        Assert.Equal(revisions, await after.SourceRevisions.OrderBy(value => value.Id).Select(value => value.Id).ToArrayAsync());
+        Assert.Equal(artifacts, await after.SourceArtifacts.OrderBy(value => value.Id).Select(value => value.Id).ToArrayAsync());
+        Assert.Equal(activities, await after.SourceActivities.OrderBy(value => value.Id).Select(value => value.Id).ToArrayAsync());
+        using var writable = File.OpenWrite(source.Path("available.txt"));
+        Assert.True(writable.CanWrite);
+    }
 
     [NativeSqlServerFact]
     public async Task An_ordinary_file_under_a_follow_links_root_still_ingests_without_authorising_history_suppression()
@@ -95,8 +132,13 @@ public sealed class PhysicalSourceConvergenceTests(NativeSqlServerFixture fixtur
         await using var source = await Source.CreateAsync(fixture.ConnectionString);
         var original = await source.CaptureAsync("available.txt");
         await File.WriteAllTextAsync(source.Path("available.txt"), "Changed capture.");
-        var snapshot = await source.SnapshotAsync("available.txt");
-        var receipt = await source.Artifacts.PutFileAsync(snapshot, new(snapshot.ContentSha256, "text/plain", snapshot.ByteLength), default);
+        await using var iterator = new LocalSourceEnumerator().EnumerateCapturedAsync(source.Claim.SourceRoot,
+            new(source.Claim.ScanRequest.Id, source.Claim.ScanRequest.Lease!), default).GetAsyncEnumerator();
+        Assert.True(await iterator.MoveNextAsync());
+        var capture = iterator.Current;
+        var snapshot = capture.Snapshot;
+        Assert.Equal("available.txt", snapshot.RelativePath);
+        var receipt = await source.Artifacts.PutCapturedFileAsync(capture, new(snapshot.ContentSha256, "text/plain", snapshot.ByteLength), default);
         try
         {
             await using (var mutate = source.Factory.CreateDbContext())
@@ -225,12 +267,17 @@ public sealed class PhysicalSourceConvergenceTests(NativeSqlServerFixture fixtur
         await using var source = await Source.CreateAsync(fixture.ConnectionString);
         var original = await source.CaptureAsync("available.txt");
         await File.WriteAllTextAsync(source.Path("available.txt"), "Revised available evidence.");
-        var snapshot = await source.SnapshotAsync("available.txt");
+        await using var iterator = new LocalSourceEnumerator().EnumerateCapturedAsync(source.Claim.SourceRoot,
+            new(source.Claim.ScanRequest.Id, source.Claim.ScanRequest.Lease!), default).GetAsyncEnumerator();
+        Assert.True(await iterator.MoveNextAsync());
+        var capture = iterator.Current;
+        var snapshot = capture.Snapshot;
+        Assert.Equal("available.txt", snapshot.RelativePath);
         long beforeVersion;
         await using (var before = source.Factory.CreateDbContext()) beforeVersion = (await before.IndexState.SingleAsync()).CorpusVersion;
         var afterSave = new AfterSave(() => File.SetLastWriteTimeUtc(snapshot.CanonicalPath, snapshot.LastWriteAtUtc.AddSeconds(1).UtcDateTime), retry);
         var factory = new Factory(fixture.ConnectionString, afterSave);
-        var receipt = await source.Artifacts.PutFileAsync(snapshot, new(snapshot.ContentSha256, "text/plain", snapshot.ByteLength), default);
+        var receipt = await source.Artifacts.PutCapturedFileAsync(capture, new(snapshot.ContentSha256, "text/plain", snapshot.ByteLength), default);
         try
         {
             await Assert.ThrowsAsync<SourceSnapshotChangedException>(() => new SqlSourceScanStore(factory, TimeProvider.System)
@@ -247,6 +294,117 @@ public sealed class PhysicalSourceConvergenceTests(NativeSqlServerFixture fixtur
         Assert.Single(await verify.SourceArtifacts.ToArrayAsync());
     }
 
+    [NativeSqlServerFact]
+    public async Task A_copied_snapshot_cannot_adopt_the_live_capture_receipt()
+    {
+        await using var source = await Source.CreateAsync(fixture.ConnectionString);
+        await using var iterator = new LocalSourceEnumerator().EnumerateCapturedAsync(source.Claim.SourceRoot,
+            new(source.Claim.ScanRequest.Id, source.Claim.ScanRequest.Lease!), default).GetAsyncEnumerator();
+        Assert.True(await iterator.MoveNextAsync());
+        var capture = iterator.Current;
+        var receipt = await source.Artifacts.PutCapturedFileAsync(capture, new(capture.Snapshot.ContentSha256, "text/plain", capture.Snapshot.ByteLength), default);
+        try
+        {
+            await Assert.ThrowsAsync<InvalidDataException>(() => source.Scans.ConvergeRevisionAndArtifactAsync(
+                source.Claim.SourceRoot, capture.Snapshot with { }, receipt, default).AsTask());
+            await using (var verify = source.Factory.CreateDbContext()) Assert.Empty(await verify.SourceRevisions.ToArrayAsync());
+            _ = await source.Scans.ConvergeRevisionAndArtifactAsync(source.Claim.SourceRoot, capture.Snapshot, receipt, default);
+            await using var after = source.Factory.CreateDbContext();
+            Assert.Single(await after.SourceRevisions.ToArrayAsync());
+        }
+        finally { await receipt.PublicationLease!.DisposeAsync(); }
+    }
+
+    [NativeSqlServerFact]
+    public async Task Cancellation_while_waiting_for_the_exclusive_blob_owner_releases_the_worker_capture()
+    {
+        await using var source = await Source.CreateAsync(fixture.ConnectionString);
+        var snapshot = await source.SnapshotAsync("available.txt");
+        var gate = new SqlSourceArtifactPublicationGate(source.Factory);
+        await using var exclusive = Assert.IsAssignableFrom<ISourceArtifactPublicationLease>(
+            await gate.TryAcquireExclusiveAsync(snapshot.ContentSha256, default));
+        using var cancellation = new CancellationTokenSource();
+        var signalling = new SignallingGate(gate);
+        using var artifacts = new ContentAddressedSourceArtifactStore(source.Storage.Root, publicationGate: signalling);
+        var worker = new SourceScanWorker(new LocalSourceEnumerator(), source.Scans, artifacts,
+            new SqlSourceActivityStore(source.Factory, TimeProvider.System));
+        var scan = worker.ScanAsync(source.Claim.SourceRoot, source.Claim.ScanRequest, cancellation.Token).AsTask();
+        await signalling.Entered.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.Throws<IOException>(() => { using var writable = File.OpenWrite(snapshot.CanonicalPath); });
+        cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => scan.WaitAsync(TimeSpan.FromSeconds(10)));
+
+        using var writable = File.OpenWrite(snapshot.CanonicalPath);
+        Assert.True(writable.CanWrite);
+        await using var verify = source.Factory.CreateDbContext();
+        Assert.Empty(await verify.SourceRevisions.ToArrayAsync());
+        Assert.Empty(await verify.SourceArtifacts.ToArrayAsync());
+    }
+
+    [NativeSqlServerFact]
+    public async Task A_retained_reference_keeps_exclusive_blob_deletion_out_until_convergence_finishes()
+    {
+        await using var source = await Source.CreateAsync(fixture.ConnectionString);
+        var gate = new SqlSourceArtifactPublicationGate(source.Factory);
+        using var artifacts = new ContentAddressedSourceArtifactStore(source.Storage.Root, publicationGate: gate);
+        await using var iterator = new LocalSourceEnumerator().EnumerateCapturedAsync(source.Claim.SourceRoot,
+            new(source.Claim.ScanRequest.Id, source.Claim.ScanRequest.Lease!), default).GetAsyncEnumerator();
+        Assert.True(await iterator.MoveNextAsync());
+        var capture = iterator.Current;
+        var receipt = await artifacts.PutCapturedFileAsync(capture, new(capture.Snapshot.ContentSha256, "text/plain", capture.Snapshot.ByteLength), default);
+        try
+        {
+            Assert.Null(await gate.TryAcquireExclusiveAsync(capture.Snapshot.ContentSha256, default));
+            _ = await source.Scans.ConvergeRevisionAndArtifactAsync(source.Claim.SourceRoot, capture.Snapshot, receipt, default);
+            Assert.Null(await gate.TryAcquireExclusiveAsync(capture.Snapshot.ContentSha256, default));
+        }
+        finally { await receipt.PublicationLease!.DisposeAsync(); }
+        await using var exclusive = Assert.IsAssignableFrom<ISourceArtifactPublicationLease>(
+            await gate.TryAcquireExclusiveAsync(capture.Snapshot.ContentSha256, default));
+        await using var verify = source.Factory.CreateDbContext();
+        var artifact = Assert.Single(await verify.SourceArtifacts.ToArrayAsync());
+        Assert.Equal(receipt.ContentSha256, artifact.ContentSha256);
+        Assert.True(File.Exists(Path.Combine(source.Storage.Root, artifact.StoreRelativePath)));
+    }
+
+    [NativeSqlServerFact]
+    public async Task Cancellation_after_SQL_save_rolls_back_before_the_capture_is_released()
+    {
+        await using var source = await Source.CreateAsync(fixture.ConnectionString);
+        await using var iterator = new LocalSourceEnumerator().EnumerateCapturedAsync(source.Claim.SourceRoot,
+            new(source.Claim.ScanRequest.Id, source.Claim.ScanRequest.Lease!), default).GetAsyncEnumerator();
+        Assert.True(await iterator.MoveNextAsync());
+        var capture = iterator.Current;
+        using var cancellation = new CancellationTokenSource();
+        var factory = new Factory(fixture.ConnectionString, new AfterSave(() => cancellation.Cancel(), retry: false));
+        var receipt = await source.Artifacts.PutCapturedFileAsync(capture, new(capture.Snapshot.ContentSha256, "text/plain", capture.Snapshot.ByteLength), default);
+        try
+        {
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => new SqlSourceScanStore(factory, TimeProvider.System)
+                .ConvergeRevisionAndArtifactAsync(source.Claim.SourceRoot, capture.Snapshot, receipt, cancellation.Token).AsTask());
+        }
+        finally { await receipt.PublicationLease!.DisposeAsync(); }
+        using var writable = File.OpenWrite(capture.Snapshot.CanonicalPath);
+        Assert.True(writable.CanWrite);
+        await using var verify = source.Factory.CreateDbContext();
+        Assert.Empty(await verify.SourceRevisions.ToArrayAsync());
+        Assert.Empty(await verify.SourceArtifacts.ToArrayAsync());
+    }
+
+    private sealed class SignallingGate(ISourceArtifactPublicationGate inner) : ISourceArtifactPublicationGate
+    {
+        public TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public ValueTask<ISourceArtifactPublicationLease> AcquireSharedAsync(string hash, CancellationToken token)
+        {
+            var acquiring = inner.AcquireSharedAsync(hash, token);
+            Entered.TrySetResult();
+            return acquiring;
+        }
+        public ValueTask<ISourceArtifactPublicationLease?> TryAcquireExclusiveAsync(string hash, CancellationToken token) =>
+            inner.TryAcquireExclusiveAsync(hash, token);
+    }
+
     private sealed class Source : IAsyncDisposable
     {
         public CloudSourceFixture Files { get; } = new();
@@ -257,18 +415,18 @@ public sealed class PhysicalSourceConvergenceTests(NativeSqlServerFixture fixtur
         public ClaimedSourceScan Claim { get; private set; } = null!;
         public string Path(string name) => System.IO.Path.Combine(Files.Root, name);
 
-        private Source(string connectionString)
+        private Source(string connectionString, Action<int>? sourceCopyRead)
         {
             Factory = new(connectionString);
             Scans = new(Factory, TimeProvider.System);
-            Artifacts = new(Storage.Root);
+            Artifacts = new(Storage.Root) { SourceBytesRead = sourceCopyRead };
             File.WriteAllText(Path("available.txt"), "Original available evidence.");
             File.WriteAllText(Path("unavailable.txt"), "Unrelated retained evidence.");
         }
 
-        public static async Task<Source> CreateAsync(string connectionString, bool followLinks = false)
+        public static async Task<Source> CreateAsync(string connectionString, bool followLinks = false, Action<int>? sourceCopyRead = null)
         {
-            var source = new Source(connectionString);
+            var source = new Source(connectionString, sourceCopyRead);
             try
             {
                 var commands = new NativeCorpusCommandService(
@@ -298,10 +456,19 @@ public sealed class PhysicalSourceConvergenceTests(NativeSqlServerFixture fixtur
 
         public async Task<SourceRevisionId> CaptureAsync(string name)
         {
-            var snapshot = await SnapshotAsync(name);
-            var receipt = await Artifacts.PutFileAsync(snapshot, new(snapshot.ContentSha256, "text/plain", snapshot.ByteLength), default);
-            try { return await Scans.ConvergeRevisionAndArtifactAsync(Claim.SourceRoot, snapshot, receipt, default); }
-            finally { if (receipt.PublicationLease is not null) await receipt.PublicationLease.DisposeAsync(); }
+            SourceRevisionId? revision = null;
+            var enumerator = new LocalSourceEnumerator();
+            await foreach (var capture in enumerator.EnumerateCapturedAsync(Claim.SourceRoot,
+                new(Claim.ScanRequest.Id, Claim.ScanRequest.Lease!), default))
+            {
+                if (capture.Snapshot.RelativePath != name) continue;
+                var snapshot = capture.Snapshot;
+                var receipt = await Artifacts.PutCapturedFileAsync(capture, new(snapshot.ContentSha256, "text/plain", snapshot.ByteLength), default);
+                try { revision = await Scans.ConvergeRevisionAndArtifactAsync(Claim.SourceRoot, snapshot, receipt, default); }
+                finally { if (receipt.PublicationLease is not null) await receipt.PublicationLease.DisposeAsync(); }
+            }
+            await Scans.RecordEnumerationEvidenceAsync(Claim.ScanRequest.Id, enumerator.LastEvidence, default);
+            return revision ?? throw new InvalidOperationException("The expected source was not captured.");
         }
 
         public ValueTask DisposeAsync()

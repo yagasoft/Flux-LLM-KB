@@ -8,12 +8,13 @@ using Microsoft.Win32.SafeHandles;
 namespace FluxKnowledge.Integrations.Files;
 
 /// <summary>Local, handle-bound source crawl. Cloud content is read only when already available.</summary>
-public sealed class LocalSourceEnumerator : IAuthoritativeSourceFileEnumerator, IBoundedSourceFileEnumerator
+public sealed class LocalSourceEnumerator : IAuthoritativeSourceFileEnumerator, IBoundedSourceFileEnumerator, ICapturingSourceFileEnumerator
 {
     private readonly Func<SafeFileHandle, string> _readIdentity;
     private readonly Action<string>? _beforeDirectoryRecheck;
     private readonly ISourceAccessRepairClient? _sourceAccessRepairClient;
     private IReadOnlyList<SourceEnumerationEvidence> _lastEvidence = [];
+    internal Action<int>? SourceBytesRead { get; init; }
 
     public LocalSourceEnumerator(Func<SafeFileHandle, string>? readIdentity = null, Action<string>? beforeDirectoryRecheck = null,
         ISourceAccessRepairClient? sourceAccessRepairClient = null)
@@ -38,13 +39,34 @@ public sealed class LocalSourceEnumerator : IAuthoritativeSourceFileEnumerator, 
     }
 
     public IAsyncEnumerable<SourceDiscoveredFile> EnumerateAsync(SourceRootConfiguration root, CancellationToken cancellationToken) =>
-        EnumerateCoreAsync(root, null, cancellationToken);
+        EnumerateSnapshotsAsync(root, null, cancellationToken);
 
     public IAsyncEnumerable<SourceDiscoveredFile> PreviewAsync(SourceRootConfiguration root, SourcePreviewLimits limits, CancellationToken cancellationToken) =>
-        EnumerateCoreAsync(root, limits, cancellationToken);
+        EnumerateSnapshotsAsync(root, limits, cancellationToken);
 
-    private async IAsyncEnumerable<SourceDiscoveredFile> EnumerateCoreAsync(
-        SourceRootConfiguration sourceRoot, SourcePreviewLimits? limits,
+    public async IAsyncEnumerable<ISourceFileCapture> EnumerateCapturedAsync(SourceRootConfiguration sourceRoot,
+        SourceScanOwnership ownership, [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(ownership);
+        if (sourceRoot.DiscoveryMode != SourceDiscoveryMode.Filesystem)
+            throw new InvalidOperationException("Live source capture requires filesystem discovery.");
+        await foreach (var capture in EnumerateCoreAsync(sourceRoot, null, ownership, cancellationToken).ConfigureAwait(false))
+            yield return capture;
+    }
+
+    private async IAsyncEnumerable<SourceDiscoveredFile> EnumerateSnapshotsAsync(SourceRootConfiguration sourceRoot,
+        SourcePreviewLimits? limits, [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        await foreach (var capture in EnumerateCoreAsync(sourceRoot, limits, null, cancellationToken).ConfigureAwait(false))
+        {
+            var snapshot = capture.Snapshot;
+            await capture.DisposeAsync().ConfigureAwait(false);
+            yield return snapshot;
+        }
+    }
+
+    private async IAsyncEnumerable<LocalSourceFileCapture> EnumerateCoreAsync(
+        SourceRootConfiguration sourceRoot, SourcePreviewLimits? limits, SourceScanOwnership? ownership,
         [EnumeratorCancellation] CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(sourceRoot);
@@ -91,7 +113,7 @@ public sealed class LocalSourceEnumerator : IAuthoritativeSourceFileEnumerator, 
             var relativePath = Path.GetRelativePath(sourceRoot.CanonicalPath, path);
             if (!MatchesPolicy(relativePath, sourceRoot.IncludePatterns, sourceRoot.ExcludePatterns)) continue;
             if (!budget.StartFile()) break;
-            SourceDiscoveredFile file;
+            LocalSourceFileCapture capture;
             try
             {
                 if (sourceRoot.DiscoveryMode == SourceDiscoveryMode.GitTracked)
@@ -99,8 +121,9 @@ public sealed class LocalSourceEnumerator : IAuthoritativeSourceFileEnumerator, 
                     PhysicalFileIdentity.EnsureNoReparsePointTraversal(Path.GetDirectoryName(path)!);
                     if ((File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0) throw new UnauthorizedAccessException("Git file is a reparse point.");
                 }
-                file = await ReadSnapshotAsync(path, relativePath, sourceRoot, rootLease.Identity.IdentityFingerprint,
-                    budget, deadline.Token, accessRepair).ConfigureAwait(false);
+                capture = await ReadCaptureAsync(path, relativePath, sourceRoot, rootLease.Identity.IdentityFingerprint,
+                    budget, deadline.Token, accessRepair, ownership, inventory is null ? null :
+                        new(inventory.Repository.Identity, inventory.Generation, inventory.TrackedCount, inventory.ExcludedCount)).ConfigureAwait(false);
             }
             catch (FileNotFoundException) when (inventory is not null) { continue; }
             catch (DirectoryNotFoundException) when (inventory is not null) { continue; }
@@ -134,8 +157,8 @@ public sealed class LocalSourceEnumerator : IAuthoritativeSourceFileEnumerator, 
                 errors.Add(FailureEvidence(exception, relativePath));
                 continue;
             }
-            yield return file with { GitInventory = inventory is null ? null :
-                new(inventory.Repository.Identity, inventory.Generation, inventory.TrackedCount, inventory.ExcludedCount) };
+            await using (capture.ConfigureAwait(false))
+                yield return capture;
         }
 
         if (inventory is not null && errors.Count == 0 && limits is null)
@@ -202,42 +225,55 @@ public sealed class LocalSourceEnumerator : IAuthoritativeSourceFileEnumerator, 
         return System.Text.RegularExpressions.Regex.IsMatch(path, regex, System.Text.RegularExpressions.RegexOptions.CultureInvariant);
     }
 
-    private async Task<SourceDiscoveredFile> ReadSnapshotAsync(string path, string relativePath,
+    private async Task<LocalSourceFileCapture> ReadCaptureAsync(string path, string relativePath,
         SourceRootConfiguration root, string rootIdentity, CrawlBudget budget, CancellationToken cancellationToken,
-        ISourceAccessRepairClient? accessRepair)
+        ISourceAccessRepairClient? accessRepair, SourceScanOwnership? ownership, GitInventoryEvidence? inventory)
     {
         const int bufferSize = 128 * 1024;
         const int signatureLimit = 8192;
-        using var lease = SourceAccessRecovery.Run(root.CanonicalPath, rootIdentity, accessRepair,
+        var lease = SourceAccessRecovery.Run(root.CanonicalPath, rootIdentity, accessRepair,
             () => WindowsSourcePathAccess.OpenRead(root.CanonicalPath, path, rootIdentity), cancellationToken);
-        var length = RandomAccess.GetLength(lease.Handle);
-        budget.ReserveRead(length); // Reject before the first content read, not after hashing the file.
-        var lastWrite = File.GetLastWriteTimeUtc(lease.Handle);
-        var identity = _readIdentity(lease.Handle);
-        var effectiveTextLimit = Math.Min(root.MaximumFileBytes, SourceClassifier.MaximumAcceptedTextBytes);
-        using var retained = new MemoryStream(length <= effectiveTextLimit ? checked((int)length) : signatureLimit);
-        await using var stream = new FileStream(lease.Handle, FileAccess.Read, bufferSize, isAsync: true);
-        var readBuffer = new byte[bufferSize];
-        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-        var total = 0L;
-        while (total < length)
+        FileStream? stream = null;
+        try
         {
-            var read = await stream.ReadAsync(readBuffer.AsMemory(0, (int)Math.Min(bufferSize, length - total)), cancellationToken).ConfigureAwait(false);
-            if (read == 0) throw new SourceSnapshotChangedException("The source was truncated during discovery.");
-            hash.AppendData(readBuffer, 0, read);
-            total += read;
-            var remaining = (length <= effectiveTextLimit ? length : signatureLimit) - retained.Length;
-            if (remaining > 0) retained.Write(readBuffer, 0, (int)Math.Min(remaining, read));
+            var length = RandomAccess.GetLength(lease.Handle);
+            budget.ReserveRead(length); // Reject before the first content read, not after hashing the file.
+            var lastWrite = File.GetLastWriteTimeUtc(lease.Handle);
+            var identity = _readIdentity(lease.Handle);
+            var effectiveTextLimit = Math.Min(root.MaximumFileBytes, SourceClassifier.MaximumAcceptedTextBytes);
+            using var retained = new MemoryStream(length <= effectiveTextLimit ? checked((int)length) : signatureLimit);
+            stream = new FileStream(lease.Handle, FileAccess.Read, bufferSize, isAsync: true);
+            var readBuffer = new byte[bufferSize];
+            using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+            var total = 0L;
+            while (total < length)
+            {
+                var read = await stream.ReadAsync(readBuffer.AsMemory(0, (int)Math.Min(bufferSize, length - total)), cancellationToken).ConfigureAwait(false);
+                if (read == 0) throw new SourceSnapshotChangedException("The source was truncated during discovery.");
+                SourceBytesRead?.Invoke(read);
+                hash.AppendData(readBuffer, 0, read);
+                total += read;
+                var remaining = (length <= effectiveTextLimit ? length : signatureLimit) - retained.Length;
+                if (remaining > 0) retained.Write(readBuffer, 0, (int)Math.Min(remaining, read));
+            }
+            cancellationToken.ThrowIfCancellationRequested();
+            WindowsSourcePathAccess.EnsureContentAvailable(WindowsSourcePathAccess.ReadMetadata(lease.Handle));
+            if (RandomAccess.GetLength(lease.Handle) != length || File.GetLastWriteTimeUtc(lease.Handle) != lastWrite)
+                throw new SourceSnapshotChangedException("The source changed during discovery.");
+            var bytes = retained.ToArray();
+            var hasFullBuffer = length <= effectiveTextLimit;
+            var snapshot = new SourceDiscoveredFile(Path.GetFullPath(path), relativePath, identity, bytes, hasFullBuffer,
+                Convert.ToHexStringLower(hash.GetHashAndReset()), length, lastWrite,
+                SourceClassifier.Classify(path, bytes, length, hasFullBuffer, effectiveTextLimit, root.IndexSourceText),
+                GitInventory: inventory, ScanOwnership: ownership, SourcePath: new(root.CanonicalPath, rootIdentity));
+            return new(snapshot, lease, stream);
         }
-        WindowsSourcePathAccess.EnsureContentAvailable(WindowsSourcePathAccess.ReadMetadata(lease.Handle));
-        if (RandomAccess.GetLength(lease.Handle) != length || File.GetLastWriteTimeUtc(lease.Handle) != lastWrite)
-            throw new SourceSnapshotChangedException("The source changed during discovery.");
-        var bytes = retained.ToArray();
-        var hasFullBuffer = length <= effectiveTextLimit;
-        return new(Path.GetFullPath(path), relativePath, identity, bytes, hasFullBuffer,
-            Convert.ToHexStringLower(hash.GetHashAndReset()), length, lastWrite,
-            SourceClassifier.Classify(path, bytes, length, hasFullBuffer, effectiveTextLimit, root.IndexSourceText),
-            SourcePath: new(root.CanonicalPath, rootIdentity));
+        catch
+        {
+            try { if (stream is not null) await stream.DisposeAsync().ConfigureAwait(false); }
+            finally { lease.Dispose(); }
+            throw;
+        }
     }
 
     private static WindowsSourcePathAccess.DirectoryPathLease? TryOpenRoot(SourceRootConfiguration root,

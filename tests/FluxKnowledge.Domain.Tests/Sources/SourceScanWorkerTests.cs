@@ -11,6 +11,37 @@ namespace FluxKnowledge.Domain.Tests.Sources;
 public sealed class SourceScanWorkerTests
 {
     [Fact]
+    public async Task Owned_scan_keeps_the_discovery_handle_through_retention_and_releases_it_before_activity_planning()
+    {
+        using var source = new FluxKnowledge.TestSupport.CloudSourceFixture();
+        using var retained = new FluxKnowledge.TestSupport.CloudSourceFixture();
+        var path = source.File("owned.txt", "Owned source evidence.");
+        var root = SourceRootConfiguration.Create(source.Root, "owned", false, false, 1024);
+        var now = DateTimeOffset.UtcNow;
+        var request = SourceScanRequest.Restore(SourceScanRequestId.New(), root.Id, "test", now,
+            SourceScanRequestState.Released, now, new(Guid.NewGuid(), "capture-test", 1));
+        var observedRetention = false;
+        using var artifacts = new ContentAddressedSourceArtifactStore(retained.Root, beforeArtifactWrite: _ =>
+        {
+            observedRetention = true;
+            Assert.Throws<IOException>(() => { using var writable = new FileStream(path, FileMode.Open, FileAccess.Write, FileShare.ReadWrite); });
+            return ValueTask.CompletedTask;
+        });
+        var revisions = new RecordingScanStore(onConverge: () =>
+            Assert.Throws<IOException>(() => { using var writable = new FileStream(path, FileMode.Open, FileAccess.Write, FileShare.ReadWrite); }));
+        var activities = new RecordingActivityStore(onCreate: () => { using var writable = File.OpenWrite(path); });
+
+        var result = await new SourceScanWorker(new LocalSourceEnumerator(), revisions, artifacts, activities)
+            .ScanAsync(root, request, default);
+
+        Assert.True(observedRetention);
+        Assert.Equal(1, result.DiscoveredCount);
+        Assert.Single(activities.Drafts);
+        using var writable = new FileStream(path, FileMode.Open, FileAccess.Write, FileShare.ReadWrite);
+        Assert.True(writable.CanWrite);
+    }
+
+    [Fact]
     public async Task Git_source_text_schedules_search_and_csharp_routes_without_unverified_suppression()
     {
         var root = SourceRootConfiguration.Create(Path.GetFullPath(Path.GetTempPath()), "git", true, false,
@@ -437,13 +468,14 @@ public sealed class SourceScanWorkerTests
         }
     }
 
-    private sealed class RecordingActivityStore(List<string>? events = null) : ISourceActivityStore
+    private sealed class RecordingActivityStore(List<string>? events = null, Action? onCreate = null) : ISourceActivityStore
     {
         public List<SourceActivityDraft> Drafts { get; } = [];
 
         public ValueTask<SourceActivity> FindOrCreateAsync(SourceActivityDraft draft, CancellationToken cancellationToken)
         {
             events?.Add("activity");
+            onCreate?.Invoke();
             Drafts.Add(draft);
             return ValueTask.FromResult(SourceActivity.Create(
                 draft.SourceRevisionId, draft.ActivityKind, draft.ExecutionClass, draft.ProcessorVersion,

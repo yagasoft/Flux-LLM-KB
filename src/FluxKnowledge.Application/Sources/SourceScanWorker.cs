@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using FluxKnowledge.Application.Contracts;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Domain.Sources;
@@ -32,56 +33,58 @@ public sealed class SourceScanWorker(
         var deferred = 0;
         var blocked = 0;
         var retentionEvidence = new List<SourceEnumerationEvidence>();
-        await foreach (var discoveredFile in enumerator.EnumerateAsync(sourceRoot, cancellationToken).ConfigureAwait(false))
+        await foreach (var (file, capture) in EnumerateFilesAsync(sourceRoot, scanRequest, cancellationToken).ConfigureAwait(false))
         {
-            var file = scanRequest.Lease is { } lease
-                ? discoveredFile with { ScanOwnership = new(scanRequest.Id, lease) } : discoveredFile;
-            cancellationToken.ThrowIfCancellationRequested();
-            discovered++;
             SourceRevisionId revisionId;
+            SourceRetentionConvergence? failedRetention = null;
+            string? failureReason = null;
             try
             {
-                var receipt = await artifactStore.PutFileAsync(
-                    file,
-                    new SourceArtifactMetadata(
-                        file.ContentSha256,
-                        "application/octet-stream",
-                        file.ByteLength),
-                    cancellationToken).ConfigureAwait(false);
+                cancellationToken.ThrowIfCancellationRequested();
+                discovered++;
                 try
                 {
-                    revisionId = await scanStore.ConvergeRevisionAndArtifactAsync(sourceRoot, file, receipt, cancellationToken).ConfigureAwait(false);
-                }
-                finally
-                {
-                    if (receipt.PublicationLease is not null)
+                    var metadata = new SourceArtifactMetadata(file.ContentSha256, "application/octet-stream", file.ByteLength);
+                    var receipt = await (capture is null
+                        ? artifactStore.PutFileAsync(file, metadata, cancellationToken)
+                        : ((ICapturedSourceArtifactStore)artifactStore).PutCapturedFileAsync(capture, metadata, cancellationToken)).ConfigureAwait(false);
+                    try
                     {
-                        await receipt.PublicationLease.DisposeAsync().ConfigureAwait(false);
+                        revisionId = await scanStore.ConvergeRevisionAndArtifactAsync(sourceRoot, file, receipt, cancellationToken).ConfigureAwait(false);
                     }
+                    finally
+                    {
+                        if (receipt.PublicationLease is not null)
+                            await receipt.PublicationLease.DisposeAsync().ConfigureAwait(false);
+                    }
+                }
+                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidDataException)
+                {
+                    failureReason = ArtifactFailureReason(exception);
+                    // A source can become unavailable after discovery; this scan is not a complete inventory.
+                    retentionEvidence.Add(new(exception is SourceContentUnavailableException ? "unavailable" : "retention",
+                        file.RelativePath, failureReason));
+                    failedRetention = await scanStore.ConvergeBlockedRevisionAsync(sourceRoot, file, failureReason, cancellationToken).ConfigureAwait(false);
+                    revisionId = failedRetention.SourceRevisionId;
                 }
             }
-            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidDataException)
+            finally
             {
-                var reason = ArtifactFailureReason(exception);
-                // A source can become unavailable after discovery; this scan is not a complete inventory.
-                retentionEvidence.Add(new(exception is SourceContentUnavailableException ? "unavailable" : "retention",
-                    file.RelativePath, reason));
-                var retention = await scanStore.ConvergeBlockedRevisionAsync(sourceRoot, file, reason, cancellationToken).ConfigureAwait(false);
-                revisionId = retention.SourceRevisionId;
+                if (capture is not null) await capture.DisposeAsync().ConfigureAwait(false);
+            }
+            if (failedRetention is { IsRetentionBlocked: true })
+            {
                 convergedRevisionIds.Add(revisionId);
-                if (retention.IsRetentionBlocked)
+                var activity = await activityStore.FindOrCreateAsync(
+                    new SourceActivityDraft(revisionId, SourceActivityKind.DocumentParsing,
+                        ExecutionClass.DeferredCapability, TextProcessorVersion, file.ContentSha256,
+                        "source-artifact-store", failureReason, SourceActivityState.DeferredPolicy), cancellationToken).ConfigureAwait(false);
+                if (retainedTextActivityPlanner is not null)
                 {
-                    var activity = await activityStore.FindOrCreateAsync(
-                        new SourceActivityDraft(revisionId, SourceActivityKind.DocumentParsing,
-                            ExecutionClass.DeferredCapability, TextProcessorVersion, file.ContentSha256,
-                            "source-artifact-store", reason, SourceActivityState.DeferredPolicy), cancellationToken).ConfigureAwait(false);
-                    if (retainedTextActivityPlanner is not null)
-                    {
-                        await retainedTextActivityPlanner.PlanAsync(activity, cancellationToken).ConfigureAwait(false);
-                    }
-                    blocked++;
-                    continue;
+                    await retainedTextActivityPlanner.PlanAsync(activity, cancellationToken).ConfigureAwait(false);
                 }
+                blocked++;
+                continue;
             }
             convergedRevisionIds.Add(revisionId);
             var acceptedByRootPolicy = file.Classification.IsAccepted &&
@@ -169,6 +172,22 @@ public sealed class SourceScanWorker(
             else await scanStore.SuppressUnseenAsync(sourceRoot.Id, convergedRevisionIds, cancellationToken).ConfigureAwait(false);
         }
         return new SourceScanResult(sourceRoot.Id, scanRequest.Id, discovered, indexed, deferred, blocked);
+    }
+
+    private async IAsyncEnumerable<(SourceDiscoveredFile File, ISourceFileCapture? Capture)> EnumerateFilesAsync(
+        SourceRootConfiguration root, SourceScanRequest request, [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        if (root.DiscoveryMode == SourceDiscoveryMode.Filesystem && request.Lease is { } ownership &&
+            enumerator is ICapturingSourceFileEnumerator capturing && artifactStore is ICapturedSourceArtifactStore)
+        {
+            await foreach (var capture in capturing.EnumerateCapturedAsync(root, new(request.Id, ownership), cancellationToken).ConfigureAwait(false))
+                yield return (capture.Snapshot, capture);
+        }
+        else
+        {
+            await foreach (var file in enumerator.EnumerateAsync(root, cancellationToken).ConfigureAwait(false))
+                yield return (request.Lease is { } lease ? file with { ScanOwnership = new(request.Id, lease) } : file, null);
+        }
     }
 
     private static string ArtifactFailureReason(Exception exception) => exception switch
