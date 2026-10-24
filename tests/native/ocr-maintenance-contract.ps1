@@ -6,6 +6,31 @@ function Assert-Refused([scriptblock]$Action,[string]$Reason) {
     try { & $Action | Out-Null } catch { $refused=$_.Exception.Message.Contains($Reason) }
     if (!$refused) { throw "Expected refusal: $Reason" }
 }
+if ($IsWindows -and [IO.File]::Exists((Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/Modules/WebAdministration/WebAdministration.psd1'))) {
+    # Exercise the verifier's real import in a clean process. Compatibility
+    # warnings must not corrupt the JSON consumed by the maintenance CLI.
+    $tokens=$null;$errors=$null
+    $ast=[Management.Automation.Language.Parser]::ParseFile(
+        (Join-Path $SourceRoot 'scripts/deploy/verify-ocr-stopped-maintenance.ps1'),[ref]$tokens,[ref]$errors)
+    $imports=@($ast.FindAll({param($node) $node -is [Management.Automation.Language.CommandAst] -and
+        $node.GetCommandName() -eq 'Import-Module'},$true))
+    if ($errors.Count -or $imports.Count -ne 1) { throw 'Verifier import contract is ambiguous.' }
+    $start=[Diagnostics.ProcessStartInfo]::new('pwsh')
+    $start.UseShellExecute=$false;$start.CreateNoWindow=$true
+    $start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true
+    $command=$imports[0].Extent.Text+"`n"+'[ordered]@{SyntheticProtocolCheck=$true} | ConvertTo-Json -Compress'
+    foreach ($argument in @('-NoProfile','-NonInteractive','-Command',$command)) { $start.ArgumentList.Add($argument) }
+    $process=[Diagnostics.Process]::Start($start)
+    try {
+        $stdout=$process.StandardOutput.ReadToEndAsync();$stderr=$process.StandardError.ReadToEndAsync()
+        if (!$process.WaitForExit(25000)) { $process.Kill($true);throw 'Verifier import protocol timed out.' }
+        $text=$stdout.GetAwaiter().GetResult();$errorText=$stderr.GetAwaiter().GetResult()
+        if ($process.ExitCode -ne 0 -or $errorText) { throw 'Verifier import protocol failed.' }
+        try { $receipt=$text | ConvertFrom-Json -ErrorAction Stop }
+        catch { throw 'Verifier import emitted non-JSON protocol output.' }
+        if (!$receipt.SyntheticProtocolCheck) { throw 'Verifier protocol receipt missing.' }
+    } finally { $process.Dispose() }
+}
 $root=Join-Path ([IO.Path]::GetTempPath()) ('FluxOcrMaintenance_'+[Guid]::NewGuid().ToString('N'))
 [void][IO.Directory]::CreateDirectory($root)
 try {

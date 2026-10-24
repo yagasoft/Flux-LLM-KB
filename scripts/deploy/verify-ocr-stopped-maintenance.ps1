@@ -48,7 +48,7 @@ function Assert-OcrOwnersStopped($Plan, $StopReceipt, $Processes) {
     if ($StopReceipt.ReleaseId -cne $Plan.ReleaseId -or !$StopReceipt.StopIntentAtUtc -or !$StopReceipt.Contains('ExitedIdentities')) {
         throw 'document-ocr-maintenance-stopped-receipt-invalid'
     }
-    Import-Module WebAdministration -ErrorAction Stop
+    Import-Module WebAdministration -ErrorAction Stop -WarningAction SilentlyContinue
     if ((Get-WebAppPoolState -Name $Plan.IisPool).Value -ne 'Stopped') { throw 'document-ocr-maintenance-pool-running' }
     $appcmd=Join-Path $env:SystemRoot 'System32/inetsrv/appcmd.exe'
     $workers=& $appcmd list wp /xml
