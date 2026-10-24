@@ -49,6 +49,18 @@ payloads, commit, configuration and task policy without restarting owners. Never
 update to undo a committed settlement. Unrelated historical uncertain tasks and
 dead letters are outside this operation.
 
+The physical verifier emits one JSON receipt. Its IIS module import suppresses
+the known compatibility warning locally and retains fatal import errors; warning
+text must never be mixed into the CLI's JSON evidence channel. The October
+release's transport correction retains the original packet and journal bytes,
+records the exact three amended verifier/implementation fields and journal hash
+rebind, and obtains fresh physical proof on resume. Diagnostic proof is not reused.
+
+For completion automation, use the durable journal's scalar `Completed` flag.
+The wrapper summary currently has a non-blocking formatting defect that can emit
+an array for `completed` when helper output reaches its success stream. The
+installed bindings and live state are verified independently of that summary.
+
 Ordinary code-only maintenance recognises this exact additive OCR migration after
 the reviewed index migration suffix. The index schema fingerprint and original
 index upgrade script remain unchanged; unknown or repeated successors refuse.
