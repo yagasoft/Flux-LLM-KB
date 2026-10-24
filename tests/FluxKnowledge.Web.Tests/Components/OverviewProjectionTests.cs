@@ -94,7 +94,7 @@ public sealed class OverviewProjectionTests
         Assert.Contains("Queued", html, StringComparison.Ordinal);
         Assert.Contains("1 queued source scans", html, StringComparison.Ordinal);
         Assert.Contains("file discovery has not completed", html, StringComparison.Ordinal);
-        Assert.Contains("Changes not yet discovered by a scan are not counted", html, StringComparison.Ordinal);
+        Assert.Contains("Undiscovered changes, interactive search and independent local ingress are outside these file totals.", html, StringComparison.Ordinal);
         Assert.DoesNotContain("No current processing backlog", html, StringComparison.Ordinal);
     }
 

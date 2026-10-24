@@ -31,7 +31,20 @@ public static class SqlPipelineActivityQuery
                 ((t.State = 0 AND t.DeferredUntilUtc > @nowUtc) OR {{OwnedTask("t", true)}}))
             """;
         var sql = $$"""
-            SELECT j.Id, j.PipelineRecordId, s.SourceRootId, j.Stage, j.PublicState,
+            SELECT j.Id, j.PipelineRecordId, s.SourceRootId, j.Stage, j.PublicState, j.SourceRevision,
+              p.CurrentStage,
+              CAST(CASE WHEN {{DirectBranchMismatch}} THEN 0 ELSE 1 END AS bit) AS MatchesSelectedFileBranch,
+              CASE WHEN s.OriginKind IN (2,3) THEN s.ParentSourceRevisionId ELSE s.Id END AS LogicalSourceRevisionId,
+              COALESCE((CASE WHEN s.OriginKind IN (2,3) THEN owner.CanonicalPath ELSE s.CanonicalPath END) COLLATE Latin1_General_100_BIN2,
+                CASE WHEN identitySource.SourceKind = N'local file' THEN identitySource.StableKey
+                  ELSE N'Local ingress (' + identitySource.SourceKind + N')' END COLLATE Latin1_General_100_BIN2) AS FullPath,
+              CASE WHEN s.OriginKind = 1 THEN owner.CanonicalPath
+                WHEN s.OriginKind IN (2,3) AND owner.OriginKind = 1 THEN archiveOwner.CanonicalPath END AS ArchivePath,
+              (SELECT MAX(currentAttempt.StartedAtUtc) FROM JobAttempts currentAttempt
+                WHERE currentAttempt.JobId = j.Id AND currentAttempt.LeaseGeneration = j.LeaseGeneration
+                  AND currentAttempt.LeaseOwner COLLATE Latin1_General_100_BIN2 = j.LeaseOwner COLLATE Latin1_General_100_BIN2
+                  AND currentAttempt.CompletedAtUtc IS NULL
+                  AND j.LeaseExpiresAtUtc > @nowUtc) AS AttemptStartedAtUtc,
               CAST(CASE WHEN {{HistoricalBinding}} THEN 1 ELSE 0 END AS bit) AS IsHistorical,
               CAST(CASE WHEN (s.Id IS NULL OR r.State = 0 OR {{SqlCorpusRebuildEligibility.ActiveJob("j.Id")}})
                 AND {{SqlCorpusRebuildEligibility.Admission("j.Id")}}
@@ -52,9 +65,11 @@ public static class SqlPipelineActivityQuery
                 p.RegisteredAtUtc) AS RecordedAtUtc
             FROM Jobs j
             INNER JOIN PipelineRecords p ON p.Id = j.PipelineRecordId
+            INNER JOIN SourceIdentities identitySource ON identitySource.Id = p.SourceIdentityId
             LEFT JOIN SourceRevisions s ON s.Id = p.SourceRevisionId
             LEFT JOIN SourceRootConfigurations r ON r.Id = s.SourceRootId
             LEFT JOIN SourceRevisions owner ON owner.Id = s.ParentSourceRevisionId
+            LEFT JOIN SourceRevisions archiveOwner ON archiveOwner.Id = owner.ParentSourceRevisionId
             {{(facts ? "LEFT JOIN #FluxPipelineGpuFacts gpu ON gpu.ParentJobId = j.Id AND gpu.SourceRevision = j.SourceRevision" : "")}}
             WHERE j.PublicState <> 4
             """;
@@ -100,6 +115,7 @@ public static class SqlPipelineActivityQuery
         OR ((p.CompletionCriteriaMet = 1 OR p.CurrentStage <> j.Stage) AND NOT ({{SqlCorpusRebuildEligibility.ActiveJob("j.Id")}}))
         OR s.SuppressedAtUtc IS NOT NULL OR (s.OriginKind <> 0 AND owner.SuppressedAtUtc IS NOT NULL) OR r.State = 2
         OR EXISTS (SELECT 1 FROM CorpusRebuildSupersededJobs superseded WHERE superseded.JobId = j.Id)
+        OR (NOT ({{SqlCorpusRebuildEligibility.ActiveJob("j.Id")}}) AND ({{DirectBranchMismatch}}))
         OR (s.OriginKind IN (2,3) AND EXISTS (
           SELECT 1 FROM #FluxPipelineSelectedBranches selected
           WHERE selected.SourceRevisionId = s.ParentSourceRevisionId
@@ -108,6 +124,17 @@ public static class SqlPipelineActivityQuery
               WHERE member.BranchId = selected.Id AND member.ChildSourceRevisionId = s.Id
                 AND activity.SourceRevisionId = s.Id AND activity.ResultingPipelineRecordId = p.Id
                 AND activity.ResultingPipelineRecordRevision = p.Revision)))
+        """;
+
+    private static string DirectBranchMismatch => """
+        s.OriginKind IN (0,1) AND EXISTS (
+          SELECT 1 FROM #FluxPipelineSelectedBranches selected
+          WHERE selected.SourceRevisionId = s.Id
+            AND NOT EXISTS (SELECT 1 FROM SourceProcessorBranches branch
+              INNER JOIN SourceActivities activity ON activity.Id = branch.SourceActivityId
+              WHERE branch.Id = selected.Id AND activity.SourceRevisionId = s.Id
+                AND activity.ResultingPipelineRecordId = p.Id
+                AND activity.ResultingPipelineRecordRevision = p.Revision))
         """;
 
     /// <summary>
@@ -159,6 +186,13 @@ public sealed class PipelineJobActivityRow
     public Guid Id { get; set; }
     public Guid PipelineRecordId { get; set; }
     public Guid? SourceRootId { get; set; }
+    public Guid? LogicalSourceRevisionId { get; set; }
+    public long SourceRevision { get; set; }
+    public int CurrentStage { get; set; }
+    public bool MatchesSelectedFileBranch { get; set; } = true;
+    public string FullPath { get; set; } = "";
+    public string? ArchivePath { get; set; }
+    public DateTimeOffset? AttemptStartedAtUtc { get; set; }
     public int Stage { get; set; }
     public int PublicState { get; set; }
     public bool IsHistorical { get; set; }

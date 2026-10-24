@@ -1,0 +1,133 @@
+@using System.Globalization
+@using FluxKnowledge.Application.Contracts
+@implements IAsyncDisposable
+@inject IProjectionReader Reader
+@inject ILogger<PipelineFileExplorer> Logger
+
+<section class="pipeline-file-explorer" aria-labelledby="affected-files-heading" aria-busy="@_loading.ToString().ToLowerInvariant()">
+    <h2 id="affected-files-heading" tabindex="-1" @ref="_heading">Affected files</h2>
+    @if (_filter is null)
+    {
+        <p>Select a file category, pending stage or current cause to inspect its files.</p>
+    }
+    @if (_loading) { <p role="status">Loading a bounded file list…</p> }
+    @if (_error is not null) { <p role="alert">@_error</p> }
+    @if (_page is { IsAvailable: true } page)
+    {
+        <p><strong>@ScopeName</strong> · @_loadedFilter?.Category @_loadedFilter?.Stage @_loadedFilter?.State</p>
+        <p>@Number(page.TotalCount) matching logical files. Page @(page.Page + 1). Showing @(page.Items.Count) of at most @(page.PageSize) records per page.</p>
+        <p class="status-freshness">List sampled at @Time(page.ObservedAtUtc). This is a separate committed sample from the overview.
+            @if (_summaryCount is { } expected && expected != page.TotalCount)
+            { <span>The earlier summary counted @Number(expected); files or their status may have changed between samples.</span> }</p>
+        <details><summary>How the current stage is selected</summary><p>Each file is counted once. Its current record/stage and selected branch determine eligible jobs; confirmed execution takes precedence, then attention, recorded waiting and queued work. Other contributing current jobs remain in details.</p></details>
+        <div class="pipeline-file-items">
+            @foreach (var file in page.Items)
+            {
+                <article class="pipeline-file-item" @key="file.SourceRevisionId">
+                    <FilePath FullPath="@file.FullPath" ArchivePath="@file.ArchivePath" />
+                    <p>@file.SourceName · @file.Category · <strong>@file.Stage · @file.State</strong></p>
+                    <p>@(file.Reason == "archive-expansion-completed-members-counted-separately" ? "Archive expanded; retained members are counted separately." : file.Reason)</p>
+                    @if (file.Category is "Blocked" or "Failed" or "Deferred" or "Unconfirmed") { <p>Next action: @file.NextAction</p> }
+                    @if (file.State == "Queued continuation")
+                    { <p>This is normal batch continuation: saved work is preserved while the next batch awaits processing.</p> }
+                    @if (file.Jobs.Count > 0)
+                    {
+                        <details><summary>Contributing pipeline jobs (@file.Jobs.Count)</summary>
+                            <ul>@foreach (var job in file.Jobs)
+                            {
+                                <li>@job.Stage · @job.State · @job.Reason
+                                    <p>Confirmed worker attempt elapsed: @Elapsed(job.AttemptStartedAtUtc, page.ObservedAtUtc). Worker heartbeat: unavailable.</p>
+                                    <a href="@($"/corpus/{job.PipelineRecordId}")">View pipeline record</a>
+                                    <code>@job.Id</code></li>
+                            }</ul>
+                        </details>
+                    }
+                    @if (file.Embedding.Count > 0)
+                    {
+                        <details><summary>Embedding detail</summary>
+                            <p>Normal batch requeuing preserves compatible saved passages and continues processing. A queue label or attempt count alone does not confirm a retry.</p>
+                            @foreach (var progress in file.Embedding)
+                            {
+                                @if (progress.SavedPassages is { } saved)
+                                {
+                                    <p>@Number(saved) saved passages.
+                                        @if (progress.RemainingPassages is { } remaining) { <span>@Number(remaining) remaining known passages.</span> }
+                                        else { <span>Remaining passages unavailable.</span> }</p>
+                                }
+                                else { <p>Saved-passage progress unavailable.</p> }
+                                <p>Last confirmed saved progress: @Time(progress.LastSavedAtUtc).
+                                    Time since saved progress at this sample: @Elapsed(progress.LastSavedAtUtc, page.ObservedAtUtc).</p>
+                                <p>@progress.Evidence</p>
+                            }
+                        </details>
+                    }
+                </article>
+            }
+        </div>
+        @if (page.Items.Count == 0) { <p>No files match this filter in this sample.</p> }
+        <p class="file-page-controls"><button type="button" disabled="@(_loading || page.Page == 0)" @onclick="() => LoadAsync(_loadedFilter!, _loadedRoot, page.Page - 1)">Previous files</button>
+            <button type="button" disabled="@(_loading || (page.Page + 1) * page.PageSize >= page.TotalCount)" @onclick="() => LoadAsync(_loadedFilter!, _loadedRoot, page.Page + 1)">Next files</button>
+            <button type="button" disabled="@_loading" @onclick="() => LoadAsync(_loadedFilter!, _loadedRoot, page.Page)">Refresh file list</button></p>
+    }
+</section>
+
+@code {
+    [Parameter] public Guid? SourceRootId { get; set; }
+    [Parameter] public IReadOnlyList<SourcePipelineProgress> Sources { get; set; } = [];
+    private readonly CancellationTokenSource _stopping = new();
+    private PipelineFilePage? _page;
+    private PipelineFileFilter? _filter, _loadedFilter;
+    private Guid? _previousScope, _loadedRoot;
+    private int? _summaryCount;
+    private bool _loading;
+    private string? _error;
+    private long _request;
+    private ElementReference _heading;
+    private bool _focusResult;
+    private string ScopeName => _loadedRoot is { } root ? Sources.FirstOrDefault(s => s.Id == root)?.Name ?? "Source binding unavailable" : "All configured sources";
+    protected override void OnParametersSet()
+    {
+        if (_previousScope == SourceRootId) return;
+        _previousScope = SourceRootId;
+        _request++;
+        _page = null; _filter = null; _error = null; _loading = false;
+    }
+    public async Task ShowAsync(PipelineFileFilter filter, Guid? root, int? summaryCount = null)
+    {
+        _summaryCount = summaryCount;
+        _page = null;
+        await LoadAsync(filter, root, 0);
+    }
+    private async Task LoadAsync(PipelineFileFilter filter, Guid? root, int page)
+    {
+        var request = ++_request;
+        _filter = filter; _loading = true; _error = null;
+        await InvokeAsync(StateHasChanged);
+        try
+        {
+            var result = await Reader.ReadPipelineFilesAsync(filter, root, page, _stopping.Token);
+            if (request != _request) return;
+            if (!result.IsAvailable) { _error = "File status unavailable. A zero count has not been confirmed."; _page = null; return; }
+            _page = result; _loadedFilter = filter; _loadedRoot = root;
+            _focusResult = true;
+        }
+        catch (OperationCanceledException) when (_stopping.IsCancellationRequested) { }
+        catch (Exception exception) when (exception is System.Data.Common.DbException or InvalidOperationException or TimeoutException)
+        {
+            Logger.LogWarning(exception, "Pipeline file read failed for {Category}/{Stage}, source {SourceRootId}, page {Page}.", filter.Category, filter.Stage, root, page + 1);
+            if (request == _request) _error = "File status unavailable. The previous list, if shown, may be out of date; refresh to try again.";
+        }
+        finally { if (request == _request) { _loading = false; await InvokeAsync(StateHasChanged); } }
+    }
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!_focusResult) return;
+        _focusResult = false;
+        await _heading.FocusAsync();
+    }
+    private static string Number(long number) => number.ToString("N0", CultureInfo.GetCultureInfo("en-GB"));
+    private static string Time(DateTimeOffset? time) => time?.ToLocalTime().ToString("dd MMM yyyy HH:mm:ss zzz", CultureInfo.InvariantCulture) ?? "Unavailable";
+    internal static string Elapsed(DateTimeOffset? start, DateTimeOffset sample) => start is { } value && value <= sample
+        ? (sample - value).ToString(@"d\d\ hh\h\ mm\m\ ss\s", CultureInfo.InvariantCulture) : "Unavailable";
+    public async ValueTask DisposeAsync() { _request++; await _stopping.CancelAsync(); _stopping.Dispose(); }
+}

@@ -31,9 +31,11 @@ public interface IProjectionReader
     ValueTask<PipelineRecordProjection?> ReadPipelineRecordAsync(Guid id, CancellationToken cancellationToken);
     ValueTask<PipelineAttentionPage> ReadPipelineAttentionAsync(string unit, Guid? sourceRootId, int page,
         CancellationToken cancellationToken) => ValueTask.FromResult(PipelineAttentionPage.Empty);
+    ValueTask<PipelineFilePage> ReadPipelineFilesAsync(PipelineFileFilter filter, Guid? sourceRootId, int page,
+        CancellationToken cancellationToken) => ValueTask.FromResult(PipelineFilePage.Unavailable);
 }
 
-public sealed class SqlProjectionReader(
+public sealed partial class SqlProjectionReader(
     IDbContextFactory<FluxKnowledgeDbContext> contextFactory,
     IDerivedIndexRecoveryStatus recoveryStatus,
     GpuSchedulerStore schedulerStore,

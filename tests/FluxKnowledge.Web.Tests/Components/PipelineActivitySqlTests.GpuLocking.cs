@@ -1,5 +1,6 @@
 using System.Data.Common;
 using System.Data;
+using FluxKnowledge.Application.Contracts;
 using FluxKnowledge.Domain.Jobs;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
@@ -92,8 +93,19 @@ public sealed partial class PipelineActivitySqlTests
     [NativeSqlServerFact]
     public async Task A_held_uncommitted_GPU_owner_change_is_never_reported_as_confirmed()
     {
+        // The controlled quiet/read fence must not share accumulated data or
+        // asynchronous Full-Text work from earlier cases in the class fixture.
+        var owned = new NativeSqlServerFixture();
+        await owned.InitializeAsync();
+        try { await new PipelineActivitySqlTests(owned, output).VerifyHeldGpuOwnerAsync(); }
+        finally { await owned.DisposeAsync(); }
+    }
+
+    private async Task VerifyHeldGpuOwnerAsync()
+    {
         await WaitForFullTextIdleAsync();
         var seed = await SeedGpuReadLockAsync(DateTimeOffset.UtcNow);
+        await WarmOwnershipReadAsync(snapshot: false);
         await WaitForLegacyReadQuietAsync();
         await using var writer = new TestDbContextFactory(_fixture.ConnectionString).CreateDbContext();
         await using var transaction = await writer.Database.BeginTransactionAsync();
@@ -108,9 +120,52 @@ public sealed partial class PipelineActivitySqlTests
         }
         finally { await transaction.RollbackAsync(CancellationToken.None); }
         await WaitForLegacyReadQuietAsync();
-        var fresh = await ActivityReader().ReadOverviewAsync(deadline.Token);
-        Assert.True(fresh.Activity.IsConsistent);
+        output.WriteLine("Before fresh read metadata: " + await ReadOwnershipFixtureMetadataAsync());
+        var trace = new ReadFenceTraceInterceptor();
+        using var recoveryDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(4));
+        var fresh = await ActivityReader(new TestDbContextFactory(_fixture.ConnectionString, trace)).ReadOverviewAsync(recoveryDeadline.Token);
+        output.WriteLine("Fresh fence: " + string.Join("; ", trace.Samples));
+        output.WriteLine("After fresh read metadata: " + await ReadOwnershipFixtureMetadataAsync());
+        Assert.True(fresh.Activity.IsConsistent, string.Join("; ", trace.Samples));
         Assert.Equal(1, PipelineActivityView.From(fresh.Activity, seed.Root).ActiveGpuTasks);
+    }
+
+    private async Task<PipelineActivitySummary> WarmOwnershipReadAsync(bool snapshot)
+    {
+        using var setupDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await using var context = new TestDbContextFactory(_fixture.ConnectionString).CreateDbContext();
+        await using var transaction = snapshot ? await context.Database.BeginTransactionAsync(IsolationLevel.Snapshot, setupDeadline.Token) : null;
+        var started = DateTimeOffset.UtcNow;
+        // The internal reader executes the full activity/file/ownership path without
+        // the conservative overview's early fence exit. Only this setup has a 10s
+        // bound; the single asserted public read retains its production 2s deadline.
+        var warm = await new SqlPipelineActivityReader(null, TimeProvider.System)
+            .ReadAsync(context, started, setupDeadline.Token, materializeGpuFacts: snapshot);
+        output.WriteLine($"Ownership setup read completed: snapshot={snapshot}, stages={warm.FileStages.Count}, taskIdentities={warm.RunningTasks.Count}, elapsedMs={(DateTimeOffset.UtcNow - started).TotalMilliseconds:F1}.");
+        if (transaction is not null) await transaction.CommitAsync(setupDeadline.Token);
+        return warm;
+    }
+
+    private async Task<string> ReadOwnershipFixtureMetadataAsync()
+    {
+        Assert.Matches("^FluxKnowledge_Phase1Tests_[a-f0-9]{32}$", _fixture.DatabaseName);
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        await using var context = new TestDbContextFactory(_fixture.ConnectionString).CreateDbContext();
+        return await context.Database.SqlQueryRaw<string>("""
+            SELECT (SELECT
+              (SELECT OBJECT_NAME(object_id) AS [table], is_enabled, change_tracking_state_desc,
+                has_crawl_completed, CONVERT(int, OBJECTPROPERTYEX(object_id, 'TableFulltextPopulateStatus')) AS population,
+                CONVERT(int, OBJECTPROPERTYEX(object_id, 'TableFulltextPendingChanges')) AS pending
+               FROM sys.fulltext_indexes WHERE object_id IN (OBJECT_ID(N'Artifacts'), OBJECT_ID(N'TextChunks')) FOR JSON PATH) AS fullText,
+              (SELECT OBJECT_NAME(object_id) AS [table], stats_id, STATS_DATE(object_id, stats_id) AS updated
+               FROM sys.stats WHERE auto_created = 1 AND object_id IN (
+                 OBJECT_ID(N'SourceRevisions'), OBJECT_ID(N'SourceActivities'), OBJECT_ID(N'SourceProcessorBranches'),
+                 OBJECT_ID(N'PipelineRecords'), OBJECT_ID(N'Jobs'), OBJECT_ID(N'JobAttempts'), OBJECT_ID(N'SourceIdentities'),
+                 OBJECT_ID(N'DocumentOcrRequests'), OBJECT_ID(N'GpuMiniTasks'), OBJECT_ID(N'GpuBatches'),
+                 OBJECT_ID(N'GpuCapacitySlots'), OBJECT_ID(N'GpuExecutorDispatches'), OBJECT_ID(N'Artifacts'), OBJECT_ID(N'TextChunks'))
+               ORDER BY object_id, stats_id FOR JSON PATH) AS autoStats
+              FOR JSON PATH, WITHOUT_ARRAY_WRAPPER) AS [Value]
+            """).SingleAsync(deadline.Token);
     }
 
     private async Task WaitForLegacyReadQuietAsync()

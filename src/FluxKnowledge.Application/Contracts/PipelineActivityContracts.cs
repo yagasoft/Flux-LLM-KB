@@ -14,6 +14,11 @@ public sealed record PipelineActivitySummary(
     public bool IsAvailable => ObservedAtUtc != default;
     public bool IsConsistent { get; init; } = true;
     public int UncertainCapacitySlots { get; init; }
+    public IReadOnlyList<PipelineFileStageGroup> FileStages { get; init; } = [];
+    public IReadOnlyList<PipelineFileCauseGroup> FileCauses { get; init; } = [];
+    public IReadOnlyList<PipelineOcrDemand> OcrDemand { get; init; } = [];
+    public IReadOnlyList<PipelineRunningTask> RunningTasks { get; init; } = [];
+    public int RunningTaskCount { get; init; }
 }
 
 public sealed record SourcePipelineProgress(
@@ -42,3 +47,29 @@ public sealed record PipelineAttentionPage(int TotalCount, int Page, int PageSiz
 {
     public static PipelineAttentionPage Empty { get; } = new(0, 0, 25, []);
 }
+
+public sealed record PipelineFileCategoryCount(string Category, string Label, int Count);
+public sealed record PipelineFileStageGroup(Guid SourceRootId, string Stage, string State, int Count);
+public sealed record PipelineFileCauseGroup(Guid SourceRootId, string Category, string Reason, string NextAction, int Count);
+public sealed record PipelineOcrDemand(Guid SourceRootId, int ConfirmedFiles, int WaitingFiles, int RunningFiles,
+    int DecisionUnconfirmedFiles, int? RequestedPages);
+public sealed record PipelineFileFilter(string Category = "all", string? Stage = null, string? Reason = null, string? State = null);
+public sealed record PipelineFileJob(Guid Id, Guid PipelineRecordId, string Stage, string State, string Reason,
+    DateTimeOffset? AttemptStartedAtUtc);
+public sealed record PipelineEmbeddingProgress(Guid JobId, long? SavedPassages, long? TotalPassages,
+    DateTimeOffset? LastSavedAtUtc, string Evidence)
+{
+    public long? RemainingPassages => TotalPassages is { } total && SavedPassages is { } saved ? total - saved : null;
+}
+public sealed record PipelineFileItem(Guid SourceRootId, Guid SourceRevisionId, string SourceName, string FullPath,
+    string? ArchivePath, string Category, string Stage, string State, string Reason, string NextAction,
+    IReadOnlyList<PipelineFileJob> Jobs, IReadOnlyList<PipelineEmbeddingProgress> Embedding);
+public sealed record PipelineFilePage(int TotalCount, int Page, int PageSize, DateTimeOffset ObservedAtUtc,
+    IReadOnlyList<PipelineFileItem> Items)
+{
+    public static PipelineFilePage Unavailable { get; } = new(0, 0, 25, default, []);
+    public bool IsAvailable => ObservedAtUtc != default;
+}
+public sealed record PipelineRunningTask(Guid Id, Guid? SourceRootId, Guid? PipelineRecordId, string SourceName,
+    string FullPath, string? ArchivePath, string Stage, string State, bool IsHistorical,
+    DateTimeOffset? AttemptStartedAtUtc);

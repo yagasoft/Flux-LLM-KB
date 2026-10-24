@@ -83,6 +83,8 @@ public sealed class SelectedBranchSqlTests(NativeSqlServerFixture fixture) : ICl
             Assert.Equivalent(new PipelineJobActivityRow
             {
                 Id = job.Id, PipelineRecordId = recordId, SourceRootId = root, Stage = (int)PipelineStage.Extract,
+                LogicalSourceRevisionId = parent.Id, SourceRevision = 1, CurrentStage = (int)PipelineStage.Extract,
+                FullPath = parent.CanonicalPath,
                 PublicState = (int)PublicJobState.GpuQueued, IsHistorical = historical, SourceAdmitted = true,
                 HasReadyGpu = true, HasUncertainGpu = true, HasPendingDispatch = true, IsDue = true, RecordedAtUtc = now
             }, row);

@@ -4,6 +4,7 @@ using FluxKnowledge.Domain.Jobs;
 using FluxKnowledge.Domain.Pipeline;
 using FluxKnowledge.Domain.Sources;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
+using FluxKnowledge.Infrastructure.SqlServer.Persistence.Configurations;
 using FluxKnowledge.Web.Components.Sources;
 using Microsoft.EntityFrameworkCore;
 
@@ -84,8 +85,10 @@ internal sealed class SqlPipelineActivityReader(IDeploymentValidationHold? hold,
         var processors = await (from branch in context.SourceProcessorBranches.AsNoTracking()
                 join revision in context.SourceRevisions.AsNoTracking() on branch.SourceRevisionId equals revision.Id
                 where branch.State == (int)RetainedProcessorBranchState.Running
-                select new { revision.SourceRootId, Confirmed = branch.LeaseOwner != null && branch.LeaseGeneration > 0 && branch.LeaseExpiresAtUtc > now })
-            .GroupBy(row => new { row.SourceRootId, row.Confirmed })
+                select new { revision.SourceRootId, Confirmed = branch.LeaseOwner != null && branch.LeaseGeneration > 0 && branch.LeaseExpiresAtUtc > now,
+                    IsCode = branch.ProcessorVersion == RetainedCsharpCodeProcessor.ProcessorVersion &&
+                        branch.ProcessorFingerprint == RetainedCsharpCodeProcessor.Capability.ProcessorFingerprint })
+            .GroupBy(row => new { row.SourceRootId, row.Confirmed, row.IsCode })
             .Select(group => new { group.Key, Count = group.Count() }).ToArrayAsync(cancellationToken).ConfigureAwait(false);
         var deletions = await context.SourceDeletionOperations.AsNoTracking()
             .ToDictionaryAsync(d => d.SourceRootId, cancellationToken).ConfigureAwait(false);
@@ -105,12 +108,84 @@ internal sealed class SqlPipelineActivityReader(IDeploymentValidationHold? hold,
                 scans.Where(s => s.Key.SourceRootId == root.Id && s.Key.State == (int)SourceScanJobState.Running && !s.Key.Confirmed).Sum(s => s.Count) +
                     processors.Where(p => p.Key.SourceRootId == root.Id && !p.Key.Confirmed).Sum(p => p.Count));
         }).ToArray();
+        var jobQuery = SqlPipelineActivityQuery.Jobs(context, now, admission, branches, gpuEvidence);
+        var files = await PipelineFileSample.ReadAsync(context, sourceStates, jobQuery, names,
+            sources.ToDictionary(s => s.Id, s => s.Lifecycle), now, gpuEvidence, cancellationToken).ConfigureAwait(false);
+        // The aggregate and details share the same committed image. Avoid repeating the
+        // ownership queries when that image already confirms there are no running rows.
+        var runningJobs = jobRows.Any(g => g.Key.HasActiveGpu || g.Key.PublicState == (int)PublicJobState.WorkerProcessing && g.Key.HasWorkerLease)
+            ? await jobQuery.Where(j => j.HasActiveGpu || j.PublicState == (int)PublicJobState.WorkerProcessing && j.HasWorkerLease)
+                .OrderBy(j => j.Id).Take(25).ToArrayAsync(cancellationToken).ConfigureAwait(false) : [];
+        var interactive = gpuRows.Any(g => g.Key.IsInteractive && g.Key.State == "Active")
+            ? await SqlPipelineActivityQuery.GpuTasks(context, now, admission, branches, gpuEvidence)
+                .Where(t => t.IsInteractive && t.State == "Active").OrderBy(t => t.Id).Take(25)
+                .ToArrayAsync(cancellationToken).ConfigureAwait(false) : [];
+        // Code parsing is a companion to source-text indexing. Its execution identity
+        // must not change the selected text outcome or headline file stage.
+        PipelineRunningTask[] codeTasks = [];
+        var codeTaskCount = 0;
+        if (processors.Any(p => p.Key.Confirmed && p.Key.IsCode))
+        {
+            var currentFiles = sourceStates.Values.SelectMany(s => s.Files)
+                .Where(f => f.Category != "Unconfirmed" && roots.Any(r => r.Id == f.SourceRootId && r.State != (int)SourceRootState.Deleting))
+                .ToDictionary(f => f.SourceRevisionId);
+            var codeQuery = from branch in context.SourceProcessorBranches.AsNoTracking()
+                join activity in SqlCurrentSourceActivities.Query(context) on branch.SourceActivityId equals activity.Id
+                join revision in context.SourceRevisions.AsNoTracking() on branch.SourceRevisionId equals revision.Id
+                where branch.State == (int)RetainedProcessorBranchState.Running && branch.LeaseOwner != null && branch.LeaseGeneration > 0 && branch.LeaseExpiresAtUtc > now &&
+                    branch.ProcessorVersion == RetainedCsharpCodeProcessor.ProcessorVersion && branch.ProcessorFingerprint == RetainedCsharpCodeProcessor.Capability.ProcessorFingerprint &&
+                    activity.SourceRevisionId == revision.Id && activity.State == (int)SourceActivityState.Pending && activity.ActivityKind == (int)SourceActivityKind.CodeParsing &&
+                    activity.ExecutionClass == (int)ExecutionClass.InProcess && revision.Extension == ".cs" && revision.Classification == "AcceptedUtf8Text" &&
+                    EF.Functions.Collate(activity.InputFingerprint, SchemaConfiguration.SchedulerFenceCollation) == EF.Functions.Collate(branch.InputSha256, SchemaConfiguration.SchedulerFenceCollation) &&
+                    EF.Functions.Collate(revision.ContentSha256, SchemaConfiguration.SchedulerFenceCollation) == EF.Functions.Collate(branch.InputSha256, SchemaConfiguration.SchedulerFenceCollation) &&
+                    EF.Functions.Collate(activity.ProcessorVersion, SchemaConfiguration.SchedulerFenceCollation) == EF.Functions.Collate(branch.ProcessorVersion, SchemaConfiguration.SchedulerFenceCollation) &&
+                    EF.Functions.Collate(activity.DescriptorFingerprint, SchemaConfiguration.SchedulerFenceCollation) == EF.Functions.Collate(branch.ProcessorFingerprint, SchemaConfiguration.SchedulerFenceCollation)
+                select new { branch.Id, branch.SourceRevisionId };
+            // Read only two IDs per confirmed live code claim, then apply the already
+            // sampled file bindings. Sending the whole file inventory back to SQL
+            // makes this small active-work lookup scale with discovered file count.
+            var candidates = await codeQuery.OrderBy(b => b.Id).ToArrayAsync(cancellationToken).ConfigureAwait(false);
+            var rows = candidates.Where(b => currentFiles.ContainsKey(b.SourceRevisionId)).ToArray();
+            codeTaskCount = rows.Length;
+            codeTasks = rows.Take(25).Select(b =>
+            {
+                var file = currentFiles[b.SourceRevisionId];
+                return new PipelineRunningTask(b.Id, file.SourceRootId, null, SourceName(file.SourceRootId, names),
+                    file.FullPath, file.ArchivePath, "Code analysis", "Running", false, null);
+            }).ToArray();
+        }
+        var runningTasks = runningJobs.Select(j => new PipelineRunningTask(j.Id, j.SourceRootId, j.PipelineRecordId,
+                SourceName(j.SourceRootId, names), j.FullPath, j.ArchivePath,
+                ((PipelineStage)j.Stage) + (!j.MatchesSelectedFileBranch && !j.IsHistorical ? " (admitted index rebuild)" : ""),
+                "Running", j.IsHistorical, j.AttemptStartedAtUtc))
+            .Concat(interactive.Select(t => new PipelineRunningTask(t.Id, null, null, "Interactive search", "",
+                null, "Query embedding", "Running", false, null)))
+            .Concat(files.Where(f => f.ProcessorRunning)
+                .Select(f => new PipelineRunningTask(f.File.SourceRevisionId, f.File.SourceRootId, null,
+                    f.File.SourceName, f.File.FullPath, f.File.ArchivePath, f.File.Stage, "Running", false, null)))
+            .Concat(codeTasks)
+            .Take(25).ToArray();
         await branches.CompleteAsync(cancellationToken).ConfigureAwait(false);
         return new(startedAt, clock.GetUtcNow(), sources, jobs, gpu,
             scans.Where(s => s.Key.Confirmed).Sum(s => s.Count), processors.Where(p => p.Key.Confirmed).Sum(p => p.Count),
             scans.Where(s => s.Key.State == (int)SourceScanJobState.Running && !s.Key.Confirmed).Sum(s => s.Count) + processors.Where(p => !p.Key.Confirmed).Sum(p => p.Count))
         {
-            UncertainCapacitySlots = gpuEvidence.UncertainCapacitySlots
+            UncertainCapacitySlots = gpuEvidence.UncertainCapacitySlots,
+            FileStages = files.Where(f => f.File.Category == "Pending")
+                .GroupBy(f => new { f.File.SourceRootId, f.File.Stage, f.File.State })
+                .Select(g => new PipelineFileStageGroup(g.Key.SourceRootId, g.Key.Stage, g.Key.State, g.Count())).ToArray(),
+            FileCauses = files.Where(f => f.File.Category is "Blocked" or "Failed")
+                .GroupBy(f => new { f.File.SourceRootId, f.File.Category, f.File.Reason, f.File.NextAction })
+                .Select(g => new PipelineFileCauseGroup(g.Key.SourceRootId, g.Key.Category, g.Key.Reason, g.Key.NextAction, g.Count()))
+                .GroupBy(g => g.SourceRootId).SelectMany(g => g.OrderByDescending(c => c.Count).ThenBy(c => c.Reason).Take(20)).ToArray(),
+            OcrDemand = files.GroupBy(f => f.File.SourceRootId).Select(g => new PipelineOcrDemand(g.Key,
+                g.Count(f => f.RequiresOcr), g.Count(f => f.OcrWaiting), g.Count(f => f.OcrRunning),
+                g.Count(f => f.OcrDecisionUnconfirmed), g.Where(f => f.RequiresOcr).All(f => f.RequestedPages is not null)
+                    ? g.Where(f => f.RequiresOcr).Sum(f => f.RequestedPages) : null)).ToArray(),
+            RunningTasks = runningTasks,
+            RunningTaskCount = jobs.Where(j => j.State == PipelineWorkState.Running).Sum(j => j.Count) +
+                gpu.Where(g => g.SourceRootId is null && g.SourceName == "Interactive search" && g.State == "Active").Sum(g => g.Count) +
+                files.Count(f => f.ProcessorRunning) + codeTaskCount
         };
     }
 

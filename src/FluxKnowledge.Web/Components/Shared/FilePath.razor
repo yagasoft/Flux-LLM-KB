@@ -1,0 +1,50 @@
+@using FluxKnowledge.Web.Components.Status
+@using Microsoft.JSInterop
+@implements IAsyncDisposable
+@inject IJSRuntime JavaScript
+
+<div class="file-path">
+    <strong>@(OpaqueMember ? "Retained archive member" : FileName)</strong>
+    @if (OpaqueMember)
+    {
+        <p class="status-freshness">Containing archive: <code>@PipelineFilePresentation.ShortenPath(ArchivePath!)</code><br />Original member path unavailable. Member identity:</p>
+    }
+    <code class="file-path-short">@PipelineFilePresentation.ShortenPath(FullPath)</code>
+    <details><summary>@(OpaqueMember ? "Member identity and copy" : "Full path and copy")</summary>
+        @if (ArchivePath is not null)
+        {
+            <p>Containing archive: <code>@ArchivePath</code></p>
+            @if (!OpaqueMember) { <p>Member path: <code>@FullPath</code></p> }
+        }
+        <label>@ValueLabel <input class="path-full-value" readonly value="@FullPath" /></label>
+        <button type="button" @onclick="CopyAsync">Copy @ValueLabel.ToLowerInvariant()</button>
+        <span role="status">@_copyStatus</span>
+        <p class="status-freshness">You can also focus the @ValueLabel.ToLowerInvariant() field and press Ctrl+A, then Ctrl+C.</p>
+    </details>
+</div>
+
+@code {
+    [Parameter, EditorRequired] public string FullPath { get; set; } = "";
+    [Parameter] public string? ArchivePath { get; set; }
+    private IJSObjectReference? _module;
+    private string? _copyStatus;
+    private bool OpaqueMember => ArchivePath is not null && FullPath.StartsWith("retained-archive-member:", StringComparison.Ordinal);
+    private string ValueLabel => OpaqueMember ? "Member identity" : "Full path";
+    private string FileName => FullPath.Replace('\\', '/').Split('/').LastOrDefault() ?? FullPath;
+    private async Task CopyAsync()
+    {
+        try
+        {
+            _module ??= await JavaScript.InvokeAsync<IJSObjectReference>("import", "./file-path.js");
+            await _module.InvokeVoidAsync("copyFullPath", FullPath);
+            _copyStatus = $"Copied {ValueLabel.ToLowerInvariant()}.";
+        }
+        catch (JSException) { _copyStatus = $"Select the {ValueLabel.ToLowerInvariant()} field and press Ctrl+A, then Ctrl+C to copy."; }
+    }
+    public async ValueTask DisposeAsync()
+    {
+        if (_module is null) return;
+        try { await _module.DisposeAsync(); }
+        catch (JSDisconnectedException) { }
+    }
+}

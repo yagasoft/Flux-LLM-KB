@@ -1,5 +1,6 @@
 using System.Data.Common;
 using FluxKnowledge.Application.Indexing;
+using FluxKnowledge.Application.Contracts;
 using FluxKnowledge.Integration.Tests.Support;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
 using FluxKnowledge.Web.Components.Status;
@@ -20,7 +21,7 @@ public sealed partial class PipelineActivitySqlTests
     {
         await EnableOwnedSnapshotAsync();
         var seed = await SeedGpuReadLockAsync(DateTimeOffset.UtcNow);
-        var mutation = new SnapshotAfterCounts(async () =>
+        async Task ChangeAsync(bool persist)
         {
             await using var writer = new TestDbContextFactory(_fixture.ConnectionString).CreateDbContext();
             await using var transaction = await writer.Database.BeginTransactionAsync();
@@ -33,9 +34,20 @@ public sealed partial class PipelineActivitySqlTests
             else
                 await writer.GpuCapacitySlots.Where(s => s.SlotKey == seed.Slot)
                     .ExecuteUpdateAsync(s => s.SetProperty(d => d.ActiveBatchId, (Guid?)null));
-            if (commit) await transaction.CommitAsync(); else await transaction.RollbackAsync();
-        });
-        var sample = await SnapshotReader(mutation).ReadOverviewAsync(default);
+            if (persist) await transaction.CommitAsync(); else await transaction.RollbackAsync();
+        }
+        // Compilation/setup is separate from the controlled interleaving. The same
+        // mutation expression is prepared without committing any ownership change.
+        await ChangeAsync(false);
+        await WarmOwnershipReadAsync(snapshot: true);
+        var mutation = new SnapshotAfterCounts(() => ChangeAsync(commit));
+        OverviewProjection sample;
+        try { sample = await SnapshotReader(mutation).ReadOverviewAsync(default); }
+        finally
+        {
+            output.WriteLine($"Injected ownership mutation: {mutation.MutationMilliseconds:F1}ms.");
+            output.WriteLine("Snapshot commands: " + string.Join("; ", mutation.CommandTimings));
+        }
         Assert.True(mutation.Changed);
         Assert.True(sample.Activity.IsConsistent);
         Assert.Equal(1, PipelineActivityView.From(sample.Activity, seed.Root).ActiveGpuTasks);
@@ -85,6 +97,8 @@ public sealed partial class PipelineActivitySqlTests
     {
         private bool _countsConsumed;
         public bool Changed { get; private set; }
+        public double MutationMilliseconds { get; private set; }
+        public List<string> CommandTimings { get; } = [];
         public List<DbConnection> Connections { get; } = [];
         public List<System.Data.IsolationLevel?> Isolations { get; } = [];
         public override InterceptionResult DataReaderDisposing(DbCommand command, DataReaderDisposingEventData eventData, InterceptionResult result)
@@ -97,8 +111,19 @@ public sealed partial class PipelineActivitySqlTests
         {
             Connections.Add(command.Connection!);
             Isolations.Add(command.Transaction?.IsolationLevel);
-            if (_countsConsumed && !Changed) { Changed = true; await change(); }
+            if (_countsConsumed && !Changed)
+            {
+                Changed = true;
+                var watch = System.Diagnostics.Stopwatch.StartNew();
+                try { await change(); } finally { MutationMilliseconds = watch.Elapsed.TotalMilliseconds; }
+            }
             return result;
+        }
+        public override ValueTask<DbDataReader> ReaderExecutedAsync(DbCommand command, CommandExecutedEventData eventData,
+            DbDataReader result, CancellationToken cancellationToken = default)
+        {
+            CommandTimings.Add($"#{CommandTimings.Count + 1} {eventData.Duration.TotalMilliseconds:F1}ms, current-file-fields={command.CommandText.Contains("LogicalSourceRevisionId", StringComparison.Ordinal)}");
+            return ValueTask.FromResult(result);
         }
     }
 }

@@ -17,6 +17,10 @@
     var global = PipelineActivityView.From(activity);
     var diagnostics = OverviewDiagnosticSummary.From(ProjectionState.Current.ActiveIndexGeneration, ProjectionState.Current.IndexRecovery);
     var scheduler = ProjectionState.Current.GpuSchedulerStatus;
+    var stages = activity.FileStages.Where(s => SelectedRoot is null || s.SourceRootId == SelectedRoot)
+        .GroupBy(s => new { s.Stage, s.State }).Select(g => new { g.Key.Stage, g.Key.State, Count = g.Sum(s => s.Count) }).ToArray();
+    var ocrDemand = activity.OcrDemand.Where(s => SelectedRoot is null || s.SourceRootId == SelectedRoot).ToArray();
+    var runningTasks = activity.RunningTasks.Where(t => SelectedRoot is null || t.SourceRootId == SelectedRoot).ToArray();
     var refreshContext = ProjectionState.HasSnapshot
         ? "The last successful read is shown below and may be out of date."
         : "Current activity is unavailable; zero activity has not been confirmed.";
@@ -98,11 +102,39 @@
                     }
                 </ul>
             }
+            <h3>Files behind running tasks</h3>
+            @if (runningTasks.Length > 0)
+            {
+                <div class="running-task-list">
+                    @foreach (var task in runningTasks)
+                    {
+                        <article class="running-task-row" @key="task.Id">
+                            @if (string.IsNullOrWhiteSpace(task.FullPath)) { <strong>@task.SourceName</strong> }
+                            else { <FilePath FullPath="@task.FullPath" ArchivePath="@task.ArchivePath" /> }
+                            <p>@task.SourceName · @task.Stage · @task.State @(task.IsHistorical ? "· Previous revision" : "")</p>
+                            <p>Confirmed worker attempt elapsed at this sample: @PipelineFileExplorer.Elapsed(task.AttemptStartedAtUtc, activity.ObservedAtUtc).</p>
+                            @if (task.PipelineRecordId is { } record) { <a href="@($"/corpus/{record}")">View pipeline record</a> }
+                        </article>
+                    }
+                </div>
+                <p class="status-freshness">Showing @runningTasks.Length task identities from a bounded app sample of at most 25; source filtering can exclude sampled rows.
+                    @if (SelectedRoot is null) { <span>@activity.RunningTaskCount running pipeline, GPU-search and selected retained-processor tasks in total.</span> }
+                    Worker heartbeat and GPU attempt timing are unavailable in these rows. Saved content progress is separate in file details.</p>
+            }
+            else if (view.RunningJobs > 0 || view.ActiveGpuTasks > 0 || view.Sources.Any(s => s.ActiveProcessors > 0))
+            { <p>Running task identities are unavailable in this bounded sample or outside the selected source scope.</p> }
+            else { <p>No file task has confirmed execution in this sample.</p> }
+            <button type="button" @onclick='() => LoadFilesAsync(new("Pending", State: "Running"), SelectedRoot)'>View running source files</button>
         }
     </section>
     <section aria-labelledby="source-progress-heading">
         <h2 id="source-progress-heading">Source progress</h2>
-        <p>File counts describe the current source inventory, including retained archive members. Extracted text and metadata belong to their original file. Pipeline jobs and GPU tasks are separate units. Changes not yet discovered by a scan are not counted.</p>
+        <p>Known files include discovered files and retained archive members. The categories add up to Known files. Published — ready to query means the file's extracted text has completed indexing.</p>
+        <details><summary>How files are counted</summary><p>Each logical file is a source root plus canonical path: physical paths are case-insensitive; archive member paths are case-sensitive. Generated text and metadata belong to their original file. Conflicting current revision bindings are unconfirmed, rather than selecting the newest timestamp.</p>
+            <p>Pipeline jobs, GPU tasks, pages and passages are separate units. Undiscovered changes, interactive search and independent local ingress are outside these file totals. Archive entries skipped or deferred before retention are excluded; no logical file identity is known for them. The file outcome categories are mutually exclusive.</p>
+            <p>No extractable text describes direct file text. An expanded archive does not publish direct text; its retained members have separate outcomes.</p></details>
+        @if (activity.IsAvailable)
+        { <p><strong>@view.PublishedFiles.ToString("N0", CultureInfo.GetCultureInfo("en-GB")) of @view.KnownFiles.ToString("N0", CultureInfo.GetCultureInfo("en-GB")) known files are ready to query</strong> in @(SelectedRoot is null ? "all configured sources" : "the selected source"). Counts belong to the committed sample timestamp above.</p> }
         <div class="source-progress-list">
             @foreach (var source in view.Sources)
             {
@@ -110,15 +142,18 @@
                     <header><h3><a href="@($"/sources/{source.Id}")">@source.Name</a></h3><span>@source.Lifecycle</span></header>
                     <p class="source-path">@source.Path</p>
                     <dl class="source-file-counts">
-                        <div><dt>Known files</dt><dd><StatusCount Value="source.KnownFiles" /></dd></div>
-                        <div><dt>Published files</dt><dd><StatusCount Value="source.PublishedFiles" /></dd></div>
-                        <div><dt>Pending files</dt><dd><StatusCount Value="source.PendingFiles" /></dd></div>
-                        <div><dt>Blocked / failed files</dt><dd>@source.BlockedFiles / @source.FailedFiles</dd></div>
+                        <div><dt>Known files</dt><dd><button class="count-link" type="button" aria-label="@($"Known files: {source.KnownFiles:N0}")" @onclick='() => LoadFilesAsync(new("all"), source.Id, source.KnownFiles)'><StatusCount Value="source.KnownFiles" /></button></dd></div>
+                        @foreach (var category in PipelineFilePresentation.Categories(source))
+                        {
+                            <div><dt>@category.Label</dt><dd><button class="count-link" type="button" aria-label="@($"{category.Label}: {category.Count:N0}")" @onclick="() => LoadFilesAsync(new(category.Category), source.Id, category.Count)"><StatusCount Value="category.Count" /></button></dd></div>
+                        }
                     </dl>
                     @if (source.IsScanning)
                     {
                         <p>Checking this source for changes. The inventory is incomplete while the scan runs.</p>
                     }
+                    @if (source.LastScanCompletedAtUtc is null)
+                    { <p>No completed scan confirms this source's coverage; the known inventory may be incomplete.</p> }
                     @if (source.ProvisionalFiles > 0)
                     {
                         <p class="pipeline-warning">@source.ProvisionalFiles known files have unconfirmed revision bindings. Published and pending totals exclude these files until authoritative source reconciliation completes. <a href="@($"/sources/{source.Id}")">View source details</a></p>
@@ -127,7 +162,7 @@
                     {
                         <p class="pipeline-warning">Source operation needs attention: @reason. <a href="@($"/sources/{source.Id}")">View source status</a></p>
                     }
-                    <p class="status-freshness">Last successful scan: @Time(source.LastScanCompletedAtUtc). Last confirmed pipeline progress: @Time(source.LastProgressAtUtc).</p>
+                    <p class="status-freshness">Last successful scan: @Time(source.LastScanCompletedAtUtc). Last confirmed publication: @Time(source.LastProgressAtUtc).</p>
                     @if (source.ScanErrors > 0)
                     {
                         <p class="pipeline-warning">The latest scan reported @source.ScanErrors problems. Its inventory may be incomplete. <a href="@($"/sources/{source.Id}")">View source details</a></p>
@@ -148,6 +183,33 @@
             <p>No source roots are configured in this scope. <a href="/sources">Sources and indexing</a></p>
         }
     </section>
+    <section aria-labelledby="pending-stages-heading">
+        <h2 id="pending-stages-heading">Where pending files are waiting</h2>
+        @if (!activity.IsAvailable) { <p>File stage and OCR status unavailable. Zero pending files has not been confirmed.</p> }
+        else
+        {
+            <p>Each pending logical file appears once, using its authoritative current record/stage and selected branch. Expand a file to inspect overlapping jobs.</p>
+            <ul class="pending-stage-list">
+                @foreach (var stage in stages.OrderBy(s => s.Stage).ThenBy(s => s.State))
+                {
+                    <li><button type="button" @onclick='() => LoadFilesAsync(new("Pending", stage.Stage, State: stage.State), SelectedRoot, stage.Count)'>@stage.Stage · @stage.State: @stage.Count.ToString("N0", CultureInfo.GetCultureInfo("en-GB")) files</button></li>
+                }
+            </ul>
+            @if (stages.Sum(s => s.Count) != view.PendingFiles)
+            { <p>Stage detail is unavailable for @(view.PendingFiles - stages.Sum(s => s.Count)) pending files in this sample.</p> }
+            else if (view.PendingFiles == 0) { <p>No pending source files in this sample.</p> }
+            <h3>Confirmed OCR demand</h3>
+            @if (ocrDemand.Length == 0) { <p>OCR demand unavailable in this sample.</p> }
+            else
+            {
+                <p>@ocrDemand.Sum(o => o.ConfirmedFiles) pending files have bound OCR requests; @ocrDemand.Sum(o => o.WaitingFiles) waiting and @ocrDemand.Sum(o => o.RunningFiles) running.
+                    @if (ocrDemand.All(o => o.RequestedPages is not null)) { <span>@ocrDemand.Sum(o => o.RequestedPages) distinct requested pages are known for these files.</span> }
+                    else { <span>Requested page total unavailable.</span> }</p>
+                <p>@ocrDemand.Sum(o => o.DecisionUnconfirmedFiles) files await a confirmed OCR decision. Extraction status alone does not confirm OCR demand.</p>
+            }
+        }
+    </section>
+    <PipelineFileExplorer @ref="_fileExplorer" SourceRootId="@SelectedRoot" Sources="@activity.Sources" />
     <section id="pipeline-attention" aria-labelledby="attention-heading">
         <h2 id="attention-heading">Needs attention</h2>
         @if (activity.IsAvailable)
@@ -161,6 +223,16 @@
                 <li><strong>@view.HistoricalGpuTasks</strong> historical GPU tasks retain unresolved bindings.</li>
             </ul>
             <p>These counts use different units and may refer to the same work. Historical records are retained; they are not marked successful or added to the current queue.</p>
+            <ul class="file-cause-list">
+                @foreach (var cause in activity.FileCauses.Where(c => SelectedRoot is null || c.SourceRootId == SelectedRoot)
+                    .GroupBy(c => new { c.Category, c.Reason, c.NextAction }).OrderByDescending(g => g.Sum(c => c.Count)))
+                {
+                    var count = cause.Sum(c => c.Count);
+                    <li><button type="button" @onclick="() => LoadFilesAsync(new(cause.Key.Category, Reason: cause.Key.Reason), SelectedRoot, count)">@count @cause.Key.Category files · @cause.Key.Reason</button>
+                        <p>Next action: @cause.Key.NextAction</p></li>
+                }
+            </ul>
+            <p class="status-freshness">Showing up to 20 current causes per source. Use the blocked or failed file category to inspect every affected file. A resolved current file error does not settle an earlier native execution.</p>
             <p><button type="button" @onclick='() => LoadAttentionAsync("jobs", 0)'>View pipeline job records</button>
                 <button type="button" @onclick='() => LoadAttentionAsync("gpu", 0)'>View GPU task records</button> <a href="/operator-actions">Operator actions</a></p>
             @if (activity.UnconfirmedControls > 0)
@@ -253,6 +325,9 @@
     private string? _attentionError;
     private DateTimeOffset? _attentionReadAtUtc;
     private long _attentionRequest;
+    private PipelineFileExplorer? _fileExplorer;
+    private Task LoadFilesAsync(PipelineFileFilter filter, Guid? root, int? expected = null) =>
+        _fileExplorer?.ShowAsync(filter, root, expected) ?? Task.CompletedTask;
     private Guid? SelectedRoot => Guid.TryParse(_sourceScope, out var id) ? id : null;
     private static string Time(DateTimeOffset? value) => value?.ToLocalTime().ToString("dd MMM yyyy HH:mm:ss zzz", CultureInfo.InvariantCulture) ?? "Not recorded";
     protected override async Task OnInitializedAsync()
