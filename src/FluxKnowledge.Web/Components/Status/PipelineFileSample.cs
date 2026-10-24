@@ -21,6 +21,18 @@ internal sealed record PipelineFileSample(PipelineFileItem File, bool RequiresOc
         var rootIds = sources.Keys.ToArray();
         var currentJobs = await jobs.Where(j => !j.IsHistorical && j.MatchesSelectedFileBranch && j.Stage == j.CurrentStage && j.LogicalSourceRevisionId != null &&
                 j.SourceRootId != null && rootIds.Contains(j.SourceRootId.Value))
+            // Paths come from the sampled logical file. Do not transfer the repeated
+            // paths or calculate the unused historical-attempt maximum for every job.
+            .Select(j => new PipelineJobActivityRow
+            {
+                Id = j.Id, PipelineRecordId = j.PipelineRecordId, LogicalSourceRevisionId = j.LogicalSourceRevisionId,
+                SourceRevision = j.SourceRevision, Stage = j.Stage, CurrentStage = j.CurrentStage,
+                MatchesSelectedFileBranch = j.MatchesSelectedFileBranch, IsHistorical = j.IsHistorical,
+                PublicState = j.PublicState, SourceAdmitted = j.SourceAdmitted, HasWorkerLease = j.HasWorkerLease,
+                HasActiveGpu = j.HasActiveGpu, HasReadyGpu = j.HasReadyGpu, HasUncertainGpu = j.HasUncertainGpu,
+                HasWaitingGpu = j.HasWaitingGpu, HasPendingDispatch = j.HasPendingDispatch, IsDue = j.IsDue,
+                Reason = j.Reason, AttemptStartedAtUtc = j.AttemptStartedAtUtc
+            })
             .ToArrayAsync(cancellationToken).ConfigureAwait(false);
         var selected = sources.Values.SelectMany(s => s.SelectedBranches).Distinct().ToArray();
         var processors = selected.Length == 0 ? [] : await context.SourceProcessorBranches.AsNoTracking()

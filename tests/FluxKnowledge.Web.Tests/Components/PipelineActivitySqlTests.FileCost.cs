@@ -30,7 +30,16 @@ public sealed partial class PipelineActivitySqlTests
         finally { await owned.DisposeAsync(); }
     }
 
-    private async Task MeasureFileReadCostAsync()
+    [NativeSqlServerFact]
+    public async Task File_summary_and_pages_remain_usable_with_twenty_thousand_current_jobs()
+    {
+        var owned = new NativeSqlServerFixture();
+        await owned.InitializeAsync();
+        try { await new PipelineActivitySqlTests(owned, output).MeasureFileReadCostAsync(20000); }
+        finally { await owned.DisposeAsync(); }
+    }
+
+    private async Task MeasureFileReadCostAsync(int currentJobCount = 1000)
     {
         await EnableOwnedSnapshotAsync();
         var now = DateTimeOffset.UtcNow;
@@ -77,8 +86,24 @@ public sealed partial class PipelineActivitySqlTests
         {
             for (var offset = 1000; offset < 30000; offset += 1000)
             {
-                setup.SourceRevisions.AddRange(Enumerable.Range(offset, 1000)
-                    .Select(i => Revision(Guid.NewGuid(), root, $"discovered-{i:D5}.txt", now, false)));
+                foreach (var i in Enumerable.Range(offset, 1000))
+                {
+                    var revision = Revision(Guid.NewGuid(), root, $"discovered-{i:D5}.txt", now, false);
+                    setup.SourceRevisions.Add(revision);
+                    if (i >= currentJobCount) continue;
+                    var identity = new SourceIdentityEntity { Id = Guid.NewGuid(), SourceKind = "local file", StableKey = revision.CanonicalPath, CreatedAtUtc = now };
+                    var record = new PipelineRecordEntity { Id = Guid.NewGuid(), SourceIdentityId = identity.Id, SourceRevisionId = revision.Id,
+                        Revision = 1, ContentHash = revision.ContentSha256, CurrentStage = (int)PipelineStage.Extract, RegisteredAtUtc = now };
+                    record.RootLineageRecordId = record.Id;
+                    var job = new JobEntity { Id = Guid.NewGuid(), PipelineRecordId = record.Id, SourceRevision = 1,
+                        Stage = (int)PipelineStage.Extract, Operation = PipelineOperations.ExtractUtf8,
+                        PublicState = (int)PublicJobState.WorkerQueued, DueAtUtc = now };
+                    setup.SourceIdentities.Add(identity); setup.PipelineRecords.Add(record); setup.Jobs.Add(job);
+                    setup.SourceActivities.Add(Activity(revision.Id, SourceActivityState.Pending, record.Id));
+                    setup.OutboxMessages.Add(new() { Id = Guid.NewGuid(), JobId = job.Id, PipelineRecordId = record.Id,
+                        SourceRevision = 1, Stage = job.Stage, Operation = job.Operation, IdempotencyKey = $"file-cost:{record.Id:N}",
+                        DueAtUtc = now, CreatedAtUtc = now });
+                }
                 await setup.SaveChangesAsync();
                 setup.ChangeTracker.Clear();
             }
@@ -86,10 +111,12 @@ public sealed partial class PipelineActivitySqlTests
         // One bounded setup read prepares this warm-read qualification. It does not
         // alter the public deadline or retry any asserted/measurement operation.
         var warmTimings = new FileCostCommandTimings();
+        var warmStatistics = new FileLogicalReadTrace();
         var internalWatch = Stopwatch.StartNew();
         using (var setupDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(10)))
         {
-            await using var context = new TestDbContextFactory(_fixture.ConnectionString, warmTimings).CreateDbContext();
+            await using var context = new TestDbContextFactory(_fixture.ConnectionString, warmTimings,
+                warmStatistics, new FileStatisticsDrain(warmTimings.Samples.Add)).CreateDbContext();
             await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Snapshot, setupDeadline.Token);
             try
             {
@@ -100,15 +127,23 @@ public sealed partial class PipelineActivitySqlTests
                 Assert.Equal(30000, Assert.Single(warm.Sources, s => s.Id == root).KnownFiles);
                 await transaction.CommitAsync(setupDeadline.Token);
             }
-            finally { output.WriteLine($"Internal file-cost setup: elapsedMs={internalWatch.Elapsed.TotalMilliseconds:F1}; " + string.Join("; ", warmTimings.Samples)); }
+            finally
+            {
+                output.WriteLine($"Internal file-cost setup: elapsedMs={internalWatch.Elapsed.TotalMilliseconds:F1}; " + string.Join("; ", warmTimings.Samples));
+                output.WriteLine("Internal SQL execution times: " + string.Join("; ", warmStatistics.SqlTimes));
+            }
         }
         var commands = new FileCommandTrace();
         var reads = new FileLogicalReadTrace();
         var commandTimings = new FileCostCommandTimings();
-        var reader = SnapshotReader(commands, reads, new FileStatisticsDrain(), commandTimings);
+        var reader = SnapshotReader(commands, reads, new FileStatisticsDrain(commandTimings.Samples.Add), commandTimings);
         var setupWatch = Stopwatch.StartNew();
         try { _ = await reader.ReadOverviewAsync(default); }
-        finally { output.WriteLine($"Initial public setup overview: elapsedMs={setupWatch.Elapsed.TotalMilliseconds:F1}; " + string.Join("; ", commandTimings.Samples)); }
+        finally
+        {
+            output.WriteLine($"Initial public setup overview: elapsedMs={setupWatch.Elapsed.TotalMilliseconds:F1}; " + string.Join("; ", commandTimings.Samples));
+            output.WriteLine("Initial public SQL execution times: " + string.Join("; ", reads.SqlTimes));
+        }
         _ = await reader.ReadPipelineFilesAsync(new(), root, 0, default);
         commands.Commands.Clear(); reads.Reset(); commandTimings.Samples.Clear();
         var timings = new List<double>();
@@ -135,9 +170,15 @@ public sealed partial class PipelineActivitySqlTests
                 await Task.Delay(25);
             }
         }
-        finally { await stopping.CancelAsync(); await writer; }
+        finally
+        {
+            await stopping.CancelAsync(); await writer;
+            if (timings.Count != 24)
+                output.WriteLine($"Incomplete file-cost qualification: usableReads={timings.Count}/24; " +
+                    string.Join("; ", commandTimings.Samples.TakeLast(70)));
+        }
         var p95 = timings.Order().ElementAt((int)Math.Ceiling(timings.Count * .95) - 1);
-        output.WriteLine($"File-cost qualification: files=30000 currentJobs=1000 confirmedCodeProcessors=1 overlappingWrites={writerCount} usableReads={timings.Count}/24 " +
+        output.WriteLine($"File-cost qualification: files=30000 currentJobs={currentJobCount} confirmedCodeProcessors=1 overlappingWrites={writerCount} usableReads={timings.Count}/24 " +
             $"p95Ms={p95:F1} maxMs={timings.Max():F1} readerCommands={commands.Commands.Count} logicalReads={reads.LogicalReads}; scalar metadata only, shared polling unchanged.");
         Assert.True(writerCount >= 2);
         Assert.True(reads.LogicalReads > 0);
@@ -191,10 +232,17 @@ public sealed partial class PipelineActivitySqlTests
             Samples.Add($"failed at {_watch.Elapsed.TotalMilliseconds:F1}ms duration={eventData.Duration.TotalMilliseconds:F1}ms type={eventData.Exception.GetType().Name}");
             return Task.CompletedTask;
         }
+        public override ValueTask<InterceptionResult> DataReaderClosingAsync(DbCommand command,
+            DataReaderClosingEventData eventData, InterceptionResult result)
+        {
+            Samples.Add($"closing at {_watch.Elapsed.TotalMilliseconds:F1}ms chars={command.CommandText.Length} rows={eventData.ReadCount} readerMs={(DateTimeOffset.UtcNow - eventData.StartTime).TotalMilliseconds:F1}");
+            return ValueTask.FromResult(result);
+        }
     }
     private sealed class FileLogicalReadTrace : DbConnectionInterceptor
     {
         private long _logicalReads;
+        public List<string> SqlTimes { get; } = [];
         public long LogicalReads => Interlocked.Read(ref _logicalReads);
         public void Reset() => Interlocked.Exchange(ref _logicalReads, 0);
         public override async Task ConnectionOpenedAsync(DbConnection connection, ConnectionEndEventData eventData,
@@ -205,22 +253,29 @@ public sealed partial class PipelineActivitySqlTests
             {
                 foreach (Match match in Regex.Matches(message.Message, @"logical reads (\d+)", RegexOptions.CultureInvariant))
                     Interlocked.Add(ref _logicalReads, long.Parse(match.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture));
+                foreach (Match match in Regex.Matches(message.Message, @"CPU time = (\d+) ms,\s*elapsed time = (\d+) ms", RegexOptions.CultureInvariant))
+                    SqlTimes.Add($"cpuMs={match.Groups[1].Value} elapsedMs={match.Groups[2].Value}");
             };
             await using var command = connection.CreateCommand();
-            command.CommandText = "SET STATISTICS IO ON";
+            command.CommandText = "SET STATISTICS IO ON; SET STATISTICS TIME ON";
             await command.ExecuteNonQueryAsync(cancellationToken);
         }
     }
 
-    private sealed class FileStatisticsDrain : DbCommandInterceptor
+    private sealed class FileStatisticsDrain(Action<string>? observe = null) : DbCommandInterceptor
     {
         public override async ValueTask<InterceptionResult> DataReaderClosingAsync(DbCommand command,
             DataReaderClosingEventData eventData, InterceptionResult result)
         {
             // SQL sends IO statistics after the result. EF normally closes its first
             // result without consuming those messages; drain them only for this probe.
-            while (await eventData.DataReader.NextResultAsync())
-                while (await eventData.DataReader.ReadAsync()) { }
+            var watch = Stopwatch.StartNew();
+            try
+            {
+                while (await eventData.DataReader.NextResultAsync())
+                    while (await eventData.DataReader.ReadAsync()) { }
+            }
+            finally { observe?.Invoke($"statistics drain chars={command.CommandText.Length} elapsedMs={watch.Elapsed.TotalMilliseconds:F1}"); }
             return result;
         }
     }

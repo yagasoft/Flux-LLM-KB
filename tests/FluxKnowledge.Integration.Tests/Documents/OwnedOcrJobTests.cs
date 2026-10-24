@@ -22,6 +22,23 @@ public sealed class OwnedOcrJobTests
     }
 
     [Fact]
+    public async Task Caller_interruption_terminates_the_owned_process_and_confirms_cleanup()
+    {
+        using var cancellation = new CancellationTokenSource();
+        var observer = new OcrTestExecutionContext.Observer();
+        var context = OcrTestExecutionContext.Create(observer: new InterruptingObserver(cancellation, observer));
+        var start = GatedPowerShell("Start-Sleep -Seconds 60");
+        var timer = Stopwatch.StartNew();
+        var outcome = await OwnedOcrProcessSupervisor.RunAsync(start, context, cancellation.Token);
+        Assert.Equal("document-ocr-owner-interrupted", outcome.FailureReason);
+        Assert.Null(outcome.ExitCode);
+        Assert.True(outcome.CleanupConfirmed);
+        Assert.NotNull(observer.Process);
+        Assert.Equal(DocumentOcrCleanupKind.OwnedJobEmpty, Assert.IsType<DocumentOcrCleanupProof>(observer.Proof).Kind);
+        Assert.True(timer.Elapsed < TimeSpan.FromSeconds(8));
+    }
+
+    [Fact]
     public async Task Refused_durable_start_never_opens_the_native_gate()
     {
         var observer = new RefusingObserver();
@@ -78,6 +95,22 @@ public sealed class OwnedOcrJobTests
             return ValueTask.FromResult(new DocumentOcrLifecycleResult(proof.Kind == DocumentOcrCleanupKind.VerifiedUnstarted
                 ? DocumentOcrLifecycleDisposition.Applied : DocumentOcrLifecycleDisposition.CleanupUnproven, "synthetic-cleanup"));
         }
+    }
+
+    private sealed class InterruptingObserver(CancellationTokenSource cancellation, OcrTestExecutionContext.Observer inner)
+        : IDocumentOcrExecutionObserver
+    {
+        public async ValueTask<DocumentOcrLifecycleResult> PermitNativeStartAsync(DocumentOcrExecutionLease lease,
+            DocumentOcrProcessIdentity process, CancellationToken cancellationToken)
+        {
+            var result = await inner.PermitNativeStartAsync(lease, process, cancellationToken);
+            cancellation.Cancel();
+            return result;
+        }
+
+        public ValueTask<DocumentOcrLifecycleResult> ConfirmCleanupAsync(DocumentOcrExecutionLease lease,
+            DocumentOcrCleanupProof proof, CancellationToken cancellationToken) =>
+            inner.ConfirmCleanupAsync(lease, proof, cancellationToken);
     }
 
     [Fact]

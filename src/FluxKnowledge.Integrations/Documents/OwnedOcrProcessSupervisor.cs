@@ -21,6 +21,7 @@ internal static class OwnedOcrProcessSupervisor
         using var job = OwnedOcrJob.Create(lease.ExecutionInstanceId);
         using var process = new Process { StartInfo = start };
         using var drainCancellation = new CancellationTokenSource();
+        using var deadline = new CancellationTokenSource();
         Task stdout = Task.CompletedTask, stderr = Task.CompletedTask;
         DocumentOcrProcessIdentity? identity = null;
         var assigned = false;
@@ -43,7 +44,7 @@ internal static class OwnedOcrProcessSupervisor
                 await process.StandardInput.FlushAsync(cancellationToken).ConfigureAwait(false);
                 process.StandardInput.Close();
                 var remaining = lease.DeadlineAtUtc - DateTimeOffset.UtcNow;
-                using var deadline = new CancellationTokenSource(remaining > TimeSpan.Zero ? remaining : TimeSpan.Zero);
+                deadline.CancelAfter(remaining > TimeSpan.Zero ? remaining : TimeSpan.Zero);
                 using var wait = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, deadline.Token);
                 await process.WaitForExitAsync(wait.Token).ConfigureAwait(false);
                 exitCode = process.ExitCode;
@@ -51,7 +52,8 @@ internal static class OwnedOcrProcessSupervisor
         }
         catch (OperationCanceledException)
         {
-            failure = DateTimeOffset.UtcNow >= lease.DeadlineAtUtc ? "document-ocr-runtime-timeout" : "document-ocr-owner-interrupted";
+            failure = deadline.IsCancellationRequested || DateTimeOffset.UtcNow >= lease.DeadlineAtUtc
+                ? "document-ocr-runtime-timeout" : "document-ocr-owner-interrupted";
         }
         catch (Exception error) when (error is Win32Exception or InvalidOperationException or IOException)
         {
@@ -59,6 +61,7 @@ internal static class OwnedOcrProcessSupervisor
         }
         finally
         {
+            deadline.Dispose();
             var cleanup = Stopwatch.StartNew();
             var empty = assigned && await job.TerminateAndConfirmAsync(TimeSpan.FromSeconds(30), CancellationToken.None).ConfigureAwait(false);
             if (!assigned && identity is not null)

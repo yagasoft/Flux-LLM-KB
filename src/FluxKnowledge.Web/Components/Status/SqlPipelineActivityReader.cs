@@ -31,7 +31,10 @@ internal sealed class SqlPipelineActivityReader(IDeploymentValidationHold? hold,
         var admission = capturedAdmission ?? hold?.ReadAdmissionState() ?? new(false, null);
         var gpuEvidence = await SqlGpuActivityReadEvidence.ReadAsync(context, cancellationToken).ConfigureAwait(false);
         if (materializeGpuFacts)
+        {
             await branches.MaterializeGpuFactsAsync(now, gpuEvidence, cancellationToken).ConfigureAwait(false);
+            await branches.MaterializeJobFactsAsync(now, admission, gpuEvidence, cancellationToken).ConfigureAwait(false);
+        }
         var jobRows = await SqlPipelineActivityQuery.Jobs(context, now, admission, branches, gpuEvidence)
             .GroupBy(row => new
             {

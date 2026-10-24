@@ -12,7 +12,13 @@ public static class SqlPipelineActivityQuery
         DeploymentHoldAdmission admission, SqlSelectedBranchReadScope selectedBranches, SqlGpuActivityReadEvidence gpuEvidence)
     {
         selectedBranches.EnsureFor(context);
-        var facts = selectedBranches.HasGpuFacts;
+        selectedBranches.EnsureJobFactsFor(context, now, admission, gpuEvidence);
+        var sql = selectedBranches.HasJobFacts ? MaterializedJobsSql : JobsSql(selectedBranches.HasGpuFacts);
+        return context.Database.SqlQueryRaw<PipelineJobActivityRow>(sql, Parameters(now, admission, gpuEvidence));
+    }
+
+    private static string JobsSql(bool facts)
+    {
         var active = facts ? "COALESCE(gpu.HasActiveGpu, 0) = 1" : $$"""
             EXISTS (SELECT 1 FROM GpuMiniTasks t WHERE t.ParentJobId = j.Id
                 AND t.SourceRevision = j.SourceRevision AND {{OwnedTask("t", false)}})
@@ -73,8 +79,52 @@ public static class SqlPipelineActivityQuery
             {{(facts ? "LEFT JOIN #FluxPipelineGpuFacts gpu ON gpu.ParentJobId = j.Id AND gpu.SourceRevision = j.SourceRevision" : "")}}
             WHERE j.PublicState <> 4
             """;
-        return context.Database.SqlQueryRaw<PipelineJobActivityRow>(sql, Parameters(now, admission, gpuEvidence));
+        return sql;
     }
+
+    private const string JobFactColumns = """
+        Id, PipelineRecordId, SourceRootId, LogicalSourceRevisionId, SourceRevision, CurrentStage,
+        MatchesSelectedFileBranch, Stage, PublicState, IsHistorical, SourceAdmitted, HasWorkerLease,
+        HasActiveGpu, HasReadyGpu, HasUncertainGpu, HasWaitingGpu, HasPendingDispatch, IsDue, Reason
+        """;
+
+    internal static Task PopulateJobFactsAsync(FluxKnowledgeDbContext context, DateTimeOffset now,
+        DeploymentHoldAdmission admission, SqlGpuActivityReadEvidence evidence, CancellationToken cancellationToken)
+    {
+        // Interpolated fragments are fixed SQL definitions; runtime values remain
+        // SqlParameters, as in the original composed job query.
+        var sql = $$"""
+            INSERT INTO #FluxPipelineJobFacts ({{JobFactColumns}})
+            SELECT {{JobFactColumns}} FROM (
+            {{JobsSql(true)}}
+            ) source;
+            """;
+        return context.Database.ExecuteSqlRawAsync(sql, Parameters(now, admission, evidence), cancellationToken);
+    }
+
+    // Only identity/classification is retained. Paths and attempt metadata are read
+    // from the same Snapshot image when a consumer actually projects those fields.
+    private static string MaterializedJobsSql => $$"""
+        SELECT {{string.Join(", ", JobFactColumns.Split(',').Select(column => "facts." + column.Trim()))}},
+          COALESCE((CASE WHEN s.OriginKind IN (2,3) THEN owner.CanonicalPath ELSE s.CanonicalPath END) COLLATE Latin1_General_100_BIN2,
+            CASE WHEN identitySource.SourceKind = N'local file' THEN identitySource.StableKey
+              ELSE N'Local ingress (' + identitySource.SourceKind + N')' END COLLATE Latin1_General_100_BIN2) AS FullPath,
+          CASE WHEN s.OriginKind = 1 THEN owner.CanonicalPath
+            WHEN s.OriginKind IN (2,3) AND owner.OriginKind = 1 THEN archiveOwner.CanonicalPath END AS ArchivePath,
+          (SELECT MAX(currentAttempt.StartedAtUtc) FROM JobAttempts currentAttempt
+            WHERE currentAttempt.JobId = j.Id AND currentAttempt.LeaseGeneration = j.LeaseGeneration
+              AND currentAttempt.LeaseOwner COLLATE Latin1_General_100_BIN2 = j.LeaseOwner COLLATE Latin1_General_100_BIN2
+              AND currentAttempt.CompletedAtUtc IS NULL AND j.LeaseExpiresAtUtc > @nowUtc) AS AttemptStartedAtUtc,
+          COALESCE((SELECT MAX(attempt.StartedAtUtc) FROM JobAttempts attempt WHERE attempt.JobId = j.Id),
+            p.RegisteredAtUtc) AS RecordedAtUtc
+        FROM #FluxPipelineJobFacts facts
+        INNER JOIN Jobs j ON j.Id = facts.Id
+        INNER JOIN PipelineRecords p ON p.Id = j.PipelineRecordId
+        INNER JOIN SourceIdentities identitySource ON identitySource.Id = p.SourceIdentityId
+        LEFT JOIN SourceRevisions s ON s.Id = p.SourceRevisionId
+        LEFT JOIN SourceRevisions owner ON owner.Id = s.ParentSourceRevisionId
+        LEFT JOIN SourceRevisions archiveOwner ON archiveOwner.Id = owner.ParentSourceRevisionId
+        """;
 
     public static IQueryable<GpuTaskActivityRow> GpuTasks(FluxKnowledgeDbContext context, DateTimeOffset now,
         DeploymentHoldAdmission admission, SqlSelectedBranchReadScope selectedBranches, SqlGpuActivityReadEvidence gpuEvidence)

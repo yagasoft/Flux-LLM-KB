@@ -75,6 +75,10 @@ public sealed class SelectedBranchSqlTests(NativeSqlServerFixture fixture) : ICl
             "empty" => [], "foreign" => [foreignBranch], "missing" => [missing],
             "duplicate-valid" => [valid, valid], "valid-and-missing" => [valid, missing], _ => [valid]
         };
+        Assert.Matches("^FluxKnowledge_Phase1Tests_[a-f0-9]{32}$", _fixture.DatabaseName);
+        var enableSnapshotSql = $"ALTER DATABASE [{_fixture.DatabaseName}] SET ALLOW_SNAPSHOT_ISOLATION ON";
+        await context.Database.ExecuteSqlRawAsync(enableSnapshotSql);
+        await using (var snapshot = await context.Database.BeginTransactionAsync(IsolationLevel.Snapshot))
         await using (var branches = await SqlSelectedBranchReadScope.CreateAsync(context, ids, CancellationToken.None))
         {
             var evidence = new SqlGpuActivityReadEvidence("[]", 0);
@@ -92,6 +96,10 @@ public sealed class SelectedBranchSqlTests(NativeSqlServerFixture fixture) : ICl
             var materialized = await SqlPipelineActivityQuery.Jobs(context, now, new(false, null), branches, evidence)
                 .SingleAsync(candidate => candidate.PipelineRecordId == recordId);
             Assert.Equivalent(row, materialized);
+            await branches.MaterializeJobFactsAsync(now, new(false, null), evidence, CancellationToken.None);
+            var jobFacts = await SqlPipelineActivityQuery.Jobs(context, now, new(false, null), branches, evidence)
+                .SingleAsync(candidate => candidate.PipelineRecordId == recordId);
+            Assert.Equivalent(row, jobFacts);
             var gpu = await SqlPipelineActivityQuery.GpuTasks(context, now, new(false, null), branches, evidence)
                 .Where(row => row.PipelineRecordId == recordId).ToArrayAsync();
             Assert.Equal(3, gpu.Length);

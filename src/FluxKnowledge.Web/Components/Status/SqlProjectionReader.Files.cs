@@ -42,6 +42,8 @@ public sealed partial class SqlProjectionReader
                 var admission = validationHold?.ReadAdmissionState() ?? new(false, null);
                 var evidence = await SqlGpuActivityReadEvidence.ReadAsync(context, token).ConfigureAwait(false);
                 await branches.MaterializeGpuFactsAsync(now, evidence, token).ConfigureAwait(false);
+                if (ReadOptions.UseSnapshotIsolation)
+                    await branches.MaterializeJobFactsAsync(now, admission, evidence, token).ConfigureAwait(false);
                 var samples = await PipelineFileSample.ReadAsync(context, sources,
                     SqlPipelineActivityQuery.Jobs(context, now, admission, branches, evidence), names,
                     roots.ToDictionary(r => r.Id, r => ((FluxKnowledge.Domain.Sources.SourceRootState)r.State).ToString()), now, evidence, token).ConfigureAwait(false);
