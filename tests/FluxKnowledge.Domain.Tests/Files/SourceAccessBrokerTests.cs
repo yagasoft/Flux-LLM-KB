@@ -607,12 +607,14 @@ public sealed class SourceAccessBrokerTests
         using var fixture = new Fixture();
         var policy = fixture.Policy() with { PipeName = "FluxKnowledge.SourceAccess." + Guid.NewGuid().ToString("N") };
         var owner = WindowsIdentity.GetCurrent().User!;
+        var repairClient = new WindowsSourceAccessRepairClient(policy.PipeName, owner);
+        var repairRequest = fixture.Request("request.txt");
         using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
         var started = new TaskCompletionSource<long>(TaskCreationOptions.RunContinuationsAsynchronously);
         var client = Task.Run(() =>
         {
             started.SetResult(DateTime.UtcNow.Ticks);
-            return new WindowsSourceAccessRepairClient(policy.PipeName, owner).TryRepair(fixture.Request("request.txt"), cancellation.Token);
+            return repairClient.TryRepair(repairRequest, cancellation.Token);
         });
         var began = await started.Task;
         await Task.Delay(TimeSpan.FromMilliseconds(500), cancellation.Token);

@@ -10,6 +10,21 @@ function Get-OcrLifecycleMigrationContract {
         DatabaseCollation='SQL_Latin1_General_CP1_CI_AS' }
 }
 
+function Get-OcrReviewedMigrationPrefix([string]$Root) {
+    # InitialPhase1.cs has no timestamp in its filename. EF's declared IDs in
+    # the generated metadata are authoritative for it and subsequent migrations.
+    $ids=@(foreach ($file in Get-ChildItem -LiteralPath (Join-Path $Root 'src/FluxKnowledge.Infrastructure.SqlServer/Persistence/Migrations') -Filter '*.Designer.cs') {
+        $attributes=[regex]::Matches([IO.File]::ReadAllText($file.FullName),'(?m)^\s*\[Migration\("(?<id>\d{14}_[A-Za-z0-9_]+)"\)\]')
+        if ($attributes.Count -ne 1) { throw 'document-ocr-maintenance-migration-metadata-ambiguous' }
+        $attributes[0].Groups['id'].Value
+    })
+    $target=(Get-OcrLifecycleMigrationContract).Target
+    if ($ids -cnotcontains $target -or @($ids | Sort-Object -Unique).Count -ne $ids.Count) {
+        throw 'document-ocr-maintenance-migration-metadata-ambiguous'
+    }
+    @($ids | Where-Object { $_ -clt $target } | Sort-Object)
+}
+
 function Write-OcrRecoveryJson([string]$Path,$Value) {
     [void](Assert-OcrPlainLocalPath $Path)
     $temporary=$Path+'.'+[Guid]::NewGuid().ToString('N')+'.tmp'
@@ -89,7 +104,7 @@ SELECT d.BatchId,d.DispatchId,d.CapacitySlotKey,d.ExecutorKey,d.AdmissionGenerat
 FROM dbo.GpuCapacitySlots s JOIN dbo.GpuBatches b ON b.Id=s.ActiveBatchId
 JOIN dbo.GpuExecutorDispatches d ON d.BatchId=b.Id JOIN dbo.GpuMiniTasks t ON t.BatchId=b.Id
 JOIN dbo.DocumentOcrRequests r ON r.MiniTaskId=t.Id
-WHERE b.Id=@batch AND s.State=2 AND t.ExecutionState=1 AND d.State=3 AND b.ItemCount=1
+WHERE b.Id=@batch AND s.State=2 AND t.State=1 AND d.State=3 AND b.ItemCount=1
  AND s.OwnerKey=d.OwnerKey AND b.OwnerKey=d.OwnerKey AND b.AdmissionGeneration=d.AdmissionGeneration
  AND t.AdmissionGeneration=d.AdmissionGeneration AND r.ResultJson IS NOT NULL AND r.ResultDigest IS NOT NULL
  AND d.ExecutorKey=N'paddleocr-vl-local-gpu-0' AND d.CapacitySlotKey=N'paddleocr-vl-local-gpu-0'
@@ -234,8 +249,7 @@ function New-OcrLifecycleRecoveryPlan([string]$Root,[string]$OperationRoot,[Guid
     if ($database.Identity -cne (Get-OcrLifecycleDatabaseState (Get-RepositoryRecoveryCompanionConnectionString)).Identity) {
         throw 'document-ocr-maintenance-companion-database-mismatch'
     }
-    $expected=@(Get-ChildItem -LiteralPath (Join-Path $Root 'src/FluxKnowledge.Infrastructure.SqlServer/Persistence/Migrations') -Filter '*.cs' |
-        Where-Object { $_.BaseName -cmatch '^\d{14}_[A-Za-z0-9]+$' -and $_.BaseName -clt (Get-OcrLifecycleMigrationContract).Target } | Sort-Object BaseName | ForEach-Object BaseName)
+    $expected=@(Get-OcrReviewedMigrationPrefix $Root)
     if (($database.History -join '|') -cne ($expected -join '|')) { throw 'document-ocr-maintenance-unreviewed-migration-prefix' }
     if ((Get-FileHash -LiteralPath (Join-Path $PSScriptRoot 'ocr-lifecycle-schema-up.sql')).Hash -cne (Get-OcrLifecycleMigrationContract).ScriptSha256) {
         throw 'document-ocr-maintenance-migration-script-changed'
