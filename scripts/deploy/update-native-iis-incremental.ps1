@@ -15,6 +15,13 @@ param(
     [switch]$ApplyCorpusChunkFullTextMigration,
     [switch]$ApplyCodeDisclosureProofMigration,
     [switch]$ApplyRepositoryRecoveryAuthorityMigration,
+    [switch]$ApplyOcrLifecycleRecovery,
+    [string]$OcrRecoveryOperationRoot='',
+    [string]$OcrDesktopClassificationsPath='',
+    [string]$OcrRecoveryPlanPath='',
+    [string]$ExpectedOcrRecoveryPlanSha256='',
+    [Guid]$OcrRecoveryBatchId=[Guid]::Empty,
+    [switch]$ResumeOcrLifecycleRecovery,
     [string]$ReconcileRepositoryRecoveryRelease = '',
     [string]$ResumeRepositoryRecoveryPreparedRelease = '',
     [string]$ResumeRepositoryRecoveryActivationRelease = '',
@@ -526,7 +533,7 @@ function Get-SourceDeletionCleanupCandidateDatabase {
     if ($MigrationMode) { Assert-SourceDeletionCleanupMigrationBaseline $database }
     else {
         $projectionContract=Get-SegmentedIndexMigrationContract
-        if(@($database.History)[-1] -ceq $projectionContract.Migrations[-1]) {
+        if(@($database.History)[-1] -cin @($projectionContract.Migrations[-1],$projectionContract.CompatibleApplicationSuccessor)) {
             if(!$database.SchemaValid){throw 'Source deletion cleanup schema is incomplete beneath the index projection migrations.'}
             $projection=Get-SegmentedIndexDatabaseState -ConnectionString (Get-DeploymentSqlConnectionString)
             Assert-SegmentedIndexApplicationSchema $projection
@@ -2001,6 +2008,11 @@ function Invoke-RepositoryRecoveryIisUpdate {
 }
 
 function Assert-IncrementalIisPreflight {
+    $ocrResume=$null
+    if ($ApplyOcrLifecycleRecovery -and $ResumeOcrLifecycleRecovery) {
+        $ocrResume=Assert-OcrRecoveryResumePreflight $OcrRecoveryPlanPath $ExpectedOcrRecoveryPlanSha256
+    }
+    $ocrPartial=$null -ne $ocrResume -and [bool]$ocrResume.AllowPartialPayloads
     $site = Get-Website -Name $SiteName -ErrorAction Stop
     Assert-CanonicalPath `
         -RequestedPath $site.physicalPath `
@@ -2019,6 +2031,7 @@ function Assert-IncrementalIisPreflight {
     elseif ($RecoverStoppedPool) {
         Assert-StoppedPoolRecoveryBaseline
     }
+    elseif ($null -ne $ocrResume -and !$ocrResume.Completed) { }
     elseif (!$ApplySegmentedIndexProjection -and (Get-WebAppPoolState -Name $SiteName).Value -ne "Started" -and [string]::IsNullOrWhiteSpace($ResumeHybridRebuildRelease) -and
         [string]::IsNullOrWhiteSpace($ResumeHybridPatchRelease)) {
         throw "The fixed FluxKnowledge IIS application pool must be started before an incremental update."
@@ -2028,7 +2041,7 @@ function Assert-IncrementalIisPreflight {
         throw "The fixed FluxKnowledge IIS site must have exactly one http/127.0.0.1:5137 binding."
     }
     if (-not (Test-Path -LiteralPath $CanonicalDeployRoot -PathType Container) -and [string]::IsNullOrWhiteSpace($ResumeHybridRebuildRelease) -and
-        [string]::IsNullOrWhiteSpace($ResumeHybridPatchRelease)) {
+        [string]::IsNullOrWhiteSpace($ResumeHybridPatchRelease) -and !$ocrPartial) {
         throw "The canonical application payload root is missing."
     }
     if (-not (Test-Path -LiteralPath $CanonicalRecoveryRoot -PathType Container)) {
@@ -2040,7 +2053,7 @@ function Assert-IncrementalIisPreflight {
     Assert-NotReparsePoint `
         -Path $CanonicalRecoveryRoot `
         -Message "The canonical recovery root cannot be a reparse point."
-    if ([string]::IsNullOrWhiteSpace($ResumeHybridRebuildRelease) -and [string]::IsNullOrWhiteSpace($ResumeHybridPatchRelease)) {
+    if ([string]::IsNullOrWhiteSpace($ResumeHybridRebuildRelease) -and [string]::IsNullOrWhiteSpace($ResumeHybridPatchRelease) -and !$ocrPartial) {
         Test-ApplicationPayload -Path $CanonicalDeployRoot
     }
 }
@@ -2210,6 +2223,33 @@ Import-Module (Join-Path $PSScriptRoot 'incremental-repository-recovery-release.
 $loopbackOrigin = Get-FixedLoopbackOrigin -SiteUrl $SiteUrl
 if ($loopbackOrigin.Origin -cne "http://127.0.0.1:5137") {
     throw "Incremental IIS deployment requires the fixed http://127.0.0.1:5137 origin."
+}
+
+if ($ApplyOcrLifecycleRecovery) {
+    $allowed=@('SourceRoot','SiteName','SiteUrl','DeployRoot','ReadinessTimeoutSeconds','PlanOnly','Apply','ApplyOcrLifecycleRecovery',
+        'OcrRecoveryOperationRoot','OcrDesktopClassificationsPath','OcrRecoveryPlanPath','ExpectedOcrRecoveryPlanSha256','OcrRecoveryBatchId','ResumeOcrLifecycleRecovery')
+    if (@($PSBoundParameters.Keys | Where-Object { $_ -cnotin $allowed }).Count -or (!$PlanOnly -and !$Apply) -or ($PlanOnly -and $Apply)) {
+        throw 'document-ocr-maintenance-incompatible-mode'
+    }
+    Import-Module WebAdministration -ErrorAction Stop
+    . (Join-Path $PSScriptRoot 'incremental-ocr-lifecycle-recovery.ps1')
+    if ($PlanOnly) {
+        Assert-IncrementalIisPreflight
+        if (!$OcrRecoveryOperationRoot -or !$OcrDesktopClassificationsPath -or $OcrRecoveryBatchId -eq [Guid]::Empty -or $OcrRecoveryPlanPath -or $ExpectedOcrRecoveryPlanSha256 -or $ResumeOcrLifecycleRecovery) {
+            throw 'document-ocr-maintenance-plan-inputs-invalid'
+        }
+        $root=if ($SourceRoot) {(Resolve-Path -LiteralPath $SourceRoot).Path}else{Split-Path -Parent (Split-Path -Parent $PSScriptRoot)}
+        New-OcrLifecycleRecoveryPlan $root $OcrRecoveryOperationRoot $OcrRecoveryBatchId $OcrDesktopClassificationsPath | ConvertTo-Json -Depth 8
+    } else {
+        if (!$OcrRecoveryPlanPath -or !$ExpectedOcrRecoveryPlanSha256 -or $OcrRecoveryOperationRoot -or $OcrDesktopClassificationsPath -or $OcrRecoveryBatchId -ne [Guid]::Empty) {
+            throw 'document-ocr-maintenance-apply-requires-reviewed-plan'
+        }
+        Invoke-OcrLifecycleRecoveryUpdate $OcrRecoveryPlanPath $ExpectedOcrRecoveryPlanSha256 -Resume:$ResumeOcrLifecycleRecovery | ConvertTo-Json -Depth 8
+    }
+    exit 0
+}
+if ($OcrRecoveryOperationRoot -or $OcrDesktopClassificationsPath -or $OcrRecoveryPlanPath -or $ExpectedOcrRecoveryPlanSha256 -or $OcrRecoveryBatchId -ne [Guid]::Empty -or $ResumeOcrLifecycleRecovery) {
+    throw 'document-ocr-maintenance-explicit-mode-required'
 }
 
 if($ApplySegmentedIndexProjection) {

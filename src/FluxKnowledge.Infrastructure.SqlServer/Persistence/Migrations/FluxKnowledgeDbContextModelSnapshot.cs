@@ -514,6 +514,9 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Migrations
                     b.Property<Guid>("MiniTaskId")
                         .HasColumnType("uniqueidentifier");
 
+                    b.Property<int?>("CleanupProofKind")
+                        .HasColumnType("int");
+
                     b.Property<string>("ContentSha256")
                         .IsRequired()
                         .HasMaxLength(64)
@@ -525,17 +528,68 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Migrations
                     b.Property<DateTimeOffset>("CreatedAtUtc")
                         .HasColumnType("datetimeoffset(7)");
 
+                    b.Property<long?>("ExecutionAdmissionGeneration")
+                        .HasColumnType("bigint");
+
+                    b.Property<Guid?>("ExecutionBatchId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTimeOffset?>("ExecutionClaimedAtUtc")
+                        .HasColumnType("datetimeoffset");
+
+                    b.Property<DateTimeOffset?>("ExecutionDeadlineAtUtc")
+                        .HasColumnType("datetimeoffset");
+
+                    b.Property<Guid?>("ExecutionDispatchId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid?>("ExecutionInstanceId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("ExecutionMachineFingerprint")
+                        .HasMaxLength(64)
+                        .IsUnicode(false)
+                        .HasColumnType("char(64)");
+
+                    b.Property<int>("ExecutionPhase")
+                        .HasColumnType("int");
+
                     b.Property<string>("ModelRuntimeKey")
                         .IsRequired()
                         .HasMaxLength(256)
                         .HasColumnType("nvarchar(256)")
                         .UseCollation("Latin1_General_100_BIN2");
 
+                    b.Property<DateTimeOffset?>("NativeCleanupConfirmedAtUtc")
+                        .HasColumnType("datetimeoffset");
+
+                    b.Property<int?>("NativeProcessId")
+                        .HasColumnType("int");
+
+                    b.Property<DateTimeOffset?>("NativeProcessStartedAtUtc")
+                        .HasColumnType("datetimeoffset");
+
                     b.Property<Guid>("ParentJobId")
                         .HasColumnType("uniqueidentifier");
 
+                    b.Property<string>("PhysicalCleanupEvidenceSha256")
+                        .HasMaxLength(64)
+                        .IsUnicode(false)
+                        .HasColumnType("char(64)");
+
                     b.Property<Guid>("PipelineRecordId")
                         .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("RecoveryReason")
+                        .HasMaxLength(128)
+                        .HasColumnType("nvarchar(128)")
+                        .UseCollation("Latin1_General_100_BIN2");
+
+                    b.Property<DateTimeOffset?>("RecoveryStartedAtUtc")
+                        .HasColumnType("datetimeoffset");
+
+                    b.Property<DateTimeOffset?>("RecoveryUpdatedAtUtc")
+                        .HasColumnType("datetimeoffset");
 
                     b.Property<string>("RequestedPageIndexesJson")
                         .IsRequired()
@@ -569,6 +623,15 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Migrations
                     b.Property<int>("State")
                         .HasColumnType("int");
 
+                    b.Property<Guid?>("SupervisorInstanceId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<int?>("SupervisorProcessId")
+                        .HasColumnType("int");
+
+                    b.Property<DateTimeOffset?>("SupervisorProcessStartedAtUtc")
+                        .HasColumnType("datetimeoffset");
+
                     b.Property<DateTimeOffset>("UpdatedAtUtc")
                         .HasColumnType("datetimeoffset(7)");
 
@@ -580,9 +643,19 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Migrations
 
                     b.ToTable("DocumentOcrRequests", null, t =>
                         {
+                            t.HasCheckConstraint("CK_DocumentOcrRequests_CleanupKind", "[CleanupProofKind] IS NULL OR [CleanupProofKind] BETWEEN 0 AND 2");
+
+                            t.HasCheckConstraint("CK_DocumentOcrRequests_CleanupProof", "([NativeCleanupConfirmedAtUtc] IS NULL AND [CleanupProofKind] IS NULL) OR ([NativeCleanupConfirmedAtUtc] IS NOT NULL AND [CleanupProofKind] IS NOT NULL AND [ExecutionInstanceId] IS NOT NULL)");
+
                             t.HasCheckConstraint("CK_DocumentOcrRequests_ContentSha256", "LEN([ContentSha256]) = 64 AND [ContentSha256] COLLATE Latin1_General_100_BIN2 NOT LIKE '%[^0-9a-f]%'");
 
+                            t.HasCheckConstraint("CK_DocumentOcrRequests_ExecutionIdentity", "[ExecutionInstanceId] IS NULL OR ([ExecutionDispatchId] IS NOT NULL AND [ExecutionBatchId] IS NOT NULL AND [ExecutionAdmissionGeneration] IS NOT NULL AND [ExecutionAdmissionGeneration] > 0 AND [SupervisorInstanceId] IS NOT NULL AND [SupervisorProcessId] IS NOT NULL AND [SupervisorProcessId] > 0 AND [SupervisorProcessStartedAtUtc] IS NOT NULL AND [ExecutionMachineFingerprint] IS NOT NULL AND [ExecutionClaimedAtUtc] IS NOT NULL AND [ExecutionDeadlineAtUtc] IS NOT NULL AND [ExecutionDeadlineAtUtc] > [ExecutionClaimedAtUtc])");
+
+                            t.HasCheckConstraint("CK_DocumentOcrRequests_ExecutionPhase", "[ExecutionPhase] BETWEEN 0 AND 5");
+
                             t.HasCheckConstraint("CK_DocumentOcrRequests_ModelRuntimeKey_NoTrailingWhitespace", "DATALENGTH([ModelRuntimeKey]) > 0 AND UNICODE(RIGHT([ModelRuntimeKey], 1)) NOT IN (9, 10, 11, 12, 13, 32, 133, 160, 5760, 8192, 8193, 8194, 8195, 8196, 8197, 8198, 8199, 8200, 8201, 8202, 8232, 8233, 8239, 8287, 12288)");
+
+                            t.HasCheckConstraint("CK_DocumentOcrRequests_NativeIdentity", "([NativeProcessId] IS NULL AND [NativeProcessStartedAtUtc] IS NULL) OR ([NativeProcessId] IS NOT NULL AND [NativeProcessId] > 0 AND [NativeProcessStartedAtUtc] IS NOT NULL AND [ExecutionInstanceId] IS NOT NULL)");
 
                             t.HasCheckConstraint("CK_DocumentOcrRequests_RequestedPages_Bounded", "DATALENGTH([RequestedPageIndexesJson]) > 0 AND DATALENGTH([RequestedPageIndexesJson]) <= 8192");
 

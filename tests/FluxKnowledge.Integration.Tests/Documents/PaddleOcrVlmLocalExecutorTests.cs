@@ -45,7 +45,7 @@ public sealed class PaddleOcrVlmLocalExecutorTests : IDisposable
             LiveRootLayout.CreateForIsolatedTests(_root),
             runner);
 
-        var result = await executor.ExecuteAsync(CreateRetained(), [0], CancellationToken.None);
+        var result = await executor.ExecuteAsync(CreateRetained(), [0], OcrTestExecutionContext.Create(), CancellationToken.None);
 
         Assert.False(result.Succeeded);
         Assert.Equal("document-ocr-model-artifact-missing", result.ReasonCode);
@@ -63,7 +63,7 @@ public sealed class PaddleOcrVlmLocalExecutorTests : IDisposable
         Directory.CreateDirectory(layout.TempRoot);
         var executor = new PaddleOcrVlmLocalExecutor(rasterizer, gate, layout, runner);
 
-        var result = await executor.ExecuteAsync(CreateRetained(), [2], CancellationToken.None);
+        var result = await executor.ExecuteAsync(CreateRetained(), [2], OcrTestExecutionContext.Create(), CancellationToken.None);
 
         Assert.True(result.Succeeded, result.ReasonCode);
         var page = Assert.Single(result.Pages);
@@ -272,7 +272,7 @@ public sealed class PaddleOcrVlmLocalExecutorTests : IDisposable
             var result = await executor.ExecuteAsync(
                 CreateRetained(CreateVisibleTextPdf("Flux OCR 2026")),
                 [0],
-                CancellationToken.None);
+                OcrTestExecutionContext.Create(), CancellationToken.None);
 
             Assert.True(result.Succeeded, result.ReasonCode);
             var text = string.Join('\n', result.Pages.SelectMany(static page => page.Blocks).Select(static block => block.Text));
@@ -314,7 +314,7 @@ public sealed class PaddleOcrVlmLocalExecutorTests : IDisposable
             using var image = SKImage.FromBitmap(bitmap);
             using var encoded = image.Encode(SKEncodedImageFormat.Png, 100);
 
-            var result = await executor.ExecuteAsync(CreateRetained(encoded.ToArray()), [0], CancellationToken.None);
+            var result = await executor.ExecuteAsync(CreateRetained(encoded.ToArray()), [0], OcrTestExecutionContext.Create(), CancellationToken.None);
 
             Assert.True(result.Succeeded, result.ReasonCode);
             var text = string.Join('\n', result.Pages.SelectMany(static page => page.Blocks).Select(static block => block.Text));
@@ -393,7 +393,7 @@ public sealed class PaddleOcrVlmLocalExecutorTests : IDisposable
                 gate,
                 layout);
 
-            var result = await executor.ExecuteAsync(retained, [1], CancellationToken.None);
+            var result = await executor.ExecuteAsync(retained, [1], OcrTestExecutionContext.Create(), CancellationToken.None);
 
             Assert.True(result.Succeeded, result.ReasonCode);
             var pageResult = Assert.Single(result.Pages);

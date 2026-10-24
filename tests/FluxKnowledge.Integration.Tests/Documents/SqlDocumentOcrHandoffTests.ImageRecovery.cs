@@ -679,13 +679,12 @@ public sealed partial class SqlDocumentOcrHandoffTests
             var handoff = await ocr.HandoffAsync(new(claimed, new(childId), hash, [0]), CancellationToken.None);
             miniTask = handoff.MiniTaskId!.Value;
             handle = await AdmitDocumentOcrTaskAsync(factory);
-            var stored = await ocr.StoreResultAsync(handle, miniTask, new(false, failureReason, []), CancellationToken.None);
-            var lifecycle = CreateLifecycle(factory);
-            Assert.True((await lifecycle.AcknowledgeAsync(new(Guid.NewGuid(), handle), CancellationToken.None)).Accepted);
-            Assert.True((await lifecycle.RecordReceiptAsync(new(Guid.NewGuid(), handle, miniTask, GpuMiniTaskBoundaryDisposition.Completed,
-                stored.ResultDigest, GpuExecutorEvidenceClass.TaskOutcomeConfirmed), CancellationToken.None)).Accepted);
-            Assert.True((await lifecycle.HandleCallbackAsync(Guid.NewGuid(), new(handle, GpuBatchCallbackKind.Completed,
-                [new(miniTask, GpuMiniTaskBoundaryDisposition.Completed)], true), CancellationToken.None)).Accepted);
+            var ownership = await ocr.TryClaimExecutionAsync(handle, miniTask, Guid.NewGuid(), SyntheticSupervisor(), CancellationToken.None);
+            var lease = Assert.IsType<DocumentOcrExecutionLease>(ownership.Lease);
+            var stored = await ocr.StoreResultAsync(lease, new(false, failureReason, []), CancellationToken.None);
+            Assert.True((await ocr.ConfirmCleanupAsync(lease, new(lease.ExecutionInstanceId,
+                DocumentOcrCleanupKind.VerifiedUnstarted, null, DateTimeOffset.UtcNow), CancellationToken.None)).Accepted);
+            Assert.True((await ocr.SettleCompletionAsync(handle, miniTask, stored.ResultDigest, CancellationToken.None)).Accepted);
             Assert.True(await ocr.RequeueCompletedAsync(handle, miniTask, CancellationToken.None));
         }
         await using (var db = await factory.CreateDbContextAsync())

@@ -147,30 +147,13 @@ public sealed partial class SqlDocumentOcrHandoffTests(NativeSqlServerFixture fi
             "document-ocr-complete",
             [new DocumentOcrPageResult(0, 0, [new DocumentOcrBlock("text", 1, 2, 3, 4, "scanned text")])]);
 
-        var stored = await store.StoreResultAsync(handle, miniTaskId, result, CancellationToken.None);
-
+        var ownership = await store.TryClaimExecutionAsync(handle, miniTaskId, Guid.NewGuid(), SyntheticSupervisor(), CancellationToken.None);
+        var lease = Assert.IsType<DocumentOcrExecutionLease>(ownership.Lease);
+        var stored = await store.StoreResultAsync(lease, result, CancellationToken.None);
         Assert.True(stored.Stored);
-        var lifecycle = CreateLifecycle(factory);
-        Assert.True((await lifecycle.AcknowledgeAsync(
-            new GpuExecutorAcknowledgement(Guid.NewGuid(), handle), CancellationToken.None)).Accepted);
-        Assert.True((await lifecycle.RecordReceiptAsync(
-            new GpuExecutorResultReceipt(
-                Guid.NewGuid(),
-                handle,
-                miniTaskId,
-                GpuMiniTaskBoundaryDisposition.Completed,
-                stored.ResultDigest,
-                GpuExecutorEvidenceClass.TaskOutcomeConfirmed),
-            CancellationToken.None)).Accepted);
-        Assert.True((await lifecycle.HandleCallbackAsync(
-            Guid.NewGuid(),
-            new GpuBatchCallback(
-                handle,
-                GpuBatchCallbackKind.Completed,
-                [new GpuMiniTaskBoundaryOutcome(miniTaskId, GpuMiniTaskBoundaryDisposition.Completed)],
-                CapacityReleased: true),
-            CancellationToken.None)).Accepted);
-
+        Assert.True((await store.ConfirmCleanupAsync(lease, new(lease.ExecutionInstanceId,
+            DocumentOcrCleanupKind.VerifiedUnstarted, null, DateTimeOffset.UtcNow), CancellationToken.None)).Accepted);
+        Assert.True((await store.SettleCompletionAsync(handle, miniTaskId, stored.ResultDigest, CancellationToken.None)).Accepted);
         Assert.True(await store.RequeueCompletedAsync(handle, miniTaskId, CancellationToken.None));
 
         var completed = await store.ReadCompletedAsync(claim, contentHash, CancellationToken.None);
@@ -232,7 +215,7 @@ public sealed partial class SqlDocumentOcrHandoffTests(NativeSqlServerFixture fi
     }
 
     [NativeSqlServerFact]
-    public async Task Cancellation_of_active_local_ocr_releases_only_its_exact_batch_without_requeueing_document_work()
+    public async Task Cancellation_of_active_local_ocr_records_a_known_failure_and_requeues_only_its_original_extract()
     {
         var (factory, claim, retainedSourceRevisionId, contentHash) = await CreateClaimedPdfAsync();
         var store = CreateStore(factory);
@@ -262,15 +245,19 @@ public sealed partial class SqlDocumentOcrHandoffTests(NativeSqlServerFixture fi
         Assert.True(provider.GetRequiredService<PaddleOcrVlmExecutionRegistry>().RequestCancellation(miniTaskId));
         await delivery.WaitAsync(TimeSpan.FromSeconds(10));
 
-        Assert.Equal(0, signal.Notifications);
-        Assert.Null(await store.ReadCompletedAsync(claim, contentHash, CancellationToken.None));
+        Assert.Equal(1, signal.Notifications);
+        var interrupted = await store.ReadCompletedAsync(claim, contentHash, CancellationToken.None);
+        Assert.NotNull(interrupted);
+        Assert.False(interrupted.Succeeded);
+        Assert.Equal("document-ocr-owner-interrupted", interrupted.ReasonCode);
         await using var verification = await factory.CreateDbContextAsync();
-        Assert.Equal((int)DocumentOcrRequestState.Pending, await verification.DocumentOcrRequests
+        Assert.Equal((int)DocumentOcrRequestState.Requeued, await verification.DocumentOcrRequests
             .Where(value => value.MiniTaskId == miniTaskId).Select(value => value.State).SingleAsync());
-        Assert.Equal((int)GpuMiniTaskExecutionState.OutcomeUncertain, await verification.GpuMiniTasks
+        Assert.Equal((int)GpuMiniTaskExecutionState.Completed, await verification.GpuMiniTasks
             .Where(value => value.Id == miniTaskId).Select(value => value.ExecutionState).SingleAsync());
-        Assert.Equal((int)PublicJobState.GpuProcessing, await verification.Jobs
+        Assert.Equal((int)PublicJobState.WorkerQueued, await verification.Jobs
             .Where(value => value.Id == claim.JobId.Value).Select(value => value.PublicState).SingleAsync());
+        Assert.NotNull(await verification.DocumentOcrRequests.Select(r => r.NativeCleanupConfirmedAtUtc).SingleAsync());
     }
 
     [NativeSqlServerFact]
@@ -322,7 +309,7 @@ public sealed partial class SqlDocumentOcrHandoffTests(NativeSqlServerFixture fi
     }
 
     [NativeSqlServerFact]
-    public async Task Application_stopping_cancels_active_local_ocr_without_publishing_a_result()
+    public async Task Application_stopping_persists_an_interrupted_outcome_after_cleanup_without_publication()
     {
         var (factory, claim, retainedSourceRevisionId, contentHash) = await CreateClaimedPdfAsync();
         var store = CreateStore(factory);
@@ -350,12 +337,16 @@ public sealed partial class SqlDocumentOcrHandoffTests(NativeSqlServerFixture fi
             await AwaitIgnoringFailureAsync(delivery);
         }
 
-        Assert.Null(await store.ReadCompletedAsync(claim, contentHash, CancellationToken.None));
+        var interrupted = await store.ReadCompletedAsync(claim, contentHash, CancellationToken.None);
+        Assert.NotNull(interrupted);
+        Assert.False(interrupted.Succeeded);
+        Assert.Equal("document-ocr-owner-interrupted", interrupted.ReasonCode);
         await using var verification = await factory.CreateDbContextAsync();
-        Assert.Equal((int)DocumentOcrRequestState.Pending, await verification.DocumentOcrRequests
+        Assert.Equal((int)DocumentOcrRequestState.Requeued, await verification.DocumentOcrRequests
             .Where(value => value.MiniTaskId == miniTaskId).Select(value => value.State).SingleAsync());
-        Assert.Equal((int)GpuMiniTaskExecutionState.OutcomeUncertain, await verification.GpuMiniTasks
+        Assert.Equal((int)GpuMiniTaskExecutionState.Completed, await verification.GpuMiniTasks
             .Where(value => value.Id == miniTaskId).Select(value => value.ExecutionState).SingleAsync());
+        Assert.Equal((int)PipelineStage.Extract, await verification.PipelineRecords.Select(r => r.CurrentStage).SingleAsync());
     }
 
     [NativeSqlServerFact]
@@ -442,8 +433,9 @@ public sealed partial class SqlDocumentOcrHandoffTests(NativeSqlServerFixture fi
         var store = CreateStore(factory);
         var handoff = await store.HandoffAsync(new(claim, revisionId, hash, [0]), CancellationToken.None);
         var handle = await AdmitDocumentOcrTaskAsync(factory);
-        await CreateLifecycle(factory).AcknowledgeAsync(new(Guid.NewGuid(), handle), CancellationToken.None);
-        await store.StoreResultAsync(handle, handoff.MiniTaskId!.Value,
+        var owned = await store.TryClaimExecutionAsync(handle, handoff.MiniTaskId!.Value, Guid.NewGuid(), SyntheticSupervisor(), CancellationToken.None);
+        var lease = Assert.IsType<DocumentOcrExecutionLease>(owned.Lease);
+        await store.StoreResultAsync(lease,
             new(true, "document-ocr-complete", [new(0, 0, [new("text", 1, 2, 3, 4, "Retained OCR text")])]),
             CancellationToken.None);
         await using var context = await factory.CreateDbContextAsync();
@@ -454,6 +446,8 @@ public sealed partial class SqlDocumentOcrHandoffTests(NativeSqlServerFixture fi
         var signal = new RecordingOutboxWakeSignal();
         await using var provider = CreateLocalExecutorProvider(
             factory, revisionId, hash, executor, signal, new TestHostApplicationLifetime());
+        Assert.True((await store.ConfirmCleanupAsync(lease, new(lease.ExecutionInstanceId,
+            DocumentOcrCleanupKind.VerifiedUnstarted, null, DateTimeOffset.UtcNow), CancellationToken.None)).Accepted);
         Assert.NotNull(await store.ReadPendingCompletionAsync(handle, CancellationToken.None));
         await provider.GetRequiredService<PaddleOcrVlmCompletionCoordinator>().RecoverAsync(CancellationToken.None);
         Assert.Equal((int)GpuCapacitySlotState.Available,
@@ -480,15 +474,18 @@ public sealed partial class SqlDocumentOcrHandoffTests(NativeSqlServerFixture fi
         string contentHash,
         IDocumentOcrExecutor executor,
         IOutboxWakeSignal signal,
-        IHostApplicationLifetime applicationLifetime)
+        IHostApplicationLifetime applicationLifetime,
+        IDocumentOcrProcessRecovery? processRecovery = null,
+        Func<SqlDocumentOcrStore>? storeFactory = null)
     {
         var services = new ServiceCollection();
-        services.AddScoped(_ => new SqlDocumentOcrStore(factory, CreateCoordinator(factory)));
+        services.AddScoped(_ => storeFactory?.Invoke() ?? new SqlDocumentOcrStore(factory, CreateCoordinator(factory)));
         services.AddScoped<IGpuExecutorLifecycleSink>(_ => CreateLifecycle(factory));
         services.AddScoped<IRetainedSourceReader>(_ => new FixedRetainedSourceReader(retainedSourceRevisionId, contentHash));
         services.AddSingleton(executor);
         services.AddSingleton(signal);
         services.AddSingleton(applicationLifetime);
+        if (processRecovery is not null) services.AddSingleton(processRecovery);
         services.AddSingleton<PaddleOcrVlmCompletionCoordinator>();
         services.AddSingleton<PaddleOcrVlmExecutionRegistry>();
         services.AddSingleton<PaddleOcrVlmCancellationCoordinator>();
@@ -709,7 +706,7 @@ public sealed partial class SqlDocumentOcrHandoffTests(NativeSqlServerFixture fi
         public ValueTask<DocumentOcrExecutionResult> ExecuteAsync(
             RetainedSourceBytes retained,
             IReadOnlyList<int> pageIndexes,
-            CancellationToken cancellationToken)
+            DocumentOcrExecutionContext execution, CancellationToken cancellationToken)
         {
             Calls.Add((retained.SourceRevisionId, pageIndexes.ToArray()));
             return ValueTask.FromResult(result);
@@ -723,7 +720,7 @@ public sealed partial class SqlDocumentOcrHandoffTests(NativeSqlServerFixture fi
         public async ValueTask<DocumentOcrExecutionResult> ExecuteAsync(
             RetainedSourceBytes retained,
             IReadOnlyList<int> pageIndexes,
-            CancellationToken cancellationToken)
+            DocumentOcrExecutionContext execution, CancellationToken cancellationToken)
         {
             Started.TrySetResult();
             await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
@@ -745,7 +742,7 @@ public sealed partial class SqlDocumentOcrHandoffTests(NativeSqlServerFixture fi
         public async ValueTask<DocumentOcrExecutionResult> ExecuteAsync(
             RetainedSourceBytes retained,
             IReadOnlyList<int> pageIndexes,
-            CancellationToken cancellationToken)
+            DocumentOcrExecutionContext execution, CancellationToken cancellationToken)
         {
             if (Interlocked.Increment(ref _calls) == 1)
             {

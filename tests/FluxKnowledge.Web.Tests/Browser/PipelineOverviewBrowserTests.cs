@@ -14,6 +14,47 @@ namespace FluxKnowledge.Web.Tests.Browser;
 public sealed class PipelineOverviewBrowserTests
 {
     [BrowserFact]
+    public async Task Blocked_OCR_owner_stays_visible_after_source_filter_and_refresh_at_desktop_and_narrow_widths()
+    {
+        var reader = new ControlledOverviewReader { OcrOwner = new(Guid.NewGuid(), null, "PaddleOCR-VL", "Blocked", 5400, null,
+            "document-ocr-legacy-owner-unproven", "Operator verification of native cleanup is required before GPU work can resume.") };
+        var root = BrowserTestRoots.Create($"FluxOcrOwner_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            await using var host = await PhaseOneVerticalSliceBrowserTests.BrowserHost.StartAsync(
+                "Server=unreachable.invalid;Database=unreachable;Integrated Security=true;Encrypt=true;TrustServerCertificate=true",
+                root, Path.Combine(root, "indexes"), services =>
+                {
+                    services.RemoveAll<IHostedService>(); services.RemoveAll<IProjectionReader>();
+                    services.AddSingleton<IProjectionReader>(reader);
+                });
+            using var playwright = await Playwright.CreateAsync();
+            await using var browser = await playwright.Chromium.LaunchAsync(BrowserLaunchOptions.Create());
+            foreach (var width in new[] { 1440, 390 })
+            {
+                await using var page = await browser.NewPageAsync(new() { ViewportSize = new() { Width = width, Height = 1000 } });
+                var errors = new List<string>();
+                page.PageError += (_, message) => errors.Add(message);
+                page.Console += (_, message) => { if (message.Type is "error" or "warning") errors.Add(message.Text); };
+                await page.GotoAsync(host.BaseAddress.AbsoluteUri, new() { WaitUntil = WaitUntilState.NetworkIdle });
+                Assert.Equal(host.BaseAddress.AbsoluteUri, page.Url);
+                Assert.Contains("Flux Knowledge", await page.TitleAsync(), StringComparison.Ordinal);
+                var owner = page.GetByRole(AriaRole.Complementary, new() { Name = "GPU capacity owner" });
+                await Assertions.Expect(owner).ToContainTextAsync("5,400 minutes");
+                await page.GetByLabel("Source scope").SelectOptionAsync(ControlledOverviewReader.SecondRoot.ToString());
+                await page.GetByRole(AriaRole.Button, new() { Name = "Refresh status" }).ClickAsync();
+                await Assertions.Expect(owner).ToContainTextAsync(reader.OcrOwner.NextAction);
+                await owner.GetByText("Capacity diagnostics", new() { Exact = true }).ClickAsync();
+                await Assertions.Expect(owner).ToContainTextAsync(reader.OcrOwner.BatchId.ToString());
+                Assert.True(await page.EvaluateAsync<bool>("document.documentElement.scrollWidth <= window.innerWidth"));
+                Assert.Empty(errors);
+                await ScreenshotAsync(page, $"ocr-owner-{width}.png");
+            }
+        }
+        finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
+    }
+    [BrowserFact]
     public async Task Refresh_notices_do_not_move_the_timestamp_or_activity_during_failure_and_recovery()
     {
         var reader = new ControlledOverviewReader();
@@ -258,6 +299,7 @@ public sealed class PipelineOverviewBrowserTests
         public Exception? ReadFailure { get; set; }
         public Exception? AttentionFailure { get; set; }
         public bool RemoveFirstRoot { get; set; }
+        public GpuOcrOwnerStatus? OcrOwner { get; set; }
         private TaskCompletionSource<PipelineAttentionPage>? _delayedAttention;
         private TaskCompletionSource _attentionStarted = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public Task AttentionStarted => _attentionStarted.Task;
@@ -274,6 +316,7 @@ public sealed class PipelineOverviewBrowserTests
             var projection = new OverviewProjection(0, 0, 8, 31, 7139, 35, 1100, "synthetic-generation",
                 new("Healthy", "synthetic-generation", now, null, null, 0))
             {
+                GpuSchedulerStatus = GpuSchedulerStatusProjection.Empty with { OcrOwner = OcrOwner },
                 Activity = new(now, now,
                     [new(FirstRoot, "Example workspace", "C:\\example-workspace", "Enabled", 1100, 1096, 4, 0, 0, 0, 0, 0,
                         now.AddMinutes(-2), now.AddHours(-1), now.AddMinutes(-1), false, null),

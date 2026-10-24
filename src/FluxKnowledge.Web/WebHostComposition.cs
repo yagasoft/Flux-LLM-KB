@@ -583,6 +583,7 @@ public static class WebHostComposition
         services.AddSingleton<PaddleOcrVlmModelGate>();
         services.AddScoped<IPdfPageRasterizer, SyncfusionPdfPageRasterizer>();
         services.AddScoped<IDocumentOcrExecutor, PaddleOcrVlmLocalExecutor>();
+        services.AddSingleton<IDocumentOcrProcessRecovery, DocumentOcrProcessRecovery>();
         services.AddScoped<SqlDocumentOcrStore>(provider => new SqlDocumentOcrStore(
             provider.GetRequiredService<IDbContextFactory<FluxKnowledgeDbContext>>(),
             provider.GetRequiredService<GpuSchedulerCoordinator>(),

@@ -50,6 +50,7 @@ public sealed class GpuStatusEndpointTests : IClassFixture<GpuStatusEndpointTest
                 "hasActiveBatch",
                 "laneCounts",
                 "nextDeferredAtUtc",
+                "ocrOwner",
                 "outcomeUncertainCount",
                 "readyCount",
                 "reservedSlotCount",
@@ -273,7 +274,7 @@ public sealed class GpuStatusEndpointTestsSql(NativeSqlServerFixture fixture)
         Assert.Equal(0, result.GetProperty("laneCounts").GetProperty("imageEnrichment").GetInt32());
         Assert.Equal(0, result.GetProperty("laneCounts").GetProperty("videoOrUnknown").GetInt32());
         Assert.Equal("Uncertain", result.GetProperty("uncertainCapacity").GetProperty("state").GetString());
-        Assert.Equal(24 * 60, result.GetProperty("uncertainCapacity").GetProperty("ageMinutes").GetInt32());
+        Assert.Equal(48 * 60, result.GetProperty("uncertainCapacity").GetProperty("ageMinutes").GetInt32());
 
         Assert.DoesNotContain("C:\\private\\input.txt", payload, StringComparison.Ordinal);
         Assert.DoesNotContain("mini-task-id-0001", payload, StringComparison.Ordinal);

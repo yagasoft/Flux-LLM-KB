@@ -466,6 +466,13 @@ public sealed partial class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecu
                 task.AdmissionGeneration == callback.AdmissionGeneration &&
                 task.ExecutionState == (int)GpuMiniTaskExecutionState.Active)
             .ToListAsync(cancellationToken).ConfigureAwait(false);
+        if (callback.CapacityReleased && !await HasOcrReleaseProofAsync(context, dispatch, cancellationToken).ConfigureAwait(false))
+        {
+            RecordReceipt(context, operationId, "callback", callback.BatchId, callback.CapacitySlotKey, ownerKey, callback.AdmissionGeneration, false, false, 0, requestFingerprint);
+            await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            return new GpuBatchCallbackResult(false, false);
+        }
         if (!CallbackOutcomesMatch(callback, activeTasks))
         {
             RecordReceipt(context, operationId, "callback", callback.BatchId, callback.CapacitySlotKey, ownerKey, callback.AdmissionGeneration, false, false, 0, requestFingerprint);
@@ -707,7 +714,8 @@ public sealed partial class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecu
             evidence.DispatchId == dispatch.DispatchId &&
             evidence.EvidenceClass == (int)GpuExecutorEvidenceClass.CapacityReleaseConfirmed,
             cancellationToken).ConfigureAwait(false);
-        if (dispatch is null || slot is null || !trustedEvidence)
+        if (dispatch is null || slot is null || !trustedEvidence ||
+            !await HasOcrReleaseProofAsync(context, dispatch, cancellationToken).ConfigureAwait(false))
         {
             RecordReceipt(context, operationId, "capacity-reconciliation", request.BatchId, request.CapacitySlotKey, dispatch?.OwnerKey, request.AdmissionGeneration, false, false, 0, requestFingerprint);
             await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
@@ -1591,7 +1599,7 @@ public sealed partial class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecu
         }
     }
 
-    private static Task AcquireMutationLockAsync(
+    internal static Task AcquireMutationLockAsync(
         FluxKnowledgeDbContext context,
         DbTransaction transaction,
         CancellationToken cancellationToken) =>
@@ -1709,7 +1717,7 @@ public sealed partial class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecu
             evidence.ObservedAtUtc.UtcDateTime.Ticks.ToString(CultureInfo.InvariantCulture),
             ((int)evidence.EvidenceClass).ToString(CultureInfo.InvariantCulture));
 
-    private static string CreateExecutorResultReceiptFingerprint(GpuExecutorResultReceipt receipt) =>
+    internal static string CreateExecutorResultReceiptFingerprint(GpuExecutorResultReceipt receipt) =>
         CreateRequestFingerprint(
             "executor-result-receipt",
             receipt.Handle.DispatchId.ToString("N"),
@@ -1870,7 +1878,7 @@ public sealed partial class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecu
         return callback.Outcomes.All(outcome => activeIds.Contains(outcome.MiniTaskId));
     }
 
-    private static async Task RecordWakeAsync(
+    internal static async Task RecordWakeAsync(
         FluxKnowledgeDbContext context,
         GpuSchedulerWakeReason reasons,
         DateTimeOffset now,

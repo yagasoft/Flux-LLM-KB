@@ -45,6 +45,17 @@
             <a href="#pipeline-attention">Needs attention</a>
         </div>
         <p>@view.Message</p>
+        @if (scheduler.OcrOwner is { } owner)
+        {
+            <aside class="ocr-capacity-status" aria-label="GPU capacity owner">
+                <h3>@(owner.State == "Running" ? "OCR is using GPU capacity" : "OCR is holding GPU capacity")</h3>
+                <p>@owner.State · @owner.Executor · Last heartbeat: @(owner.HeartbeatAgeMinutes?.ToString("N0", CultureInfo.GetCultureInfo("en-GB")) ?? "unknown") minutes ago.
+                    @if (owner.DeadlineAtUtc is { } deadline) { <span>Execution deadline: @Time(deadline).</span> }</p>
+                <p>@owner.NextAction @if (owner.State != "Running") { <a href="/operator-actions">Operator actions</a> }</p>
+                <details><summary>Capacity diagnostics</summary><p>Reason: <code>@owner.ReasonCode</code></p>
+                    <p>Batch: <code>@owner.BatchId</code> · Execution: <code>@(owner.ExecutionInstanceId?.ToString() ?? "Legacy owner unconfirmed")</code></p></details>
+            </aside>
+        }
         <label class="source-scope">Source scope
             <select @bind="_sourceScope" @bind:after="ScopeChangedAsync" disabled="@(!activity.IsAvailable)">
                 <option value="">All sources and app activity</option>

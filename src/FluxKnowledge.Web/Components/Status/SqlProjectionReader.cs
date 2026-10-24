@@ -255,17 +255,12 @@ public sealed class SqlProjectionReader(
             snapshot.NextDeferredAtUtc,
             new GpuCapacityUncertaintySummary(
                 snapshot.UncertainSlotCount == 0 ? "None" : "Uncertain",
-                ToBoundedAgeMinutes(snapshot.UncertainCapacityAge)));
+                ToBoundedAgeMinutes(snapshot.UncertainCapacityAge))) { OcrOwner = snapshot.OcrOwner };
 
     private static int? ToBoundedAgeMinutes(TimeSpan? uncertainCapacityAge) =>
         uncertainCapacityAge is not { } age
             ? null
-            : Math.Clamp(
-                (int)Math.Ceiling(age.TotalMinutes),
-                0,
-                MaximumUncertainCapacityAgeMinutes);
-
-    private const int MaximumUncertainCapacityAgeMinutes = 24 * 60;
+            : (int)Math.Clamp(Math.Ceiling(age.TotalMinutes), 0, int.MaxValue);
 
     private static IQueryable<PipelineRecordProjectionRow> BuildPipelineRecordQuery(
         FluxKnowledgeDbContext context,

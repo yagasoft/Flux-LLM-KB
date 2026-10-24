@@ -10,6 +10,7 @@ function Get-SegmentedIndexMigrationContract {
         UpSha256='53601EA1AE3CB906860B0E09940F6059A4EF9442D27E4877FDBE85F7BBD3E0B3'
         BaselineSchemaSha256='C2DE9A69E1274D83CEFCF69B02A87FB9BD9D0B82E1BB3C640F1A17DC81B90005'
         SchemaSha256='097C5B7BEEE7CB87E7FA5FD913D96464A2C4DD976D736A9911C2D0A45460DC10'
+        CompatibleApplicationSuccessor='20261024061418_AddDocumentOcrExecutionLifecycle'
     }
 }
 
@@ -69,6 +70,11 @@ function Assert-SegmentedIndexApplicationSchema {
     $contract=Get-SegmentedIndexMigrationContract
     $suffix=@($contract.Baseline)+@($contract.Migrations)
     $history=@($State.History)
+    # This reviewed additive OCR migration does not change the index contract.
+    # Keep the original index upgrade script and reject every other successor.
+    if ($history.Count -gt $suffix.Count -and $history[-1] -ceq $contract.CompatibleApplicationSuccessor) {
+        $history=@($history[0..($history.Count-2)])
+    }
     if($history.Count -lt $suffix.Count -or ($history[($history.Count-$suffix.Count)..($history.Count-1)] -join '|') -cne ($suffix -join '|') -or
         $State.SchemaSha256 -cne $contract.SchemaSha256 -or $State.AuditSingletonCount -ne 1 -or $State.RequiredFormat -notin @(1,2)) {
         throw ('index-schema-reconciliation-required; observed-schema='+$State.SchemaSha256)

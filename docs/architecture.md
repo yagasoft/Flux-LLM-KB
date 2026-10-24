@@ -220,6 +220,30 @@ cannot be proved does not create permission to repeat inference or release an
 unsettled reservation. Shutdown cancels owned children; restart reconciliation
 recovers from committed state. Model-free deterministic executors support tests.
 
+PaddleOCR owns one durable execution identity and supervisor incarnation per
+dispatch. Its 30-second liveness heartbeat keeps healthy long work active without
+extending the twenty-minute deadline. Python starts with `-I -S` behind a stdin
+gate, enters a restricted Windows job, and receives permission only after SQL
+binds its exact child incarnation. Job termination and pipe drainage are bounded;
+native cleanup is recorded independently of the result. A missing or inaccessible
+job requires operator verification rather than an age-based capacity reset.
+
+Known OCR output and physical cleanup settle atomically, including a reservation
+already diagnosed as uncertain. Stable receipts fence replay after slot reuse.
+Recovery preserves a live supervisor's result-write window through its deadline;
+an interrupted attempt with proved cleanup becomes an explicit failure without
+repeating inference. Invalid output is retained without publication and cannot
+monopolise independently proved-clean capacity. The Overview and read-only GPU
+status expose the current OCR owner, deadline, actual heartbeat age and action.
+
+Earlier OCR reservations without native ownership require the incremental updater's
+explicit OCR stopped-maintenance mode. It pins database incarnation, migration,
+payloads, configuration, reservation and result; stops exact application owners;
+and verifies the runtime boundary against bracketed OS/driver observations.
+Unrelated desktop GPU processes require positive executable classification.
+The additive schema and result/cleanup receipts survive rollback; after candidate
+start intent recovery proceeds forward under a retained admission hold.
+
 ## Offline model boundary and English OCR
 
 The model gate resolves a bounded local manifest only against `J:\Models`, pins

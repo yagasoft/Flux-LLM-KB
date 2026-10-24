@@ -109,7 +109,7 @@ public sealed class PaddleOcrVlmCompletionRecoveryService(
     ILogger<PaddleOcrVlmCompletionRecoveryService>? logger = null,
     IDatabaseStartupReadiness? databaseStartupReadiness = null) : BackgroundService
 {
-    private static readonly TimeSpan Cadence = TimeSpan.FromMinutes(1);
+    private static readonly TimeSpan Cadence = TimeSpan.FromSeconds(30);
     private readonly ILogger<PaddleOcrVlmCompletionRecoveryService> _logger =
         logger ?? NullLogger<PaddleOcrVlmCompletionRecoveryService>.Instance;
 

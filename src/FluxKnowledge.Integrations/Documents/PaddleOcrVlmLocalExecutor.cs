@@ -49,8 +49,11 @@ public sealed class PaddleOcrVlmLocalExecutor : IDocumentOcrExecutor
     public async ValueTask<DocumentOcrExecutionResult> ExecuteAsync(
         RetainedSourceBytes retained,
         IReadOnlyList<int> pageIndexes,
+        DocumentOcrExecutionContext execution,
         CancellationToken cancellationToken)
     {
+        ArgumentNullException.ThrowIfNull(execution);
+        execution.Lease.Validate();
         ArgumentNullException.ThrowIfNull(retained);
         ArgumentNullException.ThrowIfNull(pageIndexes);
         if (pageIndexes.Count == 0 || pageIndexes.Any(static index => index < 0) ||
@@ -68,6 +71,7 @@ public sealed class PaddleOcrVlmLocalExecutor : IDocumentOcrExecutor
         string? workDirectory = null;
         var result = Refused("document-ocr-execution-failed");
         var cleanupFailed = false;
+        var nativeCleanupUnproven = false;
         var phase = "temporary-storage";
         try
         {
@@ -129,9 +133,11 @@ public sealed class PaddleOcrVlmLocalExecutor : IDocumentOcrExecutor
                             inputPath,
                             outputPath,
                             expectedPages,
-                            imageFilenames),
+                            imageFilenames,
+                            execution),
                         cancellationToken)
                     .ConfigureAwait(false);
+                nativeCleanupUnproven = !processResult.CleanupConfirmed;
                 phase = "provider-result";
                 result = processResult.Succeeded
                     ? await ReadResultAsync(
@@ -162,7 +168,7 @@ public sealed class PaddleOcrVlmLocalExecutor : IDocumentOcrExecutor
         }
         finally
         {
-            if (workDirectory is not null)
+            if (workDirectory is not null && !nativeCleanupUnproven)
             {
                 cleanupFailed = !TryDeleteWorkDirectory(workDirectory);
             }
@@ -342,16 +348,16 @@ internal sealed record PaddleOcrVlmProcessRequest(
     string InputPath,
     string OutputPath,
     IReadOnlyList<int> PageIndexes,
-    IReadOnlyList<string> ImageFilenames);
+    IReadOnlyList<string> ImageFilenames,
+    DocumentOcrExecutionContext Execution);
 
-internal sealed record PaddleOcrVlmProcessResult(bool Succeeded, string ReasonCode)
+internal sealed record PaddleOcrVlmProcessResult(bool Succeeded, string ReasonCode, bool CleanupConfirmed = true)
 {
     public static PaddleOcrVlmProcessResult Completed { get; } = new(true, "document-ocr-complete");
 }
 
 internal sealed class PaddleOcrVlmProcessRunner : IPaddleOcrVlmProcessRunner
 {
-    private static readonly TimeSpan MaximumExecutionTime = TimeSpan.FromMinutes(20);
 
     public async ValueTask<PaddleOcrVlmProcessResult> RunAsync(
         PaddleOcrVlmProcessRequest request,
@@ -372,6 +378,7 @@ internal sealed class PaddleOcrVlmProcessRunner : IPaddleOcrVlmProcessRunner
             WorkingDirectory = request.WorkingDirectory
         };
         startInfo.ArgumentList.Add("-I");
+        startInfo.ArgumentList.Add("-S");
         startInfo.ArgumentList.Add(PaddleOcrVlmPythonScript.Path);
         startInfo.ArgumentList.Add("--input");
         startInfo.ArgumentList.Add(request.InputPath);
@@ -379,57 +386,13 @@ internal sealed class PaddleOcrVlmProcessRunner : IPaddleOcrVlmProcessRunner
         startInfo.ArgumentList.Add(request.OutputPath);
         ConfigureOfflineEnvironment(startInfo);
 
-        Process? process = null;
-        try
-        {
-            process = Process.Start(startInfo);
-            if (process is null)
-            {
-                return new PaddleOcrVlmProcessResult(false, "document-ocr-runtime-launch-failed");
-            }
-
-            // Drain provider output without retaining unbounded logs or private document text.
-            var stdout = DiscardOutputAsync(process.StandardOutput);
-            var stderr = DiscardOutputAsync(process.StandardError);
-            using var timeout = new CancellationTokenSource(MaximumExecutionTime);
-            using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeout.Token);
-            try
-            {
-                await process.WaitForExitAsync(linked.Token).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException) when (timeout.IsCancellationRequested)
-            {
-                TryTerminate(process);
-                await DrainAsync(stdout, stderr).ConfigureAwait(false);
-                return new PaddleOcrVlmProcessResult(false, "document-ocr-runtime-timeout");
-            }
-            catch (OperationCanceledException)
-            {
-                TryTerminate(process);
-                await DrainAsync(stdout, stderr).ConfigureAwait(false);
-                throw;
-            }
-
-            await DrainAsync(stdout, stderr).ConfigureAwait(false);
-            if (process.ExitCode == 0) return PaddleOcrVlmProcessResult.Completed;
-            var failure = await ReadFailureReasonAsync(request.WorkingDirectory, request.OutputPath, cancellationToken).ConfigureAwait(false);
-            return new PaddleOcrVlmProcessResult(false, failure == "document-ocr-runtime-failed" ? RuntimeExitReason(process.ExitCode) : failure);
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            if (process is not null) TryTerminate(process);
-            throw;
-        }
-        catch (Exception exception) when (exception is InvalidOperationException or System.ComponentModel.Win32Exception or IOException)
-        {
-            return new PaddleOcrVlmProcessResult(false, "document-ocr-runtime-launch-failed");
-        }
-        finally
-        {
-            process?.Dispose();
-        }
+        startInfo.ArgumentList.Add("--startup-gate");
+        var outcome = await OwnedOcrProcessSupervisor.RunAsync(startInfo, request.Execution, cancellationToken).ConfigureAwait(false);
+        if (outcome.FailureReason is not null) return new(false, outcome.FailureReason, outcome.CleanupConfirmed);
+        if (outcome.ExitCode == 0) return new(true, "document-ocr-complete", outcome.CleanupConfirmed);
+        var failure = await ReadFailureReasonAsync(request.WorkingDirectory, request.OutputPath, cancellationToken).ConfigureAwait(false);
+        return new(false, failure == "document-ocr-runtime-failed" ? RuntimeExitReason(outcome.ExitCode ?? -1) : failure, outcome.CleanupConfirmed);
     }
-
     private static void ConfigureOfflineEnvironment(ProcessStartInfo startInfo)
     {
         foreach (var key in startInfo.Environment.Keys
@@ -454,17 +417,6 @@ internal sealed class PaddleOcrVlmProcessRunner : IPaddleOcrVlmProcessRunner
         startInfo.Environment["HUGGINGFACE_HUB_CACHE"] = @"J:\Models\provider-cache\huggingface\hub";
         startInfo.Environment["PADDLE_PDX_CACHE_HOME"] = @"J:\Models\provider-cache\paddlex";
         startInfo.Environment["PADDLE_HOME"] = @"J:\Models\provider-cache\paddle";
-    }
-
-    private static void TryTerminate(Process process)
-    {
-        try
-        {
-            if (!process.HasExited) process.Kill(entireProcessTree: true);
-        }
-        catch (InvalidOperationException)
-        {
-        }
     }
 
     internal static bool IsKnownFailureReason(string reason) => reason is
@@ -495,21 +447,10 @@ internal sealed class PaddleOcrVlmProcessRunner : IPaddleOcrVlmProcessRunner
         }
     }
 
-    private static async Task DiscardOutputAsync(StreamReader output)
-    {
-        var buffer = new char[4096];
-        while (await output.ReadAsync(buffer.AsMemory(), CancellationToken.None).ConfigureAwait(false) != 0) { }
-    }
-
-    private static async Task DrainAsync(Task stdout, Task stderr)
-    {
-        await Task.WhenAll(stdout, stderr).ConfigureAwait(false);
-    }
 }
 
 internal static class PaddleOcrVlmPythonScript
 {
     internal const string Filename = "paddleocr_vl_executor.py";
-
     internal static string Path => System.IO.Path.Combine(AppContext.BaseDirectory, "Documents", Filename);
 }

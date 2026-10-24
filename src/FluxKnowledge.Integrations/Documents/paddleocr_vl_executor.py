@@ -280,7 +280,23 @@ def main(argv=None):
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--input", required=True)
     parser.add_argument("--output", required=True)
+    parser.add_argument("--startup-gate", action="store_true", required=True)
     args = parser.parse_args(argv)
+    # No provider import, model loading or retained image read before the parent has contained
+    # this process and committed exact start permission. A parent crash closes stdin.
+    import queue
+    import threading
+    gate = queue.Queue(maxsize=1)
+    threading.Thread(target=lambda: gate.put(sys.stdin.readline(64)), daemon=True).start()
+    try:
+        if gate.get(timeout=30) != "fluxknowledge-ocr-go-v1\n":
+            return 1
+    except queue.Empty:
+        return 1
+    # -I -S prevents executable .pth files and sitecustomize from running before containment.
+    # Restore this verified interpreter's package paths only after durable permission.
+    import site
+    site.main()
     destination, inputs = _read_input(args.input, args.output)
     phase = "document-ocr-model-initialization-failed"
     try:

@@ -13,6 +13,21 @@ namespace FluxKnowledge.Web.Tests.Components;
 public sealed class OverviewProjectionTests
 {
     [Fact]
+    public async Task Overview_explains_the_global_capacity_owner_and_action_with_the_real_multi_day_age()
+    {
+        var owner = new GpuOcrOwnerStatus(Guid.NewGuid(), null, "paddleocr-vl-local", "Blocked", 5400, null,
+            "document-ocr-legacy-owner-unproven", "Operator verification of native cleanup is required before GPU work can resume.");
+        using var factory = new OverviewApplicationFactory(CreateOverview(0, 1100) with
+        { GpuSchedulerStatus = GpuSchedulerStatusProjection.Empty with { OcrOwner = owner } });
+        using var client = factory.CreateClient();
+        var html = await client.GetStringAsync("/");
+        Assert.Contains("OCR is holding GPU capacity", html, StringComparison.Ordinal);
+        Assert.Contains("5,400 minutes", html, StringComparison.Ordinal);
+        Assert.Contains(owner.NextAction, html, StringComparison.Ordinal);
+        Assert.Contains(owner.ReasonCode, html, StringComparison.Ordinal);
+        Assert.Contains(owner.BatchId.ToString(), html, StringComparison.Ordinal);
+    }
+    [Fact]
     public async Task An_initial_status_failure_does_not_render_zero_scheduler_diagnostics()
     {
         using var factory = new OverviewApplicationFactory(CreateOverview(0, 0), failReads: true);

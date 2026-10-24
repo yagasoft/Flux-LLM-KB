@@ -427,6 +427,11 @@ public sealed class DocumentOcrRequestConfiguration : IEntityTypeConfiguration<D
             table =>
             {
                 table.HasCheckConstraint("CK_DocumentOcrRequests_ContentSha256", SchemaConfiguration.Sha256CheckFor("ContentSha256"));
+                table.HasCheckConstraint("CK_DocumentOcrRequests_ExecutionPhase", "[ExecutionPhase] BETWEEN 0 AND 5");
+                table.HasCheckConstraint("CK_DocumentOcrRequests_CleanupKind", "[CleanupProofKind] IS NULL OR [CleanupProofKind] BETWEEN 0 AND 2");
+                table.HasCheckConstraint("CK_DocumentOcrRequests_ExecutionIdentity", "[ExecutionInstanceId] IS NULL OR ([ExecutionDispatchId] IS NOT NULL AND [ExecutionBatchId] IS NOT NULL AND [ExecutionAdmissionGeneration] IS NOT NULL AND [ExecutionAdmissionGeneration] > 0 AND [SupervisorInstanceId] IS NOT NULL AND [SupervisorProcessId] IS NOT NULL AND [SupervisorProcessId] > 0 AND [SupervisorProcessStartedAtUtc] IS NOT NULL AND [ExecutionMachineFingerprint] IS NOT NULL AND [ExecutionClaimedAtUtc] IS NOT NULL AND [ExecutionDeadlineAtUtc] IS NOT NULL AND [ExecutionDeadlineAtUtc] > [ExecutionClaimedAtUtc])");
+                table.HasCheckConstraint("CK_DocumentOcrRequests_NativeIdentity", "([NativeProcessId] IS NULL AND [NativeProcessStartedAtUtc] IS NULL) OR ([NativeProcessId] IS NOT NULL AND [NativeProcessId] > 0 AND [NativeProcessStartedAtUtc] IS NOT NULL AND [ExecutionInstanceId] IS NOT NULL)");
+                table.HasCheckConstraint("CK_DocumentOcrRequests_CleanupProof", "([NativeCleanupConfirmedAtUtc] IS NULL AND [CleanupProofKind] IS NULL) OR ([NativeCleanupConfirmedAtUtc] IS NOT NULL AND [CleanupProofKind] IS NOT NULL AND [ExecutionInstanceId] IS NOT NULL)");
                 table.HasCheckConstraint(
                     "CK_DocumentOcrRequests_RequestedPages_Bounded",
                     "DATALENGTH([RequestedPageIndexesJson]) > 0 AND DATALENGTH([RequestedPageIndexesJson]) <= 8192");
@@ -453,6 +458,9 @@ public sealed class DocumentOcrRequestConfiguration : IEntityTypeConfiguration<D
         builder.Property(entity => entity.ResultJson).HasColumnType("nvarchar(max)");
         builder.Property(entity => entity.CreatedAtUtc).HasColumnType("datetimeoffset(7)");
         builder.Property(entity => entity.UpdatedAtUtc).HasColumnType("datetimeoffset(7)");
+        builder.Property(entity => entity.ExecutionMachineFingerprint).HasColumnType("char(64)").IsUnicode(false).HasMaxLength(64);
+        builder.Property(entity => entity.PhysicalCleanupEvidenceSha256).HasColumnType("char(64)").IsUnicode(false).HasMaxLength(64);
+        builder.Property(entity => entity.RecoveryReason).HasMaxLength(128).UseCollation(SchemaConfiguration.SchedulerFenceCollation);
         SchemaConfiguration.ConfigureRowVersion(builder.Property(entity => entity.RowVersion));
         builder.HasIndex(entity => new { entity.PipelineRecordId, entity.SourceRevision, entity.State });
         builder.HasIndex(entity => new { entity.ParentJobId, entity.State });

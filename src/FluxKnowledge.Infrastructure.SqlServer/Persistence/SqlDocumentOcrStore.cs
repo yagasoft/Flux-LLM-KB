@@ -10,6 +10,7 @@ using FluxKnowledge.Domain.Jobs;
 using FluxKnowledge.Domain.Sources;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
 
 namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
 
@@ -18,10 +19,11 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
 /// corpus item nor a provider choice: the normal Extract worker consumes a completed result and
 /// performs the ordinary stage transition.
 /// </summary>
-public sealed class SqlDocumentOcrStore(
+public sealed partial class SqlDocumentOcrStore(
     IDbContextFactory<FluxKnowledgeDbContext> contextFactory,
-    GpuSchedulerCoordinator scheduler,
-    TimeProvider? timeProvider = null) : IDocumentOcrHandoff, IDocumentOcrResultReader
+    GpuSchedulerCoordinator? scheduler,
+    TimeProvider? timeProvider = null,
+    Func<DocumentOcrLifecycleResult, CancellationToken, ValueTask>? afterLifecycleCommitted = null) : IDocumentOcrHandoff, IDocumentOcrResultReader, IDocumentOcrExecutionObserver
 {
     private const int MaximumRequestedPagesJsonBytes = 8 * 1024;
     private static readonly UTF8Encoding StrictUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
@@ -33,6 +35,7 @@ public sealed class SqlDocumentOcrStore(
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(request);
+        var activeScheduler = scheduler ?? throw new InvalidOperationException("document-ocr-maintenance-store-cannot-handoff");
         PaddleOcrVlmRuntimeContract.AssertFrozenSettings();
         if (!IsCanonicalSha256(request.ContentSha256))
         {
@@ -60,7 +63,7 @@ public sealed class SqlDocumentOcrStore(
 
         try
         {
-            var handoff = await scheduler.HandoffAsync(
+            var handoff = await activeScheduler.HandoffAsync(
                     new GpuMiniTaskHandoffRequest(
                         request.ParentJob,
                         GpuPriorityLane.DocumentIndexing,
@@ -132,10 +135,21 @@ public sealed class SqlDocumentOcrStore(
     }
 
     /// <summary>Writes one bounded provider result before its GPU completion receipt is recorded.</summary>
-    public async ValueTask<DocumentOcrStoredResult> StoreResultAsync(
+    public ValueTask<DocumentOcrStoredResult> StoreResultAsync(
         GpuExecutorBatchHandle handle,
         Guid miniTaskId,
         DocumentOcrExecutionResult result,
+        CancellationToken cancellationToken) => StoreResultCoreAsync(handle, miniTaskId, result, null, cancellationToken);
+
+    public ValueTask<DocumentOcrStoredResult> StoreResultAsync(DocumentOcrExecutionLease lease,
+        DocumentOcrExecutionResult result, CancellationToken cancellationToken)
+    {
+        lease.Validate();
+        return StoreResultCoreAsync(lease.Handle, lease.MiniTaskId, result, lease, cancellationToken);
+    }
+
+    private async ValueTask<DocumentOcrStoredResult> StoreResultCoreAsync(GpuExecutorBatchHandle handle,
+        Guid miniTaskId, DocumentOcrExecutionResult result, DocumentOcrExecutionLease? lease,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(handle);
@@ -160,6 +174,7 @@ public sealed class SqlDocumentOcrStore(
             await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
             await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken)
                 .ConfigureAwait(false);
+            await SqlGpuSchedulerStore.AcquireMutationLockAsync(context, transaction.GetDbTransaction(), cancellationToken).ConfigureAwait(false);
             var request = await context.DocumentOcrRequests.SingleOrDefaultAsync(
                     value => value.MiniTaskId == miniTaskId,
                     cancellationToken)
@@ -170,6 +185,9 @@ public sealed class SqlDocumentOcrStore(
             {
                 throw new InvalidOperationException("document-ocr-request-unavailable");
             }
+            if (request.ExecutionInstanceId is not null && (lease is null || !MatchesLease(request, lease)) ||
+                lease is not null && (request.ExecutionInstanceId is null || request.ExecutionPhase == (int)DocumentOcrExecutionPhase.Settled))
+                throw new InvalidOperationException("document-ocr-result-owner-stale");
 
             var task = await context.GpuMiniTasks.SingleOrDefaultAsync(value =>
                     value.Id == miniTaskId &&
@@ -426,7 +444,7 @@ public sealed class SqlDocumentOcrStore(
                 parent.PublicState == (int)PublicJobState.WorkerQueued)
             {
                 await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-                return true;
+                return false;
             }
 
             var outbox = await context.OutboxMessages.SingleOrDefaultAsync(value =>

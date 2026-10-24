@@ -112,6 +112,7 @@ public sealed record GpuSchedulerStatusProjection(
     DateTimeOffset? NextDeferredAtUtc,
     GpuCapacityUncertaintySummary UncertainCapacity)
 {
+    public GpuOcrOwnerStatus? OcrOwner { get; init; }
     public static GpuSchedulerStatusProjection Empty { get; } = new(
         0,
         0,
@@ -126,6 +127,9 @@ public sealed record GpuSchedulerStatusProjection(
         null,
         GpuCapacityUncertaintySummary.None);
 }
+
+public sealed record GpuOcrOwnerStatus(Guid BatchId, Guid? ExecutionInstanceId, string Executor,
+    string State, int? HeartbeatAgeMinutes, DateTimeOffset? DeadlineAtUtc, string ReasonCode, string NextAction);
 
 public sealed record GpuSchedulerLaneCounts(
     int InteractiveRetrieval,

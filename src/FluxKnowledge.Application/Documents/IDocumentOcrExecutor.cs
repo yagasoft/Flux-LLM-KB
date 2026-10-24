@@ -11,5 +11,6 @@ public interface IDocumentOcrExecutor
     ValueTask<DocumentOcrExecutionResult> ExecuteAsync(
         RetainedSourceBytes retained,
         IReadOnlyList<int> pageIndexes,
+        DocumentOcrExecutionContext execution,
         CancellationToken cancellationToken);
 }

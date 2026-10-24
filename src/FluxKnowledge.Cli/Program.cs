@@ -13,6 +13,7 @@ internal static class CliProgram
             "index-retention" => await IndexRetentionCommand.ExecuteFromEnvironmentAsync(args.Skip(1).ToArray(), Console.Out, Console.Error),
             "index-projection" => await IndexProjectionCommand.ExecuteFromEnvironmentAsync(args.Skip(1).ToArray(), Console.Out, Console.Error),
             "index-recovery" => await IndexRecoveryCommand.ExecuteFromEnvironmentAsync(args.Skip(1).ToArray(), Console.Out, Console.Error),
+            "ocr-recovery" => await OcrRecoveryCommand.ExecuteFromEnvironmentAsync(args.Skip(1).ToArray(), Console.Out, Console.Error),
             "csharp-code" => await LocalRetainedCsharpCodeCommand.ExecuteFromEnvironmentAsync(
                 args.Skip(1).ToArray(),
                 Console.Out,

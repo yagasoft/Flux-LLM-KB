@@ -10,6 +10,25 @@ function Sql([string]$Text){$connection=[Data.SqlClient.SqlConnection]::new($tar
 $before=Get-OfflineCodeDatabaseBinding
 if($before.RequiredFormat -ne 2 -or $before.Identity -notlike ('*|'+$ExpectedDatabase+'|*') -or !$before.SchemaSha256 -or !$before.Projection){throw 'Actual schema/current-generation binding is incomplete.'}
 if((Get-OfflineCodeDatabaseBinding).Projection -cne $before.Projection){throw 'Read-only binding changed the projection.'}
+Import-Module (Join-Path $SourceRoot 'scripts/deploy/incremental-source-deletion-cleanup-migration.psm1') -Force
+$tokens=$null;$errors=$null
+$updater=[Management.Automation.Language.Parser]::ParseFile((Join-Path $SourceRoot 'scripts/deploy/update-native-iis-incremental.ps1'),[ref]$tokens,[ref]$errors)
+if ($errors.Count) { throw 'Actual updater did not parse.' }
+$candidate=$updater.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'Get-SourceDeletionCleanupCandidateDatabase'},$true)
+. ([scriptblock]::Create($candidate.Extent.Text))
+[void](Get-SourceDeletionCleanupCandidateDatabase -Root $SourceRoot -MigrationMode $false -ReadState {Get-SourceDeletionCleanupDatabaseState -ConnectionString $target.ConnectionString})
+$actualSchema=Get-SegmentedIndexDatabaseState -ConnectionString $target.ConnectionString
+foreach ($drift in @('unknown-successor','duplicate-successor','changed-index-schema')) {
+    $changed=$actualSchema.PSObject.Copy()
+    switch ($drift) {
+        'unknown-successor' { $changed.History=@($actualSchema.History)+@('99999999999999_Unknown') }
+        'duplicate-successor' { $changed.History=@($actualSchema.History)+@('20261024061418_AddDocumentOcrExecutionLifecycle') }
+        'changed-index-schema' { $changed.SchemaSha256='F'*64 }
+    }
+    $refused=$false
+    try { Assert-SegmentedIndexApplicationSchema $changed } catch { $refused=$_.Exception.Message -like 'index-schema-reconciliation-required*' }
+    if (!$refused) { throw ('Unreviewed index schema/history accepted: '+$drift) }
+}
 [void](Sql 'UPDATE dbo.IndexState SET CorpusVersion=CorpusVersion+1 WHERE Id=1; SELECT 1;')
 try {
     $refused=$false
