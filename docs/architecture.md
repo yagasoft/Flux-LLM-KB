@@ -131,8 +131,11 @@ compatibility evidence on provider 26.189.0928.0009: eight exact native capture,
 seal and later-change cycles, with preserved bytes/identity and a passing matched
 no-edit capture control. The composite still failed at final synchronisation;
 older edited controls provide context rather than current-version post-edit sync
-equivalence. This does not establish general sync reliability. Exact production
-root/provider/environment profile binding remains a release gate.
+equivalence. This does not establish general sync reliability. The 26 October
+release activated exact root/provider/environment bindings after independent
+review. Actual IIS-identity transport and progressing sealed captures passed
+bounded live acceptance; initial baseline and namespace establishment were still
+ongoing, without a claim of production steady-state byte savings or change latency.
 
 Weekly integrity checks use the existing durable source request/outbox/root
 lease with a separate verification request kind. Frozen cycle membership,
