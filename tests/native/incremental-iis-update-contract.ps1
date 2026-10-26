@@ -47,6 +47,8 @@ if ($plan.mode -ne "plan-only" -or
     $plan.recovery_root -ne "I:\FluxKnowledge\Recovery" -or
     $plan.cpu_search_owner_file.path -ne 'I:\FluxKnowledge\Runtime\bge-cpu-search-owner.lock' -or
     $plan.cpu_search_owner_file.action -notin @('preserve-existing','create-new-before-activation') -or
+    $plan.source_verification_reader_file.path -ne 'I:\FluxKnowledge\Runtime\source-verification.lock' -or
+    $plan.source_verification_reader_file.action -notin @('preserve-existing','create-new-before-activation') -or
     $plan.migrations -ne $false -or
     $plan.clean_slate -ne $false -or
     $plan.payload_acl -ne "inherit-from-live-root" -or
@@ -294,4 +296,5 @@ if ($rejected.ExitCode -eq 0 -or $rejected.Output -notmatch 'Maintenance impleme
     throw 'Changed maintenance implementation did not refuse before importing dependencies or observing production.'
 }
 
+& (Join-Path $PSScriptRoot 'source-verification-slot-provisioning.ps1') -SourceRoot $SourceRoot
 Write-Output "Incremental IIS update contract passed."

@@ -26,6 +26,8 @@ public sealed class SourceVerificationBrowserTests
         var runtime = Path.Combine(ground, "Runtime");
         Directory.CreateDirectory(source);
         Directory.CreateDirectory(index);
+        Directory.CreateDirectory(runtime);
+        if (OperatingSystem.IsWindows()) File.WriteAllBytes(Path.Combine(runtime, WindowsSourceVerificationReaderSlot.FileName), []);
         await File.WriteAllTextAsync(Path.Combine(source, "sample.txt"), "Synthetic verification settings browser fixture.");
         try
         {

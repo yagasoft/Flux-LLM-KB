@@ -79,6 +79,11 @@ public sealed partial class PipelineActivitySqlTests
     private SqlProjectionReader SnapshotReader(params IInterceptor[] interceptors)
     {
         var factory = new TestDbContextFactory(_fixture.ConnectionString, interceptors);
+        return SnapshotReader(factory);
+    }
+
+    private static SqlProjectionReader SnapshotReader(IDbContextFactory<FluxKnowledgeDbContext> factory)
+    {
         return new(factory, new FixedRecoveryStatus(new DerivedIndexRecoverySnapshot(DerivedIndexRecoveryState.Healthy,
             null, null, null, null, 0)), new SqlGpuSchedulerStore(factory), readOptions: new(true));
     }

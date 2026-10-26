@@ -808,6 +808,7 @@ internal sealed class NativeGoLiveWindowsAclPort : INativeGoLiveAclPort
         foreach (var path in new[] { layout.IndexRoot, layout.RetainedRoot, layout.SpoolRoot, layout.TempRoot, layout.LogsRoot })
             ApplyDirectoryAcl(path, (appPoolSid, FileSystemRights.Modify));
         ApplyDirectoryAcl(layout.RecoveryRoot);
+        EnsureSourceVerificationReaderFile(layout.RuntimeRoot, appPoolSid);
         return ObserveEffectiveAsync(expectedPlan, cancellationToken);
     }
 
@@ -850,6 +851,33 @@ internal sealed class NativeGoLiveWindowsAclPort : INativeGoLiveAclPort
             appPoolSid.Value,
             sqlSid.Value,
             paths));
+    }
+
+    internal static void EnsureSourceVerificationReaderFile(string runtimeRoot, SecurityIdentifier appPoolSid)
+    {
+        var fileSystem = new HandleRelativeNativeFileSystem();
+        using var runtime = fileSystem.OpenReadOnlyDirectory(runtimeRoot);
+        var path = Path.Combine(runtime.CanonicalPath, Files.WindowsSourceVerificationReaderSlot.FileName);
+        // Fresh installation runs before activation. CreateNew refuses a race
+        // or an existing unsafe object; upgrades preserve the existing object.
+        if (!File.Exists(path))
+            using (var created = new FileStream(path, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None)) { }
+        var (parent, handle) = fileSystem.OpenExistingStableReadFile(path);
+        using (parent)
+        using (handle)
+        {
+            var acl = new FileInfo(path).GetAccessControl(AccessControlSections.Access | AccessControlSections.Owner);
+            var owner = acl.GetOwner(typeof(SecurityIdentifier))?.Value;
+            if (owner is not ("S-1-5-18" or "S-1-5-32-544"))
+                throw new NativeGoLiveContractException("source-verification-reader-owner-unsafe");
+            var unsafeRights = FileSystemRights.Write | FileSystemRights.Delete | FileSystemRights.DeleteSubdirectoriesAndFiles |
+                FileSystemRights.ChangePermissions | FileSystemRights.TakeOwnership;
+            if (acl.GetAccessRules(true, true, typeof(SecurityIdentifier)).Cast<FileSystemAccessRule>().Any(rule =>
+                    rule.AccessControlType == AccessControlType.Allow &&
+                    rule.IdentityReference.Value is not ("S-1-5-18" or "S-1-5-32-544") && (rule.FileSystemRights & unsafeRights) != 0) ||
+                !NativeGoLiveWindowsAclInspector.HasRights(path, appPoolSid.Value, FileSystemRights.ReadData))
+                throw new NativeGoLiveContractException("source-verification-reader-acl-unsafe");
+        }
     }
 
     private void ApplyDirectoryAcl(

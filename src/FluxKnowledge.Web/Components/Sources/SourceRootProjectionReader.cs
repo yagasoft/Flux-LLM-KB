@@ -397,6 +397,12 @@ public sealed class SourceRootProjectionReader(
             from publication in publicationValues.DefaultIfEmpty()
             join recordValue in context.PipelineRecords.AsNoTracking() on activity.ResultingPipelineRecordId equals recordValue.Id into recordValues
             from record in recordValues.DefaultIfEmpty()
+            // The unique (PipelineRecordId, SourceRevision, Stage) index permits at most
+            // one Publish artifact. A nullable join avoids a correlated MAX/spool per row.
+            join artifactValue in context.Artifacts.AsNoTracking().Where(artifact => artifact.Stage == (int)PipelineStage.Publish)
+                on new { Id = (Guid?)record.Id, Revision = (long?)record.Revision }
+                equals new { Id = (Guid?)artifactValue.PipelineRecordId, Revision = (long?)artifactValue.SourceRevision } into artifactValues
+            from artifact in artifactValues.DefaultIfEmpty()
             select new SourceStateRow(
                 revision.SourceRootId,
                 activity.SourceRevisionId,
@@ -421,9 +427,7 @@ public sealed class SourceRootProjectionReader(
                     ? publication.PublishedAtUtc
                     : record != null && record.CompletionCriteriaMet && !record.IsDeleted && record.SourceRevisionId == revision.Id &&
                         (activity.ResultingPipelineRecordRevision == null || record.Revision == activity.ResultingPipelineRecordRevision)
-                        ? context.Artifacts.Where(artifact => artifact.PipelineRecordId == record.Id &&
-                            artifact.SourceRevision == record.Revision && artifact.Stage == (int)PipelineStage.Publish)
-                            .Max(artifact => (DateTimeOffset?)artifact.CreatedAtUtc) : null,
+                        ? (DateTimeOffset?)artifact.CreatedAtUtc : null,
                 activity.Reason))
             .ToListAsync(cancellationToken).ConfigureAwait(false);
         var logicalStates = await ReadLogicalOwnerStatesAsync(context, rootIds, cancellationToken).ConfigureAwait(false);

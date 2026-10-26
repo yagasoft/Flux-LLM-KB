@@ -89,10 +89,11 @@ public sealed partial class SqlProjectionReader(
             throw new OverviewReadBudgetExceededException(exception);
         }
         catch (SqlException exception) when (!cancellationToken.IsCancellationRequested && budget.IsCancellationRequested &&
-            exception.Errors.Count > 0 && exception.Errors.Cast<SqlError>().All(error => error.Number == 0))
+            OverviewReadBudgetExceededException.HasCommandCancellationErrors(exception))
         {
             // SqlClient can report command cancellation as a zero-number SQL
-            // exception. Preserve the provider evidence and all genuine errors.
+            // exception, optionally followed by informational termination 3621.
+            // Preserve the provider evidence and all genuine errors.
             throw new OverviewReadBudgetExceededException(exception);
         }
     }

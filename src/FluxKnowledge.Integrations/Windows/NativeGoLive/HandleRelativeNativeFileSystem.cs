@@ -800,6 +800,32 @@ internal sealed partial class HandleRelativeNativeFileSystem
         }
     }
 
+    // The installer owns this file. Runtime readers need neither directory
+    // creation rights nor write access, and must never create a replacement.
+    internal (VerifiedNativeDirectory Parent, SafeFileHandle Handle) OpenExistingStableReadFile(string absolutePath)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(absolutePath);
+        var canonicalPath = Path.GetFullPath(absolutePath);
+        var fileName = Path.GetFileName(canonicalPath);
+        EnsureLiteralChild(fileName);
+        var parent = OpenReadOnlyDirectory(Path.GetDirectoryName(canonicalPath)
+            ?? throw new UnauthorizedAccessException("The stable file has no parent directory."));
+        SafeFileHandle? handle = null;
+        try
+        {
+            handle = NativeMethods.OpenRelative(parent.Handle, fileName, NativeMethods.FileReadAccess,
+                NativeMethods.ShareNone, NativeMethods.FileOpen, NativeMethods.StableFileOpenOptions);
+            EnsureSafeFile(handle);
+            return (parent, handle);
+        }
+        catch
+        {
+            handle?.Dispose();
+            parent.Dispose();
+            throw;
+        }
+    }
+
     internal (VerifiedNativeDirectory Parent, SafeFileHandle Handle) OpenOrCreateStableFile(string absolutePath)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(absolutePath);
@@ -1083,6 +1109,7 @@ internal sealed partial class HandleRelativeNativeFileSystem
         internal const uint DirectoryOpenOptions = FileDirectoryFile | FileSynchronousIoNonalert | FileOpenReparsePoint;
         internal const uint FileOpenOptions = FileNonDirectoryFile | FileSynchronousIoNonalert | FileOpenReparsePoint;
         internal const uint ModelFileOpenOptions = FileOpenOptions | FileOpenNoRecall;
+        internal const uint StableFileOpenOptions = FileOpenOptions | FileOpenNoRecall;
         internal const uint OpenAnyOptions = FileSynchronousIoNonalert | FileOpenReparsePoint;
 
         private const uint FileOpenNoRecall = 0x00400000;

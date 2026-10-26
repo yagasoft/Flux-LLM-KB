@@ -104,6 +104,7 @@ public sealed partial class SourceVerificationExecutionIntegrationTests(NativeSq
             {
                 Directory.CreateDirectory(scenario.Sources);
                 Directory.CreateDirectory(scenario.Runtime);
+                File.WriteAllBytes(Path.Combine(scenario.Runtime, WindowsSourceVerificationReaderSlot.FileName), []);
                 await File.WriteAllTextAsync(Path.Combine(scenario.Sources, "one.txt"), new string('a', 64));
                 await File.WriteAllTextAsync(Path.Combine(scenario.Sources, "two.txt"), new string('b', 96));
                 if (gitTracked) { scenario.Git("init", "--quiet"); scenario.Git("add", "."); }

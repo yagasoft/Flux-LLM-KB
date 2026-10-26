@@ -10,6 +10,37 @@ namespace FluxKnowledge.Web.Tests.Components;
 public sealed class OverviewSnapshotCoordinatorTests
 {
     [Theory]
+    [InlineData(true, 0, 0, true)]
+    [InlineData(true, 0, 3621, true)]
+    [InlineData(false, 0, 3621, false)]
+    [InlineData(true, 3621, 3621, false)]
+    [InlineData(false, 0, 0, false)]
+    [InlineData(true, 0, 1205, false)]
+    [InlineData(true, -2, -2, false)]
+    public async Task Only_SQL_command_cancellation_at_the_owned_deadline_is_busy(
+        bool waitForDeadline, int firstError, int secondError, bool busy)
+    {
+        var reader = new ControlledReader();
+        reader.Release.SetResult();
+        using var services = new ServiceCollection().AddSingleton<IProjectionReader>(reader).BuildServiceProvider();
+        await using var shared = new OverviewSnapshotCoordinator(services.GetRequiredService<IServiceScopeFactory>(), new StatusEventFeed());
+        await shared.RefreshAsync(default);
+        var original = shared.Current;
+        reader.Failure = SqlProjectionReadBudgetTests.SqlFailure(firstError, secondError);
+        reader.WaitForDeadline = waitForDeadline;
+        await shared.RefreshAsync(default, force: true).AsTask().WaitAsync(TimeSpan.FromSeconds(6));
+        Assert.Equal(busy ? "Status is busy. Waiting for a consistent sample." : "Status refresh failed.", shared.Current.RefreshIssue);
+        Assert.Same(original.Projection, shared.Current.Projection);
+        Assert.Equal(original.PublishedAtUtc, shared.Current.PublishedAtUtc);
+        reader.Failure = null;
+        reader.WaitForDeadline = false;
+        reader.Result = Sample(9);
+        await shared.RefreshAsync(default, force: true).AsTask().WaitAsync(TimeSpan.FromSeconds(6));
+        Assert.Null(shared.Current.RefreshIssue);
+        Assert.Equal(9, shared.Current.Projection!.IndexedRecordCount);
+    }
+
+    [Theory]
     [InlineData(true)]
     [InlineData(false)]
     public async Task Connection_hints_reuse_a_fresh_sample_and_refresh_an_old_sample(bool fresh)
@@ -143,6 +174,28 @@ public sealed class OverviewSnapshotCoordinatorTests
         Assert.Null(shared.Current.Projection);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task SQL_cancellation_at_shutdown_is_quiet_and_disposal_still_awaits_cleanup(bool terminationNotice)
+    {
+        var lifetime = new Lifetime();
+        var reader = new ControlledReader { Failure = terminationNotice ? SqlProjectionReadBudgetTests.SqlFailure(0, 0, 3621) : SqlProjectionReadBudgetTests.SqlFailure(0),
+            WaitForDeadline = true, HoldCancellation = true };
+        using var services = new ServiceCollection().AddSingleton<IProjectionReader>(reader).BuildServiceProvider();
+        var shared = new OverviewSnapshotCoordinator(services.GetRequiredService<IServiceScopeFactory>(), new StatusEventFeed(), lifetime: lifetime);
+        var refresh = shared.RefreshAsync(default).AsTask();
+        await reader.Started.Task.WaitAsync(TimeSpan.FromSeconds(3));
+        lifetime.StopApplication();
+        await reader.CancellationObserved.Task.WaitAsync(TimeSpan.FromSeconds(3));
+        var dispose = shared.DisposeAsync().AsTask();
+        Assert.False(dispose.IsCompleted);
+        reader.CleanupRelease.SetResult();
+        await Task.WhenAll(dispose, refresh).WaitAsync(TimeSpan.FromSeconds(3));
+        Assert.Null(shared.Current.RefreshIssue);
+        Assert.Equal(0, shared.Metrics.Failed);
+    }
+
     private static async Task WaitUntilAsync(Func<bool> condition)
     {
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(3));
@@ -252,12 +305,25 @@ public sealed class OverviewSnapshotCoordinatorTests
         public TaskCompletionSource SecondRead { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource Release { get; set; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public bool HoldCancellation { get; init; }
+        public Exception? Failure { get; set; }
+        public bool WaitForDeadline { get; set; }
         public TaskCompletionSource CancellationObserved { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource CleanupRelease { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public async ValueTask<OverviewProjection> ReadOverviewAsync(CancellationToken token)
         {
             if (Interlocked.Increment(ref _reads) == 2) SecondRead.TrySetResult();
             Started.TrySetResult();
+            if (Failure is { } failure)
+            {
+                if (WaitForDeadline)
+                    try { await Task.Delay(Timeout.Infinite, token); }
+                    catch (OperationCanceledException)
+                    {
+                        CancellationObserved.TrySetResult();
+                        if (HoldCancellation) await CleanupRelease.Task;
+                    }
+                throw failure;
+            }
             try { await Release.Task.WaitAsync(token); }
             catch (OperationCanceledException) when (HoldCancellation)
             {

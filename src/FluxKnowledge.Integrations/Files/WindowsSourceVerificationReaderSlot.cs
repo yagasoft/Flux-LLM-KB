@@ -15,7 +15,7 @@ public sealed class WindowsSourceVerificationReaderSlot(string runtimeDirectory)
     {
         try
         {
-            var (parent, handle) = new HandleRelativeNativeFileSystem().OpenOrCreateStableFile(_path);
+            var (parent, handle) = new HandleRelativeNativeFileSystem().OpenExistingStableReadFile(_path);
             return new Lease(parent, handle);
         }
         catch (IOException error) when (error.InnerException is Win32Exception { NativeErrorCode: 32 or 33 })

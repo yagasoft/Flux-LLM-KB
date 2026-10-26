@@ -1,6 +1,7 @@
 using System.Collections.Immutable;
 using FluxKnowledge.Application.Contracts;
 using FluxKnowledge.Application.Sources;
+using Microsoft.Data.SqlClient;
 
 namespace FluxKnowledge.Web.Components.Status;
 
@@ -167,6 +168,15 @@ public sealed class OverviewSnapshotCoordinator : IAsyncDisposable
             { RecordFailure("Status is busy. Waiting for a consistent sample."); }
             catch (OverviewReadBudgetExceededException)
             { RecordFailure("Status is busy. Waiting for a consistent sample."); }
+            catch (SqlException exception) when (budget.IsCancellationRequested &&
+                OverviewReadBudgetExceededException.HasCommandCancellationErrors(exception))
+            {
+                // This coordinator owns the caller deadline. SqlClient can
+                // surface its cancellation as SqlException rather than OCE;
+                // the reader deliberately leaves caller cancellation intact.
+                if (!_stopping.IsCancellationRequested)
+                    RecordFailure("Status is busy. Waiting for a consistent sample.");
+            }
             catch (Exception exception) when (!_stopping.IsCancellationRequested)
             {
                 _logger?.LogWarning(exception, "Shared overview refresh failed.");

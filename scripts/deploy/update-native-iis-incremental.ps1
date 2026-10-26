@@ -73,6 +73,7 @@ $CanonicalRecoveryRoot = "$CanonicalLiveRoot\Recovery"
 $IncrementalRecoveryRoot = "$CanonicalRecoveryRoot\IncrementalUpdates"
 $ValidationHoldPath = "$CanonicalLiveRoot\Runtime\deployment-validation-hold.json"
 $CpuSearchOwnerPath = "$CanonicalLiveRoot\Runtime\bge-cpu-search-owner.lock"
+$SourceVerificationReaderPath = "$CanonicalLiveRoot\Runtime\source-verification.lock"
 $InteractiveHostRoot = "C:\inetpub\FluxKnowledge\outlook-host"
 $InteractiveHostTaskName = "FluxKnowledge.OutlookHost"
 $SourceJournalHelperRoot = 'I:\FluxKnowledgeSourceAccess'
@@ -165,6 +166,7 @@ function Invoke-CandidatePayloadActivation {
         [string]$ApplicationRoot
     )
 
+    Ensure-SourceVerificationReaderFile
     New-Item -ItemType Directory -Path $ApplicationRoot -ErrorAction Stop | Out-Null
     Assert-NotReparsePoint `
         -Path $ApplicationRoot `
@@ -998,7 +1000,7 @@ function Assert-NotReparsePoint {
     }
 }
 
-function Assert-CpuSearchOwnerAcl {
+function Assert-StableRuntimeReaderAcl {
     param([Parameter(Mandatory)][string]$Path)
     $acl = Get-Acl -LiteralPath $Path -ErrorAction Stop
     $unsafeRights = [int]([Security.AccessControl.FileSystemRights]::WriteData -bor
@@ -1019,22 +1021,22 @@ function Assert-CpuSearchOwnerAcl {
         }
         if ($identity -notin @('NT AUTHORITY\SYSTEM', 'BUILTIN\Administrators') -and
             (([int]$rule.FileSystemRights -band $unsafeRights) -ne 0)) {
-            throw "The CPU search owner path grants untrusted write or delete access: $Path"
+            throw "The stable runtime reader path grants untrusted write or delete access: $Path"
         }
     }
-    if (-not $workerRead) { throw "The CPU search owner path does not grant the IIS worker read access: $Path" }
+    if (-not $workerRead) { throw "The stable runtime reader path does not grant the IIS worker read access: $Path" }
 }
 
 function Get-CpuSearchOwnerFilePlan {
     $runtimeRoot = Join-Path $CanonicalLiveRoot 'Runtime'
     foreach ($path in @($CanonicalLiveRoot, $runtimeRoot)) {
         Assert-NotReparsePoint -Path $path -Message 'cpu-search-owner-directory-unsafe'
-        Assert-CpuSearchOwnerAcl -Path $path
+        Assert-StableRuntimeReaderAcl -Path $path
     }
     if (Test-Path -LiteralPath $CpuSearchOwnerPath) {
         if (-not (Test-Path -LiteralPath $CpuSearchOwnerPath -PathType Leaf)) { throw 'cpu-search-owner-file-invalid' }
         Assert-NotReparsePoint -Path $CpuSearchOwnerPath -Message 'cpu-search-owner-file-unsafe'
-        Assert-CpuSearchOwnerAcl -Path $CpuSearchOwnerPath
+        Assert-StableRuntimeReaderAcl -Path $CpuSearchOwnerPath
         return [ordered]@{ path=$CpuSearchOwnerPath; action='preserve-existing' }
     }
     return [ordered]@{ path=$CpuSearchOwnerPath; action='create-new-before-activation' }
@@ -1049,6 +1051,45 @@ function Ensure-CpuSearchOwnerFile {
     }
     $verified = Get-CpuSearchOwnerFilePlan
     if ($verified.action -ne 'preserve-existing') { throw 'cpu-search-owner-file-unavailable' }
+}
+
+function Get-SourceVerificationReaderFilePlan {
+    foreach ($path in @($CanonicalLiveRoot, (Join-Path $CanonicalLiveRoot 'Runtime'), $SourceVerificationReaderPath)) {
+        if ($path -ceq $SourceVerificationReaderPath -and !(Test-Path -LiteralPath $path)) { continue }
+        Assert-NotReparsePoint -Path $path -Message 'source-verification-reader-path-unsafe'
+        Assert-StableRuntimeReaderAcl -Path $path
+        $owner=(Get-Acl -LiteralPath $path).GetOwner([Security.Principal.SecurityIdentifier]).Value
+        if ($owner -notin @('S-1-5-18','S-1-5-32-544')) { throw 'source-verification-reader-owner-unsafe' }
+    }
+    if (Test-Path -LiteralPath $SourceVerificationReaderPath) {
+        if (!(Test-Path -LiteralPath $SourceVerificationReaderPath -PathType Leaf)) { throw 'source-verification-reader-file-invalid' }
+        return [ordered]@{path=$SourceVerificationReaderPath;action='preserve-existing'}
+    }
+    return [ordered]@{path=$SourceVerificationReaderPath;action='create-new-before-activation'}
+}
+
+function Assert-SourceVerificationReaderMaintenance {
+    $appcmd=Join-Path $env:SystemRoot 'System32\inetsrv\appcmd.exe'
+    if ((& $appcmd list apppool FluxKnowledge /text:state) -cne 'Stopped' -or $LASTEXITCODE -ne 0 -or
+        @(Get-HybridIisWorkerIds -AppCmdPath $appcmd -PoolName 'FluxKnowledge').Count -ne 0) {
+        throw 'source-verification-reader-requires-proved-worker-stop'
+    }
+    if (!(Test-Path -LiteralPath $ValidationHoldPath -PathType Leaf)) { throw 'source-verification-reader-requires-validation-hold' }
+    Assert-NotReparsePoint -Path $ValidationHoldPath -Message 'source-verification-reader-validation-hold-unsafe'
+}
+
+function Ensure-SourceVerificationReaderFile {
+    Assert-SourceVerificationReaderMaintenance
+    $plan=Get-SourceVerificationReaderFilePlan
+    if ($plan.action -eq 'create-new-before-activation') {
+        $stream=[IO.FileStream]::new($SourceVerificationReaderPath,[IO.FileMode]::CreateNew,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
+        $stream.Dispose()
+    }
+    if ((Get-SourceVerificationReaderFilePlan).action -ne 'preserve-existing') { throw 'source-verification-reader-file-unavailable' }
+    # A conflicting external holder is a maintenance failure, never permission
+    # to replace the stable file and create a second ownership object.
+    $stream=[IO.FileStream]::new($SourceVerificationReaderPath,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::None)
+    $stream.Dispose()
 }
 
 function Get-HybridIisWorkerIds {
@@ -2656,6 +2697,7 @@ if ($PlanOnly) {
         interactive_host_activation = "next ordinary scheduled run; never triggered by deployment"
         recovery_root = $CanonicalRecoveryRoot
         cpu_search_owner_file = Get-CpuSearchOwnerFilePlan
+        source_verification_reader_file = Get-SourceVerificationReaderFilePlan
         migrations = [bool]$applyAnyMigration
         migration_plan = $migrationPlan
         source_journal_release = $sourceJournalPlan

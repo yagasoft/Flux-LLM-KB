@@ -8,6 +8,7 @@ using FluxKnowledge.Application.Workers;
 using FluxKnowledge.Domain.Jobs;
 using FluxKnowledge.Domain.Pipeline;
 using FluxKnowledge.Domain.Sources;
+using FluxKnowledge.Infrastructure.SqlServer.Persistence;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
 using FluxKnowledge.Integration.Tests.Support;
 using FluxKnowledge.Web.Components.Status;
@@ -39,7 +40,7 @@ public sealed partial class PipelineActivitySqlTests
         finally { await owned.DisposeAsync(); }
     }
 
-    private async Task MeasureFileReadCostAsync(int currentJobCount = 1000)
+    private async Task<FileCostFixture> SeedFileCostFixtureAsync(int currentJobCount)
     {
         await EnableOwnedSnapshotAsync();
         var now = DateTimeOffset.UtcNow;
@@ -108,6 +109,15 @@ public sealed partial class PipelineActivitySqlTests
                 setup.ChangeTracker.Clear();
             }
         }
+        return new(root, toggledActivity, toggledJob, codeBranch);
+    }
+
+    private sealed record FileCostFixture(Guid Root, Guid ToggledActivity, Guid ToggledJob, Guid CodeBranch);
+
+    private async Task MeasureFileReadCostAsync(int currentJobCount = 1000)
+    {
+        var (root, toggledActivity, toggledJob, codeBranch) = await SeedFileCostFixtureAsync(currentJobCount);
+        var factory = new TestDbContextFactory(_fixture.ConnectionString);
         // One bounded setup read prepares this warm-read qualification. It does not
         // alter the public deadline or retry any asserted/measurement operation.
         var warmTimings = new FileCostCommandTimings();
@@ -116,7 +126,7 @@ public sealed partial class PipelineActivitySqlTests
         using (var setupDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(10)))
         {
             await using var context = new TestDbContextFactory(_fixture.ConnectionString, warmTimings,
-                warmStatistics, new FileStatisticsDrain(warmTimings.Samples.Add)).CreateDbContext();
+                warmStatistics, new FileStatisticsDrain(warmTimings.Samples.Add, setupDeadline.Token)).CreateDbContext();
             await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Snapshot, setupDeadline.Token);
             try
             {
@@ -134,18 +144,20 @@ public sealed partial class PipelineActivitySqlTests
             }
         }
         var commands = new FileCommandTrace();
-        var reads = new FileLogicalReadTrace();
-        var commandTimings = new FileCostCommandTimings();
-        var reader = SnapshotReader(commands, reads, new FileStatisticsDrain(commandTimings.Samples.Add), commandTimings);
+        // Match application retry/buffering policy. Statistics messages and result
+        // draining above are setup diagnostics, not part of runtime qualification.
+        var runtimeFactory = new FileCostRuntimeFactory(_fixture.ConnectionString, commands);
+        await using (var policy = runtimeFactory.CreateDbContext())
+            Assert.True(policy.Database.CreateExecutionStrategy().RetriesOnFailure);
+        var reader = SnapshotReader(runtimeFactory);
         var setupWatch = Stopwatch.StartNew();
         try { _ = await reader.ReadOverviewAsync(default); }
         finally
         {
-            output.WriteLine($"Initial public setup overview: elapsedMs={setupWatch.Elapsed.TotalMilliseconds:F1}; " + string.Join("; ", commandTimings.Samples));
-            output.WriteLine("Initial public SQL execution times: " + string.Join("; ", reads.SqlTimes));
+            output.WriteLine($"Initial public setup overview: elapsedMs={setupWatch.Elapsed.TotalMilliseconds:F1}; serverGc={System.Runtime.GCSettings.IsServerGC}; production retry policy; no statistics/drain instrumentation.");
         }
         _ = await reader.ReadPipelineFilesAsync(new(), root, 0, default);
-        commands.Commands.Clear(); reads.Reset(); commandTimings.Samples.Clear();
+        commands.Commands.Clear();
         var timings = new List<double>();
         var writerCount = 0;
         using var stopping = new CancellationTokenSource();
@@ -175,13 +187,15 @@ public sealed partial class PipelineActivitySqlTests
             await stopping.CancelAsync(); await writer;
             if (timings.Count != 24)
                 output.WriteLine($"Incomplete file-cost qualification: usableReads={timings.Count}/24; " +
-                    string.Join("; ", commandTimings.Samples.TakeLast(70)));
+                    $"completedReadMs={string.Join(",", timings.Select(ms => ms.ToString("F1", System.Globalization.CultureInfo.InvariantCulture)))}; " +
+                    "production retry policy; no statistics/drain instrumentation.");
         }
         var p95 = timings.Order().ElementAt((int)Math.Ceiling(timings.Count * .95) - 1);
         output.WriteLine($"File-cost qualification: files=30000 currentJobs={currentJobCount} confirmedCodeProcessors=1 overlappingWrites={writerCount} usableReads={timings.Count}/24 " +
-            $"p95Ms={p95:F1} maxMs={timings.Max():F1} readerCommands={commands.Commands.Count} logicalReads={reads.LogicalReads}; scalar metadata only, shared polling unchanged.");
+            $"p95Ms={p95:F1} maxMs={timings.Max():F1} readerCommands={commands.Commands.Count} setupLogicalReads={warmStatistics.LogicalReads}; " +
+            "production retry policy; scalar metadata only; no statistics/drain instrumentation in measured reads; shared polling unchanged.");
         Assert.True(writerCount >= 2);
-        Assert.True(reads.LogicalReads > 0);
+        Assert.True(warmStatistics.LogicalReads > 0);
         Assert.InRange(commands.Commands.Count, 1, 24 * 45);
         Assert.True(timings.All(ms => ms < 2500)); // Includes return/cleanup around the existing 2s operation budget.
 
@@ -209,6 +223,14 @@ public sealed partial class PipelineActivitySqlTests
         }
     }
 
+    private sealed class FileCostRuntimeFactory(string connectionString, params IInterceptor[] interceptors)
+        : IDbContextFactory<FluxKnowledgeDbContext>
+    {
+        private readonly DbContextOptions<FluxKnowledgeDbContext> options = new DbContextOptionsBuilder<FluxKnowledgeDbContext>()
+            .UseSqlServer(connectionString, sql => sql.EnableRetryOnFailure()).AddInterceptors(interceptors).Options;
+        public FluxKnowledgeDbContext CreateDbContext() => new(options);
+    }
+
     private sealed class FileCostCommandTimings : DbCommandInterceptor
     {
         private readonly Stopwatch _watch = Stopwatch.StartNew();
@@ -224,6 +246,18 @@ public sealed partial class PipelineActivitySqlTests
             DbDataReader result, CancellationToken cancellationToken = default)
         {
             Samples.Add($"executed at {_watch.Elapsed.TotalMilliseconds:F1}ms duration={eventData.Duration.TotalMilliseconds:F1}ms");
+            return ValueTask.FromResult(result);
+        }
+        public override ValueTask<InterceptionResult<int>> NonQueryExecutingAsync(DbCommand command,
+            CommandEventData eventData, InterceptionResult<int> result, CancellationToken cancellationToken = default)
+        {
+            Samples.Add($"nonquery#{++_commands} at {_watch.Elapsed.TotalMilliseconds:F1}ms chars={command.CommandText.Length} jobFacts={command.CommandText.Contains("INSERT INTO #FluxPipelineJobFacts", StringComparison.Ordinal)} gpuFacts={command.CommandText.Contains("INSERT INTO #FluxPipelineGpuFacts", StringComparison.Ordinal)}");
+            return ValueTask.FromResult(result);
+        }
+        public override ValueTask<int> NonQueryExecutedAsync(DbCommand command, CommandExecutedEventData eventData,
+            int result, CancellationToken cancellationToken = default)
+        {
+            Samples.Add($"nonquery executed at {_watch.Elapsed.TotalMilliseconds:F1}ms duration={eventData.Duration.TotalMilliseconds:F1}ms rows={result}");
             return ValueTask.FromResult(result);
         }
         public override Task CommandFailedAsync(DbCommand command, CommandErrorEventData eventData,
@@ -262,7 +296,7 @@ public sealed partial class PipelineActivitySqlTests
         }
     }
 
-    private sealed class FileStatisticsDrain(Action<string>? observe = null) : DbCommandInterceptor
+    private sealed class FileStatisticsDrain(Action<string>? observe = null, CancellationToken cancellationToken = default) : DbCommandInterceptor
     {
         public override async ValueTask<InterceptionResult> DataReaderClosingAsync(DbCommand command,
             DataReaderClosingEventData eventData, InterceptionResult result)
@@ -272,8 +306,8 @@ public sealed partial class PipelineActivitySqlTests
             var watch = Stopwatch.StartNew();
             try
             {
-                while (await eventData.DataReader.NextResultAsync())
-                    while (await eventData.DataReader.ReadAsync()) { }
+                while (await eventData.DataReader.NextResultAsync(cancellationToken))
+                    while (await eventData.DataReader.ReadAsync(cancellationToken)) { }
             }
             finally { observe?.Invoke($"statistics drain chars={command.CommandText.Length} elapsedMs={watch.Elapsed.TotalMilliseconds:F1}"); }
             return result;

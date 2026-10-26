@@ -22,6 +22,118 @@ public sealed class SourceRootProjectionReaderIntegrationTests(NativeSqlServerFi
 {
     private readonly NativeSqlServerFixture _fixture = fixture;
 
+    [NativeSqlServerFact]
+    public async Task Summary_publication_times_preserve_exact_record_binding_and_document_precedence()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var root = Guid.NewGuid();
+        var factory = new TestDbContextFactory(_fixture.ConnectionString);
+        (string Name, PipelineStage? Stage, bool Complete, bool Deleted, long? Revision, bool OtherSource, int Publication, DateTimeOffset? Expected)[] cases =
+        [
+            ("publish", PipelineStage.Publish, true, false, 1, false, 0, now),
+            ("no-artifact", (PipelineStage?)null, true, false, (long?)1, false, 0, (DateTimeOffset?)null),
+            ("other-stage", PipelineStage.Extract, true, false, (long?)1, false, 0, (DateTimeOffset?)null),
+            ("incomplete", PipelineStage.Publish, false, false, (long?)1, false, 0, (DateTimeOffset?)null),
+            ("deleted", PipelineStage.Publish, true, true, (long?)1, false, 0, (DateTimeOffset?)null),
+            ("unversioned-activity", PipelineStage.Publish, true, false, (long?)null, false, 0, (DateTimeOffset?)now),
+            ("wrong-source", PipelineStage.Publish, true, false, (long?)1, true, 0, (DateTimeOffset?)null),
+            ("valid-document", PipelineStage.Publish, true, false, (long?)1, false, 1, (DateTimeOffset?)now.AddMinutes(-10)),
+            ("stale-document", PipelineStage.Publish, true, false, (long?)1, false, 2, (DateTimeOffset?)now)
+        ];
+        var expected = new Dictionary<Guid, SourceLogicalFileState>();
+        await using (var setup = factory.CreateDbContext())
+        {
+            setup.SourceRootConfigurations.Add(new SourceRootConfigurationEntity
+            {
+                Id = root, CanonicalPath = $"I:\\publication-summary\\{root:N}", DisplayName = "Publication summary",
+                State = (int)SourceRootState.Enabled, ConfigurationRevision = 1, CreatedAtUtc = now, UpdatedAtUtc = now
+            });
+            foreach (var item in cases)
+            {
+                var source = Revision(Guid.NewGuid(), root, item.Name + ".txt", now, false);
+                setup.SourceRevisions.Add(source);
+                var record = AddRecord(source.Id, item.Complete, item.Deleted);
+                if (item.OtherSource)
+                {
+                    var other = Revision(Guid.NewGuid(), root, "suppressed-other.txt", now, true);
+                    setup.SourceRevisions.Add(other);
+                    record.SourceRevisionId = other.Id;
+                }
+                var activity = Activity(source.Id, SourceActivityState.Completed, record.Id);
+                activity.ResultingPipelineRecordRevision = item.Revision;
+                activity.DescriptorFingerprint = new string('b', 64);
+                setup.SourceActivities.Add(activity);
+                // Multiple activities/branches must not multiply the logical file.
+                foreach (var fingerprint in new[] { 'b', 'c' })
+                {
+                    var branchActivity = activity;
+                    if (fingerprint == 'c')
+                    {
+                        branchActivity = Activity(source.Id, SourceActivityState.Completed, record.Id);
+                        branchActivity.ResultingPipelineRecordRevision = item.Revision;
+                        branchActivity.DescriptorFingerprint = new string('c', 64);
+                        setup.SourceActivities.Add(branchActivity);
+                    }
+                    setup.SourceProcessorBranches.Add(new SourceProcessorBranchEntity
+                    {
+                        Id = Guid.NewGuid(), SourceRevisionId = source.Id, SourceActivityId = branchActivity.Id,
+                        InputSha256 = source.ContentSha256, ProcessorVersion = "summary-test", ProcessorFingerprint = new string(fingerprint, 64),
+                        State = (int)RetainedProcessorBranchState.Completed, CreatedAtUtc = now, UpdatedAtUtc = now
+                    });
+                }
+                if (item.Stage is { } stage)
+                    setup.Artifacts.Add(new ArtifactEntity
+                    {
+                        Id = Guid.NewGuid(), PipelineRecordId = record.Id, SourceRevision = 1, Stage = (int)stage,
+                        ContentHash = record.ContentHash, ContentType = "text/plain", SearchText = "test", CreatedAtUtc = now
+                    });
+                if (item.Publication != 0)
+                {
+                    var input = Revision(Guid.NewGuid(), root, item.Name + "-input.txt", now, false);
+                    input.OriginKind = 2; input.ParentSourceRevisionId = source.Id;
+                    setup.SourceRevisions.Add(input);
+                    var published = AddRecord(input.Id, item.Publication == 1, false);
+                    setup.DocumentPublications.Add(new DocumentPublicationEntity
+                    {
+                        OwnerSourceRevisionId = source.Id, DocumentInputSourceRevisionId = input.Id,
+                        SourceProcessorBranchId = setup.SourceProcessorBranches.Local.First(branch => branch.SourceRevisionId == source.Id).Id,
+                        PipelineRecordId = published.Id, PipelineRecordRevision = 1, ProcessorFingerprint = new string('b', 64),
+                        PublishedAtUtc = now.AddMinutes(-10)
+                    });
+                }
+                var selectedBranch = item.Publication == 0 ? (Guid?)null
+                    : setup.SourceProcessorBranches.Local.First(branch => branch.SourceRevisionId == source.Id).Id;
+                var category = item.Complete && !item.Deleted && !item.OtherSource ? "Published" : "Pending";
+                expected.Add(source.Id, new(root, source.Id, source.CanonicalPath, null, category, null,
+                    selectedBranch, item.Expected, source.Classification));
+            }
+            await setup.SaveChangesAsync();
+
+            PipelineRecordEntity AddRecord(Guid source, bool complete, bool deleted)
+            {
+                var identity = new SourceIdentityEntity { Id = Guid.NewGuid(), SourceKind = "summary-test", StableKey = Guid.NewGuid().ToString("N"), CreatedAtUtc = now };
+                var record = new PipelineRecordEntity
+                {
+                    Id = Guid.NewGuid(), SourceIdentityId = identity.Id, SourceRevisionId = source, Revision = 1,
+                    ContentHash = new string('a', 64), CurrentStage = (int)PipelineStage.Publish,
+                    CompletionCriteriaMet = complete, IsDeleted = deleted, RegisteredAtUtc = now
+                };
+                record.RootLineageRecordId = record.Id;
+                setup.SourceIdentities.Add(identity); setup.PipelineRecords.Add(record);
+                return record;
+            }
+        }
+        await using var context = factory.CreateDbContext();
+        var summary = (await SourceRootProjectionReader.ReadStateSummariesAsync(context, [root], default))[root];
+        Assert.Equal(cases.Length, summary.Known);
+        Assert.Equal(cases.Length, summary.Files.Count);
+        Assert.Equal(expected.Values.OrderBy(file => file.SourceRevisionId), summary.Files.OrderBy(file => file.SourceRevisionId));
+        Assert.Equal(expected.Values.Count(file => file.Category == "Published"), summary.Indexed);
+        Assert.Equal(expected.Values.Count(file => file.Category == "Pending"), summary.Pending);
+        Assert.Equal(0, summary.Deferred + summary.Blocked + summary.Error + summary.Provisional + summary.MetadataOnly + summary.WithoutText);
+        Assert.Equal(now, summary.LastProgressAtUtc);
+    }
+
     [NativeSqlServerTheory]
     [InlineData(false)]
     [InlineData(true)]
