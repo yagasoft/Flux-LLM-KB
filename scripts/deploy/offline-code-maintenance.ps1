@@ -106,7 +106,14 @@ function Get-OfflineCodeDatabaseBinding {
     $connection=Open-SegmentedSchemaConnection $connectionString
     try {
         $schema=Read-SegmentedSchemaState $connection
-        Assert-SegmentedIndexApplicationSchema $schema
+        Import-Module (Join-Path $PSScriptRoot 'incremental-source-journal-migration.psm1') -ErrorAction Stop
+        $journalContract=Get-SourceJournalMigrationContract
+        if(@($schema.History | Where-Object {$_ -cin $journalContract.Migrations}).Count) {
+            $journal=Get-SourceJournalDatabaseState -ConnectionString $connectionString
+            Assert-SourceJournalComposedApplicationSchema -JournalState $journal -ProjectionState $schema
+        } else {
+            Assert-SegmentedIndexApplicationSchema $schema
+        }
         if($schema.RequiredFormat -ne 2){throw 'offline-code-format2-required'}
         $command=$connection.CreateCommand()
         try {

@@ -17,7 +17,7 @@ public sealed class SqlNativeV1ProjectionReader(
     IDbContextFactory<FluxKnowledgeDbContext> contextFactory,
     ILocalPrivateContentDisclosure disclosure,
     ILocalRetainedDetailReader retainedDetails,
-    INativeV1CursorCodec cursorCodec) : INativeV1ProjectionReader
+    INativeV1CursorCodec cursorCodec, ISourceVerificationStore? verification = null) : INativeV1ProjectionReader
 {
     public async ValueTask<object> ReadCorpusAsync(NativeCorpusQuery query, CancellationToken cancellationToken)
     {
@@ -25,6 +25,9 @@ public sealed class SqlNativeV1ProjectionReader(
         return query.View switch
         {
             "roots" => await ReadRootsAsync(context, query, cancellationToken).ConfigureAwait(false),
+            "verification" => await (verification ?? throw new NativeOperationException("source-verification-unavailable"))
+                .ReadAsync(new(query.RootId ?? throw new NativeOperationException("invalid-payload")), cancellationToken).ConfigureAwait(false)
+                ?? throw new NativeOperationException("target-not-found"),
             "branches" => await ReadBranchesAsync(context, query, cancellationToken).ConfigureAwait(false),
             "processors" => await ReadProcessorsAsync(context, query, cancellationToken).ConfigureAwait(false),
             "jobs" => await ReadJobsAsync(context, query, cancellationToken).ConfigureAwait(false),

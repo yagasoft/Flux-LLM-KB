@@ -11,10 +11,14 @@ if ((Get-FileHash -LiteralPath $SqlPath -Algorithm SHA256).Hash -cne $contract.U
 $tokens=$null; $errors=$null
 $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $SourceRoot 'scripts/deploy/update-native-iis-incremental.ps1'),[ref]$tokens,[ref]$errors)
 if ($errors.Count -ne 0) { throw 'The updater does not parse.' }
-foreach ($name in @('New-DeploymentValidationHold','Assert-SourceDeletionCleanupReleaseBinding','Get-SourceDeletionCleanupCandidateDatabase','Start-IndexCompatibleWebAppPool')) {
+foreach ($name in @('New-DeploymentValidationHold','Assert-SourceDeletionCleanupReleaseBinding','Get-SourceDeletionCleanupCandidateDatabase','Start-IndexCompatibleWebAppPool','Assert-DeploymentSourceJournalPredecessorRestorationAllowed')) {
     $function=$ast.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name },$true)
     Invoke-Expression $function.Extent.Text
 }
+# This fixture models the legacy cleanup baseline; journal feature/gap admission
+# and unavailable-boundary refusal run against their own recovery fixtures.
+function Get-DeploymentSourceJournalBoundary { @{Protected=$false} }
+$sourceJournalMode=$false
 $createHold=(Get-Command New-DeploymentValidationHold).ScriptBlock
 function New-DeploymentValidationHold {
     param($Path,$ReleaseId)

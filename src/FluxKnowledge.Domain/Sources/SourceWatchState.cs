@@ -3,13 +3,18 @@ using FluxKnowledge.Domain.Common;
 namespace FluxKnowledge.Domain.Sources;
 
 /// <summary>
-/// Durable, root-scoped watcher state. Signals deliberately carry no filesystem path:
-/// reconciliation remains the authority for discovered source changes.
+/// Bounded source-relative hints. Only guarded reconciliation can authorise source access.
 /// </summary>
 public sealed record SourceWatchSignal(
     SourceRootId RootId,
     SourceWatchSignalKind Kind,
-    DateTimeOffset ObservedAtUtc);
+    DateTimeOffset ObservedAtUtc,
+    IReadOnlyList<SourceWatchPathHint>? Paths = null,
+    bool PathsIncomplete = false,
+    bool RepositoryControlChanged = false,
+    DateTimeOffset? FirstObservedAtUtc = null);
+
+public sealed record SourceWatchPathHint(string RelativePath, bool IsSubtree = false);
 
 public sealed record SourceWatchState(
     SourceRootId SourceRootId,
@@ -35,7 +40,12 @@ public sealed record SourceWatchState(
             throw new DomainInvariantException("Watch signal root must match the persisted watch state.");
         }
 
-        var firstSignalAtUtc = FirstSignalAtUtc ?? signal.ObservedAtUtc;
+        var firstObservedAtUtc = signal.FirstObservedAtUtc is { } earlier
+            ? Min(earlier, signal.ObservedAtUtc)
+            : signal.ObservedAtUtc;
+        var firstSignalAtUtc = FirstSignalAtUtc is { } first
+            ? Min(first, firstObservedAtUtc)
+            : firstObservedAtUtc;
         var lastSignalAtUtc = LastSignalAtUtc is { } last && last > signal.ObservedAtUtc
             ? last
             : signal.ObservedAtUtc;

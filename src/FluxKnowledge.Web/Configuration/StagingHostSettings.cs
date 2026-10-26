@@ -3,6 +3,7 @@ using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 using FluxKnowledge.Application.Contracts;
 using FluxKnowledge.Application.Operations;
+using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Infrastructure.SqlServer.Configuration;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
 using FluxKnowledge.Integrations.Files;
@@ -36,6 +37,11 @@ internal sealed class StagingHostSettings
     internal string IndexPublicationMode { get; }
     internal bool DashboardReadBenchmark { get; }
     internal string DashboardReadConsistency { get; }
+    internal bool SourceJournalEnabled { get; private init; }
+    internal IReadOnlyList<string> SourceJournalVolumes { get; private init; } = [];
+    internal bool SourceJournalSealingEnabled { get; private init; }
+    internal IReadOnlyList<SourceJournalSealQualification> SourceJournalSealQualifications { get; private init; } = [];
+    internal int SourceJournalMetadataEntriesPerSecond { get; private init; } = 64;
 
     internal static StagingHostSettings Create(string root, string connection, string origin,
         ILiveRootPathInspector? inspector = null, string indexPublicationMode = "Legacy", bool dashboardReadBenchmark = false)
@@ -77,8 +83,22 @@ internal sealed class StagingHostSettings
             dashboardReadBenchmark: document.DashboardReadBenchmark);
         if (document.DashboardReadConsistency is not ("LegacyFenced" or "Snapshot"))
             throw new ArgumentException("Invalid staging dashboard read consistency.");
+        var volumes = document.SourceJournalVolumes ?? [];
+        if (volumes.Any(volume => volume is null || !volume.StartsWith(@"\\?\Volume{", StringComparison.OrdinalIgnoreCase)))
+            throw new ArgumentException("Staging journal targets must be explicit canonical volume identities.");
+        try { volumes = volumes.Select(WindowsSourceChangeJournalReader.CanonicalVolume).Distinct(StringComparer.OrdinalIgnoreCase).ToArray(); }
+        catch (Exception error) when (error is ArgumentException or UnauthorizedAccessException)
+        { throw new ArgumentException("Staging journal targets must be explicit canonical volume identities.", error); }
+        if (document.SourceJournalEnabled && volumes.Length == 0)
+            throw new ArgumentException("Incremental staging requires explicit journal volumes.");
         return new(loaded.Layout, loaded.Sql, loaded.Origin, loaded.IndexPublicationMode, loaded.DashboardReadBenchmark,
-            document.DashboardReadConsistency);
+            document.DashboardReadConsistency)
+        {
+            SourceJournalEnabled = document.SourceJournalEnabled, SourceJournalVolumes = volumes,
+            SourceJournalSealingEnabled = document.SourceJournalSealingEnabled,
+            SourceJournalSealQualifications = document.SourceJournalSealQualifications ?? [],
+            SourceJournalMetadataEntriesPerSecond = document.SourceJournalMetadataEntriesPerSecond
+        };
     }
 
     internal void ValidateBeforeStart()
@@ -123,6 +143,10 @@ internal sealed class StagingHostSettings
         ["Search:HybridPassagesEnabled"] = "false",
         ["IndexPublication:Mode"] = IndexPublicationMode,
         ["Worker:Enabled"] = DashboardReadBenchmark ? "false" : "true",
+        ["SourceJournal:Enabled"] = SourceJournalEnabled ? "true" : "false",
+        ["SourceJournal:PollSeconds"] = "2",
+        ["SourceJournal:SealingEnabled"] = SourceJournalSealingEnabled ? "true" : "false",
+        ["SourceJournal:MetadataEntriesPerSecond"] = SourceJournalMetadataEntriesPerSecond.ToString(System.Globalization.CultureInfo.InvariantCulture),
         ["Dashboard:ReadConsistency"] = DashboardReadConsistency,
         ["Codex:PromptContextEnabled"] = "false",
         ["Logging:LogLevel:Default"] = "Warning",
@@ -130,10 +154,23 @@ internal sealed class StagingHostSettings
         ["Logging:LogLevel:Microsoft.Hosting.Lifetime"] = "Information",
         ["Logging:LogLevel:FluxKnowledge.Infrastructure.SqlServer.Persistence.SqlDatabaseStartupReadiness"] = "Information",
         ["Logging:LogLevel:Microsoft.EntityFrameworkCore"] = "Warning"
-    }).Build();
+    }.Concat(SourceJournalVolumes.Select((volume, index) =>
+        new KeyValuePair<string, string?>($"SourceJournal:ApprovedVolumes:{index}", volume)))
+        .Concat(SourceJournalSealQualifications.SelectMany((qualification, index) => new Dictionary<string, string?>
+        {
+            [$"SourceJournal:SealQualifications:{index}:RootIdentityFingerprint"] = qualification.RootIdentityFingerprint,
+            [$"SourceJournal:SealQualifications:{index}:EnvironmentFingerprint"] = qualification.EnvironmentFingerprint,
+            [$"SourceJournal:SealQualifications:{index}:Scope"] = qualification.Scope,
+            [$"SourceJournal:SealQualifications:{index}:QualificationId"] = qualification.QualificationId,
+            [$"SourceJournal:SealQualifications:{index}:ProviderName"] = qualification.ProviderName,
+            [$"SourceJournal:SealQualifications:{index}:ProviderVersion"] = qualification.ProviderVersion
+        }))).Build();
 
     private sealed record SettingsDocument(string SqlConnectionString, string Origin, string IndexPublicationMode = "Legacy",
-        bool DashboardReadBenchmark = false, string DashboardReadConsistency = "LegacyFenced");
+        bool DashboardReadBenchmark = false, string DashboardReadConsistency = "LegacyFenced",
+        bool SourceJournalEnabled = false, string[]? SourceJournalVolumes = null,
+        bool SourceJournalSealingEnabled = false, SourceJournalSealQualification[]? SourceJournalSealQualifications = null,
+        int SourceJournalMetadataEntriesPerSecond = 64);
 }
 
 internal sealed class StagingSourceRootPathPolicy(ISourceRootPathPolicy inner, string sourcesRoot) : ISourceRootPathPolicy

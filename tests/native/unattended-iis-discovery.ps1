@@ -9,13 +9,16 @@ $ast = [Management.Automation.Language.Parser]::ParseFile(
 if ($errors.Count) { throw 'The incremental updater does not parse.' }
 foreach ($name in @('Assert-CanonicalPath', 'Get-IncrementalIisHostingSettings', 'Test-IisHostingSettingsMatch',
     'Set-IncrementalIisHostingSettings', 'Restore-IncrementalIisHostingSettings', 'Wait-IncrementalIisPreloadStartup',
-    'Test-IncrementalRollbackHoldRelease', 'Start-IndexCompatibleWebAppPool')) {
+    'Test-IncrementalRollbackHoldRelease', 'Start-IndexCompatibleWebAppPool', 'Assert-DeploymentSourceJournalPredecessorRestorationAllowed')) {
     $definitions = @($ast.FindAll({ param($node)
         $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name
     }, $true))
     if ($definitions.Count -ne 1) { throw "Missing deployment function: $name" }
     Invoke-Expression $definitions[0].Extent.Text
 }
+# This fixture models the legacy hosting baseline, without journal activation.
+function Get-DeploymentSourceJournalBoundary { @{Protected=$false} }
+$sourceJournalMode=$false
 
 $SiteName = 'FluxKnowledge'
 $CanonicalDeployRoot = 'I:\FluxKnowledge\App'

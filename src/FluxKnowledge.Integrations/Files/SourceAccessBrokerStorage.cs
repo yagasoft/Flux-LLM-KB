@@ -10,6 +10,7 @@ internal sealed class SourceAccessBrokerStorage : IDisposable
     private readonly WindowsSourcePathAccess.DirectoryPathLease _root;
     private readonly WindowsSourcePathAccess.DirectoryPathLease _journal;
     private SafeFileHandle? _policyHandle;
+    private SafeFileHandle? _journalPolicyHandle;
     private SourceAccessPolicy? _policy;
     private bool _disposed;
     internal string RootPath { get; }
@@ -76,6 +77,25 @@ internal sealed class SourceAccessBrokerStorage : IDisposable
         return bytes;
     }
 
+    internal SourceJournalPolicy? ReadJournalPolicy()
+    {
+        ValidateCurrent();
+        try { _journalPolicyHandle = OpenTrustedFile(_root, "journal-policy.json", readData: true); }
+        catch (FileNotFoundException) { return null; }
+        var length = RandomAccess.GetLength(_journalPolicyHandle);
+        if (length is <= 0 or > 65536) throw new InvalidDataException("SourceJournalPolicyInvalid");
+        var bytes = new byte[(int)length];
+        var offset = 0;
+        while (offset < bytes.Length)
+        {
+            var read = RandomAccess.Read(_journalPolicyHandle, bytes.AsSpan(offset), offset);
+            if (read == 0) throw new EndOfStreamException();
+            offset += read;
+        }
+        ValidateCurrent();
+        return SourceJournalPolicy.Parse(bytes);
+    }
+
     internal void ValidateCurrent()
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
@@ -85,6 +105,7 @@ internal sealed class SourceAccessBrokerStorage : IDisposable
         if (current.Identity != _journal.Identity || current.IdentityAt(RootPath) != _root.Identity)
             throw new UnauthorizedAccessException("SourceAccessStorageIdentityChanged");
         if (_policyHandle is not null) ValidateFile(_policyHandle, Path.Combine(RootPath, "policy.json"));
+        if (_journalPolicyHandle is not null) ValidateFile(_journalPolicyHandle, Path.Combine(RootPath, "journal-policy.json"));
     }
 
     internal void ValidateJournalFile(string path)
@@ -150,6 +171,6 @@ internal sealed class SourceAccessBrokerStorage : IDisposable
     {
         if (_disposed) return;
         _disposed = true;
-        _policyHandle?.Dispose(); _journal.Dispose(); _root.Dispose();
+        _journalPolicyHandle?.Dispose(); _policyHandle?.Dispose(); _journal.Dispose(); _root.Dispose();
     }
 }

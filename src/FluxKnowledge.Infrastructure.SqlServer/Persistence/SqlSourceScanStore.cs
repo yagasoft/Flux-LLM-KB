@@ -17,7 +17,7 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
 public sealed partial class SqlSourceScanStore(
     IDbContextFactory<FluxKnowledgeDbContext> contextFactory,
     TimeProvider timeProvider, EmbeddingGpuRuntime? embeddingRuntime = null,
-    ILogger<SqlSourceScanStore>? logger = null) : ISourceScanStore, ISourceScanControlStore
+    ILogger<SqlSourceScanStore>? logger = null, SourceJournalOptions? sourceJournalOptions = null) : ISourceScanStore, ISourceScanControlStore
 {
     private const string SourceArtifactStoreCapability = "source-artifact-store";
     private const string SourceProcessorVersion = "phase-3a-v1";
@@ -516,6 +516,7 @@ public sealed partial class SqlSourceScanStore(
         TimeSpan leaseDuration,
         CancellationToken cancellationToken)
     {
+        var allowVerification = sourceJournalOptions?.Enabled == true;
         await using var executionContext = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         var strategy = executionContext.Database.CreateExecutionStrategy();
         return await strategy.ExecuteAsync(async () =>
@@ -531,13 +532,14 @@ public sealed partial class SqlSourceScanStore(
                     (value.State == (int)SourceScanJobState.Running && value.LeaseExpiresAtUtc <= nowUtc)) &&
                 value.DueAtUtc <= nowUtc &&
                 value.SourceScanRequest.IsReleased &&
+                (value.SourceScanRequest.RequestKind != SqlSourceVerificationStore.RequestKind || allowVerification) &&
                 value.SourceScanRequest.SourceRoot.State == (int)SourceRootState.Enabled &&
-                (value.SourceScanRequest.SourceRoot.CrawlMode != (int)SourceDiscoveryMode.GitTracked ||
-                    !context.SourceScanJobs.Any(other => other.Id != value.Id &&
+                !context.SourceScanJobs.Any(other => other.Id != value.Id &&
                         other.SourceScanRequest.SourceRootId == value.SourceScanRequest.SourceRootId &&
-                        other.State == (int)SourceScanJobState.Running && other.LeaseExpiresAtUtc > nowUtc)) &&
+                        other.State == (int)SourceScanJobState.Running && other.LeaseExpiresAtUtc > nowUtc) &&
                 (value.LeaseExpiresAtUtc == null || value.LeaseExpiresAtUtc <= nowUtc))
-            .OrderBy(value => value.DueAtUtc).ThenBy(value => value.Id)
+            .OrderBy(value => value.SourceScanRequest.RequestKind == SqlSourceVerificationStore.RequestKind)
+            .ThenBy(value => value.DueAtUtc).ThenBy(value => value.Id)
             .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
         if (candidate is null)
         {
@@ -553,7 +555,8 @@ public sealed partial class SqlSourceScanStore(
         candidate.LeaseGeneration++;
         candidate.AttemptCount++;
         candidate.UpdatedAtUtc = nowUtc;
-        candidate.SourceScanRequest.SourceRoot.LastScanStartedAtUtc = nowUtc;
+        if (candidate.SourceScanRequest.RequestKind != SqlSourceVerificationStore.RequestKind)
+            candidate.SourceScanRequest.SourceRoot.LastScanStartedAtUtc = nowUtc;
         await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
         var root = candidate.SourceScanRequest.SourceRoot;
@@ -572,7 +575,8 @@ public sealed partial class SqlSourceScanStore(
                 new SourceScanRequestId(candidate.SourceScanRequest.Id), new SourceRootId(root.Id),
                 candidate.SourceScanRequest.RequestedBy, candidate.SourceScanRequest.RequestedAtUtc,
                 (SourceScanRequestState)candidate.SourceScanRequest.State, candidate.SourceScanRequest.ReleasedAtUtc ?? nowUtc,
-                new SourceScanLease(candidate.Id, leaseOwner, candidate.LeaseGeneration)));
+                new SourceScanLease(candidate.Id, leaseOwner, candidate.LeaseGeneration),
+                candidate.SourceScanRequest.RequestKind == SqlSourceVerificationStore.RequestKind, candidate.SourceScanRequest.VerificationRunId));
         }).ConfigureAwait(false);
     }
 
@@ -617,6 +621,15 @@ public sealed partial class SqlSourceScanStore(
             $"SELECT * FROM [SourceRootConfigurations] WITH (UPDLOCK, HOLDLOCK) WHERE [Id] = {claim.SourceRoot.Id.Value}")
             .SingleAsync(cancellationToken).ConfigureAwait(false);
         var now = timeProvider.GetUtcNow();
+        var request = await context.SourceScanRequests.SingleAsync(value => value.Id == claim.ScanRequest.Id.Value, cancellationToken).ConfigureAwait(false);
+        var verification = request.RequestKind == SqlSourceVerificationStore.RequestKind;
+        if (verification && (result.IsCompleteInventory || result.CompletesReconciliation || !claim.ScanRequest.IsVerification ||
+            request.VerificationRunId is null || request.VerificationRunId != claim.ScanRequest.VerificationRunId ||
+            root.State != (int)SourceRootState.Enabled || root.ConfigurationRevision != claim.SourceRoot.ConfigurationRevision ||
+            root.CrawlMode != (int)claim.SourceRoot.DiscoveryMode ||
+            !await OwnsRootScanAsync(context, root.Id, new(claim.ScanRequest.Id,
+                new(claim.ControlJobId, claim.LeaseOwner, claim.LeaseGeneration)), now, cancellationToken).ConfigureAwait(false)))
+            throw new InvalidOperationException("SourceVerificationCompletionAuthorityInvalid");
         if (claim.SourceRoot.DiscoveryMode == SourceDiscoveryMode.GitTracked &&
             (root.State != (int)SourceRootState.Enabled || root.CrawlMode != (int)SourceDiscoveryMode.GitTracked ||
              root.ConfigurationRevision != claim.SourceRoot.ConfigurationRevision ||
@@ -631,10 +644,9 @@ public sealed partial class SqlSourceScanStore(
         {
             throw new InvalidOperationException("The source scan control lease is no longer owned by this worker.");
         }
-        var request = await context.SourceScanRequests.SingleAsync(value => value.Id == claim.ScanRequest.Id.Value, cancellationToken).ConfigureAwait(false);
         // Filesystem completion keeps its existing acceptance rules. Deleting old
         // diagnostics needs the stronger, fresh authority used for source mutations.
-        var cleanupUntil = failureReason is null && root.State == (int)SourceRootState.Enabled &&
+        var cleanupUntil = !verification && result.IsCompleteInventory && failureReason is null && root.State == (int)SourceRootState.Enabled &&
             root.ConfigurationRevision == claim.SourceRoot.ConfigurationRevision && root.CrawlMode == (int)claim.SourceRoot.DiscoveryMode &&
             await OwnsRootScanAsync(context, root.Id, new(claim.ScanRequest.Id,
                 new(claim.ControlJobId, claim.LeaseOwner, claim.LeaseGeneration)), now, cancellationToken).ConfigureAwait(false)
@@ -645,13 +657,18 @@ public sealed partial class SqlSourceScanStore(
         job.LeaseExpiresAtUtc = null;
         job.UpdatedAtUtc = now;
         request.State = failureReason is null ? (int)SourceScanRequestState.Completed : (int)SourceScanRequestState.Released;
-        request.DiscoveredFileCount = result.DiscoveredCount;
-        request.IndexedFileCount = result.IndexedCount;
-        request.DeferredFileCount = result.DeferredCount;
-        request.BlockedFileCount = result.BlockedCount;
-        root.LastScanCompletedAtUtc = now;
-        root.LastScanEvidenceJson = JsonSerializer.Serialize(new { result.DiscoveredCount, result.IndexedCount, result.DeferredCount, result.BlockedCount, failureReason });
-        root.UpdatedAtUtc = now;
+        if (!verification)
+        {
+            request.DiscoveredFileCount = result.DiscoveredCount;
+            request.IndexedFileCount = result.IndexedCount;
+            request.DeferredFileCount = result.DeferredCount;
+            request.BlockedFileCount = result.BlockedCount;
+            if (failureReason is null && (result.IsCompleteInventory || result.CompletesReconciliation))
+                root.LastScanCompletedAtUtc = now;
+            if (result.IsCompleteInventory)
+                root.LastScanEvidenceJson = JsonSerializer.Serialize(new { result.DiscoveredCount, result.IndexedCount, result.DeferredCount, result.BlockedCount, failureReason });
+            root.UpdatedAtUtc = now;
+        }
         if (failureReason is not null)
         {
             job.DueAtUtc = now.AddMinutes(1);
@@ -687,7 +704,7 @@ public sealed partial class SqlSourceScanStore(
             .ToListAsync(cancellationToken).ConfigureAwait(false);
         foreach (var root in roots)
         {
-            var hasActive = await context.SourceScanRequests.AnyAsync(request => request.SourceRootId == root.Id &&
+            var hasActive = await context.SourceScanRequests.AnyAsync(request => request.SourceRootId == root.Id && request.RequestKind != SqlSourceVerificationStore.RequestKind &&
                 (request.State == (int)SourceScanRequestState.Held ||
                     request.State == (int)SourceScanRequestState.Released ||
                     request.State == (int)SourceScanRequestState.Running),
@@ -730,10 +747,16 @@ public sealed partial class SqlSourceScanStore(
         }
     }
 
-    private static Task LockControlRangesAsync(
+    internal static async Task LockControlRangesAsync(
         FluxKnowledgeDbContext context,
-        CancellationToken cancellationToken) =>
-        context.Database.ExecuteSqlRawAsync(
+        CancellationToken cancellationToken, bool includeAllRoots = false)
+    {
+        if (includeAllRoots)
+            await context.Database.ExecuteSqlRawAsync(
+                "SELECT [Id] FROM [SourceRootConfigurations] WITH (UPDLOCK, HOLDLOCK) ORDER BY [Id];", cancellationToken).ConfigureAwait(false);
+        // Preserve the ordinary claim query; stopped maintenance first extends its
+        // root fence to paused/deleting roots before taking the same control ranges.
+        await context.Database.ExecuteSqlRawAsync(
             """
             SELECT [Id]
             FROM [SourceRootConfigurations] WITH (UPDLOCK, HOLDLOCK)
@@ -748,11 +771,12 @@ public sealed partial class SqlSourceScanStore(
             FROM [SourceScanJobs] WITH (UPDLOCK, HOLDLOCK)
             ORDER BY [SourceScanRequestId], [Id];
             """,
-            cancellationToken);
+            cancellationToken).ConfigureAwait(false);
+    }
 
     private static IReadOnlyList<string> DeserializeRules(string json) => JsonSerializer.Deserialize<string[]>(json) ?? [];
 
-    private static async Task<bool> OwnsRootScanAsync(FluxKnowledgeDbContext context, Guid rootId,
+    internal static async Task<bool> OwnsRootScanAsync(FluxKnowledgeDbContext context, Guid rootId,
         SourceScanOwnership ownership, DateTimeOffset now, CancellationToken token)
     {
         // Caller holds the root lock used by claim creation/reclaim: no second job can become authoritative here.

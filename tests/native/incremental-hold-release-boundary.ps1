@@ -1,6 +1,8 @@
 [CmdletBinding()]
 param([Parameter(Mandatory)][string]$SourceRoot)
 $ErrorActionPreference = 'Stop'
+Import-Module (Join-Path $SourceRoot 'scripts/deploy/incremental-source-journal-helper.psm1') -Force
+Import-Module (Join-Path $SourceRoot 'scripts/deploy/incremental-source-journal-helper-task.psm1') -Force
 $tokens = $null; $errors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile(
     (Join-Path $SourceRoot 'scripts/deploy/update-native-iis-incremental.ps1'), [ref]$tokens, [ref]$errors)
@@ -25,6 +27,13 @@ function Invoke-DeploymentIndexAdmission { param($Roles,$Action) & $Action }
 $enableDefinition=$ast.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'Enable-IndexCompatibleOutlookTask'},$true)
 Assert-True ($null -ne $enableDefinition) 'The admitted task callback is missing.'
 Invoke-Expression $enableDefinition.Extent.Text
+# This fixture exercises the legacy baseline rollback path. Protected and
+# unavailable journal boundaries have their own actual recovery tests.
+$journalGuard=$ast.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+    $node.Name -ceq 'Assert-DeploymentSourceJournalPredecessorRestorationAllowed'},$true)
+Assert-True ($null -ne $journalGuard) 'The predecessor restoration guard is missing.'
+Invoke-Expression $journalGuard.Extent.Text
+function Get-DeploymentSourceJournalBoundary { @{Protected=$false} }
 function Remove-DeploymentValidationHold {
     param($Path, $ReleaseId)
     $calls.Removes++
@@ -79,6 +88,8 @@ try {
         $RecoverStoppedPool = $false; $EnableUnattendedDiscovery = $false; $DeferReadinessForScopedRemediation = $false
         $sourceDeletionCleanupState = $null; $corpusMigrationState = $null; $codeDisclosureMigrationState = $null
         $sourceAccessChange = $null; $recoveryWriter = [object]::new()
+        $sourceJournalHelperState = $null; $sourceJournalNativePorts = $null
+        $sourceJournalMode = $false; $ApplyIncrementalSourceScanning = $false; $sourceJournalChange = $null
         $holdReleaseAttempted = $false; $holdReleased = $false
         $interactiveHostMutationStarted = $true; $interactiveHostTaskWasEnabled = $true; $interactiveHostRollbackVerified = $false
         $deploymentValidation = @{ HoldCreated = $true; PayloadRollbackVerified = $true; RollbackVerified = $true }

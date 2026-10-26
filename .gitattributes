@@ -3,3 +3,5 @@
 *.ps1 text eol=lf
 *.cmd text eol=crlf
 *.bat text eol=crlf
+# Preserve the exact reviewed EF-generated migration artifact, including its BOM.
+scripts/deploy/source-journal-up.sql -text

@@ -52,6 +52,14 @@ main { padding-block: 1.5rem; }
 .activity-list, .attention-counts { padding-inline-start: 1.25rem; }
 .activity-list li, .attention-counts li { margin-block: .5rem; }
 .scheduler-details > summary { font-weight: 600; cursor: pointer; }
+.source-verification { margin-block: 2rem; }
+.verification-grid dd { font-size: 1.05rem; }
+.verification-actions { display: flex; flex-wrap: wrap; gap: .5rem; }
+.verification-actions button { max-width: 100%; }
+.verification-form { margin-block: 1rem; }
+.verification-form label { display: grid; gap: .3rem; }
+.verification-form label:has(input[type="checkbox"]) { display: block; }
+.verification-form input, .verification-form select { min-width: 0; max-width: 100%; box-sizing: border-box; font: inherit; padding: .5rem; }
 .pipeline-overview details > summary { cursor: pointer; }
 .pipeline-overview code { overflow-wrap: anywhere; }
 @media (max-width: 40rem) {

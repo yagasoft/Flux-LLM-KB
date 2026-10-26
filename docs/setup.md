@@ -53,6 +53,67 @@ Production startup loads canonical configuration with no-follow path checks;
 an unrestricted development `dotnet run` is not an installation procedure.
 Tests provide their own isolated host composition and synthetic fixtures.
 
+## Incremental source scanning and integrity checks
+
+Journal-backed scanning is opt-in through `SourceJournal:Enabled`. Configure
+explicit canonical local NTFS `ApprovedVolumes` and the installed protected
+helper's `PipeName`; the application identity does not receive raw volume
+access. The helper's journal protocol uses bounded, non-waiting reads. The
+default two-second poll is also a health check; watcher notifications wake
+journal intake under healthy qualified coverage. Unsupported/unqualified roots
+retain scoped fallback and explicit baseline/recovery requirements.
+
+`SealingEnabled` and per-root/environment `SealQualifications` permit the
+qualified guarded file-close protocol. Do not copy a qualification to a new
+physical root, filesystem/kernel/provider environment or deployment without
+running the qualification checks. OneDrive needs actual provider qualification;
+synthetic cloud fixtures do not provide it. A journal gap or changed identity
+invalidates coverage and requires an authoritative baseline. Periodic namespace
+and Git membership reconciliation remain paced metadata work.
+
+The existing source detail page contains **Integrity verification**, including
+the schedule, read limit, pause/resume and manual request controls. New policies
+use the installation's local time zone explicitly: Sunday 02:00, a six-hour
+quiet window and 2 MiB/s combined source/retained reads. An unfinished weekly
+cycle continues during daily windows. One protected physical
+`Runtime/source-verification.lock` owns the installation-wide reader slot
+through terminal native cleanup. All instances of the same deployment must
+share that canonical Runtime path; isolated staging must use its own path.
+Do not delete/recreate the slot file while a process can own it.
+
+Verification progress is read from SQL every ten seconds, independently of the
+source file table. Verify now overrides that cycle's quiet window while retaining
+pause, source state, foreground priority and pacing. Source and retained hashes
+receive actual historical read times, and interrupted work cannot claim success.
+Keep read-on-consumption checks enabled. See [native controls and status](integrations.md#incremental-source-and-integrity-status)
+for equivalent REST, CLI and MCP operations.
+
+Enlarging the NTFS journal is an explicit operator action, never a runtime
+helper capability. The approved target is 1,024 MiB maximum with a 128 MiB
+allocation delta on E: and I:, preserving any larger existing setting. It is
+still a release operation requiring before/after identity, history and free-space
+checks; changing capacity alone does not enable incremental application scans.
+
+The operator-only `scripts/deploy/resize-source-journals.ps1` provides `-PlanOnly`
+and hash-bound `-Apply`. It targets 1 GiB maximum and 128 MiB allocation increments,
+preserves larger existing values and requires at least 2 GiB free before mutation.
+Maximum size is a trimming target, not a strict disk ceiling. The script does not
+delete/recreate journals or shrink/roll back their capacity. Exclude concurrent
+administrative journal changes: the native create/modify API cannot atomically
+condition its update on a journal ID.
+
+Apply requires a fresh private application-cursor evidence file and the exact
+reviewed PlanOnly receipt/hash. Version 1 evidence contains `capturedAtUtc`, Boolean
+`completeApplicationCursorSnapshot: true`, an attributable `source` and `cursors`
+with canonical `volumeIdentity`, hexadecimal `journalId` and `nextUsn`. A verified
+empty set also needs `noApplicationCursorsReason`; do not infer absence from a
+stopped application. Evidence expires after 15 minutes. The operator binds its
+executed code, targets and evidence, probes each cursor before/after the update
+and retains flushed partial-failure receipts in an existing private FluxKnowledge
+operational-evidence directory on I:. Production Apply still requires the exact
+operation packet, explicit authority and independent review. Simulated boundaries
+and an I: read-only probe are qualified; native Apply has not been exercised.
+
 ## Production prerequisites and layout
 
 For repository coverage, open **Sources and indexing → Configure a repository**,

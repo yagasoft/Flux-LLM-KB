@@ -6,6 +6,12 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
 public sealed class FluxKnowledgeDbContext(DbContextOptions<FluxKnowledgeDbContext> options)
     : DbContext(options)
 {
+    public DbSet<SourceVolumeJournalCheckpointEntity> SourceVolumeJournalCheckpoints => Set<SourceVolumeJournalCheckpointEntity>();
+    public DbSet<SourceRootScanStateEntity> SourceRootScanStates => Set<SourceRootScanStateEntity>();
+    public DbSet<SourceInventoryEntryEntity> SourceInventoryEntries => Set<SourceInventoryEntryEntity>();
+    public DbSet<SourcePendingChangeEntity> SourcePendingChanges => Set<SourcePendingChangeEntity>();
+    public DbSet<SourceVerificationRunEntity> SourceVerificationRuns => Set<SourceVerificationRunEntity>();
+    public DbSet<SourceVerificationItemEntity> SourceVerificationItems => Set<SourceVerificationItemEntity>();
     public DbSet<SourceIdentityEntity> SourceIdentities => Set<SourceIdentityEntity>();
     public DbSet<PipelineRecordEntity> PipelineRecords => Set<PipelineRecordEntity>();
     public DbSet<JobEntity> Jobs => Set<JobEntity>();

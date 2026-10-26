@@ -5,6 +5,7 @@ $target=[Data.SqlClient.SqlConnectionStringBuilder]::new($normalised)
 if($target.InitialCatalog -cne $ExpectedDatabase -or $ExpectedDatabase -cnotmatch '^FluxKnowledge_Phase1Tests_[a-f0-9]{32}$') { throw 'Not an owned disposable database.' }
 $script:connection=$target.ConnectionString
 Import-Module (Join-Path $SourceRoot 'scripts/deploy/incremental-segmented-index-schema.psm1') -Force
+Import-Module (Join-Path $SourceRoot 'scripts/deploy/incremental-source-journal-migration.psm1') -Force
 function Require([bool]$condition,[string]$reason){if(!$condition){throw $reason}}
 function Sql([string]$text) {
     $sql=[Data.SqlClient.SqlConnection]::new($script:connection)

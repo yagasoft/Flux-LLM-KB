@@ -141,6 +141,11 @@ $swap=@($swaps | Where-Object {$parent=$_.Parent;while($parent -and $parent -isn
 function Get-Callback([string]$Name){$elements=$swap.CommandElements;for($i=0;$i -lt $elements.Count;$i++){if($elements[$i] -is [Management.Automation.Language.CommandParameterAst] -and $elements[$i].ParameterName -ceq $Name){return $elements[$i+1].ScriptBlock.GetScriptBlock()}};throw 'Callback missing'}
 $stopDefinition=@($ast.FindAll({param($n)$n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Stop-HybridIisAfterGpuDrain'},$true))[0]
 Invoke-Expression $stopDefinition.Extent.Text
+$journalGuard=$ast.Find({param($n)$n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Assert-DeploymentSourceJournalPredecessorRestorationAllowed'},$true)
+Invoke-Expression $journalGuard.Extent.Text
+# Explicit legacy-baseline observation for this offline-code fixture.
+function Get-DeploymentSourceJournalBoundary { @{Protected=$false} }
+$sourceJournalMode=$false
 $ApplyResumableSourceDeletionCleanupMigration=$false;$SiteName='DisposableOfflineCode';$ReadinessTimeoutSeconds=10
 foreach($parameter in $ast.ParamBlock.Parameters){$name=$parameter.Name.VariablePath.UserPath;if(!(Get-Variable -Name $name -ErrorAction SilentlyContinue)){Set-Variable -Name $name -Value $null}}
 $hostingChange=@{Attempted=$false};$deploymentValidation=@{HoldCreated=$true;Baseline='fixture'}

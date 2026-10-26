@@ -6,7 +6,8 @@ using FluxKnowledge.Domain.Sources;
 
 namespace FluxKnowledge.Integrations.Files;
 
-public sealed class ContentAddressedSourceArtifactStore : ICapturedSourceArtifactStore, IDisposable
+public sealed partial class ContentAddressedSourceArtifactStore : ICapturedSourceArtifactStore, ISourceRetainedObservationStore,
+    ISourceVerificationRetainedStore, IDisposable
 {
     private readonly string _root;
     private readonly PhysicalDirectoryIdentity _rootIdentity;
@@ -16,8 +17,9 @@ public sealed class ContentAddressedSourceArtifactStore : ICapturedSourceArtifac
     private readonly Action? _beforeShardCreation;
     private readonly ISourceArtifactPublicationGate? _publicationGate;
     private readonly ISourceAccessRepairClient? _sourceAccessRepairClient;
-    internal Action<int>? SourceBytesRead { get; init; }
-    internal Action<int>? RetainedBytesRead { get; init; }
+    private readonly TimeProvider _time;
+    internal Action<int>? SourceBytesRead { get; set; }
+    internal Action<int>? RetainedBytesRead { get; set; }
 
     public ContentAddressedSourceArtifactStore(
         string configuredRoot,
@@ -26,7 +28,7 @@ public sealed class ContentAddressedSourceArtifactStore : ICapturedSourceArtifac
         Func<CancellationToken, ValueTask>? beforeArtifactWrite = null,
         Action? beforeShardCreation = null,
         ISourceArtifactPublicationGate? publicationGate = null,
-        ISourceAccessRepairClient? sourceAccessRepairClient = null)
+        ISourceAccessRepairClient? sourceAccessRepairClient = null, TimeProvider? timeProvider = null)
     {
         var effectiveProtectedRoots = protectedRoots?.ToArray();
         _root = ValidateRoot(configuredRoot, effectiveProtectedRoots);
@@ -39,6 +41,7 @@ public sealed class ContentAddressedSourceArtifactStore : ICapturedSourceArtifac
         _beforeShardCreation = beforeShardCreation;
         _publicationGate = publicationGate;
         _sourceAccessRepairClient = sourceAccessRepairClient;
+        _time = timeProvider ?? TimeProvider.System;
     }
 
     public ValueTask<SourceArtifactReceipt> PutFileAsync(

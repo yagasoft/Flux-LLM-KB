@@ -19,7 +19,7 @@ internal sealed class SqlPipelineActivityReader(IDeploymentValidationHold? hold,
         var now = startedAt;
         var roots = await context.SourceRootConfigurations.AsNoTracking().OrderBy(r => r.DisplayName).ThenBy(r => r.Id)
             .Select(r => new RootRow(r.Id, r.DisplayName, r.CanonicalPath, r.State, r.LastScanCompletedAtUtc,
-                context.SourceScanRequests.Where(request => request.SourceRootId == r.Id &&
+                context.SourceScanRequests.Where(request => request.SourceRootId == r.Id && request.RequestKind != SqlSourceVerificationStore.RequestKind &&
                         (request.State == (int)SourceScanRequestState.Completed || request.State == (int)SourceScanRequestState.Failed))
                     .OrderByDescending(request => request.RequestedAtUtc).ThenByDescending(request => request.Id)
                     .Select(request => (int?)request.ErrorFileCount).FirstOrDefault() ?? 0))
@@ -75,8 +75,9 @@ internal sealed class SqlPipelineActivityReader(IDeploymentValidationHold? hold,
                 join configuration in context.SourceRootConfigurations.AsNoTracking() on request.SourceRootId equals configuration.Id
                 join busyRoot in busyScanRoots on (Guid?)request.SourceRootId equals busyRoot.SourceRootId into busyRoots
                 from busyRoot in busyRoots.DefaultIfEmpty()
-                where job.State == (int)SourceScanJobState.Running || job.State == (int)SourceScanJobState.Pending &&
-                    (job.DueAtUtc <= now || request.RequestKind != 1 || !request.IsReleased || job.AttemptCount > 0 || job.Reason != null)
+                where request.RequestKind != SqlSourceVerificationStore.RequestKind &&
+                    (job.State == (int)SourceScanJobState.Running || job.State == (int)SourceScanJobState.Pending &&
+                    (job.DueAtUtc <= now || request.RequestKind != 1 || !request.IsReleased || job.AttemptCount > 0 || job.Reason != null))
                 select new { request.SourceRootId, job.State,
                     Confirmed = job.State == (int)SourceScanJobState.Running && job.LeaseOwner != null && job.LeaseGeneration > 0 && job.LeaseExpiresAtUtc > now,
                     Admitted = !admission.IsHeld && request.IsReleased && configuration.State == (int)SourceRootState.Enabled &&

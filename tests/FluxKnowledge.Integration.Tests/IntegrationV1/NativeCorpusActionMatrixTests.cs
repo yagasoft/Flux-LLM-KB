@@ -349,8 +349,10 @@ public sealed class NativeCorpusActionMatrixTests(NativeSqlServerFixture fixture
         Assert.False(await verification.SourceDeletionOperations.AnyAsync(value => value.SourceRootId == root));
     }
 
-    [NativeSqlServerFact]
-    public async Task Root_resume_notifies_both_local_pumps_after_its_durable_commit()
+    [NativeSqlServerTheory]
+    [InlineData("root_resume")]
+    [InlineData("source_sync")]
+    public async Task Root_resume_and_sync_wake_both_local_pumps_after_commit_and_durable_replay(string action)
     {
         var root = await SeedRootAsync();
         var outboxWake = new RecordingOutboxWakeSignal();
@@ -361,10 +363,25 @@ public sealed class NativeCorpusActionMatrixTests(NativeSqlServerFixture fixture
             outboxWake,
             sourceWake);
 
-        await CommitAsync(service, "root_resume", new { rootId = root }, "root-resume-wake");
+        var mutation = Mutation(action, new { rootId = root });
+        var preview = await service.PreviewAsync(mutation, "test", CancellationToken.None);
+        using var cancelled = new CancellationTokenSource();
+        cancelled.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => service.CommitAsync(
+            mutation, preview.ConfirmationId, action + "-wake", "test", cancelled.Token).AsTask());
+        Assert.Equal(0, outboxWake.NotificationCount);
+        Assert.Equal(0, sourceWake.NotificationCount);
 
-        Assert.Equal(1, outboxWake.NotificationCount);
-        Assert.Equal(1, sourceWake.NotificationCount);
+        var first = await service.CommitAsync(mutation, preview.ConfirmationId, action + "-wake", "test", CancellationToken.None);
+        var replay = await service.CommitAsync(mutation, preview.ConfirmationId, action + "-wake", "test", CancellationToken.None);
+
+        Assert.True(replay.WasReplay);
+        Assert.Equal(first.OperationId, replay.OperationId);
+        Assert.Equal(2, outboxWake.NotificationCount);
+        Assert.Equal(2, sourceWake.NotificationCount);
+        await using var db = await SqlTestData.CreateFactory(_fixture).CreateDbContextAsync();
+        Assert.True((await db.SourceScanRequests.SingleAsync(value => value.SourceRootId == root)).IsReleased);
+        Assert.Single(await db.SourceScanJobs.ToListAsync());
     }
 
     [NativeSqlServerFact]

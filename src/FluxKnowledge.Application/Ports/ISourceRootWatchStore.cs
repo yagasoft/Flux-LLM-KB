@@ -9,7 +9,8 @@ public sealed record ClaimedSourceWatchBatch(
     int SignalCount,
     long DebounceGeneration,
     string LeaseOwner,
-    long LeaseGeneration);
+    long LeaseGeneration,
+    SourceWatchSignal? Signal = null);
 
 public interface ISourceRootWatchStore
 {

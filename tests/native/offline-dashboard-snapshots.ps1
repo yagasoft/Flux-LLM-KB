@@ -93,6 +93,11 @@ $swap=@($swaps|Where-Object {$parent=$_.Parent;while($parent -and $parent -isnot
 function Get-Callback([string]$Name){$elements=$swap.CommandElements;for($i=0;$i -lt $elements.Count;$i++){if($elements[$i] -is [Management.Automation.Language.CommandParameterAst] -and $elements[$i].ParameterName -ceq $Name){return $elements[$i+1].ScriptBlock.GetScriptBlock()}};throw 'Callback missing'}
 $outer=$swap.Parent;while($outer -and $outer -isnot [Management.Automation.Language.TryStatementAst]){$outer=$outer.Parent}
 $outerCatch=[scriptblock]::Create(($outer.CatchClauses[0].Body.Statements.Extent.Text -join "`n"))
+$journalGuard=$ast.Find({param($n)$n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Assert-DeploymentSourceJournalPredecessorRestorationAllowed'},$true)
+Invoke-Expression $journalGuard.Extent.Text
+# This is the legacy dashboard-maintenance fixture, with no journal boundary.
+function Get-DeploymentSourceJournalBoundary { @{Protected=$false} }
+$sourceJournalMode=$false
 $stopDefinition=@($ast.FindAll({param($n)$n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Stop-HybridIisAfterGpuDrain'},$true))[0]
 Invoke-Expression $stopDefinition.Extent.Text
 foreach($parameter in $ast.ParamBlock.Parameters){$name=$parameter.Name.VariablePath.UserPath;if(!(Get-Variable -Name $name -ErrorAction SilentlyContinue)){Set-Variable -Name $name -Value $null}}

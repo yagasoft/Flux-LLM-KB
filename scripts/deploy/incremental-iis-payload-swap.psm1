@@ -21,6 +21,7 @@ function Invoke-IncrementalApplicationPayloadSwap {
         [scriptblock]$ValidateApplication,
         [scriptblock]$ValidateRollbackApplication,
         [scriptblock]$PrepareRollbackApplication,
+        [scriptblock]$AssertRollbackAllowed,
         [bool]$RestartPreviousApplication = $true
     )
 
@@ -78,6 +79,9 @@ function Invoke-IncrementalApplicationPayloadSwap {
                 $stopRequested = $true
                 & $StopApplication
                 $poolStopped = $true
+            }
+            if ($null -ne $AssertRollbackAllowed) {
+                & $AssertRollbackAllowed
             }
             if ($candidateActivationStarted -and (Test-Path -LiteralPath $ApplicationRoot -PathType Container)) {
                 Move-Item -LiteralPath $ApplicationRoot -Destination $FailedRoot -ErrorAction Stop

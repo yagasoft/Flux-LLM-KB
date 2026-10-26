@@ -166,6 +166,8 @@ public static class WebHostComposition
             allowedHostedServiceTypes.Add(typeof(SourceReconciliationService));
             allowedHostedServiceTypes.Add(typeof(LocalSourceRootWatchHostedService));
             allowedHostedServiceTypes.Add(typeof(CodeDisclosureProofRecoveryService));
+            if (configuration.GetValue<bool>("SourceJournal:Enabled"))
+                allowedHostedServiceTypes.Add(typeof(SourceChangeJournalService));
         }
         if (runtime.OutlookEnabled)
             allowedHostedServiceTypes.Add(typeof(OutlookCaptureRecoveryService));
@@ -398,6 +400,8 @@ public static class WebHostComposition
             protectedRoots,
             publicationGate: provider.GetRequiredService<ISourceArtifactPublicationGate>(),
             sourceAccessRepairClient: provider.GetService<ISourceAccessRepairClient>()));
+        services.AddSingleton<ISourceRetainedObservationStore>(provider => (ISourceRetainedObservationStore)provider.GetRequiredService<ISourceArtifactStore>());
+        services.AddSingleton<ISourceVerificationRetainedStore>(provider => (ISourceVerificationRetainedStore)provider.GetRequiredService<ISourceArtifactStore>());
         services.AddSingleton<ISourceDeletionFileStore>(_ => new WindowsSourceDeletionFileStore(
             artifactRoot,
             indexRoot));
@@ -462,9 +466,31 @@ public static class WebHostComposition
         services.AddScoped<ISourceScanStore>(provider => provider.GetRequiredService<SqlSourceScanStore>());
         services.AddScoped<ISourceScanControlStore>(provider => provider.GetRequiredService<SqlSourceScanStore>());
         services.AddScoped<ISourceFileEnumerator, LocalSourceEnumerator>();
-        services.AddScoped<ISourceScanner, SourceScanWorker>();
+        var sourceJournalOptions = configuration.GetSection("SourceJournal").Get<SourceJournalOptions>() ?? new();
+        if (sourceJournalOptions.PollSeconds is < 1 or > 60) throw new InvalidOperationException("Source journal poll seconds must be between 1 and 60.");
+        if (sourceJournalOptions.MetadataEntriesPerSecond is < 1 or > 4096) throw new InvalidOperationException("Source metadata rate must be between 1 and 4096 entries per second.");
+        sourceJournalOptions.ApprovedVolumes = sourceJournalOptions.ApprovedVolumes.Select(WindowsSourceChangeJournalReader.CanonicalVolume).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        if (sourceJournalOptions.Enabled && sourceJournalOptions.ApprovedVolumes.Length == 0) throw new InvalidOperationException("Source journal requires approved volumes.");
+        services.AddSingleton(sourceJournalOptions);
+        services.AddSingleton<ISourceChangeJournalReader>(provider => sourceJournalOptions.PipeName is null
+            ? new WindowsSourceChangeJournalReader() : OperatingSystem.IsWindows()
+                ? new SourceJournalPipeClient(sourceJournalOptions) : throw new PlatformNotSupportedException("Source journal helper requires Windows."));
+        services.AddSingleton<ISourceObservationReader, WindowsSourceObservationReader>();
+        services.AddScoped<SqlSourceIncrementalCoordinator>();
+        services.AddScoped<ISourceIncrementalCoordinator>(provider => provider.GetRequiredService<SqlSourceIncrementalCoordinator>());
+        services.AddScoped<SqlSourceVerificationStore>();
+        services.AddScoped<ISourceVerificationStore>(provider => provider.GetRequiredService<SqlSourceVerificationStore>());
+        services.AddScoped<ISourceVerificationExecutionStore>(provider => provider.GetRequiredService<SqlSourceVerificationStore>());
+        services.AddScoped<ISourceVerificationScheduler>(provider => provider.GetRequiredService<SqlSourceVerificationStore>());
+        services.AddSingleton<ISourceVerificationReaderSlot>(_ => OperatingSystem.IsWindows()
+            ? new WindowsSourceVerificationReaderSlot(liveRoot.RuntimeRoot) : throw new PlatformNotSupportedException("Source verification requires Windows."));
+        services.AddSingleton<ISourceVerificationContentReader, WindowsSourceVerificationContentReader>();
+        services.AddScoped<SourceScanWorker>();
+        services.AddScoped<SourceVerificationWorker>();
+        services.AddScoped<ISourceScanner, SourceWorkScanner>();
         services.AddSingleton<ChannelSourceScanWakeSignal>();
         services.AddSingleton<ISourceScanWakeSignal>(provider => provider.GetRequiredService<ChannelSourceScanWakeSignal>());
+        if (sourceJournalOptions.Enabled) services.AddSingleton<ISourceJournalWakeSignal, ChannelSourceJournalWakeSignal>();
         services.AddScoped<SourceRootService>();
         services.AddScoped<SourceScanControlService>();
         var workersEnabled = configuration.GetValue<bool>("Worker:Enabled");
@@ -474,6 +500,7 @@ public static class WebHostComposition
             services.AddSingleton<ISourceRootWatchStore>(provider => provider.GetRequiredService<SqlSourceRootWatchStore>());
             services.AddSingleton<SourceWatchCoordinator>();
             services.AddSingleton<IHostedService, SourceReconciliationService>();
+            if (sourceJournalOptions.Enabled) services.AddSingleton<IHostedService, SourceChangeJournalService>();
             services.AddSingleton<IHostedService, LocalSourceRootWatchHostedService>();
             services.AddSingleton<IHostedService, CodeDisclosureProofRecoveryService>();
         }

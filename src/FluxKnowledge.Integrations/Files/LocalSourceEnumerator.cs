@@ -8,20 +8,33 @@ using Microsoft.Win32.SafeHandles;
 namespace FluxKnowledge.Integrations.Files;
 
 /// <summary>Local, handle-bound source crawl. Cloud content is read only when already available.</summary>
-public sealed class LocalSourceEnumerator : IAuthoritativeSourceFileEnumerator, IBoundedSourceFileEnumerator, ICapturingSourceFileEnumerator
+public sealed partial class LocalSourceEnumerator : IAuthoritativeSourceFileEnumerator, IBoundedSourceFileEnumerator, IIncrementalSourceFileEnumerator
 {
+    private SourceEnumerationScope? _scope;
+    private readonly List<SourceNamespaceObservation> _directories = [];
+    public IReadOnlyList<SourceNamespaceObservation> LastDirectories => _directories;
+    public int LastEnumeratedEntries { get; private set; }
+    public IDisposable UseScope(SourceEnumerationScope scope)
+    {
+        if (_scope is not null) throw new InvalidOperationException("SourceEnumerationScopeAlreadyActive");
+        _scope = scope;
+        return new ScopeLease(() => _scope = null);
+    }
     private readonly Func<SafeFileHandle, string> _readIdentity;
     private readonly Action<string>? _beforeDirectoryRecheck;
     private readonly ISourceAccessRepairClient? _sourceAccessRepairClient;
+    private readonly TimeProvider _metadataTimeProvider;
     private IReadOnlyList<SourceEnumerationEvidence> _lastEvidence = [];
-    internal Action<int>? SourceBytesRead { get; init; }
+    internal Action<int>? SourceBytesRead { get; set; }
+    internal Func<CancellationToken, ValueTask>? BeforeMetadataDelay { get; init; }
 
     public LocalSourceEnumerator(Func<SafeFileHandle, string>? readIdentity = null, Action<string>? beforeDirectoryRecheck = null,
-        ISourceAccessRepairClient? sourceAccessRepairClient = null)
+        ISourceAccessRepairClient? sourceAccessRepairClient = null, TimeProvider? metadataTimeProvider = null)
     {
         _readIdentity = readIdentity ?? PhysicalFileIdentity.Get;
         _beforeDirectoryRecheck = beforeDirectoryRecheck;
         _sourceAccessRepairClient = sourceAccessRepairClient;
+        _metadataTimeProvider = metadataTimeProvider ?? TimeProvider.System;
     }
 
     public IReadOnlyList<SourceEnumerationEvidence> LastEvidence => _lastEvidence;
@@ -48,8 +61,8 @@ public sealed class LocalSourceEnumerator : IAuthoritativeSourceFileEnumerator, 
         SourceScanOwnership ownership, [EnumeratorCancellation] CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(ownership);
-        if (sourceRoot.DiscoveryMode != SourceDiscoveryMode.Filesystem)
-            throw new InvalidOperationException("Live source capture requires filesystem discovery.");
+        if (sourceRoot.DiscoveryMode is not (SourceDiscoveryMode.Filesystem or SourceDiscoveryMode.GitTracked))
+            throw new InvalidOperationException("Live source capture requires supported local discovery.");
         await foreach (var capture in EnumerateCoreAsync(sourceRoot, null, ownership, cancellationToken).ConfigureAwait(false))
             yield return capture;
     }
@@ -73,6 +86,7 @@ public sealed class LocalSourceEnumerator : IAuthoritativeSourceFileEnumerator, 
         var errors = new List<SourceEnumerationEvidence>();
         _lastEvidence = errors; // Also remains visible when a consumer stops early.
         LastInventory = null;
+        _directories.Clear(); LastEnumeratedEntries = 0;
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         if (limits is not null)
         {
@@ -83,8 +97,13 @@ public sealed class LocalSourceEnumerator : IAuthoritativeSourceFileEnumerator, 
         var budget = new CrawlBudget(limits, errors, deadline.Token, cancellationToken);
         // Preview is always read-only, including when recovery is enabled for normal scans.
         var accessRepair = limits is null ? _sourceAccessRepairClient : null;
-        using var rootLease = TryOpenRoot(sourceRoot, errors, accessRepair, cancellationToken);
+        var metadataPacer = limits is null && _scope is { MetadataEntriesPerSecond: > 0 }
+            ? new SourceMetadataPacer(_scope.MetadataEntriesPerSecond, _metadataTimeProvider) : null;
+        Func<CancellationToken, ValueTask>? paceMetadata = metadataPacer is null ? null : PaceMetadataAsync;
+        using var rootLease = TryOpenRoot(sourceRoot, errors, accessRepair, cancellationToken, metadataPacer is not null);
         if (rootLease is null) yield break;
+        var rootIdentity = rootLease.Identity.IdentityFingerprint;
+        if (metadataPacer is not null) rootLease.Dispose(); // No ancestor handle survives an artificial delay.
         var candidates = new List<string>();
         GitTrackedSourceDiscovery.Inventory? inventory = null;
         if (sourceRoot.DiscoveryMode == SourceDiscoveryMode.GitTracked)
@@ -95,33 +114,63 @@ public sealed class LocalSourceEnumerator : IAuthoritativeSourceFileEnumerator, 
                 inventory = await new GitTrackedSourceDiscovery().ReadAsync(sourceRoot.CanonicalPath, deadline.Token, limits?.MaximumEntries).ConfigureAwait(false);
                 if (sourceRoot.RequiresPhysicalIdentityValidation && (sourceRoot.RepositoryIdentityFingerprint is null ||
                     inventory.Repository.Identity != sourceRoot.RepositoryIdentityFingerprint)) throw new IOException("Git repository identity changed.");
-                if (!inventory.IsComplete) errors.Add(new("limit", ".", "PreviewEntryLimit"));
+                if (!inventory.IsComplete) errors.Add(new("limit", ".", "PreviewEntryLimit") { NamespaceIncomplete = true });
                 candidates.AddRange(inventory.Paths.Select(path => Path.GetFullPath(path, sourceRoot.CanonicalPath)));
             }
             catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && limits is not null)
             { budget.RecordLimit("PreviewTimeLimit"); }
             catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidDataException)
-            { errors.Add(new("git", ".", exception.GetType().Name)); }
+            { errors.Add(new("git", ".", exception.GetType().Name) { NamespaceIncomplete = true }); }
         }
         if (sourceRoot.DiscoveryMode == SourceDiscoveryMode.Filesystem)
-            CollectFiles(sourceRoot, sourceRoot.CanonicalPath, rootLease.Identity.IdentityFingerprint, candidates, errors, budget, accessRepair);
+        {
+            if (limits is null && _scope?.Targets is { } targets)
+            {
+                foreach (var relative in targets.Distinct(StringComparer.OrdinalIgnoreCase))
+                {
+                    var target = Path.GetFullPath(relative, sourceRoot.CanonicalPath);
+                    if (!WindowsSourcePathAccess.IsWithin(sourceRoot.CanonicalPath, target)) throw new UnauthorizedAccessException("SourceTargetOutsideRoot");
+                    var admittedRelative = Path.GetRelativePath(sourceRoot.CanonicalPath, target);
+                    if (!sourceRoot.Recursive && admittedRelative.Contains(Path.DirectorySeparatorChar)) continue;
+                    try
+                    {
+                        var attributes = File.GetAttributes(target);
+                        if ((attributes & FileAttributes.Directory) != 0)
+                        {
+                            if (sourceRoot.Recursive || admittedRelative == ".")
+                                await CollectFilesAsync(sourceRoot, target, rootIdentity, candidates, errors, budget, accessRepair, paceMetadata).ConfigureAwait(false);
+                        }
+                        else candidates.Add(target);
+                    }
+                    catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+                    { errors.Add(FailureEvidence(exception, relative) with { NamespaceIncomplete = true }); }
+                }
+            }
+            else await CollectFilesAsync(sourceRoot, sourceRoot.CanonicalPath, rootIdentity, candidates, errors, budget, accessRepair, paceMetadata).ConfigureAwait(false);
+        }
         else if (sourceRoot.DiscoveryMode != SourceDiscoveryMode.GitTracked)
-            errors.Add(new("policy", ".", "UnknownDiscoveryMode"));
+            errors.Add(new("policy", ".", "UnknownDiscoveryMode") { NamespaceIncomplete = true });
 
-        foreach (var path in candidates.OrderBy(path => Path.GetRelativePath(sourceRoot.CanonicalPath, path), StringComparer.Ordinal))
+        foreach (var path in candidates.Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(path => Path.GetRelativePath(sourceRoot.CanonicalPath, path), StringComparer.Ordinal))
         {
             var relativePath = Path.GetRelativePath(sourceRoot.CanonicalPath, path);
+            if (!sourceRoot.Recursive && relativePath.Contains(Path.DirectorySeparatorChar)) continue;
+            if (limits is null && _scope?.Targets is { } selected &&
+                !selected.Any(target => SourcePathScope.Contains(target, true, relativePath))) continue;
             if (!MatchesPolicy(relativePath, sourceRoot.IncludePatterns, sourceRoot.ExcludePatterns)) continue;
             if (!budget.StartFile()) break;
             LocalSourceFileCapture capture;
             try
             {
+                if (paceMetadata is not null) await paceMetadata(cancellationToken).ConfigureAwait(false);
+                if (limits is null && _scope?.CaptureNeeded is { } filter &&
+                    !await filter(relativePath, cancellationToken).ConfigureAwait(false)) continue;
                 if (sourceRoot.DiscoveryMode == SourceDiscoveryMode.GitTracked)
                 {
                     PhysicalFileIdentity.EnsureNoReparsePointTraversal(Path.GetDirectoryName(path)!);
                     if ((File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0) throw new UnauthorizedAccessException("Git file is a reparse point.");
                 }
-                capture = await ReadCaptureAsync(path, relativePath, sourceRoot, rootLease.Identity.IdentityFingerprint,
+                capture = await ReadCaptureAsync(path, relativePath, sourceRoot, rootIdentity,
                     budget, deadline.Token, accessRepair, ownership, inventory is null ? null :
                         new(inventory.Repository.Identity, inventory.Generation, inventory.TrackedCount, inventory.ExcludedCount)).ConfigureAwait(false);
             }
@@ -167,26 +216,46 @@ public sealed class LocalSourceEnumerator : IAuthoritativeSourceFileEnumerator, 
             if (!await ValidateInventoryAsync(sourceRoot, cancellationToken).ConfigureAwait(false))
             {
                 LastInventory = null;
-                errors.Add(new("git", ".", "GitInventoryChanged"));
+                errors.Add(new("git", ".", "GitInventoryChanged") { NamespaceIncomplete = true });
             }
+        }
+
+        async ValueTask PaceMetadataAsync(CancellationToken ct)
+        {
+            var wait = metadataPacer!.WaitAsync(ct);
+            if (!wait.IsCompletedSuccessfully && BeforeMetadataDelay is { } beforeDelay)
+                await beforeDelay(ct).ConfigureAwait(false);
+            await wait.ConfigureAwait(false);
         }
     }
 
-    private void CollectFiles(SourceRootConfiguration root, string directory, string rootIdentity,
-        ICollection<string> files, ICollection<SourceEnumerationEvidence> errors, CrawlBudget budget, ISourceAccessRepairClient? accessRepair)
+    private async Task CollectFilesAsync(SourceRootConfiguration root, string directory, string rootIdentity,
+        ICollection<string> files, ICollection<SourceEnumerationEvidence> errors, CrawlBudget budget, ISourceAccessRepairClient? accessRepair,
+        Func<CancellationToken, ValueTask>? paceMetadata)
     {
+        if (paceMetadata is not null)
+        {
+            await CollectMetadataFilesAsync(root, directory, rootIdentity, files, errors, budget, accessRepair, paceMetadata).ConfigureAwait(false);
+            return;
+        }
         if (!budget.CheckTime()) return;
         var relative = Path.GetRelativePath(root.CanonicalPath, directory);
         try
         {
             using var lease = SourceAccessRecovery.Run(root.CanonicalPath, rootIdentity, accessRepair,
-                () => WindowsSourcePathAccess.OpenDirectoryPath(directory, enumerate: true), budget.CallerCancellation);
+                () => WindowsSourcePathAccess.OpenDirectoryPath(directory, enumerate: true, allowNamespaceChanges: paceMetadata is not null), budget.CallerCancellation);
+            var parentIdentity = lease.HeldComponents.Count > 1 ? PhysicalFileIdentity.Get(lease.HeldComponents[^2].Handle).Split(':')[^1] : "";
+            _directories.Add(new(relative, PhysicalFileIdentity.Get(lease.Handle).Split(':')[^1], parentIdentity, false));
             if (lease.IdentityAt(root.CanonicalPath).IdentityFingerprint != rootIdentity)
                 throw new SourceSnapshotChangedException("The admitted source root changed.");
             if (lease.Metadata.NamespaceIncomplete)
-                errors.Add(new("partial", relative, "CloudDirectoryNamespaceIncomplete"));
-            foreach (var entry in lease.Entries(budget.CallerCancellation))
+                errors.Add(new("partial", relative, "CloudDirectoryNamespaceIncomplete") { NamespaceIncomplete = true });
+            foreach (var entry in lease.Entries(budget.CallerCancellation,
+                paceMetadata is null ? null : root.CanonicalPath, rootIdentity,
+                () => RecordIncompleteNamespace()))
             {
+                if (paceMetadata is not null) await paceMetadata(budget.CallerCancellation).ConfigureAwait(false);
+                LastEnumeratedEntries++;
                 if (!budget.VisitEntry()) return;
                 var path = Path.Combine(directory, entry.Name);
                 var entryRelative = Path.GetRelativePath(root.CanonicalPath, path);
@@ -198,17 +267,23 @@ public sealed class LocalSourceEnumerator : IAuthoritativeSourceFileEnumerator, 
                     pattern.Replace('\\', '/').EndsWith("/**", StringComparison.Ordinal) &&
                     GlobMatches(entryRelative.Replace('\\', '/'), pattern.Replace('\\', '/')[..^3])))
                 {
-                    CollectFiles(root, path, rootIdentity, files, errors, budget, accessRepair);
+                    await CollectFilesAsync(root, path, rootIdentity, files, errors, budget, accessRepair, paceMetadata).ConfigureAwait(false);
                 }
             }
             _beforeDirectoryRecheck?.Invoke(directory);
             var after = lease.Metadata;
             WindowsSourcePathAccess.ValidateTag(after);
             if (after.NamespaceIncomplete && !errors.Any(item => item.RelativePath == relative && item.Detail == "CloudDirectoryNamespaceIncomplete"))
-                errors.Add(new("partial", relative, "CloudDirectoryNamespaceIncomplete"));
+                errors.Add(new("partial", relative, "CloudDirectoryNamespaceIncomplete") { NamespaceIncomplete = true });
+
+            void RecordIncompleteNamespace()
+            {
+                if (!errors.Any(item => item.RelativePath == relative && item.Detail == "CloudDirectoryNamespaceIncomplete"))
+                    errors.Add(new("partial", relative, "CloudDirectoryNamespaceIncomplete") { NamespaceIncomplete = true });
+            }
         }
-        catch (UnauthorizedAccessException exception) { errors.Add(FailureEvidence(exception, relative)); }
-        catch (IOException exception) { errors.Add(FailureEvidence(exception, relative)); }
+        catch (UnauthorizedAccessException exception) { errors.Add(FailureEvidence(exception, relative) with { NamespaceIncomplete = true }); }
+        catch (IOException exception) { errors.Add(FailureEvidence(exception, relative) with { NamespaceIncomplete = true }); }
     }
 
     public static bool MatchesPolicy(string relativePath, IReadOnlyList<string> includes, IReadOnlyList<string> excludes)
@@ -265,7 +340,8 @@ public sealed class LocalSourceEnumerator : IAuthoritativeSourceFileEnumerator, 
             var snapshot = new SourceDiscoveredFile(Path.GetFullPath(path), relativePath, identity, bytes, hasFullBuffer,
                 Convert.ToHexStringLower(hash.GetHashAndReset()), length, lastWrite,
                 SourceClassifier.Classify(path, bytes, length, hasFullBuffer, effectiveTextLimit, root.IndexSourceText),
-                GitInventory: inventory, ScanOwnership: ownership, SourcePath: new(root.CanonicalPath, rootIdentity));
+                GitInventory: inventory, ScanOwnership: ownership, SourcePath: new(root.CanonicalPath, rootIdentity),
+                Observation: WindowsSourceObservationReader.Describe(lease));
             return new(snapshot, lease, stream);
         }
         catch
@@ -277,7 +353,7 @@ public sealed class LocalSourceEnumerator : IAuthoritativeSourceFileEnumerator, 
     }
 
     private static WindowsSourcePathAccess.DirectoryPathLease? TryOpenRoot(SourceRootConfiguration root,
-        ICollection<SourceEnumerationEvidence> errors, ISourceAccessRepairClient? accessRepair, CancellationToken cancellationToken)
+        ICollection<SourceEnumerationEvidence> errors, ISourceAccessRepairClient? accessRepair, CancellationToken cancellationToken, bool allowNamespaceChanges = false)
     {
         WindowsSourcePathAccess.DirectoryPathLease? lease = null;
         try
@@ -296,7 +372,7 @@ public sealed class LocalSourceEnumerator : IAuthoritativeSourceFileEnumerator, 
             if (root.DiscoveryMode == SourceDiscoveryMode.GitTracked)
                 PhysicalFileIdentity.EnsureNoReparsePointTraversal(root.CanonicalPath);
             lease = SourceAccessRecovery.Run(root.CanonicalPath, root.PhysicalIdentityFingerprint, accessRepair,
-                () => WindowsSourcePathAccess.OpenDirectoryPath(root.CanonicalPath), cancellationToken);
+                () => WindowsSourcePathAccess.OpenDirectoryPath(root.CanonicalPath, allowNamespaceChanges: allowNamespaceChanges), cancellationToken);
             if (!string.IsNullOrWhiteSpace(root.PhysicalIdentityFingerprint) &&
                 lease.Identity.IdentityFingerprint != root.PhysicalIdentityFingerprint)
             {
@@ -332,6 +408,8 @@ public sealed class LocalSourceEnumerator : IAuthoritativeSourceFileEnumerator, 
 
     private sealed class PreviewLimitException : IOException;
 
+    private sealed class ScopeLease(Action release) : IDisposable { public void Dispose() => release(); }
+
     private sealed class CrawlBudget(SourcePreviewLimits? limits, ICollection<SourceEnumerationEvidence> errors,
         CancellationToken deadline, CancellationToken caller)
     {
@@ -341,7 +419,7 @@ public sealed class LocalSourceEnumerator : IAuthoritativeSourceFileEnumerator, 
         public CancellationToken CallerCancellation => caller;
         public void RecordLimit(string reason)
         {
-            if (!errors.Any(item => item.Kind == "limit" && item.Detail == reason)) errors.Add(new("limit", ".", reason));
+            if (!errors.Any(item => item.Kind == "limit" && item.Detail == reason)) errors.Add(new("limit", ".", reason) { NamespaceIncomplete = true });
         }
         public bool CheckTime()
         {

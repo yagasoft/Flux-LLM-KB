@@ -402,6 +402,44 @@ public sealed class WebHostCompositionTests : IDisposable
     }
 
     [Fact]
+    public void Enabled_journal_worker_is_accepted_by_the_native_startup_service_allow_list()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var config = new ConfigurationBuilder().AddConfiguration(CreateProductionConfiguration())
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Worker:Enabled"] = "true", ["SourceJournal:Enabled"] = "true",
+                ["SourceJournal:ApprovedVolumes:0"] = @"I:\",
+                ["SourceJournal:PipeName"] = "FluxKnowledge.Test.NoConnection"
+            }).Build();
+        var services = new ServiceCollection();
+        WebHostComposition.AddProductionFluxKnowledgeServicesForTests(services, config);
+        Assert.Single(services, value => value.ImplementationType == typeof(SourceChangeJournalService));
+        WebHostComposition.ValidateNativeGoLiveComposition(services, config);
+    }
+
+    [Fact]
+    public void Source_verification_composition_uses_one_scoped_store_and_the_existing_dispatcher()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var services = new ServiceCollection();
+        services.AddLogging();
+        WebHostComposition.AddProductionFluxKnowledgeServicesForTests(services, CreateProductionConfiguration());
+        using var provider = services.BuildServiceProvider(new ServiceProviderOptions { ValidateScopes = true, ValidateOnBuild = true });
+        using var scope = provider.CreateScope();
+        var store = scope.ServiceProvider.GetRequiredService<SqlSourceVerificationStore>();
+        Assert.Same(store, scope.ServiceProvider.GetRequiredService<ISourceVerificationStore>());
+        Assert.Same(store, scope.ServiceProvider.GetRequiredService<ISourceVerificationExecutionStore>());
+        Assert.Same(store, scope.ServiceProvider.GetRequiredService<ISourceVerificationScheduler>());
+        Assert.IsType<SourceWorkScanner>(scope.ServiceProvider.GetRequiredService<ISourceScanner>());
+        Assert.IsType<WindowsSourceVerificationContentReader>(scope.ServiceProvider.GetRequiredService<ISourceVerificationContentReader>());
+        Assert.IsType<WindowsSourceVerificationReaderSlot>(scope.ServiceProvider.GetRequiredService<ISourceVerificationReaderSlot>());
+        var artifacts = provider.GetRequiredService<ISourceArtifactStore>();
+        Assert.Same(artifacts, provider.GetRequiredService<ISourceVerificationRetainedStore>());
+        Assert.Same(artifacts, provider.GetRequiredService<ISourceRetainedObservationStore>());
+    }
+
+    [Fact]
     public void Production_composition_registers_the_UTF8_endpoint_handler_with_local_hosted_services()
     {
         var services = new ServiceCollection();

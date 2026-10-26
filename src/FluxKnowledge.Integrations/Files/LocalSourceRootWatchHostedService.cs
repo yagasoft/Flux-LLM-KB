@@ -6,7 +6,7 @@ using Microsoft.Extensions.Logging;
 
 namespace FluxKnowledge.Integrations.Files;
 
-/// <summary>Best-effort local hint watcher. It carries root identifiers only; SQL reconciliation establishes truth.</summary>
+/// <summary>Best-effort bounded relative hints; guarded reconciliation establishes truth.</summary>
 public sealed class LocalSourceRootWatchHostedService(
     ISourceRootWatchStore store,
     SourceWatchCoordinator coordinator,
@@ -86,8 +86,8 @@ public sealed class LocalSourceRootWatchHostedService(
                     var watcher = new FileSystemWatcher(watchPath)
                     {
                         IncludeSubdirectories = root.Recursive,
-                        NotifyFilter = NotifyFilters.FileName | NotifyFilters.LastWrite | NotifyFilters.Size | NotifyFilters.CreationTime |
-                            (root.DiscoveryMode == SourceDiscoveryMode.GitTracked ? NotifyFilters.DirectoryName : 0)
+                        NotifyFilter = NotifyFilters.FileName | NotifyFilters.DirectoryName | NotifyFilters.LastWrite |
+                            NotifyFilters.Size | NotifyFilters.CreationTime | NotifyFilters.Attributes | NotifyFilters.Security
                     };
                     registration.Add(watcher);
                     watcher.Created += (_, change) => SignalIfRelevant(root, SourceWatchSignalKind.Created, change, repository);
@@ -121,8 +121,58 @@ public sealed class LocalSourceRootWatchHostedService(
     private void SignalIfRelevant(SourceRootConfiguration root, SourceWatchSignalKind kind, FileSystemEventArgs change,
         GitTrackedSourceDiscovery.Repository? repository)
     {
-        if (ShouldSignal(root, change, repository)) Signal(root.Id, kind);
+        if (CreateSignal(root, kind, change, timeProvider.GetUtcNow(), repository) is { } signal) _signals.Signal(signal);
     }
+
+    internal static SourceWatchSignal? CreateSignal(SourceRootConfiguration root, SourceWatchSignalKind kind,
+        FileSystemEventArgs change, DateTimeOffset observedAtUtc, GitTrackedSourceDiscovery.Repository? repository = null)
+    {
+        if (!ShouldSignal(root, change, repository)) return null;
+        var paths = new List<SourceWatchPathHint>(2);
+        var incomplete = false;
+        var outside = false;
+        var control = false;
+        // FileSystemWatcher cannot reliably tell us whether a deleted/renamed path was a
+        // directory. Keep a conservative subtree hint, without opening event paths.
+        foreach (var eventPath in change is RenamedEventArgs renamed
+            ? new[] { renamed.OldFullPath, change.FullPath } : new[] { change.FullPath })
+        {
+            try
+            {
+                if (!Path.IsPathFullyQualified(eventPath)) { incomplete = true; continue; }
+                var path = Path.GetFullPath(eventPath);
+                var relative = Path.GetRelativePath(root.CanonicalPath, path);
+                var slashRelative = relative.Replace('\\', '/');
+                var git = root.DiscoveryMode == SourceDiscoveryMode.GitTracked;
+                var insideControl = git && (slashRelative.Equals(".git", StringComparison.OrdinalIgnoreCase) ||
+                    slashRelative.StartsWith(".git/", StringComparison.OrdinalIgnoreCase) || repository is not null &&
+                    (Within(path, repository.GitDirectory) || Within(path, repository.CommonDirectory)));
+                if (insideControl) { control = true; continue; }
+                if (git && repository is not null &&
+                    (OverlapsControl(path, repository.GitDirectory) || OverlapsControl(path, repository.CommonDirectory))) control = true;
+                if (slashRelative == ".." || slashRelative.StartsWith("../", StringComparison.Ordinal) || Path.IsPathFullyQualified(relative))
+                {
+                    outside = true;
+                    continue;
+                }
+                if (git && GitTrackedSourceDiscovery.IsExcludedTree(slashRelative)) continue;
+                paths.Add(new(relative, IsSubtree: true));
+            }
+            catch (Exception error) when (error is ArgumentException or NotSupportedException or PathTooLongException)
+            {
+                incomplete = true;
+            }
+        }
+        // A boundary rename needs only its inside obligation. An unexplained outside-only
+        // callback, or an invalid name, cannot establish a complete path hint.
+        incomplete |= outside && paths.Count == 0 && !control;
+        return new(root.Id, kind, observedAtUtc, paths, incomplete, control);
+    }
+
+    private static bool Within(string path, string directory) =>
+        path.Equals(directory, StringComparison.OrdinalIgnoreCase) ||
+        path.StartsWith(directory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar,
+            StringComparison.OrdinalIgnoreCase);
 
     internal static bool ShouldSignal(SourceRootConfiguration root, FileSystemEventArgs change,
         GitTrackedSourceDiscovery.Repository? repository = null) =>

@@ -70,11 +70,12 @@ else {
     $tokens=$null; $errors=$null
     $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $SourceRoot 'scripts/deploy/update-native-iis-incremental.ps1'), [ref]$tokens, [ref]$errors)
     if ($errors.Count -ne 0) { throw 'Updater parse failed.' }
-    foreach ($name in @('Invoke-GeneratedSqlScript','Get-HybridPreservedInputFingerprint')) {
+    foreach ($name in @('Invoke-GeneratedSqlScript','Get-HybridPreservedInputFingerprint','Assert-DeploymentSourceJournalLegacyMigrationAllowed')) {
         $definition=@($ast.FindAll({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name}, $true))
         if ($definition.Count -ne 1) { throw 'Updater function missing.' }
         . ([scriptblock]::Create($definition[0].Extent.Text))
     }
+    function Get-DeploymentSourceJournalBoundary { @{Protected=$false} }
     function Get-DeploymentSqlConnectionString { return $connectionString }
     $contract=Get-HybridPassageMigrationContract
     if ((Get-FileHash -LiteralPath $MigrationScript -Algorithm SHA256).Hash -cne $contract.UpSha256) { throw 'Reviewed migration hash mismatch.' }

@@ -7,6 +7,7 @@ public sealed class SourceRootWatchStateEntity
     public DateTimeOffset LastSignalAtUtc { get; set; }
     public int SignalCount { get; set; }
     public long DebounceGeneration { get; set; }
+    public string? HintsJson { get; set; }
     public DateTimeOffset DueAtUtc { get; set; }
     public string? LeaseOwner { get; set; }
     public long LeaseGeneration { get; set; }

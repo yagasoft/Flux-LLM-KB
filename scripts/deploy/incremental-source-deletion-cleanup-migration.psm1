@@ -19,8 +19,20 @@ function Get-SourceDeletionCleanupDatabaseState {
             $command=$connection.CreateCommand()
             try {
                 $command.Transaction=$transaction; $command.CommandTimeout=15
-                $command.CommandText="SELECT CONCAT(CONVERT(nvarchar(128),SERVERPROPERTY('ServerName')),N'|',DB_NAME(),N'|',DB_ID(),N'|',CONVERT(nvarchar(33),create_date,126)) FROM sys.databases WHERE database_id=DB_ID();"
-                $identity=[string]$command.ExecuteScalar()
+                # Preserve the legacy receipt identity. Journal composition also
+                # needs the database GUID used by its own incarnation contract.
+                $command.CommandText=@'
+SELECT CONCAT(CONVERT(nvarchar(128),SERVERPROPERTY('ServerName')),N'|',DB_NAME(),N'|',DB_ID(),N'|',CONVERT(nvarchar(33),d.create_date,126)),
+ CASE WHEN r.database_guid IS NOT NULL THEN CONCAT(CONVERT(nvarchar(128),SERVERPROPERTY('ServerName')),N'|',DB_NAME(),N'|',CONVERT(nvarchar(36),r.database_guid)) END
+FROM sys.databases d LEFT JOIN sys.database_recovery_status r ON r.database_id=d.database_id
+WHERE d.database_id=DB_ID();
+'@
+                $identityReader=$command.ExecuteReader()
+                try {
+                    if(!$identityReader.Read()){throw 'Source deletion database identity is unavailable.'}
+                    $identity=$identityReader.GetString(0)
+                    $incarnationIdentity=if($identityReader.IsDBNull(1)){$null}else{$identityReader.GetString(1)}
+                } finally {$identityReader.Dispose()}
                 $command.CommandText="SELECT HAS_PERMS_BY_NAME(DB_NAME(),'DATABASE','ALTER');"
                 $canAlter=[int]$command.ExecuteScalar() -eq 1
                 $command.CommandText='SELECT MigrationId FROM dbo.__EFMigrationsHistory WITH (HOLDLOCK) ORDER BY MigrationId;'
@@ -49,7 +61,7 @@ SELECT CONVERT(varchar(64), HASHBYTES('SHA2_256', CONVERT(varbinary(max), CONCAT
                     $initial=[long]$command.ExecuteScalar() -eq 0
                 }
                 $transaction.Commit()
-                [pscustomobject]@{ Identity=$identity; History=@($history); CanAlter=$canAlter;
+                [pscustomobject]@{ Identity=$identity; IncarnationIdentity=$incarnationIdentity; History=@($history); CanAlter=$canAlter;
                     ColumnCount=@($schema.columns).Count; CheckCount=@($schema.checks).Count;
                     SchemaSha256=$schemaHash; SchemaJson=$schemaJson; SchemaValid=($schemaHash -ceq (Get-SourceDeletionCleanupMigrationContract).SchemaSha256);
                     RunnableCount=$runnable; LegacySha256=$legacyHash; ProgressIsInitial=$initial }

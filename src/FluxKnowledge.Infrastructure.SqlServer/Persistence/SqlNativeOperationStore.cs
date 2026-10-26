@@ -26,7 +26,7 @@ public sealed class SqlNativeOperationStore(
     Action? afterCommitFailureInjector = null,
     Action? beforeCommitInjector = null,
     Action? afterSaveBeforeCommitInjector = null, EmbeddingGpuRuntime? embeddingRuntime = null,
-    SqlIndexRetentionOperations? indexRetention = null) : INativeOperationStore
+    SqlIndexRetentionOperations? indexRetention = null, SourceJournalOptions? sourceJournalOptions = null) : INativeOperationStore
 {
     private static readonly TimeSpan ConfirmationLifetime = TimeSpan.FromMinutes(5);
     private readonly IDbContextFactory<FluxKnowledgeDbContext> _contextFactory = contextFactory ?? throw new ArgumentNullException(nameof(contextFactory));
@@ -589,11 +589,23 @@ public sealed class SqlNativeOperationStore(
             outbox!.DueAtUtc = now; outbox.DispatchedAtUtc = null; outbox.LeaseOwner = null; outbox.LeaseExpiresAtUtc = null;
             return;
         }
-        var rootIdValue = RequiredGuid(payload, "rootId"); var root = await context.SourceRootConfigurations.SingleOrDefaultAsync(value => value.Id == rootIdValue, cancellationToken);
+        var rootIdValue = RequiredGuid(payload, "rootId");
+        var root = operation.Action is "source_verify" or "source_verification_set"
+            ? await context.SourceRootConfigurations.FromSqlInterpolated($"SELECT * FROM [SourceRootConfigurations] WITH (UPDLOCK,HOLDLOCK) WHERE [Id]={rootIdValue}")
+                .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false)
+            : await context.SourceRootConfigurations.SingleOrDefaultAsync(value => value.Id == rootIdValue, cancellationToken).ConfigureAwait(false);
         FenceOne(targets, "root", rootIdValue, root?.RowVersion);
         if (root?.State == (int)SourceRootState.Deleting && operation.Action != "root_delete")
         {
             throw new NativeOperationException("source-deleting");
+        }
+        if (operation.Action is "source_verify" or "source_verification_set")
+        {
+            var state = await context.SourceRootScanStates.SingleOrDefaultAsync(x => x.SourceRootId == rootIdValue, cancellationToken).ConfigureAwait(false);
+            FenceExpectedTarget(targets, "verification-policy", rootIdValue, state?.RowVersion);
+            await SqlSourceVerificationStore.ApplyControlInTransactionAsync(context, root!, state, operation.Action, payload,
+                sourceJournalOptions?.Enabled == true, now, cancellationToken).ConfigureAwait(false);
+            return;
         }
         if (operation.Action == "root_update")
         {
@@ -928,6 +940,7 @@ public sealed class SqlNativeOperationStore(
 
     private static bool IsRetryable(SourceScanJobEntity job, SourceScanRequestEntity request, SourceScanOutboxEntity outbox, DateTimeOffset now)
     {
+        if (request.RequestKind == SqlSourceVerificationStore.RequestKind && job.Reason == SqlSourceVerificationStore.FeatureOffReason) return false;
         var failed = job.State == (int)SourceScanJobState.Failed && request.State == (int)SourceScanRequestState.Failed;
         var expiredRunning = job.State == (int)SourceScanJobState.Running &&
             request.State == (int)SourceScanRequestState.Running &&

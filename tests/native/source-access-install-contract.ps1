@@ -39,6 +39,9 @@ try {
     $held=[FluxSourceAccessInstallFile]::CreatePrivateDirectory($created,$privateBytes)
     try {
         [FluxSourceAccessInstallFile]::ValidatePrivateDirectory($held,$created)
+        $reopened=[FluxSourceAccessInstallFile]::OpenPrivateDirectory($created)
+        try { [FluxSourceAccessInstallFile]::ValidatePrivateDirectory($reopened,$created) }
+        finally { $reopened.Dispose() }
         $rejected=$false
         try { $unexpected=[FluxSourceAccessInstallFile]::CreatePrivateDirectory($created,$privateBytes); $unexpected.Dispose() } catch { $rejected=$true }
         if (-not $rejected -or @(Get-ChildItem -LiteralPath $created -Force).Count -ne 0) { throw 'A preclaimed directory was not refused before writes.' }
@@ -68,7 +71,7 @@ try {
     $rejected=$false
     try { & $installer @argsMap -PlanOnly | Out-Null } catch { $rejected=$_.Exception.Message -like '*checksum*' -or $_.Exception.Message -like '*Unsafe candidate*' }
     if (-not $rejected) { throw 'Changed payload was accepted.' }
-    [pscustomobject]@{passed=10;source_bytes_changed=0;source_folder_acl_changes=0;scheduled_tasks_created=0;production_calls=0} | ConvertTo-Json
+    [pscustomobject]@{passed=11;source_bytes_changed=0;source_folder_acl_changes=0;scheduled_tasks_created=0;production_calls=0} | ConvertTo-Json
 } finally {
     $resolved=[IO.Path]::GetFullPath($fixture)
     if (-not $resolved.StartsWith([IO.Path]::GetFullPath([IO.Path]::GetTempPath()),[StringComparison]::OrdinalIgnoreCase)) { throw 'Fixture escaped its isolated temporary root.' }

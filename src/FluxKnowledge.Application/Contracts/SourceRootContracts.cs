@@ -90,4 +90,8 @@ public sealed record SourceScanResult(
     int DiscoveredCount,
     int IndexedCount,
     int DeferredCount,
-    int BlockedCount);
+    int BlockedCount)
+{
+    public bool IsCompleteInventory { get; init; } = true;
+    public bool CompletesReconciliation { get; init; }
+}

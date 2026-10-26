@@ -25,6 +25,7 @@ internal static class WindowsSourcePathAccess
     }
 
     internal static bool IsCloudTag(uint tag) => (tag & 0xffff0fff) == 0x9000001a;
+    internal static uint DirectoryQueryFlags(bool restart) => 0x8u | (restart ? 0x1u : 0);
 
     internal static void ValidateTag(Metadata metadata)
     {
@@ -48,7 +49,7 @@ internal static class WindowsSourcePathAccess
         return new(information.Attributes, information.Tag, state);
     }
 
-    internal static DirectoryPathLease OpenDirectoryPath(string path, bool enumerate = false, bool readPermissions = false)
+    internal static DirectoryPathLease OpenDirectoryPath(string path, bool enumerate = false, bool readPermissions = false, bool allowNamespaceChanges = false)
     {
         if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("Source physical-path validation requires Windows.");
         var canonical = Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
@@ -58,7 +59,7 @@ internal static class WindowsSourcePathAccess
         try
         {
             var handle = CreateFile(volume, ReadAttributes | Synchronize | (readPermissions ? 0x20000u : 0) | (canonical == volume && enumerate ? 1u : 0),
-                3, IntPtr.Zero, 3, 0x02300000, IntPtr.Zero);
+                allowNamespaceChanges ? 7u : 3u, IntPtr.Zero, 3, 0x02300000, IntPtr.Zero);
             if (handle.IsInvalid)
             {
                 var error = Marshal.GetLastPInvokeError();
@@ -76,7 +77,7 @@ internal static class WindowsSourcePathAccess
                     current = Path.Combine(current, components[index]);
                     var access = ReadAttributes | Synchronize | (readPermissions ? 0x20000u : 0) | (enumerate && index == components.Length - 1 ? 1u : 0);
                     // Type-neutral no-recall open; Add verifies Directory on the returned handle.
-                    var child = OpenRelative(lease.Handle, components[index], access, 3, SynchronousIo, current, true);
+                    var child = OpenRelative(lease.Handle, components[index], access, allowNamespaceChanges ? 7u : 3u, SynchronousIo, current, true);
                     lease.Add(current, child);
                 }
             }
@@ -85,7 +86,7 @@ internal static class WindowsSourcePathAccess
         catch { lease.Dispose(); throw; }
     }
 
-    internal static SourceReadLease OpenRead(string root, string path, string? rootFingerprint = null, string? fileIdentity = null)
+    internal static SourceReadLease OpenRead(string root, string path, string? rootFingerprint = null, string? fileIdentity = null, bool synchronous = false)
     {
         var canonicalRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(root));
         var canonicalPath = Path.GetFullPath(path);
@@ -101,7 +102,7 @@ internal static class WindowsSourcePathAccess
             using (var metadataHandle = OpenRelative(parent.Handle, name, ReadAttributes, 7, NonDirectoryFile, canonicalPath))
                 EnsureContentAvailable(ReadMetadata(metadataHandle));
             // The same handle supplies readiness, final path, identity and every content byte.
-            handle = OpenRelative(parent.Handle, name, ReadAttributes | Synchronize | 1, 1, NonDirectoryFile, canonicalPath);
+            handle = OpenRelative(parent.Handle, name, ReadAttributes | Synchronize | 1, 1, NonDirectoryFile | (synchronous ? SynchronousIo : 0), canonicalPath);
             EnsureContentAvailable(ReadMetadata(handle));
             var finalPath = PhysicalFileIdentity.GetFinalPath(handle);
             if (!string.Equals(finalPath, canonicalPath, StringComparison.OrdinalIgnoreCase) || !IsWithin(rootIdentity.CanonicalPath, finalPath))
@@ -261,7 +262,8 @@ internal static class WindowsSourcePathAccess
             catch { handle.Dispose(); throw; }
         }
 
-        public IEnumerable<(string Name, FileAttributes Attributes)> Entries(CancellationToken cancellationToken)
+        public IEnumerable<(string Name, FileAttributes Attributes)> Entries(CancellationToken cancellationToken,
+            string? admittedRootPath = null, string? admittedRootFingerprint = null, Action? onIncompleteNamespace = null)
         {
             var capacity = 4096;
             var buffer = Marshal.AllocHGlobal(capacity);
@@ -271,44 +273,71 @@ internal static class WindowsSourcePathAccess
                 while (true)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
-                    // Materialised namespace only; never fall back to a query that expands cloud folders.
-                    var status = NtQueryDirectoryFileEx(Handle, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, out var io,
-                        buffer, (uint)capacity, 37, 0x8u | (restart ? 0x2u : 0), IntPtr.Zero);
-                    if (unchecked((uint)status) == 0x80000006) yield break; // STATUS_NO_MORE_FILES
-                    if (status < 0) throw NativeError("The local source namespace cannot be enumerated.", unchecked((int)RtlNtStatusToDosError(status)));
-                    var returned = checked((int)io.Information);
-                    if (returned == 0)
+                    var page = new List<(string Name, FileAttributes Attributes)>();
+                    var complete = false;
+                    var grow = false;
+                    // A metadata cursor allows compatible namespace changes during pauses.
+                    // Its new restrictive guard owns only this page, never a yield or wait.
+                    using (var guard = admittedRootPath is null ? null : OpenDirectoryPath(Path, enumerate: true))
+                    {
+                        ValidatePageGuard(guard);
+                        // Query this retained FileObject's cursor, not the newly opened guard.
+                        var status = NtQueryDirectoryFileEx(Handle, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, out var io,
+                            buffer, (uint)capacity, 37, DirectoryQueryFlags(restart), IntPtr.Zero);
+                        complete = unchecked((uint)status) == 0x80000006; // STATUS_NO_MORE_FILES
+                        if (!complete)
+                        {
+                            if (status < 0) throw NativeError("The local source namespace cannot be enumerated.", unchecked((int)RtlNtStatusToDosError(status)));
+                            var returned = checked((int)io.Information);
+                            if (returned > capacity) throw new IOException("Invalid source directory response length.");
+                            grow = returned == 0;
+                            if (!grow)
+                            {
+                                restart = false;
+                                var offset = 0;
+                                while (true)
+                                {
+                                    if (returned - offset < 104) throw new IOException("Invalid source directory entry.");
+                                    var record = IntPtr.Add(buffer, offset);
+                                    var next = Marshal.ReadInt32(record);
+                                    var nameBytes = Marshal.ReadInt32(record, 60);
+                                    if (nameBytes < 0 || (nameBytes & 1) != 0 || nameBytes > returned - offset - 104)
+                                        throw new IOException("Invalid source directory name length.");
+                                    var name = Marshal.PtrToStringUni(IntPtr.Add(record, 104), nameBytes / 2)!;
+                                    if (name is not "." and not "..")
+                                    {
+                                        if (name.IndexOfAny(['\\', '/', ':', '\0']) >= 0) throw new IOException("Invalid source directory name.");
+                                        page.Add((name, (FileAttributes)Marshal.ReadInt32(record, 56)));
+                                    }
+                                    if (next == 0) break;
+                                    if (next < 104 + nameBytes || (next & 7) != 0 || next > returned - offset - 104)
+                                        throw new IOException("Invalid source directory entry offset.");
+                                    offset += next;
+                                }
+                            }
+                        }
+                        ValidatePageGuard(guard); // Includes EOF and zero-length responses.
+                    }
+                    if (complete) yield break;
+                    if (grow)
                     {
                         if (capacity >= 65536) throw new IOException("The source namespace returned no bounded directory data.");
-                        capacity *= 2;
-                        buffer = Marshal.ReAllocHGlobal(buffer, capacity);
-                        continue;
+                        capacity *= 2; buffer = Marshal.ReAllocHGlobal(buffer, capacity); continue;
                     }
-                    restart = false;
-                    if (returned > capacity) throw new IOException("Invalid source directory response length.");
-                    var offset = 0;
-                    while (true)
-                    {
-                        if (returned - offset < 104) throw new IOException("Invalid source directory entry.");
-                        var record = IntPtr.Add(buffer, offset);
-                        var next = Marshal.ReadInt32(record);
-                        var nameBytes = Marshal.ReadInt32(record, 60);
-                        if (nameBytes < 0 || (nameBytes & 1) != 0 || nameBytes > returned - offset - 104)
-                            throw new IOException("Invalid source directory name length.");
-                        var name = Marshal.PtrToStringUni(IntPtr.Add(record, 104), nameBytes / 2)!;
-                        if (name is not "." and not "..")
-                        {
-                            if (name.IndexOfAny(['\\', '/', ':', '\0']) >= 0) throw new IOException("Invalid source directory name.");
-                            yield return (name, (FileAttributes)Marshal.ReadInt32(record, 56));
-                        }
-                        if (next == 0) break;
-                        if (next < 104 + nameBytes || (next & 7) != 0 || next > returned - offset - 104)
-                            throw new IOException("Invalid source directory entry offset.");
-                        offset += next;
-                    }
+                    foreach (var entry in page) yield return entry;
                 }
             }
             finally { Marshal.FreeHGlobal(buffer); }
+
+            void ValidatePageGuard(DirectoryPathLease? guard)
+            {
+                if (guard is null) return;
+                guard.ValidateCurrent(); ValidateCurrent();
+                if (guard.Identity.IdentityFingerprint != Identity.IdentityFingerprint ||
+                    !IsWithin(admittedRootPath!, Path) || guard.IdentityAt(admittedRootPath!).IdentityFingerprint != admittedRootFingerprint)
+                    throw new SourceSnapshotChangedException("SourceMetadataDirectoryCursorChanged");
+                if (guard.Metadata.NamespaceIncomplete) onIncompleteNamespace?.Invoke();
+            }
         }
 
         public void Dispose()
@@ -320,10 +349,11 @@ internal static class WindowsSourcePathAccess
 
     internal sealed class SourceReadLease(DirectoryPathLease parent, SafeFileHandle handle, string identity, PhysicalDirectoryIdentity root) : IDisposable
     {
+        internal DirectoryPathLease Parent { get; } = parent;
         public SafeFileHandle Handle { get; } = handle;
         public string Identity { get; } = identity;
         public PhysicalDirectoryIdentity Root { get; } = root;
-        public void Dispose() { Handle.Dispose(); parent.Dispose(); }
+        public void Dispose() { Handle.Dispose(); Parent.Dispose(); }
     }
 
     [StructLayout(LayoutKind.Sequential)] private struct AttributeTagInfo { public uint Attributes; public uint Tag; }

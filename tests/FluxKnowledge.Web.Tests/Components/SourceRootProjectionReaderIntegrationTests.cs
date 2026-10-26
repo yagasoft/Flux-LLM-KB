@@ -22,6 +22,43 @@ public sealed class SourceRootProjectionReaderIntegrationTests(NativeSqlServerFi
 {
     private readonly NativeSqlServerFixture _fixture = fixture;
 
+    [NativeSqlServerTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Verification_controls_cannot_replace_ordinary_scan_summaries_or_active_scan_counts(bool completed)
+    {
+        var root = Guid.NewGuid(); var verification = Guid.NewGuid(); var now = DateTimeOffset.UtcNow;
+        var factory = new TestDbContextFactory(_fixture.ConnectionString);
+        await using (var setup = factory.CreateDbContext())
+        {
+            setup.SourceRootConfigurations.Add(new SourceRootConfigurationEntity { Id = root, CanonicalPath = $"I:\\projection-verification\\{root:N}",
+                DisplayName = "Verification projection", State = (int)SourceRootState.Enabled, ConfigurationRevision = 1,
+                LastScanCompletedAtUtc = now.AddMinutes(-1), CreatedAtUtc = now, UpdatedAtUtc = now });
+            setup.SourceScanRequests.Add(new SourceScanRequestEntity { Id = Guid.NewGuid(), SourceRootId = root, RequestedBy = "ordinary",
+                RequestedAtUtc = now.AddMinutes(-1), IsReleased = true, State = (int)SourceScanRequestState.Completed,
+                DiscoveredFileCount = 40, ErrorFileCount = 7 });
+            setup.SourceScanRequests.Add(new SourceScanRequestEntity { Id = verification, SourceRootId = root,
+                RequestKind = SqlSourceVerificationStore.RequestKind, VerificationRunId = Guid.NewGuid(), RequestedBy = "verification",
+                RequestedAtUtc = now, IsReleased = true, State = (int)(completed ? SourceScanRequestState.Completed : SourceScanRequestState.Running),
+                DiscoveredFileCount = 999, ErrorFileCount = 999 });
+            setup.SourceScanJobs.Add(new SourceScanJobEntity { Id = Guid.NewGuid(), SourceScanRequestId = verification,
+                State = (int)(completed ? SourceScanJobState.Completed : SourceScanJobState.Running), LeaseOwner = "verification",
+                LeaseGeneration = 1, LeaseExpiresAtUtc = now.AddMinutes(10), DueAtUtc = now, CreatedAtUtc = now, UpdatedAtUtc = now });
+            await setup.SaveChangesAsync();
+        }
+        var reader = new SourceRootProjectionReader(factory, new NoPathPolicy(), new NoEnumeration(), new LocalSourceCapabilityHandlerRegistry([]));
+        var detail = Assert.IsType<SourceRootDetailProjection>(await reader.ReadRootAsync(root, default));
+        Assert.Equal("Completed", detail.ScanState);
+        Assert.Equal(40, detail.DiscoveredCount);
+        Assert.Equal(7, detail.LastScanIssueCount);
+        Assert.Equal(7, (await reader.ReadRootsAsync(default)).Single(x => x.Id == root).LastScanIssueCount);
+        await using var db = factory.CreateDbContext();
+        var overview = await new SqlPipelineActivityReader(null, TimeProvider.System).ReadAsync(db, now, default);
+        Assert.Equal(0, overview.ActiveScans);
+        Assert.Equal(7, overview.Sources.Single(x => x.Id == root).ScanErrors);
+        Assert.False(overview.Sources.Single(x => x.Id == root).IsScanning);
+    }
+
     [NativeSqlServerFact]
     public async Task Empty_root_avoids_derived_branch_queries_and_returns_empty_file_counts()
     {

@@ -39,6 +39,10 @@ Import-Function 'Assert-StoppedPoolRecoveryBaseline'
 Import-Function 'Test-IncrementalRollbackHoldRelease'
 Import-Function 'Assert-NotReparsePoint'
 Import-Function 'New-DeploymentValidationHold'
+Import-Function 'Assert-DeploymentSourceJournalPredecessorRestorationAllowed'
+# Legacy-baseline recovery fixture; protected/unavailable observations are
+# exercised independently by source-journal-migration-recovery.ps1.
+function Get-DeploymentSourceJournalBoundary { @{Protected=$false} }
 $SiteName = 'FluxKnowledge'
 $baseline = @{ Pool = 'Stopped'; Workers = @() }
 function Get-WebAppPoolState { param($Name); if ($Name -cne 'FluxKnowledge') { throw 'Wrong pool' }; [pscustomobject]@{Value=$baseline.Pool} }

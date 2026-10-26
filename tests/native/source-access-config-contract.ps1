@@ -2,6 +2,9 @@
 param([Parameter(Mandatory)][string]$SourceRoot)
 $ErrorActionPreference='Stop'
 Import-Module (Join-Path $SourceRoot 'scripts/deploy/incremental-source-access-config.psm1') -Force
+Import-Module (Join-Path $SourceRoot 'scripts/deploy/incremental-source-journal-helper.psm1') -Force
+Import-Module (Join-Path $SourceRoot 'scripts/deploy/incremental-source-journal-helper-task.psm1') -Force
+$sourceJournalMode=$false;$sourceJournalHelperState=$null;$sourceJournalNativePorts=$null
 $fixture=[IO.Directory]::CreateTempSubdirectory('FluxSourceAccessConfig_').FullName
 try {
     $path=Join-Path $fixture 'settings.json'
@@ -81,6 +84,10 @@ $change.AfterHash
     $tokens=$null; $errors=$null
     $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $SourceRoot 'scripts/deploy/update-native-iis-incremental.ps1'),[ref]$tokens,[ref]$errors)
     if ($errors.Count) { throw 'Updater does not parse.' }
+    $journalGuard=$ast.Find({param($node)$node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'Assert-DeploymentSourceJournalPredecessorRestorationAllowed'},$true)
+    Invoke-Expression $journalGuard.Extent.Text
+    # Explicit legacy-baseline observation; feature/gap refusal has separate tests.
+    function Get-DeploymentSourceJournalBoundary { @{Protected=$false} }
     # Exercise the real top-level mode gates before configuration callbacks.
     # A valid version 2 receipt is checked by offline-code-maintenance.ps1;
     # this gate must admit that route without admitting an unbound recovery.

@@ -69,6 +69,18 @@ internal static class SqlRepositoryWorkRecovery
     }
 
     internal static string Authorize(Discovery proof, bool recoveryRequired) => JsonSerializer.Serialize(new DiscoveryState(1, proof with { Authoritative = true }, null, recoveryRequired));
+    internal static bool CanReuseCurrentDiscovery(SourceRootConfigurationEntity root, SourceRevisionEntity source, SourceArtifactEntity artifact)
+    {
+        var proof = ReadDiscovery(source.CurrentDiscoveryEvidenceJson);
+        var repository = SqlSourceScanStore.ParseGitAdmissionIdentity(root.HealthEvidenceJson);
+        return root.State == (int)SourceRootState.Enabled && root.CrawlMode == (int)SourceDiscoveryMode.GitTracked &&
+            source.SourceRootId == root.Id && source.OriginKind == 0 && source.SuppressedAtUtc is null &&
+            artifact.SourceRevisionId == source.Id && artifact.ContentSha256 == source.ContentSha256 && artifact.ByteLength == source.ByteLength &&
+            proof is { Version: 1, Authoritative: true, LeaseGeneration: > 0, Inventory.Length: 64 } &&
+            proof.SourceId == source.Id && proof.ArtifactId == artifact.Id && proof.Hash == artifact.ContentSha256 && proof.Bytes == artifact.ByteLength &&
+            proof.ConfigurationRevision == root.ConfigurationRevision && proof.Policy == Policy(root) &&
+            repository is not null && proof.Repository == repository && proof.ScanRequestId != Guid.Empty && proof.Inventory.All(Uri.IsHexDigit);
+    }
     internal static string Withdraw() => JsonSerializer.Serialize(new DiscoveryState(1, null, null, true));
     internal static bool RequiresRecovery(SourceRevisionEntity source)
     {

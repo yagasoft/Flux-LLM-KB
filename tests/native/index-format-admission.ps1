@@ -120,6 +120,9 @@ foreach($name in @('Invoke-DeploymentIndexAdmission','Start-IndexCompatibleWebAp
     Invoke-Expression $definition[0].Extent.Text
 }
 function Get-DeploymentSqlConnectionString { $connection }
+# This contract exercises index-format admission; journal admission has its own
+# canonical callback/installed-set tests in source-journal-start-admission.ps1.
+function Invoke-DeploymentSourceJournalAdmission {param($Action) &$Action}
 function Start-WebAppPool { param($Name) $script:starts++ }
 $script:starts=0
 $CanonicalLiveRoot=$ScratchRoot; $CanonicalDeployRoot=$legacy

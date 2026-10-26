@@ -233,7 +233,7 @@ public sealed class SqlSourceRootStore(
                 value => value.Id == sourceScanRequestId.Value && value.SourceRootId == sourceRootId.Value,
                 cancellationToken)
             .ConfigureAwait(false);
-        if (request.IsReleased)
+        if (request.IsReleased || request.State != (int)SourceScanRequestState.Held)
         {
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
             return false;
@@ -291,7 +291,7 @@ public sealed class SqlSourceRootStore(
                 value => value.Id == requestId && value.SourceRootId == rootId,
                 cancellationToken)
             .ConfigureAwait(false);
-        if (request.IsReleased)
+        if (request.IsReleased || request.State != (int)SourceScanRequestState.Held)
         {
             return;
         }

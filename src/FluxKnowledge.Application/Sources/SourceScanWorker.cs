@@ -11,7 +11,8 @@ public sealed class SourceScanWorker(
     ISourceScanStore scanStore,
     ISourceArtifactStore artifactStore,
     ISourceActivityStore activityStore,
-    RetainedTextActivityPlanner? retainedTextActivityPlanner = null) : ISourceScanner
+    RetainedTextActivityPlanner? retainedTextActivityPlanner = null,
+    ISourceIncrementalCoordinator? incrementalCoordinator = null) : ISourceScanner
 {
     public const string TextProcessorVersion = "phase-3a-v1";
 
@@ -33,11 +34,21 @@ public sealed class SourceScanWorker(
         var deferred = 0;
         var blocked = 0;
         var retentionEvidence = new List<SourceEnumerationEvidence>();
-        await foreach (var (file, capture) in EnumerateFilesAsync(sourceRoot, scanRequest, cancellationToken).ConfigureAwait(false))
+        var incrementalPlan = incrementalCoordinator is null ? null : await incrementalCoordinator.PrepareAsync(sourceRoot, scanRequest, cancellationToken).ConfigureAwait(false);
+        using var enumerationScope = incrementalPlan is not null && enumerator is IIncrementalSourceFileEnumerator scoped
+            ? scoped.UseScope(new(incrementalPlan.IsBaseline ? null : incrementalPlan.Targets.Where(x => x.HasCaptureScope).Select(x => x.RelativePath).ToArray(), async (relative, ct) =>
+            {
+                var reused = await incrementalCoordinator!.TryReuseAsync(sourceRoot, scanRequest, incrementalPlan, relative, ct).ConfigureAwait(false);
+                if (reused is null) return true;
+                convergedRevisionIds.Add(reused); discovered++; return false;
+            }) { MetadataEntriesPerSecond = incrementalPlan.IsReconciliation && !incrementalPlan.IsBaseline
+                ? incrementalPlan.MetadataEntriesPerSecond > 0 ? incrementalPlan.MetadataEntriesPerSecond : 64 : 0 }) : null;
+        await foreach (var (file, capture) in EnumerateFilesAsync(sourceRoot, scanRequest, incrementalPlan is not null, cancellationToken).ConfigureAwait(false))
         {
             SourceRevisionId revisionId;
             SourceRetentionConvergence? failedRetention = null;
             string? failureReason = null;
+            ISourceArtifactPublicationLease? publicationLease = null;
             try
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -45,18 +56,11 @@ public sealed class SourceScanWorker(
                 try
                 {
                     var metadata = new SourceArtifactMetadata(file.ContentSha256, "application/octet-stream", file.ByteLength);
-                    var receipt = await (capture is null
+                    var receipt = await (capture is null || sourceRoot.DiscoveryMode == SourceDiscoveryMode.GitTracked
                         ? artifactStore.PutFileAsync(file, metadata, cancellationToken)
                         : ((ICapturedSourceArtifactStore)artifactStore).PutCapturedFileAsync(capture, metadata, cancellationToken)).ConfigureAwait(false);
-                    try
-                    {
-                        revisionId = await scanStore.ConvergeRevisionAndArtifactAsync(sourceRoot, file, receipt, cancellationToken).ConfigureAwait(false);
-                    }
-                    finally
-                    {
-                        if (receipt.PublicationLease is not null)
-                            await receipt.PublicationLease.DisposeAsync().ConfigureAwait(false);
-                    }
+                    publicationLease = receipt.PublicationLease;
+                    revisionId = await scanStore.ConvergeRevisionAndArtifactAsync(sourceRoot, file, receipt, cancellationToken).ConfigureAwait(false);
                 }
                 catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidDataException)
                 {
@@ -67,10 +71,21 @@ public sealed class SourceScanWorker(
                     failedRetention = await scanStore.ConvergeBlockedRevisionAsync(sourceRoot, file, failureReason, cancellationToken).ConfigureAwait(false);
                     revisionId = failedRetention.SourceRevisionId;
                 }
+                // Retention has already succeeded. A lost incremental epoch/lease or failed
+                // observation commit must retry the scan, not create a blocked-artifact record.
+                if (failedRetention is null && incrementalPlan is not null)
+                    await incrementalCoordinator!.RecordCaptureAsync(sourceRoot, scanRequest, incrementalPlan, file, revisionId, capture, cancellationToken).ConfigureAwait(false);
             }
             finally
             {
-                if (capture is not null) await capture.DisposeAsync().ConfigureAwait(false);
+                try
+                {
+                    if (publicationLease is not null) await publicationLease.DisposeAsync().ConfigureAwait(false);
+                }
+                finally
+                {
+                    if (capture is not null) await capture.DisposeAsync().ConfigureAwait(false);
+                }
             }
             if (failedRetention is { IsRetentionBlocked: true })
             {
@@ -161,7 +176,14 @@ public sealed class SourceScanWorker(
 
         IReadOnlyList<SourceEnumerationEvidence> evidence = [.. enumerator.LastEvidence, .. retentionEvidence];
         await scanStore.RecordEnumerationEvidenceAsync(scanRequest.Id, evidence, cancellationToken).ConfigureAwait(false);
-        if (evidence.Count == 0)
+        var completeInventory = incrementalPlan is null;
+        if (incrementalPlan is not null)
+        {
+            completeInventory = await incrementalCoordinator!.CompleteAsync(sourceRoot, scanRequest, incrementalPlan,
+                ((IIncrementalSourceFileEnumerator)enumerator).LastDirectories, evidence, convergedRevisionIds,
+                (enumerator as IAuthoritativeSourceFileEnumerator)?.LastInventory, cancellationToken).ConfigureAwait(false);
+        }
+        else if (evidence.Count == 0)
         {
             if (sourceRoot.DiscoveryMode == SourceDiscoveryMode.GitTracked)
             {
@@ -171,14 +193,16 @@ public sealed class SourceScanWorker(
             }
             else await scanStore.SuppressUnseenAsync(sourceRoot.Id, convergedRevisionIds, cancellationToken).ConfigureAwait(false);
         }
-        return new SourceScanResult(sourceRoot.Id, scanRequest.Id, discovered, indexed, deferred, blocked);
+        return new SourceScanResult(sourceRoot.Id, scanRequest.Id, discovered, indexed, deferred, blocked)
+        { IsCompleteInventory = completeInventory, CompletesReconciliation = incrementalPlan is { IsReconciliation: true } or { IsBaseline: true } };
     }
 
     private async IAsyncEnumerable<(SourceDiscoveredFile File, ISourceFileCapture? Capture)> EnumerateFilesAsync(
-        SourceRootConfiguration root, SourceScanRequest request, [EnumeratorCancellation] CancellationToken cancellationToken)
+        SourceRootConfiguration root, SourceScanRequest request, bool incremental, [EnumeratorCancellation] CancellationToken cancellationToken)
     {
-        if (root.DiscoveryMode == SourceDiscoveryMode.Filesystem && request.Lease is { } ownership &&
-            enumerator is ICapturingSourceFileEnumerator capturing && artifactStore is ICapturedSourceArtifactStore)
+        if (request.Lease is { } ownership && enumerator is ICapturingSourceFileEnumerator capturing &&
+            (root.DiscoveryMode == SourceDiscoveryMode.Filesystem && artifactStore is ICapturedSourceArtifactStore ||
+             root.DiscoveryMode == SourceDiscoveryMode.GitTracked && incremental))
         {
             await foreach (var capture in capturing.EnumerateCapturedAsync(root, new(request.Id, ownership), cancellationToken).ConfigureAwait(false))
                 yield return (capture.Snapshot, capture);

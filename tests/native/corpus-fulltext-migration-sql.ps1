@@ -10,11 +10,14 @@ $tokens = $null; $errors = $null
 $ast = [System.Management.Automation.Language.Parser]::ParseFile(
     (Join-Path $SourceRoot 'scripts/deploy/update-native-iis-incremental.ps1'), [ref]$tokens, [ref]$errors)
 if ($errors.Count) { throw 'Deployment script parse failed.' }
-foreach ($name in @('Get-AppliedMigrationIds','Get-CorpusFullTextDatabaseState','New-CorpusFullTextMigrationScript','Invoke-GeneratedSqlScript')) {
+foreach ($name in @('Get-AppliedMigrationIds','Get-CorpusFullTextDatabaseState','New-CorpusFullTextMigrationScript','Invoke-GeneratedSqlScript','Assert-DeploymentSourceJournalLegacyMigrationAllowed')) {
     $definition = @($ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name }, $true))
     if ($definition.Count -ne 1) { throw "Missing deployment function: $name" }
     . ([scriptblock]::Create($definition[0].Extent.Text))
 }
+# This fixture qualifies the earlier schema contract. The journal recovery fixture
+# exercises the actual new guard against feature/intent and unavailable states.
+function Get-DeploymentSourceJournalBoundary { @{Protected=$false} }
 $server = (& (Join-Path $SourceRoot 'scripts/dev/ensure-disposable-sql.ps1') | Out-String).Trim()
 if ([string]::IsNullOrWhiteSpace($server)) { throw 'Disposable SQL prerequisite returned no connection.' }
 $dbName = 'FluxKnowledgeTest_CorpusMigration_' + [guid]::NewGuid().ToString('N')

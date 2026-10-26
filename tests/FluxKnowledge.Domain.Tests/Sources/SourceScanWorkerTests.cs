@@ -10,6 +10,101 @@ namespace FluxKnowledge.Domain.Tests.Sources;
 
 public sealed class SourceScanWorkerTests
 {
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task Git_incremental_bookkeeping_keeps_its_capture_without_filesystem_retention_authority(bool registered, bool incremental)
+    {
+        var root = SourceRootConfiguration.Create(@"I:\SyntheticGitFixture", "git", true, false, 1024,
+            discoveryMode: SourceDiscoveryMode.GitTracked);
+        var now = DateTimeOffset.UtcNow;
+        var request = SourceScanRequest.Restore(SourceScanRequestId.New(), root.Id, "test", now,
+            SourceScanRequestState.Released, now, new(Guid.NewGuid(), "git-capture", 1));
+        var file = new SourceDiscoveredFile(Path.Combine(root.CanonicalPath, "one.txt"), "one.txt", "test:git",
+            "one"u8.ToArray(), true, new string('a', 64), 3, now,
+            new(SourceClassification.AcceptedUtf8Text, "one", null), new("repository", "inventory", 1, 0));
+        var enumeration = new GitCaptureEnumerator(file);
+        var artifacts = new GitLegacyArtifactStore(() =>
+        {
+            if (incremental) Assert.False(Assert.IsType<TestGitCapture>(enumeration.Capture).Disposed);
+        });
+        var observed = false;
+        var coordinator = new FailingCaptureCoordinator(capture =>
+        {
+            Assert.Same(enumeration.Capture, capture);
+            Assert.False(Assert.IsType<TestGitCapture>(capture).Disposed);
+            observed = true;
+        }, incremental);
+        var worker = new SourceScanWorker(enumeration, new RecordingScanStore(), artifacts, new RecordingActivityStore(),
+            incrementalCoordinator: registered ? coordinator : null);
+        if (incremental)
+        {
+            await Assert.ThrowsAsync<SourceSnapshotChangedException>(() => worker.ScanAsync(root, request, default).AsTask());
+            Assert.True(observed);
+            Assert.True(Assert.IsType<TestGitCapture>(enumeration.Capture).Disposed);
+        }
+        else
+        {
+            Assert.Equal(1, (await worker.ScanAsync(root, request, default)).DiscoveredCount);
+            Assert.Null(enumeration.Capture);
+        }
+        Assert.Equal(1, artifacts.LegacyCalls);
+        Assert.Equal(0, artifacts.CapturedCalls);
+    }
+
+    [Fact]
+    public async Task Incremental_bookkeeping_keeps_the_original_capture_guard_and_releases_it_on_failure()
+    {
+        using var source = new FluxKnowledge.TestSupport.CloudSourceFixture();
+        using var retained = new FluxKnowledge.TestSupport.CloudSourceFixture();
+        var path = source.File("owned.txt", "Held source evidence.");
+        var root = SourceRootConfiguration.Create(source.Root, "owned", false, false, 1024);
+        var now = DateTimeOffset.UtcNow;
+        var request = SourceScanRequest.Restore(SourceScanRequestId.New(), root.Id, "test", now,
+            SourceScanRequestState.Released, now, new(Guid.NewGuid(), "seal-test", 1));
+        using var artifacts = new ContentAddressedSourceArtifactStore(retained.Root);
+        var observed = false;
+        var coordinator = new FailingCaptureCoordinator(capture =>
+        {
+            Assert.IsAssignableFrom<IJournalSealableSourceCapture>(capture);
+            Assert.Throws<IOException>(() => { using var writable = new FileStream(path, FileMode.Open, FileAccess.Write, FileShare.ReadWrite); });
+            observed = true;
+        });
+        var worker = new SourceScanWorker(new LocalSourceEnumerator(), new RecordingScanStore(), artifacts,
+            new RecordingActivityStore(), incrementalCoordinator: coordinator);
+        await Assert.ThrowsAsync<SourceSnapshotChangedException>(() => worker.ScanAsync(root, request, default).AsTask());
+        Assert.True(observed);
+        using var released = File.OpenWrite(path);
+        Assert.True(released.CanWrite);
+    }
+
+    [Fact]
+    public async Task Incremental_bookkeeping_failure_retries_the_scan_without_reporting_successful_retention_as_blocked()
+    {
+        var path = Path.Combine(@"I:\Codex Workspaces\Staging\FluxKnowledge", "CaptureBookkeeping-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(path);
+        try
+        {
+            await File.WriteAllTextAsync(Path.Combine(path, "one.txt"), "retained evidence");
+            var root = SourceRootConfiguration.Create(path, "Bookkeeping fixture", true, false, 1024);
+            var revisions = new RecordingScanStore();
+            var activities = new RecordingActivityStore();
+            var artifacts = new RecordingArtifactStore();
+            var now = DateTimeOffset.UtcNow;
+            var request = SourceScanRequest.Restore(SourceScanRequestId.New(), root.Id, "test", now,
+                SourceScanRequestState.Released, now, new(Guid.NewGuid(), "test", 1));
+            var worker = new SourceScanWorker(new LocalSourceEnumerator(), revisions, artifacts, activities,
+                incrementalCoordinator: new FailingCaptureCoordinator());
+            await Assert.ThrowsAsync<SourceSnapshotChangedException>(() => worker.ScanAsync(root, request, default).AsTask());
+            Assert.Equal(1, artifacts.PutCount);
+            Assert.Null(revisions.ArtifactFailureReason);
+            Assert.Empty(activities.Drafts);
+            Assert.Equal(0, revisions.SuppressionCalls);
+        }
+        finally { Directory.Delete(path, true); }
+    }
+
     [Fact]
     public async Task Owned_scan_keeps_the_discovery_handle_through_retention_and_releases_it_before_activity_planning()
     {
@@ -369,6 +464,41 @@ public sealed class SourceScanWorkerTests
         Assert.DoesNotContain(activities.Drafts, draft => draft.ActivityKind == SourceActivityKind.TextExtraction);
     }
 
+    private sealed class TestGitCapture(SourceDiscoveredFile snapshot) : ISourceFileCapture
+    {
+        public SourceDiscoveredFile Snapshot => snapshot;
+        internal bool Disposed { get; private set; }
+        public ValueTask DisposeAsync() { Disposed = true; return ValueTask.CompletedTask; }
+    }
+
+    private sealed class GitCaptureEnumerator(SourceDiscoveredFile file) : ICapturingSourceFileEnumerator
+    {
+        internal TestGitCapture? Capture { get; private set; }
+        public IReadOnlyList<SourceEnumerationEvidence> LastEvidence => [];
+        public async IAsyncEnumerable<ISourceFileCapture> EnumerateCapturedAsync(SourceRootConfiguration root,
+            SourceScanOwnership ownership, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+            Capture = new(file with { ScanOwnership = ownership });
+            await using (Capture) yield return Capture;
+        }
+        public async IAsyncEnumerable<SourceDiscoveredFile> EnumerateAsync(SourceRootConfiguration root,
+            [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
+        { ct.ThrowIfCancellationRequested(); yield return file; await Task.CompletedTask; }
+    }
+
+    private sealed class GitLegacyArtifactStore(Action onPut) : ICapturedSourceArtifactStore
+    {
+        internal int LegacyCalls { get; private set; }
+        internal int CapturedCalls { get; private set; }
+        public ValueTask<SourceArtifactReceipt> PutFileAsync(SourceDiscoveredFile snapshot, SourceArtifactMetadata metadata, CancellationToken ct)
+        { onPut(); LegacyCalls++; return PutAsync(snapshot.ClassificationBuffer, metadata, ct); }
+        public ValueTask<SourceArtifactReceipt> PutAsync(ReadOnlyMemory<byte> content, SourceArtifactMetadata metadata, CancellationToken ct) =>
+            ValueTask.FromResult(new SourceArtifactReceipt(SourceArtifactId.New(), metadata.ContentSha256, "sha256/aa/fixture.bin", metadata.ByteLength, false));
+        public ValueTask<SourceArtifactReceipt> PutCapturedFileAsync(ISourceFileCapture capture, SourceArtifactMetadata metadata, CancellationToken ct)
+        { CapturedCalls++; throw new InvalidOperationException("Git retention must retain its existing contract."); }
+    }
+
     private sealed class ReturningEnumerator(params SourceDiscoveredFile[] files) : ISourceFileEnumerator
     {
         public IReadOnlyList<SourceEnumerationEvidence> Evidence { get; init; } = [];
@@ -481,5 +611,22 @@ public sealed class SourceScanWorkerTests
                 draft.SourceRevisionId, draft.ActivityKind, draft.ExecutionClass, draft.ProcessorVersion,
                 draft.InputFingerprint, draft.RequiredCapability, draft.Reason, draft.InitialState));
         }
+    }
+
+    private sealed class FailingCaptureCoordinator(Action<ISourceFileCapture?>? onCapture = null, bool enabled = true) : ISourceIncrementalCoordinator
+    {
+        public ValueTask<SourceIncrementalPlan?> PrepareAsync(SourceRootConfiguration root, SourceScanRequest request, CancellationToken ct) =>
+            ValueTask.FromResult<SourceIncrementalPlan?>(enabled ? new(Guid.NewGuid(), 1, true, "Baselining", null, 0, []) : null);
+        public ValueTask<SourceRevisionId?> TryReuseAsync(SourceRootConfiguration root, SourceScanRequest request, SourceIncrementalPlan plan, string relativePath, CancellationToken ct) =>
+            ValueTask.FromResult<SourceRevisionId?>(null);
+        public ValueTask RecordCaptureAsync(SourceRootConfiguration root, SourceScanRequest request, SourceIncrementalPlan plan, SourceDiscoveredFile file, SourceRevisionId revision, ISourceFileCapture? capture, CancellationToken ct)
+        {
+            onCapture?.Invoke(capture);
+            return ValueTask.FromException(new SourceSnapshotChangedException("Fixture recovery epoch changed after retention"));
+        }
+        public ValueTask<bool> CompleteAsync(SourceRootConfiguration root, SourceScanRequest request, SourceIncrementalPlan plan,
+            IReadOnlyList<SourceNamespaceObservation> directories, IReadOnlyList<SourceEnumerationEvidence> evidence,
+            IReadOnlySet<SourceRevisionId> seen, GitInventoryEvidence? inventory, CancellationToken ct) => ValueTask.FromResult(false);
+        public ValueTask<int> PumpAsync(CancellationToken ct) => ValueTask.FromResult(0);
     }
 }

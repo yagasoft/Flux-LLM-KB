@@ -32,9 +32,11 @@ public sealed class CodeDisclosureProofIntegrationTests(NativeSqlServerFixture f
         while (directory is not null && !File.Exists(Path.Combine(directory.FullName, relative))) directory = directory.Parent;
         Assert.NotNull(directory);
         var text = (await File.ReadAllTextAsync(Path.Combine(directory.FullName, relative))).Replace("\r\n", "\n", StringComparison.Ordinal);
-        var method = Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree.ParseText(text).GetRoot().DescendantNodes()
+        var declaration = Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree.ParseText(text).GetRoot().DescendantNodes()
             .OfType<Microsoft.CodeAnalysis.CSharp.Syntax.MethodDeclarationSyntax>()
-            .Single(value => value.Identifier.ValueText == "OwnsRootScanAsync").ToString();
+            .Single(value => value.Identifier.ValueText == "OwnsRootScanAsync");
+        var method = declaration.ToString();
+        var signature = text[declaration.SpanStart..declaration.Identifier.Span.End];
         var factory = SqlTestData.CreateFactory(fixture);
         await SqlTestData.ClearPipelineAsync(fixture);
         var root = Guid.NewGuid();
@@ -53,8 +55,8 @@ public sealed class CodeDisclosureProofIntegrationTests(NativeSqlServerFixture f
         Assert.Equal(CodeDisclosureProofState.Ready, built.State);
         Assert.True(await store.CommitAsync(candidate, built, CancellationToken.None));
         var rawReader = new SqlCorpusRetrievalReader(factory);
-        var rawCandidate = Assert.Single(await rawReader.SearchAsync("private static async Task<bool> OwnsRootScanAsync",
-            new("root", [root], null), 20, CancellationToken.None), value => value.Content.Contains("private static async Task<bool> OwnsRootScanAsync", StringComparison.Ordinal));
+        var rawCandidate = Assert.Single(await rawReader.SearchAsync(signature,
+            new("root", [root], null), 20, CancellationToken.None), value => value.Content.Contains(signature, StringComparison.Ordinal));
         var directBinding = new CorpusEvidenceBinding(2, rawCandidate.RootId, rawCandidate.OwnerSourceRevisionId,
             CodeDisclosureIntegrity.Hash(rawCandidate.SourceIdentity),rawCandidate.PipelineRecordId,rawCandidate.PipelineRecordRevision,
             rawCandidate.ArtifactId,rawCandidate.ArtifactHash,rawCandidate.ChunkId,rawCandidate.ChunkHash,
@@ -65,7 +67,7 @@ public sealed class CodeDisclosureProofIntegrationTests(NativeSqlServerFixture f
             directRead.StartOffset,directRead.Text.Length).Withheld);
         var service = new CorpusRetrievalService(new SqlCorpusRetrievalReader(factory),
             new ScopedCorpusRetrievalTests.TestEvidenceCodec(), disclosure);
-        var declarations = await service.SearchAsync(new("private static async Task<bool> OwnsRootScanAsync", 5, "root", root, null), CancellationToken.None);
+        var declarations = await service.SearchAsync(new(signature, 5, "root", root, null), CancellationToken.None);
         Assert.Contains(declarations.Results, hit => hit.Passage.Contains("OwnsRootScanAsync", StringComparison.Ordinal));
         // Full-Text population can add other safe token matches; this proof requires the exact method-body anchor.
         var body = Assert.Single((await service.SearchAsync(new("var lease = ownership.Lease;", 5, "root", root, null), CancellationToken.None)).Results,

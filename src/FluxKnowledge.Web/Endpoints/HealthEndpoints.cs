@@ -15,6 +15,7 @@ public static class HealthEndpoints
     {
         endpoints.MapGet("/health/live", Live);
         endpoints.MapGet("/health/ready", ReadyAsync);
+        endpoints.MapFluxKnowledgeSourceJournalHelperHealth();
         return endpoints;
     }
 

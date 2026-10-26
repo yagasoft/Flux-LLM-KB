@@ -12,6 +12,15 @@ using Xunit;
 
 namespace FluxKnowledge.Web.Tests.Components;
 
+[CollectionDefinition(Name, DisableParallelization = true)]
+public sealed class OverviewProjectionSqlCollection
+{
+    public const string Name = "overview-projection-sql";
+}
+
+// Keep the production deadline for these semantic assertions while isolating
+// them from unrelated suite-wide CPU/SQL pressure. Dedicated race tests remain parallel.
+[Collection(OverviewProjectionSqlCollection.Name)]
 public sealed class SqlProjectionReaderIntegrationTests(NativeSqlServerFixture fixture)
     : IClassFixture<NativeSqlServerFixture>
 {

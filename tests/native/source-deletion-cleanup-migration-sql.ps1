@@ -3,6 +3,7 @@ param([Parameter(Mandatory)][string]$SourceRoot,[Parameter(Mandatory)][string]$S
 $ErrorActionPreference='Stop'
 Import-Module (Join-Path $SourceRoot 'scripts/deploy/incremental-source-deletion-cleanup-migration.psm1') -Force
 Import-Module (Join-Path $SourceRoot 'scripts/deploy/incremental-segmented-index-schema.psm1') -Force
+Import-Module (Join-Path $SourceRoot 'scripts/deploy/incremental-source-journal-migration.psm1') -Force
 $text=[Environment]::GetEnvironmentVariable('FLUXKNOWLEDGE_SOURCE_CLEANUP_DISPOSABLE_SQL')
 $text=[regex]::Replace($text,'(?i)(^|;)\s*Trust Server Certificate\s*=','$1TrustServerCertificate=')
 $text=[regex]::Replace($text,'(?i)(^|;)\s*Connect Retry Count\s*=','$1ConnectRetryCount=')
@@ -18,10 +19,11 @@ function Get-RepositoryRecoveryCompanionConnectionString { $text }
 $tokens=$null; $errors=$null
 $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $SourceRoot 'scripts/deploy/update-native-iis-incremental.ps1'),[ref]$tokens,[ref]$errors)
 if ($errors.Count -ne 0) { throw 'The updater does not parse.' }
-foreach ($name in @('Invoke-GeneratedSqlScript','Get-SourceDeletionCleanupCandidateDatabase','Assert-SourceDeletionCleanupCompanionDatabase')) {
+foreach ($name in @('Invoke-GeneratedSqlScript','Get-SourceDeletionCleanupCandidateDatabase','Assert-SourceDeletionCleanupCompanionDatabase','Assert-DeploymentSourceJournalLegacyMigrationAllowed')) {
     $function=$ast.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name },$true)
     Invoke-Expression $function.Extent.Text
 }
+function Get-DeploymentSourceJournalBoundary { @{Protected=$false} }
 function Invoke-TestSql([string]$Sql) {
     $connection=[System.Data.SqlClient.SqlConnection]::new($text)
     try {

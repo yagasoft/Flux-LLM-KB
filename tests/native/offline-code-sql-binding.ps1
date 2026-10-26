@@ -4,6 +4,7 @@ $text=$env:FLUXKNOWLEDGE_OFFLINE_CODE_TEST_SQL -replace '(?i)(^|;)\s*Trust Serve
 $target=[Data.SqlClient.SqlConnectionStringBuilder]::new($text)
 if($target.InitialCatalog -cne $ExpectedDatabase -or $ExpectedDatabase -cnotmatch '^FluxKnowledge_Phase1Tests_[a-f0-9]{32}$'){throw 'Owned disposable database required.'}
 Import-Module (Join-Path $SourceRoot 'scripts/deploy/incremental-segmented-index-schema.psm1') -Force
+Import-Module (Join-Path $SourceRoot 'scripts/deploy/incremental-source-journal-migration.psm1') -Force
 . (Join-Path $SourceRoot 'scripts/deploy/offline-code-maintenance.ps1')
 function Get-DeploymentSqlConnectionString {$target.ConnectionString}
 function Sql([string]$Text){$connection=[Data.SqlClient.SqlConnection]::new($target.ConnectionString);try{$connection.Open();$command=$connection.CreateCommand();try{$command.CommandTimeout=3;$command.CommandText=$Text;$command.ExecuteScalar()}finally{$command.Dispose()}}finally{$connection.Dispose()}}
@@ -18,6 +19,7 @@ $candidate=$updater.Find({param($node) $node -is [Management.Automation.Language
 . ([scriptblock]::Create($candidate.Extent.Text))
 [void](Get-SourceDeletionCleanupCandidateDatabase -Root $SourceRoot -MigrationMode $false -ReadState {Get-SourceDeletionCleanupDatabaseState -ConnectionString $target.ConnectionString})
 $actualSchema=Get-SegmentedIndexDatabaseState -ConnectionString $target.ConnectionString
+$journalSchema=@($actualSchema.History|Where-Object {$_ -cin (Get-SourceJournalMigrationContract).Migrations}).Count -gt 0
 foreach ($drift in @('unknown-successor','duplicate-successor','changed-index-schema')) {
     $changed=$actualSchema.PSObject.Copy()
     switch ($drift) {
@@ -26,8 +28,25 @@ foreach ($drift in @('unknown-successor','duplicate-successor','changed-index-sc
         'changed-index-schema' { $changed.SchemaSha256='F'*64 }
     }
     $refused=$false
-    try { Assert-SegmentedIndexApplicationSchema $changed } catch { $refused=$_.Exception.Message -like 'index-schema-reconciliation-required*' }
+    try {
+        if($journalSchema) {
+            $journal=Get-SourceJournalDatabaseState -ConnectionString $target.ConnectionString
+            $journal.History=$changed.History
+            Assert-SourceJournalComposedApplicationSchema -JournalState $journal -ProjectionState $changed
+        } else { Assert-SegmentedIndexApplicationSchema $changed }
+    } catch {
+        $refused=$_.Exception.Message -match '^(index-schema-reconciliation-required|journal-schema-partial-or-unreviewed-state-retain-hold|journal-schema-baseline-history-changed)'
+    }
     if (!$refused) { throw ('Unreviewed index schema/history accepted: '+$drift) }
+}
+if($journalSchema) {
+    [void](Sql 'ALTER TABLE dbo.SourceVolumeJournalCheckpoints ADD UnreviewedOfflineBinding bit NULL;')
+    try {
+        $refused=$false
+        try { Get-OfflineCodeDatabaseBinding | Out-Null }
+        catch { if($_.Exception.Message -cne 'journal-schema-partial-or-unreviewed-state-retain-hold'){throw};$refused=$true }
+        if(!$refused){throw 'Offline binding accepted actual journal schema drift.'}
+    } finally {[void](Sql 'ALTER TABLE dbo.SourceVolumeJournalCheckpoints DROP COLUMN UnreviewedOfflineBinding;')}
 }
 [void](Sql 'UPDATE dbo.IndexState SET CorpusVersion=CorpusVersion+1 WHERE Id=1; SELECT 1;')
 try {

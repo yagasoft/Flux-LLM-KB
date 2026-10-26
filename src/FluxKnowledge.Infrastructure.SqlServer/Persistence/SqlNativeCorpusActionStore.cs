@@ -53,6 +53,13 @@ public sealed class SqlNativeCorpusActionStore(
         var version = await context.SourceRootConfigurations.AsNoTracking().Where(value => value.Id == id).Select(value => value.RowVersion).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
         if (version is null || version.Length != 8) throw new NativeOperationException("target-not-found");
         var targets = new List<NativeTargetVersion> { new($"root:{id:D}", Convert.ToBase64String(version)) };
+        if (action is "source_verify" or "source_verification_set")
+        {
+            var stateVersion = await context.SourceRootScanStates.AsNoTracking().Where(x => x.SourceRootId == id)
+                .Select(x => x.RowVersion).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+            targets.Add(new($"verification-policy:{id:D}", stateVersion is null ? "absent" : Convert.ToBase64String(stateVersion)));
+            return targets;
+        }
         var watch = await context.SourceRootWatchStates.AsNoTracking().Where(value => value.SourceRootId == id).Select(value => new { value.SourceRootId, value.RowVersion }).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
         if (action is "watcher_set" or "root_disable" or "root_pause" or "root_delete")
         {
@@ -183,6 +190,8 @@ public sealed class SqlNativeCorpusActionStore(
                 "root_update" => new[] { "rootId", "displayName", "applyDefaultPolicy", "reconcile" },
                 "policy_reprocess" => new[] { "rootId", "sourceRevisionId", "predecessorActivityId", "inputSha256", "configurationRevision" },
                 "root_disable" or "root_pause" or "root_resume" or "root_delete" or "source_sync" => new[] { "rootId" },
+                "source_verify" => new[] { "rootId" },
+                "source_verification_set" => new[] { "rootId", "policy", "paused" },
                 "watcher_set" => new[] { "rootId", "enabled" },
                 "job_retry" or "publication_retry" or "embedding_retry" => new[] { "jobId" },
                 "index_retention" or "index_retention_restore" => new[] { "manifestId", "manifestHash", "generationId", "deletionReceiptId" },
@@ -203,6 +212,11 @@ public sealed class SqlNativeCorpusActionStore(
                     _ = OptionalBool(root, "applyDefaultPolicy", false); _ = OptionalBool(root, "reconcile", true);
                     break;
                 case "root_disable": case "root_pause": case "root_resume": case "root_delete": case "source_sync": _ = RequiredGuid(root, "rootId"); break;
+                case "source_verify": _ = RequiredGuid(root, "rootId"); break;
+                case "source_verification_set":
+                    _ = RequiredGuid(root, "rootId");
+                    _ = SqlSourceVerificationStore.ParseControl(root);
+                    break;
                 case "watcher_set": _ = RequiredGuid(root, "rootId"); if (!root.TryGetProperty("enabled", out var enabled) || enabled.ValueKind is not (JsonValueKind.True or JsonValueKind.False)) throw new NativeOperationException("invalid-payload"); break;
                 case "job_retry": case "publication_retry": case "embedding_retry": _ = RequiredGuid(root, "jobId"); break;
                 case "index_retention": case "index_retention_restore": SqlIndexRetentionOperations.ParsePayload(payload, action == "index_retention_restore"); break;

@@ -16,7 +16,8 @@ public sealed record SourceDiscoveredFile(
     SourceClassificationResult Classification,
     GitInventoryEvidence? GitInventory = null,
     SourceScanOwnership? ScanOwnership = null,
-    SourcePathBinding? SourcePath = null);
+    SourcePathBinding? SourcePath = null,
+    SourceFileObservation? Observation = null);
 
 /// <summary>Admission identity carried in memory from discovery to retention.</summary>
 public sealed record SourcePathBinding(string RootPath, string RootIdentityFingerprint);
@@ -36,6 +37,7 @@ public sealed record SourceScanOwnership(SourceScanRequestId RequestId, SourceSc
 public sealed record SourceEnumerationEvidence(string Kind, string RelativePath, string Detail)
 {
     public int? NativeErrorCode { get; init; }
+    public bool NamespaceIncomplete { get; init; }
 }
 
 public sealed record GitInventoryEvidence(string RepositoryIdentity, string Generation, int TrackedCount, int ExcludedCount);

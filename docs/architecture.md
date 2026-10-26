@@ -115,6 +115,51 @@ Registration uses preview/commit fencing and maintains stable revision identity.
 Watcher-driven refresh is reconciled against retained state and configured
 include/exclude rules.
 
+Opt-in journal-backed roots converge watcher hints and bounded NTFS journal
+pages on one durable pending-work pipeline. Cursor advancement and pending
+generations commit together; healthy qualified coverage uses watcher signals
+as advisory intake wakeups. Root/environment-bound guarded seals allow unchanged
+files to reuse retained observations. Baseline and journal-gap recovery,
+independent paced namespace/Git reconciliation and scoped degraded-mode work
+preserve discovery and deletion authority. See the [incremental scanning design](design/incremental-source-scanning.md).
+
+Cloud seal profiles additionally bind the provider name/version read from Cloud
+Files metadata at the root. A mismatch or unavailable provider evidence revokes
+reuse and advisory-only watcher trust. Local qualification remains separate.
+The tested hydrated OneDrive workflow has independently reviewed guarded-CLOSE
+compatibility evidence on provider 26.189.0928.0009: eight exact native capture,
+seal and later-change cycles, with preserved bytes/identity and a passing matched
+no-edit capture control. The composite still failed at final synchronisation;
+older edited controls provide context rather than current-version post-edit sync
+equivalence. This does not establish general sync reliability. Exact production
+root/provider/environment profile binding remains a release gate.
+
+Weekly integrity checks use the existing durable source request/outbox/root
+lease with a separate verification request kind. Frozen cycle membership,
+per-file successful receipts and a protected physical reader slot survive
+ordinary job retries without claiming ordinary scan completeness. Source and
+retained reads share one paced budget; ordinary work, current policy/pause and
+ownership are checked between chunks. Qualified native read intervals and a
+closing journal barrier bind historical source hashes. Successors require a
+fresh authoritative hash, and deletions/exclusions require guarded suppression
+witnesses. Deferred or incomplete coverage cannot advance the clean verification
+time. The existing source page and native APIs read SQL-only progress; settings
+use the normal confirmed, idempotent and audited native mutation contract.
+
+Feature-off rollback uses an explicit stopped-updater retirement operation, with
+no standalone CLI route or background retirement service. It pins the deployment
+hold/configuration and stopped-writer evidence to the database incarnation and
+physical runtime directory. The existing physical verification slot remains held
+through SQL retirement. Active cycles become invalidated, queued verification
+controls become terminal to retry/release, and unfinished measurement attempts
+remain explicit lower bounds. Existing receipts, clean verification timestamps,
+content-change obligations and outboxes survive. This operation alone does not
+establish older-binary compatibility; the updater must retain the hold and refuse
+unproved predecessor startup.
+Actual read deltas commit atomically with successful receipts. Abandoned unfinished
+attempts leave a sticky lower-bound measurement flag, independently of whether
+the cycle's integrity receipts eventually complete successfully.
+
 New roots default to 32 MiB strict UTF-8 text and inert source-text indexing.
 Explicit root restrictions remain authoritative. The additional text extensions
 are RDL, INI, HTML, NDJSON, VTT and URL; content is indexed as text and never

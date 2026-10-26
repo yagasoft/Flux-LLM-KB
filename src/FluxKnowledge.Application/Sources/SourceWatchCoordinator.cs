@@ -4,14 +4,16 @@ using FluxKnowledge.Domain.Sources;
 namespace FluxKnowledge.Application.Sources;
 
 /// <summary>Coordinates persisted watcher hints; it never reads a source path or indexes content.</summary>
-public sealed class SourceWatchCoordinator(ISourceRootWatchStore store, ISourceScanWakeSignal? wakeSignal = null)
+public sealed class SourceWatchCoordinator(ISourceRootWatchStore store, ISourceScanWakeSignal? wakeSignal = null,
+    ISourceJournalWakeSignal? journalWake = null)
 {
     private readonly string _leaseOwner = $"source-watch:{Guid.NewGuid():N}";
 
     public async ValueTask RecordAsync(SourceWatchSignal signal, CancellationToken cancellationToken)
     {
         await store.RecordSignalAsync(signal, cancellationToken).ConfigureAwait(false);
-        wakeSignal?.Notify();
+        if (journalWake is not null) journalWake.Notify();
+        else wakeSignal?.Notify();
     }
 
     public async ValueTask<int> ReleaseDueAsync(
@@ -29,6 +31,7 @@ public sealed class SourceWatchCoordinator(ISourceRootWatchStore store, ISourceS
             }
 
             await store.ReleaseScanAsync(batch, cancellationToken).ConfigureAwait(false);
+            journalWake?.Notify();
             wakeSignal?.Notify();
             released++;
         }

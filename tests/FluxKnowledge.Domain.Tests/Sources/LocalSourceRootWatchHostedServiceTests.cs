@@ -137,6 +137,133 @@ public sealed class LocalSourceRootWatchHostedServiceTests
     }
 
     [Fact]
+    public void Path_hint_creation_keeps_both_rename_endpoints_without_opening_them()
+    {
+        var root = SourceRootConfiguration.Create(Path.GetFullPath(Path.Combine(Path.GetTempPath(), "FluxWatchPolicy")),
+            "Synthetic watcher", true, false, 1024);
+        var signal = LocalSourceRootWatchHostedService.CreateSignal(root, SourceWatchSignalKind.Renamed,
+            new RenamedEventArgs(WatcherChangeTypes.Renamed, root.CanonicalPath, "new/file.md", "old/file.md"), DateTimeOffset.UnixEpoch);
+        Assert.NotNull(signal);
+        Assert.Equal(new[] { Path.Combine("old", "file.md"), Path.Combine("new", "file.md") }, signal.Paths!.Select(x => x.RelativePath));
+        Assert.All(signal.Paths!, hint => Assert.True(hint.IsSubtree));
+        Assert.False(signal.PathsIncomplete);
+    }
+
+    [Fact]
+    public void Linked_Git_control_wakes_membership_without_persisting_an_outside_path()
+    {
+        var root = SourceRootConfiguration.Create(Path.GetFullPath(Path.Combine(Path.GetTempPath(), "FluxWatchPolicy", "source")),
+            "Synthetic Git watcher", true, false, 1024, discoveryMode: SourceDiscoveryMode.GitTracked);
+        var control = Path.GetFullPath(Path.Combine(root.CanonicalPath, "..", "control"));
+        var repository = new GitTrackedSourceDiscovery.Repository(control, control, "synthetic");
+        var signal = LocalSourceRootWatchHostedService.CreateSignal(root, SourceWatchSignalKind.Changed,
+            new FileSystemEventArgs(WatcherChangeTypes.Changed, control, "index"), DateTimeOffset.UnixEpoch, repository);
+        Assert.NotNull(signal);
+        Assert.Empty(signal.Paths!);
+        Assert.True(signal.RepositoryControlChanged);
+        Assert.False(signal.PathsIncomplete);
+    }
+
+    [Fact]
+    public void Boundary_rename_keeps_the_inside_endpoint_and_invalid_paths_require_recovery()
+    {
+        var root = SourceRootConfiguration.Create(Path.GetFullPath(Path.Combine(Path.GetTempPath(), "FluxWatchPolicy")),
+            "Synthetic watcher", true, false, 1024);
+        var moved = LocalSourceRootWatchHostedService.CreateSignal(root, SourceWatchSignalKind.Renamed,
+            new RenamedEventArgs(WatcherChangeTypes.Renamed, root.CanonicalPath, "../outside.md", "inside.md"), DateTimeOffset.UnixEpoch);
+        Assert.Equal("inside.md", Assert.Single(moved!.Paths!).RelativePath);
+        Assert.False(moved.PathsIncomplete);
+        var invalid = LocalSourceRootWatchHostedService.CreateSignal(root, SourceWatchSignalKind.Changed,
+            new FileSystemEventArgs(WatcherChangeTypes.Changed, root.CanonicalPath, "bad\0name"), DateTimeOffset.UnixEpoch);
+        Assert.NotNull(invalid);
+        Assert.Empty(invalid.Paths!);
+        Assert.True(invalid.PathsIncomplete);
+    }
+
+    [Fact]
+    public void Excluded_Git_file_does_not_create_a_scan_hint()
+    {
+        var root = SourceRootConfiguration.Create(Path.GetFullPath(Path.Combine(Path.GetTempPath(), "FluxWatchPolicy")),
+            "Synthetic Git watcher", true, false, 1024, discoveryMode: SourceDiscoveryMode.GitTracked);
+        Assert.Null(LocalSourceRootWatchHostedService.CreateSignal(root, SourceWatchSignalKind.Changed,
+            new FileSystemEventArgs(WatcherChangeTypes.Changed, root.CanonicalPath, ".agents/private.md"), DateTimeOffset.UnixEpoch));
+    }
+
+    [Fact]
+    public async Task Buffer_preserves_rename_paths_and_earliest_time_when_persistence_is_ambiguous()
+    {
+        var root = SourceRootId.New();
+        var recorded = new List<SourceWatchSignal>();
+        var attempts = 0;
+        LocalSourceWatchSignalBuffer? buffer = null;
+        var store = new SignalStore((signal, _) =>
+        {
+            if (++attempts == 1)
+            {
+                buffer!.Signal(new(root, SourceWatchSignalKind.Changed, DateTimeOffset.UnixEpoch.AddSeconds(29), [new("later.txt")]));
+                throw new IOException("synthetic acknowledgement loss");
+            }
+            recorded.Add(signal);
+            return ValueTask.CompletedTask;
+        });
+        buffer = new(new SourceWatchCoordinator(store), NullLogger.Instance);
+        buffer.ConfigureRoots([root]);
+        buffer.Signal(new(root, SourceWatchSignalKind.Renamed, DateTimeOffset.UnixEpoch, [new("old.txt"), new("new.txt")]));
+
+        Assert.False(await buffer.FlushAsync(CancellationToken.None));
+        Assert.True(await buffer.FlushAsync(CancellationToken.None));
+        var retry = Assert.Single(recorded);
+        Assert.Equal(new[] { "later.txt", "new.txt", "old.txt" }, retry.Paths!.Select(x => x.RelativePath));
+        Assert.Equal(DateTimeOffset.UnixEpoch, retry.FirstObservedAtUtc);
+        Assert.Equal(DateTimeOffset.UnixEpoch.AddSeconds(29), retry.ObservedAtUtc);
+        Assert.True(retry.PathsIncomplete);
+        Assert.Equal(SourceWatchSignalKind.Overflow, retry.Kind);
+    }
+
+    [Fact]
+    public async Task Buffer_leaves_later_paths_for_the_next_batch_during_a_successful_write()
+    {
+        var root = SourceRootId.New();
+        var recorded = new List<SourceWatchSignal>();
+        LocalSourceWatchSignalBuffer? buffer = null;
+        var store = new SignalStore((signal, _) =>
+        {
+            recorded.Add(signal);
+            if (recorded.Count == 1)
+                buffer!.Signal(new(root, SourceWatchSignalKind.Changed, DateTimeOffset.UnixEpoch.AddSeconds(1), [new("later.txt")]));
+            return ValueTask.CompletedTask;
+        });
+        buffer = new(new SourceWatchCoordinator(store), NullLogger.Instance);
+        buffer.ConfigureRoots([root]);
+        buffer.Signal(new(root, SourceWatchSignalKind.Renamed, DateTimeOffset.UnixEpoch, [new("old.txt"), new("new.txt")]));
+        buffer.Signal(new(root, SourceWatchSignalKind.Changed, DateTimeOffset.UnixEpoch, [new("other.txt")]));
+        Assert.True(await buffer.FlushAsync(CancellationToken.None));
+        Assert.Equal(new[] { "new.txt", "old.txt", "other.txt" }, Assert.Single(recorded).Paths!.Select(x => x.RelativePath));
+        Assert.True(await buffer.FlushAsync(CancellationToken.None));
+        Assert.Equal("later.txt", Assert.Single(recorded[1].Paths!).RelativePath);
+    }
+
+    [Fact]
+    public async Task Buffer_bounds_unique_path_bursts_and_retains_a_recovery_marker()
+    {
+        var root = SourceRootId.New();
+        SourceWatchSignal? recorded = null;
+        var buffer = new LocalSourceWatchSignalBuffer(new SourceWatchCoordinator(new SignalStore((signal, _) =>
+        {
+            recorded = signal;
+            return ValueTask.CompletedTask;
+        })), NullLogger.Instance);
+        buffer.ConfigureRoots([root]);
+        for (var index = 0; index < 1000; index++)
+            buffer.Signal(new(root, SourceWatchSignalKind.Changed, DateTimeOffset.UnixEpoch, [new($"file{index}.txt")]));
+        Assert.True(await buffer.FlushAsync(CancellationToken.None));
+        Assert.NotNull(recorded);
+        Assert.Equal(512, recorded.Paths!.Count);
+        Assert.True(recorded.PathsIncomplete);
+        Assert.Equal(SourceWatchSignalKind.Overflow, recorded.Kind);
+    }
+
+    [Fact]
     public async Task File_event_burst_has_one_outstanding_persistence_and_shutdown_cancels_it()
     {
         var directory = Path.Combine(Path.GetTempPath(), "FluxWatchBurst_" + Guid.NewGuid().ToString("N"));

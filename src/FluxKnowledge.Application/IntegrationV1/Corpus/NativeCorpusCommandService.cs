@@ -21,6 +21,8 @@ public sealed class NativeCorpusCommandService
         ["root_resume"] = "Resume the selected source root and queue reconciliation.",
         ["root_delete"] = "Delete the selected local source root and its owned data.",
         ["source_sync"] = "Queue source synchronisation.",
+        ["source_verify"] = "Verify current source and retained content, overriding the quiet window while respecting verification pause.",
+        ["source_verification_set"] = "Set the weekly verification policy or pause state without rescanning the source.",
         ["policy_reprocess"] = "Re-evaluate one exact retained item under the current default policy, preserving its original attempts and publication.",
         ["watcher_set"] = "Set persisted watcher state.",
         ["job_retry"] = "Queue a supported job retry.",
@@ -79,7 +81,7 @@ public sealed class NativeCorpusCommandService
             cancellationToken).ConfigureAwait(false);
         receipt = await _actionStore.FinalizeCommitAsync(action, Payload(command), receipt, cancellationToken).ConfigureAwait(false);
         if (action is "publication_retry" or "embedding_retry") _outboxWakeSignal?.Notify();
-        if (action is "root_create" or "root_resume" or "root_delete")
+        if (action is "root_create" or "root_resume" or "root_delete" or "source_sync" or "source_verify" or "source_verification_set")
         {
             // A durable replay can follow a process stop immediately after the
             // original commit; duplicate bounded wake signals are safe.

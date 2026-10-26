@@ -102,7 +102,12 @@ public static class WindowsSourceAccessAdministration
         using var storage = new SourceAccessBrokerStorage(brokerRoot);
         var policy = storage.ReadPolicy();
         var broker = new WindowsSourceAccessBroker(policy, storage.JournalRoot, storage: storage);
-        await SourceAccessPipeServer.RunAsync(policy, broker, cancellationToken).ConfigureAwait(false);
+        var journal = storage.ReadJournalPolicy();
+        if (journal is null)
+            await SourceAccessPipeServer.RunAsync(policy, broker, cancellationToken).ConfigureAwait(false);
+        else
+            await Task.WhenAll(SourceJournalPipeServer.RunAsync(journal, policy.IndexerSid, storage.ValidateCurrent, cancellationToken),
+                journal.RepairEnabled ? SourceAccessPipeServer.RunAsync(policy, broker, cancellationToken) : Task.CompletedTask).ConfigureAwait(false);
     }
 
     private static ApprovedSourceAccessRoot ValidateScope(string path, string fingerprint, string sid, string[] protectedRoots)

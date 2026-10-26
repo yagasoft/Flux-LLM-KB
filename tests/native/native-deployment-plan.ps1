@@ -480,7 +480,9 @@ if ($LASTEXITCODE -ne 0) { throw "The unattended IIS discovery contract failed: 
 $unattendedWindowsOutput = & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $SourceRoot 'tests/native/unattended-iis-discovery.ps1') -SourceRoot $SourceRoot 2>&1 | Out-String
 if ($LASTEXITCODE -ne 0) { throw "The Windows PowerShell unattended IIS discovery contract failed: $unattendedWindowsOutput" }
 
-foreach ($accessContract in @('source-access-install-contract.ps1','source-access-config-contract.ps1')) {
+foreach ($accessContract in @('source-access-install-contract.ps1','source-access-config-contract.ps1','source-journal-config-contract.ps1','source-journal-resize-contract.ps1',
+    'source-journal-migration-contract.ps1','source-journal-migration-recovery.ps1','source-journal-sql-bytes.ps1','source-journal-update-admission.ps1',
+    'source-journal-helper-update.ps1','source-journal-helper-task-contract.ps1','source-journal-helper-checkpoint.ps1','source-journal-start-admission.ps1','source-journal-release-activation.ps1','source-journal-iis-contract.ps1')) {
     $accessOutput = & pwsh -NoProfile -File (Join-Path $SourceRoot "tests/native/$accessContract") -SourceRoot $SourceRoot 2>&1 | Out-String
     if ($LASTEXITCODE -ne 0) { throw "The isolated source-access contract failed ($accessContract): $accessOutput" }
 }

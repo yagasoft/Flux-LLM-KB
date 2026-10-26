@@ -66,4 +66,87 @@ function Restore-SourceAccessConfigurationChange {
     Assert-SourceAccessConfigurationChange $Change -Original
     $Change.RollbackVerified=$true
 }
-Export-ModuleMember -Function New-SourceAccessConfigurationChange,Set-SourceAccessConfigurationChange,Assert-SourceAccessConfigurationChange,Restore-SourceAccessConfigurationChange
+
+function ConvertFrom-UniqueConfigurationJson([byte[]]$Bytes) {
+    $text=[Text.UTF8Encoding]::new($false,$true).GetString($Bytes).TrimStart([char]0xfeff)
+    $document=[Text.Json.JsonDocument]::Parse($text)
+    try {
+        function Assert-UniqueProperty($Element) {
+            if ($Element.ValueKind -eq [Text.Json.JsonValueKind]::Object) {
+                $names=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+                foreach ($property in $Element.EnumerateObject()) {
+                    if (!$names.Add($property.Name)) {throw 'Duplicate configuration property.'}
+                    Assert-UniqueProperty $property.Value
+                }
+            } elseif ($Element.ValueKind -eq [Text.Json.JsonValueKind]::Array) {
+                foreach ($item in $Element.EnumerateArray()) {Assert-UniqueProperty $item}
+            }
+        }
+        Assert-UniqueProperty $document.RootElement
+        if ($document.RootElement.ValueKind -ne [Text.Json.JsonValueKind]::Object) {throw 'Configuration must be a JSON object.'}
+    } finally {$document.Dispose()}
+    ConvertFrom-Json -InputObject $text -AsHashtable -DateKind String
+}
+
+function New-SourceJournalConfigurationChange {
+    param([Parameter(Mandatory)][string]$Path,[string]$OptionsPath='',
+        [string]$ExpectedOptionsSha256='', [switch]$Disable)
+    if ($Disable) {
+        if ($OptionsPath -or $ExpectedOptionsSha256) {throw 'Journal disable cannot replace qualifications.'}
+    } elseif (!$OptionsPath -or $ExpectedOptionsSha256 -cnotmatch '^[A-Fa-f0-9]{64}$') {throw 'Journal activation requires hash-bound options.'}
+    $before=Get-SourceAccessConfigurationBytes $Path
+    $configuration=ConvertFrom-UniqueConfigurationJson $before
+    if (!$configuration.Contains('SourceJournal')) {$configuration.SourceJournal=[ordered]@{}}
+    if ($configuration.SourceJournal -isnot [Collections.IDictionary]) {throw 'SourceJournal must be a JSON object.'}
+    if ($Disable) {
+        $configuration.SourceJournal.Enabled=$false
+        $configuration.SourceJournal.SealingEnabled=$false
+    } else {
+        $bytes=Get-SourceAccessConfigurationBytes $OptionsPath
+        if ((Get-SourceAccessConfigurationHash $bytes) -cne $ExpectedOptionsSha256.ToUpperInvariant()) {throw 'Journal options differ from the reviewed hash.'}
+        $options=ConvertFrom-UniqueConfigurationJson $bytes
+        $keys=@('Enabled','PipeName','ApprovedVolumes','PollSeconds','MetadataEntriesPerSecond','SealingEnabled','SealQualifications')
+        if ($options.Count -ne $keys.Count -or @($options.Keys|Where-Object {$_ -cnotin $keys}).Count -or
+            $options.Enabled -isnot [bool] -or !$options.Enabled -or $options.SealingEnabled -isnot [bool] -or
+            $options.PipeName -isnot [string] -or $options.PipeName.Length -gt 128 -or
+            $options.PipeName -cnotmatch '^FluxKnowledge\.SourceJournal\.[A-Za-z0-9.-]*$' -or
+            $options.PollSeconds -isnot [long] -or $options.PollSeconds -lt 1 -or $options.PollSeconds -gt 60 -or
+            $options.MetadataEntriesPerSecond -isnot [long] -or $options.MetadataEntriesPerSecond -lt 1 -or $options.MetadataEntriesPerSecond -gt 4096) {throw 'Journal options are invalid.'}
+        if ($options.ApprovedVolumes -isnot [array] -or $options.ApprovedVolumes.Count -lt 1 -or $options.ApprovedVolumes.Count -gt 16) {throw 'Approved journal volumes are required.'}
+        $volumes=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        foreach ($volume in $options.ApprovedVolumes) {
+            if ($volume -isnot [string] -or $volume -inotmatch '^\\\\\?\\Volume\{[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\}\\$' -or !$volumes.Add($volume)) {throw 'Journal volume identity is invalid or duplicated.'}
+        }
+        if ($options.SealQualifications -isnot [array] -or $options.SealQualifications.Count -gt 1024) {throw 'Journal qualifications must be a bounded array.'}
+        $roots=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+        foreach ($qualification in $options.SealQualifications) {
+            $required=@('RootIdentityFingerprint','EnvironmentFingerprint','Scope','QualificationId')
+            $allowed=$required+@('ProviderName','ProviderVersion')
+            if ($qualification -isnot [Collections.IDictionary] -or @($qualification.Keys|Where-Object {$_ -cnotin $allowed}).Count -or
+                @($required|Where-Object {!$qualification.Contains($_)}).Count) {throw 'Journal qualification fields are invalid.'}
+            foreach ($fingerprint in @('RootIdentityFingerprint','EnvironmentFingerprint')) {
+                if ($qualification[$fingerprint] -isnot [string] -or $qualification[$fingerprint] -cnotmatch '^[a-f0-9]{64}$') {throw 'Journal qualification fingerprint is invalid.'}
+            }
+            if (!$roots.Add($qualification.RootIdentityFingerprint)) {throw 'Journal root qualification is duplicated.'}
+            foreach ($field in @('Scope','QualificationId')) {
+                if ($qualification[$field] -isnot [string] -or [string]::IsNullOrWhiteSpace($qualification[$field]) -or $qualification[$field].Length -gt 256) {throw 'Journal qualification label is invalid.'}
+            }
+            $hasProvider=$qualification.Contains('ProviderName') -or $qualification.Contains('ProviderVersion')
+            if ($hasProvider) {
+                foreach ($field in @('ProviderName','ProviderVersion')) {
+                    if (!$qualification.Contains($field) -or $qualification[$field] -isnot [string] -or [string]::IsNullOrWhiteSpace($qualification[$field]) -or $qualification[$field].Length -gt 256) {throw 'Journal provider identity is incomplete.'}
+                }
+            } elseif (!$qualification.Scope.StartsWith('local-ntfs-',[StringComparison]::Ordinal) -and $qualification.Scope -cne 'isolated-local-ntfs-staging') {throw 'Cloud qualification requires its tested provider identity.'}
+        }
+        # Fixed insertion order keeps PlanOnly and Apply hashes stable across processes.
+        $desired=[ordered]@{}
+        foreach ($key in $keys) {$desired[$key]=$options[$key]}
+        $desired.ApprovedVolumes=@($options.ApprovedVolumes|ForEach-Object {$_.ToUpperInvariant()})
+        $configuration.SourceJournal=$desired
+    }
+    $after=[Text.UTF8Encoding]::new($false).GetBytes(($configuration|ConvertTo-Json -Depth 100))
+    [pscustomobject]@{Path=[IO.Path]::GetFullPath($Path);Before=$before;After=$after;
+        BeforeHash=(Get-SourceAccessConfigurationHash $before);AfterHash=(Get-SourceAccessConfigurationHash $after);
+        Enabled=(!$Disable);OptionsSha256=$ExpectedOptionsSha256.ToUpperInvariant();Attempted=$false;RollbackVerified=$true}
+}
+Export-ModuleMember -Function New-SourceAccessConfigurationChange,New-SourceJournalConfigurationChange,Set-SourceAccessConfigurationChange,Assert-SourceAccessConfigurationChange,Restore-SourceAccessConfigurationChange,ConvertFrom-UniqueConfigurationJson,Get-SourceAccessConfigurationBytes

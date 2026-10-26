@@ -25,7 +25,8 @@ function Get-ProjectionOperatorFramework([string]$OperatorRoot) {
 function Invoke-ProjectionOperatorBridge {
     param([Parameter(Mandatory)][string]$OperatorRoot,
         [Parameter(Mandatory)][ValidateSet('BeginProduction','BeginForIsolatedTests')][string]$BeginMethod,
-        [Parameter(Mandatory)][object[]]$BeginArguments,[ValidateRange(1,3600)][int]$TimeoutSeconds=1800)
+        [Parameter(Mandatory)][object[]]$BeginArguments,[ValidateRange(1,3600)][int]$TimeoutSeconds=1800,
+        [ValidateSet('Projection','SourceJournalRetirement')][string]$Operation='Projection')
     if($PSVersionTable.PSVersion.Major -lt 7 -or [Environment]::Version.Major -lt 10){throw 'index-projection-operator-requires-pwsh-net10'}
     $entry=Join-Path ([IO.Path]::GetFullPath($OperatorRoot)) 'FluxKnowledge.Cli.dll'
     for($path=$entry;$path;$path=[IO.Path]::GetDirectoryName($path)) {
@@ -43,7 +44,8 @@ function Invoke-ProjectionOperatorBridge {
         $framework=Get-ProjectionOperatorFramework $OperatorRoot
         $context=[FluxKnowledge.Deployment.ProjectionOperatorLoadContext]::new($entry,$framework)
         $assembly=$context.LoadFromAssemblyPath($entry)
-        $bridge=$assembly.GetType('FluxKnowledge.Cli.Commands.IncrementalProjectionBridge',$true)
+        $bridgeName=if($Operation -ceq 'Projection'){'IncrementalProjectionBridge'}else{'IncrementalSourceJournalRetirementBridge'}
+        $bridge=$assembly.GetType(('FluxKnowledge.Cli.Commands.'+$bridgeName),$true)
         $flags=[Reflection.BindingFlags]::Static -bor [Reflection.BindingFlags]::NonPublic
         $stage='bind'
         $arguments=[object[]]::new($BeginArguments.Count)
@@ -67,7 +69,9 @@ function Invoke-ProjectionOperatorBridge {
             Write-Verbose ('Native operator dependency could not load: '+$cause.Message)
         }
         $reason=$cause.Message
-        if($reason -cnotmatch '^index-(projection|rebuild|storage)-[a-z-]{1,120}$'){$reason='index-projection-operator-failed-reconcile-before-resume'}
+        if($reason -cnotmatch '^(index-(projection|rebuild|storage)|source-journal-retirement)-[a-z-]{1,120}$'){
+            $reason=if($Operation -ceq 'Projection'){'index-projection-operator-failed-reconcile-before-resume'}else{'source-journal-retirement-failed-reconcile-before-resume'}
+        }
         throw [InvalidOperationException]::new($reason)
     } finally {
         try{if($null -ne $capability){([IDisposable]$capability).Dispose()}}
@@ -84,4 +88,11 @@ function Invoke-IncrementalProjectionOperator {
         -BeginArguments @($BindingsJson,[Action]$AssertQuiescent) -TimeoutSeconds $TimeoutSeconds
 }
 
-Export-ModuleMember -Function Invoke-IncrementalProjectionOperator
+function Invoke-IncrementalSourceJournalRetirement {
+    param([Parameter(Mandatory)][string]$OperatorRoot,[Parameter(Mandatory)][string]$BindingsJson,
+        [Parameter(Mandatory)][scriptblock]$AssertQuiescent,[ValidateRange(1,120)][int]$TimeoutSeconds=60)
+    Invoke-ProjectionOperatorBridge -OperatorRoot $OperatorRoot -Operation SourceJournalRetirement -BeginMethod 'BeginProduction' `
+        -BeginArguments @($BindingsJson,[Action]$AssertQuiescent) -TimeoutSeconds $TimeoutSeconds
+}
+
+Export-ModuleMember -Function Invoke-IncrementalProjectionOperator,Invoke-IncrementalSourceJournalRetirement,Get-ProjectionOperatorFramework

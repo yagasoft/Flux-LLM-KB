@@ -148,7 +148,7 @@ public sealed class SourceReconciliationService(
             }
             catch (Exception exception) when (!cancellationToken.IsCancellationRequested)
             {
-                result = new SourceScanResult(claim.SourceRoot.Id, claim.ScanRequest.Id, 0, 0, 0, 0);
+                result = new SourceScanResult(claim.SourceRoot.Id, claim.ScanRequest.Id, 0, 0, 0, 0) { IsCompleteInventory = false };
                 failureReason = Truncate(exception.GetType().Name);
                 logger?.LogWarning(exception, "Source scan {ScanRequestId} for root {SourceRootId} failed; its request remains retryable.",
                     claim.ScanRequest.Id.Value, claim.SourceRoot.Id.Value);

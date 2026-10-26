@@ -34,6 +34,7 @@ public sealed class SourceReconciliationServiceTests
         Assert.True(offeredBeforeAnotherScanClaim, "Already retained inputs must be offered before another ready source scan is claimed.");
         var completion = Assert.Single(control.Completions);
         Assert.Equal(scanFails ? "InvalidOperationException" : null, completion.FailureReason);
+        Assert.Equal(!scanFails, completion.Result.IsCompleteInventory);
     }
 
     [Theory]

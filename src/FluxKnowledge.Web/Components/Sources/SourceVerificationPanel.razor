@@ -1,0 +1,82 @@
+@implements IAsyncDisposable
+@using System.Globalization
+@using FluxKnowledge.Application.IntegrationV1.Corpus
+@using FluxKnowledge.Application.Ports
+@using FluxKnowledge.Domain.Sources
+@inject ISourceVerificationStore VerificationStore
+@inject NativeCorpusCommandService CorpusCommands
+
+<section class="source-verification" aria-labelledby="verification-heading">
+    <h2 id="verification-heading">Integrity verification</h2>
+    @if (_state.ReadError is { } error)
+    {
+        <p role="alert">@error</p>
+    }
+    @if (_state.Status is { } status)
+    {
+        @if (status.Scanning is { } scanning)
+        {
+            <dl class="status-grid verification-grid">
+                <div><dt>Change detection</dt><dd>@scanning.Mode</dd></div>
+                <div><dt>Last baseline</dt><dd>@When(scanning.LastBaselineAtUtc)</dd></div>
+                <div><dt>Last complete verification</dt><dd>@When(status.LastVerifiedAtUtc)</dd></div>
+                <div><dt>Pending changes</dt><dd>@Count(scanning.PendingObligations)</dd></div>
+                <div><dt>Journal lag (USN distance)</dt><dd>@Count(scanning.DurableJournalLagUsn)</dd></div>
+                <div><dt>Namespace</dt><dd>@(scanning.NamespaceComplete ? "Complete" : "Reconciliation pending")</dd></div>
+            </dl>
+            @if (scanning.Reason is { } reason) { <p class="diagnostic-value">Change detection: @reason</p> }
+        }
+        <p>Full checksum checks run @(status.Policy.Enabled ? "weekly" : "when requested"), with a combined source and retained read limit of @Count(status.Policy.MaximumBytesPerSecond) bytes/s. Unfinished weekly checks continue in daily quiet windows.</p>
+        <p>Schedule: @status.Policy.Weekday at @status.Policy.LocalStart.ToString("HH:mm"), @status.Policy.TimeZoneId; @status.Policy.WindowDuration.TotalHours.ToString("0.##", CultureInfo.InvariantCulture) hours per window.</p>
+        <p>Current or next daily quiet window: @When(status.NextWindowAtUtc) to @When(status.WindowEndAtUtc).</p>
+        @if (!status.FeatureEnabled) { <p>Incremental scanning and verification are disabled for this installation.</p> }
+        @if (NeedsBaseline) { <p>Verification needs a complete baseline before it can start.</p> }
+        @if (status.Paused) { <p>Verification is paused. Ordinary change processing follows the source state.</p> }
+        @if (status.Run is { } run)
+        {
+            <h3>Latest cycle: @run.State</h3>
+            <p>@Count(run.Verified) verified, @Count(run.Resolved) resolved, @Count(run.Deferred) deferred; @Count(run.Total) files in this cycle.</p>
+            @if (run.ReadCountsIncomplete)
+            {
+                <p>Durably recorded content read: at least @Count(run.SourceBytesRead) source bytes; at least @Count(run.RetainedBytesRead) retained bytes. An interrupted attempt may have read additional bytes.</p>
+            }
+            else
+            {
+                <p>Actual content read: @Count(run.SourceBytesRead) source bytes; @Count(run.RetainedBytesRead) retained bytes.</p>
+            }
+            <p>Started @When(run.CreatedAtUtc). @(run.CompletedAtUtc is { } completed ? $"Finished {When(completed)}." : $"Next batch: {When(run.NextBatchAtUtc)}.")</p>
+            @if (run.Reason is { } runReason) { <p class="diagnostic-value">Cycle status: @runReason</p> }
+        }
+        <div class="verification-actions">
+            <button type="button" disabled="@(!CanVerify)" @onclick="VerifyAsync">Verify now</button>
+            <button type="button" disabled="@ControlsDisabled" @onclick="TogglePauseAsync">@(status.Paused ? "Resume verification" : "Pause verification")</button>
+            <button type="button" disabled="@(ControlsDisabled || _editing)" @onclick="BeginEdit">Edit verification schedule</button>
+            <button type="button" disabled="@_refreshing" @onclick="RefreshAsync">Refresh verification status</button>
+        </div>
+        <p class="status-freshness">Verify now overrides the quiet window for this cycle. The read limit and pause still apply. Status refreshes every 10 seconds.</p>
+        @if (_editing)
+        {
+            <EditForm Model="_draft" OnValidSubmit="SaveAsync" FormName="source-verification-policy" class="source-form verification-form">
+                <DataAnnotationsValidator />
+                <ValidationSummary />
+                <label><InputCheckbox @bind-Value="_draft.Enabled" /> Enable weekly verification</label>
+                <div><label for="verification-weekday">Weekly start day</label><InputSelect id="verification-weekday" @bind-Value="_draft.Weekday">@foreach (var day in Enum.GetValues<DayOfWeek>()) { <option value="@day">@day</option> }</InputSelect></div>
+                <label>Local start time <InputDate Type="InputDateType.Time" @bind-Value="_draft.LocalStart" /></label>
+                <label>Time zone <InputText @bind-Value="_draft.TimeZoneId" maxlength="128" /></label>
+                <label>Quiet window (hours) <InputNumber @bind-Value="_draft.WindowHours" min="0.25" max="24" step="0.25" /></label>
+                <label>Combined read limit (bytes/s) <InputNumber @bind-Value="_draft.BytesPerSecond" min="1" step="1" /></label>
+                @if (_formError is { } formError) { <p role="alert">@formError</p> }
+                <div class="verification-actions">
+                    <button type="submit" disabled="@ControlsDisabled">Save verification schedule</button>
+                    <button type="button" disabled="@_state.IsSubmitting" @onclick="CancelEdit">Cancel schedule edit</button>
+                </div>
+            </EditForm>
+        }
+    }
+    else if (_state.ReadError is null) { <p role="status">Loading verification status…</p> }
+    @if (_state.Message is { } message) { <p role="status" aria-live="polite">@message</p> }
+    @if (_state.HasPendingCommit)
+    {
+        <button type="button" disabled="@_state.IsSubmitting" @onclick="RetryAsync">Retry verification request</button>
+    }
+</section>

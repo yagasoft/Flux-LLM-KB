@@ -4,12 +4,12 @@ using Microsoft.Extensions.Logging;
 
 namespace FluxKnowledge.Integrations.Files;
 
-/// <summary>One pending hint per configured root; a single consumer opens persistence connections.</summary>
+/// <summary>One bounded hint batch per configured root; a single consumer opens persistence connections.</summary>
 internal sealed class LocalSourceWatchSignalBuffer(SourceWatchCoordinator coordinator, ILogger logger)
 {
     private readonly object _sync = new();
     private HashSet<SourceRootId> _roots = [];
-    private readonly Dictionary<SourceRootId, SourceWatchSignal> _pending = [];
+    private readonly Dictionary<SourceRootId, SourceWatchHintAccumulator> _pending = [];
 
     public void ConfigureRoots(IEnumerable<SourceRootId> roots)
     {
@@ -25,13 +25,9 @@ internal sealed class LocalSourceWatchSignalBuffer(SourceWatchCoordinator coordi
         lock (_sync)
         {
             if (!_roots.Contains(signal.RootId)) return;
-            if (_pending.TryGetValue(signal.RootId, out var previous))
-                signal = signal with
-                {
-                    Kind = previous.Kind == SourceWatchSignalKind.Overflow ? previous.Kind : signal.Kind,
-                    ObservedAtUtc = previous.ObservedAtUtc > signal.ObservedAtUtc ? previous.ObservedAtUtc : signal.ObservedAtUtc
-                };
-            _pending[signal.RootId] = signal;
+            if (!_pending.TryGetValue(signal.RootId, out var hints))
+                _pending.Add(signal.RootId, hints = new SourceWatchHintAccumulator(signal.RootId));
+            hints.Add(signal);
         }
     }
 
@@ -39,7 +35,7 @@ internal sealed class LocalSourceWatchSignalBuffer(SourceWatchCoordinator coordi
     public async Task<bool> FlushAsync(CancellationToken cancellationToken)
     {
         SourceWatchSignal[] signals;
-        lock (_sync) { signals = _pending.Values.ToArray(); _pending.Clear(); }
+        lock (_sync) { signals = _pending.Values.Select(hints => hints.Snapshot()).ToArray(); _pending.Clear(); }
         for (var index = 0; index < signals.Length; index++)
         {
             try { await coordinator.RecordAsync(signals[index], cancellationToken).ConfigureAwait(false); }
@@ -48,7 +44,8 @@ internal sealed class LocalSourceWatchSignalBuffer(SourceWatchCoordinator coordi
             {
                 logger.LogWarning(exception, "Source-root watcher hints could not be persisted; coalesced rescan hints remain pending for retry.");
                 // A failed/ambiguous write may already have committed. Reconciliation is idempotent;
-                // retry a rescan hint, never a per-file operation, and retain unattempted roots too.
+                // Preserve paths and the first time, add an uncertainty marker, and retain
+                // unattempted roots too. No callback directly authorises a content operation.
                 foreach (var signal in signals.Skip(index)) Signal(signal with { Kind = SourceWatchSignalKind.Overflow });
                 return false;
             }

@@ -12,7 +12,7 @@ public sealed class NativeCorpusQueryService(INativeV1ProjectionReader reader, I
 {
     private static readonly HashSet<string> Views = new(StringComparer.Ordinal)
     {
-        "roots", "assets", "branches", "processors", "jobs", "detail"
+        "roots", "assets", "branches", "processors", "jobs", "detail", "verification"
     };
 
     public ValueTask<object> ExecuteAsync(NativeCorpusQuery query, CancellationToken cancellationToken)
@@ -20,6 +20,8 @@ public sealed class NativeCorpusQueryService(INativeV1ProjectionReader reader, I
         ArgumentNullException.ThrowIfNull(query);
         ValidateView(query.View, query.Limit);
         var canonical = query with { View = query.View.Trim().ToLowerInvariant(), Continuation = null };
+        if (canonical.View == "verification" && (canonical.RootId is null || canonical.BranchId is not null || canonical.JobId is not null))
+            throw new NativeOperationException("invalid-payload");
         if (canonical.Cursor is not null)
         {
             if (!NativeV1CursorBindings.IsPageableCorpusView(canonical.View)) throw new NativeOperationException("cursor-invalid");

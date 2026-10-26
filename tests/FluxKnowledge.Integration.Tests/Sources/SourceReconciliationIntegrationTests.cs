@@ -20,6 +20,56 @@ public sealed class SourceReconciliationIntegrationTests(NativeSqlServerFixture 
     public Task DisposeAsync() => Task.CompletedTask;
 
     [NativeSqlServerFact]
+    public async Task Filesystem_root_has_one_active_scan_owner_even_when_another_request_is_released()
+    {
+        var now = DateTimeOffset.Parse("2026-08-06T12:00:00+00:00");
+        var rootId = Guid.NewGuid();
+        await using (var setup = CreateContext())
+        {
+            setup.SourceRootConfigurations.Add(Root(rootId, now));
+            for (var index = 0; index < 2; index++)
+            {
+                var requestId = Guid.NewGuid();
+                setup.SourceScanRequests.Add(Request(requestId, rootId, now, true, SourceScanRequestState.Released));
+                setup.SourceScanJobs.Add(Job(Guid.NewGuid(), requestId, now, now));
+            }
+            await setup.SaveChangesAsync();
+        }
+        var store = CreateStore(now);
+        var first = Assert.IsType<ClaimedSourceScan>(await store.ClaimNextReleasedAsync("first", now, TimeSpan.FromMinutes(1), default));
+        Assert.Null(await store.ClaimNextReleasedAsync("overlapping", now, TimeSpan.FromMinutes(1), default));
+        await store.CompleteAsync(first, new(first.SourceRoot.Id, first.ScanRequest.Id, 0, 0, 0, 0), null, default);
+        var second = Assert.IsType<ClaimedSourceScan>(await store.ClaimNextReleasedAsync("successor", now, TimeSpan.FromMinutes(1), default));
+        Assert.NotEqual(first.ScanRequest.Id, second.ScanRequest.Id);
+    }
+
+    [NativeSqlServerFact]
+    public async Task Targeted_completion_does_not_postpone_the_independent_reconciliation_deadline()
+    {
+        var now = DateTimeOffset.Parse("2026-08-06T12:00:00+00:00");
+        var lastReconciliation = now.AddMinutes(-14);
+        var rootId = Guid.NewGuid();
+        await using (var setup = CreateContext())
+        {
+            var root = Root(rootId, now);
+            root.LastScanCompletedAtUtc = lastReconciliation;
+            setup.SourceRootConfigurations.Add(root);
+            var requestId = Guid.NewGuid();
+            setup.SourceScanRequests.Add(Request(requestId, rootId, now, true, SourceScanRequestState.Released));
+            setup.SourceScanJobs.Add(Job(Guid.NewGuid(), requestId, now, now));
+            await setup.SaveChangesAsync();
+        }
+        var store = CreateStore(now);
+        var claim = Assert.IsType<ClaimedSourceScan>(await store.ClaimNextReleasedAsync("target", now, TimeSpan.FromMinutes(1), default));
+        await store.CompleteAsync(claim, new(claim.SourceRoot.Id, claim.ScanRequest.Id, 1, 0, 0, 0) { IsCompleteInventory = false }, null, default);
+        await using (var verify = CreateContext())
+            Assert.Equal(lastReconciliation, (await verify.SourceRootConfigurations.SingleAsync(x => x.Id == rootId)).LastScanCompletedAtUtc);
+        var due = Assert.IsType<ClaimedSourceScan>(await CreateStore(now.AddMinutes(1)).ClaimNextReleasedAsync("health", now.AddMinutes(1), TimeSpan.FromMinutes(1), default));
+        await using var check = CreateContext();
+        Assert.Equal("reconciliation", (await check.SourceScanRequests.SingleAsync(x => x.Id == due.ScanRequest.Id.Value)).RequestedBy);
+    }
+
+    [NativeSqlServerFact]
     public async Task Due_enabled_root_creates_and_claims_one_durable_recurring_control()
     {
         var now = DateTimeOffset.Parse("2026-08-06T12:00:00+00:00");

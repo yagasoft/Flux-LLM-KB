@@ -21,6 +21,8 @@ $restorer=Parse 'scripts/deploy/restore-outlook-scheduled-host.ps1'
 $entry=@($updater.EndBlock.Statements | Where-Object {$_ -is [Management.Automation.Language.TryStatementAst] -and $_.Body.Extent.Text.Contains('if ($ApplyRepositoryRecoveryAuthorityMigration -and $ReconcileRepositoryRecoveryRelease)')})
 Require ($entry.Count -eq 1) 'Actual updater operation boundary missing.'
 Import-Module (Join-Path $SourceRoot 'scripts/deploy/recovery-reference-writer.psm1') -Force
+Import-Module (Join-Path $SourceRoot 'scripts/deploy/incremental-source-journal-helper.psm1') -Force
+Import-Module (Join-Path $SourceRoot 'scripts/deploy/incremental-source-journal-helper-task.psm1') -Force
 $script:scratch=Join-Path ([IO.Path]::GetTempPath()) ('flux-recovery-deployment-'+[guid]::NewGuid().ToString('N'))
 [IO.Directory]::CreateDirectory($script:scratch) | Out-Null
 $script:mutations=0;$script:failWrite=$false
@@ -57,6 +59,7 @@ function Invoke-Continuation([string]$mode) {
     $ApplyResumableSourceDeletionCleanupMigration=$false;$sourceDeletionCleanupState=$null
     $interactiveHostMutationStarted=$false;$interactiveHostTaskWasEnabled=$false
     $recoveryWriter=$null
+    $sourceJournalHelperState=$null;$sourceJournalNativePorts=$null
     $mutex=[Threading.Mutex]::new($false,'Local\FluxKnowledge.RecoveryFixture.'+[guid]::NewGuid().ToString('N'))
     Invoke-Expression $entry[0].Extent.Text
 }

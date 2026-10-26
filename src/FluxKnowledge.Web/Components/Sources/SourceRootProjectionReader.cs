@@ -38,7 +38,7 @@ public sealed class SourceRootProjectionReader(
 
         var rootIds = roots.Select(root => root.Id).ToArray();
         var requests = await context.SourceScanRequests.AsNoTracking()
-            .Where(request => rootIds.Contains(request.SourceRootId))
+            .Where(request => rootIds.Contains(request.SourceRootId) && request.RequestKind != SqlSourceVerificationStore.RequestKind)
             .OrderByDescending(request => request.RequestedAtUtc).ThenByDescending(request => request.Id)
             .ToListAsync(cancellationToken).ConfigureAwait(false);
         var lastFinishedByRoot = requests
@@ -75,11 +75,11 @@ public sealed class SourceRootProjectionReader(
         }
 
         var request = await context.SourceScanRequests.AsNoTracking()
-            .Where(value => value.SourceRootId == rootId)
+            .Where(value => value.SourceRootId == rootId && value.RequestKind != SqlSourceVerificationStore.RequestKind)
             .OrderByDescending(value => value.RequestedAtUtc).ThenByDescending(value => value.Id)
             .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
         var lastFinishedRequest = await context.SourceScanRequests.AsNoTracking()
-            .Where(value => value.SourceRootId == rootId &&
+            .Where(value => value.SourceRootId == rootId && value.RequestKind != SqlSourceVerificationStore.RequestKind &&
                 (value.State == (int)SourceScanRequestState.Completed || value.State == (int)SourceScanRequestState.Failed))
             .OrderByDescending(value => value.RequestedAtUtc).ThenByDescending(value => value.Id)
             .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);

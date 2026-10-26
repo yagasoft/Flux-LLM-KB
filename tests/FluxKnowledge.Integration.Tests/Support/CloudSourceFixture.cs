@@ -7,10 +7,11 @@ namespace FluxKnowledge.TestSupport;
 /// <summary>A private, disconnected Cloud Files provider; never touches OneDrive or a network.</summary>
 internal sealed class CloudSourceFixture : IDisposable
 {
-    public string Root { get; } = Path.Combine(Path.GetTempPath(), $"FluxKnowledgeCloudTest_{Guid.NewGuid():N}");
+    public string Root { get; }
 
-    public CloudSourceFixture()
+    public CloudSourceFixture(string? parentDirectory = null)
     {
+        Root = Path.Combine(parentDirectory ?? Path.GetTempPath(), $"FluxKnowledgeCloudTest_{Guid.NewGuid():N}");
         System.IO.Directory.CreateDirectory(Root);
         var registration = new Registration
         {

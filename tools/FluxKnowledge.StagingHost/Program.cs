@@ -85,6 +85,7 @@ builder.Configuration.Sources.Clear();
 builder.Configuration.AddConfiguration(settings.Configuration);
 builder.WebHost.ConfigureKestrel(options => options.Listen(IPAddress.Loopback, settings.Origin.Port));
 WebHostComposition.AddStagingFluxKnowledgeServices(builder.Services, settings);
+var sourceDiagnostics = StagingSourceDiagnostics.Register(builder.Services, builder.Logging);
 builder.Services.AddRazorComponents().AddInteractiveServerComponents();
 builder.Services.AddScoped<OverviewProjectionState>();
 builder.Services.AddScoped<CircuitHandler, StatusEventCircuitHandler>();
@@ -119,6 +120,7 @@ app.MapFluxKnowledgeLocalRetainedDetails();
 app.MapFluxKnowledgeLocalRetainedCsharpCode();
 app.MapFluxKnowledgeNativeV1();
 app.MapMcp("/mcp");
+app.MapGet("/staging/source-diagnostics", sourceDiagnostics.Read);
 app.MapGet("/staging", async (ISqlServerReadinessValidator validator, SqlServerOptions options, CancellationToken ct) =>
 {
     var readiness = await validator.ValidateAsync(options, ct);

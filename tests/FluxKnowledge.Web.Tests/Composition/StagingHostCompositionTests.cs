@@ -18,7 +18,7 @@ namespace FluxKnowledge.Web.Tests.Composition;
 
 public sealed class StagingHostCompositionTests : IDisposable
 {
-    private const string Root = @"E:\Codex Workspaces\Staging\FluxKnowledge\CompositionTests";
+    private const string Root = @"I:\Codex Workspaces\Staging\FluxKnowledge\CompositionTests";
     private const string Connection = "Server=localhost;Initial Catalog=FluxKnowledge_Staging_CompositionTests;User ID=stage_test;Password=synthetic-only;Encrypt=True;TrustServerCertificate=True";
     private readonly string _ownedRoot = Root + "-" + Guid.NewGuid().ToString("N");
 
@@ -49,6 +49,74 @@ public sealed class StagingHostCompositionTests : IDisposable
             service => Assert.Equal(typeof(KeyManagementOptions).Assembly, service.ImplementationType?.Assembly));
         Assert.Contains(services, service => service.ServiceType == typeof(FluxKnowledge.Web.Components.Status.IProjectionReader));
         Assert.Contains(services, service => service.ServiceType == typeof(IDatabaseStartupReadiness));
+    }
+
+    [Fact]
+    public void Incremental_staging_requires_explicit_volumes_and_keeps_the_local_staging_bindings()
+    {
+        const string volume = @"\\?\Volume{00000000-0000-0000-0000-000000000001}\";
+        var settingsFile = Path.Combine(_ownedRoot, "Config", "staging.json");
+        Directory.CreateDirectory(Path.GetDirectoryName(settingsFile)!);
+        File.WriteAllText(settingsFile, System.Text.Json.JsonSerializer.Serialize(new
+        {
+            SqlConnectionString = Connection, Origin = "http://127.0.0.1:5147",
+            SourceJournalEnabled = true, SourceJournalVolumes = new[] { volume }
+        }));
+        var settings = StagingHostSettings.Load(settingsFile);
+        Assert.Equal("true", settings.Configuration["SourceJournal:Enabled"]);
+        Assert.Equal(volume.ToUpperInvariant(), settings.Configuration["SourceJournal:ApprovedVolumes:0"]);
+        Assert.Null(settings.Configuration["SourceJournal:PipeName"]);
+        Directory.CreateDirectory(settings.SourcesRoot);
+        var services = new ServiceCollection(); services.AddLogging();
+        WebHostComposition.AddStagingFluxKnowledgeServices(services, settings);
+        using var provider = services.BuildServiceProvider();
+        Assert.IsType<FluxKnowledge.Integrations.Files.WindowsSourceChangeJournalReader>(provider.GetRequiredService<ISourceChangeJournalReader>());
+        Assert.True(provider.GetRequiredService<SourceJournalOptions>().Enabled);
+        Assert.Equal(settings.RuntimeConnectionString, provider.GetRequiredService<SqlServerOptions>().ConnectionString);
+        Assert.Contains(services, descriptor => descriptor.ImplementationType == typeof(FluxKnowledge.Application.Sources.SourceChangeJournalService));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Staging_rejects_implicit_or_noncanonical_journal_targets_before_runtime_access(bool noncanonical)
+    {
+        var settingsFile = Path.Combine(_ownedRoot, "Config", "staging.json");
+        Directory.CreateDirectory(Path.GetDirectoryName(settingsFile)!);
+        File.WriteAllText(settingsFile, System.Text.Json.JsonSerializer.Serialize(new
+        {
+            SqlConnectionString = Connection, Origin = "http://127.0.0.1:5147", SourceJournalEnabled = true,
+            SourceJournalVolumes = noncanonical ? new[] { @"I:\" } : Array.Empty<string>()
+        }));
+        Assert.Throws<ArgumentException>(() => StagingHostSettings.Load(settingsFile));
+    }
+
+    [Fact]
+    public void Incremental_staging_preserves_explicit_seal_qualification_and_metadata_rate()
+    {
+        const string volume = @"\\?\Volume{00000000-0000-0000-0000-000000000001}\";
+        var qualification = new SourceJournalSealQualification("owned-root", "qualified-environment",
+            "owned synthetic staging fixture", "guarded-close-v1") { ProviderName = "Test provider", ProviderVersion = "1.2.3" };
+        var settingsFile = Path.Combine(_ownedRoot, "Config", "staging.json");
+        Directory.CreateDirectory(Path.GetDirectoryName(settingsFile)!);
+        File.WriteAllText(settingsFile, System.Text.Json.JsonSerializer.Serialize(new
+        {
+            SqlConnectionString = Connection, Origin = "http://127.0.0.1:5147",
+            SourceJournalEnabled = true, SourceJournalVolumes = new[] { volume },
+            SourceJournalSealingEnabled = true, SourceJournalSealQualifications = new[] { qualification },
+            SourceJournalMetadataEntriesPerSecond = 32
+        }));
+        var settings = StagingHostSettings.Load(settingsFile);
+        Directory.CreateDirectory(settings.SourcesRoot);
+        var services = new ServiceCollection(); services.AddLogging();
+        WebHostComposition.AddStagingFluxKnowledgeServices(services, settings);
+        using var provider = services.BuildServiceProvider();
+        var options = provider.GetRequiredService<SourceJournalOptions>();
+        Assert.True(options.SealingEnabled);
+        Assert.Equal(32, options.MetadataEntriesPerSecond);
+        Assert.Equal(qualification, Assert.Single(options.SealQualifications));
+        Assert.Equal(settings.RuntimeConnectionString, provider.GetRequiredService<SqlServerOptions>().ConnectionString);
+        Assert.Null(settings.Configuration["SourceJournal:PipeName"]);
     }
 
     private sealed class ExistingHostService : IHostedService
