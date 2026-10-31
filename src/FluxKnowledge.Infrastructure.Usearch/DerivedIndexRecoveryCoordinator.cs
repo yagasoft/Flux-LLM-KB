@@ -274,8 +274,10 @@ public sealed class DerivedIndexRecoveryCoordinator : IDerivedIndexRecoveryStatu
     {
         var projection = await store.ReadProjectionAsync(cancellationToken);
         if (!projection.MaintenanceActive && projection.Generation is { CorpusStamp: { } stamp } && stamp != projection.Stamp &&
-            stamp.CorpusEpoch == projection.Stamp.CorpusEpoch && stamp.CorpusVersion < projection.Stamp.CorpusVersion && _deploymentHold?.IsHeld != true)
+            stamp.CorpusEpoch == projection.Stamp.CorpusEpoch && stamp.CorpusVersion < projection.Stamp.CorpusVersion)
         {
+            // A no-draft segmented refresh changes only the derived projection. It must
+            // catch up under a deployment hold so native readiness can precede release.
             var publisher = services.GetRequiredService<IIndexGenerationPublisher>();
             var candidate = await publisher.BuildAndPlaceAsync(Guid.Empty, cancellationToken);
             if (await store.TryActivateRefreshAsync(candidate, cancellationToken))

@@ -37,6 +37,8 @@ param(
     [ValidateRange(30, 3600)][int]$RebuildTimeoutSeconds = 1800,
     [switch]$DeferReadinessForScopedRemediation,
     [switch]$RecoverStoppedPool,
+    [string]$StoppedRecoveryBindingPath = '',
+    [string]$ExpectedStoppedRecoveryBindingSha256 = '',
     [string]$OfflineCodeMaintenanceReceipt = '',
     [string]$ExpectedOfflineCodeMaintenanceReceiptSha256 = '',
     [switch]$EnableDashboardSnapshots,
@@ -452,6 +454,9 @@ function Assert-DeploymentSourceJournalLegacyMigrationAllowed {
 }
 
 function Assert-DeploymentSourceJournalPredecessorRestorationAllowed {
+    if (Get-Variable -Name stoppedRecoveryBinding -Scope Script -ValueOnly -ErrorAction SilentlyContinue) {
+        throw 'stopped-release-forward-recovery-required-retain-candidate-set-and-hold'
+    }
     if ($null -ne $deploymentValidation -and $deploymentValidation.ContainsKey('JournalRecoveryRequired') -and
         $deploymentValidation.JournalRecoveryRequired) {
         throw 'journal-schema-predecessor-restoration-forbidden-retain-candidate-set-and-hold'
@@ -2230,6 +2235,15 @@ if ($sourceJournalMode) {
         throw 'journal-release-reviewed-database-and-payload-set-required'
     }
 } elseif ($SourceJournalOptionsPath -or $ExpectedSourceJournalOptionsSha256) {throw 'journal-release-explicit-mode-required'}
+if ($StoppedRecoveryBindingPath -or $ExpectedStoppedRecoveryBindingSha256) {
+    $allowed=@('SourceRoot','SiteName','SiteUrl','DeployRoot','ReadinessTimeoutSeconds','RecoverStoppedPool',
+        'StoppedRecoveryBindingPath','ExpectedStoppedRecoveryBindingSha256','ReviewedSourceJournalPayloads',
+        'ExpectedSourceJournalDatabaseIdentity','InspectIndexAdmissionPayloads','PlanOnly','Apply')
+    if (!$RecoverStoppedPool -or !$StoppedRecoveryBindingPath -or $ExpectedStoppedRecoveryBindingSha256 -cnotmatch '^[A-Fa-f0-9]{64}$' -or
+        @($PSBoundParameters.Keys | Where-Object {$_ -cnotin $allowed}).Count) {
+        throw 'Stopped release adoption requires explicit stopped-pool recovery and one exact binding; migrations, configuration changes and readiness deferral are forbidden.'
+    }
+}
 if($EnableDashboardSnapshots -and ($PSVersionTable.PSVersion.Major -lt 7 -or !$RecoverStoppedPool -or
     !$OfflineCodeMaintenanceReceipt -or $ExpectedOfflineCodeMaintenanceReceiptSha256 -cnotmatch '^[A-Fa-f0-9]{64}$' -or
     $sourceAccessRequested -or $EnterSourceDeletionAcceptanceMaintenance -or $ApplyMigrations -or
@@ -2387,6 +2401,8 @@ if ($Apply -and $applyAnyMigration -and !$ApplyIncrementalSourceScanning) { Asse
 Import-Module (Join-Path $PSScriptRoot 'incremental-segmented-index-schema.psm1') -Force -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'incremental-segmented-index-update.psm1') -Force -ErrorAction Stop
 . (Join-Path $PSScriptRoot 'offline-code-maintenance.ps1')
+. (Join-Path $PSScriptRoot 'incremental-stopped-release-recovery.ps1')
+$stoppedRecoveryBinding=$null
 $offlineCodeState = $null
 Import-Module (Join-Path $PSScriptRoot 'incremental-hybrid-passage-rebuild.psm1') -Force -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'incremental-repository-recovery-migration.psm1') -Force -ErrorAction Stop
@@ -2488,6 +2504,11 @@ if ($EnterSourceDeletionAcceptanceMaintenance) {
     exit 0
 }
 
+if ($StoppedRecoveryBindingPath) {
+    Import-Module WebAdministration -ErrorAction Stop
+    $stoppedRecoveryBinding=Read-IncrementalStoppedRecoveryBinding -Path $StoppedRecoveryBindingPath -ExpectedSha256 $ExpectedStoppedRecoveryBindingSha256
+    Assert-IncrementalStoppedRecoveryBinding $stoppedRecoveryBinding
+}
 if ($PlanOnly) {
     $migrationPlan = $null
     $sourceJournalPlan = $null
@@ -2711,6 +2732,12 @@ if ($PlanOnly) {
         clean_slate = $false
         preserved = @("Config", "Data", "Runtime", "Recovery", "CodexPlugin")
         recover_stopped_pool = [bool]$RecoverStoppedPool
+        stopped_release_recovery = if ($stoppedRecoveryBinding) {
+            @{ binding=$StoppedRecoveryBindingPath; sha256=$ExpectedStoppedRecoveryBindingSha256;
+                prior_release=$stoppedRecoveryBinding.PriorReleaseId; hold='atomic transfer of exact owned deny-all hold after fresh stopped-owner proof';
+                companion_enabled_after_validation=$stoppedRecoveryBinding.EnableCompanionAfterValidation;
+                recovery='forward-only; retain compatible candidate set and owned hold on failure' }
+        } else { $null }
         offline_code_maintenance = if ($OfflineCodeMaintenanceReceipt) {
             Assert-OfflineCodeMaintenance -RequireStopped -OriginalPayloads
             @{ receipt=$OfflineCodeMaintenanceReceipt; sha256=$ExpectedOfflineCodeMaintenanceReceiptSha256;
@@ -2731,7 +2758,7 @@ if ($PlanOnly) {
         } } else { $null }
         payload_acl = "inherit-from-live-root"
         rollback_boundary = 'all restoration paths require an available source-journal boundary with no feature, configuration, intent or interrupted helper evidence; otherwise retain the current compatible set and deployment hold'
-        rollback = if ($OfflineCodeMaintenanceReceipt) { 'before start: stopped rollback; after start intent: matching pair retained for fresh stopped forward recovery; after hold release: reconcile current state' } elseif ($ApplyResumableSourceDeletionCleanupMigration -or $ApplyRepositoryRecoveryAuthorityMigration) { 'preserve-schema-and-evidence; verified-prior-payloads-stopped-task-disabled-hold-retained' } elseif ($RecoverStoppedPool) { 'restore-prior-payloads-with-pool-stopped-and-hold-retained' } elseif ($PatchHybridRebuildRelease -or $ResumeHybridPatchRelease) { 'forward-only after activation intent; predecessor payload/packet retained, hold denied on failure' } elseif ($ApplyHybridPassageRebuild) { 'before-schema: original payload; after-schema: held forward recovery with retained original payload/configuration' } else { "automatic-application-and-interactive-host-payload-restore" }
+        rollback = if ($stoppedRecoveryBinding) { 'forward-only; retain compatible candidate set and owned hold on failure' } elseif ($OfflineCodeMaintenanceReceipt) { 'before start: stopped rollback; after start intent: matching pair retained for fresh stopped forward recovery; after hold release: reconcile current state' } elseif ($ApplyResumableSourceDeletionCleanupMigration -or $ApplyRepositoryRecoveryAuthorityMigration) { 'preserve-schema-and-evidence; verified-prior-payloads-stopped-task-disabled-hold-retained' } elseif ($RecoverStoppedPool) { 'restore-prior-payloads-with-pool-stopped-and-hold-retained' } elseif ($PatchHybridRebuildRelease -or $ResumeHybridPatchRelease) { 'forward-only after activation intent; predecessor payload/packet retained, hold denied on failure' } elseif ($ApplyHybridPassageRebuild) { 'before-schema: original payload; after-schema: held forward recovery with retained original payload/configuration' } else { "automatic-application-and-interactive-host-payload-restore" }
         gpu_drain = if ($OfflineCodeMaintenanceReceipt) { 'fresh reviewed stopped-owner proof; no GPU settlement claimed' } else { 'deny admissions; allow active OCR page and native cleanup to finish; prove exact IIS worker exit before each payload swap stop' }
         deployment_validation_hold = $true
         candidate_validation = if ($PatchHybridRebuildRelease -or $ResumeHybridPatchRelease) { 'same-operation-epoch-checkpoint-continuity-preserved-inputs-and-loopback-probes' } elseif ($ApplyHybridPassageRebuild) { 'held-exact-rebuild-finalisation-preserved-inputs-and-loopback-probes' } elseif ($DeferReadinessForScopedRemediation) {
@@ -2834,6 +2861,7 @@ try {
     if (-not $leaseAcquired) {
         throw "Another incremental IIS deployment is already in progress."
     }
+    if ($stoppedRecoveryBinding) { Assert-IncrementalStoppedRecoveryBinding $stoppedRecoveryBinding }
     # Register before every Recovery write, including continuation/failure packets.
     # This scope launches external children; parent exit is insufficient on failure.
     $recoveryWriter = Start-RecoveryReferenceWrite -ConnectionString (Get-DeploymentSqlConnectionString) -RecoveryRoot $CanonicalRecoveryRoot
@@ -3002,6 +3030,10 @@ try {
             Move-OfflineCodeMaintenanceHold -StatePath $offlineCodeState.StatePath -State $offlineCodeState
         }
         Stop-HybridIisAfterGpuDrain
+        if ($stoppedRecoveryBinding) {
+            Move-IncrementalStoppedRecoveryHold -Binding $stoppedRecoveryBinding -ReleaseId $releaseId `
+                -StatePath (Join-Path $releaseRoot 'stopped-release-hold-transfer.json')
+        }
         [void](New-DeploymentValidationHold -Path $ValidationHoldPath -ReleaseId $releaseId)
         $deploymentValidation.HoldCreated = $true
         $deploymentValidation.Baseline = Get-RetainedPipelineStateBaseline
@@ -3020,7 +3052,7 @@ try {
             ConvertTo-Json | Set-Content -LiteralPath (Join-Path $releaseRoot 'stopped-pool-recovery-baseline.json') -Encoding utf8
     }
     $interactiveHostTask = Get-ScheduledTask -TaskName $InteractiveHostTaskName -ErrorAction Stop
-    $interactiveHostTaskWasEnabled = if ($null -ne $sourceDeletionMaintenance) { [bool]$sourceDeletionMaintenance.Original.Task.Enabled } else { [bool]$interactiveHostTask.Settings.Enabled }
+    $interactiveHostTaskWasEnabled = if ($stoppedRecoveryBinding) { $stoppedRecoveryBinding.EnableCompanionAfterValidation } elseif ($null -ne $sourceDeletionMaintenance) { [bool]$sourceDeletionMaintenance.Original.Task.Enabled } else { [bool]$interactiveHostTask.Settings.Enabled }
     if ($interactiveHostTask.Settings.Enabled) {
         Disable-ScheduledTask -TaskName $InteractiveHostTaskName -ErrorAction Stop | Out-Null
     }

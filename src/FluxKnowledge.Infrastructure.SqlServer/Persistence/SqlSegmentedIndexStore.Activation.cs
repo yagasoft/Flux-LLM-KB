@@ -63,10 +63,12 @@ public sealed partial class SqlSegmentedIndexStore
             await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
             await AcquireSharedTransactionAsync(context, cancellationToken);
             await SqlPublishedPassageSelection.AcquireFenceAsync(context, cancellationToken);
-            if (deploymentHold?.IsHeld == true) return false;
             var candidate = await LockCandidateAsync(context, id, cancellationToken);
             if (candidate.BuildPurpose != 0 || candidate.DraftGenerationId is not null || candidate.ResultGenerationId != snapshot.Generation.Id)
                 throw new InvalidOperationException("segmented-refresh-proof-invalid");
+            // Held validation may activate a sealed, derived-only refresh. Draft
+            // publication and canonical mutations retain their separate hold fences.
+            if (deploymentHold?.IsHeld == true && candidate.State != 1) return false;
             if (candidate.State == 2) return true;
             try { candidate = await ValidateRefreshBeforeAsync(context, snapshot, cancellationToken); }
             catch (PublicationSnapshotConflictException) { return false; }

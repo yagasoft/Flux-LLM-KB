@@ -201,6 +201,20 @@ predecessor. Migration, rebuild and readiness-deferral switches are incompatible
 After the hold is released, a failed probe retains the candidate for reviewed
 recovery. Terminal Publish replay requires separate native confirmation and authority.
 
+An ordinary failed incremental release can retain its own deny-all hold. To adopt
+that exact hold, include `-StoppedRecoveryBindingPath <private.json>` and
+`-ExpectedStoppedRecoveryBindingSha256 <sha256>` with `-RecoverStoppedPool` in both
+the reviewed plan and the separately authorised Apply. The version-1
+`incremental-stopped-release` binding identifies the prior release/commit/manifest,
+installed Web/OutlookHost/Cli payload roots and hashes, both configuration hashes,
+database incarnation, hold hash, task/launcher identities and the intended
+post-validation companion task preference. The updater requires stopped IIS and
+companion ownership, verifies the installed pair against the prior candidate,
+and replaces the hold atomically after recording transfer intent. An interrupted
+transfer requires reconciliation; repeating the same transfer state is refused.
+This mode permits no migration, configuration change or readiness deferral and
+retains the compatible candidate set and hold on failure.
+
 The one-time `-ApplyCorpusChunkFullTextMigration` switch applies only
 `20260924125920_AddCorpusChunkFullTextIndex` from the exact OCR-metadata baseline
 `20260920122758_AddDocumentOcrRequestsAndArtifactMetadata`. Include that switch

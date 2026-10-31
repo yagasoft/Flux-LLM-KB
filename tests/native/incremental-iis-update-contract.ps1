@@ -297,4 +297,16 @@ if ($rejected.ExitCode -eq 0 -or $rejected.Output -notmatch 'Maintenance impleme
 }
 
 & (Join-Path $PSScriptRoot 'source-verification-slot-provisioning.ps1') -SourceRoot $SourceRoot
+& (Join-Path $PSScriptRoot 'incremental-stopped-release-recovery.ps1') -SourceRoot $SourceRoot
+foreach ($arguments in @(
+    @('-StoppedRecoveryBindingPath','unused.json'),
+    @('-RecoverStoppedPool','-StoppedRecoveryBindingPath','unused.json'),
+    @('-RecoverStoppedPool','-ExpectedStoppedRecoveryBindingSha256',('A'*64)),
+    @('-RecoverStoppedPool','-StoppedRecoveryBindingPath','unused.json','-ExpectedStoppedRecoveryBindingSha256',('A'*64),'-EnableDashboardSnapshots')
+)) {
+    $rejected=Invoke-ExpectedRejection -Arguments (@('-SourceRoot',$legacyPlanRoot,'-PlanOnly')+$arguments)
+    if($rejected.ExitCode -eq 0 -or $rejected.Output -notmatch 'Stopped release adoption requires') {
+        throw 'Stopped release adoption admitted an incomplete binding or a configuration change.'
+    }
+}
 Write-Output "Incremental IIS update contract passed."

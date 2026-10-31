@@ -82,7 +82,12 @@ try{
    }
   }
  }
- Write-Output 'Five canonical journal rollback/generic-SQL boundaries passed through real payload files; zero production operations.'
+ $script:stoppedRecoveryBinding=@{PriorReleaseId='owned-failed-release'}
+ $stoppedRefusal=''
+ try{Assert-DeploymentSourceJournalPredecessorRestorationAllowed}catch{$stoppedRefusal=$_.Exception.Message}
+ Assert-True ($stoppedRefusal -ceq 'stopped-release-forward-recovery-required-retain-candidate-set-and-hold') 'Explicit stopped recovery reached predecessor restoration.'
+ Remove-Variable -Name stoppedRecoveryBinding -Scope Script
+ Write-Output 'Five canonical journal rollback/generic-SQL boundaries and explicit stopped-recovery refusal passed through real payload files; zero production operations.'
 }finally{
  $resolved=[IO.Path]::GetFullPath($area)
  if(!$resolved.StartsWith('I:\Codex Workspaces\Staging\FluxKnowledge\JournalMigrationRecovery-',[StringComparison]::OrdinalIgnoreCase)){throw 'Unsafe recovery fixture cleanup'}

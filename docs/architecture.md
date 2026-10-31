@@ -842,6 +842,16 @@ rebuild recovery, GPU measurements and scoped English staging acceptance have
 completed. Future deployment or rebuild operations still require their own
 explicit operational authority.
 
+Held deployment validation can catch up a segmented derived projection before
+releasing canonical work. Only a sealed purpose-0 candidate without a draft may
+activate through this path. Same-epoch/version/base-pointer, complete change-log,
+membership, maintenance and native ownership checks remain mandatory; the refresh
+does not advance the canonical corpus stamp or run pipeline jobs. This avoids a
+cycle in which held readiness waits for a refresh that itself waits for hold
+release. Stopped incremental recovery can atomically adopt the exact failed
+release's hold using a reviewed payload/configuration/database/owner binding;
+foreign holds, drift and interrupted transfer replay remain refused.
+
 An interrupted schema-54 worklist can be replaced explicitly through that updater.
 The successor binds the immutable predecessor packet and the same canonical inputs,
 then atomically commits a new epoch/worklist and permanent old-job supersession.
