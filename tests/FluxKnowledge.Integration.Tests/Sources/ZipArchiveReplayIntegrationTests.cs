@@ -93,7 +93,7 @@ public sealed class ZipArchiveReplayIntegrationTests(NativeSqlServerFixture fixt
         var parentHash = new string('a', 64);
         var seeded = await SeedDeferredZipAsync(parentHash, 4, $"sha256\\aa\\{parentHash}.bin", revision: 2);
         var factory = new ContextFactory(_fixture.ConnectionString);
-        var store = new SqlRetainedProcessorBranchStore(factory, TimeProvider.System);
+        var store = new SqlRetainedProcessorBranchStore(factory, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         var identity = ArchiveMemberIdentity.Create($"zip-parent:{seeded.SourceRevisionId:N}", "member.txt");
         var childHash = new string('b', 64);
         var childId = Guid.NewGuid();
@@ -159,7 +159,7 @@ public sealed class ZipArchiveReplayIntegrationTests(NativeSqlServerFixture fixt
     {
         var hash = new string('a', 64);
         var seeded = await SeedDeferredZipAsync(hash, 4, $"sha256\\aa\\{hash}.bin");
-        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System);
+        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(_fixture.ConnectionString)));
         Assert.True(await store.PromoteAsync(new RetainedProcessorPromotionCandidate(seeded.LegacyActivityId,
             new SourceRevisionId(seeded.SourceRevisionId), hash), ZipArchiveRetainedProcessor.Capability, CancellationToken.None));
         var claim = Assert.Single(await store.ClaimAsync("fenced-archive", 1, CancellationToken.None));
@@ -306,7 +306,7 @@ public sealed class ZipArchiveReplayIntegrationTests(NativeSqlServerFixture fixt
             Assert.Single(await verification.SourceActivities.Where(value => value.SourceRevisionId == child.Id &&
                 value.ActivityKind == (int)SourceActivityKind.TextExtraction).ToListAsync());
 
-            var offered = await new SqlRetainedTextRegistrationStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System)
+            var offered = await new SqlRetainedTextRegistrationStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(_fixture.ConnectionString)))
                 .OfferUnlinkedInProcessActivitiesAsync(CancellationToken.None);
 
             Assert.True(offered >= 1);
@@ -444,7 +444,7 @@ public sealed class ZipArchiveReplayIntegrationTests(NativeSqlServerFixture fixt
             var selected = await SeedDeferredZipAsync(hash, zip.Length, relativePath, extension: ".vsdx");
             var unrelated = await SeedDeferredZipAsync(hash, zip.Length, relativePath, extension: ".vsdx");
             var legacyV1 = LegacyZipV1Capability();
-            var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System);
+            var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(_fixture.ConnectionString)));
 
             Assert.True(await store.PromoteAsync(
                 new RetainedProcessorPromotionCandidate(selected.LegacyActivityId, new SourceRevisionId(selected.SourceRevisionId), hash),
@@ -514,7 +514,7 @@ public sealed class ZipArchiveReplayIntegrationTests(NativeSqlServerFixture fixt
         const string hash = "d7b157427727a3509dc34a77445a3abed1bf05da9d079d795502d344fadf2a0d";
         var seeded = await SeedDeferredZipAsync(hash, 4, Path.Combine("sha256", hash[..2], $"{hash}.bin"), extension: ".vsdx");
         var factory = new ContextFactory(_fixture.ConnectionString);
-        var store = new SqlRetainedProcessorBranchStore(factory, TimeProvider.System);
+        var store = new SqlRetainedProcessorBranchStore(factory, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         var legacy = LegacyZipV1Capability();
         var capabilities = new SourceCapabilityService(
             new SqlSourceActivityStore(factory, TimeProvider.System),
@@ -563,7 +563,7 @@ public sealed class ZipArchiveReplayIntegrationTests(NativeSqlServerFixture fixt
         const string hash = "b4bb92557d83bc26c5f476b792c9e2d251bd83aa872a6b9cb21bb04771d6c61e";
         var seeded = await SeedDeferredZipAsync(hash, 4, Path.Combine("sha256", hash[..2], $"{hash}.bin"), extension: ".vsdx");
         var factory = new ContextFactory(_fixture.ConnectionString);
-        var store = new SqlRetainedProcessorBranchStore(factory, TimeProvider.System);
+        var store = new SqlRetainedProcessorBranchStore(factory, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         var legacy = LegacyZipV1Capability();
         var capabilities = new SourceCapabilityService(
             new SqlSourceActivityStore(factory, TimeProvider.System),
@@ -608,7 +608,7 @@ public sealed class ZipArchiveReplayIntegrationTests(NativeSqlServerFixture fixt
             var factory = new ContextFactory(_fixture.ConnectionString);
             using var reader = new SqlRetainedSourceReader(factory, root);
             var executor = new LocalDocumentReprocessExecutor(
-                new SqlRetainedProcessorBranchStore(factory, TimeProvider.System),
+                new SqlRetainedProcessorBranchStore(factory, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory)),
                 reader,
                 new SourceCapabilityService(
                     new SqlSourceActivityStore(factory, TimeProvider.System),
@@ -639,7 +639,7 @@ public sealed class ZipArchiveReplayIntegrationTests(NativeSqlServerFixture fixt
             var childActivity = await verification.SourceActivities.SingleAsync(value => value.SourceRevisionId == child.Id);
             Assert.Equal((int)SourceActivityKind.DocumentParsing, childActivity.ActivityKind);
 
-            var offered = await new SqlRetainedTextRegistrationStore(factory, TimeProvider.System)
+            var offered = await new SqlRetainedTextRegistrationStore(factory, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory))
                 .OfferUnlinkedInProcessActivitiesAsync(CancellationToken.None);
 
             Assert.Equal(1, offered);
@@ -674,7 +674,7 @@ public sealed class ZipArchiveReplayIntegrationTests(NativeSqlServerFixture fixt
             await mutation.SaveChangesAsync();
         }
 
-        var result = await new SqlRetainedProcessorBranchStore(factory, TimeProvider.System).RequestDocumentReprocessAsync(
+        var result = await new SqlRetainedProcessorBranchStore(factory, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory)).RequestDocumentReprocessAsync(
             new DocumentReprocessRequest(new SourceRevisionId(seeded.SourceRevisionId), hash, PdfDocumentProcessor.Capability.ProcessorFingerprint),
             CancellationToken.None);
 
@@ -699,7 +699,7 @@ public sealed class ZipArchiveReplayIntegrationTests(NativeSqlServerFixture fixt
             await mutation.SaveChangesAsync();
         }
 
-        var result = await new SqlRetainedProcessorBranchStore(factory, TimeProvider.System).RequestDocumentReprocessAsync(
+        var result = await new SqlRetainedProcessorBranchStore(factory, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory)).RequestDocumentReprocessAsync(
             new DocumentReprocessRequest(new SourceRevisionId(seeded.SourceRevisionId), hash, PdfDocumentProcessor.Capability.ProcessorFingerprint),
             CancellationToken.None);
 
@@ -715,7 +715,7 @@ public sealed class ZipArchiveReplayIntegrationTests(NativeSqlServerFixture fixt
         var hash = Convert.ToHexStringLower(SHA256.HashData(bytes));
         var seeded = await SeedDeferredZipAsync(hash, bytes.Length, Path.Combine("sha256", hash[..2], $"{hash}.bin"), extension: ".pdf");
         var factory = new ContextFactory(_fixture.ConnectionString);
-        var store = new SqlRetainedProcessorBranchStore(factory, TimeProvider.System);
+        var store = new SqlRetainedProcessorBranchStore(factory, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         var capabilities = new SourceCapabilityService(
             new SqlSourceActivityStore(factory, TimeProvider.System),
             new LocalSourceCapabilityHandlerRegistry([new PdfDocumentCapabilityHandler()]));
@@ -779,7 +779,7 @@ public sealed class ZipArchiveReplayIntegrationTests(NativeSqlServerFixture fixt
     {
         const string hash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
         var seeded = await SeedDeferredZipAsync(hash, 4, Path.Combine("sha256", "bb", $"{hash}.bin"));
-        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System);
+        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(_fixture.ConnectionString)));
         Assert.True(await store.PromoteAsync(
             new RetainedProcessorPromotionCandidate(seeded.LegacyActivityId, new SourceRevisionId(seeded.SourceRevisionId), hash),
             ZipArchiveRetainedProcessor.Capability,
@@ -803,7 +803,7 @@ public sealed class ZipArchiveReplayIntegrationTests(NativeSqlServerFixture fixt
     public async Task Generic_zip_claim_store_preserves_the_shared_sixteen_claim_limit()
     {
         var branchIds = new List<Guid>();
-        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System);
+        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(_fixture.ConnectionString)));
         for (var ordinal = 0; ordinal < 16; ordinal++)
         {
             var hash = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes($"shared-claim-{ordinal}")));
@@ -834,7 +834,7 @@ public sealed class ZipArchiveReplayIntegrationTests(NativeSqlServerFixture fixt
     {
         const string hash = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
         var seeded = await SeedDeferredZipAsync(hash, 4, Path.Combine("sha256", "cc", $"{hash}.bin"));
-        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System);
+        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(_fixture.ConnectionString)));
         Assert.True(await store.PromoteAsync(
             new RetainedProcessorPromotionCandidate(seeded.LegacyActivityId, new SourceRevisionId(seeded.SourceRevisionId), hash),
             ZipArchiveRetainedProcessor.Capability,
@@ -868,7 +868,7 @@ public sealed class ZipArchiveReplayIntegrationTests(NativeSqlServerFixture fixt
     {
         const string hash = "abababababababababababababababababababababababababababababababab";
         var seeded = await SeedDeferredZipAsync(hash, 4, Path.Combine("sha256", "ab", $"{hash}.bin"));
-        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System);
+        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(_fixture.ConnectionString)));
         Assert.True(await store.PromoteAsync(
             new RetainedProcessorPromotionCandidate(seeded.LegacyActivityId, new SourceRevisionId(seeded.SourceRevisionId), hash),
             ZipArchiveRetainedProcessor.Capability,
@@ -901,7 +901,7 @@ public sealed class ZipArchiveReplayIntegrationTests(NativeSqlServerFixture fixt
     {
         const string hash = "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd";
         var seeded = await SeedDeferredZipAsync(hash, 4, Path.Combine("sha256", "cd", $"{hash}.bin"));
-        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System);
+        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(_fixture.ConnectionString)));
         Assert.True(await store.PromoteAsync(
             new RetainedProcessorPromotionCandidate(seeded.LegacyActivityId, new SourceRevisionId(seeded.SourceRevisionId), hash),
             ZipArchiveRetainedProcessor.Capability,
@@ -931,7 +931,7 @@ public sealed class ZipArchiveReplayIntegrationTests(NativeSqlServerFixture fixt
         const string hash = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
         const string memberHash = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
         var seeded = await SeedDeferredZipAsync(hash, 4, Path.Combine("sha256", "ee", $"{hash}.bin"));
-        var claimStore = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System);
+        var claimStore = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(_fixture.ConnectionString)));
         Assert.True(await claimStore.PromoteAsync(
             new RetainedProcessorPromotionCandidate(seeded.LegacyActivityId, new SourceRevisionId(seeded.SourceRevisionId), hash),
             ZipArchiveRetainedProcessor.Capability,
@@ -945,7 +945,7 @@ public sealed class ZipArchiveReplayIntegrationTests(NativeSqlServerFixture fixt
         }
 
         var barrier = new ChildPersistenceBarrierInterceptor();
-        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString, barrier), TimeProvider.System);
+        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString, barrier), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(_fixture.ConnectionString, barrier)));
         var member = new RetainedProcessorMember(
             ArchiveMemberIdentity.Create("expiry-parent", "member.txt"),
             memberHash,
@@ -1075,7 +1075,7 @@ public sealed class ZipArchiveReplayIntegrationTests(NativeSqlServerFixture fixt
         const string hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         var seeded = await SeedDeferredZipAsync(hash, 4, Path.Combine("sha256", "aa", $"{hash}.bin"));
 
-        var candidates = await new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System)
+        var candidates = await new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(_fixture.ConnectionString)))
             .ReadPromotionCandidatesAsync(16, CancellationToken.None);
 
         var candidate = Assert.Single(candidates);
@@ -1280,7 +1280,7 @@ public sealed class ZipArchiveReplayIntegrationTests(NativeSqlServerFixture fixt
             var processor = new ZipArchiveRetainedProcessor(new WriteThenFailWriter(new SqlRetainedArtifactWriter(factory, root)));
             var first = new RetainedProcessorActivationService(
                 new SourceCapabilityService(new SqlSourceActivityStore(factory, TimeProvider.System), new LocalSourceCapabilityHandlerRegistry([processor])),
-                new SqlRetainedProcessorBranchStore(factory, TimeProvider.System), _resources.Own(new SqlRetainedSourceReader(factory, root)), processor,
+                new SqlRetainedProcessorBranchStore(factory, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory)), _resources.Own(new SqlRetainedSourceReader(factory, root)), processor,
                 new RetainedProcessorOptions { ArchiveZipExpandEnabled = true }, TimeProvider.System);
 
             var transient = await first.RunOnceAsync(CancellationToken.None);
@@ -1321,7 +1321,7 @@ public sealed class ZipArchiveReplayIntegrationTests(NativeSqlServerFixture fixt
         var registry = new LocalSourceCapabilityHandlerRegistry([processor]);
         return new RetainedProcessorActivationService(
             new SourceCapabilityService(new SqlSourceActivityStore(factory, TimeProvider.System), registry),
-            new SqlRetainedProcessorBranchStore(factory, TimeProvider.System),
+            new SqlRetainedProcessorBranchStore(factory, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory)),
             _resources.Own(new SqlRetainedSourceReader(factory, root, policy)),
             processor,
             new RetainedProcessorOptions { ArchiveZipExpandEnabled = true },

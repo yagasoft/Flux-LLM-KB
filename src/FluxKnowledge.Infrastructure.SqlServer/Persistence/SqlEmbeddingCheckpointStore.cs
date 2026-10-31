@@ -14,7 +14,8 @@ using Microsoft.EntityFrameworkCore;
 namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
 
 public sealed class SqlEmbeddingCheckpointStore(
-    IDbContextFactory<FluxKnowledgeDbContext> contextFactory, TimeProvider timeProvider, EmbeddingGpuRuntime? embeddingRuntime = null) : IEmbeddingCheckpointStore
+    IDbContextFactory<FluxKnowledgeDbContext> contextFactory, TimeProvider timeProvider, EmbeddingGpuRuntime? embeddingRuntime = null,
+    ISourceWorkAdmission? sourceAdmission = null) : IEmbeddingCheckpointStore
 {
     internal const int MaximumBatchSize = 4;
     private int BatchSize => embeddingRuntime is null ? MaximumBatchSize : EmbeddingGpuRuntime.MaximumRequestChunks;
@@ -24,7 +25,7 @@ public sealed class SqlEmbeddingCheckpointStore(
         {
             ValidateProfile(profile);
             await SqlCorpusRebuildStore.ValidateMaintenanceJobAsync(context, work.Job.JobId.Value, cancellationToken, profile).ConfigureAwait(false);
-            await ValidateClaimAsync(context, work, timeProvider.GetUtcNow(), cancellationToken).ConfigureAwait(false);
+            await ValidateClaimAsync(context, work, timeProvider.GetUtcNow(), cancellationToken, sourceAdmission).ConfigureAwait(false);
             var checkpointJob = await context.Jobs.SingleAsync(value => value.Id == work.Job.JobId.Value, cancellationToken).ConfigureAwait(false);
             var refusal = await SqlRepositoryWorkRecovery.CheckCheckpointAsync(context, checkpointJob, embeddingRuntime, cancellationToken, profile).ConfigureAwait(false);
             if (refusal is not null) throw new RepositorySourceDeferredException(refusal);
@@ -71,7 +72,7 @@ public sealed class SqlEmbeddingCheckpointStore(
         var values = results.Select(result => ValidateResult(result, batch.Profile)).ToArray();
         await ExecuteAsync(async context =>
         {
-            await ValidateClaimAsync(context, work, timeProvider.GetUtcNow(), cancellationToken).ConfigureAwait(false);
+            await ValidateClaimAsync(context, work, timeProvider.GetUtcNow(), cancellationToken, sourceAdmission).ConfigureAwait(false);
             var epoch = (await SqlPublishedPassageSelection.ReadStampAsync(context, cancellationToken).ConfigureAwait(false)).CorpusEpoch;
             var draft = await context.IndexGenerations.SingleAsync(value => value.Id == batch.GenerationId, cancellationToken).ConfigureAwait(false);
             if (batch.CorpusEpoch != epoch) throw new InvalidOperationException("embedding-checkpoint-epoch-changed");
@@ -133,7 +134,8 @@ public sealed class SqlEmbeddingCheckpointStore(
         }).ConfigureAwait(false);
     }
 
-    internal static async Task ValidateClaimAsync(FluxKnowledgeDbContext context, StageWorkItem work, DateTimeOffset now, CancellationToken ct)
+    internal static async Task ValidateClaimAsync(FluxKnowledgeDbContext context, StageWorkItem work, DateTimeOffset now, CancellationToken ct,
+        ISourceWorkAdmission? sourceAdmission = null)
     {
         await SqlCorpusRebuildStore.ValidateMaintenanceJobAsync(context, work.Job.JobId.Value, ct).ConfigureAwait(false);
         if (work.Job.Stage != PipelineStage.Embed || work.Job.Operation != PipelineOperations.Embed ||
@@ -159,6 +161,7 @@ public sealed class SqlEmbeddingCheckpointStore(
                 !record.IsDeleted && record.CurrentStage == (int)PipelineStage.Embed, ct).ConfigureAwait(false))
             throw new InvalidOperationException("embedding-checkpoint-lease-lost");
         await SqlRepositoryWorkRecovery.ValidateAsync(context, job, now, ct).ConfigureAwait(false);
+        await SqlSourceWorkEligibility.RequireAsync(context, job.PipelineRecordId, ct, sourceAdmission).ConfigureAwait(false);
         var unavailable = await (from record in context.PipelineRecords
             join retained in context.SourceRevisions on record.SourceRevisionId equals retained.Id
             join root in context.SourceRootConfigurations on retained.SourceRootId equals root.Id

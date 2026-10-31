@@ -121,12 +121,17 @@ public sealed partial class SqlSourceScanStore(
         var exactOwners = pathOwners.Where(value => value.ContentSha256 == file.ContentSha256 &&
             string.Equals(value.CanonicalPath, file.CanonicalPath, StringComparison.Ordinal)).ToList();
         SourceRevisionEntity? revision = null;
+        var adoptedPhysicalOwner = false;
         if (exactOwners.Any(value => !string.Equals(value.StableSourceIdentity, file.StableSourceIdentity, StringComparison.Ordinal)))
         {
-            // Git checkout/atomic saves can replace the physical file while retaining identical tracked bytes.
-            // Reuse only a proven Git owner; its immutable identity, artifact and existing work remain unchanged.
-            if (sourceRoot.DiscoveryMode != SourceDiscoveryMode.GitTracked || exactOwners.Count != 1 ||
-                !IsRetainedGitOwner(exactOwners[0], file.ByteLength, admittedGitRepositoryIdentity))
+            // An atomic save can replace the physical file without changing its bytes.
+            // Preserve the immutable logical owner; a live owned capture proves the
+            // current physical binding, which is recorded separately below.
+            adoptedPhysicalOwner = authoritativePhysicalCapture && exactOwners.Count == 1 &&
+                exactOwners[0].OriginKind == 0 && exactOwners[0].ByteLength == file.ByteLength;
+            var retainedGitOwner = sourceRoot.DiscoveryMode == SourceDiscoveryMode.GitTracked && exactOwners.Count == 1 &&
+                IsRetainedGitOwner(exactOwners[0], file.ByteLength, admittedGitRepositoryIdentity);
+            if (!adoptedPhysicalOwner && !retainedGitOwner)
                 throw new InvalidOperationException("A canonical source path and content hash are already owned by another stable source identity.");
             revision = exactOwners[0];
         }
@@ -155,7 +160,7 @@ public sealed partial class SqlSourceScanStore(
         else if (revision.SuppressedAtUtc is not null && currentGitRoot is null)
         {
             selectionChanged = true;
-            selectionScopes.Add(new(2, revision.Id));
+            selectionScopes.Add(new(3, revision.SourceRootId));
             revision.SuppressedAtUtc = null;
             revision.RetentionEvidenceJson = null;
             eventType = "source.updated";
@@ -216,7 +221,7 @@ public sealed partial class SqlSourceScanStore(
             // Only an actual supersession needs this wider ambiguity check. Ordinary
             // new/unchanged files keep indexed identity/path lookups, avoiding a root
             // path scan for every file in a large workspace.
-            if (superseded.Length > 0 && await context.SourceRevisions.AnyAsync(value =>
+            if ((superseded.Length > 0 || adoptedPhysicalOwner) && await context.SourceRevisions.AnyAsync(value =>
                     value.SourceRootId == sourceRoot.Id.Value && value.OriginKind == 0 && value.SuppressedAtUtc == null &&
                     value.StableSourceIdentity != file.StableSourceIdentity &&
                     EF.Functions.Collate(value.CanonicalPath, "Latin1_General_100_CI_AS") == file.CanonicalPath &&
@@ -232,7 +237,7 @@ public sealed partial class SqlSourceScanStore(
                 previous.RetentionEvidenceJson = JsonSerializer.Serialize(new
                 { reason = "superseded-by-verified-physical-capture", successorSourceRevisionId = revision.Id });
                 selectionChanged = true;
-                selectionScopes.Add(new(2, previous.Id));
+                selectionScopes.Add(new(3, previous.SourceRootId));
                 OperatorEventAppender.Add(context, OperatorEventDraft.SourceRemoved(sourceRoot.Id.Value, previous.Id,
                     $"source:{previous.Id:N}", new { revision = previous.Revision, reason = "superseded-by-verified-physical-capture" }));
             }
@@ -463,7 +468,7 @@ public sealed partial class SqlSourceScanStore(
                             revision.SuppressedAtUtc = null;
                             revision.RetentionEvidenceJson = null;
                             suppressionChanged = true;
-                            suppressionScopes.Add(new(2, revision.Id));
+                            suppressionScopes.Add(new(3, revision.SourceRootId));
                             OperatorEventAppender.Add(context, OperatorEventDraft.SourceUpdated(root.Id, null, revision.Id,
                                 $"source:{revision.Id:N}", new { revision = revision.Revision, reason = "authoritative-rediscovery" }));
                         }
@@ -477,7 +482,7 @@ public sealed partial class SqlSourceScanStore(
 
             revision.SuppressedAtUtc = now;
             suppressionChanged = true;
-            suppressionScopes.Add(new(2, revision.Id));
+            suppressionScopes.Add(new(3, revision.SourceRootId));
             revision.RetainUntilUtc = now.AddDays(30);
             revision.RetentionEvidenceJson = "{\"reason\":\"unseen-during-authoritative-scan\"}";
             OperatorEventAppender.Add(context, OperatorEventDraft.SourceRemoved(

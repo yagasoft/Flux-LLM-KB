@@ -41,7 +41,7 @@ public sealed partial class PublicationRetryTests
         Assert.False(receipt.WasReplay);
         await AssertOldLeaseRefusedAsync(environment, seed.Failed);
         var recovered = await ClaimAsync(environment, seed.Failed.Job.PipelineRecordId.Value);
-        var transitions = new StageTransitionService(new SqlStageTransitionStore(environment.Factory), new StatusPublisher(), new WakeSignal(), TimeProvider.System);
+        var transitions = new StageTransitionService(new SqlStageTransitionStore(environment.Factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory)), new StatusPublisher(), new WakeSignal(), TimeProvider.System);
         await new PublishStageWorker(environment.Store, environment.Store, environment.Builder, transitions, TimeProvider.System)
             .ExecuteAsync(recovered, CancellationToken.None);
 

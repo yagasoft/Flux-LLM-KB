@@ -25,7 +25,7 @@ public sealed class VisioOwnershipIntegrationTests(NativeSqlServerFixture fixtur
         await SqlTestData.SeedWorkItemAsync(fixture, _now.AddMinutes(-2),
             expired ? PublicJobState.WorkerProcessing : PublicJobState.WorkerQueued,
             expired ? _now.AddMinutes(-1) : null, operation: InteractiveOperation);
-        var store = new SqlJobClaimStore(SqlTestData.CreateFactory(fixture));
+        var store = new SqlJobClaimStore(SqlTestData.CreateFactory(fixture), sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(SqlTestData.CreateFactory(fixture)));
         Assert.Null(await store.ClaimNextDueAsync("iis", _now, TimeSpan.FromMinutes(2), default));
         Assert.Null(await store.ClaimWorkerAsync("iis", _now, _now.AddMinutes(2), default));
     }
@@ -36,7 +36,7 @@ public sealed class VisioOwnershipIntegrationTests(NativeSqlServerFixture fixtur
         await SqlTestData.SeedWorkItemAsync(fixture, _now, PublicJobState.WorkerQueued, null,
             operation: InteractiveOperation);
         var factory = SqlTestData.CreateFactory(fixture);
-        var dispatch = await new SqlOutboxStore(factory).ClaimNextDueAsync(
+        var dispatch = await new SqlOutboxStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory)).ClaimNextDueAsync(
             "desktop", _now, TimeSpan.FromMinutes(12), [InteractiveOperation], default);
         Assert.NotNull(dispatch);
         await using (var context = await factory.CreateDbContextAsync())
@@ -45,7 +45,7 @@ public sealed class VisioOwnershipIntegrationTests(NativeSqlServerFixture fixtur
                 .SetProperty(row => row.LeaseOwner, "replacement")
                 .SetProperty(row => row.LeaseGeneration, row => row.LeaseGeneration + 1));
         }
-        Assert.Null(await new SqlJobClaimStore(factory).ClaimForDispatchAsync(
+        Assert.Null(await new SqlJobClaimStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory)).ClaimForDispatchAsync(
             dispatch, "desktop", _now, TimeSpan.FromMinutes(12), default));
     }
 
@@ -55,11 +55,11 @@ public sealed class VisioOwnershipIntegrationTests(NativeSqlServerFixture fixtur
         await SqlTestData.SeedWorkItemAsync(fixture, _now, PublicJobState.WorkerQueued, null,
             operation: InteractiveOperation);
         var factory = SqlTestData.CreateFactory(fixture);
-        var dispatch = (await new SqlOutboxStore(factory).ClaimNextDueAsync(
+        var dispatch = (await new SqlOutboxStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory)).ClaimNextDueAsync(
             "desktop", _now, TimeSpan.FromMinutes(1), [InteractiveOperation], default))!;
-        var job = (await new SqlJobClaimStore(factory).ClaimForDispatchAsync(
+        var job = (await new SqlJobClaimStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory)).ClaimForDispatchAsync(
             dispatch, "desktop", _now, TimeSpan.FromMinutes(1), default))!;
-        var store = new SqlStageTransitionStore(factory, null, new TestClock(_now.AddMinutes(2)));
+        var store = new SqlStageTransitionStore(factory, null, new TestClock(_now.AddMinutes(2)), sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         var exception = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
             await store.TransitionAsync(new StageTransitionRequest(dispatch, job,
                 new StageArtifact(Guid.NewGuid(), PipelineStage.Extract, new string('a', 64),

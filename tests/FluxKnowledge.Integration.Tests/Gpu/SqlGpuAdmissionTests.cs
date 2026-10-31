@@ -42,7 +42,7 @@ public sealed class SqlGpuAdmissionTests(NativeSqlServerFixture fixture) : IClas
             timeProvider: new FixedTimeProvider(Now),
             afterAdmissionCommitted: _ => Interlocked.Increment(ref postCommitFailureCount) == 1
                 ? ValueTask.FromException(new PostCommitTransientException())
-                : ValueTask.CompletedTask);
+                : ValueTask.CompletedTask, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
 
         var result = await store.RunAdmissionRoundAsync(
             GpuSchedulerWakeReason.WorkReady,
@@ -76,7 +76,7 @@ public sealed class SqlGpuAdmissionTests(NativeSqlServerFixture fixture) : IClas
             timeProvider: new FixedTimeProvider(Now),
             afterAdmissionCommitted: _ => Interlocked.Increment(ref postCommitFailureCount) == 1
                 ? ValueTask.FromException(new PostCommitTransientException())
-                : ValueTask.CompletedTask);
+                : ValueTask.CompletedTask, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
 
         var result = await store.RunAdmissionRoundAsync(
             GpuSchedulerWakeReason.WorkReady,
@@ -122,7 +122,7 @@ public sealed class SqlGpuAdmissionTests(NativeSqlServerFixture fixture) : IClas
             timeProvider: new FixedTimeProvider(Now),
             afterAdmissionCommitted: _ => Interlocked.Increment(ref postCommitFailureCount) == 1
                 ? ValueTask.FromException(new PostCommitTransientException())
-                : ValueTask.CompletedTask);
+                : ValueTask.CompletedTask, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
 
         var result = await store.RunAdmissionRoundAsync(
             GpuSchedulerWakeReason.WorkReady,
@@ -162,7 +162,7 @@ public sealed class SqlGpuAdmissionTests(NativeSqlServerFixture fixture) : IClas
             10);
         var operationId = Guid.NewGuid();
         var decisionCount = 0;
-        var store = new SqlGpuSchedulerStore(factory, timeProvider: new FixedTimeProvider(Now));
+        var store = new SqlGpuSchedulerStore(factory, timeProvider: new FixedTimeProvider(Now), sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
 
         var first = await store.RunAdmissionRoundAsync(
             operationId,
@@ -228,7 +228,7 @@ public sealed class SqlGpuAdmissionTests(NativeSqlServerFixture fixture) : IClas
             var taskId = await AddReadyAsync(factory, GpuPriorityLane.InteractiveRetrieval, "r", "s", 10);
             var operationId = Guid.NewGuid();
             var decisionCount = 0;
-            var store = new SqlGpuSchedulerStore(factory, timeProvider: new FixedTimeProvider(Now));
+            var store = new SqlGpuSchedulerStore(factory, timeProvider: new FixedTimeProvider(Now), sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
 
             var first = await store.RunAdmissionRoundAsync(
                 operationId,
@@ -300,7 +300,7 @@ public sealed class SqlGpuAdmissionTests(NativeSqlServerFixture fixture) : IClas
 
         var decisionCount = 0;
         var mismatch = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
-            await new SqlGpuSchedulerStore(factory, timeProvider: new FixedTimeProvider(Now))
+            await new SqlGpuSchedulerStore(factory, timeProvider: new FixedTimeProvider(Now), sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory))
                 .RunAdmissionRoundAsync(
                     operationId,
                     GpuSchedulerWakeReason.CapacityReleased,
@@ -669,7 +669,7 @@ public sealed class SqlGpuAdmissionTests(NativeSqlServerFixture fixture) : IClas
     }
 
     internal static async Task<GpuSchedulerAdmissionRoundResult> AdmitAsync(IDbContextFactory<FluxKnowledgeDbContext> factory, Func<GpuBatchCandidate, CancellationToken, ValueTask<GpuAdmissionDecision>> decision, GpuSchedulerOptions? options = null, GpuSchedulerWakeReason wakeReason = GpuSchedulerWakeReason.WorkReady) =>
-        await new SqlGpuSchedulerStore(factory, timeProvider: new FixedTimeProvider(Now)).RunAdmissionRoundAsync(wakeReason, options ?? Options, decision, CancellationToken.None);
+        await new SqlGpuSchedulerStore(factory, timeProvider: new FixedTimeProvider(Now), sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory)).RunAdmissionRoundAsync(wakeReason, options ?? Options, decision, CancellationToken.None);
 
     private sealed class FixedTimeProvider(DateTimeOffset now) : TimeProvider
     {

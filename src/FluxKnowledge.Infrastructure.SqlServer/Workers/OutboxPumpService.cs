@@ -98,6 +98,11 @@ public sealed class OutboxPumpService(
                 await transitions.RetryAsync(new(dispatch, job, timeProvider.GetUtcNow().AddMinutes(1),
                     "repository-source-deferred", nameof(OutboxPumpService), exception.Deferral), cancellationToken).ConfigureAwait(false);
             }
+            catch (SourceWorkDeferredException)
+            {
+                await transitions.RetryAsync(new(dispatch, job, timeProvider.GetUtcNow().AddSeconds(5),
+                    "source-work-deferred", nameof(OutboxPumpService)), cancellationToken).ConfigureAwait(false);
+            }
             catch (Exception exception) when (job.Stage == dispatch.Stage && job.Operation == dispatch.Operation &&
                 (job.Stage == PipelineStage.Normalise && job.Operation == PipelineOperations.NormaliseText ||
                  job.Stage == PipelineStage.CanonicalIndex && job.Operation == PipelineOperations.CanonicalIndex) &&

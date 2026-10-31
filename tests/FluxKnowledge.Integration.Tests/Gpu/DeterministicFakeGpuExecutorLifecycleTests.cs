@@ -169,7 +169,7 @@ public sealed class DeterministicFakeGpuExecutorLifecycleTests(NativeSqlServerFi
 
     private static IGpuExecutorLifecycleSink CreateSink(IDbContextFactory<FluxKnowledgeDbContext> factory)
     {
-        var store = new SqlGpuSchedulerStore(factory);
+        var store = new SqlGpuSchedulerStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         return new GpuExecutorLifecycleCoordinator(
             store,
             new GpuSchedulerCoordinator(

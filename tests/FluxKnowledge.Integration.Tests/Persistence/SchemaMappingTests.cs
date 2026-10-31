@@ -1465,7 +1465,7 @@ public sealed class NativeSchemaMigrationTests(NativeSqlServerFixture fixture)
             .SingleAsync() > migrated[1].CreatedSequence);
         Assert.Equal(1, await verification.GpuSchedulerStates.CountAsync(state => state.Id == 1));
 
-        var store = new SqlGpuSchedulerStore(new DirectContextFactory(database.ConnectionString));
+        var store = new SqlGpuSchedulerStore(new DirectContextFactory(database.ConnectionString), sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new DirectContextFactory(database.ConnectionString)));
         var admission = await store.RunAdmissionRoundAsync(
             Guid.NewGuid(),
             GpuSchedulerWakeReason.WorkReady,

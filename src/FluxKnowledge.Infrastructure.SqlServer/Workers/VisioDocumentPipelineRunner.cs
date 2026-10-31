@@ -98,6 +98,18 @@ public static class VisioDocumentPipelineRunner
             return 0;
         }
         if (extractor.GetUnavailableReason() is { } reason) throw new RetainedProcessorException(reason);
+        SourceWorkAdmission admission;
+        try
+        {
+            admission = await SourceCommandAdmission.PrepareAsync(factory, request.SourceRevisionId,
+                request.ExpectedInputSha256, retainedRoot, cancellationToken).ConfigureAwait(false);
+        }
+        catch (SourceWorkDeferredException)
+        {
+            await output.WriteLineAsync("{\"outcomeCode\":\"source-work-not-admitted\"}").ConfigureAwait(false);
+            return 1;
+        }
+        transitions = new SqlStageTransitionStore(factory, sourceAdmission: admission);
         await using var branchContext = await factory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         var branchId = await branchContext.SourceProcessorBranches.AsNoTracking()
             .Where(branch => branch.SourceRevisionId == request.SourceRevisionId.Value &&
@@ -108,12 +120,12 @@ public static class VisioDocumentPipelineRunner
             .Select(branch => (Guid?)branch.Id)
             .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
         if (branchId is null) throw new RetainedProcessorException("visio-preparation-pending");
-        var recordId = await new SqlRetainedTextRegistrationStore(factory, TimeProvider.System, retainedRoot)
+        var recordId = await new SqlRetainedTextRegistrationStore(factory, TimeProvider.System, retainedRoot, sourceAdmission: admission)
             .RegisterVisioBranchAsync(request, branchId.Value, cancellationToken).ConfigureAwait(false);
         if (recordId is null) throw new RetainedProcessorException("visio-registration-unavailable");
         var owner = $"visio-desktop:{Environment.ProcessId}:{Guid.NewGuid():N}";
         var now = DateTimeOffset.UtcNow;
-        var outbox = new SqlOutboxStore(factory);
+        var outbox = new SqlOutboxStore(factory, sourceAdmission: admission);
         var dispatch = await outbox.ClaimVisioDocumentAsync(request, branchId.Value, owner, now, TimeSpan.FromMinutes(12), cancellationToken).ConfigureAwait(false);
         if (dispatch is null)
         {
@@ -125,7 +137,7 @@ public static class VisioDocumentPipelineRunner
                 outcomeCode = complete ? "visio-already-extracted" : jobState.Reason ?? "visio-not-claimed" })).ConfigureAwait(false);
             return complete ? 0 : 1;
         }
-        var job = await new SqlJobClaimStore(factory).ClaimForDispatchAsync(dispatch, owner, now, TimeSpan.FromMinutes(12), cancellationToken).ConfigureAwait(false);
+        var job = await new SqlJobClaimStore(factory, sourceAdmission: admission).ClaimForDispatchAsync(dispatch, owner, now, TimeSpan.FromMinutes(12), cancellationToken).ConfigureAwait(false);
         if (job is null)
         {
             await outbox.ReleaseAsync(dispatch, now, CancellationToken.None).ConfigureAwait(false);

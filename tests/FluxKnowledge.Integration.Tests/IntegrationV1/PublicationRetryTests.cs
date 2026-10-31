@@ -71,7 +71,7 @@ public sealed partial class PublicationRetryTests(NativeSqlServerFixture fixture
         await AssertOldLeaseRefusedAsync(environment, failed);
         var recovered = await ClaimAsync(environment, recordId);
         await AssertOldLeaseRefusedAsync(environment, failed);
-        var transitions = new StageTransitionService(new SqlStageTransitionStore(environment.Factory), new StatusPublisher(), wake, TimeProvider.System);
+        var transitions = new StageTransitionService(new SqlStageTransitionStore(environment.Factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory)), new StatusPublisher(), wake, TimeProvider.System);
         await new PublishStageWorker(environment.Store, environment.Store, environment.Builder, transitions, TimeProvider.System)
             .ExecuteAsync(recovered, CancellationToken.None);
         await using (var db = await environment.Factory.CreateDbContextAsync())
@@ -265,7 +265,7 @@ public sealed partial class PublicationRetryTests(NativeSqlServerFixture fixture
         var winner = Assert.Single(outcomes, value => value.Receipt is not null);
         Assert.Single(outcomes, value => value.Error is not null);
         var work = await ClaimAsync(environment, recordId);
-        await new SqlStageTransitionStore(environment.Factory).FailAsync(new(work.DispatchMessage, work.Job, "second-synthetic-failure", "second-details", "test"), CancellationToken.None);
+        await new SqlStageTransitionStore(environment.Factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory)).FailAsync(new(work.DispatchMessage, work.Job, "second-synthetic-failure", "second-details", "test"), CancellationToken.None);
         var before = await SnapshotAsync(environment, failed.Job.JobId.Value);
         var replay = await service.CommitAsync(command, previews[winner.Index].ConfirmationId, "concurrent-" + winner.Index, "test", CancellationToken.None);
         Assert.True(replay.WasReplay);
@@ -354,7 +354,7 @@ public sealed partial class PublicationRetryTests(NativeSqlServerFixture fixture
         await service.CommitAsync(command, preview.ConfirmationId, "stamp-recovery", "test", CancellationToken.None);
         var work = await ClaimAsync(environment, recordId);
         var publisher = new ChangingSnapshotPublisher(environment);
-        var transitions = new StageTransitionService(new SqlStageTransitionStore(environment.Factory), new StatusPublisher(), new WakeSignal(), TimeProvider.System);
+        var transitions = new StageTransitionService(new SqlStageTransitionStore(environment.Factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory)), new StatusPublisher(), new WakeSignal(), TimeProvider.System);
         await new PublishStageWorker(environment.Store, environment.Store, publisher, transitions, TimeProvider.System).ExecuteAsync(work, CancellationToken.None);
         Assert.Equal(2, publisher.Placements);
         await using var verification = await environment.Factory.CreateDbContextAsync();
@@ -428,18 +428,18 @@ public sealed partial class PublicationRetryTests(NativeSqlServerFixture fixture
             await db.OutboxMessages.Where(value => value.PipelineRecordId != recordId && value.Stage == (int)PipelineStage.Publish)
                 .ExecuteUpdateAsync(set => set.SetProperty(value => value.DispatchedAtUtc, DateTimeOffset.UtcNow));
         var work = await ClaimAsync(environment, recordId);
-        await new SqlStageTransitionStore(environment.Factory).FailAsync(new(work.DispatchMessage, work.Job,
+        await new SqlStageTransitionStore(environment.Factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory)).FailAsync(new(work.DispatchMessage, work.Job,
             "synthetic-publish-timeout", "synthetic-error-details", "test"), CancellationToken.None);
         return work;
     }
 
     private static async Task<StageWorkItem> ClaimAsync(SqlToUsearchRebuildTests.PipelineEnvironment environment, Guid recordId)
     {
-        var dispatch = await new SqlOutboxStore(environment.Factory).ClaimNextDueAsync("recovery-dispatcher", DateTimeOffset.UtcNow.AddSeconds(1),
+        var dispatch = await new SqlOutboxStore(environment.Factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory)).ClaimNextDueAsync("recovery-dispatcher", DateTimeOffset.UtcNow.AddSeconds(1),
             TimeSpan.FromMinutes(2), [PipelineOperations.Publish], CancellationToken.None);
         Assert.NotNull(dispatch);
         Assert.Equal(recordId, dispatch.PipelineRecordId.Value);
-        var job = await new SqlJobClaimStore(environment.Factory).ClaimForDispatchAsync(dispatch, "recovery-worker", DateTimeOffset.UtcNow.AddSeconds(1),
+        var job = await new SqlJobClaimStore(environment.Factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory)).ClaimForDispatchAsync(dispatch, "recovery-worker", DateTimeOffset.UtcNow.AddSeconds(1),
             TimeSpan.FromMinutes(2), CancellationToken.None);
         Assert.NotNull(job);
         return new(dispatch, job);
@@ -447,13 +447,13 @@ public sealed partial class PublicationRetryTests(NativeSqlServerFixture fixture
 
     private static async Task AssertOldLeaseRefusedAsync(SqlToUsearchRebuildTests.PipelineEnvironment environment, StageWorkItem old)
     {
-        var store = new SqlStageTransitionStore(environment.Factory);
+        var store = new SqlStageTransitionStore(environment.Factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory));
         await Assert.ThrowsAsync<InvalidOperationException>(() => store.FailAsync(new(old.DispatchMessage, old.Job,
             "obsolete-failure", "obsolete-details", "test"), CancellationToken.None).AsTask());
         await Assert.ThrowsAsync<InvalidOperationException>(() => store.TransitionAsync(new(old.DispatchMessage, old.Job,
             new StageArtifact(Guid.NewGuid(), PipelineStage.Publish, new string('a', 64), "text/plain", "obsolete", DateTimeOffset.UtcNow),
             null, null, "test"), CancellationToken.None).AsTask());
-        await Assert.ThrowsAsync<InvalidOperationException>(() => new SqlOutboxStore(environment.Factory)
+        await Assert.ThrowsAsync<InvalidOperationException>(() => new SqlOutboxStore(environment.Factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory))
             .ReleaseAsync(old.DispatchMessage, DateTimeOffset.UtcNow.AddDays(1), CancellationToken.None).AsTask());
     }
 

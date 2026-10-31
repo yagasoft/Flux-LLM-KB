@@ -77,7 +77,7 @@ public sealed class RepositoryCoverageIntegrationTests(NativeSqlServerFixture fi
         using var codeReader = new SqlRetainedSourceReader(environment.Factory, environment.ArtifactRoot);
         var activation = new RetainedProcessorActivationService(
             new SourceCapabilityService(new SqlSourceActivityStore(environment.Factory, clock), new LocalSourceCapabilityHandlerRegistry([new RetainedCsharpCodeCapabilityHandler()])),
-            new SqlRetainedProcessorBranchStore(environment.Factory, clock), retainedReader,
+            new SqlRetainedProcessorBranchStore(environment.Factory, clock, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory)), retainedReader,
             new ZipArchiveRetainedProcessor(new SqlRetainedArtifactWriter(environment.Factory, environment.ArtifactRoot)),
             new RetainedProcessorOptions { CsharpCodeEnabled = true, ArchiveZipExpandEnabled = false }, clock,
             csharpProcessor: new RetainedCsharpCodeProcessor(codeReader, new LocalPrivateContentDisclosure()));
@@ -200,9 +200,16 @@ public sealed class RepositoryCoverageIntegrationTests(NativeSqlServerFixture fi
         var claim = Assert.IsType<ClaimedSourceScan>(await store.ClaimNextReleasedAsync("coverage-worker", clock.Now, TimeSpan.FromMinutes(10), default));
         using var artifacts = new ContentAddressedSourceArtifactStore(environment.ArtifactRoot);
         var worker = new SourceScanWorker(new LocalSourceEnumerator(), store, artifacts, new SqlSourceActivityStore(environment.Factory, clock),
-            new RetainedTextActivityPlanner(new SqlRetainedTextRegistrationStore(environment.Factory, clock)));
+            new RetainedTextActivityPlanner(new SqlRetainedTextRegistrationStore(environment.Factory, clock, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory))));
         var result = await worker.ScanAsync(claim.SourceRoot, claim.ScanRequest, default);
-        await store.CompleteAsync(claim, result, null, default); await environment.PumpAsync(); return claim.SourceRoot.Id.Value;
+        await store.CompleteAsync(claim, result, null, default);
+        // The host reconciles advisory removal debt independently, then reoffers
+        // retained activities that were fenced while the watcher scope was pending.
+        await new SqlSourceRemovalReconciler(environment.Factory, clock, new WindowsSourceObservationReader()).ReconcileAsync(default);
+        await new SqlRetainedTextRegistrationStore(environment.Factory, clock,
+            sourceAdmission: new FixtureSourceAdmission(environment.Factory)).OfferUnlinkedInProcessActivitiesAsync(default);
+        await environment.PumpAsync();
+        return claim.SourceRoot.Id.Value;
     }
 
     [NativeSqlServerTheory]
@@ -256,7 +263,7 @@ public sealed class RepositoryCoverageIntegrationTests(NativeSqlServerFixture fi
             var concurrent = await Task.WhenAll(Converge(), Converge());
             Assert.All(concurrent, value => Assert.Equal(first.Id, value.Value));
             var worker = new SourceScanWorker(new LocalSourceEnumerator(), store, artifacts, new SqlSourceActivityStore(environment.Factory, clock),
-                new RetainedTextActivityPlanner(new SqlRetainedTextRegistrationStore(environment.Factory, clock)));
+                new RetainedTextActivityPlanner(new SqlRetainedTextRegistrationStore(environment.Factory, clock, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory))));
             var result = await worker.ScanAsync(claim.SourceRoot, claim.ScanRequest, default);
             await store.CompleteAsync(claim, result, null, default);
             await using var verify = await environment.Factory.CreateDbContextAsync();
@@ -380,7 +387,7 @@ public sealed class RepositoryCoverageIntegrationTests(NativeSqlServerFixture fi
                     State = (int)SourceActivityState.Pending, CreatedAtUtc = clock.Now, UpdatedAtUtc = clock.Now });
                 await setup.SaveChangesAsync();
             }
-            Assert.False(await new SqlRetainedTextRegistrationStore(factory, clock).RegisterAsync(activity, default));
+            Assert.False(await new SqlRetainedTextRegistrationStore(factory, clock, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory)).RegisterAsync(activity, default));
             await using var verify = await factory.CreateDbContextAsync();
             Assert.Null((await verify.SourceActivities.FindAsync(activity.Id.Value))!.ResultingPipelineRecordId);
             Assert.False(await verify.PipelineRecords.AnyAsync(value => value.SourceRevisionId == revision.Value));

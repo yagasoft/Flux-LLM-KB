@@ -52,8 +52,8 @@ public sealed class CorpusRebuildPreparationTests(NativeSqlServerFixture fixture
         Assert.False(record.CompletionCriteriaMet);
         Assert.Equal((int)PipelineStage.Embed, record.CurrentStage);
         Assert.Equal(1, (await context.CorpusRebuildWorkItems.SingleAsync()).State);
-        Assert.Equal(input.EmbeddingJobId, (await new SqlJobClaimStore(environment.Factory, environment.DeploymentHold).ClaimForDispatchAsync(
-            (await new SqlOutboxStore(environment.Factory, environment.DeploymentHold).ClaimNextDueAsync("rebuild-dispatch", DateTimeOffset.UtcNow,
+        Assert.Equal(input.EmbeddingJobId, (await new SqlJobClaimStore(environment.Factory, environment.DeploymentHold, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory)).ClaimForDispatchAsync(
+            (await new SqlOutboxStore(environment.Factory, environment.DeploymentHold, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory)).ClaimNextDueAsync("rebuild-dispatch", DateTimeOffset.UtcNow,
                 TimeSpan.FromMinutes(2), [PipelineOperations.Embed], CancellationToken.None))!,
             "rebuild-worker", DateTimeOffset.UtcNow, TimeSpan.FromMinutes(2), CancellationToken.None))!.JobId.Value);
     }
@@ -109,15 +109,15 @@ public sealed class CorpusRebuildPreparationTests(NativeSqlServerFixture fixture
         var input = Assert.Single(plan.Inputs);
         await store.PrepareAsync(plan.OperationId, input.PipelineRecordId, builder, CancellationToken.None);
         var now = DateTimeOffset.UtcNow;
-        var dispatch = (await new SqlOutboxStore(environment.Factory, environment.DeploymentHold).ClaimNextDueAsync("maintenance", now,
+        var dispatch = (await new SqlOutboxStore(environment.Factory, environment.DeploymentHold, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory)).ClaimNextDueAsync("maintenance", now,
             TimeSpan.FromMinutes(2), [PipelineOperations.Embed], CancellationToken.None))!;
-        var job = (await new SqlJobClaimStore(environment.Factory, environment.DeploymentHold).ClaimForDispatchAsync(dispatch, "maintenance", now,
+        var job = (await new SqlJobClaimStore(environment.Factory, environment.DeploymentHold, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory)).ClaimForDispatchAsync(dispatch, "maintenance", now,
             TimeSpan.FromMinutes(2), CancellationToken.None))!;
         await using var context = environment.Factory.CreateDbContext();
         await context.Artifacts.Where(value => value.Id == input.CanonicalArtifactId)
             .ExecuteUpdateAsync(setters => setters.SetProperty(value => value.DocumentMetadataJson, "{}"));
         Assert.Equal("corpus-rebuild-input-changed", (await Assert.ThrowsAsync<CorpusRebuildRefusalException>(async () =>
-            await new SqlEmbeddingCheckpointStore(environment.Factory, TimeProvider.System).ReadNextAsync(new(dispatch, job),
+            await new SqlEmbeddingCheckpointStore(environment.Factory, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory)).ReadNextAsync(new(dispatch, job),
                 plan.Profile, CancellationToken.None))).Message);
         Assert.Empty(await context.IndexGenerations.ToArrayAsync());
         Assert.Empty(await context.Vectors.ToArrayAsync());
@@ -133,8 +133,8 @@ public sealed class CorpusRebuildPreparationTests(NativeSqlServerFixture fixture
         await store.PrepareAsync(plan.OperationId, input.PipelineRecordId, builder, CancellationToken.None);
         await environment.AddAndPumpAtPathAsync("Ordinary intake waits.", "waiting.txt", pump: false);
         var hold = new MutableHold();
-        var outbox = new SqlOutboxStore(environment.Factory, hold);
-        var jobs = new SqlJobClaimStore(environment.Factory, hold);
+        var outbox = new SqlOutboxStore(environment.Factory, hold, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory));
+        var jobs = new SqlJobClaimStore(environment.Factory, hold, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory));
         async Task AssertBlockedAsync()
         {
             Assert.Null(await outbox.ClaimNextDueAsync("held-dispatcher", DateTimeOffset.UtcNow, TimeSpan.FromMinutes(2),
@@ -328,13 +328,13 @@ public sealed class CorpusRebuildPreparationTests(NativeSqlServerFixture fixture
         var input = plan.Inputs.Single(value => value.PipelineRecordId == recordId);
         await store.PrepareAsync(plan.OperationId, recordId, builder, CancellationToken.None);
         await environment.AddAndPumpAtPathAsync("New ingress must wait during rebuild.", "waiting.txt", pump: false);
-        var outbox = new SqlOutboxStore(environment.Factory, environment.DeploymentHold);
+        var outbox = new SqlOutboxStore(environment.Factory, environment.DeploymentHold, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory));
         var now = DateTimeOffset.UtcNow;
         Assert.Null(await outbox.ClaimNextDueAsync("ordinary", now, TimeSpan.FromMinutes(2), [PipelineOperations.ExtractUtf8], CancellationToken.None));
         var dispatch = await outbox.ClaimNextDueAsync("maintenance", now, TimeSpan.FromMinutes(2), [PipelineOperations.Embed], CancellationToken.None);
         Assert.NotNull(dispatch);
         Assert.Equal(input.DispatchMessageId, dispatch.DispatchMessageId.Value);
-        var job = await new SqlJobClaimStore(environment.Factory, environment.DeploymentHold).ClaimForDispatchAsync(dispatch,
+        var job = await new SqlJobClaimStore(environment.Factory, environment.DeploymentHold, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory)).ClaimForDispatchAsync(dispatch,
             "maintenance", now, TimeSpan.FromMinutes(2), CancellationToken.None);
         Assert.NotNull(job);
         Assert.Equal(input.EmbeddingJobId, job.JobId.Value);

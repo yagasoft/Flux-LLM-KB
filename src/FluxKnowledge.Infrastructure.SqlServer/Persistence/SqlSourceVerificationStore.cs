@@ -155,8 +155,9 @@ public sealed partial class SqlSourceVerificationStore(IDbContextFactory<FluxKno
         if (await db.SourceScanRequests.AnyAsync(x => x.RequestKind != RequestKind && x.IsReleased && x.SourceRoot.State == (int)SourceRootState.Enabled &&
             (x.State == (int)SourceScanRequestState.Released || x.State == (int)SourceScanRequestState.Running), ct).ConfigureAwait(false) ||
             await db.SourcePendingChanges.AnyAsync(pending =>
+                (pending.ReasonFlags & ~SourcePendingReasons.RemovalPending) != 0 &&
                 (pending.NotBeforeUtc == null || pending.NotBeforeUtc <= now ||
-                 pending.ReasonFlags != SourcePendingReasons.NamespaceMetadata && (pending.RetryGeneration == null || pending.RetryGeneration != pending.Generation)) &&
+                 (pending.ReasonFlags & ~SourcePendingReasons.RemovalPending) != SourcePendingReasons.NamespaceMetadata && (pending.RetryGeneration == null || pending.RetryGeneration != pending.Generation)) &&
                 db.SourceRootConfigurations.Any(other => other.Id == pending.SourceRootId && other.State == (int)SourceRootState.Enabled), ct).ConfigureAwait(false))
         { run.Reason = "foreground-work"; return false; }
         var requestId = Guid.NewGuid();

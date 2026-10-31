@@ -45,6 +45,9 @@ public sealed class IncrementalProjectionBridgeTests(NativeSqlServerFixture fixt
                 Assert.True((await db.IndexRecoveryAudit.SingleAsync()).IsValid);
                 await RunStageAsync(true);
                 foreach (var file in nativeFiles) Assert.Equal(file.Value, Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(file.Key))));
+                // Offline conversion deliberately starts on the historical schema. Normal workers
+                // resume only after the current runtime's remaining schema prerequisites exist.
+                await migrator.MigrateAsync();
                 await environment.AddAndPumpAsync("A normal publication follows the controlled conversion.");
                 await SqlToUsearchRebuildTests.AssertSegmentedOracleAsync(environment);
 

@@ -69,8 +69,8 @@ public sealed partial class GpuSchedulerServiceTests(NativeSqlServerFixture fixt
         services.AddLogging();
         services.AddScoped<IGpuSchedulerStore>(_ => new SqlGpuSchedulerStore(factory,
             timeProvider: TimeProvider.System, afterAdmissionCommitted: AfterAdmission,
-            interactiveExecutionTimeout: TimeSpan.FromSeconds(20)));
-        services.AddScoped<IGpuExecutorDispatchStore>(_ => new SqlGpuSchedulerStore(factory));
+            interactiveExecutionTimeout: TimeSpan.FromSeconds(20), sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory)));
+        services.AddScoped<IGpuExecutorDispatchStore>(_ => new SqlGpuSchedulerStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory)));
         services.AddSingleton<IGpuAdmissionGate, AdmittingInteractiveGate>();
         services.AddSingleton<IStatusEventPublisher, NullPublisher>();
         services.AddSingleton<TimeProvider>(TimeProvider.System);
@@ -88,7 +88,7 @@ public sealed partial class GpuSchedulerServiceTests(NativeSqlServerFixture fixt
         var scheduler = provider.GetRequiredService<GpuSchedulerService>();
         var dispatcher = provider.GetRequiredService<GpuExecutorDispatchRecoveryService>();
         var signal = provider.GetRequiredService<IGpuSchedulerWakeSignal>();
-        var store = new SqlGpuSchedulerStore(factory, interactiveExecutionTimeout: TimeSpan.FromSeconds(20));
+        var store = new SqlGpuSchedulerStore(factory, interactiveExecutionTimeout: TimeSpan.FromSeconds(20), sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         GpuInteractiveHandoffRequest Request()
         {
             var now = DateTimeOffset.UtcNow;
@@ -488,7 +488,7 @@ public sealed partial class GpuSchedulerServiceTests(NativeSqlServerFixture fixt
         var gate = new CountingDeferredGate(TimeSpan.FromMinutes(3));
         var services = new ServiceCollection();
         services.AddSingleton(factory);
-        services.AddScoped<IGpuSchedulerStore>(_ => new SqlGpuSchedulerStore(factory, timeProvider: clock));
+        services.AddScoped<IGpuSchedulerStore>(_ => new SqlGpuSchedulerStore(factory, timeProvider: clock, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory)));
         services.AddSingleton<IGpuAdmissionGate>(gate);
         services.AddSingleton<IStatusEventPublisher>(publisher);
         services.AddSingleton<IGpuSchedulerWakeSignal>(signal);
@@ -565,7 +565,7 @@ public sealed partial class GpuSchedulerServiceTests(NativeSqlServerFixture fixt
         var publisher = new RecordingStatusPublisher();
         var services = new ServiceCollection();
         services.AddSingleton(factory);
-        services.AddScoped<IGpuSchedulerStore>(_ => new SqlGpuSchedulerStore(factory, timeProvider: clock));
+        services.AddScoped<IGpuSchedulerStore>(_ => new SqlGpuSchedulerStore(factory, timeProvider: clock, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory)));
         services.AddSingleton<IGpuAdmissionGate, NoGpuAdmissionGate>();
         services.AddSingleton<IStatusEventPublisher>(publisher);
         services.AddSingleton<IGpuSchedulerWakeSignal>(signal);
@@ -659,7 +659,7 @@ public sealed partial class GpuSchedulerServiceTests(NativeSqlServerFixture fixt
             await Assert.ThrowsAsync<InvalidOperationException>(async () =>
                 await SqlGpuAdmissionTests.AdmitAsync(factory, SqlGpuAdmissionTests.Admit("slot-a")));
 
-            var reconciliationStore = new SqlGpuSchedulerStore(factory, timeProvider: clock);
+            var reconciliationStore = new SqlGpuSchedulerStore(factory, timeProvider: clock, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
             var handle = new GpuExecutorBatchHandle(
                 batch.Id, "slot-a", "test-executor", batch.AdmissionGeneration, batch.Id);
             var evidenceOperationId = Guid.NewGuid();
@@ -722,7 +722,7 @@ public sealed partial class GpuSchedulerServiceTests(NativeSqlServerFixture fixt
         var fallbackInterval = TimeSpan.FromMinutes(1);
         var diagnosticAge = TimeSpan.FromMinutes(5);
         var clock = new ManualTimeProvider(now, () => 0);
-        var setupStore = new SqlGpuSchedulerStore(factory, timeProvider: clock);
+        var setupStore = new SqlGpuSchedulerStore(factory, timeProvider: clock, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         Assert.True((await setupStore.AcknowledgeAsync(
             new GpuExecutorAcknowledgement(Guid.NewGuid(), handle),
             CancellationToken.None)).Accepted);
@@ -740,7 +740,7 @@ public sealed partial class GpuSchedulerServiceTests(NativeSqlServerFixture fixt
         var publisher = new RecordingStatusPublisher();
         var services = new ServiceCollection();
         services.AddSingleton(factory);
-        services.AddScoped<IGpuSchedulerStore>(_ => new SqlGpuSchedulerStore(factory, timeProvider: clock));
+        services.AddScoped<IGpuSchedulerStore>(_ => new SqlGpuSchedulerStore(factory, timeProvider: clock, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory)));
         services.AddSingleton<IGpuAdmissionGate, NoGpuAdmissionGate>();
         services.AddSingleton<IStatusEventPublisher>(publisher);
         services.AddSingleton<IGpuSchedulerWakeSignal>(signal);

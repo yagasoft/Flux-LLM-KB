@@ -29,16 +29,16 @@ public sealed partial class EmbeddingGpuRequestTests
     {
         await using var environment = await SqlToUsearchRebuildTests.PipelineEnvironment.CreateAsync(fixture, OwnedBatchText, embed: false);
         var worker = await ClaimAsync(environment);
-        var previousStore = new SqlEmbeddingCheckpointStore(environment.Factory, TimeProvider.System);
+        var previousStore = new SqlEmbeddingCheckpointStore(environment.Factory, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory));
         var previous = await previousStore.ReadNextAsync(worker, Runtime.Profile, default);
         Assert.Equal(4, previous.Chunks.Count);
         var interrupted = new SqlEmbeddingGpuRequestStore(environment.Factory, new InterruptBeforeGpuHandoff(),
-            new ChannelGpuSchedulerWakeSignal(), Runtime, TimeProvider.System);
+            new ChannelGpuSchedulerWakeSignal(), Runtime, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory));
         await Assert.ThrowsAsync<ResponseLostException>(() => interrupted.QueueAsync(worker, previous, default).AsTask());
         await using var verify = await environment.Factory.CreateDbContextAsync();
         var saved = await verify.EmbeddingGpuRequests.AsNoTracking().SingleAsync();
         Assert.Empty(await verify.GpuMiniTasks.ToArrayAsync());
-        var upgraded = new SqlEmbeddingCheckpointStore(environment.Factory, TimeProvider.System, Runtime);
+        var upgraded = new SqlEmbeddingCheckpointStore(environment.Factory, TimeProvider.System, Runtime, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory));
         var replay = await upgraded.ReadNextAsync(worker, Runtime.Profile, default);
         Assert.Equal(previous.Chunks, replay.Chunks);
         var requests = NewBatchRequests(environment);
@@ -71,11 +71,11 @@ public sealed partial class EmbeddingGpuRequestTests
     {
         await using var environment = await SqlToUsearchRebuildTests.PipelineEnvironment.CreateAsync(fixture, OwnedBatchText, embed: false);
         var worker = await ClaimAsync(environment);
-        var larger = await new SqlEmbeddingCheckpointStore(environment.Factory, TimeProvider.System, Runtime).ReadNextAsync(worker, Runtime.Profile, default);
+        var larger = await new SqlEmbeddingCheckpointStore(environment.Factory, TimeProvider.System, Runtime, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory)).ReadNextAsync(worker, Runtime.Profile, default);
         Assert.Equal(16, larger.Chunks.Count);
         var previous = larger with { Chunks = larger.Chunks.Take(4).ToArray() };
         var interrupted = new SqlEmbeddingGpuRequestStore(environment.Factory, new InterruptBeforeGpuHandoff(),
-            new ChannelGpuSchedulerWakeSignal(), Runtime, TimeProvider.System);
+            new ChannelGpuSchedulerWakeSignal(), Runtime, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory));
         await Assert.ThrowsAsync<ResponseLostException>(() => interrupted.QueueAsync(worker, previous, default).AsTask());
         var refused = await Assert.ThrowsAsync<InvalidOperationException>(() => NewBatchRequests(environment).QueueAsync(worker, larger, default).AsTask());
         Assert.Equal("embedding-gpu-request-conflict", refused.Message);
@@ -89,9 +89,9 @@ public sealed partial class EmbeddingGpuRequestTests
     {
         await using var environment = await SqlToUsearchRebuildTests.PipelineEnvironment.CreateAsync(fixture, OwnedBatchText, embed: false);
         var worker = await ClaimAsync(environment);
-        var previous = await new SqlEmbeddingCheckpointStore(environment.Factory, TimeProvider.System).ReadNextAsync(worker, Runtime.Profile, default);
+        var previous = await new SqlEmbeddingCheckpointStore(environment.Factory, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory)).ReadNextAsync(worker, Runtime.Profile, default);
         var requests = NewBatchRequests(environment);
-        var upgraded = new SqlEmbeddingCheckpointStore(environment.Factory, TimeProvider.System, Runtime);
+        var upgraded = new SqlEmbeddingCheckpointStore(environment.Factory, TimeProvider.System, Runtime, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory));
         for (var attempt = 0; attempt < 3; attempt++)
         {
             if (attempt > 0)
@@ -122,7 +122,7 @@ public sealed partial class EmbeddingGpuRequestTests
     {
         await using var environment = await SqlToUsearchRebuildTests.PipelineEnvironment.CreateAsync(fixture, OwnedBatchText, embed: false);
         var worker = await ClaimAsync(environment);
-        var batch = await new SqlEmbeddingCheckpointStore(environment.Factory, TimeProvider.System, Runtime).ReadNextAsync(worker, Runtime.Profile, default);
+        var batch = await new SqlEmbeddingCheckpointStore(environment.Factory, TimeProvider.System, Runtime, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory)).ReadNextAsync(worker, Runtime.Profile, default);
         await NewBatchRequests(environment).QueueAsync(worker, batch, default);
         await using var verify = await environment.Factory.CreateDbContextAsync();
         var persisted = await verify.EmbeddingGpuRequests.AsNoTracking().SingleAsync();
@@ -153,9 +153,9 @@ public sealed partial class EmbeddingGpuRequestTests
     {
         await using var environment = await SqlToUsearchRebuildTests.PipelineEnvironment.CreateAsync(fixture, OwnedBatchText, embed: false);
         var worker = await ClaimAsync(environment);
-        var first = await new SqlEmbeddingCheckpointStore(environment.Factory, TimeProvider.System).ReadNextAsync(worker, Runtime.Profile, default);
+        var first = await new SqlEmbeddingCheckpointStore(environment.Factory, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory)).ReadNextAsync(worker, Runtime.Profile, default);
         var interrupted = new SqlEmbeddingGpuRequestStore(environment.Factory, new InterruptBeforeGpuHandoff(),
-            new ChannelGpuSchedulerWakeSignal(), Runtime, TimeProvider.System);
+            new ChannelGpuSchedulerWakeSignal(), Runtime, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory));
         await Assert.ThrowsAsync<ResponseLostException>(() => interrupted.QueueAsync(worker, first, default).AsTask());
         await using (var change = await environment.Factory.CreateDbContextAsync())
         {
@@ -172,7 +172,7 @@ public sealed partial class EmbeddingGpuRequestTests
             await change.SaveChangesAsync();
         }
         var refused = await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            new SqlEmbeddingCheckpointStore(environment.Factory, TimeProvider.System, Runtime).ReadNextAsync(worker, Runtime.Profile, default).AsTask());
+            new SqlEmbeddingCheckpointStore(environment.Factory, TimeProvider.System, Runtime, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory)).ReadNextAsync(worker, Runtime.Profile, default).AsTask());
         Assert.Equal("embedding-gpu-request-conflict", refused.Message);
         await using var verify = await environment.Factory.CreateDbContextAsync();
         Assert.Equal(competing ? 2 : 1, await verify.EmbeddingGpuRequests.CountAsync());
@@ -184,7 +184,7 @@ public sealed partial class EmbeddingGpuRequestTests
     {
         await using var environment = await SqlToUsearchRebuildTests.PipelineEnvironment.CreateAsync(fixture, OwnedBatchText, embed: false);
         var worker = await ClaimAsync(environment);
-        var larger = await new SqlEmbeddingCheckpointStore(environment.Factory, TimeProvider.System, Runtime).ReadNextAsync(worker, Runtime.Profile, default);
+        var larger = await new SqlEmbeddingCheckpointStore(environment.Factory, TimeProvider.System, Runtime, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory)).ReadNextAsync(worker, Runtime.Profile, default);
         var requests = NewBatchRequests(environment);
         await requests.QueueAsync(worker, larger with { Chunks = larger.Chunks.Take(4).ToArray() }, default);
         await ExecutePendingBatchAsync(environment, requests, modelFailure: "dispose");
@@ -207,7 +207,7 @@ public sealed partial class EmbeddingGpuRequestTests
     {
         await using var environment = await SqlToUsearchRebuildTests.PipelineEnvironment.CreateAsync(fixture, OwnedBatchText, embed: false);
         var producer = await ClaimAsync(environment);
-        var selected = await new SqlEmbeddingCheckpointStore(environment.Factory, TimeProvider.System, Runtime)
+        var selected = await new SqlEmbeddingCheckpointStore(environment.Factory, TimeProvider.System, Runtime, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory))
             .ReadNextAsync(producer, Runtime.Profile, default);
         var batch = selected with { Chunks = selected.Chunks.Take(chunkCount).ToArray() };
         var requests = NewBatchRequests(environment);
@@ -215,7 +215,7 @@ public sealed partial class EmbeddingGpuRequestTests
         await using var verify = await environment.Factory.CreateDbContextAsync();
         verify.GpuCapacitySlots.Add(new() { SlotKey = "gpu-0", State = 0, UpdatedAtUtc = DateTimeOffset.UtcNow });
         await verify.SaveChangesAsync();
-        var scheduler = new SqlGpuSchedulerStore(environment.Factory);
+        var scheduler = new SqlGpuSchedulerStore(environment.Factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory));
         await scheduler.RunAdmissionRoundAsync(Guid.NewGuid(), GpuSchedulerWakeReason.WorkReady,
             new(4, 4096, TimeSpan.FromMinutes(1), TimeSpan.FromSeconds(1), TimeSpan.FromMinutes(1)),
             (_, _) => ValueTask.FromResult(new GpuAdmissionDecision(GpuAdmissionDisposition.Admit, "gpu-0", "owner", null, EmbeddingGpuExecutor.Name)), default);
@@ -254,12 +254,12 @@ public sealed partial class EmbeddingGpuRequestTests
     }
 
     private static SqlEmbeddingGpuRequestStore NewBatchRequests(SqlToUsearchRebuildTests.PipelineEnvironment environment) =>
-        new(environment.Factory, new SqlGpuSchedulerStore(environment.Factory), new ChannelGpuSchedulerWakeSignal(), Runtime, TimeProvider.System);
+        new(environment.Factory, new SqlGpuSchedulerStore(environment.Factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory)), new ChannelGpuSchedulerWakeSignal(), Runtime, TimeProvider.System);
 
     private static async Task<BgeGpuInferenceTests.RecordingModels> ExecutePendingBatchAsync(
         SqlToUsearchRebuildTests.PipelineEnvironment environment, SqlEmbeddingGpuRequestStore requests, bool fail = false, string? modelFailure = null)
     {
-        var scheduler = new SqlGpuSchedulerStore(environment.Factory);
+        var scheduler = new SqlGpuSchedulerStore(environment.Factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory));
         await using (var db = await environment.Factory.CreateDbContextAsync())
         {
             if (!await db.GpuCapacitySlots.AnyAsync()) db.GpuCapacitySlots.Add(new() { SlotKey = "gpu-0", State = 0, UpdatedAtUtc = DateTimeOffset.UtcNow });

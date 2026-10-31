@@ -38,7 +38,7 @@ public sealed partial class SqlDocumentOcrHandoffTests(NativeSqlServerFixture fi
             new("synthetic-retrieval", "synthetic-settings", GpuWorkloadKind.Retrieval)]);
         var options = new GpuSchedulerOptions(4, PaddleOcrVlmRuntimeContract.EstimatedDocumentBytes,
             TimeSpan.FromMinutes(1), TimeSpan.FromSeconds(1), TimeSpan.FromMinutes(1), policy);
-        var store = new SqlGpuSchedulerStore(factory, timeProvider: new TurnTestTimeProvider(now));
+        var store = new SqlGpuSchedulerStore(factory, timeProvider: new TurnTestTimeProvider(now), sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         await using (var context = await factory.CreateDbContextAsync())
         {
             context.GpuCapacitySlots.Add(new GpuCapacitySlotEntity { SlotKey = "shared-test-gpu", State = 0, UpdatedAtUtc = now });
@@ -81,7 +81,7 @@ public sealed partial class SqlDocumentOcrHandoffTests(NativeSqlServerFixture fi
             await using (var state = await factory.CreateDbContextAsync())
                 Assert.Equal(i, (await state.GpuSchedulerStates.SingleAsync()).SearchBatchesWhileOcrWaiting);
             await CompleteAsync(admitted.Handle, admitted.Task);
-            store = new SqlGpuSchedulerStore(factory, timeProvider: new TurnTestTimeProvider(now));
+            store = new SqlGpuSchedulerStore(factory, timeProvider: new TurnTestTimeProvider(now), sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         }
         await store.HandoffInteractiveAsync(Request(), CancellationToken.None);
         var owed = await AdmitAsync(Guid.NewGuid());
@@ -187,7 +187,7 @@ public sealed partial class SqlDocumentOcrHandoffTests(NativeSqlServerFixture fi
         var executor = new RecordingDocumentOcrExecutor(executionResult);
         var signal = new RecordingOutboxWakeSignal();
         var services = new ServiceCollection();
-        services.AddScoped(_ => new SqlDocumentOcrStore(factory, CreateCoordinator(factory)));
+        services.AddScoped(_ => new SqlDocumentOcrStore(factory, CreateCoordinator(factory), sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory)));
         services.AddScoped<IGpuExecutorLifecycleSink>(_ => CreateLifecycle(factory));
         services.AddScoped<IRetainedSourceReader>(_ => new FixedRetainedSourceReader(retainedSourceRevisionId, contentHash));
         services.AddSingleton<IDocumentOcrExecutor>(executor);
@@ -227,7 +227,7 @@ public sealed partial class SqlDocumentOcrHandoffTests(NativeSqlServerFixture fi
         var executor = new BlockingDocumentOcrExecutor();
         var signal = new RecordingOutboxWakeSignal();
         var services = new ServiceCollection();
-        services.AddScoped(_ => new SqlDocumentOcrStore(factory, CreateCoordinator(factory)));
+        services.AddScoped(_ => new SqlDocumentOcrStore(factory, CreateCoordinator(factory), sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory)));
         services.AddScoped<IGpuExecutorLifecycleSink>(_ => CreateLifecycle(factory));
         services.AddScoped<IRetainedSourceReader>(_ => new FixedRetainedSourceReader(retainedSourceRevisionId, contentHash));
         services.AddSingleton<IDocumentOcrExecutor>(executor);
@@ -466,7 +466,7 @@ public sealed partial class SqlDocumentOcrHandoffTests(NativeSqlServerFixture fi
 
     private SqlDocumentOcrStore CreateStore(IDbContextFactory<FluxKnowledgeDbContext> factory) => new(
         factory,
-        CreateCoordinator(factory));
+        CreateCoordinator(factory), sourceAdmission: new FixtureSourceAdmission(factory));
 
     private ServiceProvider CreateLocalExecutorProvider(
         IDbContextFactory<FluxKnowledgeDbContext> factory,
@@ -479,7 +479,7 @@ public sealed partial class SqlDocumentOcrHandoffTests(NativeSqlServerFixture fi
         Func<SqlDocumentOcrStore>? storeFactory = null)
     {
         var services = new ServiceCollection();
-        services.AddScoped(_ => storeFactory?.Invoke() ?? new SqlDocumentOcrStore(factory, CreateCoordinator(factory)));
+        services.AddScoped(_ => storeFactory?.Invoke() ?? new SqlDocumentOcrStore(factory, CreateCoordinator(factory), sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory)));
         services.AddScoped<IGpuExecutorLifecycleSink>(_ => CreateLifecycle(factory));
         services.AddScoped<IRetainedSourceReader>(_ => new FixedRetainedSourceReader(retainedSourceRevisionId, contentHash));
         services.AddSingleton(executor);
@@ -506,10 +506,10 @@ public sealed partial class SqlDocumentOcrHandoffTests(NativeSqlServerFixture fi
     }
 
     private GpuExecutorLifecycleCoordinator CreateLifecycle(IDbContextFactory<FluxKnowledgeDbContext> factory) =>
-        new(new SqlGpuSchedulerStore(factory), CreateCoordinator(factory));
+        new(new SqlGpuSchedulerStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory)), CreateCoordinator(factory));
 
     private static GpuSchedulerCoordinator CreateCoordinator(IDbContextFactory<FluxKnowledgeDbContext> factory) => new(
-        new SqlGpuSchedulerStore(factory),
+        new SqlGpuSchedulerStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory)),
         new NoGpuAdmissionGate(),
         new NullStatusPublisher(),
         new NullWakeSignal(),
@@ -538,7 +538,7 @@ public sealed partial class SqlDocumentOcrHandoffTests(NativeSqlServerFixture fi
             capacityDeferralCap: TimeSpan.FromMinutes(5),
             fallbackInterval: TimeSpan.FromMinutes(1),
             unresponsiveDiagnosticAge: TimeSpan.FromMinutes(10));
-        var admitted = await new SqlGpuSchedulerStore(factory).RunAdmissionRoundAsync(
+        var admitted = await new SqlGpuSchedulerStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory)).RunAdmissionRoundAsync(
             GpuSchedulerWakeReason.WorkReady,
             options,
             (_, _) => ValueTask.FromResult(new GpuAdmissionDecision(
@@ -653,7 +653,7 @@ public sealed partial class SqlDocumentOcrHandoffTests(NativeSqlServerFixture fi
         }
 
         var factory = SqlTestData.CreateFactory(_fixture);
-        var claim = await new SqlJobClaimStore(factory).ClaimNextDueAsync(
+        var claim = await new SqlJobClaimStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory)).ClaimNextDueAsync(
             "document-ocr-worker",
             now,
             TimeSpan.FromMinutes(5),

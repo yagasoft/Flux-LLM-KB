@@ -1,4 +1,5 @@
 using FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
+using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Domain.Sources;
 using Microsoft.EntityFrameworkCore;
 
@@ -28,6 +29,7 @@ public sealed partial class SqlSourceIncrementalCoordinator
         SourceRootScanStateEntity state, CancellationToken ct)
     {
         var now = time.GetUtcNow();
+        await SqlSourcePendingWork.CoalesceExistingAsync(db, state, now, ct).ConfigureAwait(false);
         var profile = _qualifications.GetProfile(SqlSourceScanStore.ParseAdmissionIdentityFingerprint(root.HealthEvidenceJson), root.CanonicalPath);
         if (state.SealProfileId != profile)
         {
@@ -44,13 +46,15 @@ public sealed partial class SqlSourceIncrementalCoordinator
             .OrderBy(x => x.NextForcedCheckAtUtc).ThenBy(x => x.Id).Take(128).ToArrayAsync(ct).ConfigureAwait(false);
         if (due.Length == 0) return;
         var pending = await db.SourcePendingChanges.Where(x => x.SourceRootId == root.Id).ToListAsync(ct).ConfigureAwait(false);
+        if (SqlSourcePendingWork.HasFullRecapture(pending)) return;
+        if (pending.Count + due.Count(entry => pending.All(x => x.PathFingerprint != entry.PathFingerprint)) > SqlSourcePendingWork.MaximumPaths)
+        { SqlSourcePendingWork.Coalesce(db, state, pending, now); return; }
         var generation = ++state.Generation;
         foreach (var entry in due)
         {
             var item = pending.SingleOrDefault(x => x.PathFingerprint == entry.PathFingerprint);
             if (item is null)
             {
-                if (pending.Count >= 10000) { SqlSourceIncrementalState.InvalidateCoverage(state, "pending-path-overflow", state.CoveredUsn); break; }
                 item = new() { Id = Guid.NewGuid(), SourceRootId = root.Id, RelativePath = entry.RelativePath,
                     PathFingerprint = entry.PathFingerprint, LastContentUsn = 0 };
                 pending.Add(item); db.SourcePendingChanges.Add(item);

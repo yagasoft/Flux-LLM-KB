@@ -186,7 +186,7 @@ public sealed class OperatorActionCapabilitySchemaTests(NativeSqlServerFixture f
         var blockedRowVersion = new byte[8];
         var requestFingerprint = CanonicalRequestFingerprint(actionId, blockedRowVersion);
         await SeedActionAsync(actionId);
-        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System);
+        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(_fixture.ConnectionString)));
 
         var created = await store.SetOperatorActionIgnoreAsync(
             new OperatorActionIgnoreCommand(actionId, operationId, requestFingerprint, blockedRowVersion, IsIgnored: true),
@@ -216,7 +216,7 @@ public sealed class OperatorActionCapabilitySchemaTests(NativeSqlServerFixture f
         var staleRowVersion = new byte[] { 0, 0, 0, 0, 0, 0, 0, 1 };
         var requestFingerprint = CanonicalRequestFingerprint(actionId, blockedRowVersion);
         await SeedActionAsync(actionId);
-        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System);
+        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(_fixture.ConnectionString)));
 
         var stale = await Assert.ThrowsAsync<OperatorActionRejectedException>(async () =>
             await store.SetOperatorActionIgnoreAsync(
@@ -242,7 +242,7 @@ public sealed class OperatorActionCapabilitySchemaTests(NativeSqlServerFixture f
         var blockedRowVersion = new byte[8];
         var requestFingerprint = CanonicalRequestFingerprint(actionId, blockedRowVersion);
         await SeedActionAsync(actionId);
-        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System);
+        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(_fixture.ConnectionString)));
 
         await store.SetOperatorActionIgnoreAsync(
             new OperatorActionIgnoreCommand(actionId, operationId, requestFingerprint, blockedRowVersion, IsIgnored: true),
@@ -266,7 +266,7 @@ public sealed class OperatorActionCapabilitySchemaTests(NativeSqlServerFixture f
         await SeedActionAsync(secondActionId);
         var race = new OperationInsertRaceInterceptor();
         var saveFailures = new SaveFailureObserver();
-        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString, race, saveFailures), TimeProvider.System);
+        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString, race, saveFailures), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(_fixture.ConnectionString, race, saveFailures)));
         await using (var before = CreateContext())
         {
             Assert.Empty(await before.OperatorActionOperationLedger
@@ -302,7 +302,7 @@ public sealed class OperatorActionCapabilitySchemaTests(NativeSqlServerFixture f
         var blockedRowVersion = new byte[8];
         var requestFingerprint = CanonicalRequestFingerprint(actionId, blockedRowVersion);
         await SeedActionAsync(actionId);
-        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System);
+        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(_fixture.ConnectionString)));
 
         var receipts = await Task.WhenAll(
             store.SetOperatorActionIgnoreAsync(new OperatorActionIgnoreCommand(actionId, Guid.NewGuid(), requestFingerprint, blockedRowVersion, IsIgnored: true), CancellationToken.None).AsTask(),

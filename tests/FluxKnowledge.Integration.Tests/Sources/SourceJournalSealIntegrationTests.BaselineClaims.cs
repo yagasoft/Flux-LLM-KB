@@ -33,7 +33,7 @@ public sealed partial class SourceJournalSealIntegrationTests
         await using var db = scenario.Factory.CreateDbContext();
         var remaining = await db.SourcePendingChanges.SingleOrDefaultAsync(x => x.RelativePath == "one.txt");
         if (laterSignal) { Assert.NotNull(remaining); Assert.True(remaining.Generation > target.Generation); }
-        else Assert.Null(remaining);
+        else { Assert.NotNull(remaining); Assert.Equal(SourcePendingReasons.RemovalPending, remaining.ReasonFlags); }
     }
 
     [NativeSqlServerFact]
@@ -111,7 +111,7 @@ public sealed partial class SourceJournalSealIntegrationTests
         await using (var db = scenario.Factory.CreateDbContext())
         {
             var pending = await db.SourcePendingChanges.SingleAsync(x => x.RelativePath == "one.txt");
-            Assert.Equal(expectedReason, pending.ReasonFlags);
+            Assert.Equal(expectedReason | SourcePendingReasons.RemovalPending, pending.ReasonFlags);
             if (expectedReason == 1) Assert.True(pending.LastUnjournaledGeneration > 0);
             if (git) Assert.True(await db.SourcePendingChanges.AnyAsync(x => x.RelativePath == "." && (x.ReasonFlags & SourcePendingReasons.GitMembership) != 0));
         }

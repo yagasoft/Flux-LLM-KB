@@ -37,7 +37,7 @@ public sealed partial class SqlDocumentOcrHandoffTests
         var recovery = await CreateCommittedRecoveryAsync(seed, pdf);
         await ChangeImageRecoveryBindingAsync(seed, change);
 
-        Assert.Equal(0, await new SqlRetainedTextRegistrationStore(seed.Factory, TimeProvider.System, seed.ArtifactRoot)
+        Assert.Equal(0, await new SqlRetainedTextRegistrationStore(seed.Factory, TimeProvider.System, seed.ArtifactRoot, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(seed.Factory))
             .OfferUnlinkedInProcessActivitiesAsync(CancellationToken.None));
 
         await using var verify = await seed.Factory.CreateDbContextAsync();
@@ -65,8 +65,8 @@ public sealed partial class SqlDocumentOcrHandoffTests
         var publication = await PrepareRecoveryPublicationAsync(seed, recovery.ChildId);
         await ChangeImageRecoveryBindingAsync(seed, change);
 
-        await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            new SqlStageTransitionStore(seed.Factory).TransitionAsync(publication, CancellationToken.None).AsTask());
+        await Assert.ThrowsAsync(change == "suppressed" ? typeof(SourceWorkDeferredException) : typeof(InvalidOperationException), () =>
+            new SqlStageTransitionStore(seed.Factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(seed.Factory)).TransitionAsync(publication, CancellationToken.None).AsTask());
 
         await using var verify = await seed.Factory.CreateDbContextAsync();
         Assert.Empty(await verify.DocumentPublications.ToArrayAsync());
@@ -85,7 +85,7 @@ public sealed partial class SqlDocumentOcrHandoffTests
         var seed = await CreateSettledImageFailureAsync(failureReason: "document-ocr-runtime-failed");
         var recovery = await CreateCommittedRecoveryAsync(seed, false);
         var publication = await PrepareRecoveryPublicationAsync(seed, recovery.ChildId);
-        await new SqlStageTransitionStore(seed.Factory).TransitionAsync(publication, CancellationToken.None);
+        await new SqlStageTransitionStore(seed.Factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(seed.Factory)).TransitionAsync(publication, CancellationToken.None);
         var independentId = Guid.NewGuid();
         await using (var alter = await seed.Factory.CreateDbContextAsync())
         {
@@ -118,7 +118,7 @@ public sealed partial class SqlDocumentOcrHandoffTests
         var seed = await CreateSettledImageFailureAsync(failureReason: "document-ocr-runtime-failed");
         var recovery = await CreateCommittedRecoveryAsync(seed, false);
         var publication = await PrepareRecoveryPublicationAsync(seed, recovery.ChildId);
-        await new SqlStageTransitionStore(seed.Factory).TransitionAsync(publication, CancellationToken.None);
+        await new SqlStageTransitionStore(seed.Factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(seed.Factory)).TransitionAsync(publication, CancellationToken.None);
         await using (var alter = await seed.Factory.CreateDbContextAsync())
         {
             (await alter.DocumentPublications.SingleAsync()).PipelineRecordRevision++;
@@ -153,7 +153,7 @@ public sealed partial class SqlDocumentOcrHandoffTests
     {
         var seed = await CreateSettledImageFailureAsync(pdf, "document-ocr-runtime-failed");
         var descriptor = pdf ? PdfDocumentProcessor.Capability : ImageDocumentInputProcessor.Capability;
-        var store = new SqlRetainedProcessorBranchStore(seed.Factory, TimeProvider.System);
+        var store = new SqlRetainedProcessorBranchStore(seed.Factory, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(seed.Factory));
         var request = new DocumentReprocessRequest(new(seed.ParentId), seed.Hash, descriptor.ProcessorFingerprint, seed.FailedJobId, 1);
         var created = await store.RequestDocumentReprocessAsync(request, CancellationToken.None);
         Assert.True(created.Created);
@@ -163,7 +163,7 @@ public sealed partial class SqlDocumentOcrHandoffTests
             ? await new PdfDocumentProcessor(new SqlRetainedArtifactWriter(seed.Factory, seed.ArtifactRoot)).ProcessAsync(claim, input, new(), CancellationToken.None)
             : await new ImageDocumentInputProcessor().ProcessAsync(claim, input, new(), CancellationToken.None);
         Assert.True(await store.CommitAsync(claim, completion, CancellationToken.None));
-        Assert.Equal(1, await new SqlRetainedTextRegistrationStore(seed.Factory, TimeProvider.System, seed.ArtifactRoot)
+        Assert.Equal(1, await new SqlRetainedTextRegistrationStore(seed.Factory, TimeProvider.System, seed.ArtifactRoot, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(seed.Factory))
             .OfferUnlinkedInProcessActivitiesAsync(CancellationToken.None));
         var now = DateTimeOffset.UtcNow;
         var jobId = Guid.NewGuid(); var deliveryId = Guid.NewGuid();
@@ -188,7 +188,7 @@ public sealed partial class SqlDocumentOcrHandoffTests
                 DueAtUtc = now, CreatedAtUtc = now, LeaseOwner = "recovery-publish-delivery", LeaseGeneration = 1, LeaseExpiresAtUtc = now.AddMinutes(5) });
             await arrange.SaveChangesAsync();
         }
-        await new SqlStageTransitionStore(seed.Factory).TransitionAsync(new(
+        await new SqlStageTransitionStore(seed.Factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(seed.Factory)).TransitionAsync(new(
             new ClaimedDispatchMessage(new(deliveryId), new(recordId), 1, PipelineStage.Publish, PipelineOperations.Publish, 0,
                 "exact-recovery-publication", now, "recovery-publish-delivery", now.AddMinutes(5), 1),
             new ClaimedJob(new(jobId), new(recordId), 1, PipelineStage.Publish, PipelineOperations.Publish,
@@ -215,7 +215,7 @@ public sealed partial class SqlDocumentOcrHandoffTests
     {
         var seed = await CreateSettledImageFailureAsync(pdf, reason, native);
         var descriptor = pdf ? PdfDocumentProcessor.Capability : ImageDocumentInputProcessor.Capability;
-        var store = new SqlRetainedProcessorBranchStore(seed.Factory, TimeProvider.System);
+        var store = new SqlRetainedProcessorBranchStore(seed.Factory, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(seed.Factory));
         var request = new DocumentReprocessRequest(new(seed.ParentId), seed.Hash, descriptor.ProcessorFingerprint, seed.FailedJobId, 1);
 
         var created = await store.RequestDocumentReprocessAsync(request, CancellationToken.None);
@@ -254,7 +254,7 @@ public sealed partial class SqlDocumentOcrHandoffTests
     public async Task Exact_document_recovery_does_not_infer_execution_settlement_from_an_unrelated_failure(string reason)
     {
         var seed = await CreateSettledImageFailureAsync(failureReason: reason);
-        Assert.False((await new SqlRetainedProcessorBranchStore(seed.Factory, TimeProvider.System)
+        Assert.False((await new SqlRetainedProcessorBranchStore(seed.Factory, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(seed.Factory))
             .RequestDocumentReprocessAsync(ImageRecoveryRequest(seed), CancellationToken.None)).Accepted);
     }
 
@@ -271,7 +271,7 @@ public sealed partial class SqlDocumentOcrHandoffTests
             Assert.Equal(1, await change.DocumentOcrRequests.ExecuteDeleteAsync());
             Assert.Equal(1, await change.GpuMiniTasks.CountAsync());
         }
-        Assert.False((await new SqlRetainedProcessorBranchStore(seed.Factory, TimeProvider.System)
+        Assert.False((await new SqlRetainedProcessorBranchStore(seed.Factory, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(seed.Factory))
             .RequestDocumentReprocessAsync(new(new(seed.ParentId), seed.Hash, PdfDocumentProcessor.Capability.ProcessorFingerprint,
                 seed.FailedJobId, 1), CancellationToken.None)).Accepted);
     }
@@ -280,7 +280,7 @@ public sealed partial class SqlDocumentOcrHandoffTests
     public async Task Late_old_results_callbacks_and_requeue_cannot_reopen_the_failed_job_or_change_the_recovery()
     {
         var seed = await CreateSettledImageFailureAsync();
-        var store = new SqlRetainedProcessorBranchStore(seed.Factory, TimeProvider.System);
+        var store = new SqlRetainedProcessorBranchStore(seed.Factory, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(seed.Factory));
         var created = await store.RequestDocumentReprocessAsync(ImageRecoveryRequest(seed), CancellationToken.None);
         Assert.True(created.Created);
         var claim = await store.ClaimDocumentBranchAsync(created.SuccessorBranchId!.Value, new(seed.ParentId), seed.Hash,
@@ -322,7 +322,7 @@ public sealed partial class SqlDocumentOcrHandoffTests
     public async Task Marked_image_recovery_never_falls_back_to_ordinary_processing_when_lineage_is_missing_or_wrong(string phase, bool wrongKind)
     {
         var seed = await CreateSettledImageFailureAsync();
-        var store = new SqlRetainedProcessorBranchStore(seed.Factory, TimeProvider.System);
+        var store = new SqlRetainedProcessorBranchStore(seed.Factory, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(seed.Factory));
         var created = await store.RequestDocumentReprocessAsync(ImageRecoveryRequest(seed), CancellationToken.None);
         Assert.True(created.Created);
         RetainedProcessorClaim? claim = null;
@@ -365,7 +365,7 @@ public sealed partial class SqlDocumentOcrHandoffTests
     public async Task Exact_image_recovery_refuses_a_terminal_batch_that_still_owns_capacity(string phase, GpuCapacitySlotState state)
     {
         var seed = await CreateSettledImageFailureAsync();
-        var store = new SqlRetainedProcessorBranchStore(seed.Factory, TimeProvider.System);
+        var store = new SqlRetainedProcessorBranchStore(seed.Factory, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(seed.Factory));
         DocumentReprocessRequestResult? created = null;
         RetainedProcessorClaim? claim = null;
         RetainedProcessorCompletion? completion = null;
@@ -413,7 +413,7 @@ public sealed partial class SqlDocumentOcrHandoffTests
             slot.ActiveBatchId = unrelated.Id; slot.State = (int)GpuCapacitySlotState.Reserved; slot.OwnerKey = unrelated.OwnerKey;
             await change.SaveChangesAsync();
         }
-        Assert.True((await new SqlRetainedProcessorBranchStore(seed.Factory, TimeProvider.System)
+        Assert.True((await new SqlRetainedProcessorBranchStore(seed.Factory, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(seed.Factory))
             .RequestDocumentReprocessAsync(ImageRecoveryRequest(seed), CancellationToken.None)).Created);
     }
 
@@ -421,7 +421,7 @@ public sealed partial class SqlDocumentOcrHandoffTests
     public async Task Exact_image_recovery_creates_one_fenced_successor_and_distinct_child_without_resetting_old_work()
     {
         var seed = await CreateSettledImageFailureAsync();
-        var store = new SqlRetainedProcessorBranchStore(seed.Factory, TimeProvider.System);
+        var store = new SqlRetainedProcessorBranchStore(seed.Factory, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(seed.Factory));
         var request = ImageRecoveryRequest(seed);
         var created = await store.RequestDocumentReprocessAsync(request, CancellationToken.None);
         Assert.True(created.Created);
@@ -478,7 +478,7 @@ public sealed partial class SqlDocumentOcrHandoffTests
     {
         var seed = await CreateSettledImageFailureAsync();
         await ChangeImageRecoveryBindingAsync(seed, change);
-        var result = await new SqlRetainedProcessorBranchStore(seed.Factory, TimeProvider.System)
+        var result = await new SqlRetainedProcessorBranchStore(seed.Factory, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(seed.Factory))
             .RequestDocumentReprocessAsync(ImageRecoveryRequest(seed), CancellationToken.None);
         Assert.False(result.Accepted);
         await using var verify = await seed.Factory.CreateDbContextAsync();
@@ -498,7 +498,7 @@ public sealed partial class SqlDocumentOcrHandoffTests
     public async Task Exact_image_recovery_rechecks_the_durable_proof_at_claim_and_commit(string phase, string change)
     {
         var seed = await CreateSettledImageFailureAsync();
-        var store = new SqlRetainedProcessorBranchStore(seed.Factory, TimeProvider.System);
+        var store = new SqlRetainedProcessorBranchStore(seed.Factory, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(seed.Factory));
         var created = await store.RequestDocumentReprocessAsync(ImageRecoveryRequest(seed), CancellationToken.None);
         Assert.True(created.Created);
         if (phase == "claim") await ChangeImageRecoveryBindingAsync(seed, change);
@@ -520,7 +520,7 @@ public sealed partial class SqlDocumentOcrHandoffTests
     public async Task Exact_image_recovery_requires_both_explicit_job_and_root_revision_and_deduplicates_concurrent_requests()
     {
         var seed = await CreateSettledImageFailureAsync();
-        var store = new SqlRetainedProcessorBranchStore(seed.Factory, TimeProvider.System);
+        var store = new SqlRetainedProcessorBranchStore(seed.Factory, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(seed.Factory));
         var request = ImageRecoveryRequest(seed);
         Assert.False((await store.RequestDocumentReprocessAsync(request with { FailedExtractJobId = null }, CancellationToken.None)).Accepted);
         Assert.False((await store.RequestDocumentReprocessAsync(request with { ExpectedRootConfigurationRevision = null }, CancellationToken.None)).Accepted);
@@ -536,7 +536,7 @@ public sealed partial class SqlDocumentOcrHandoffTests
     public async Task Exact_image_recovery_generic_claim_derives_its_identity_and_commit_refuses_a_forged_child(bool forgeChild)
     {
         var seed = await CreateSettledImageFailureAsync();
-        var store = new SqlRetainedProcessorBranchStore(seed.Factory, TimeProvider.System);
+        var store = new SqlRetainedProcessorBranchStore(seed.Factory, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(seed.Factory));
         var created = await store.RequestDocumentReprocessAsync(ImageRecoveryRequest(seed), CancellationToken.None);
         Assert.True(created.Created);
         var claim = Assert.Single(await store.ClaimAsync("generic-image-test", 1,
@@ -555,7 +555,7 @@ public sealed partial class SqlDocumentOcrHandoffTests
     private static async Task<(Guid BranchId, Guid ChildId)> CreateCommittedRecoveryAsync(ImageFailureSeed seed, bool pdf)
     {
         var descriptor = pdf ? PdfDocumentProcessor.Capability : ImageDocumentInputProcessor.Capability;
-        var store = new SqlRetainedProcessorBranchStore(seed.Factory, TimeProvider.System);
+        var store = new SqlRetainedProcessorBranchStore(seed.Factory, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(seed.Factory));
         var created = await store.RequestDocumentReprocessAsync(new(new(seed.ParentId), seed.Hash,
             descriptor.ProcessorFingerprint, seed.FailedJobId, 1), CancellationToken.None);
         Assert.True(created.Created);
@@ -571,7 +571,7 @@ public sealed partial class SqlDocumentOcrHandoffTests
 
     private static async Task<StageTransitionRequest> PrepareRecoveryPublicationAsync(ImageFailureSeed seed, Guid childId)
     {
-        Assert.Equal(1, await new SqlRetainedTextRegistrationStore(seed.Factory, TimeProvider.System, seed.ArtifactRoot)
+        Assert.Equal(1, await new SqlRetainedTextRegistrationStore(seed.Factory, TimeProvider.System, seed.ArtifactRoot, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(seed.Factory))
             .OfferUnlinkedInProcessActivitiesAsync(CancellationToken.None));
         var now = DateTimeOffset.UtcNow;
         var jobId = Guid.NewGuid(); var deliveryId = Guid.NewGuid();
@@ -635,7 +635,7 @@ public sealed partial class SqlDocumentOcrHandoffTests
             { Id = parentId, SourceRootId = rootId, StableSourceIdentity = parentStable, CanonicalPath = Path.Combine(sourceRoot, pdf ? "document.pdf" : "diagram.jpg"),
                 Revision = 1, ContentSha256 = hash, ByteLength = bytes.Length, Classification = descriptor.AcceptedClassification, Extension = contract.Extension, DiscoveredAtUtc = now };
             if (withPhysicalHistory) SqlTestData.AddPhysicalRevisionHistory(db, parent, suppressPrevious, differentHistoryIdentity);
-            parent.OriginKind = parentOriginKind;
+            // Build the settled predecessor under a valid original ownership binding.
             db.SourceRevisions.Add(parent);
             await db.SaveChangesAsync();
             db.SourceRevisions.Add(new() { Id = childId, SourceRootId = rootId, StableSourceIdentity = child.StableSourceIdentity, CanonicalPath = childLocator,
@@ -669,7 +669,7 @@ public sealed partial class SqlDocumentOcrHandoffTests
         }
         await new SourceCapabilityService(new SqlSourceActivityStore(factory, TimeProvider.System),
             new LocalSourceCapabilityHandlerRegistry([new ImageDocumentInputCapabilityHandler(), new PdfDocumentCapabilityHandler()])).RegisterAsync(descriptor, CancellationToken.None);
-        var claimed = await new SqlJobClaimStore(factory).ClaimNextDueAsync("image-failure-fixture", now, TimeSpan.FromMinutes(5), CancellationToken.None);
+        var claimed = await new SqlJobClaimStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory)).ClaimNextDueAsync("image-failure-fixture", now, TimeSpan.FromMinutes(5), CancellationToken.None);
         Assert.NotNull(claimed);
         var miniTask = Guid.Empty;
         GpuExecutorBatchHandle? handle = null;
@@ -689,6 +689,7 @@ public sealed partial class SqlDocumentOcrHandoffTests
         }
         await using (var db = await factory.CreateDbContextAsync())
         {
+            (await db.SourceRevisions.SingleAsync(value => value.Id == parentId)).OriginKind = parentOriginKind;
             var job = await db.Jobs.SingleAsync(value => value.Id == jobId);
             job.PublicState = (int)PublicJobState.Failed; job.Reason = failureReason; job.LeaseOwner = null; job.LeaseExpiresAtUtc = null;
             var activity = await db.SourceActivities.SingleAsync(value => value.Id == childActivityId);

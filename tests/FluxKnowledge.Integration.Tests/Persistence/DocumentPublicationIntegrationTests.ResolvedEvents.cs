@@ -45,7 +45,7 @@ public sealed partial class DocumentPublicationIntegrationTests
         var warnings = new OperatorEventQuery(new OperatorEventFilters(Severity: "warning", SourceRootId: seed.RootId), PageSize: 1);
         Assert.Equal(seed.PipelineEventId, Assert.Single((await reader.ReadPageAsync(query, CancellationToken.None)).Items).Id);
         Assert.Equal(seed.BlockedEventId, Assert.Single((await reader.ReadPageAsync(warnings, CancellationToken.None)).Items).Id);
-        await PublishAsync(new SqlStageTransitionStore(SqlTestData.CreateFactory(_fixture)), seed.Current, DateTimeOffset.UtcNow);
+        await PublishAsync(new SqlStageTransitionStore(SqlTestData.CreateFactory(_fixture), sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(SqlTestData.CreateFactory(_fixture))), seed.Current, DateTimeOffset.UtcNow);
         await using (var mutate = Context())
         {
             if (change == "paused-root")

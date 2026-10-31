@@ -117,7 +117,7 @@ public static class WebHostComposition
         // owner probe or native worker is registered or started in functional staging.
         services.AddScoped<IGpuSchedulerStore>(provider => new SqlGpuSchedulerStore(
             provider.GetRequiredService<IDbContextFactory<FluxKnowledgeDbContext>>(),
-            timeProvider: provider.GetRequiredService<TimeProvider>()));
+            timeProvider: provider.GetRequiredService<TimeProvider>(), sourceAdmission: provider.GetRequiredService<ISourceWorkAdmission>()));
         services.AddSingleton<FluxKnowledge.Application.Contracts.ISourceRootPathPolicy>(provider =>
             new StagingSourceRootPathPolicy(new SourceRootPathPolicy(
                 new LocalIngressOptions([settings.SourcesRoot]),
@@ -163,6 +163,7 @@ public static class WebHostComposition
         }
         if (runtime.WorkerEnabled)
         {
+            allowedHostedServiceTypes.Add(typeof(SourceWorkRecoveryService));
             allowedHostedServiceTypes.Add(typeof(SourceReconciliationService));
             allowedHostedServiceTypes.Add(typeof(LocalSourceRootWatchHostedService));
             allowedHostedServiceTypes.Add(typeof(CodeDisclosureProofRecoveryService));
@@ -476,6 +477,11 @@ public static class WebHostComposition
             ? new WindowsSourceChangeJournalReader() : OperatingSystem.IsWindows()
                 ? new SourceJournalPipeClient(sourceJournalOptions) : throw new PlatformNotSupportedException("Source journal helper requires Windows."));
         services.AddSingleton<ISourceObservationReader, WindowsSourceObservationReader>();
+        services.AddSingleton<SourceWorkAdmission>();
+        services.AddSingleton<ISourceWorkAdmission>(provider => provider.GetRequiredService<SourceWorkAdmission>());
+        services.AddSingleton<ISourceRemovalReconciler, SqlSourceRemovalReconciler>();
+        services.AddScoped<ISourceWorkRecovery, SqlSourceWorkRecovery>();
+        services.AddScoped<ISourceWorkRetirement, SqlSourceWorkRetirement>();
         services.AddScoped<SqlSourceIncrementalCoordinator>();
         services.AddScoped<ISourceIncrementalCoordinator>(provider => provider.GetRequiredService<SqlSourceIncrementalCoordinator>());
         services.AddScoped<SqlSourceVerificationStore>();
@@ -496,6 +502,7 @@ public static class WebHostComposition
         var workersEnabled = configuration.GetValue<bool>("Worker:Enabled");
         if (workersEnabled)
         {
+            services.AddSingleton<IHostedService, SourceWorkRecoveryService>();
             services.AddSingleton<SqlSourceRootWatchStore>();
             services.AddSingleton<ISourceRootWatchStore>(provider => provider.GetRequiredService<SqlSourceRootWatchStore>());
             services.AddSingleton<SourceWatchCoordinator>();
@@ -614,7 +621,7 @@ public static class WebHostComposition
         services.AddScoped<SqlDocumentOcrStore>(provider => new SqlDocumentOcrStore(
             provider.GetRequiredService<IDbContextFactory<FluxKnowledgeDbContext>>(),
             provider.GetRequiredService<GpuSchedulerCoordinator>(),
-            provider.GetRequiredService<TimeProvider>()));
+            provider.GetRequiredService<TimeProvider>(), sourceAdmission: provider.GetRequiredService<ISourceWorkAdmission>()));
         services.Replace(ServiceDescriptor.Scoped<IDocumentOcrHandoff>(provider =>
             provider.GetRequiredService<SqlDocumentOcrStore>()));
         services.Replace(ServiceDescriptor.Scoped<IDocumentOcrResultReader>(provider =>

@@ -17,6 +17,7 @@ using Xunit;
 namespace FluxKnowledge.Integration.Tests.Sources;
 
 [SupportedOSPlatform("windows")]
+[Collection("sql-full-text")] // Real volume-journal baselines must not race other native fixture IO.
 public sealed partial class SourceVerificationExecutionIntegrationTests(NativeSqlServerFixture fixture)
     : IClassFixture<NativeSqlServerFixture>, IAsyncLifetime
 {

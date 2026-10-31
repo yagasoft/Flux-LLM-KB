@@ -18,7 +18,7 @@ public sealed partial class SqlDocumentOcrHandoffTests
         var store = CreateStore(factory);
         var task = Assert.IsType<Guid>((await store.HandoffAsync(new(claim, revision, hash, [0]), CancellationToken.None)).MiniTaskId);
         var handle = await AdmitDocumentOcrTaskAsync(factory);
-        var scheduler = new SqlGpuSchedulerStore(factory);
+        var scheduler = new SqlGpuSchedulerStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         await scheduler.AcknowledgeAsync(new(Guid.NewGuid(), handle), CancellationToken.None);
         var result = await store.StoreResultAsync(handle, task, new(true, "document-ocr-complete",
             [new(0, 0, [new("text", 1, 2, 3, 4, "saved legacy success")])]), CancellationToken.None);
@@ -56,7 +56,7 @@ public sealed partial class SqlDocumentOcrHandoffTests
         Assert.Equal((int)GpuCapacitySlotState.Available, await verify.GpuCapacitySlots.Select(s => s.State).SingleAsync());
         Assert.Equal("saved legacy success", Assert.Single(Assert.Single(Assert.IsType<DocumentOcrExecutionResult>(
             await store.ReadCompletedAsync(claim, hash, CancellationToken.None)).Pages).Blocks).Text);
-        Assert.NotNull(await new SqlJobClaimStore(factory).ClaimNextDueAsync("legacy-resumed-consumer",
+        Assert.NotNull(await new SqlJobClaimStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory)).ClaimNextDueAsync("legacy-resumed-consumer",
             DateTimeOffset.UtcNow, TimeSpan.FromMinutes(5), CancellationToken.None));
         var (_, nextClaim, nextRevision, nextHash) = await CreateClaimedPdfAsync(clearData: false);
         var nextTask = Assert.IsType<Guid>((await store.HandoffAsync(new(nextClaim, nextRevision, nextHash, [0]), CancellationToken.None)).MiniTaskId);

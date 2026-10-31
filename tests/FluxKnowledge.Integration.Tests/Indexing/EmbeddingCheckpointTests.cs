@@ -45,10 +45,10 @@ public sealed class EmbeddingCheckpointTests(NativeSqlServerFixture fixture) : I
         Assert.Equal(recordId, claim.Job.PipelineRecordId.Value);
         await using var context = await environment.Factory.CreateDbContextAsync();
         var before = await context.SourceActivities.AsNoTracking().SingleAsync(value => value.ResultingPipelineRecordId == recordId);
-        var transitions = new StageTransitionService(new SqlStageTransitionStore(environment.Factory), new NullStatusEventPublisher(),
+        var transitions = new StageTransitionService(new SqlStageTransitionStore(environment.Factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory)), new NullStatusEventPublisher(),
             new ChannelOutboxWakeSignal(), TimeProvider.System);
         var worker = new EmbedStageWorker(environment.Store, new RecordingProvider(), transitions, TimeProvider.System,
-            new SqlEmbeddingCheckpointStore(environment.Factory, TimeProvider.System));
+            new SqlEmbeddingCheckpointStore(environment.Factory, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory)));
         await worker.ExecuteAsync(claim, CancellationToken.None);
         var after = await context.SourceActivities.AsNoTracking().SingleAsync(value => value.Id == before.Id);
         Assert.Equal(before.State, after.State);
@@ -63,7 +63,7 @@ public sealed class EmbeddingCheckpointTests(NativeSqlServerFixture fixture) : I
     public async Task Large_draft_seal_hashes_all_keyset_pages_in_passage_order()
     {
         await using var environment = await SqlToUsearchRebuildTests.PipelineEnvironment.CreateAsync(fixture, string.Concat(Enumerable.Repeat(LongText, 14)), embed: false);
-        var store = new SqlEmbeddingCheckpointStore(environment.Factory, TimeProvider.System);
+        var store = new SqlEmbeddingCheckpointStore(environment.Factory, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory));
         var claim = await ClaimAsync(environment);
         var completed = await store.ReadNextAsync(claim, Profile, CancellationToken.None);
         while (completed.Chunks.Count > 0)
@@ -88,7 +88,7 @@ public sealed class EmbeddingCheckpointTests(NativeSqlServerFixture fixture) : I
     {
         await using var environment = await SqlToUsearchRebuildTests.PipelineEnvironment.CreateAsync(fixture, LongText, embed: false);
         var claim = await ClaimAsync(environment);
-        var store = new SqlEmbeddingCheckpointStore(environment.Factory, TimeProvider.System);
+        var store = new SqlEmbeddingCheckpointStore(environment.Factory, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory));
         var batch = await store.ReadNextAsync(claim, Profile, CancellationToken.None);
         if (persist) await store.CommitAsync(claim, batch, await EmbedAsync(batch), CancellationToken.None);
         var snapshot = await new SqlDerivedIndexRecoveryStore(environment.Factory, TimeProvider.System).ReadActiveAsync(CancellationToken.None);
@@ -104,7 +104,7 @@ public sealed class EmbeddingCheckpointTests(NativeSqlServerFixture fixture) : I
     {
         await using var environment = await SqlToUsearchRebuildTests.PipelineEnvironment.CreateAsync(fixture, "Other root control.", embed: false);
         var otherClaim = await ClaimAsync(environment);
-        var checkpoints = new SqlEmbeddingCheckpointStore(environment.Factory, TimeProvider.System);
+        var checkpoints = new SqlEmbeddingCheckpointStore(environment.Factory, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory));
         var other = await checkpoints.ReadNextAsync(otherClaim, Profile, CancellationToken.None);
         var recordId = await environment.AddRetainedAndPumpAsync(LongText);
         var deletingClaim = await ClaimAsync(environment);
@@ -159,7 +159,7 @@ public sealed class EmbeddingCheckpointTests(NativeSqlServerFixture fixture) : I
     {
         await using var environment = await SqlToUsearchRebuildTests.PipelineEnvironment.CreateAsync(fixture, LongText, embed: false);
         var claim = await ClaimAsync(environment);
-        var checkpoints = new SqlEmbeddingCheckpointStore(environment.Factory, TimeProvider.System);
+        var checkpoints = new SqlEmbeddingCheckpointStore(environment.Factory, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory));
         var batch = await checkpoints.ReadNextAsync(claim, Profile, CancellationToken.None);
         if (hashOnly) await checkpoints.CommitAsync(claim, batch, await EmbedAsync(batch), CancellationToken.None);
         await using var context = await environment.Factory.CreateDbContextAsync();
@@ -188,7 +188,7 @@ public sealed class EmbeddingCheckpointTests(NativeSqlServerFixture fixture) : I
     {
         await using var environment = await SqlToUsearchRebuildTests.PipelineEnvironment.CreateAsync(fixture, LongText, embed: false);
         var claim = await ClaimAsync(environment);
-        var store = new SqlEmbeddingCheckpointStore(environment.Factory, TimeProvider.System);
+        var store = new SqlEmbeddingCheckpointStore(environment.Factory, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory));
         var batch = await store.ReadNextAsync(claim, Profile, CancellationToken.None);
         Assert.Equal(4, batch.Chunks.Count);
         var results = await EmbedAsync(batch);
@@ -222,7 +222,7 @@ public sealed class EmbeddingCheckpointTests(NativeSqlServerFixture fixture) : I
     {
         await using var environment = await SqlToUsearchRebuildTests.PipelineEnvironment.CreateAsync(fixture, LongText, embed: false);
         var claim = await ClaimAsync(environment);
-        var store = new SqlEmbeddingCheckpointStore(environment.Factory, TimeProvider.System);
+        var store = new SqlEmbeddingCheckpointStore(environment.Factory, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory));
         var batch = await store.ReadNextAsync(claim, Profile, CancellationToken.None);
         var results = await EmbedAsync(batch);
         await using (var context = await environment.Factory.CreateDbContextAsync())
@@ -245,7 +245,7 @@ public sealed class EmbeddingCheckpointTests(NativeSqlServerFixture fixture) : I
     {
         await using var environment = await SqlToUsearchRebuildTests.PipelineEnvironment.CreateAsync(fixture, LongText, embed: false);
         var claim = await ClaimAsync(environment);
-        var store = new SqlEmbeddingCheckpointStore(environment.Factory, TimeProvider.System);
+        var store = new SqlEmbeddingCheckpointStore(environment.Factory, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory));
         var batch = await store.ReadNextAsync(claim, Profile, CancellationToken.None);
         var results = (await EmbedAsync(batch)).ToArray();
         results[^1] = new(new float[256], Profile.ModelFingerprint);
@@ -261,7 +261,7 @@ public sealed class EmbeddingCheckpointTests(NativeSqlServerFixture fixture) : I
     {
         await using var environment = await SqlToUsearchRebuildTests.PipelineEnvironment.CreateAsync(fixture, LongText, embed: false);
         var claim = await ClaimAsync(environment);
-        var store = new SqlEmbeddingCheckpointStore(environment.Factory, TimeProvider.System);
+        var store = new SqlEmbeddingCheckpointStore(environment.Factory, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory));
         var first = await store.ReadNextAsync(claim, Profile, CancellationToken.None);
         await store.CommitAsync(claim, first, await EmbedAsync(first), CancellationToken.None);
         await using (var context = await environment.Factory.CreateDbContextAsync())
@@ -272,7 +272,7 @@ public sealed class EmbeddingCheckpointTests(NativeSqlServerFixture fixture) : I
             await context.SaveChangesAsync();
         }
         var provider = new RecordingProvider();
-        var transitions = new StageTransitionService(new SqlStageTransitionStore(environment.Factory), new NullStatusEventPublisher(),
+        var transitions = new StageTransitionService(new SqlStageTransitionStore(environment.Factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory)), new NullStatusEventPublisher(),
             new ChannelOutboxWakeSignal(), TimeProvider.System);
         var worker = new EmbedStageWorker(environment.Store, provider, transitions, TimeProvider.System, store);
         while (true)
@@ -313,9 +313,9 @@ public sealed class EmbeddingCheckpointTests(NativeSqlServerFixture fixture) : I
     private static async Task<StageWorkItem> ClaimAsync(SqlToUsearchRebuildTests.PipelineEnvironment environment, string operation = PipelineOperations.Embed)
     {
         var now = DateTimeOffset.UtcNow;
-        var dispatch = await new SqlOutboxStore(environment.Factory).ClaimNextDueAsync("checkpoint-dispatch", now, TimeSpan.FromMinutes(2), [operation], CancellationToken.None);
+        var dispatch = await new SqlOutboxStore(environment.Factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory)).ClaimNextDueAsync("checkpoint-dispatch", now, TimeSpan.FromMinutes(2), [operation], CancellationToken.None);
         Assert.NotNull(dispatch);
-        var job = await new SqlJobClaimStore(environment.Factory).ClaimForDispatchAsync(dispatch, "checkpoint-worker", now, TimeSpan.FromMinutes(2), CancellationToken.None);
+        var job = await new SqlJobClaimStore(environment.Factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory)).ClaimForDispatchAsync(dispatch, "checkpoint-worker", now, TimeSpan.FromMinutes(2), CancellationToken.None);
         Assert.NotNull(job);
         return new(dispatch, job);
     }

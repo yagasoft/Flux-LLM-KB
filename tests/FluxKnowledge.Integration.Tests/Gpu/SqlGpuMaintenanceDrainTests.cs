@@ -21,7 +21,7 @@ public sealed class SqlGpuMaintenanceDrainTests(NativeSqlServerFixture fixture) 
         var factory = await seed.CreateEnvironmentAsync();
         await seed.AddReadyAsync(factory, GpuPriorityLane.DocumentIndexing, "ocr-runtime", "ocr-settings", 10);
         var hold = new Hold();
-        var scheduler = new SqlGpuSchedulerStore(factory, deploymentValidationHold: hold);
+        var scheduler = new SqlGpuSchedulerStore(factory, deploymentValidationHold: hold, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         async Task AssertWaitingAsync()
         {
             _ = await scheduler.RunAdmissionRoundAsync(GpuSchedulerWakeReason.WorkReady,
@@ -56,12 +56,12 @@ public sealed class SqlGpuMaintenanceDrainTests(NativeSqlServerFixture fixture) 
         var factory = await seed.CreateEnvironmentAsync();
         var first = await seed.AddReadyAsync(factory, GpuPriorityLane.DocumentIndexing, "ocr-runtime", "ocr-settings", 10);
         Assert.True((await SqlGpuAdmissionTests.AdmitAsync(factory, SqlGpuAdmissionTests.Admit("slot-a"))).Committed);
-        var lifecycle = new SqlGpuSchedulerStore(factory);
+        var lifecycle = new SqlGpuSchedulerStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         var handle = Assert.Single(await lifecycle.ReadPendingDispatchesAsync(CancellationToken.None));
         Assert.True((await lifecycle.AcknowledgeAsync(new(Guid.NewGuid(), handle), CancellationToken.None)).Committed);
         var drain = await SqlGpuMaintenanceDrainLease.AcquireAsync(factory, CancellationToken.None);
         var atFence = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var next = new SqlGpuSchedulerStore(factory, beforeAdmissionLockAttempt: _ => { atFence.TrySetResult(); return ValueTask.CompletedTask; });
+        var next = new SqlGpuSchedulerStore(factory, beforeAdmissionLockAttempt: _ => { atFence.TrySetResult(); return ValueTask.CompletedTask; }, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         Task<GpuSchedulerAdmissionRoundResult>? pending = null;
         try
         {

@@ -106,6 +106,9 @@ public sealed class SqlSourceChangeJournalStore(IDbContextFactory<FluxKnowledgeD
             {
                 var state = states.Single(x => x.SourceRootId == root.Id);
                 var owned = entries.Where(x => x.SourceRootId == root.Id && x.BaselineEpoch == state.BaselineEpoch).ToArray();
+                var rootKey = PathKey(".");
+                var coalesced = await db.SourcePendingChanges.AnyAsync(x => x.SourceRootId == root.Id && x.PathFingerprint == rootKey &&
+                    x.RelativePath == "." && x.IsSubtree && (x.ReasonFlags & SourcePendingReasons.FullRecapture) != 0, ct).ConfigureAwait(false);
                 var targets = new Dictionary<string, (long Reasons, bool Subtree, long First, long Last, long Content)>(StringComparer.OrdinalIgnoreCase);
                 var namespaceChanged = false;
                 foreach (var change in page.Changes)
@@ -135,8 +138,8 @@ public sealed class SqlSourceChangeJournalStore(IDbContextFactory<FluxKnowledgeD
                         state.UnresolvedThroughUsn = page.Next.NextUsn;
                         namespaceChanged = true;
                         targets["."] = targets.TryGetValue(".", out var debt)
-                            ? (debt.Reasons | SourcePendingReasons.NamespaceMetadata, true, debt.First, change.Usn, debt.Content)
-                            : (SourcePendingReasons.NamespaceMetadata, true, change.Usn, change.Usn, 0);
+                            ? (debt.Reasons | SourcePendingReasons.NamespaceMetadata | SourcePendingReasons.RemovalPending, true, debt.First, change.Usn, debt.Content)
+                            : (SourcePendingReasons.NamespaceMetadata | SourcePendingReasons.RemovalPending, true, change.Usn, change.Usn, 0);
                     }
                 }
                 if (namespaceChanged)
@@ -148,7 +151,14 @@ public sealed class SqlSourceChangeJournalStore(IDbContextFactory<FluxKnowledgeD
                 {
                     state.Generation++;
                     var pending = await db.SourcePendingChanges.Where(x => x.SourceRootId == root.Id).ToListAsync(ct).ConfigureAwait(false);
-                    foreach (var (path, item) in targets)
+                    if (SqlSourcePendingWork.HasFullRecapture(pending) ||
+                        pending.Count + targets.Keys.Count(path => pending.All(x => x.PathFingerprint != PathKey(path))) > SqlSourcePendingWork.MaximumPaths)
+                    {
+                        SqlSourcePendingWork.Coalesce(db, state, pending, time.GetUtcNow(),
+                            targets.Values.Aggregate(0L, (value, item) => value | item.Reasons),
+                            targets.Values.Min(x => x.First), targets.Values.Max(x => x.Last), targets.Values.Max(x => x.Content));
+                    }
+                    else foreach (var (path, item) in targets)
                     {
                         var key = PathKey(path);
                         var row = pending.SingleOrDefault(x => x.PathFingerprint == key);
@@ -156,7 +166,6 @@ public sealed class SqlSourceChangeJournalStore(IDbContextFactory<FluxKnowledgeD
                             throw new InvalidDataException("SourceJournalPathCollision");
                         if (row is null)
                         {
-                            if (pending.Count >= 10000) { SqlSourceIncrementalState.InvalidateCoverage(state, "pending-path-overflow", page.Next.NextUsn); break; }
                             row = new() { Id = Guid.NewGuid(), SourceRootId = root.Id, RelativePath = path, PathFingerprint = key,
                                 FirstUsn = item.First, LastContentUsn = 0, LastUnjournaledGeneration = 0 };
                             pending.Add(row); db.SourcePendingChanges.Add(row);
@@ -184,10 +193,11 @@ public sealed class SqlSourceChangeJournalStore(IDbContextFactory<FluxKnowledgeD
                 void Add(string path, JournalChange change, bool subtree)
                 {
                     path = NormaliseRelative(path);
-                    // Keep cursor/latest-record evidence above, but a duplicate pure
-                    // CLOSE cannot create work or advance existing work generations.
-                    // The same physical ID at a new path still needs discovery.
-                    if (!subtree && change.Reason == 0x80000000u && owned.Any(entry => entry.IsSealed && !entry.IsDirectory &&
+                    // Keep cursor/latest-record evidence above. A known-path pure CLOSE
+                    // cannot extend an existing full recapture, including for unsealed
+                    // captures; it is not sealing or content evidence. New paths/IDs and
+                    // mixed data/namespace reasons still create conservative work.
+                    if (!subtree && change.Reason == 0x80000000u && owned.Any(entry => (entry.IsSealed || coalesced) && !entry.IsDirectory &&
                         entry.FileId == change.FileId && entry.RelativePath.Equals(path, StringComparison.OrdinalIgnoreCase))) return;
                     // Directory BASIC_INFO/CLOSE notifications do not imply changed descendants.
                     if (subtree && (change.Reason & ~0x80008000u) == 0) return;
@@ -196,6 +206,7 @@ public sealed class SqlSourceChangeJournalStore(IDbContextFactory<FluxKnowledgeD
                             JsonSerializer.Deserialize<string[]>(root.IncludePatternsJson) ?? [],
                             JsonSerializer.Deserialize<string[]>(root.ExcludePatternsJson) ?? [])) return;
                     long reasons = change.Reason;
+                    if ((change.Reason & 0x3300) != 0) reasons |= SourcePendingReasons.RemovalPending;
                     if (subtree && (change.Reason & 0x00103300) != 0)
                     { reasons |= SourcePendingReasons.ScopedNamespace; namespaceChanged = true; }
                     var content = change.ContentChanged ? change.Usn : 0;
@@ -245,6 +256,7 @@ public sealed class SqlSourceChangeJournalStore(IDbContextFactory<FluxKnowledgeD
         {
             await using var db = await factory.CreateDbContextAsync(ct).ConfigureAwait(false);
             await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct).ConfigureAwait(false);
+            await SqlPublishedPassageSelection.AcquireFenceAsync(db, ct).ConfigureAwait(false);
             await action(db).ConfigureAwait(false); await db.SaveChangesAsync(ct).ConfigureAwait(false);
             beforeCommit?.Invoke(); await tx.CommitAsync(ct).ConfigureAwait(false);
         }).ConfigureAwait(false);

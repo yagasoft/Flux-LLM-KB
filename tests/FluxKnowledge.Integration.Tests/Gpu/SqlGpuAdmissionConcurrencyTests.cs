@@ -49,7 +49,7 @@ public sealed class SqlGpuAdmissionConcurrencyTests(NativeSqlServerFixture fixtu
                     lockHeld.SetResult();
                     await releaseFirst.Task;
                 }
-            });
+            }, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
 
         var firstAdmission = store.RunAdmissionRoundAsync(
             GpuSchedulerWakeReason.WorkReady,
@@ -100,7 +100,7 @@ public sealed class SqlGpuAdmissionConcurrencyTests(NativeSqlServerFixture fixtu
     public async Task Concurrent_acknowledgements_have_one_effective_transition_without_task_or_capacity_mutation()
     {
         var (factory, taskId, handle) = await CreateAdmittedDispatchAsync();
-        var store = new SqlGpuSchedulerStore(factory);
+        var store = new SqlGpuSchedulerStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
 
         var results = await RunTogetherAsync(
             () => store.AcknowledgeAsync(new GpuExecutorAcknowledgement(Guid.NewGuid(), handle), CancellationToken.None).AsTask(),
@@ -121,7 +121,7 @@ public sealed class SqlGpuAdmissionConcurrencyTests(NativeSqlServerFixture fixtu
     public async Task Concurrent_delivery_uncertainty_has_one_effective_transition_and_no_replacement()
     {
         var (factory, taskId, handle) = await CreateAdmittedDispatchAsync();
-        var store = new SqlGpuSchedulerStore(factory);
+        var store = new SqlGpuSchedulerStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
 
         var results = await RunTogetherAsync(
             () => store.MarkDeliveryUncertainAsync(new GpuExecutorDeliveryUncertainty(Guid.NewGuid(), handle), CancellationToken.None).AsTask(),
@@ -143,7 +143,7 @@ public sealed class SqlGpuAdmissionConcurrencyTests(NativeSqlServerFixture fixtu
     public async Task Concurrent_result_receipts_create_one_immutable_receipt_without_task_or_capacity_mutation()
     {
         var (factory, taskId, handle) = await CreateAdmittedDispatchAsync();
-        var store = new SqlGpuSchedulerStore(factory);
+        var store = new SqlGpuSchedulerStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         Assert.True((await store.AcknowledgeAsync(new GpuExecutorAcknowledgement(Guid.NewGuid(), handle), CancellationToken.None)).Accepted);
 
         var results = await RunTogetherAsync(
@@ -165,7 +165,7 @@ public sealed class SqlGpuAdmissionConcurrencyTests(NativeSqlServerFixture fixtu
     public async Task Concurrent_same_operation_acknowledgement_replays_without_a_second_transition()
     {
         var (factory, taskId, handle) = await CreateAdmittedDispatchAsync();
-        var store = new SqlGpuSchedulerStore(factory);
+        var store = new SqlGpuSchedulerStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         var operationId = Guid.NewGuid();
 
         var results = await RunTogetherAsync(
@@ -200,7 +200,7 @@ public sealed class SqlGpuAdmissionConcurrencyTests(NativeSqlServerFixture fixtu
         await using var read = await first.Factory.CreateDbContextAsync();
         var secondDispatch = await read.GpuExecutorDispatches.SingleAsync(value => value.DispatchId != first.Handle.DispatchId);
         var secondHandle = new GpuExecutorBatchHandle(secondDispatch.BatchId, secondDispatch.CapacitySlotKey, secondDispatch.ExecutorKey, secondDispatch.AdmissionGeneration, secondDispatch.DispatchId);
-        var store = new SqlGpuSchedulerStore(first.Factory);
+        var store = new SqlGpuSchedulerStore(first.Factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(first.Factory));
         var operationId = Guid.NewGuid();
 
         var outcomes = await RunTogetherCapturingAsync(
@@ -233,7 +233,7 @@ public sealed class SqlGpuAdmissionConcurrencyTests(NativeSqlServerFixture fixtu
         }
 
         var failure = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
-            await new SqlGpuSchedulerStore(factory).AcknowledgeAsync(
+            await new SqlGpuSchedulerStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory)).AcknowledgeAsync(
                 new GpuExecutorAcknowledgement(Guid.NewGuid(), handle), CancellationToken.None));
 
         Assert.Contains("lifecycle fence", failure.Message, StringComparison.OrdinalIgnoreCase);
@@ -276,7 +276,7 @@ public sealed class SqlGpuAdmissionConcurrencyTests(NativeSqlServerFixture fixtu
             Assert.True(Convert.ToInt32(await hold.ExecuteScalarAsync()) >= 0);
         }
 
-        var result = await new SqlGpuSchedulerStore(first.Factory).AcknowledgeAsync(
+        var result = await new SqlGpuSchedulerStore(first.Factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(first.Factory)).AcknowledgeAsync(
             new GpuExecutorAcknowledgement(Guid.NewGuid(), secondHandle), CancellationToken.None);
 
         Assert.True(result.Accepted);
@@ -287,7 +287,7 @@ public sealed class SqlGpuAdmissionConcurrencyTests(NativeSqlServerFixture fixtu
     public async Task Concurrent_receipt_and_completed_callback_have_only_legal_serial_outcomes()
     {
         var (factory, taskId, handle) = await CreateAdmittedDispatchAsync();
-        var store = new SqlGpuSchedulerStore(factory);
+        var store = new SqlGpuSchedulerStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         Assert.True((await store.AcknowledgeAsync(new GpuExecutorAcknowledgement(Guid.NewGuid(), handle), CancellationToken.None)).Accepted);
         var callback = new GpuBatchCallback(handle, GpuBatchCallbackKind.Completed,
             [new GpuMiniTaskBoundaryOutcome(taskId, GpuMiniTaskBoundaryDisposition.Completed)], true);
@@ -313,7 +313,7 @@ public sealed class SqlGpuAdmissionConcurrencyTests(NativeSqlServerFixture fixtu
     public async Task Concurrent_trusted_evidence_and_capacity_reconciliation_never_releases_without_a_prior_evidence_record()
     {
         var (factory, taskId, handle) = await CreateAdmittedDispatchAsync();
-        var store = new SqlGpuSchedulerStore(factory);
+        var store = new SqlGpuSchedulerStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         var uncertainty = Assert.Single(await store.ReadStaleCapacityReservationsAsync(DateTimeOffset.Parse("2030-01-01T00:00:00+00:00"), CancellationToken.None));
         Assert.True((await store.MarkCapacityUncertainAsync(Guid.NewGuid(), uncertainty, CancellationToken.None)).Committed);
         var evidenceOperationId = Guid.NewGuid();
@@ -344,7 +344,7 @@ public sealed class SqlGpuAdmissionConcurrencyTests(NativeSqlServerFixture fixtu
     public async Task Concurrent_callback_and_diagnostic_uncertainty_preserve_exactly_one_legal_serialized_lifecycle_without_requeue_or_result_replacement()
     {
         var (factory, taskId, handle) = await CreateAdmittedDispatchAsync();
-        var store = new SqlGpuSchedulerStore(factory);
+        var store = new SqlGpuSchedulerStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         Assert.True((await store.AcknowledgeAsync(
             new GpuExecutorAcknowledgement(Guid.NewGuid(), handle),
             CancellationToken.None)).Accepted);
@@ -399,7 +399,7 @@ public sealed class SqlGpuAdmissionConcurrencyTests(NativeSqlServerFixture fixtu
     public async Task Concurrent_capacity_and_outcome_reconciliation_apply_each_trusted_proof_without_duplicate_evidence_or_improper_release()
     {
         var (factory, taskId, handle) = await CreateAdmittedDispatchAsync();
-        var store = new SqlGpuSchedulerStore(factory);
+        var store = new SqlGpuSchedulerStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         var uncertainty = Assert.Single(await store.ReadStaleCapacityReservationsAsync(DateTimeOffset.Parse("2030-01-01T00:00:00+00:00"), CancellationToken.None));
         Assert.True((await store.MarkCapacityUncertainAsync(Guid.NewGuid(), uncertainty, CancellationToken.None)).Committed);
         var capacityEvidenceOperationId = Guid.NewGuid();

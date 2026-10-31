@@ -33,7 +33,7 @@ public sealed partial class SqlDocumentOcrHandoffTests
         var query = new OperatorEventQuery(new OperatorEventFilters(Severity: "error"), PageSize: 1);
         Assert.Equal(pipelineFailure.Id, Assert.Single((await reader.ReadPageAsync(query, CancellationToken.None)).Items).Id);
 
-        await new SqlStageTransitionStore(seed.Factory).TransitionAsync(publication, CancellationToken.None);
+        await new SqlStageTransitionStore(seed.Factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(seed.Factory)).TransitionAsync(publication, CancellationToken.None);
         await using (var pause = await seed.Factory.CreateDbContextAsync())
         {
             // Pausing a root does not turn an already proved success back into a failure.

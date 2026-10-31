@@ -127,7 +127,7 @@ public sealed class SqlStartupBootstrapTests(NativeSqlServerFixture fixture) : I
         await SqlTestData.ClearPipelineAsync(fixture);
         var factory = SqlTestData.CreateFactory(fixture);
         var clock = new FixedClock(DateTimeOffset.UtcNow);
-        var store = new SqlGpuSchedulerStore(factory, timeProvider:clock, interactiveExecutionTimeout:TimeSpan.FromSeconds(20));
+        var store = new SqlGpuSchedulerStore(factory, timeProvider:clock, interactiveExecutionTimeout:TimeSpan.FromSeconds(20), sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         var instance = Guid.NewGuid();
         var now = clock.GetUtcNow();
         var handoff = new GpuInteractiveHandoffRequest(Guid.NewGuid(), instance, $"retrieval-gpu:{instance:N}",

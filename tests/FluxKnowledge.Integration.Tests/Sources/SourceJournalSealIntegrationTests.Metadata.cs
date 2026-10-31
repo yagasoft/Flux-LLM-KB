@@ -22,21 +22,32 @@ public sealed partial class SourceJournalSealIntegrationTests
         long priorGeneration;
         await using (var db = scenario.Factory.CreateDbContext())
         { var prior = await db.SourcePendingChanges.SingleAsync(x => x.RelativePath == "."); pendingId = prior.Id; priorGeneration = prior.Generation; }
+        // Accepted metadata can advance after this early sample and before plan freezing.
+        await scenario.SignalUnknownNamespaceAsync();
         scenario.Clock.Now += root.ReconciliationCadence + TimeSpan.FromSeconds(1);
         SourceIncrementalPlan? frozen = null;
-        scenario.BeforeReuse = async plan => { frozen = plan; await scenario.SignalUnknownNamespaceAsync(); };
+        scenario.BeforeReuse = async plan =>
+        {
+            frozen = plan;
+            await using (var db = scenario.Factory.CreateDbContext())
+            {
+                var atFreeze = await db.SourcePendingChanges.AsNoTracking().SingleAsync(x => x.Id == pendingId);
+                Assert.True(atFreeze.Generation > priorGeneration);
+                Assert.Contains(plan.Targets, target => target.RelativePath == "." && target.Generation == atFreeze.Generation);
+            }
+            await scenario.SignalUnknownNamespaceAsync();
+        };
         scenario.SourceBytes = scenario.ArtifactSourceBytes = scenario.RetainedBytes = 0;
         scenario.ReadTrace.Clear();
         await scenario.ScanAsync("metadata-frozen-plan");
         Assert.NotNull(frozen);
-        Assert.Contains(frozen.Targets, target => target.RelativePath == "." && target.Generation == priorGeneration);
         Assert.True(scenario.SourceBytes + scenario.ArtifactSourceBytes == 0, string.Join(Environment.NewLine, scenario.ReadTrace));
         Assert.Equal(0, scenario.RetainedBytes);
         await using var verified = scenario.Factory.CreateDbContext();
         Assert.Equal(revision, (await verified.SourceRevisions.SingleAsync()).Id);
         Assert.Equal(checksumTime, (await verified.SourceArtifacts.SingleAsync()).ChecksumVerifiedAtUtc);
         var pending = Assert.Single(await verified.SourcePendingChanges.Where(x => x.RelativePath == ".").ToArrayAsync());
-        Assert.Equal(SourcePendingReasons.NamespaceMetadata, pending.ReasonFlags);
+        Assert.Equal(SourcePendingReasons.NamespaceMetadata | SourcePendingReasons.RemovalPending, pending.ReasonFlags);
         Assert.Equal(pendingId, pending.Id);
         Assert.True(pending.Generation > frozen.Generation);
         Assert.True(pending.NotBeforeUtc > scenario.Clock.Now);

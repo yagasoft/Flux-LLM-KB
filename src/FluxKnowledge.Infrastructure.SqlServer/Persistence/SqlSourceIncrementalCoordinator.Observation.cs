@@ -184,6 +184,10 @@ public sealed partial class SqlSourceIncrementalCoordinator
         proof.JournalId == plan.Cursor?.JournalId.ToString("X16");
 
     private static bool ContentObligationCovered(CachedObservation proof, bool qualified, long reasons, long? contentUsn, long? unjournaledGeneration) =>
+        (reasons & SourcePendingReasons.FullRecapture) != 0
+        ? qualified && unjournaledGeneration is not null && proof.CaptureGeneration >= unjournaledGeneration &&
+            contentUsn is not null && proof.SealUsn >= contentUsn
+        :
         !new JournalChange(0, "", "", "", (uint)reasons, false).ContentChanged ||
         qualified && contentUsn is not null && unjournaledGeneration is not null &&
         contentUsn <= proof.SealUsn && unjournaledGeneration <= proof.CaptureGeneration;

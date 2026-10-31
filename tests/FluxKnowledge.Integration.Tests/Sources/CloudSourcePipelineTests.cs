@@ -69,7 +69,7 @@ public sealed class CloudSourcePipelineTests(NativeSqlServerFixture fixture) : I
         using var artifacts = new ContentAddressedSourceArtifactStore(environment.ArtifactRoot);
         var worker = new SourceScanWorker(new LocalSourceEnumerator(), scans, artifacts,
             new SqlSourceActivityStore(environment.Factory, TimeProvider.System),
-            new RetainedTextActivityPlanner(new SqlRetainedTextRegistrationStore(environment.Factory, TimeProvider.System)));
+            new RetainedTextActivityPlanner(new SqlRetainedTextRegistrationStore(environment.Factory, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory))));
         var scanResult = await worker.ScanAsync(claim.SourceRoot, claim.ScanRequest, default);
         await scans.CompleteAsync(claim, scanResult, null, default);
         await environment.PumpAsync();

@@ -21,7 +21,7 @@ public sealed partial class SqlDocumentOcrHandoffTests
 
         var recovery = await CreateCommittedRecoveryAsync(seed, pdf);
         var publication = await PrepareRecoveryPublicationAsync(seed, recovery.ChildId);
-        await new SqlStageTransitionStore(seed.Factory).TransitionAsync(publication, CancellationToken.None);
+        await new SqlStageTransitionStore(seed.Factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(seed.Factory)).TransitionAsync(publication, CancellationToken.None);
 
         await using var verify = await seed.Factory.CreateDbContextAsync();
         var predecessor = await verify.SourceRevisions.SingleAsync(value => value.Id == seed.ChildId);
@@ -56,7 +56,7 @@ public sealed partial class SqlDocumentOcrHandoffTests
         var request = ImageRecoveryRequest(seed);
         if (change == "wrong-hash") request = request with { ExpectedInputSha256 = new string('a', 64) };
 
-        var result = await new SqlRetainedProcessorBranchStore(seed.Factory, TimeProvider.System)
+        var result = await new SqlRetainedProcessorBranchStore(seed.Factory, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(seed.Factory))
             .RequestDocumentReprocessAsync(request, CancellationToken.None);
 
         Assert.False(result.Accepted);

@@ -29,7 +29,8 @@ public static class GpuSchedulerServiceCollectionExtensions
         services.TryAddScoped<SqlGpuSchedulerStore>(provider => new SqlGpuSchedulerStore(
             provider.GetRequiredService<IDbContextFactory<FluxKnowledgeDbContext>>(),
             timeProvider: provider.GetRequiredService<TimeProvider>(),
-            deploymentValidationHold: provider.GetService<IDeploymentValidationHold>()));
+            deploymentValidationHold: provider.GetService<IDeploymentValidationHold>(),
+            sourceAdmission: provider.GetService<ISourceWorkAdmission>()));
         services.TryAddScoped<IGpuSchedulerStore>(provider => provider.GetRequiredService<SqlGpuSchedulerStore>());
         services.TryAddScoped<IGpuExecutorDispatchStore>(provider => provider.GetRequiredService<SqlGpuSchedulerStore>());
         services.TryAddScoped<SqlNativeWorkerInstanceStore>(provider => new SqlNativeWorkerInstanceStore(

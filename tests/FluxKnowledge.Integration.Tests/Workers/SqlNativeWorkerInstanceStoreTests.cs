@@ -174,7 +174,7 @@ public sealed class SqlNativeWorkerInstanceStoreTests(NativeSqlServerFixture fix
         await using var read = await factory.CreateDbContextAsync();
         var dispatch = await read.GpuExecutorDispatches.SingleAsync();
         var handle = new GpuExecutorBatchHandle(dispatch.BatchId, dispatch.CapacitySlotKey, dispatch.ExecutorKey, dispatch.AdmissionGeneration, dispatch.DispatchId);
-        await new SqlGpuSchedulerStore(factory).AcknowledgeAsync(new GpuExecutorAcknowledgement(Guid.NewGuid(), handle), CancellationToken.None);
+        await new SqlGpuSchedulerStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory)).AcknowledgeAsync(new GpuExecutorAcknowledgement(Guid.NewGuid(), handle), CancellationToken.None);
         var instance = NativeWorkerInstanceHandle.Create(Guid.NewGuid(), handle.ExecutorKey, 42, Now, NativeWorkerProtocol.SupportedVersion);
         var scheduler = new ReplayableUncertaintyStore();
         var setup = new SqlNativeWorkerInstanceStore(factory, new FixedTimeProvider(Now), scheduler);
@@ -278,7 +278,7 @@ public sealed class SqlNativeWorkerInstanceStoreTests(NativeSqlServerFixture fix
         await using var firstRead = await factory.CreateDbContextAsync();
         var firstDispatch = await firstRead.GpuExecutorDispatches.SingleAsync();
         var handleA = new GpuExecutorBatchHandle(firstDispatch.BatchId, firstDispatch.CapacitySlotKey, firstDispatch.ExecutorKey, firstDispatch.AdmissionGeneration, firstDispatch.DispatchId);
-        await new SqlGpuSchedulerStore(factory).AcknowledgeAsync(new GpuExecutorAcknowledgement(Guid.NewGuid(), handleA), CancellationToken.None);
+        await new SqlGpuSchedulerStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory)).AcknowledgeAsync(new GpuExecutorAcknowledgement(Guid.NewGuid(), handleA), CancellationToken.None);
 
         await using (var addCapacity = await factory.CreateDbContextAsync())
         {
@@ -291,7 +291,7 @@ public sealed class SqlNativeWorkerInstanceStoreTests(NativeSqlServerFixture fix
         await using var secondRead = await factory.CreateDbContextAsync();
         var secondDispatch = await secondRead.GpuExecutorDispatches.SingleAsync(dispatch => dispatch.DispatchId != handleA.DispatchId);
         var handleB = new GpuExecutorBatchHandle(secondDispatch.BatchId, secondDispatch.CapacitySlotKey, secondDispatch.ExecutorKey, secondDispatch.AdmissionGeneration, secondDispatch.DispatchId);
-        await new SqlGpuSchedulerStore(factory).AcknowledgeAsync(new GpuExecutorAcknowledgement(Guid.NewGuid(), handleB), CancellationToken.None);
+        await new SqlGpuSchedulerStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory)).AcknowledgeAsync(new GpuExecutorAcknowledgement(Guid.NewGuid(), handleB), CancellationToken.None);
 
         var instance = NativeWorkerInstanceHandle.Create(Guid.NewGuid(), handleA.ExecutorKey, 42, Now, NativeWorkerProtocol.SupportedVersion);
         var store = new SqlNativeWorkerInstanceStore(factory, new FixedTimeProvider(Now));
@@ -321,7 +321,7 @@ public sealed class SqlNativeWorkerInstanceStoreTests(NativeSqlServerFixture fix
         await SqlGpuAdmissionTests.AdmitAsync(factory, SqlGpuAdmissionTests.Admit("slot-a"));
         await using var read = await factory.CreateDbContextAsync(); var dispatch = await read.GpuExecutorDispatches.SingleAsync();
         var handle = new GpuExecutorBatchHandle(dispatch.BatchId, dispatch.CapacitySlotKey, dispatch.ExecutorKey, dispatch.AdmissionGeneration, dispatch.DispatchId);
-        await new SqlGpuSchedulerStore(factory).AcknowledgeAsync(new GpuExecutorAcknowledgement(Guid.NewGuid(), handle), CancellationToken.None);
+        await new SqlGpuSchedulerStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory)).AcknowledgeAsync(new GpuExecutorAcknowledgement(Guid.NewGuid(), handle), CancellationToken.None);
         var instance = NativeWorkerInstanceHandle.Create(Guid.NewGuid(), handle.ExecutorKey, 42, Now, NativeWorkerProtocol.SupportedVersion);
         var store = new SqlNativeWorkerInstanceStore(factory, new FixedTimeProvider(Now));
         Assert.True((await store.CreateAsync(Guid.NewGuid(), Launch(instance), CancellationToken.None)).Accepted);

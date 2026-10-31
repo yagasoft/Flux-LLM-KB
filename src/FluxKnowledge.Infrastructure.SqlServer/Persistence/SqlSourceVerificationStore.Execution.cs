@@ -93,8 +93,9 @@ public sealed partial class SqlSourceVerificationStore
                 state.VerificationPolicyRevision == batch.PolicyRevision) &&
             db.SourceVerificationRuns.Any(run => run.Id == batch.RunId && run.Active && (run.NextBatchAtUtc == null || run.NextBatchAtUtc <= now)) &&
             !db.SourcePendingChanges.Any(pending =>
+                (pending.ReasonFlags & ~SourcePendingReasons.RemovalPending) != 0 &&
                 (pending.NotBeforeUtc == null || pending.NotBeforeUtc <= now ||
-                 pending.ReasonFlags != SourcePendingReasons.NamespaceMetadata && (pending.RetryGeneration == null || pending.RetryGeneration != pending.Generation)) &&
+                 (pending.ReasonFlags & ~SourcePendingReasons.RemovalPending) != SourcePendingReasons.NamespaceMetadata && (pending.RetryGeneration == null || pending.RetryGeneration != pending.Generation)) &&
                 db.SourceRootConfigurations.Any(root => root.Id == pending.SourceRootId && root.State == (int)SourceRootState.Enabled)) &&
             !db.SourceScanRequests.Any(other => other.RequestKind != RequestKind && other.IsReleased && other.SourceRoot.State == (int)SourceRootState.Enabled &&
                 (other.State == (int)SourceScanRequestState.Released || other.State == (int)SourceScanRequestState.Running)), ct).ConfigureAwait(false);

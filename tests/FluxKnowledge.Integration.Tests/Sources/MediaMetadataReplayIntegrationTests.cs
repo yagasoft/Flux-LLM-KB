@@ -491,7 +491,7 @@ public sealed class MediaMetadataReplayIntegrationTests(NativeSqlServerFixture f
             var hash = new string('c', 64);
             var seeded = await SeedDeferredAsync(hash, checked((int)MediaMetadataRetainedProcessor.MaximumInputBytes + 1),
                 Path.Combine("sha256", hash[..2], $"{hash}.bin"), ".png", "oversized-claim");
-            var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System);
+            var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(_fixture.ConnectionString)));
             Assert.True(await store.PromoteAsync(
                 new RetainedProcessorPromotionCandidate(seeded.ActivityId, new SourceRevisionId(seeded.RevisionId), hash, ".png"),
                 MediaMetadataRetainedProcessor.Capability, CancellationToken.None));
@@ -517,7 +517,7 @@ public sealed class MediaMetadataReplayIntegrationTests(NativeSqlServerFixture f
         try
         {
             var seeded = await SeedPngAsync(privateRoot, "fence");
-            var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System);
+            var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(_fixture.ConnectionString)));
             var candidate = new RetainedProcessorPromotionCandidate(seeded.ActivityId, new SourceRevisionId(seeded.RevisionId), seeded.Hash, ".png");
             Assert.True(await store.PromoteAsync(candidate, MediaMetadataRetainedProcessor.Capability, CancellationToken.None));
             Assert.False(await store.PromoteAsync(candidate, MediaMetadataRetainedProcessor.Capability, CancellationToken.None));
@@ -581,7 +581,7 @@ public sealed class MediaMetadataReplayIntegrationTests(NativeSqlServerFixture f
         var zip = new ZipArchiveRetainedProcessor(writer);
         return new RetainedProcessorActivationService(
             new SourceCapabilityService(new SqlSourceActivityStore(factory, TimeProvider.System), new LocalSourceCapabilityHandlerRegistry([zip, new MediaMetadataCapabilityHandler()])),
-            new SqlRetainedProcessorBranchStore(factory, TimeProvider.System), retainedReader ?? _resources.Own(new SqlRetainedSourceReader(factory, privateRoot)), zip,
+            new SqlRetainedProcessorBranchStore(factory, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory)), retainedReader ?? _resources.Own(new SqlRetainedSourceReader(factory, privateRoot)), zip,
             new RetainedProcessorOptions { MediaMetadataEnabled = enabled }, TimeProvider.System,
             mediaMetadataProcessor: media ?? new MediaMetadataRetainedProcessor(writer, new AllowingDisclosure()));
     }

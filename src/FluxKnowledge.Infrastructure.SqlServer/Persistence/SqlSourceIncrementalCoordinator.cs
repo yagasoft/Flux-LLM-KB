@@ -89,6 +89,7 @@ public sealed partial class SqlSourceIncrementalCoordinator(
             var baseline = SqlSourceIncrementalState.RequiresBaseline(state) || superseded?.IsBaseline == true;
             var now = time.GetUtcNow();
             var pending = await db.SourcePendingChanges.Where(x => x.SourceRootId == root.Id.Value &&
+                (x.ReasonFlags & ~SourcePendingReasons.RemovalPending) != 0 &&
                 (x.NotBeforeUtc == null || x.NotBeforeUtc <= now)).ToArrayAsync(ct).ConfigureAwait(false);
             // Legacy rows carry unknown provenance. Turn them into explicit forced work
             // before freezing the claim, rather than interpreting missing evidence as zero.
@@ -175,8 +176,9 @@ public sealed partial class SqlSourceIncrementalCoordinator(
                 proof.SealProfileId != _qualifications.GetProfile(root.PhysicalIdentityFingerprint, root.CanonicalPath);
         }).ToArray();
         var pending = await db.SourcePendingChanges.Where(x => x.SourceRootId == root.Id.Value).ToListAsync(ct).ConfigureAwait(false);
-        if (pending.Count + unproved.Count(entry => pending.All(x => x.PathFingerprint != entry.PathFingerprint)) > 10000)
-        { SqlSourceIncrementalState.InvalidateCoverage(state, "fallback-capture-overflow", state.CoveredUsn); return; }
+        if (SqlSourcePendingWork.HasFullRecapture(pending)) return;
+        if (pending.Count + unproved.Count(entry => pending.All(x => x.PathFingerprint != entry.PathFingerprint)) > SqlSourcePendingWork.MaximumPaths)
+        { SqlSourcePendingWork.Coalesce(db, state, pending, time.GetUtcNow()); return; }
         if (unproved.Length == 0) return;
         var generation = ++state.Generation;
         foreach (var entry in unproved)
@@ -292,7 +294,8 @@ public sealed partial class SqlSourceIncrementalCoordinator(
         var queued = 0;
         var now = time.GetUtcNow();
         await using var lookup = await factory.CreateDbContextAsync(ct).ConfigureAwait(false);
-        var roots = await lookup.SourcePendingChanges.Where(x => x.NotBeforeUtc == null || x.NotBeforeUtc <= now)
+        var roots = await lookup.SourcePendingChanges.Where(x => (x.ReasonFlags & ~SourcePendingReasons.RemovalPending) != 0 &&
+                (x.NotBeforeUtc == null || x.NotBeforeUtc <= now))
             .Select(x => x.SourceRootId).Union(lookup.SourceRootScanStates.Where(x => x.Mode != "Fallback" && (x.RecoveryRequired ||
                 x.Mode == "BaselineRequired" || x.Mode == "Baselining")).Select(x => x.SourceRootId)).ToArrayAsync(ct).ConfigureAwait(false);
         foreach (var id in roots.Order())
@@ -347,6 +350,8 @@ public sealed partial class SqlSourceIncrementalCoordinator(
         }
     }
 
+    internal Task CatchUpStartupAsync(JournalCapability barrier, CancellationToken ct) => DrainThroughAsync(barrier, ct);
+
     internal async ValueTask<JournalCapability> ReadVerificationBarrierAsync(string volume, string journalId, CancellationToken ct)
     {
         if (!options.Enabled || !options.ApprovedVolumes.Contains(volume, StringComparer.OrdinalIgnoreCase))
@@ -385,6 +390,8 @@ public sealed partial class SqlSourceIncrementalCoordinator(
             {
                 SqlSourceIncrementalState.InvalidateCoverage(state, "journal-continuity-lost", current.NextUsn);
                 state.CoveredUsn = current.NextUsn;
+                var pending = await db.SourcePendingChanges.Where(x => x.SourceRootId == state.SourceRootId).ToListAsync(ct).ConfigureAwait(false);
+                SqlSourcePendingWork.Coalesce(db, state, pending, time.GetUtcNow(), unjournaled: true);
             }
             point.JournalId = current.JournalId.ToString("X16"); point.NextUsn = current.NextUsn;
             point.RegistrationGeneration++; point.LeaseOwner = null; point.LeaseExpiresAtUtc = null; point.DueAtUtc = null;

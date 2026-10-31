@@ -48,6 +48,7 @@ internal static class SqlPublishedPassageSelection
         AND [chunk].[SourceRevision] = [artifact].[SourceRevision]
         AND [artifact].[SourceRevision] = [record].[Revision]
         AND [retained].[SuppressedAtUtc] IS NULL AND [owner].[SuppressedAtUtc] IS NULL
+        AND {SqlSourceWorkEligibility.Source("[record].[SourceRevisionId]", includePending: false, includeAdmission: false)}
         AND ([record].[SourceRevisionId] IS NULL OR
              ([retained].[Id] IS NOT NULL AND [root].[State] <> {(int)SourceRootState.Deleting}))
         AND ([retained].[Id] IS NULL OR [retained].[OriginKind] NOT IN (2, 3) OR

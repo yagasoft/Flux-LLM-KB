@@ -24,7 +24,7 @@ public sealed class SharedGpuOccupiedCapacityTests(NativeSqlServerFixture fixtur
     public async Task Occupied_shared_slot_returns_busy_replays_and_admits_after_confirmed_release(bool atSafeBoundary)
     {
         var (factory, first, second) = await CreateAsync();
-        var store = new SqlGpuSchedulerStore(factory);
+        var store = new SqlGpuSchedulerStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         Assert.Equal(GpuAdmissionDisposition.Admit, (await AdmitAsync(store)).Disposition);
         if (atSafeBoundary)
         {
@@ -70,7 +70,7 @@ public sealed class SharedGpuOccupiedCapacityTests(NativeSqlServerFixture fixtur
         var attempts = 0;
         var store = new SqlGpuSchedulerStore(factory,
             beforeAdmissionLockAttempt: _ => { if (Interlocked.Increment(ref attempts) == 2) secondAttempt.SetResult(); return ValueTask.CompletedTask; },
-            afterAdmissionLockAcquired: async _ => { if (attempts == 1) { firstAtLock.SetResult(); await releaseFirst.Task; } });
+            afterAdmissionLockAcquired: async _ => { if (attempts == 1) { firstAtLock.SetResult(); await releaseFirst.Task; } }, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         var first = AdmitAsync(store).AsTask();
         await firstAtLock.Task.WaitAsync(TimeSpan.FromSeconds(15));
         var second = AdmitAsync(store).AsTask();
@@ -93,7 +93,7 @@ public sealed class SharedGpuOccupiedCapacityTests(NativeSqlServerFixture fixtur
     public async Task Invalid_or_uncertain_capacity_still_refuses_admission(string fault)
     {
         var (factory, _, second) = await CreateAsync();
-        var store = new SqlGpuSchedulerStore(factory);
+        var store = new SqlGpuSchedulerStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         if (fault != "missing") Assert.Equal(GpuAdmissionDisposition.Admit, (await AdmitAsync(store)).Disposition);
         await using (var mutate = await factory.CreateDbContextAsync())
         {

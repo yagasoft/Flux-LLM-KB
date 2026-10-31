@@ -24,7 +24,7 @@ public sealed partial class SqlToUsearchRebuildTests
         var candidate = await environment.Builder.BuildAndPlaceAsync(Guid.NewGuid(), CancellationToken.None);
         Assert.True(candidate.Vectors.Count >= 1025);
         var observer = new MembershipWriteObserver();
-        var store = new SqlStageTransitionStore(new MembershipObservedFactory(_fixture.ConnectionString, observer));
+        var store = new SqlStageTransitionStore(new MembershipObservedFactory(_fixture.ConnectionString, observer), sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new MembershipObservedFactory(_fixture.ConnectionString, observer)));
         var firstRequest = await ClaimPublishAsync(environment, candidate);
         var first = await store.TransitionAsync(firstRequest, CancellationToken.None);
         Assert.False(first.ExistingTransition);
@@ -67,7 +67,7 @@ public sealed partial class SqlToUsearchRebuildTests
         var request = await ClaimPublishAsync(environment, candidate);
         var observer = new MembershipWriteObserver();
         await Assert.ThrowsAsync<IndexGenerationStaleException>(async () => await new SqlStageTransitionStore(
-            new MembershipObservedFactory(_fixture.ConnectionString, observer)).TransitionAsync(request, CancellationToken.None));
+            new MembershipObservedFactory(_fixture.ConnectionString, observer), sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new MembershipObservedFactory(_fixture.ConnectionString, observer))).TransitionAsync(request, CancellationToken.None));
         Assert.Equal(0, observer.InsertCommands);
         await AssertMembershipActivationRolledBackAsync(environment, request, previous.Id);
         await using var verify = await environment.Factory.CreateDbContextAsync();
@@ -85,7 +85,7 @@ public sealed partial class SqlToUsearchRebuildTests
         using var cancellation = new CancellationTokenSource();
         var observer = new MembershipWriteObserver(cancellation);
         await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await new SqlStageTransitionStore(
-            new MembershipObservedFactory(_fixture.ConnectionString, observer)).TransitionAsync(request, cancellation.Token));
+            new MembershipObservedFactory(_fixture.ConnectionString, observer), sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new MembershipObservedFactory(_fixture.ConnectionString, observer))).TransitionAsync(request, cancellation.Token));
         Assert.True(observer.InsertCommands > 0);
         await AssertMembershipActivationRolledBackAsync(environment, request, previous.Id);
         await using var verify = await environment.Factory.CreateDbContextAsync();
@@ -102,7 +102,7 @@ public sealed partial class SqlToUsearchRebuildTests
         var previous = await environment.ActiveGenerationAsync();
         var observer = new MembershipWriteObserver();
         await Assert.ThrowsAsync<PublicationSnapshotConflictException>(async () => await new SqlStageTransitionStore(
-            new MembershipObservedFactory(_fixture.ConnectionString, observer)).TransitionAsync(request, CancellationToken.None));
+            new MembershipObservedFactory(_fixture.ConnectionString, observer), sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new MembershipObservedFactory(_fixture.ConnectionString, observer))).TransitionAsync(request, CancellationToken.None));
         Assert.Equal(0, observer.InsertCommands);
         await AssertMembershipActivationRolledBackAsync(environment, request, previous.Id);
     }

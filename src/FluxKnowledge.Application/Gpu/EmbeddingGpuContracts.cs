@@ -35,6 +35,8 @@ public interface IEmbeddingGpuRequestStore : IEmbeddingGpuHandoff
     /// <summary>Exact-operation replay recovers a lost claim response. The adapter must still run one native callback per dispatch.</summary>
     ValueTask<EmbeddingGpuExecutionWork?> ClaimExecutionAsync(GpuExecutorBatchHandle handle,
         Guid executorInstance, Guid claimOperation, GpuInteractiveOwnerIdentity owner, CancellationToken cancellationToken);
+    ValueTask<bool> IsExecutionSourceAvailableAsync(GpuExecutorBatchHandle handle, Guid executorInstance, Guid miniTaskId,
+        CancellationToken cancellationToken);
     ValueTask CommitAsync(GpuExecutorBatchHandle handle, Guid executorInstance,
         EmbeddingGpuExecutionWork work, IReadOnlyList<EmbeddingResult> results, CancellationToken cancellationToken);
     ValueTask RecordNativeCleanupAsync(GpuExecutorBatchHandle handle, Guid executorInstance, Guid claimOperation,

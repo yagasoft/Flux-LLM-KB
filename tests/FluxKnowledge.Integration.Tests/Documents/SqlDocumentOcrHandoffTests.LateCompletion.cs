@@ -51,7 +51,7 @@ public sealed partial class SqlDocumentOcrHandoffTests
         var owned = await ocrStore.TryClaimExecutionAsync(handle, miniTaskId, Guid.NewGuid(), SyntheticSupervisor(), CancellationToken.None);
         var lease = Assert.IsType<DocumentOcrExecutionLease>(owned.Lease);
         Assert.Equal(DocumentOcrLifecycleDisposition.Applied, owned.Disposition);
-        var schedulerStore = new SqlGpuSchedulerStore(factory);
+        var schedulerStore = new SqlGpuSchedulerStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         var reservation = Assert.Single(await schedulerStore.ReadStaleCapacityReservationsAsync(
             DateTimeOffset.UtcNow.AddDays(1), CancellationToken.None));
         Assert.True((await schedulerStore.MarkCapacityUncertainAsync(Guid.NewGuid(), reservation, CancellationToken.None)).Committed);
@@ -81,7 +81,7 @@ public sealed partial class SqlDocumentOcrHandoffTests
         await coordinator.RecoverAsync(CancellationToken.None);
         Assert.Equal(1, signal.Notifications);
 
-        var resumed = await new SqlJobClaimStore(factory).ClaimNextDueAsync("resumed-ocr-consumer",
+        var resumed = await new SqlJobClaimStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory)).ClaimNextDueAsync("resumed-ocr-consumer",
             DateTimeOffset.UtcNow, TimeSpan.FromMinutes(5), CancellationToken.None);
         Assert.NotNull(resumed);
         Assert.Equal(claim.JobId, resumed.JobId);

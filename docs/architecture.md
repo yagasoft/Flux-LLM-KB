@@ -103,7 +103,9 @@ private/runtime/build paths and model payload locations remain excluded.
 Authored `src/**/Models/*.cs` is code, not a model payload directory. Watcher
 hints include validated linked-worktree control paths; periodic rescans handle
 missed hints and changes in tracking status. Complete, stable inventory evidence
-and the current serialised root scan lease are required for unseen suppression.
+and the current serialised root scan lease are required for tracking/policy exclusion.
+Physical deletion can also converge independently under current root authority
+and live no-follow absence leases; it does not depend on a successful content scan.
 Every Git revision convergence and scan completion also fences configuration
 and the owned lease. Active scans renew that lease; renewal loss cancels work.
 Older binaries ignore this mode: quiesce workers and pause/disable Git roots,
@@ -114,6 +116,30 @@ Local source roots must pass fixed-drive NTFS and root-overlap/path policies.
 Registration uses preview/commit fencing and maintains stable revision identity.
 Watcher-driven refresh is reconciled against retained state and configured
 include/exclude rules.
+
+Durable removal scopes hold new work for affected originals and their finite
+archive/document descendants. Guarded reconciliation suppresses absent originals,
+withdraws their published descendants and records a versioned absence witness.
+New dispatch, native inference and result/publication commits share the same
+source-eligibility rule and publication fence. Running owners receive cooperative
+cancellation; native capacity stays occupied until existing cleanup proofs settle.
+Unclaimed or expired retained processor work reaches an explicit terminal state.
+
+Each process and root configuration starts with retained-work admission closed.
+Startup drains a fixed journal high-water mark, or checks retained original paths
+when coverage is unavailable, before admitting unaffected paths. Uncertain paths
+remain durable holds. Standalone document commands validate their exact physical
+owner and honour existing pending scopes; their local gate is confined to exact
+request/branch/dispatch selectors and never starts a sibling sweep.
+Cleanup remains available while source admission is closed. Ordinary publication
+reads follow durable owner suppression and continue to expose paused roots.
+
+Exact same-path/hash/length filesystem replacements can reuse one immutable logical
+revision only under owned, single-link, no-follow physical capture. Inventory and
+capture evidence record the current physical binding; immutable history and retained
+artifacts keep their identities. Pending-path pressure becomes one full-recapture
+obligation rather than repeatedly invalidating active scan epochs. Later harmless
+journal CLOSE traffic does not advance its forced-capture boundary.
 
 Opt-in journal-backed roots converge watcher hints and bounded NTFS journal
 pages on one durable pending-work pipeline. Cursor advancement and pending

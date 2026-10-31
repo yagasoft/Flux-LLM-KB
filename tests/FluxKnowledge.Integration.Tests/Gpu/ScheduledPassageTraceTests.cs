@@ -176,7 +176,7 @@ public sealed class ScheduledPassageTraceTests(NativeSqlServerFixture fixture) :
 
     private static async Task<(SqlGpuSchedulerStore, GpuInteractiveExecutor, Lifecycle)> CreateExecutorAsync(IDbContextFactory<FluxKnowledgeDbContext> factory)
     {
-        var store = new SqlGpuSchedulerStore(factory);
+        var store = new SqlGpuSchedulerStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         await using var setup = await factory.CreateDbContextAsync();
         setup.GpuCapacitySlots.Add(new GpuCapacitySlotEntity { SlotKey = "gpu-0", State = 0, UpdatedAtUtc = DateTimeOffset.UtcNow });
         await setup.SaveChangesAsync();

@@ -19,6 +19,15 @@ function Refuses([scriptblock]$work,[string]$reason) {
     try { & $work } catch { if($_.Exception.Message -like ('*'+$reason+'*')) { return }; throw }
     throw ('Expected refusal: '+$reason)
 }
+function Assert-RecoveryReleased([string]$message) {
+    $after=Sql @'
+DECLARE @r int; EXEC @r=sys.sp_getapplock @Resource=N'FluxKnowledge.DerivedIndexRecovery',
+    @LockMode=N'Exclusive', @LockOwner=N'Session', @LockTimeout=0;
+IF @r >= 0 EXEC sys.sp_releaseapplock @Resource=N'FluxKnowledge.DerivedIndexRecovery', @LockOwner=N'Session';
+SELECT @r;
+'@
+    Assert ([int]$after -ge 0) $message
+}
 $fingerprint={param($root) Get-HybridPayloadFingerprint -Path $root}
 $web=Join-Path $ScratchRoot 'web'; $cli=Join-Path $ScratchRoot 'cli'; $legacy=Join-Path $ScratchRoot 'legacy'
 foreach($directory in @($web,$cli,$legacy)) { New-Item -ItemType Directory -Path $directory | Out-Null }
@@ -47,6 +56,7 @@ Assert ($script:actions -eq 2) 'A model-free compatible operator was not admitte
 Refuses { Invoke-IndexFormatAdmission -ConnectionString $connection -Payloads @(@{Role='Cli';Root=$cli}) `
     -ReadPayloadFingerprint $fingerprint -OperationFormats @(1) -Action $action } 'operation-incompatible'
 Refuses { Admit $webPayload $action 'Legacy' } 'segmented-publication-disabled'
+Assert-RecoveryReleased 'A refused admission retained its recovery lock.'
 Refuses { Admit @(@{Role='Web';Root=$legacy}) $action 'Segmented' $reviewed } 'payload-incompatible'
 Refuses { Admit @(@{Role='Web';Root=$legacy}) $action 'Segmented' @('Cli='+$legacyHash) } 'payload-incompatible'
 Assert ($script:actions -eq 2) 'An incompatible predecessor reached the start callback.'
@@ -63,11 +73,32 @@ DECLARE @r int; EXEC @r=sys.sp_getapplock @Resource=N'FluxKnowledge.DerivedIndex
     catch { if($_.Exception.InnerException.Number -eq 1222 -or $_.Exception.Number -eq 1222) { $blocked=$true } else { throw } }
     Assert $blocked 'A format activation passed the admission publication fence.'
 }
-$after=Sql @'
-DECLARE @r int; EXEC @r=sys.sp_getapplock @Resource=N'FluxKnowledge.DerivedIndexRecovery',
-    @LockMode=N'Exclusive', @LockOwner=N'Session', @LockTimeout=0; SELECT @r;
-'@
-Assert ([int]$after -ge 0) 'Admission retained a recovery lock through readiness.'
+Assert-RecoveryReleased 'Admission retained a recovery lock through readiness.'
+Refuses { Admit $webPayload { throw 'deliberate-admission-action-failure' } } 'deliberate-admission-action-failure'
+Assert-RecoveryReleased 'A throwing action retained its recovery lock.'
+
+# A failed release acknowledgement cannot report success or hide a primary error.
+$admissionModule=Get-Module index-format-admission
+& $admissionModule {
+    $script:IndexAdmissionOriginalReleaseForTest=(Get-Item Function:Release-IndexAdmissionRecoveryLock).ScriptBlock
+    Set-Item Function:script:Release-IndexAdmissionRecoveryLock {
+        param($Connection)
+        & $script:IndexAdmissionOriginalReleaseForTest -Connection $Connection
+        throw 'deliberate-release-ack-failure'
+    }
+}
+try {
+    Refuses { Admit $webPayload {} } 'deliberate-release-ack-failure'
+    Assert-RecoveryReleased 'Release-failure cleanup retained its recovery lock.'
+    Refuses { Admit $webPayload { throw 'primary-admission-action-failure' } } 'primary-admission-action-failure'
+    Assert-RecoveryReleased 'Primary-error cleanup retained its recovery lock.'
+}
+finally {
+    & $admissionModule {
+        Set-Item Function:script:Release-IndexAdmissionRecoveryLock $script:IndexAdmissionOriginalReleaseForTest
+        Remove-Variable -Name IndexAdmissionOriginalReleaseForTest -Scope Script
+    }
+}
 [void](Sql 'UPDATE [IndexState] SET [RequiredIndexFormat]=1 WHERE [Id]=1;')
 Admit @(@{Role='Web';Root=$legacy}) $action 'Legacy' $reviewed
 Assert ($script:actions -eq 3) 'The exact reviewed legacy v1 entry was not admitted.'

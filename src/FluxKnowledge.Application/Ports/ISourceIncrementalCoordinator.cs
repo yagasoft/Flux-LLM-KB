@@ -9,11 +9,13 @@ public static class SourcePendingReasons
     public const long NamespaceMetadata = 1L << 32;
     public const long GitMembership = 1L << 33;
     public const long ScopedNamespace = 1L << 34;
+    public const long FullRecapture = 1L << 35;
+    public const long RemovalPending = 1L << 36;
     public const long NamespaceMask = NamespaceMetadata | ScopedNamespace;
 }
 public sealed record SourceScanTarget(string RelativePath, long Generation, bool IsSubtree, long ReasonFlags)
 {
-    public bool HasCaptureScope => ReasonFlags != SourcePendingReasons.GitMembership;
+    public bool HasCaptureScope => (ReasonFlags & ~(SourcePendingReasons.RemovalPending | SourcePendingReasons.GitMembership)) != 0;
     public long? LastContentUsn { get; init; }
     public long? LastUnjournaledGeneration { get; init; }
 }

@@ -251,6 +251,10 @@ public sealed class TargetedSourceScanIntegrationTests(NativeSqlServerFixture fi
             await control.CompleteAsync(target, result, null, default);
             Assert.Equal("later evidence"u8.Length, reads);
             Assert.Equal(0, enumeration.LastEnumeratedEntries);
+            await using (var contentDone = factory.CreateDbContext())
+                Assert.Equal(SourcePendingReasons.RemovalPending,
+                    (await contentDone.SourcePendingChanges.SingleAsync(x => x.RelativePath == "one.txt")).ReasonFlags);
+            await new SqlSourceRemovalReconciler(factory, clock, new WindowsSourceObservationReader()).ReconcileAsync(default);
             await using (var inspect = factory.CreateDbContext())
             {
                 Assert.Equal("Fallback", (await inspect.SourceRootScanStates.SingleAsync()).Mode);

@@ -45,9 +45,9 @@ public sealed class SourceActivityLifecycleIntegrationTests(NativeSqlServerFixtu
             operation: PipelineOperations.Publish);
         var activityIds = await SeedLinkedActivitiesAsync(primary.PipelineRecordId, unrelated.PipelineRecordId, published.PipelineRecordId, now);
         var factory = new ContextFactory(_fixture.ConnectionString);
-        var outboxStore = new SqlOutboxStore(factory);
-        var jobStore = new SqlJobClaimStore(factory);
-        var transitions = new SqlStageTransitionStore(factory, null, new FixedTimeProvider(now.AddMinutes(6)));
+        var outboxStore = new SqlOutboxStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
+        var jobStore = new SqlJobClaimStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
+        var transitions = new SqlStageTransitionStore(factory, null, new FixedTimeProvider(now.AddMinutes(6)), sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
 
         var extractDispatch = await outboxStore.ClaimNextDueAsync(
             "source-lifecycle-dispatcher",

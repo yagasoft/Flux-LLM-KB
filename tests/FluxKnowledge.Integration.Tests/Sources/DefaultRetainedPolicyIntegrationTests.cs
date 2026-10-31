@@ -38,7 +38,7 @@ public sealed class DefaultRetainedPolicyIntegrationTests(NativeSqlServerFixture
         var replay = await service.CommitAsync(mutation, preview.ConfirmationId, idempotencyKey, "test", CancellationToken.None);
         Assert.Equal(first.OperationId, replay.OperationId);
         Assert.True(replay.WasReplay);
-        var registration = new SqlRetainedTextRegistrationStore(SqlTestData.CreateFactory(fixture), TimeProvider.System, seeded.ArtifactRoot);
+        var registration = new SqlRetainedTextRegistrationStore(SqlTestData.CreateFactory(fixture), TimeProvider.System, seeded.ArtifactRoot, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(SqlTestData.CreateFactory(fixture)));
         Assert.True(await registration.OfferUnlinkedInProcessActivitiesAsync(CancellationToken.None) >= 1);
         Assert.Equal(0, await registration.OfferUnlinkedInProcessActivitiesAsync(CancellationToken.None));
         await using var db = await SqlTestData.CreateFactory(fixture).CreateDbContextAsync();
@@ -90,7 +90,7 @@ public sealed class DefaultRetainedPolicyIntegrationTests(NativeSqlServerFixture
         }
         var preview = await service.PreviewAsync(mutation, "test", CancellationToken.None);
         await service.CommitAsync(mutation, preview.ConfirmationId, "physical-history-policy", "test", CancellationToken.None);
-        Assert.True(await new SqlRetainedTextRegistrationStore(factory, TimeProvider.System, seeded.ArtifactRoot)
+        Assert.True(await new SqlRetainedTextRegistrationStore(factory, TimeProvider.System, seeded.ArtifactRoot, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory))
             .OfferUnlinkedInProcessActivitiesAsync(CancellationToken.None) >= 1);
         await using var verify = await factory.CreateDbContextAsync();
         Assert.Equal(previousId, (await verify.SourceRevisions.SingleAsync(value => value.Id == seeded.RevisionId)).ParentSourceRevisionId);
@@ -123,7 +123,7 @@ public sealed class DefaultRetainedPolicyIntegrationTests(NativeSqlServerFixture
         }
         else
         {
-            Assert.Equal(0, await new SqlRetainedTextRegistrationStore(factory, TimeProvider.System, seeded.ArtifactRoot)
+            Assert.Equal(0, await new SqlRetainedTextRegistrationStore(factory, TimeProvider.System, seeded.ArtifactRoot, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory))
                 .OfferUnlinkedInProcessActivitiesAsync(CancellationToken.None));
         }
         await using var verify = await factory.CreateDbContextAsync();
@@ -151,7 +151,7 @@ public sealed class DefaultRetainedPolicyIntegrationTests(NativeSqlServerFixture
         using var evidence = JsonDocument.Parse(cancelled.AttemptEvidenceJson!);
         Assert.Equal(rescanned.Id.Value, evidence.RootElement.GetProperty("supersededByActivityId").GetGuid());
         Assert.True(await db.AuditEvents.AnyAsync(value => value.SourceActivityId == orphan.Id.Value && value.EventType == "source.unlinked_text_superseded"));
-        var registration = new SqlRetainedTextRegistrationStore(SqlTestData.CreateFactory(fixture), TimeProvider.System, seeded.ArtifactRoot);
+        var registration = new SqlRetainedTextRegistrationStore(SqlTestData.CreateFactory(fixture), TimeProvider.System, seeded.ArtifactRoot, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(SqlTestData.CreateFactory(fixture)));
         Assert.True(await registration.RegisterAsync(rescanned, CancellationToken.None));
         Assert.False(await registration.RegisterAsync(rescanned, CancellationToken.None));
         Assert.Single(await SqlCurrentSourceActivities.Query(db).Where(value => value.SourceRevisionId == seeded.RevisionId).ToArrayAsync());
@@ -194,7 +194,7 @@ public sealed class DefaultRetainedPolicyIntegrationTests(NativeSqlServerFixture
             else (await db.SourceRevisions.SingleAsync(value => value.Id == seeded.RevisionId)).SuppressedAtUtc = DateTimeOffset.UtcNow;
             await db.SaveChangesAsync();
         }
-        var registration = new SqlRetainedTextRegistrationStore(factory, TimeProvider.System, seeded.ArtifactRoot);
+        var registration = new SqlRetainedTextRegistrationStore(factory, TimeProvider.System, seeded.ArtifactRoot, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         Assert.False(await registration.RegisterAsync(successor, CancellationToken.None));
         await using (var db = await factory.CreateDbContextAsync())
             Assert.Equal("policy-binding-stale", (await db.SourceActivities.SingleAsync(value => value.Id == successor.Id.Value)).Reason);
@@ -388,7 +388,7 @@ public sealed class DefaultRetainedPolicyIntegrationTests(NativeSqlServerFixture
         Assert.True((await capabilities.RegisterAsync(descriptor, CancellationToken.None)).IsRunnable);
         using var reader = new SqlRetainedSourceReader(factory, seeded.ArtifactRoot);
         var service = Service(reader); var mutation = Mutation(seeded);
-        var branches = new SqlRetainedProcessorBranchStore(factory, TimeProvider.System);
+        var branches = new SqlRetainedProcessorBranchStore(factory, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         if (previousOffice)
         {
             await using var current = await factory.CreateDbContextAsync();

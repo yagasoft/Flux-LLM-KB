@@ -570,7 +570,7 @@ public sealed partial class SqlToUsearchRebuildTests(NativeSqlServerFixture fixt
             candidate with { Generation = candidate.Generation with { CorpusStamp = null } };
         var request = await ClaimPublishAsync(environment, candidate);
         await Assert.ThrowsAsync<PublicationSnapshotConflictException>(async () =>
-            await new SqlStageTransitionStore(environment.Factory).TransitionAsync(request, CancellationToken.None));
+            await new SqlStageTransitionStore(environment.Factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory)).TransitionAsync(request, CancellationToken.None));
         await using var context = await environment.Factory.CreateDbContextAsync();
         Assert.False(await context.Artifacts.AnyAsync(value => value.Id == request.Artifact.Id));
     }
@@ -645,7 +645,7 @@ public sealed partial class SqlToUsearchRebuildTests(NativeSqlServerFixture fixt
         Assert.Equal(replacement.CorpusStamp.CorpusVersion, (await verification.IndexState.SingleAsync()).CorpusVersion);
         var candidate = await environment.Builder.BuildAndPlaceAsync(Guid.NewGuid(), CancellationToken.None);
         var request = await ClaimPublishAsync(environment, candidate);
-        await new SqlStageTransitionStore(environment.Factory).TransitionAsync(request, CancellationToken.None);
+        await new SqlStageTransitionStore(environment.Factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory)).TransitionAsync(request, CancellationToken.None);
         await using var afterNoMembershipChange = await environment.Factory.CreateDbContextAsync();
         Assert.Equal(replacement.CorpusStamp.CorpusVersion, (await afterNoMembershipChange.IndexState.SingleAsync()).CorpusVersion);
     }
@@ -664,7 +664,7 @@ public sealed partial class SqlToUsearchRebuildTests(NativeSqlServerFixture fixt
             await context.SaveChangesAsync();
         }
         await Assert.ThrowsAsync<PublicationSnapshotConflictException>(async () =>
-            await new SqlStageTransitionStore(environment.Factory).TransitionAsync(request, CancellationToken.None));
+            await new SqlStageTransitionStore(environment.Factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory)).TransitionAsync(request, CancellationToken.None));
         await using var verification = await environment.Factory.CreateDbContextAsync();
         Assert.False(await verification.Artifacts.AnyAsync(artifact => artifact.Id == request.Artifact.Id));
         Assert.False((await verification.PipelineRecords.SingleAsync(record => record.Id == request.CurrentJob.PipelineRecordId.Value)).CompletionCriteriaMet);
@@ -678,7 +678,7 @@ public sealed partial class SqlToUsearchRebuildTests(NativeSqlServerFixture fixt
         await using var environment = await PipelineEnvironment.CreateAsync(_fixture, "Published retry baseline.");
         var candidate = await environment.Builder.BuildAndPlaceAsync(Guid.NewGuid(), CancellationToken.None);
         var claim = await ClaimPublishAsync(environment, candidate);
-        IStageTransitionStore store = new SqlStageTransitionStore(environment.Factory);
+        IStageTransitionStore store = new SqlStageTransitionStore(environment.Factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory));
         var due = DateTimeOffset.UtcNow.AddSeconds(5);
         var request = new StageRetryRequest(claim.DispatchMessage, claim.CurrentJob, due,
             "publication-snapshot-conflict", nameof(SqlToUsearchRebuildTests));
@@ -699,13 +699,13 @@ public sealed partial class SqlToUsearchRebuildTests(NativeSqlServerFixture fixt
             Assert.Equal(due, dispatch.DueAtUtc);
             Assert.False(await context.Artifacts.AnyAsync(artifact => artifact.Id == claim.Artifact.Id));
         }
-        var outbox = new SqlOutboxStore(environment.Factory);
+        var outbox = new SqlOutboxStore(environment.Factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory));
         Assert.Null(await outbox.ClaimNextDueAsync("retry-dispatcher", due.AddMilliseconds(-1),
             TimeSpan.FromMinutes(2), [PipelineOperations.Publish], CancellationToken.None));
         var nextDispatch = await outbox.ClaimNextDueAsync("retry-dispatcher", due,
             TimeSpan.FromMinutes(2), [PipelineOperations.Publish], CancellationToken.None);
         Assert.NotNull(nextDispatch);
-        var nextJob = await new SqlJobClaimStore(environment.Factory).ClaimForDispatchAsync(nextDispatch,
+        var nextJob = await new SqlJobClaimStore(environment.Factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory)).ClaimForDispatchAsync(nextDispatch,
             "retry-worker", due, TimeSpan.FromMinutes(2), CancellationToken.None);
         Assert.NotNull(nextJob);
         Assert.True(nextJob.LeaseGeneration > claim.CurrentJob.LeaseGeneration);
@@ -948,7 +948,7 @@ public sealed partial class SqlToUsearchRebuildTests(NativeSqlServerFixture fixt
             expectedMembership, publicationStamp.ExpectedCorpusStamp);
         var request = await ClaimPublishAsync(environment, candidate);
 
-        _ = await new SqlStageTransitionStore(environment.Factory).TransitionAsync(request, CancellationToken.None);
+        _ = await new SqlStageTransitionStore(environment.Factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory)).TransitionAsync(request, CancellationToken.None);
 
         Assert.Equal(candidate.Generation.Id, await environment.Store.GetActiveGenerationIdAsync(CancellationToken.None));
         await using var verification = await environment.Factory.CreateDbContextAsync();
@@ -1486,7 +1486,7 @@ public sealed partial class SqlToUsearchRebuildTests(NativeSqlServerFixture fixt
         var stale = await environment.Builder.BuildAndPlaceAsync(Guid.NewGuid(), CancellationToken.None);
         await environment.AddAndPumpAsync("second source");
         var active = await environment.ActiveGenerationAsync();
-        var transition = new SqlStageTransitionStore(environment.Factory);
+        var transition = new SqlStageTransitionStore(environment.Factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory));
         var request = await ClaimPublishAsync(environment, stale);
 
         await Assert.ThrowsAsync<PublicationSnapshotConflictException>(async () =>
@@ -1510,7 +1510,7 @@ public sealed partial class SqlToUsearchRebuildTests(NativeSqlServerFixture fixt
         await using var environment = await PipelineEnvironment.CreateAsync(_fixture, "replay source");
         var active = await environment.ActiveGenerationAsync();
         var candidate = await environment.Builder.BuildAndPlaceAsync(Guid.NewGuid(), CancellationToken.None);
-        var transition = new SqlStageTransitionStore(environment.Factory);
+        var transition = new SqlStageTransitionStore(environment.Factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory));
         var request = await ClaimPublishAsync(environment, candidate);
         var first = await transition.TransitionAsync(request, CancellationToken.None);
         var replay = await transition.TransitionAsync(request, CancellationToken.None);
@@ -1550,7 +1550,7 @@ public sealed partial class SqlToUsearchRebuildTests(NativeSqlServerFixture fixt
             new IndexGenerationCandidateSnapshot(incompatible, vectors, active.CorpusStamp));
 
         await Assert.ThrowsAsync<IndexGenerationStaleException>(
-            async () => await new SqlStageTransitionStore(environment.Factory)
+            async () => await new SqlStageTransitionStore(environment.Factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory))
                 .TransitionAsync(request, CancellationToken.None));
 
         await using var context = await environment.Factory.CreateDbContextAsync();
@@ -1570,8 +1570,8 @@ public sealed partial class SqlToUsearchRebuildTests(NativeSqlServerFixture fixt
         await PrepareUntrackedCandidateAsync(environment);
         var candidate = await environment.Builder.BuildAndPlaceAsync(Guid.NewGuid(), CancellationToken.None);
         var barrier = new ActivationBarrier();
-        var first = new SqlStageTransitionStore(environment.Factory, barrier);
-        var second = new SqlStageTransitionStore(environment.Factory, barrier);
+        var first = new SqlStageTransitionStore(environment.Factory, barrier, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory));
+        var second = new SqlStageTransitionStore(environment.Factory, barrier, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory));
         var firstRequest = await ClaimPublishAsync(environment, candidate);
         var secondRequest = await ClaimPublishAsync(environment, candidate);
 
@@ -1604,7 +1604,7 @@ public sealed partial class SqlToUsearchRebuildTests(NativeSqlServerFixture fixt
                 .ExecuteDeleteAsync();
         }
 
-        await new SqlStageTransitionStore(environment.Factory).TransitionAsync(
+        await new SqlStageTransitionStore(environment.Factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory)).TransitionAsync(
             await ClaimPublishAsync(environment, candidate),
             CancellationToken.None);
 
@@ -1659,14 +1659,14 @@ public sealed partial class SqlToUsearchRebuildTests(NativeSqlServerFixture fixt
             leaseExpiresAtUtc: null,
             stage: PipelineStage.Publish,
             operation: PipelineOperations.Publish);
-        var outbox = await new SqlOutboxStore(environment.Factory).ClaimNextDueAsync(
+        var outbox = await new SqlOutboxStore(environment.Factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory)).ClaimNextDueAsync(
             "task-5-publish-dispatcher",
             now.AddMinutes(1),
             TimeSpan.FromMinutes(2),
             [PipelineOperations.Publish],
             CancellationToken.None);
         Assert.NotNull(outbox);
-        var job = await new SqlJobClaimStore(environment.Factory).ClaimForDispatchAsync(
+        var job = await new SqlJobClaimStore(environment.Factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory)).ClaimForDispatchAsync(
             outbox!,
             "task-5-publish-worker",
             now.AddMinutes(1),
@@ -2190,6 +2190,8 @@ public sealed partial class SqlToUsearchRebuildTests(NativeSqlServerFixture fixt
             Directory.CreateDirectory(ingress);
             Directory.CreateDirectory(artifact);
             var services = new ServiceCollection();
+            services.AddSingleton<FluxKnowledge.Application.Ports.ISourceWorkAdmission>(provider =>
+                new FixtureSourceAdmission(provider.GetRequiredService<IDbContextFactory<FluxKnowledgeDbContext>>()));
             services.AddSingleton<IDeploymentValidationHold>(new RebuildTestHold());
             services.AddSingleton(SqlTestData.CreateFactory(fixture));
             if (clock is not null) services.AddSingleton(clock);

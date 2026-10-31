@@ -20,7 +20,7 @@ public sealed class OutboxJobBindingTests(NativeSqlServerFixture fixture) : ICla
         var now = DateTimeOffset.UtcNow;
         var seeded = await SqlTestData.SeedWorkItemAsync(fixture, now, PublicJobState.WorkerQueued, null);
         var factory = SqlTestData.CreateFactory(fixture);
-        var dispatch = await new SqlOutboxStore(factory).ClaimNextDueAsync("old-delivery", now, TimeSpan.FromMinutes(1),
+        var dispatch = await new SqlOutboxStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory)).ClaimNextDueAsync("old-delivery", now, TimeSpan.FromMinutes(1),
             [PipelineOperations.ExtractUtf8], CancellationToken.None);
         Assert.NotNull(dispatch);
         Assert.Equal(seeded.DispatchMessageId, dispatch.DispatchMessageId);
@@ -37,7 +37,7 @@ public sealed class OutboxJobBindingTests(NativeSqlServerFixture fixture) : ICla
             });
             await context.SaveChangesAsync();
         }
-        var claim = await new SqlJobClaimStore(factory).ClaimForDispatchAsync(dispatch, "worker", now, TimeSpan.FromMinutes(1), CancellationToken.None);
+        var claim = await new SqlJobClaimStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory)).ClaimForDispatchAsync(dispatch, "worker", now, TimeSpan.FromMinutes(1), CancellationToken.None);
         Assert.Null(claim);
         await using var verification = await factory.CreateDbContextAsync();
         Assert.Equal((int)PublicJobState.WorkerQueued, await verification.Jobs.Where(job => job.Id != seeded.JobId.Value).Select(job => job.PublicState).SingleAsync());
@@ -63,12 +63,12 @@ public sealed class OutboxJobBindingTests(NativeSqlServerFixture fixture) : ICla
             });
             await context.SaveChangesAsync();
         }
-        await new SqlOutboxStore(factory).EnqueueAsync(DispatchMessage.Create(new(newJobId), seeded.PipelineRecordId,
+        await new SqlOutboxStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory)).EnqueueAsync(DispatchMessage.Create(new(newJobId), seeded.PipelineRecordId,
             1, PipelineStage.Extract, PipelineOperations.ExtractUtf8, 1, "replacement", now), CancellationToken.None);
-        var dispatch = await new SqlOutboxStore(factory).ClaimNextDueAsync("new-delivery", now, TimeSpan.FromMinutes(1),
+        var dispatch = await new SqlOutboxStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory)).ClaimNextDueAsync("new-delivery", now, TimeSpan.FromMinutes(1),
             [PipelineOperations.ExtractUtf8], CancellationToken.None);
         Assert.NotNull(dispatch);
-        var claim = await new SqlJobClaimStore(factory).ClaimForDispatchAsync(dispatch, "worker", now, TimeSpan.FromMinutes(1), CancellationToken.None);
+        var claim = await new SqlJobClaimStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory)).ClaimForDispatchAsync(dispatch, "worker", now, TimeSpan.FromMinutes(1), CancellationToken.None);
         Assert.NotNull(claim);
         Assert.Equal(newJobId, claim.JobId.Value);
         await using var verification = await factory.CreateDbContextAsync();
@@ -86,7 +86,7 @@ public sealed class OutboxJobBindingTests(NativeSqlServerFixture fixture) : ICla
         var now = DateTimeOffset.UtcNow;
         var seeded = await SqlTestData.SeedWorkItemAsync(fixture, now, PublicJobState.WorkerQueued, null);
         var factory = SqlTestData.CreateFactory(fixture);
-        var dispatch = await new SqlOutboxStore(factory).ClaimNextDueAsync("dispatcher", now, TimeSpan.FromMinutes(1),
+        var dispatch = await new SqlOutboxStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory)).ClaimNextDueAsync("dispatcher", now, TimeSpan.FromMinutes(1),
             [PipelineOperations.ExtractUtf8], CancellationToken.None);
         Assert.NotNull(dispatch);
         if (mismatch == "owner") dispatch = dispatch with { LeaseOwner = "other" };
@@ -96,7 +96,7 @@ public sealed class OutboxJobBindingTests(NativeSqlServerFixture fixture) : ICla
             await using var context = await factory.CreateDbContextAsync();
             await context.OutboxMessages.ExecuteUpdateAsync(setters => setters.SetProperty(message => message.JobId, (Guid?)null));
         }
-        var claim = await new SqlJobClaimStore(factory).ClaimForDispatchAsync(dispatch, "worker",
+        var claim = await new SqlJobClaimStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory)).ClaimForDispatchAsync(dispatch, "worker",
             mismatch == "expired" ? now.AddMinutes(2) : now, TimeSpan.FromMinutes(1), CancellationToken.None);
         Assert.Null(claim);
         await using var verification = await factory.CreateDbContextAsync();
@@ -110,7 +110,7 @@ public sealed class OutboxJobBindingTests(NativeSqlServerFixture fixture) : ICla
         var now = DateTimeOffset.UtcNow;
         var seeded = await SqlTestData.SeedWorkItemAsync(fixture, now, PublicJobState.WorkerQueued, null);
         var factory = SqlTestData.CreateFactory(fixture);
-        var outbox = new SqlOutboxStore(factory);
+        var outbox = new SqlOutboxStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         foreach (var message in new[]
         {
             DispatchMessage.Create(seeded.JobId, PipelineRecordId.New(), 1, PipelineStage.Extract, PipelineOperations.ExtractUtf8, 1, "wrong-record", now),

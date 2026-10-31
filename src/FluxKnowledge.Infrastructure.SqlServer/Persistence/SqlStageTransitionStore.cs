@@ -41,6 +41,7 @@ public sealed partial class SqlStageTransitionStore : IStageTransitionStore
                 value.LeaseExpiresAtUtc > now, cancellationToken).ConfigureAwait(false))
             throw new InvalidOperationException("Repository preflight lost its worker lease.");
         await SqlRepositoryWorkRecovery.ValidateAsync(context, job, _timeProvider.GetUtcNow(), cancellationToken).ConfigureAwait(false);
+        await SqlSourceWorkEligibility.RequireAsync(context, job.PipelineRecordId, cancellationToken, _sourceAdmission).ConfigureAwait(false);
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
         }).ConfigureAwait(false);
     }
@@ -48,22 +49,24 @@ public sealed partial class SqlStageTransitionStore : IStageTransitionStore
     private readonly IStageTransitionFailureInjector? _failureInjector;
     private readonly TimeProvider _timeProvider;
     private readonly Application.Gpu.EmbeddingGpuRuntime? _embeddingRuntime;
+    private readonly ISourceWorkAdmission? _sourceAdmission;
 
     public SqlStageTransitionStore(
         IDbContextFactory<FluxKnowledgeDbContext> contextFactory,
         IStageTransitionFailureInjector? failureInjector,
-        TimeProvider timeProvider, Application.Gpu.EmbeddingGpuRuntime? embeddingRuntime = null)
+        TimeProvider timeProvider, Application.Gpu.EmbeddingGpuRuntime? embeddingRuntime = null, ISourceWorkAdmission? sourceAdmission = null)
     {
         _contextFactory = contextFactory;
         _failureInjector = failureInjector;
         _timeProvider = timeProvider;
         _embeddingRuntime = embeddingRuntime;
+        _sourceAdmission = sourceAdmission;
     }
 
     public SqlStageTransitionStore(
         IDbContextFactory<FluxKnowledgeDbContext> contextFactory,
-        IStageTransitionFailureInjector? failureInjector = null)
-        : this(contextFactory, failureInjector, TimeProvider.System)
+        IStageTransitionFailureInjector? failureInjector = null, ISourceWorkAdmission? sourceAdmission = null)
+        : this(contextFactory, failureInjector, TimeProvider.System, sourceAdmission: sourceAdmission)
     {
     }
 
@@ -112,12 +115,9 @@ public sealed partial class SqlStageTransitionStore : IStageTransitionStore
                 cancellationToken)
             .ConfigureAwait(false);
 
-        if (repositoryWork || request.Artifact.Stage >= PipelineStage.Embed || request.IndexingOutput?.ActivateGeneration is not null || request.IndexingOutput?.UsePersistedEmbeddingDraft == true)
-        {
-            if (request.Artifact.Stage == PipelineStage.Publish || request.IndexingOutput?.ActivateGeneration is not null)
-                await SqlSegmentedIndexStore.AcquireSharedTransactionAsync(context, cancellationToken).ConfigureAwait(false);
-            await SqlPublishedPassageSelection.AcquireFenceAsync(context, cancellationToken).ConfigureAwait(false);
-        }
+        if (request.Artifact.Stage == PipelineStage.Publish || request.IndexingOutput?.ActivateGeneration is not null)
+            await SqlSegmentedIndexStore.AcquireSharedTransactionAsync(context, cancellationToken).ConfigureAwait(false);
+        await SqlPublishedPassageSelection.AcquireFenceAsync(context, cancellationToken).ConfigureAwait(false);
 
         var validated = await ValidateClaimAsync(context, request, cancellationToken)
             .ConfigureAwait(false);
@@ -133,6 +133,7 @@ public sealed partial class SqlStageTransitionStore : IStageTransitionStore
         }
 
         await SqlCorpusRebuildStore.ValidateMaintenanceJobAsync(context, request.CurrentJob.JobId.Value, cancellationToken).ConfigureAwait(false);
+        await SqlSourceWorkEligibility.RequireAsync(context, request.CurrentJob.PipelineRecordId.Value, cancellationToken, _sourceAdmission).ConfigureAwait(false);
 
         if (request.IndexingOutput?.UsePersistedEmbeddingDraft == true)
         {
@@ -141,7 +142,7 @@ public sealed partial class SqlStageTransitionStore : IStageTransitionStore
                 request.Artifact.ContentType != EmbedDraftDefaults.ArtifactContentType || request.Artifact.SearchText != draftId.ToString("D"))
                 throw new InvalidOperationException("embedding-checkpoint-seal-invalid");
             var work = new Application.Workers.StageWorkItem(request.DispatchMessage, request.CurrentJob);
-            await SqlEmbeddingCheckpointStore.ValidateClaimAsync(context, work, _timeProvider.GetUtcNow(), cancellationToken).ConfigureAwait(false);
+            await SqlEmbeddingCheckpointStore.ValidateClaimAsync(context, work, _timeProvider.GetUtcNow(), cancellationToken, _sourceAdmission).ConfigureAwait(false);
             var draft = await context.IndexGenerations.SingleAsync(value => value.Id == draftId, cancellationToken).ConfigureAwait(false);
             var epoch = (await SqlPublishedPassageSelection.ReadStampAsync(context, cancellationToken).ConfigureAwait(false)).CorpusEpoch;
             SqlEmbeddingCheckpointStore.ValidateDraft(draft, work, new(request.IndexingOutput.ModelFingerprint!, draft.Dimensions), epoch);

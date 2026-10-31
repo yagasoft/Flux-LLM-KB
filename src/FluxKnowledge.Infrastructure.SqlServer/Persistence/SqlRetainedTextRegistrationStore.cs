@@ -22,7 +22,7 @@ public sealed class SqlRetainedTextRegistrationStore(
     IDbContextFactory<FluxKnowledgeDbContext> contextFactory,
     TimeProvider timeProvider,
     string? retainedArtifactRoot = null,
-    PersistedOutlookSpoolRootPolicy? outlookSpoolPolicy = null) : IRetainedTextRegistrationStore, IDeferredActivityReplayStore, ISourceActivityRestartStore
+    PersistedOutlookSpoolRootPolicy? outlookSpoolPolicy = null, ISourceWorkAdmission? sourceAdmission = null) : IRetainedTextRegistrationStore, IDeferredActivityReplayStore, ISourceActivityRestartStore
 {
     private const string RetainedSourceKind = "retained local source";
     private const string AcceptedUtf8Classification = "AcceptedUtf8Text";
@@ -268,6 +268,7 @@ public sealed class SqlRetainedTextRegistrationStore(
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
             return false;
         }
+        if (!await SqlSourceWorkEligibility.Inputs(context, sourceAdmission).AnyAsync(x => x.Id == activity.SourceRevisionId.Value, cancellationToken).ConfigureAwait(false)) return false;
         var isUtf8Input = sourceRevision is not null &&
             (sourceRevision.Classification == AcceptedUtf8Classification && activity.ProcessorVersion != RetainedDefaultPolicy.Version || isPolicyText) &&
             activity.Kind is SourceActivityKind.TextExtraction or SourceActivityKind.MetadataExtraction;

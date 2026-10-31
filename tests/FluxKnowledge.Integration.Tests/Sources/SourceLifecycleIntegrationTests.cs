@@ -26,8 +26,8 @@ public sealed class SourceLifecycleIntegrationTests(NativeSqlServerFixture fixtu
         var source = await SeedPausedSourceWorkAsync(now);
         var unrelated = await SeedUnrelatedWorkAsync(now);
         var factory = SqlTestData.CreateFactory(_fixture);
-        var outbox = new SqlOutboxStore(factory);
-        var jobs = new SqlJobClaimStore(factory);
+        var outbox = new SqlOutboxStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
+        var jobs = new SqlJobClaimStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
 
         var unrelatedDispatch = await outbox.ClaimNextDueAsync(
             "paused-root-dispatcher",
@@ -79,7 +79,7 @@ public sealed class SourceLifecycleIntegrationTests(NativeSqlServerFixture fixtu
         var source = await SeedPausedUnlinkedActivityAsync(now);
         var store = new SqlRetainedTextRegistrationStore(
             SqlTestData.CreateFactory(_fixture),
-            new FixedTimeProvider(now));
+            new FixedTimeProvider(now), sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(SqlTestData.CreateFactory(_fixture)));
 
         Assert.Equal(0, await store.OfferUnlinkedInProcessActivitiesAsync(CancellationToken.None));
         await AssertUnlinkedAsync(source.ActivityId);

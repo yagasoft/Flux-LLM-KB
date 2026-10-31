@@ -12,7 +12,8 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
 
 public sealed class SqlJobClaimStore(
     IDbContextFactory<FluxKnowledgeDbContext> contextFactory,
-    IDeploymentValidationHold? deploymentValidationHold = null) : IJobClaimStore
+    IDeploymentValidationHold? deploymentValidationHold = null,
+    ISourceWorkAdmission? sourceAdmission = null) : IJobClaimStore
 {
     public async ValueTask<Job?> ClaimWorkerAsync(
         string leaseOwner,
@@ -138,6 +139,8 @@ public sealed class SqlJobClaimStore(
                  [AttemptCount] int, [LeaseOwner] nvarchar(256), [LeaseExpiresAtUtc] datetimeoffset(7), [LeaseGeneration] bigint
              );
              DECLARE @claimedActivities TABLE ([Id] uniqueidentifier, [SourceRevisionId] uniqueidentifier);
+             DECLARE @publicationFence int;
+             SELECT @publicationFence=[Id] FROM [IndexState] WITH (UPDLOCK,HOLDLOCK) WHERE [Id]=1;
              ;WITH [candidate] AS
              (
                  SELECT TOP (1)
@@ -175,6 +178,8 @@ public sealed class SqlJobClaimStore(
                            INNER JOIN [SourceRootConfigurations] AS [root]
                                ON [root].[Id] = [revision].[SourceRootId]
                            WHERE [record].[Id] = [Jobs].[PipelineRecordId]
+                             AND [record].[IsDeleted] = 0 AND [record].[Revision] = [Jobs].[SourceRevision]
+                             AND {{SqlSourceWorkEligibility.Source("[record].[SourceRevisionId]")}}
                              AND ([root].[State] = @sourceRootEnabled OR {{SqlCorpusRebuildEligibility.ActiveJob("[Jobs].[Id]")}})
                        )
                    )
@@ -268,6 +273,7 @@ public sealed class SqlJobClaimStore(
         AddParameter(command, "@sourceMetadataExtraction", SqlDbType.Int, (int)FluxKnowledge.Domain.Sources.SourceActivityKind.MetadataExtraction);
         AddParameter(command, "@sourceDocumentParsing", SqlDbType.Int, (int)FluxKnowledge.Domain.Sources.SourceActivityKind.DocumentParsing);
         AddParameter(command, "@sourceRootEnabled", SqlDbType.Int, (int)FluxKnowledge.Domain.Sources.SourceRootState.Enabled);
+        command.Parameters.Add(SqlSourceWorkEligibility.AdmissionParameter(sourceAdmission));
         if (dispatchMessage is not null)
         {
             AddParameter(command, "@dispatchId", SqlDbType.UniqueIdentifier, dispatchMessage.DispatchMessageId.Value);

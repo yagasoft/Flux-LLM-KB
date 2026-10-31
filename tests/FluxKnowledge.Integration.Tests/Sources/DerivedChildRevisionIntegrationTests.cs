@@ -282,7 +282,7 @@ public sealed class DerivedChildRevisionIntegrationTests(NativeSqlServerFixture 
         finally { DeletePrivateRoot(root); }
     }
 
-    private SqlRetainedProcessorBranchStore CreateStore() => new(new ContextFactory(fixture.ConnectionString), TimeProvider.System);
+    private SqlRetainedProcessorBranchStore CreateStore() => new(new ContextFactory(fixture.ConnectionString), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(fixture.ConnectionString)));
     private FluxKnowledgeDbContext CreateContext() => new(new DbContextOptionsBuilder<FluxKnowledgeDbContext>().UseSqlServer(fixture.ConnectionString).Options);
 
     private static SourceCapabilityDescriptor Capability(string kind) => kind switch

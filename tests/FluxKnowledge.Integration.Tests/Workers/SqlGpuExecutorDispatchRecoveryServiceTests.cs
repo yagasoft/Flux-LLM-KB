@@ -207,7 +207,7 @@ public sealed class SqlGpuExecutorDispatchRecoveryServiceTests(NativeSqlServerFi
         await SqlGpuAdmissionTests.AdmitAsync(factory, SqlGpuAdmissionTests.Admit("slot-b"), SingleTaskOptions);
         var uncertainHandle = await ReadHandleAsync(factory, "slot-b");
 
-        var store = new SqlGpuSchedulerStore(factory);
+        var store = new SqlGpuSchedulerStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         Assert.True((await store.AcknowledgeAsync(new GpuExecutorAcknowledgement(Guid.NewGuid(), receiptHandle), CancellationToken.None)).Accepted);
         Assert.True((await store.RecordReceiptAsync(
             new GpuExecutorResultReceipt(

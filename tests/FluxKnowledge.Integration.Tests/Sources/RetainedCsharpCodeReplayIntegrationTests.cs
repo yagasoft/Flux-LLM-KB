@@ -16,7 +16,7 @@ using Xunit;
 namespace FluxKnowledge.Integration.Tests.Sources;
 
 /// <summary>Disposable-SQL contract tests for durable retained C# completion ownership.</summary>
-public sealed class RetainedCsharpCodeReplayIntegrationTests(NativeSqlServerFixture fixture) : IClassFixture<NativeSqlServerFixture>
+public sealed partial class RetainedCsharpCodeReplayIntegrationTests(NativeSqlServerFixture fixture) : IClassFixture<NativeSqlServerFixture>
 {
     [NativeSqlServerFact]
     public async Task Additive_migration_upgrades_the_previous_schema_with_csharp_hard_denials_and_restrictive_fact_tables()
@@ -37,7 +37,7 @@ public sealed class RetainedCsharpCodeReplayIntegrationTests(NativeSqlServerFixt
         var seeded = await SeedCsharpBranchAsync(bytes);
         var store = new SqlRetainedProcessorBranchStore(
             SqlTestData.CreateFactory(fixture),
-            TimeProvider.System);
+            TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(SqlTestData.CreateFactory(fixture)));
 
         var claims = await store.ClaimCsharpCodeAsync(
             "retained-csharp-test-owner",
@@ -58,7 +58,7 @@ public sealed class RetainedCsharpCodeReplayIntegrationTests(NativeSqlServerFixt
     {
         var bytes = Encoding.UTF8.GetBytes("namespace N; public sealed class C { public void M() { } }");
         var seeded = await SeedCsharpBranchAsync(bytes);
-        var store = new SqlRetainedProcessorBranchStore(SqlTestData.CreateFactory(fixture), TimeProvider.System);
+        var store = new SqlRetainedProcessorBranchStore(SqlTestData.CreateFactory(fixture), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(SqlTestData.CreateFactory(fixture)));
         var claim = Assert.Single(await store.ClaimCsharpCodeAsync("retained-csharp-success", 1,
             RetainedCsharpCodeProcessor.Capability.ProcessorFingerprint, CancellationToken.None));
         var completion = await ProcessAsync(claim, bytes);
@@ -85,7 +85,7 @@ public sealed class RetainedCsharpCodeReplayIntegrationTests(NativeSqlServerFixt
     {
         var bytes = Encoding.UTF8.GetBytes("class C {");
         var seeded = await SeedCsharpBranchAsync(bytes);
-        var store = new SqlRetainedProcessorBranchStore(SqlTestData.CreateFactory(fixture), TimeProvider.System);
+        var store = new SqlRetainedProcessorBranchStore(SqlTestData.CreateFactory(fixture), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(SqlTestData.CreateFactory(fixture)));
         var claim = Assert.Single(await store.ClaimCsharpCodeAsync("retained-csharp-syntax", 1,
             RetainedCsharpCodeProcessor.Capability.ProcessorFingerprint, CancellationToken.None));
         var completion = await ProcessAsync(claim, bytes);
@@ -108,8 +108,8 @@ public sealed class RetainedCsharpCodeReplayIntegrationTests(NativeSqlServerFixt
     {
         var bytes = Encoding.UTF8.GetBytes("namespace C; public sealed class Concurrent { public int Value => 1; }");
         var seeded = await SeedCsharpBranchAsync(bytes);
-        var firstStore = new SqlRetainedProcessorBranchStore(SqlTestData.CreateFactory(fixture), TimeProvider.System);
-        var secondStore = new SqlRetainedProcessorBranchStore(SqlTestData.CreateFactory(fixture), TimeProvider.System);
+        var firstStore = new SqlRetainedProcessorBranchStore(SqlTestData.CreateFactory(fixture), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(SqlTestData.CreateFactory(fixture)));
+        var secondStore = new SqlRetainedProcessorBranchStore(SqlTestData.CreateFactory(fixture), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(SqlTestData.CreateFactory(fixture)));
         var claim = Assert.Single(await firstStore.ClaimCsharpCodeAsync("retained-csharp-race", 1,
             RetainedCsharpCodeProcessor.Capability.ProcessorFingerprint, CancellationToken.None));
         var completion = await ProcessAsync(claim, bytes);
@@ -143,7 +143,7 @@ public sealed class RetainedCsharpCodeReplayIntegrationTests(NativeSqlServerFixt
             using var reader = new SqlRetainedSourceReader(factory, root);
             var activation = new RetainedProcessorActivationService(
                 new SourceCapabilityService(new SqlSourceActivityStore(factory, TimeProvider.System), new LocalSourceCapabilityHandlerRegistry([new RetainedCsharpCodeCapabilityHandler()])),
-                new SqlRetainedProcessorBranchStore(factory, TimeProvider.System), reader,
+                new SqlRetainedProcessorBranchStore(factory, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory)), reader,
                 new ZipArchiveRetainedProcessor(new SqlRetainedArtifactWriter(factory, root)),
                 new RetainedProcessorOptions { CsharpCodeEnabled = true, ArchiveZipExpandEnabled = false }, TimeProvider.System,
                 csharpProcessor: new RetainedCsharpCodeProcessor(reader, new LocalPrivateContentDisclosure()));
@@ -187,7 +187,7 @@ public sealed class RetainedCsharpCodeReplayIntegrationTests(NativeSqlServerFixt
             using var reader = new SqlRetainedSourceReader(factory, root);
             var activation = new RetainedProcessorActivationService(
                 new SourceCapabilityService(new SqlSourceActivityStore(factory, TimeProvider.System), new LocalSourceCapabilityHandlerRegistry([new RetainedCsharpCodeCapabilityHandler()])),
-                new SqlRetainedProcessorBranchStore(factory, TimeProvider.System), reader,
+                new SqlRetainedProcessorBranchStore(factory, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory)), reader,
                 new ZipArchiveRetainedProcessor(new SqlRetainedArtifactWriter(factory, root)),
                 new RetainedProcessorOptions { CsharpCodeEnabled = true, ArchiveZipExpandEnabled = false }, TimeProvider.System,
                 csharpProcessor: new RetainedCsharpCodeProcessor(reader, new LocalPrivateContentDisclosure()));

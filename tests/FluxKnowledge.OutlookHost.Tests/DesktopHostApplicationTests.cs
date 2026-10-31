@@ -33,18 +33,20 @@ public sealed class DesktopHostApplicationTests
         public IOutlookHostApplication Create(OutlookHostOptions options) => application;
     }
 
-    [Fact]
-    public async Task Scheduled_desktop_run_processes_one_pending_Visio_document_without_a_manual_trigger()
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Scheduled_desktop_run_continues_to_Outlook_after_the_Visio_result(bool processed)
     {
         var order = new List<string>();
         await using var application = new DesktopHostApplication(
-            new RecordingVisioRunner(order, processed: true),
+            new RecordingVisioRunner(order, processed),
             new RecordingOutlookApplication(order, OutlookHostExitReason.NoDurableWork));
 
         var result = await application.RunOnceAsync(CancellationToken.None);
 
         Assert.Equal(["visio", "outlook"], order);
-        Assert.Equal(OutlookHostExitReason.Completed, result.Reason);
+        Assert.Equal(processed ? OutlookHostExitReason.Completed : OutlookHostExitReason.NoDurableWork, result.Reason);
     }
 
     private sealed class RecordingVisioRunner(List<string> order, bool processed) : IPendingVisioDocumentRunner

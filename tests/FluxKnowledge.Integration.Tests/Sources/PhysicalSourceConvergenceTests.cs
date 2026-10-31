@@ -185,19 +185,86 @@ public sealed class PhysicalSourceConvergenceTests(NativeSqlServerFixture fixtur
     }
 
     [NativeSqlServerFact]
-    public async Task An_identical_byte_replacement_is_not_relabelled_as_the_old_physical_identity()
+    public async Task Verified_identical_byte_replacements_reuse_the_logical_owner_without_relabelling_its_immutable_identity()
     {
         await using var source = await Source.CreateAsync(fixture.ConnectionString);
         var original = await source.CaptureAsync("available.txt");
         var bytes = await File.ReadAllBytesAsync(source.Path("available.txt"));
-        File.Move(source.Path("available.txt"), System.IO.Path.Combine(source.Storage.Root, "previous-source.txt"));
-        await File.WriteAllBytesAsync(source.Path("available.txt"), bytes);
-        await Assert.ThrowsAsync<InvalidOperationException>(() => source.CaptureAsync("available.txt"));
+        string immutableIdentity;
+        Guid artifactId;
+        await using (var before = source.Factory.CreateDbContext())
+        {
+            immutableIdentity = (await before.SourceRevisions.SingleAsync()).StableSourceIdentity;
+            artifactId = (await before.SourceArtifacts.SingleAsync()).Id;
+        }
+        for (var attempt = 0; attempt < 3; attempt++)
+        {
+            File.Move(source.Path("available.txt"), System.IO.Path.Combine(source.Storage.Root, $"previous-source-{attempt}.txt"));
+            await File.WriteAllBytesAsync(source.Path("available.txt"), bytes);
+            Assert.Equal(original, await source.CaptureAsync("available.txt"));
+        }
         await using var verify = source.Factory.CreateDbContext();
         var row = Assert.Single(await verify.SourceRevisions.ToArrayAsync());
         Assert.Equal(original.Value, row.Id);
+        Assert.Equal(immutableIdentity, row.StableSourceIdentity);
         Assert.NotEqual(row.StableSourceIdentity, PhysicalFileIdentity.Get(source.Path("available.txt")));
+        Assert.Equal(artifactId, (await verify.SourceArtifacts.SingleAsync()).Id);
+        using var evidence = JsonDocument.Parse(row.CurrentDiscoveryEvidenceJson!);
+        Assert.Equal(PhysicalFileIdentity.Get(source.Path("available.txt")), evidence.RootElement.GetProperty("StableSourceIdentity").GetString());
         Assert.Null(row.SuppressedAtUtc);
+    }
+
+    [NativeSqlServerTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Identical_byte_replacements_cannot_be_adopted_without_exclusive_physical_capture_authority(bool followLinks)
+    {
+        await using var source = await Source.CreateAsync(fixture.ConnectionString, followLinks: followLinks);
+        var original = await source.CaptureAsync("available.txt");
+        var bytes = await File.ReadAllBytesAsync(source.Path("available.txt"));
+        File.Move(source.Path("available.txt"), System.IO.Path.Combine(source.Storage.Root, "previous-source.txt"));
+        await File.WriteAllBytesAsync(source.Path("available.txt"), bytes);
+        if (followLinks)
+            await Assert.ThrowsAsync<InvalidOperationException>(() => source.CaptureAsync("available.txt"));
+        else
+        {
+            var snapshot = await source.SnapshotAsync("available.txt");
+            var receipt = await source.Artifacts.PutAsync(bytes, new(snapshot.ContentSha256, "text/plain", snapshot.ByteLength), default);
+            try
+            {
+                await Assert.ThrowsAsync<InvalidOperationException>(() => source.Scans.ConvergeRevisionAndArtifactAsync(
+                    source.Claim.SourceRoot, snapshot, receipt, default).AsTask());
+            }
+            finally { if (receipt.PublicationLease is not null) await receipt.PublicationLease.DisposeAsync(); }
+        }
+        await using var verify = source.Factory.CreateDbContext();
+        Assert.Equal(original.Value, (await verify.SourceRevisions.SingleAsync()).Id);
+        Assert.Equal(1, await verify.SourceArtifacts.CountAsync());
+    }
+
+    [NativeSqlServerTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Identical_byte_replacement_recovers_missing_retention_but_refuses_a_conflicting_immutable_artifact(bool missing)
+    {
+        await using var source = await Source.CreateAsync(fixture.ConnectionString);
+        var original = await source.CaptureAsync("available.txt");
+        var bytes = await File.ReadAllBytesAsync(source.Path("available.txt"));
+        await using (var setup = source.Factory.CreateDbContext())
+        {
+            if (missing) await setup.SourceArtifacts.ExecuteDeleteAsync();
+            else await setup.SourceArtifacts.ExecuteUpdateAsync(x => x.SetProperty(a => a.StoreRelativePath, "conflicting-immutable-reference"));
+        }
+        File.Move(source.Path("available.txt"), System.IO.Path.Combine(source.Storage.Root, "previous-source.txt"));
+        await File.WriteAllBytesAsync(source.Path("available.txt"), bytes);
+        if (missing) Assert.Equal(original, await source.CaptureAsync("available.txt"));
+        else await Assert.ThrowsAsync<InvalidOperationException>(() => source.CaptureAsync("available.txt"));
+        await using var verify = source.Factory.CreateDbContext();
+        Assert.Equal(original.Value, (await verify.SourceRevisions.SingleAsync()).Id);
+        var artifact = await verify.SourceArtifacts.SingleAsync();
+        Assert.Equal(original.Value, artifact.SourceRevisionId);
+        if (missing) Assert.Equal(bytes.Length, artifact.ByteLength);
+        else Assert.Equal("conflicting-immutable-reference", artifact.StoreRelativePath);
     }
 
     [NativeSqlServerFact]

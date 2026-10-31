@@ -14,7 +14,8 @@ using FluxKnowledge.Domain.Pipeline;
 namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
 
 /// <summary>Durable branch claims and fenced completion writes for retained processors.</summary>
-public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowledgeDbContext> contextFactory, TimeProvider timeProvider)
+public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowledgeDbContext> contextFactory, TimeProvider timeProvider,
+    ISourceWorkAdmission? sourceAdmission = null)
     : IRetainedProcessorBranchStore
 {
     private const string RetainedCsharpSchemaMigration = "20260820101021_CloseRetainedCsharpMixedOutcomes";
@@ -710,6 +711,7 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
         {
         await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken).ConfigureAwait(false);
+        await SqlPublishedPassageSelection.AcquireFenceAsync(context, cancellationToken).ConfigureAwait(false);
         var requested = await context.SourceProcessorForceRequests
             .FromSqlInterpolated($"""
                 SELECT TOP ({Math.Clamp(maximumCount, 1, RetainedProcessorOptions.MaximumAutomaticReplayBatchSize)}) [force].*
@@ -743,6 +745,7 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
                 .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
             if (branch is null || branch.State != (int)RetainedProcessorBranchState.Pending ||
                 branch.LeaseGeneration != request.OriginalBlockedLeaseGeneration ||
+                !await SqlSourceWorkEligibility.Inputs(context, sourceAdmission).AnyAsync(x => x.Id == branch.SourceRevisionId, cancellationToken).ConfigureAwait(false) ||
                 !await IsForceRequestBindingCurrentAsync(context, request, branch, cancellationToken).ConfigureAwait(false) ||
                 !await IsForceRequestPolicyCurrentAsync(context, request, cancellationToken).ConfigureAwait(false) ||
                 !await IsOoxmlDescriptorRunnableAsync(context, request, cancellationToken).ConfigureAwait(false))
@@ -1391,6 +1394,7 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
             await SqlPublishedPassageSelection.AcquireFenceAsync(context, retryCancellationToken).ConfigureAwait(false);
             var now = await DatabaseUtcNowAsync(context, retryCancellationToken).ConfigureAwait(false);
             var expiry = now.AddMinutes(5);
+            var eligibleInputs = SqlSourceWorkEligibility.Inputs(context, sourceAdmission).Select(x => x.Id);
             var branches = await context.SourceProcessorBranches.FromSqlInterpolated($"""
             SELECT * FROM [SourceProcessorBranches] WITH (UPDLOCK, HOLDLOCK)
             WHERE ([State] = {(int)RetainedProcessorBranchState.Pending}
@@ -1422,7 +1426,7 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
                     AND [revision].[ContentSha256] COLLATE Latin1_General_100_BIN2 = [SourceProcessorBranches].[InputSha256] COLLATE Latin1_General_100_BIN2
                     AND [artifact].[ContentSha256] COLLATE Latin1_General_100_BIN2 = [SourceProcessorBranches].[InputSha256] COLLATE Latin1_General_100_BIN2
                     AND [artifact].[ByteLength] = [revision].[ByteLength])
-            """).OrderBy(value => value.CreatedAtUtc).ThenBy(value => value.Id).Take(Math.Clamp(
+            """).Where(value => eligibleInputs.Contains(value.SourceRevisionId)).OrderBy(value => value.CreatedAtUtc).ThenBy(value => value.Id).Take(Math.Clamp(
                 maximumCount,
                 1,
                 RetainedCsharpCodeProcessor.MaximumClaimBatchSize)).ToListAsync(retryCancellationToken).ConfigureAwait(false);
@@ -1529,6 +1533,9 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
         {
             return new RetainedCsharpCodeCompletionWriteResult(false, false, "processor-fence-invalid", null);
         }
+
+        if (!await SqlSourceWorkEligibility.Inputs(context, sourceAdmission).AnyAsync(x => x.Id == revision.Id, cancellationToken).ConfigureAwait(false))
+            return new RetainedCsharpCodeCompletionWriteResult(false, false, "source-work-not-admitted", null);
 
         if (!await SqlDefaultRetainedPolicy.BindingIsCurrentAsync(context, activity.Id, cancellationToken).ConfigureAwait(false))
         {
@@ -1827,6 +1834,7 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
         await SqlPublishedPassageSelection.AcquireFenceAsync(context, cancellationToken).ConfigureAwait(false);
         var now = await DatabaseUtcNowAsync(context, cancellationToken).ConfigureAwait(false);
         var expiry = now.AddMinutes(5);
+        var eligibleInputs = SqlSourceWorkEligibility.Inputs(context, sourceAdmission).Select(x => x.Id);
         var branches = await context.SourceProcessorBranches
             .FromSqlInterpolated($"""
                 SELECT *
@@ -1857,6 +1865,7 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
                       WHERE [revision].[Id] = [SourceProcessorBranches].[SourceRevisionId]
                         AND [root].[State] = {(int)SourceRootState.Enabled})
                 """)
+            .Where(value => eligibleInputs.Contains(value.SourceRevisionId))
             .OrderBy(value => value.CreatedAtUtc)
             .ThenBy(value => value.Id)
             .Take(Math.Clamp(maximumCount, 1, RetainedProcessorOptions.MaximumAutomaticReplayBatchSize))
@@ -1923,6 +1932,7 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
                 """)
             .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
         if (branch is null) return false;
+        if (!await SqlSourceWorkEligibility.Inputs(context, sourceAdmission).AnyAsync(x => x.Id == branch.SourceRevisionId, cancellationToken).ConfigureAwait(false)) return false;
         var recoveryId = await SqlDocumentInputRecovery.ReadRecoveryIdAsync(context, branch.SourceActivityId, cancellationToken).ConfigureAwait(false);
         if (recoveryId == Guid.Empty || recoveryId != claim.DocumentRecoveryId) return false;
         if (!await SqlDefaultRetainedPolicy.BindingIsCurrentAsync(context, branch.SourceActivityId, cancellationToken).ConfigureAwait(false))
@@ -2698,6 +2708,7 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
                 return null;
             }
 
+            if (!await SqlSourceWorkEligibility.Inputs(context, sourceAdmission).AnyAsync(x => x.Id == branch.SourceRevisionId, cancellationToken).ConfigureAwait(false)) return null;
             var revision = await context.SourceRevisions.FromSqlInterpolated($"""
                 SELECT * FROM [SourceRevisions] WITH (UPDLOCK, HOLDLOCK)
                 WHERE [Id] = {expectedSourceRevisionId.Value}

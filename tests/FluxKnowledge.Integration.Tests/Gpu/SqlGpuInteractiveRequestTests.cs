@@ -47,7 +47,7 @@ public sealed class SqlGpuInteractiveRequestTests(NativeSqlServerFixture fixture
             Assert.True(Convert.ToInt32(await command.ExecuteScalarAsync()) >= 0);
         }
 
-        var store = new SqlGpuSchedulerStore(factory, timeProvider: new FixedTimeProvider(Now));
+        var store = new SqlGpuSchedulerStore(factory, timeProvider: new FixedTimeProvider(Now), sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         Task<bool>? acknowledgement = null;
         Task<GpuMiniTaskHandoffResult>? handoff = null;
         try
@@ -85,11 +85,11 @@ public sealed class SqlGpuInteractiveRequestTests(NativeSqlServerFixture fixture
         await SqlTestData.ClearPipelineAsync(fixture);
         var factory = SqlTestData.CreateFactory(fixture);
         var request = Request() with { ExecutionDeadlineUtc = Now.AddSeconds(25) };
-        var defaultStore = new SqlGpuSchedulerStore(factory, timeProvider: new FixedTimeProvider(Now));
+        var defaultStore = new SqlGpuSchedulerStore(factory, timeProvider: new FixedTimeProvider(Now), sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         await Assert.ThrowsAsync<ArgumentException>(async () =>
             await defaultStore.HandoffInteractiveAsync(request, CancellationToken.None));
         var diagnosticStore = new SqlGpuSchedulerStore(factory, timeProvider: new FixedTimeProvider(Now),
-            interactiveExecutionTimeout: TimeSpan.FromSeconds(25));
+            interactiveExecutionTimeout: TimeSpan.FromSeconds(25), sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         Assert.True((await diagnosticStore.HandoffInteractiveAsync(request, CancellationToken.None)).Committed);
         await Assert.ThrowsAsync<ArgumentException>(async () =>
             await diagnosticStore.HandoffInteractiveAsync(Request() with { ExecutionDeadlineUtc = Now.AddSeconds(26) },
@@ -108,7 +108,7 @@ public sealed class SqlGpuInteractiveRequestTests(NativeSqlServerFixture fixture
         await SqlTestData.ClearPipelineAsync(fixture);
         var factory = SqlTestData.CreateFactory(fixture);
         var identity = new GpuInteractiveOwnerIdentity(17, Now.AddMinutes(-1), new string('a', 64));
-        var store = new SqlGpuSchedulerStore(factory, timeProvider: new FixedTimeProvider(Now), interactiveOwner: identity);
+        var store = new SqlGpuSchedulerStore(factory, timeProvider: new FixedTimeProvider(Now), interactiveOwner: identity, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         await using (var setup = await factory.CreateDbContextAsync())
         {
             setup.GpuCapacitySlots.Add(new GpuCapacitySlotEntity { SlotKey = "gpu-0", State = 0, UpdatedAtUtc = Now });
@@ -131,7 +131,7 @@ public sealed class SqlGpuInteractiveRequestTests(NativeSqlServerFixture fixture
         }
         if (interruption == 3) Assert.True((await store.ReconcileTaskOutcomeAsync(Guid.NewGuid(), new(handle, outcomeEvidence.OperationId, request.RequestId), CancellationToken.None)).Committed);
         if (interruption == 4) Assert.True((await store.ReconcileCapacityAsync(Guid.NewGuid(), new(handle, capacityEvidence.OperationId), CancellationToken.None)).Committed);
-        var replacement = new SqlGpuSchedulerStore(factory, timeProvider: new FixedTimeProvider(Now), interactiveOwner: identity with { StartedAtUtc = Now });
+        var replacement = new SqlGpuSchedulerStore(factory, timeProvider: new FixedTimeProvider(Now), interactiveOwner: identity with { StartedAtUtc = Now }, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         var recovery = new GpuInteractiveOwnerRecovery(replacement, replacement, replacement,
             new OwnerProbe(identity) { Observation = GpuInteractiveOwnerObservation.Exited }, new ChannelGpuSchedulerWakeSignal(), new FixedTimeProvider(Now));
         Assert.Equal(1, await recovery.RecoverAsync(CancellationToken.None));
@@ -151,7 +151,7 @@ public sealed class SqlGpuInteractiveRequestTests(NativeSqlServerFixture fixture
         await using var context = await factory.CreateDbContextAsync();
         var migrator = context.GetService<IMigrator>();
         var request = Request();
-        await new SqlGpuSchedulerStore(factory, timeProvider: new FixedTimeProvider(Now)).HandoffInteractiveAsync(request, CancellationToken.None);
+        await new SqlGpuSchedulerStore(factory, timeProvider: new FixedTimeProvider(Now), sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory)).HandoffInteractiveAsync(request, CancellationToken.None);
         var error = await Assert.ThrowsAsync<Microsoft.Data.SqlClient.SqlException>(() => migrator.MigrateAsync("20260926183316_AddGpuOcrTurnBound"));
         Assert.Equal(51000, error.Number);
         Assert.NotNull((await context.GpuMiniTasks.AsNoTracking().SingleAsync()).InteractiveOwnerProcessId);
@@ -186,7 +186,7 @@ public sealed class SqlGpuInteractiveRequestTests(NativeSqlServerFixture fixture
         var factory = SqlTestData.CreateFactory(fixture);
         var clock = new FixedTimeProvider(Now);
         var identity = new GpuInteractiveOwnerIdentity(17, Now.AddMinutes(-1), new string('a', 64));
-        var store = new SqlGpuSchedulerStore(factory, timeProvider: clock, interactiveOwner: identity);
+        var store = new SqlGpuSchedulerStore(factory, timeProvider: clock, interactiveOwner: identity, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         await using (var setup = await factory.CreateDbContextAsync())
         {
             setup.GpuCapacitySlots.Add(new GpuCapacitySlotEntity { SlotKey = "gpu-0", State = 0, UpdatedAtUtc = Now });
@@ -229,9 +229,9 @@ public sealed class SqlGpuInteractiveRequestTests(NativeSqlServerFixture fixture
         await SqlTestData.ClearPipelineAsync(fixture);
         var factory = SqlTestData.CreateFactory(fixture);
         var identity = new GpuInteractiveOwnerIdentity(17, Now.AddMinutes(-1), new string('a', 64));
-        var original = new SqlGpuSchedulerStore(factory, timeProvider: new FixedTimeProvider(Now), interactiveOwner: identity);
+        var original = new SqlGpuSchedulerStore(factory, timeProvider: new FixedTimeProvider(Now), interactiveOwner: identity, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         var replacement = new SqlGpuSchedulerStore(factory, timeProvider: new FixedTimeProvider(Now),
-            interactiveOwner: identity with { StartedAtUtc = Now });
+            interactiveOwner: identity with { StartedAtUtc = Now }, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         var request = Request();
         await original.HandoffInteractiveAsync(request, CancellationToken.None);
         await Assert.ThrowsAsync<InvalidOperationException>(async () => await replacement.HandoffInteractiveAsync(request, CancellationToken.None));
@@ -258,7 +258,7 @@ public sealed class SqlGpuInteractiveRequestTests(NativeSqlServerFixture fixture
         await SqlTestData.ClearPipelineAsync(fixture);
         var factory = SqlTestData.CreateFactory(fixture);
         var request = Request();
-        await new SqlGpuSchedulerStore(factory, timeProvider: new FixedTimeProvider(Now))
+        await new SqlGpuSchedulerStore(factory, timeProvider: new FixedTimeProvider(Now), sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory))
             .HandoffInteractiveAsync(request, CancellationToken.None);
         await using var context = await factory.CreateDbContextAsync();
         await context.Database.OpenConnectionAsync();
@@ -279,7 +279,7 @@ public sealed class SqlGpuInteractiveRequestTests(NativeSqlServerFixture fixture
         await SqlTestData.ClearPipelineAsync(fixture);
         var factory = SqlTestData.CreateFactory(fixture);
         var clock = new MutableTimeProvider(Now);
-        var store = new SqlGpuSchedulerStore(factory, timeProvider: clock);
+        var store = new SqlGpuSchedulerStore(factory, timeProvider: clock, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         await using (var setup = await factory.CreateDbContextAsync())
         {
             setup.GpuCapacitySlots.Add(new GpuCapacitySlotEntity { SlotKey = PaddleOcrVlmRuntimeContract.CapacitySlotKey, State = 0, UpdatedAtUtc = Now });
@@ -341,7 +341,7 @@ public sealed class SqlGpuInteractiveRequestTests(NativeSqlServerFixture fixture
     {
         await SqlTestData.ClearPipelineAsync(fixture);
         var factory = SqlTestData.CreateFactory(fixture);
-        var store = new SqlGpuSchedulerStore(factory, timeProvider: new FixedTimeProvider(Now));
+        var store = new SqlGpuSchedulerStore(factory, timeProvider: new FixedTimeProvider(Now), sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         await using (var context = await factory.CreateDbContextAsync())
         {
             context.GpuCapacitySlots.Add(new GpuCapacitySlotEntity { SlotKey = "gpu-0", State = 0, UpdatedAtUtc = Now });
@@ -389,7 +389,7 @@ public sealed class SqlGpuInteractiveRequestTests(NativeSqlServerFixture fixture
     {
         await SqlTestData.ClearPipelineAsync(fixture);
         var factory = SqlTestData.CreateFactory(fixture);
-        var store = new SqlGpuSchedulerStore(factory, timeProvider: new FixedTimeProvider(Now));
+        var store = new SqlGpuSchedulerStore(factory, timeProvider: new FixedTimeProvider(Now), sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         var first = Request();
         var second = Request();
         await store.HandoffInteractiveAsync(first, CancellationToken.None);
@@ -397,7 +397,7 @@ public sealed class SqlGpuInteractiveRequestTests(NativeSqlServerFixture fixture
         await Assert.ThrowsAsync<InvalidOperationException>(async () => await store.HandoffInteractiveAsync(Request(), CancellationToken.None));
         Assert.True(await store.CancelInteractiveAsync(first.RequestId, first.ExecutorInstanceId, CancellationToken.None));
         await store.HandoffInteractiveAsync(Request(), CancellationToken.None);
-        var expiredStore = new SqlGpuSchedulerStore(factory, timeProvider: new FixedTimeProvider(Now.AddSeconds(3)));
+        var expiredStore = new SqlGpuSchedulerStore(factory, timeProvider: new FixedTimeProvider(Now.AddSeconds(3)), sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         var result = await expiredStore.RunAdmissionRoundAsync(Guid.NewGuid(), GpuSchedulerWakeReason.WorkReady, Options,
             (_, _) => throw new InvalidOperationException("Expired requests reached admission"), CancellationToken.None);
         Assert.Equal(GpuAdmissionDisposition.Busy, result.Disposition);
@@ -414,7 +414,7 @@ public sealed class SqlGpuInteractiveRequestTests(NativeSqlServerFixture fixture
         {
             try
             {
-                await new SqlGpuSchedulerStore(factory, timeProvider: new FixedTimeProvider(Now))
+                await new SqlGpuSchedulerStore(factory, timeProvider: new FixedTimeProvider(Now), sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory))
                     .HandoffInteractiveAsync(Request(), CancellationToken.None);
                 return true;
             }
@@ -431,7 +431,7 @@ public sealed class SqlGpuInteractiveRequestTests(NativeSqlServerFixture fixture
     {
         await SqlTestData.ClearPipelineAsync(fixture);
         var factory = SqlTestData.CreateFactory(fixture);
-        var store = new SqlGpuSchedulerStore(factory, timeProvider: new FixedTimeProvider(Now));
+        var store = new SqlGpuSchedulerStore(factory, timeProvider: new FixedTimeProvider(Now), sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         await using (var context = await factory.CreateDbContextAsync())
         {
             context.GpuCapacitySlots.Add(new GpuCapacitySlotEntity { SlotKey = "gpu-0", State = 0, UpdatedAtUtc = Now });
@@ -454,7 +454,7 @@ public sealed class SqlGpuInteractiveRequestTests(NativeSqlServerFixture fixture
     {
         await SqlTestData.ClearPipelineAsync(fixture);
         var factory = SqlTestData.CreateFactory(fixture);
-        var store = new SqlGpuSchedulerStore(factory, timeProvider: new FixedTimeProvider(Now));
+        var store = new SqlGpuSchedulerStore(factory, timeProvider: new FixedTimeProvider(Now), sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         await using (var context = await factory.CreateDbContextAsync())
         {
             context.GpuCapacitySlots.Add(new GpuCapacitySlotEntity { SlotKey = "gpu-0", State = (int)GpuCapacitySlotState.Reserved, UpdatedAtUtc = Now });
@@ -489,7 +489,7 @@ public sealed class SqlGpuInteractiveRequestTests(NativeSqlServerFixture fixture
         {
             try
             {
-                await new SqlGpuSchedulerStore(factory, timeProvider: new FixedTimeProvider(Now))
+                await new SqlGpuSchedulerStore(factory, timeProvider: new FixedTimeProvider(Now), sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory))
                     .HandoffInteractiveAsync(Request() with { DeclineWhenGpuBusy = true }, CancellationToken.None);
                 return true;
             }
@@ -506,7 +506,7 @@ public sealed class SqlGpuInteractiveRequestTests(NativeSqlServerFixture fixture
         await SqlTestData.ClearPipelineAsync(fixture);
         var factory = SqlTestData.CreateFactory(fixture);
         var request = Request();
-        await new SqlGpuSchedulerStore(factory, timeProvider: new FixedTimeProvider(Now)).HandoffInteractiveAsync(request, CancellationToken.None);
+        await new SqlGpuSchedulerStore(factory, timeProvider: new FixedTimeProvider(Now), sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory)).HandoffInteractiveAsync(request, CancellationToken.None);
         await using var context = await factory.CreateDbContextAsync();
         var error = await Assert.ThrowsAsync<Microsoft.Data.SqlClient.SqlException>(async () =>
             await context.Database.ExecuteSqlInterpolatedAsync($"UPDATE [GpuMiniTasks] SET [ExecutionDeadlineUtc] = NULL WHERE [Id] = {request.RequestId}"));
@@ -522,7 +522,7 @@ public sealed class SqlGpuInteractiveRequestTests(NativeSqlServerFixture fixture
         await SqlTestData.ClearPipelineAsync(fixture);
         var factory = SqlTestData.CreateFactory(fixture);
         var clock = new MutableTimeProvider(Now);
-        var store = new SqlGpuSchedulerStore(factory, timeProvider: clock);
+        var store = new SqlGpuSchedulerStore(factory, timeProvider: clock, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         await using (var context = await factory.CreateDbContextAsync())
         {
             context.GpuCapacitySlots.Add(new GpuCapacitySlotEntity { SlotKey = "gpu-0", State = 0, UpdatedAtUtc = Now });

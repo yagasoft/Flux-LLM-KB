@@ -99,7 +99,7 @@ public sealed class TarArchiveReplayIntegrationTests(NativeSqlServerFixture fixt
     {
         var zip = await SeedDeferredTarAsync(new string('b', 64), 512, Path.Combine("sha256", "bb", "zip.bin"));
         var tar = await SeedDeferredTarAsync(new string('c', 64), 512, Path.Combine("sha256", "cc", "tar.bin"));
-        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System);
+        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(_fixture.ConnectionString)));
         Assert.True(await store.PromoteAsync(new RetainedProcessorPromotionCandidate(zip.LegacyActivityId, new SourceRevisionId(zip.SourceRevisionId), new string('b', 64)), ZipArchiveRetainedProcessor.Capability, CancellationToken.None));
         Assert.True(await store.PromoteAsync(new RetainedProcessorPromotionCandidate(tar.LegacyActivityId, new SourceRevisionId(tar.SourceRevisionId), new string('c', 64)), TarArchiveRetainedProcessor.Capability, CancellationToken.None));
 
@@ -224,7 +224,7 @@ public sealed class TarArchiveReplayIntegrationTests(NativeSqlServerFixture fixt
         var tar = new TarArchiveRetainedProcessor(writer);
         return new RetainedProcessorActivationService(
             new SourceCapabilityService(new SqlSourceActivityStore(factory, TimeProvider.System), new LocalSourceCapabilityHandlerRegistry([zip, tar])),
-            new SqlRetainedProcessorBranchStore(factory, TimeProvider.System), _resources.Own(new SqlRetainedSourceReader(factory, privateRoot)), zip,
+            new SqlRetainedProcessorBranchStore(factory, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory)), _resources.Own(new SqlRetainedSourceReader(factory, privateRoot)), zip,
             new RetainedProcessorOptions { ArchiveTarExpandEnabled = enabled }, TimeProvider.System, tar);
     }
 

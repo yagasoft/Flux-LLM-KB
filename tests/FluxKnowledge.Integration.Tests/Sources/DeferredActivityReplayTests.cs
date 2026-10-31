@@ -27,7 +27,7 @@ public sealed class DeferredActivityReplayTests(NativeSqlServerFixture fixture) 
         var store = new SqlRetainedTextRegistrationStore(
             new ContextFactory(_fixture.ConnectionString),
             TimeProvider.System,
-            seeded.ArtifactRoot);
+            seeded.ArtifactRoot, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(_fixture.ConnectionString)));
 
         Assert.Equal(1, await store.ReplayActivityAsync(request, capability, CancellationToken.None));
         Assert.Equal(0, await store.ReplayActivityAsync(request, capability, CancellationToken.None));
@@ -59,7 +59,7 @@ public sealed class DeferredActivityReplayTests(NativeSqlServerFixture fixture) 
         var request = new DeferredContentReplayRequest(seeded.ActivityId, seeded.IdempotencyKey, "text-metadata",
             seeded.CapabilityId, "phase-3a-v1", "phase-3a-inprocess-text-metadata-v1");
 
-        Assert.Equal(0, await new SqlRetainedTextRegistrationStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System)
+        Assert.Equal(0, await new SqlRetainedTextRegistrationStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(_fixture.ConnectionString)))
             .ReplayActivityAsync(request, capability, CancellationToken.None));
         await using var verification = CreateContext();
         Assert.Null((await verification.SourceActivities.SingleAsync(value => value.Id == seeded.ActivityId)).ResultingPipelineRecordId);
@@ -89,7 +89,7 @@ public sealed class DeferredActivityReplayTests(NativeSqlServerFixture fixture) 
             Assert.Empty(await check.DeferredCapabilities.Where(value => value.SourceRevisionId == seeded.RevisionId).ToListAsync());
         }
 
-        Assert.Equal(0, await new SqlRetainedTextRegistrationStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System)
+        Assert.Equal(0, await new SqlRetainedTextRegistrationStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(_fixture.ConnectionString)))
             .ReplayActivityAsync(request, capability, CancellationToken.None));
         await using var verification = CreateContext();
         Assert.Null((await verification.SourceActivities.SingleAsync(value => value.Id == seeded.ActivityId)).ResultingPipelineRecordId);

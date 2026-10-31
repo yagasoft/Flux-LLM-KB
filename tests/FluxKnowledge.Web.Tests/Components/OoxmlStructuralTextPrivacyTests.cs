@@ -42,6 +42,8 @@ public sealed class OoxmlStructuralTextPrivacyTests(NativeSqlServerFixture fixtu
             Directory.CreateDirectory(Path.Combine(privateRoot, "sha256", hash[..2]));
             await File.WriteAllBytesAsync(Path.Combine(privateRoot, relative), bytes);
             var (rootId, revisionId) = await SeedAsync(hash, bytes.Length, relative, sourcePathSentinel);
+            var sourceAdmission = new SourceWorkAdmission();
+            sourceAdmission.Admit(rootId, 1);
 
             var dbFactory = new ContextFactory(_fixture.ConnectionString);
             var writer = new SqlRetainedArtifactWriter(dbFactory, privateRoot);
@@ -51,7 +53,7 @@ public sealed class OoxmlStructuralTextPrivacyTests(NativeSqlServerFixture fixtu
             await using var subscription = feed.Subscribe();
             var activation = new RetainedProcessorActivationService(
                 new SourceCapabilityService(new SqlSourceActivityStore(dbFactory, TimeProvider.System), new LocalSourceCapabilityHandlerRegistry([zip, new OoxmlStructuralTextCapabilityHandler()])),
-                new SqlRetainedProcessorBranchStore(dbFactory, TimeProvider.System), _resources.Own(new SqlRetainedSourceReader(dbFactory, privateRoot)), zip,
+                new SqlRetainedProcessorBranchStore(dbFactory, TimeProvider.System, sourceAdmission: sourceAdmission), _resources.Own(new SqlRetainedSourceReader(dbFactory, privateRoot)), zip,
                 new RetainedProcessorOptions { OoxmlDocumentStructuralExtractEnabled = true }, TimeProvider.System, statusEvents: feed, ooxmlProcessor: ooxml);
 
             Assert.Equal(1, (await activation.RunOnceAsync(CancellationToken.None)).CompletedBranches);

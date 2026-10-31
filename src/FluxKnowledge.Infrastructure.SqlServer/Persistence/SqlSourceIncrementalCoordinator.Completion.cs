@@ -129,7 +129,7 @@ public sealed partial class SqlSourceIncrementalCoordinator
                                     revision.SuppressedAtUtc.Value, closingBarrier?.JournalId.ToString("X16"), closingBarrier?.NextUsn ?? 0,
                                     closingGit?.Repository.Identity, closingGit?.Generation));
                                 revision.CurrentDiscoveryEvidenceJson = SqlRepositoryWorkRecovery.Withdraw();
-                                scopes.Add(new(2, revision.Id));
+                                scopes.Add(new(3, revision.SourceRootId));
                                 OperatorEventAppender.Add(db, OperatorEventDraft.SourceRemoved(root.Id.Value, revision.Id, $"source:{revision.Id:N}",
                                     new { revision = revision.Revision, reason = "incremental-authoritative-absence" }));
                             }
@@ -173,7 +173,14 @@ public sealed partial class SqlSourceIncrementalCoordinator
             {
                 var failed = deferred.Any(x => SourcePathScope.Contains(item.RelativePath, item.IsSubtree, x.RelativePath)) ||
                     (item.ReasonFlags & SourcePendingReasons.NamespaceMetadata) != 0 && !namespaceComplete;
-                if (!failed) db.SourcePendingChanges.Remove(item);
+                if (!failed)
+                {
+                    // Removal has independent guarded progress and exact-generation
+                    // acknowledgement; content completion cannot consume its work.
+                    if ((item.ReasonFlags & SourcePendingReasons.RemovalPending) != 0)
+                        item.ReasonFlags = SourcePendingReasons.RemovalPending;
+                    else db.SourcePendingChanges.Remove(item);
+                }
                 else
                 {
                     item.NotBeforeUtc = time.GetUtcNow().Add(root.ReconciliationCadence);
@@ -199,7 +206,7 @@ public sealed partial class SqlSourceIncrementalCoordinator
                 state.NamespaceComplete = true;
             if (plan.IsFallback) state.NamespaceComplete = false;
             if (plan.IsNamespaceSweep)
-                foreach (var item in remaining.Where(x => x.ReasonFlags == SourcePendingReasons.NamespaceMetadata))
+                foreach (var item in remaining.Where(x => (x.ReasonFlags & ~SourcePendingReasons.RemovalPending) == SourcePendingReasons.NamespaceMetadata))
                 {
                     item.NotBeforeUtc = time.GetUtcNow().Add(root.ReconciliationCadence);
                     item.RetryGeneration = item.Generation;

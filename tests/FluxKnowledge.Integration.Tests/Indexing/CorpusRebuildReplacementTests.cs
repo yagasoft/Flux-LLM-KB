@@ -54,7 +54,7 @@ public sealed class CorpusRebuildReplacementTests(NativeSqlServerFixture fixture
         await environment.PumpAsync();
         await FinishAsync(store, replacement.OperationId);
         Assert.Null((await context.IndexState.AsNoTracking().SingleAsync()).CorpusRebuildOperationId);
-        Assert.Null(await new SqlOutboxStore(environment.Factory).ClaimNextDueAsync("old-delivery", DateTimeOffset.UtcNow.AddHours(1),
+        Assert.Null(await new SqlOutboxStore(environment.Factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory)).ClaimNextDueAsync("old-delivery", DateTimeOffset.UtcNow.AddHours(1),
             TimeSpan.FromMinutes(1), [PipelineOperations.Embed, PipelineOperations.Publish], CancellationToken.None));
         Assert.False((await store.ReadPlanAsync(Guid.NewGuid(), new("next", 4), new string('c', 64), CancellationToken.None)).Inputs.Count == 0);
     }
@@ -138,15 +138,15 @@ public sealed class CorpusRebuildReplacementTests(NativeSqlServerFixture fixture
         var (store, old, _) = await InterruptedAsync(environment.Factory);
         environment.PermitRebuild(old.OperationId);
         var now = DateTimeOffset.UtcNow;
-        var dispatch = (await new SqlOutboxStore(environment.Factory, environment.DeploymentHold).ClaimNextDueAsync("replacement-test", now,
+        var dispatch = (await new SqlOutboxStore(environment.Factory, environment.DeploymentHold, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory)).ClaimNextDueAsync("replacement-test", now,
             TimeSpan.FromMinutes(2), [PipelineOperations.Embed], CancellationToken.None))!;
-        var job = (await new SqlJobClaimStore(environment.Factory, environment.DeploymentHold).ClaimForDispatchAsync(dispatch, "replacement-test", now,
+        var job = (await new SqlJobClaimStore(environment.Factory, environment.DeploymentHold, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory)).ClaimForDispatchAsync(dispatch, "replacement-test", now,
             TimeSpan.FromMinutes(2), CancellationToken.None))!;
         var work = new StageWorkItem(dispatch, job);
         var runtime = new EmbeddingGpuRuntime("replacement-test-runtime", new string('d', 64), old.Profile, 1024);
-        var scheduler = new SqlGpuSchedulerStore(environment.Factory, deploymentValidationHold: environment.DeploymentHold);
-        var batch = await new SqlEmbeddingCheckpointStore(environment.Factory, TimeProvider.System).ReadNextAsync(work, old.Profile, CancellationToken.None);
-        await new SqlEmbeddingGpuRequestStore(environment.Factory, scheduler, new ChannelGpuSchedulerWakeSignal(), runtime, TimeProvider.System)
+        var scheduler = new SqlGpuSchedulerStore(environment.Factory, deploymentValidationHold: environment.DeploymentHold, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory));
+        var batch = await new SqlEmbeddingCheckpointStore(environment.Factory, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory)).ReadNextAsync(work, old.Profile, CancellationToken.None);
+        await new SqlEmbeddingGpuRequestStore(environment.Factory, scheduler, new ChannelGpuSchedulerWakeSignal(), runtime, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory))
             .QueueAsync(work, batch, CancellationToken.None);
         await using var context = environment.Factory.CreateDbContext();
         var request = await context.EmbeddingGpuRequests.SingleAsync();
@@ -248,14 +248,14 @@ public sealed class CorpusRebuildReplacementTests(NativeSqlServerFixture fixture
         var (store, old, builder) = await InterruptedAsync(environment.Factory);
         environment.PermitRebuild(old.OperationId);
         var now = DateTimeOffset.UtcNow;
-        var outbox = new SqlOutboxStore(environment.Factory, environment.DeploymentHold);
+        var outbox = new SqlOutboxStore(environment.Factory, environment.DeploymentHold, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory));
         var dispatch = (await outbox.ClaimNextDueAsync("embed", now, TimeSpan.FromMinutes(2), [PipelineOperations.Embed], CancellationToken.None))!;
-        var job = (await new SqlJobClaimStore(environment.Factory, environment.DeploymentHold).ClaimForDispatchAsync(dispatch, "embed", now,
+        var job = (await new SqlJobClaimStore(environment.Factory, environment.DeploymentHold, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory)).ClaimForDispatchAsync(dispatch, "embed", now,
             TimeSpan.FromMinutes(2), CancellationToken.None))!;
-        var transitions = new StageTransitionService(new SqlStageTransitionStore(environment.Factory, null, TimeProvider.System),
+        var transitions = new StageTransitionService(new SqlStageTransitionStore(environment.Factory, null, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory)),
             new NoEvents(), new ChannelOutboxWakeSignal(), TimeProvider.System);
         await new EmbedStageWorker(environment.Store, new BatchedProvider(environment.Embeddings, old.Profile), transitions, TimeProvider.System,
-            new SqlEmbeddingCheckpointStore(environment.Factory, TimeProvider.System))
+            new SqlEmbeddingCheckpointStore(environment.Factory, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory)))
             .ExecuteAsync(new(dispatch, job), CancellationToken.None);
         var oldPublish = (await outbox.ClaimNextDueAsync("publish", now.AddSeconds(1), TimeSpan.FromMinutes(2), [PipelineOperations.Publish], CancellationToken.None))!;
         await using var context = environment.Factory.CreateDbContext();
@@ -274,7 +274,7 @@ public sealed class CorpusRebuildReplacementTests(NativeSqlServerFixture fixture
         await store.PrepareAsync(replacement.OperationId, old.Inputs[0].PipelineRecordId, builder, CancellationToken.None);
         await environment.PumpAsync();
         await FinishAsync(store, replacement.OperationId);
-        Assert.Null(await new SqlJobClaimStore(environment.Factory).ClaimForDispatchAsync(oldPublish, "stale-publish", now.AddHours(1),
+        Assert.Null(await new SqlJobClaimStore(environment.Factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory)).ClaimForDispatchAsync(oldPublish, "stale-publish", now.AddHours(1),
             TimeSpan.FromMinutes(2), CancellationToken.None));
         Assert.Equal(2, await context.CorpusRebuildSupersededJobs.CountAsync());
         var oldPublishJobId = await context.OutboxMessages.Where(value => value.Id == oldPublish.DispatchMessageId.Value).Select(value => value.JobId).SingleAsync();

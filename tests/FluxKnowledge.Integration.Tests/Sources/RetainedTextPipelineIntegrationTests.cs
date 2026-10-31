@@ -402,7 +402,7 @@ public sealed class RetainedTextPipelineIntegrationTests(NativeSqlServerFixture 
             await setup.SaveChangesAsync();
         }
 
-        var store = new SqlRetainedTextRegistrationStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System);
+        var store = new SqlRetainedTextRegistrationStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(_fixture.ConnectionString)));
         Assert.False(await store.RegisterAsync(activity, CancellationToken.None));
 
         await BindCompletedOoxmlChildAsync(revisionId, hash, activity.Id.Value, processorGeneration);
@@ -429,7 +429,7 @@ public sealed class RetainedTextPipelineIntegrationTests(NativeSqlServerFixture 
             await setup.SaveChangesAsync();
         }
 
-        var planner = new RetainedTextActivityPlanner(new SqlRetainedTextRegistrationStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System));
+        var planner = new RetainedTextActivityPlanner(new SqlRetainedTextRegistrationStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(_fixture.ConnectionString))));
         Assert.True(await planner.PlanAsync(activity, CancellationToken.None));
         Assert.False(await planner.PlanAsync(activity, CancellationToken.None));
 
@@ -518,7 +518,7 @@ public sealed class RetainedTextPipelineIntegrationTests(NativeSqlServerFixture 
             await setup.SaveChangesAsync();
         }
 
-        var planner = new RetainedTextActivityPlanner(new SqlRetainedTextRegistrationStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System));
+        var planner = new RetainedTextActivityPlanner(new SqlRetainedTextRegistrationStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(_fixture.ConnectionString))));
         Assert.True(await planner.PlanAsync(activity, CancellationToken.None));
 
         await using var verification = CreateContext();
@@ -554,7 +554,7 @@ public sealed class RetainedTextPipelineIntegrationTests(NativeSqlServerFixture 
         }
 
         var planner = new RetainedTextActivityPlanner(new SqlRetainedTextRegistrationStore(
-            new ContextFactory(_fixture.ConnectionString), TimeProvider.System));
+            new ContextFactory(_fixture.ConnectionString), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(_fixture.ConnectionString))));
         var outcomes = await Task.WhenAll(
             planner.PlanAsync(text, CancellationToken.None).AsTask(),
             planner.PlanAsync(metadata, CancellationToken.None).AsTask());
@@ -596,7 +596,7 @@ public sealed class RetainedTextPipelineIntegrationTests(NativeSqlServerFixture 
         }
 
         Assert.True(await new RetainedTextActivityPlanner(new SqlRetainedTextRegistrationStore(
-            new ContextFactory(_fixture.ConnectionString), TimeProvider.System)).PlanAsync(activity, CancellationToken.None));
+            new ContextFactory(_fixture.ConnectionString), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(_fixture.ConnectionString)))).PlanAsync(activity, CancellationToken.None));
         await using var verification = CreateContext();
         Assert.Single(await verification.PipelineRecords.Where(value => value.SourceRevisionId == revisionId).ToListAsync());
     }
@@ -636,7 +636,7 @@ public sealed class RetainedTextPipelineIntegrationTests(NativeSqlServerFixture 
             await setup.SaveChangesAsync();
         }
 
-        var offered = await new SqlRetainedTextRegistrationStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System)
+        var offered = await new SqlRetainedTextRegistrationStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(_fixture.ConnectionString)))
             .OfferUnlinkedInProcessActivitiesAsync(CancellationToken.None);
 
         Assert.Equal(1, offered);
@@ -669,7 +669,7 @@ public sealed class RetainedTextPipelineIntegrationTests(NativeSqlServerFixture 
             await setup.SaveChangesAsync();
         }
 
-        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System);
+        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(_fixture.ConnectionString)));
 
         var vsdxCandidate = Assert.Single(await store.ReadPromotionCandidatesAsync(
             16, VsdxStructuralTextProcessor.Capability, CancellationToken.None));
@@ -758,7 +758,7 @@ public sealed class RetainedTextPipelineIntegrationTests(NativeSqlServerFixture 
             await setup.SaveChangesAsync();
         }
 
-        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System);
+        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(_fixture.ConnectionString)));
         var imageCandidate = Assert.Single(await store.ReadPromotionCandidatesAsync(
             16, ImageDocumentInputProcessor.Capability, CancellationToken.None));
 

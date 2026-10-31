@@ -15,8 +15,10 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
 
 public sealed class SqlOutboxStore(
     IDbContextFactory<FluxKnowledgeDbContext> contextFactory,
-    IDeploymentValidationHold? deploymentValidationHold = null, EmbeddingGpuRuntime? embeddingRuntime = null) : IOutboxStore
+    IDeploymentValidationHold? deploymentValidationHold = null, EmbeddingGpuRuntime? embeddingRuntime = null,
+    ISourceWorkAdmission? sourceAdmission = null) : IOutboxStore
 {
+    internal Func<CancellationToken, ValueTask>? AfterClaimRead { get; init; }
     public async ValueTask EnqueueAsync(
         DispatchMessage message,
         CancellationToken cancellationToken)
@@ -113,6 +115,8 @@ public sealed class SqlOutboxStore(
         var sql =
             $"""
              SET TRANSACTION ISOLATION LEVEL READ COMMITTED;
+             DECLARE @publicationFence int;
+             SELECT @publicationFence=[Id] FROM [IndexState] WITH (UPDLOCK,HOLDLOCK) WHERE [Id]=1;
              ;WITH [candidate] AS
              (
                  SELECT TOP (1)
@@ -164,6 +168,8 @@ public sealed class SqlOutboxStore(
                            INNER JOIN [SourceRootConfigurations] AS [root]
                                ON [root].[Id] = [revision].[SourceRootId]
                            WHERE [record].[Id] = [OutboxMessages].[PipelineRecordId]
+                             AND [record].[IsDeleted]=0 AND [record].[Revision]=[OutboxMessages].[SourceRevision]
+                             AND {SqlSourceWorkEligibility.Source("[record].[SourceRevisionId]")}
                              AND ([root].[State] = @sourceRootEnabled OR {SqlCorpusRebuildEligibility.ActiveJob("[OutboxMessages].[JobId]")})
                        )
                    )
@@ -197,6 +203,7 @@ public sealed class SqlOutboxStore(
         AddParameter(command, "@permittedRebuildOperationId", SqlDbType.UniqueIdentifier,
             (object?)admission.PermittedCorpusRebuildOperationId ?? DBNull.Value);
         AddParameter(command, "@nowUtc", SqlDbType.DateTimeOffset, nowUtc);
+        command.Parameters.Add(SqlSourceWorkEligibility.AdmissionParameter(sourceAdmission));
         AddParameter(command, "@workerQueued", SqlDbType.Int, (int)PublicJobState.WorkerQueued);
         AddParameter(command, "@workerProcessing", SqlDbType.Int, (int)PublicJobState.WorkerProcessing);
         AddParameter(
@@ -229,14 +236,18 @@ public sealed class SqlOutboxStore(
                 128);
         }
 
+        await using var transaction = (SqlTransaction)await connection.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken).ConfigureAwait(false);
+        command.Transaction = transaction;
         await using var reader = await command.ExecuteReaderAsync(cancellationToken)
             .ConfigureAwait(false);
         if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
         {
+            await reader.DisposeAsync().ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
             return null;
         }
 
-        return new ClaimedDispatchMessage(
+        var claimed = new ClaimedDispatchMessage(
             new DispatchMessageId(reader.GetGuid(0)),
             new PipelineRecordId(reader.GetGuid(1)),
             reader.GetInt64(2),
@@ -248,6 +259,10 @@ public sealed class SqlOutboxStore(
             reader.GetString(8),
             reader.GetFieldValue<DateTimeOffset>(9),
             reader.GetInt64(10));
+        if (AfterClaimRead is not null) await AfterClaimRead(cancellationToken).ConfigureAwait(false);
+        await reader.DisposeAsync().ConfigureAwait(false);
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        return claimed;
     }
 
     public async ValueTask ReleaseAsync(

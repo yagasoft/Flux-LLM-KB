@@ -335,6 +335,7 @@ public sealed partial class SqlDocumentOcrStore
         {
             await using var context = await contextFactory.CreateDbContextAsync(ct).ConfigureAwait(false);
             await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct).ConfigureAwait(false);
+            await SqlPublishedPassageSelection.AcquireFenceAsync(context, ct).ConfigureAwait(false);
             await SqlGpuSchedulerStore.AcquireMutationLockAsync(context, transaction.GetDbTransaction(), ct).ConfigureAwait(false);
             var result = await action(context).ConfigureAwait(false);
             await context.SaveChangesAsync(ct).ConfigureAwait(false);

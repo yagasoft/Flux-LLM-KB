@@ -25,7 +25,7 @@ public sealed class ClaimConcurrencyTests(NativeSqlServerFixture fixture)
             now,
             PublicJobState.WorkerQueued,
             leaseExpiresAtUtc: null);
-        var store = new SqlJobClaimStore(SqlTestData.CreateFactory(_fixture));
+        var store = new SqlJobClaimStore(SqlTestData.CreateFactory(_fixture), sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(SqlTestData.CreateFactory(_fixture)));
 
         var claims = await Task.WhenAll(
             store.ClaimNextDueAsync(
@@ -47,7 +47,7 @@ public sealed class ClaimConcurrencyTests(NativeSqlServerFixture fixture)
             now,
             PublicJobState.WorkerQueued,
             leaseExpiresAtUtc: null);
-        var store = new SqlOutboxStore(SqlTestData.CreateFactory(_fixture));
+        var store = new SqlOutboxStore(SqlTestData.CreateFactory(_fixture), sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(SqlTestData.CreateFactory(_fixture)));
         string[] registeredOperations = [PipelineOperations.ExtractUtf8];
 
         var claims = await Task.WhenAll(
@@ -91,7 +91,7 @@ public sealed class ClaimConcurrencyTests(NativeSqlServerFixture fixture)
                 null),
             CancellationToken.None);
 
-        var outboxClaim = await new SqlOutboxStore(factory).ClaimNextDueAsync(
+        var outboxClaim = await new SqlOutboxStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory)).ClaimNextDueAsync(
             "dispatcher",
             now,
             TimeSpan.FromMinutes(1),
@@ -110,7 +110,7 @@ public sealed class ClaimConcurrencyTests(NativeSqlServerFixture fixture)
                 null),
             CancellationToken.None);
 
-        var jobClaim = await new SqlJobClaimStore(factory).ClaimNextDueAsync(
+        var jobClaim = await new SqlJobClaimStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory)).ClaimNextDueAsync(
             "worker",
             now,
             TimeSpan.FromMinutes(1),
@@ -132,7 +132,7 @@ public sealed class ClaimConcurrencyTests(NativeSqlServerFixture fixture)
             now.AddMinutes(-1),
             leaseGeneration: 3,
             attemptCount: 3);
-        var store = new SqlJobClaimStore(SqlTestData.CreateFactory(_fixture));
+        var store = new SqlJobClaimStore(SqlTestData.CreateFactory(_fixture), sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(SqlTestData.CreateFactory(_fixture)));
 
         var claim = await store.ClaimNextDueAsync(
             "replacement-worker",
@@ -160,7 +160,7 @@ public sealed class ClaimConcurrencyTests(NativeSqlServerFixture fixture)
             leaseExpiresAtUtc: null,
             stage: PipelineStage.CanonicalIndex,
             operation: PipelineOperations.CanonicalIndex);
-        var store = new SqlOutboxStore(SqlTestData.CreateFactory(_fixture));
+        var store = new SqlOutboxStore(SqlTestData.CreateFactory(_fixture), sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(SqlTestData.CreateFactory(_fixture)));
 
         var claim = await store.ClaimNextDueAsync(
             "dispatcher",

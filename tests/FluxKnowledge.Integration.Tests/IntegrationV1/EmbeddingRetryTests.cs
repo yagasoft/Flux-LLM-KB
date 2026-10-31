@@ -42,7 +42,7 @@ public sealed class EmbeddingRetryTests(NativeSqlServerFixture fixture) : IClass
     {
         await using var environment = await SeedAsync();
         var failed = await FailAsync(environment, savedBatches);
-        var checkpoints = new SqlEmbeddingCheckpointStore(environment.Factory, TimeProvider.System);
+        var checkpoints = new SqlEmbeddingCheckpointStore(environment.Factory, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory));
         var command = Mutation(failed.Work.Job.JobId.Value);
         var service = Service(environment);
         var preview = await service.PreviewAsync(command, "test", CancellationToken.None);
@@ -72,7 +72,7 @@ public sealed class EmbeddingRetryTests(NativeSqlServerFixture fixture) : IClass
         Assert.DoesNotContain(next.Chunks, chunk => failed.ChunkIds.Contains(chunk.Id));
         var provider = new SyntheticBatchedProvider(environment.Embeddings);
         var worker = new EmbedStageWorker(environment.Store, provider,
-            new StageTransitionService(new SqlStageTransitionStore(environment.Factory), new NoEvents(),
+            new StageTransitionService(new SqlStageTransitionStore(environment.Factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory)), new NoEvents(),
                 new ChannelOutboxWakeSignal(), TimeProvider.System), TimeProvider.System, checkpoints);
         await using var verification = await environment.Factory.CreateDbContextAsync();
         var expectedCount = await verification.TextChunks.CountAsync(value => value.Artifact.PipelineRecordId == failed.Work.Job.PipelineRecordId.Value);
@@ -170,10 +170,10 @@ public sealed class EmbeddingRetryTests(NativeSqlServerFixture fixture) : IClass
     {
         await using var environment = await SeedAsync();
         var work = await ClaimAsync(environment);
-        var checkpoint = new SqlEmbeddingCheckpointStore(environment.Factory, TimeProvider.System);
+        var checkpoint = new SqlEmbeddingCheckpointStore(environment.Factory, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory));
         var batch = await checkpoint.ReadNextAsync(work, Profile, CancellationToken.None);
-        var scheduler = new SqlGpuSchedulerStore(environment.Factory);
-        var requests = new SqlEmbeddingGpuRequestStore(environment.Factory, scheduler, new ChannelGpuSchedulerWakeSignal(), Runtime, TimeProvider.System);
+        var scheduler = new SqlGpuSchedulerStore(environment.Factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory));
+        var requests = new SqlEmbeddingGpuRequestStore(environment.Factory, scheduler, new ChannelGpuSchedulerWakeSignal(), Runtime, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory));
         await requests.QueueAsync(work, batch, CancellationToken.None);
         await using (var db = await environment.Factory.CreateDbContextAsync())
         {
@@ -190,7 +190,7 @@ public sealed class EmbeddingRetryTests(NativeSqlServerFixture fixture) : IClass
         await Executor().DeliverAsync(handle, CancellationToken.None);
         Assert.Equal(1, inference.Calls);
         work = await ClaimAsync(environment);
-        await new SqlStageTransitionStore(environment.Factory).FailAsync(new(work.DispatchMessage, work.Job,
+        await new SqlStageTransitionStore(environment.Factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory)).FailAsync(new(work.DispatchMessage, work.Job,
             "stage worker failed non-retryably", "embedding-checkpoint-source-unavailable", "test"), CancellationToken.None);
         var service = Service(environment);
         var command = Mutation(work.Job.JobId.Value);
@@ -279,7 +279,7 @@ public sealed class EmbeddingRetryTests(NativeSqlServerFixture fixture) : IClass
     private static async Task<(StageWorkItem Work, Guid Generation, long[] Vectors, long[] ChunkIds)> FailAsync(SqlToUsearchRebuildTests.PipelineEnvironment environment, int savedBatches = 1)
     {
         var work = await ClaimAsync(environment);
-        var store = new SqlEmbeddingCheckpointStore(environment.Factory, TimeProvider.System);
+        var store = new SqlEmbeddingCheckpointStore(environment.Factory, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory));
         var batch = await store.ReadNextAsync(work, Profile, CancellationToken.None);
         for (var index = 0; index < savedBatches && batch.Chunks.Count > 0; index++)
         {
@@ -288,7 +288,7 @@ public sealed class EmbeddingRetryTests(NativeSqlServerFixture fixture) : IClass
             await store.CommitAsync(work,batch,results,CancellationToken.None);
             batch = await store.ReadNextAsync(work, Profile, CancellationToken.None);
         }
-        await new SqlStageTransitionStore(environment.Factory).FailAsync(new(work.DispatchMessage,work.Job,
+        await new SqlStageTransitionStore(environment.Factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory)).FailAsync(new(work.DispatchMessage,work.Job,
             "stage worker failed non-retryably","embedding-checkpoint-source-unavailable","test"),CancellationToken.None);
         await using var db=await environment.Factory.CreateDbContextAsync();
         return (work,batch.GenerationId,await db.Vectors.Where(value=>value.IndexGenerationId==batch.GenerationId)
@@ -299,9 +299,9 @@ public sealed class EmbeddingRetryTests(NativeSqlServerFixture fixture) : IClass
     private static async Task<StageWorkItem> ClaimAsync(SqlToUsearchRebuildTests.PipelineEnvironment environment)
     {
         var now=DateTimeOffset.UtcNow.AddSeconds(1);
-        var dispatch=await new SqlOutboxStore(environment.Factory).ClaimNextDueAsync("retry-dispatch",now,TimeSpan.FromMinutes(2),[PipelineOperations.Embed],CancellationToken.None);
+        var dispatch=await new SqlOutboxStore(environment.Factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory)).ClaimNextDueAsync("retry-dispatch",now,TimeSpan.FromMinutes(2),[PipelineOperations.Embed],CancellationToken.None);
         Assert.NotNull(dispatch);
-        var job=await new SqlJobClaimStore(environment.Factory).ClaimForDispatchAsync(dispatch,"retry-worker",now,TimeSpan.FromMinutes(2),CancellationToken.None);
+        var job=await new SqlJobClaimStore(environment.Factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory)).ClaimForDispatchAsync(dispatch,"retry-worker",now,TimeSpan.FromMinutes(2),CancellationToken.None);
         Assert.NotNull(job);return new(dispatch,job);
     }
     private static NativeCorpusMutation Mutation(Guid job)=>new("embedding_retry",JsonSerializer.SerializeToElement(new {jobId=job}));

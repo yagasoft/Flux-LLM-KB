@@ -21,7 +21,7 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
 /// <summary>Background batches use the existing parent job and GPU lifecycle, never a worker lease fabricated from GPU ownership.</summary>
 public sealed class SqlEmbeddingGpuRequestStore(IDbContextFactory<FluxKnowledgeDbContext> contextFactory,
     IGpuSchedulerStore scheduler, IGpuSchedulerWakeSignal wake, EmbeddingGpuRuntime runtime, TimeProvider clock,
-    IDeploymentValidationHold? deploymentValidationHold = null) : IEmbeddingGpuRequestStore
+    IDeploymentValidationHold? deploymentValidationHold = null, ISourceWorkAdmission? sourceAdmission = null) : IEmbeddingGpuRequestStore
 {
     private sealed record Input(long Id, string Hash);
     public EmbeddingProfile Profile => runtime.Profile;
@@ -109,7 +109,7 @@ public sealed class SqlEmbeddingGpuRequestStore(IDbContextFactory<FluxKnowledgeD
                 throw new InvalidOperationException("embedding-gpu-request-conflict");
             var inputs = replay?.InputsJson ?? canonicalInputs;
             var digest = replay?.InputDigest ?? canonicalDigest;
-            await SqlEmbeddingCheckpointStore.ValidateClaimAsync(context, work, clock.GetUtcNow(), cancellationToken).ConfigureAwait(false);
+            await SqlEmbeddingCheckpointStore.ValidateClaimAsync(context, work, clock.GetUtcNow(), cancellationToken, sourceAdmission).ConfigureAwait(false);
             if (await context.EmbeddingGpuRequests.CountAsync(request => request.ParentJobId == work.Job.JobId.Value &&
                 request.GenerationId == batch.GenerationId && request.InputDigest == digest && request.State == 2 && request.ResultDigest == null,
                 cancellationToken).ConfigureAwait(false) >= 3)
@@ -171,6 +171,14 @@ public sealed class SqlEmbeddingGpuRequestStore(IDbContextFactory<FluxKnowledgeD
             return new(request.MiniTaskId, claimOperation, request.ParentJobId, request.PipelineRecordId, request.SourceRevision, batch);
         }, cancellationToken);
     }
+
+    public ValueTask<bool> IsExecutionSourceAvailableAsync(GpuExecutorBatchHandle handle, Guid executorInstance, Guid miniTaskId,
+        CancellationToken cancellationToken) => TransactionAsync(async context =>
+    {
+        var request = await ReadOwnedRequestAsync(context, handle, cancellationToken).ConfigureAwait(false);
+        return request is not null && request.MiniTaskId == miniTaskId && request.ExecutorInstanceId == executorInstance && request.State == 0 &&
+            await SourceAvailableAsync(context, request, cancellationToken).ConfigureAwait(false);
+    }, cancellationToken);
 
     public async ValueTask RecordNativeCleanupAsync(GpuExecutorBatchHandle handle, Guid executorInstance, Guid claimOperation, CancellationToken cancellationToken)
     {
@@ -516,6 +524,7 @@ public sealed class SqlEmbeddingGpuRequestStore(IDbContextFactory<FluxKnowledgeD
 
     private async Task<bool> SourceAvailableAsync(FluxKnowledgeDbContext context, EmbeddingGpuRequestEntity request, CancellationToken ct, bool allowPaused = false)
     {
+        if (!await SqlSourceWorkEligibility.IsAvailableAsync(context, request.PipelineRecordId, ct, sourceAdmission).ConfigureAwait(false)) return false;
         bool maintenance;
         try { maintenance = await SqlCorpusRebuildStore.ValidateMaintenanceJobAsync(context, request.ParentJobId, ct).ConfigureAwait(false); }
         catch (CorpusRebuildRefusalException) { return false; }

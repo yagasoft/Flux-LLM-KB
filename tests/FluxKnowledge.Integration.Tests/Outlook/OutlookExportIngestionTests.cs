@@ -708,7 +708,7 @@ public sealed class OutlookExportIngestionTests(NativeSqlServerFixture fixture) 
             Assert.Equal(1, await new SqlRetainedTextRegistrationStore(
                     factory,
                     new ManualTimeProvider(Now),
-                    outlookSpoolPolicy: PersistedOutlookSpoolRootPolicy.CreateForIsolatedTests(spoolRoot))
+                    outlookSpoolPolicy: PersistedOutlookSpoolRootPolicy.CreateForIsolatedTests(spoolRoot), sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory))
                 .ReplayAsync(capability, seed.SourceRootId, CancellationToken.None));
             await using var replayed = CreateContext();
             var replayedActivity = await replayed.SourceActivities
@@ -787,7 +787,7 @@ public sealed class OutlookExportIngestionTests(NativeSqlServerFixture fixture) 
             Assert.Equal(0, await new SqlRetainedTextRegistrationStore(
                     factory,
                     new ManualTimeProvider(Now),
-                    outlookSpoolPolicy: PersistedOutlookSpoolRootPolicy.CreateForIsolatedTests(spoolRoot))
+                    outlookSpoolPolicy: PersistedOutlookSpoolRootPolicy.CreateForIsolatedTests(spoolRoot), sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory))
                 .ReplayAsync(capability, seed.SourceRootId, CancellationToken.None));
             await using var verification = CreateContext();
             Assert.Null((await verification.SourceActivities.SingleAsync(row => row.Id == activityId)).ResultingPipelineRecordId);
@@ -847,7 +847,7 @@ public sealed class OutlookExportIngestionTests(NativeSqlServerFixture fixture) 
             Assert.Equal(0, await new SqlRetainedTextRegistrationStore(
                     factory,
                     new ManualTimeProvider(Now),
-                    outlookSpoolPolicy: PersistedOutlookSpoolRootPolicy.CreateForIsolatedTests(spoolRoot))
+                    outlookSpoolPolicy: PersistedOutlookSpoolRootPolicy.CreateForIsolatedTests(spoolRoot), sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory))
                 .ReplayAsync(capability, seed.SourceRootId, CancellationToken.None));
             await using var verification = CreateContext();
             var activity = await verification.SourceActivities.SingleAsync(row => row.Id == deferredActivityId);
@@ -914,7 +914,7 @@ public sealed class OutlookExportIngestionTests(NativeSqlServerFixture fixture) 
             Assert.Equal(0, await new SqlRetainedTextRegistrationStore(
                     factory,
                     new ManualTimeProvider(Now),
-                    outlookSpoolPolicy: PersistedOutlookSpoolRootPolicy.CreateForIsolatedTests(spoolRoot))
+                    outlookSpoolPolicy: PersistedOutlookSpoolRootPolicy.CreateForIsolatedTests(spoolRoot), sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory))
                 .ReplayAsync(capability, seed.SourceRootId, CancellationToken.None));
             await using var verification = CreateContext();
             var activity = await verification.SourceActivities.SingleAsync(row => row.Id == deferredActivityId);
@@ -980,7 +980,7 @@ public sealed class OutlookExportIngestionTests(NativeSqlServerFixture fixture) 
             Assert.Equal(0, await new SqlRetainedTextRegistrationStore(
                     factory,
                     new ManualTimeProvider(Now),
-                    outlookSpoolPolicy: PersistedOutlookSpoolRootPolicy.CreateForIsolatedTests(spoolRoot))
+                    outlookSpoolPolicy: PersistedOutlookSpoolRootPolicy.CreateForIsolatedTests(spoolRoot), sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory))
                 .ReplayAsync(capability, seed.SourceRootId, CancellationToken.None));
             Assert.Equal("future text", await File.ReadAllTextAsync(outsidePath));
             await using var verification = CreateContext();

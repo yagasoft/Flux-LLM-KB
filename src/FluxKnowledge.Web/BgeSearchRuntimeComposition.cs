@@ -54,7 +54,7 @@ internal static class BgeSearchRuntimeComposition
         services.AddSingleton(provider => new SqlEmbeddingGpuRequestStore(
             provider.GetRequiredService<IDbContextFactory<FluxKnowledgeDbContext>>(), NewSchedulerStore(provider),
             provider.GetRequiredService<IGpuSchedulerWakeSignal>(), runtime, provider.GetRequiredService<TimeProvider>(),
-            provider.GetService<IDeploymentValidationHold>()));
+            provider.GetService<IDeploymentValidationHold>(), provider.GetRequiredService<ISourceWorkAdmission>()));
         services.AddSingleton<IEmbeddingGpuRequestStore>(provider => provider.GetRequiredService<SqlEmbeddingGpuRequestStore>());
         services.AddScoped<IEmbeddingGpuHandoff>(provider => provider.GetRequiredService<SqlEmbeddingGpuRequestStore>());
         services.AddSingleton(provider => new EmbeddingGpuExecutor(provider.GetRequiredService<IEmbeddingGpuRequestStore>(),
@@ -97,7 +97,7 @@ internal static class BgeSearchRuntimeComposition
     private static SqlGpuSchedulerStore NewSchedulerStore(IServiceProvider provider) =>
         new(provider.GetRequiredService<IDbContextFactory<FluxKnowledgeDbContext>>(), timeProvider: provider.GetRequiredService<TimeProvider>(),
             deploymentValidationHold: provider.GetService<IDeploymentValidationHold>(),
-            interactiveExecutionTimeout: SearchExecutionTimeout);
+            interactiveExecutionTimeout: SearchExecutionTimeout, sourceAdmission: provider.GetRequiredService<ISourceWorkAdmission>());
 
     private static BgeGpuModelStores CreateModelStores() => new(
         Store(["bundles", "bge-m3-onnx", BgeOfflineModels.EmbeddingRevision, "onnx"]),

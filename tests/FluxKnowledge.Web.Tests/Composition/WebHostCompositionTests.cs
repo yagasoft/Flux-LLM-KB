@@ -480,7 +480,9 @@ public sealed class WebHostCompositionTests : IDisposable
 
         WebHostComposition.AddProductionFluxKnowledgeServicesForTests(services, configuration);
 
-        Assert.Equal(7, services.Count(descriptor => descriptor.ServiceType == typeof(IHostedService)));
+        Assert.Equal(8, services.Count(descriptor => descriptor.ServiceType == typeof(IHostedService)));
+        Assert.Contains(services, descriptor => descriptor.ServiceType == typeof(IHostedService) &&
+            descriptor.ImplementationType == typeof(SourceWorkRecoveryService));
         WebHostComposition.ValidateNativeGoLiveComposition(services, configuration);
     }
 

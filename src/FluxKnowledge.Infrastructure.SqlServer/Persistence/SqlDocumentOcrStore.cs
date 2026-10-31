@@ -23,7 +23,8 @@ public sealed partial class SqlDocumentOcrStore(
     IDbContextFactory<FluxKnowledgeDbContext> contextFactory,
     GpuSchedulerCoordinator? scheduler,
     TimeProvider? timeProvider = null,
-    Func<DocumentOcrLifecycleResult, CancellationToken, ValueTask>? afterLifecycleCommitted = null) : IDocumentOcrHandoff, IDocumentOcrResultReader, IDocumentOcrExecutionObserver
+    Func<DocumentOcrLifecycleResult, CancellationToken, ValueTask>? afterLifecycleCommitted = null,
+    ISourceWorkAdmission? sourceAdmission = null) : IDocumentOcrHandoff, IDocumentOcrResultReader, IDocumentOcrExecutionObserver
 {
     private const int MaximumRequestedPagesJsonBytes = 8 * 1024;
     private static readonly UTF8Encoding StrictUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
@@ -174,6 +175,7 @@ public sealed partial class SqlDocumentOcrStore(
             await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
             await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken)
                 .ConfigureAwait(false);
+            await SqlPublishedPassageSelection.AcquireFenceAsync(context, cancellationToken).ConfigureAwait(false);
             await SqlGpuSchedulerStore.AcquireMutationLockAsync(context, transaction.GetDbTransaction(), cancellationToken).ConfigureAwait(false);
             var request = await context.DocumentOcrRequests.SingleOrDefaultAsync(
                     value => value.MiniTaskId == miniTaskId,
@@ -394,6 +396,7 @@ public sealed partial class SqlDocumentOcrStore(
             await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
             await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken)
                 .ConfigureAwait(false);
+            await SqlPublishedPassageSelection.AcquireFenceAsync(context, cancellationToken).ConfigureAwait(false);
             var request = await context.DocumentOcrRequests.SingleOrDefaultAsync(
                     value => value.MiniTaskId == miniTaskId,
                     cancellationToken)
@@ -492,6 +495,7 @@ public sealed partial class SqlDocumentOcrStore(
             await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
             await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken)
                 .ConfigureAwait(false);
+            await SqlPublishedPassageSelection.AcquireFenceAsync(context, cancellationToken).ConfigureAwait(false);
             var existing = await context.DocumentOcrRequests.SingleOrDefaultAsync(
                     value => value.MiniTaskId == miniTaskId,
                     cancellationToken)
@@ -535,7 +539,7 @@ public sealed partial class SqlDocumentOcrStore(
                     select job.Id)
                 .AnyAsync(cancellationToken)
                 .ConfigureAwait(false);
-            if (!parentClaimIsCurrent)
+            if (!parentClaimIsCurrent || !await SqlSourceWorkEligibility.IsAvailableAsync(context, request.ParentJob.PipelineRecordId.Value, cancellationToken, sourceAdmission).ConfigureAwait(false))
             {
                 await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
                 return new DocumentOcrEnsureResult(false, false, "document-ocr-source-unavailable");
@@ -649,11 +653,11 @@ public sealed partial class SqlDocumentOcrStore(
         }
     }
 
-    private static Task<bool> SourceIsEnabledAsync(
+    private Task<bool> SourceIsEnabledAsync(
         FluxKnowledgeDbContext context,
         DocumentOcrRequestEntity request,
         CancellationToken cancellationToken) =>
-        (from record in context.PipelineRecords.AsNoTracking()
+        (from record in SqlSourceWorkEligibility.Records(context, sourceAdmission).AsNoTracking()
          join revision in context.SourceRevisions.AsNoTracking() on record.SourceRevisionId equals revision.Id
          join root in context.SourceRootConfigurations.AsNoTracking() on revision.SourceRootId equals root.Id
          where record.Id == request.PipelineRecordId &&

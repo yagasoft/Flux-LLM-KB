@@ -38,11 +38,12 @@ public sealed class SegmentedSelectionScaleTests(NativeSqlServerFixture fixture,
         var childRevision = await db.SourceRevisions.AsNoTracking().SingleAsync(value => value.Id == child.SourceRevisionId);
         var ownerRevision = await db.SourceRevisions.AsNoTracking().SingleAsync(value => value.Id == owner.SourceRevisionId);
         await db.SourceRevisions.Where(value => value.Id == childRevision.Id).ExecuteUpdateAsync(setters =>
-            setters.SetProperty(value => value.OriginKind, 1).SetProperty(value => value.ParentSourceRevisionId, firstRevision.Id));
+            setters.SetProperty(value => value.OriginKind, 1).SetProperty(value => value.ParentSourceRevisionId, firstRevision.Id)
+                .SetProperty(value => value.SourceRootId, firstRevision.SourceRootId));
         await AssertScopeAsync(new(2, firstRevision.Id), first.SourceIdentityId, child.SourceIdentityId);
         await AssertScopeAsync(new(2, childRevision.Id)); // An inclusive seed cannot make a child its own publication owner.
-        await AssertScopeAsync(new(3, firstRevision.SourceRootId), first.SourceIdentityId);
-        await AssertScopeAsync(new(3, childRevision.SourceRootId), child.SourceIdentityId);
+        await AssertScopeAsync(new(3, firstRevision.SourceRootId), first.SourceIdentityId, child.SourceIdentityId);
+        await AssertScopeAsync(new(3, childRevision.SourceRootId));
         await AssertScopeAsync(new(1, child.SourceIdentityId), child.SourceIdentityId);
 
         var branchId = Guid.NewGuid();
@@ -59,7 +60,8 @@ public sealed class SegmentedSelectionScaleTests(NativeSqlServerFixture fixture,
             PipelineRecordId = child.Id, PipelineRecordRevision = child.Revision, ProcessorFingerprint = "synthetic-scope-v1", PublishedAtUtc = DateTimeOffset.UtcNow
         });
         await db.SaveChangesAsync();
-        await db.SourceRevisions.Where(value => value.Id == childRevision.Id).ExecuteUpdateAsync(setters => setters.SetProperty(value => value.OriginKind, 2));
+        await db.SourceRevisions.Where(value => value.Id == childRevision.Id).ExecuteUpdateAsync(setters => setters.SetProperty(value => value.OriginKind, 2)
+            .SetProperty(value => value.ParentSourceRevisionId, ownerRevision.Id).SetProperty(value => value.SourceRootId, ownerRevision.SourceRootId));
         await AssertScopeAsync(new(2, firstRevision.Id), first.SourceIdentityId);
         await AssertScopeAsync(new(2, ownerRevision.Id), owner.SourceIdentityId, child.SourceIdentityId);
         await AssertScopeAsync(new(3, ownerRevision.SourceRootId), owner.SourceIdentityId, child.SourceIdentityId);

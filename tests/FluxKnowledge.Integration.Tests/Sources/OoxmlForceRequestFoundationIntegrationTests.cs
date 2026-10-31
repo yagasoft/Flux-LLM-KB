@@ -31,7 +31,7 @@ public sealed class OoxmlForceRequestFoundationIntegrationTests(NativeSqlServerF
     public async Task Current_forceable_ooxml_block_creates_one_durable_requested_receipt_and_excludes_the_branch_from_ordinary_claims()
     {
         var seeded = await SeedCurrentBlockedOoxmlAsync();
-        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System);
+        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(_fixture.ConnectionString)));
 
         var action = Assert.Single(await store.ListForceEligibleOoxmlActionsAsync(16, CancellationToken.None), value => value.BranchId == seeded.BranchId);
         Assert.Equal(seeded.BranchId, action.BranchId);
@@ -66,7 +66,7 @@ public sealed class OoxmlForceRequestFoundationIntegrationTests(NativeSqlServerF
     public async Task A_legacy_history_policy_tuple_cannot_claim_a_current_retained_ooxml_force_request()
     {
         var seeded = await SeedCurrentBlockedOoxmlAsync();
-        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System);
+        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(_fixture.ConnectionString)));
         var requestId = await SeedLegacyHistoryForceRequestAsync(seeded.BranchId);
 
         var claims = await store.ClaimForceAsync("legacy-history-owner", 1,
@@ -84,7 +84,7 @@ public sealed class OoxmlForceRequestFoundationIntegrationTests(NativeSqlServerF
     public async Task Operator_action_lifecycle_events_expose_only_the_opaque_action_binding()
     {
         var seeded = await SeedCurrentBlockedOoxmlAsync();
-        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System);
+        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(_fixture.ConnectionString)));
         var action = Assert.Single(await store.ListForceEligibleOoxmlActionsAsync(16, CancellationToken.None), value => value.BranchId == seeded.BranchId);
         await store.RequestForceAsync(
             new OoxmlForceRequestCommand(action.ActionId, Guid.NewGuid(), action.RequestFingerprint, action.BlockedRowVersionToken),
@@ -117,7 +117,7 @@ public sealed class OoxmlForceRequestFoundationIntegrationTests(NativeSqlServerF
     public async Task Open_force_request_remains_listed_as_a_non_forceable_receipt_after_the_branch_moves_to_pending()
     {
         var seeded = await SeedCurrentBlockedOoxmlAsync();
-        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System);
+        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(_fixture.ConnectionString)));
         var action = Assert.Single(await store.ListForceEligibleOoxmlActionsAsync(16, CancellationToken.None), value => value.BranchId == seeded.BranchId);
 
         var request = await store.RequestForceAsync(
@@ -149,7 +149,7 @@ public sealed class OoxmlForceRequestFoundationIntegrationTests(NativeSqlServerF
             await mutate.SaveChangesAsync();
         }
 
-        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System);
+        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(_fixture.ConnectionString)));
         Assert.DoesNotContain(await store.ListForceEligibleOoxmlActionsAsync(16, CancellationToken.None), value => value.BranchId == seeded.BranchId);
     }
 
@@ -179,7 +179,7 @@ public sealed class OoxmlForceRequestFoundationIntegrationTests(NativeSqlServerF
             seeded.BranchId, OoxmlStructuralTextProcessor.Capability.Id,
             OoxmlStructuralTextProcessor.Capability.ProcessorFingerprint, rowVersion);
         var factory = new ContextFactory(_fixture.ConnectionString);
-        var branchStore = new SqlRetainedProcessorBranchStore(factory, TimeProvider.System);
+        var branchStore = new SqlRetainedProcessorBranchStore(factory, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         var store = new SqlOperatorActionStore(factory, branchStore);
 
         var action = Assert.Single(await store.ListAsync(includeIgnored: false, 100, CancellationToken.None),
@@ -210,7 +210,7 @@ public sealed class OoxmlForceRequestFoundationIntegrationTests(NativeSqlServerF
     public async Task Hard_denial_reason_is_never_listed_as_a_runnable_operator_action(string reasonCode)
     {
         var seeded = await SeedCurrentBlockedOoxmlAsync(outcomeCode: reasonCode);
-        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System);
+        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(_fixture.ConnectionString)));
 
         Assert.DoesNotContain(
             await store.ListForceEligibleOoxmlActionsAsync(16, CancellationToken.None),
@@ -224,7 +224,7 @@ public sealed class OoxmlForceRequestFoundationIntegrationTests(NativeSqlServerF
         var hard = await SeedCurrentBlockedOoxmlAsync(outcomeCode: "office-document-encrypted", seedRetryPolicy: false);
         var noPolicy = await SeedCurrentBlockedOoxmlAsync(outcomeCode: noPolicyReasonCode, seedRetryPolicy: false);
         var factory = new ContextFactory(_fixture.ConnectionString);
-        var branchStore = new SqlRetainedProcessorBranchStore(factory, TimeProvider.System);
+        var branchStore = new SqlRetainedProcessorBranchStore(factory, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         var store = new SqlOperatorActionStore(factory, branchStore);
         await using var identityContext = CreateContext();
         var hardRowVersion = await identityContext.SourceProcessorBranches.Where(value => value.Id == hard.BranchId)
@@ -279,7 +279,7 @@ public sealed class OoxmlForceRequestFoundationIntegrationTests(NativeSqlServerF
     {
         var seeded = await SeedCurrentBlockedOoxmlAsync();
         var factory = new ContextFactory(_fixture.ConnectionString);
-        var branchStore = new SqlRetainedProcessorBranchStore(factory, TimeProvider.System);
+        var branchStore = new SqlRetainedProcessorBranchStore(factory, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         var store = new SqlOperatorActionStore(factory, branchStore);
         await using var identityContext = CreateContext();
         var rowVersion = await identityContext.SourceProcessorBranches.Where(value => value.Id == seeded.BranchId)
@@ -325,7 +325,7 @@ public sealed class OoxmlForceRequestFoundationIntegrationTests(NativeSqlServerF
     {
         var seeded = await SeedCurrentBlockedOoxmlAsync();
         var factory = new ContextFactory(_fixture.ConnectionString);
-        var branchStore = new SqlRetainedProcessorBranchStore(factory, TimeProvider.System);
+        var branchStore = new SqlRetainedProcessorBranchStore(factory, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         var store = new SqlOperatorActionStore(factory, branchStore);
         byte[] rowVersion;
         await using (var identityContext = CreateContext())
@@ -386,7 +386,7 @@ public sealed class OoxmlForceRequestFoundationIntegrationTests(NativeSqlServerF
         var factory = new ContextFactory(_fixture.ConnectionString);
         var store = new SqlOperatorActionStore(
             factory,
-            new SqlRetainedProcessorBranchStore(factory, TimeProvider.System));
+            new SqlRetainedProcessorBranchStore(factory, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory)));
 
         var projected = await store.ListAsync(includeIgnored: false, 100, CancellationToken.None);
 
@@ -401,7 +401,7 @@ public sealed class OoxmlForceRequestFoundationIntegrationTests(NativeSqlServerF
     {
         const string unregisteredReasonCode = "operator-action-retryable-unregistered-test";
         var seeded = await SeedCurrentBlockedOoxmlAsync(outcomeCode: unregisteredReasonCode, seedRetryPolicy: false);
-        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System);
+        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(_fixture.ConnectionString)));
 
         Assert.DoesNotContain(
             await store.ListForceEligibleOoxmlActionsAsync(16, CancellationToken.None),
@@ -425,7 +425,7 @@ public sealed class OoxmlForceRequestFoundationIntegrationTests(NativeSqlServerF
         const string safeReasonCode = "operator-action-policy-override-success-test";
         var seeded = await SeedCurrentBlockedOoxmlAsync(outcomeCode: safeReasonCode, seedRetryPolicy: false);
         await SeedCapabilityPolicyAsync(safeReasonCode, "policy-override");
-        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System);
+        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(_fixture.ConnectionString)));
         await using var before = CreateContext();
         var branch = await before.SourceProcessorBranches.SingleAsync(value => value.Id == seeded.BranchId);
         var actionId = OoxmlForceRequestIdentity.CreateActionId(
@@ -461,7 +461,7 @@ public sealed class OoxmlForceRequestFoundationIntegrationTests(NativeSqlServerF
         const string safeReasonCode = "operator-action-empty-operation-test";
         var seeded = await SeedCurrentBlockedOoxmlAsync(outcomeCode: safeReasonCode, seedRetryPolicy: false);
         await SeedCapabilityPolicyAsync(safeReasonCode, actionKind);
-        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System);
+        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(_fixture.ConnectionString)));
         await using var before = CreateContext();
         var branch = await before.SourceProcessorBranches.SingleAsync(value => value.Id == seeded.BranchId);
         var actionId = OoxmlForceRequestIdentity.CreateActionId(
@@ -491,7 +491,7 @@ public sealed class OoxmlForceRequestFoundationIntegrationTests(NativeSqlServerF
     public async Task Ignore_creates_an_independent_durable_identity_for_a_current_listed_action_without_a_force_request()
     {
         var seeded = await SeedCurrentBlockedOoxmlAsync();
-        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System);
+        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(_fixture.ConnectionString)));
         var action = Assert.Single(await store.ListForceEligibleOoxmlActionsAsync(16, CancellationToken.None), value => value.BranchId == seeded.BranchId);
 
         await using (var before = CreateContext())
@@ -539,7 +539,7 @@ public sealed class OoxmlForceRequestFoundationIntegrationTests(NativeSqlServerF
             OoxmlStructuralTextProcessor.Capability.ProcessorFingerprint,
             rowVersion);
         var token = OoxmlForceRequestIdentity.EncodeBlockedRowVersion(rowVersion);
-        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System);
+        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(_fixture.ConnectionString)));
 
         var receipt = await store.SetOperatorActionIgnoreAsync(new OperatorActionIgnoreCommand(
             actionId, Guid.NewGuid(), OoxmlForceRequestIdentity.CreateRequestFingerprint(actionId, token),
@@ -556,7 +556,7 @@ public sealed class OoxmlForceRequestFoundationIntegrationTests(NativeSqlServerF
     public async Task An_independent_ignore_identity_does_not_change_the_later_retry_lifecycle()
     {
         var seeded = await SeedCurrentBlockedOoxmlAsync();
-        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System);
+        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(_fixture.ConnectionString)));
         var action = Assert.Single(await store.ListForceEligibleOoxmlActionsAsync(16, CancellationToken.None), value => value.BranchId == seeded.BranchId);
         var command = new OperatorActionIgnoreCommand(action.ActionId, Guid.NewGuid(), action.RequestFingerprint,
             OoxmlForceRequestIdentity.DecodeBlockedRowVersion(action.BlockedRowVersionToken), IsIgnored: true);
@@ -578,7 +578,7 @@ public sealed class OoxmlForceRequestFoundationIntegrationTests(NativeSqlServerF
     public async Task Ignore_resolves_an_existing_operation_before_live_eligibility_and_maps_a_malformed_collision_to_conflict()
     {
         var seeded = await SeedCurrentBlockedOoxmlAsync();
-        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System);
+        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(_fixture.ConnectionString)));
         var action = Assert.Single(await store.ListForceEligibleOoxmlActionsAsync(16, CancellationToken.None), value => value.BranchId == seeded.BranchId);
         var operationId = Guid.NewGuid();
         var command = new OperatorActionIgnoreCommand(action.ActionId, operationId, action.RequestFingerprint,
@@ -614,7 +614,7 @@ public sealed class OoxmlForceRequestFoundationIntegrationTests(NativeSqlServerF
     public async Task A_new_ignore_operation_rejects_a_noncanonical_valid_fingerprint_without_a_receipt_or_head()
     {
         var seeded = await SeedCurrentBlockedOoxmlAsync();
-        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System);
+        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(_fixture.ConnectionString)));
         var action = Assert.Single(await store.ListForceEligibleOoxmlActionsAsync(16, CancellationToken.None), value => value.BranchId == seeded.BranchId);
         await store.RequestForceAsync(
             new OoxmlForceRequestCommand(action.ActionId, Guid.NewGuid(), action.RequestFingerprint, action.BlockedRowVersionToken),
@@ -640,7 +640,7 @@ public sealed class OoxmlForceRequestFoundationIntegrationTests(NativeSqlServerF
     public async Task Sequential_ignore_then_unignore_records_distinct_receipts_and_leaves_the_current_action_unignored()
     {
         var seeded = await SeedCurrentBlockedOoxmlAsync();
-        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System);
+        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(_fixture.ConnectionString)));
         var action = Assert.Single(await store.ListForceEligibleOoxmlActionsAsync(16, CancellationToken.None), value => value.BranchId == seeded.BranchId);
         await store.RequestForceAsync(
             new OoxmlForceRequestCommand(action.ActionId, Guid.NewGuid(), action.RequestFingerprint, action.BlockedRowVersionToken),
@@ -675,7 +675,7 @@ public sealed class OoxmlForceRequestFoundationIntegrationTests(NativeSqlServerF
     public async Task A_new_blocked_generation_does_not_inherit_the_previous_action_ignore_state()
     {
         var seeded = await SeedCurrentBlockedOoxmlAsync();
-        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System);
+        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(_fixture.ConnectionString)));
         var action = Assert.Single(await store.ListForceEligibleOoxmlActionsAsync(16, CancellationToken.None), value => value.BranchId == seeded.BranchId);
         await store.RequestForceAsync(
             new OoxmlForceRequestCommand(action.ActionId, Guid.NewGuid(), action.RequestFingerprint, action.BlockedRowVersionToken),
@@ -704,7 +704,7 @@ public sealed class OoxmlForceRequestFoundationIntegrationTests(NativeSqlServerF
         var seeded = await SeedCurrentBlockedOoxmlAsync(outcomeCode: safeReasonCode, seedRetryPolicy: false);
         await SeedCapabilityPolicyAsync(safeReasonCode, RetryActionKind);
         await SeedCapabilityPolicyAsync(safeReasonCode, "policy-override");
-        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System);
+        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(_fixture.ConnectionString)));
         var action = Assert.Single(
             await store.ListForceEligibleOoxmlActionsAsync(16, CancellationToken.None),
             value => value.BranchId == seeded.BranchId);
@@ -729,7 +729,7 @@ public sealed class OoxmlForceRequestFoundationIntegrationTests(NativeSqlServerF
             seeded.Add(await SeedCurrentBlockedOoxmlAsync());
         }
 
-        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System);
+        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(_fixture.ConnectionString)));
         var claimedAction = Assert.Single(await store.ListForceEligibleOoxmlActionsAsync(16, CancellationToken.None), value => value.BranchId == seeded[0].BranchId);
         var claimed = await store.RequestForceAsync(
             new OoxmlForceRequestCommand(claimedAction.ActionId, Guid.NewGuid(), claimedAction.RequestFingerprint, claimedAction.BlockedRowVersionToken), CancellationToken.None);
@@ -771,7 +771,7 @@ public sealed class OoxmlForceRequestFoundationIntegrationTests(NativeSqlServerF
             await mutate.SaveChangesAsync();
         }
 
-        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System);
+        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(_fixture.ConnectionString)));
         Assert.DoesNotContain(await store.ListForceEligibleOoxmlActionsAsync(16, CancellationToken.None), value => value.BranchId == seeded.BranchId);
     }
 
@@ -795,7 +795,7 @@ public sealed class OoxmlForceRequestFoundationIntegrationTests(NativeSqlServerF
             await mutate.SaveChangesAsync();
         }
 
-        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System);
+        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(_fixture.ConnectionString)));
         Assert.DoesNotContain(await store.ListForceEligibleOoxmlActionsAsync(16, CancellationToken.None), value => value.BranchId == seeded.BranchId);
     }
 
@@ -803,7 +803,7 @@ public sealed class OoxmlForceRequestFoundationIntegrationTests(NativeSqlServerF
     public async Task Forced_claim_binds_exactly_one_new_attempt_and_a_repeated_block_finalises_the_original_receipt()
     {
         var seeded = await SeedCurrentBlockedOoxmlAsync();
-        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System);
+        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(_fixture.ConnectionString)));
         var action = Assert.Single(await store.ListForceEligibleOoxmlActionsAsync(16, CancellationToken.None), value => value.BranchId == seeded.BranchId);
         var first = await store.RequestForceAsync(
             new OoxmlForceRequestCommand(action.ActionId, Guid.NewGuid(), action.RequestFingerprint, action.BlockedRowVersionToken),
@@ -834,7 +834,7 @@ public sealed class OoxmlForceRequestFoundationIntegrationTests(NativeSqlServerF
     public async Task Database_time_reconciliation_expires_requested_force_work_into_a_new_blocked_action_version()
     {
         var seeded = await SeedCurrentBlockedOoxmlAsync();
-        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System);
+        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(_fixture.ConnectionString)));
         var action = Assert.Single(await store.ListForceEligibleOoxmlActionsAsync(16, CancellationToken.None), value => value.BranchId == seeded.BranchId);
         var first = await store.RequestForceAsync(
             new OoxmlForceRequestCommand(action.ActionId, Guid.NewGuid(), action.RequestFingerprint, action.BlockedRowVersionToken),
@@ -863,7 +863,7 @@ public sealed class OoxmlForceRequestFoundationIntegrationTests(NativeSqlServerF
     public async Task Operation_and_action_identities_replay_before_current_eligibility_and_operation_collisions_do_not_mutate()
     {
         var seeded = await SeedCurrentBlockedOoxmlAsync();
-        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System);
+        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(_fixture.ConnectionString)));
         var action = Assert.Single(await store.ListForceEligibleOoxmlActionsAsync(16, CancellationToken.None), value => value.BranchId == seeded.BranchId);
         var operationId = Guid.NewGuid();
         var created = await store.RequestForceAsync(
@@ -902,7 +902,7 @@ public sealed class OoxmlForceRequestFoundationIntegrationTests(NativeSqlServerF
     public async Task Operation_collision_is_resolved_before_the_changed_action_or_row_version_is_parsed()
     {
         var seeded = await SeedCurrentBlockedOoxmlAsync();
-        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System);
+        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(_fixture.ConnectionString)));
         var action = Assert.Single(await store.ListForceEligibleOoxmlActionsAsync(16, CancellationToken.None), value => value.BranchId == seeded.BranchId);
         var operationId = Guid.NewGuid();
         await store.RequestForceAsync(new OoxmlForceRequestCommand(action.ActionId, operationId, action.RequestFingerprint, action.BlockedRowVersionToken), CancellationToken.None);
@@ -921,7 +921,7 @@ public sealed class OoxmlForceRequestFoundationIntegrationTests(NativeSqlServerF
     public async Task A_new_operation_for_an_existing_action_is_durably_replayed_and_conflicts_globally()
     {
         var seeded = await SeedCurrentBlockedOoxmlAsync();
-        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System);
+        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(_fixture.ConnectionString)));
         var action = Assert.Single(await store.ListForceEligibleOoxmlActionsAsync(16, CancellationToken.None), value => value.BranchId == seeded.BranchId);
         var original = await store.RequestForceAsync(
             new OoxmlForceRequestCommand(action.ActionId, Guid.NewGuid(), action.RequestFingerprint, action.BlockedRowVersionToken), CancellationToken.None);
@@ -979,7 +979,7 @@ public sealed class OoxmlForceRequestFoundationIntegrationTests(NativeSqlServerF
         var integrity = await SeedCurrentBlockedOoxmlAsync();
         var stale = await SeedCurrentBlockedOoxmlAsync();
         var legacy = await SeedCurrentBlockedOoxmlAsync();
-        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System);
+        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(_fixture.ConnectionString)));
         var staleAction = Assert.Single(await store.ListForceEligibleOoxmlActionsAsync(16, CancellationToken.None), value => value.BranchId == stale.BranchId);
         await using (var mutate = CreateContext())
         {
@@ -1008,7 +1008,7 @@ public sealed class OoxmlForceRequestFoundationIntegrationTests(NativeSqlServerF
     public async Task Reconciliation_terminalises_a_stale_requested_receipt_without_overwriting_a_newer_branch_generation()
     {
         var seeded = await SeedCurrentBlockedOoxmlAsync();
-        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System);
+        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(_fixture.ConnectionString)));
         var action = Assert.Single(await store.ListForceEligibleOoxmlActionsAsync(16, CancellationToken.None), value => value.BranchId == seeded.BranchId);
         var request = await store.RequestForceAsync(new OoxmlForceRequestCommand(action.ActionId, Guid.NewGuid(), action.RequestFingerprint, action.BlockedRowVersionToken), CancellationToken.None);
         await using (var mutate = CreateContext())
@@ -1035,7 +1035,7 @@ public sealed class OoxmlForceRequestFoundationIntegrationTests(NativeSqlServerF
     public async Task Reconciliation_terminalises_a_superseded_claimed_attempt_without_touching_a_newer_generation()
     {
         var seeded = await SeedCurrentBlockedOoxmlAsync();
-        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System);
+        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(_fixture.ConnectionString)));
         var action = Assert.Single(await store.ListForceEligibleOoxmlActionsAsync(16, CancellationToken.None), value => value.BranchId == seeded.BranchId);
         var request = await store.RequestForceAsync(new OoxmlForceRequestCommand(action.ActionId, Guid.NewGuid(), action.RequestFingerprint, action.BlockedRowVersionToken), CancellationToken.None);
         var forceClaim = Assert.Single(await store.ClaimForceAsync("superseded-force-owner", 1, OoxmlStructuralTextProcessor.Capability.ProcessorFingerprint, CancellationToken.None));
@@ -1075,7 +1075,7 @@ public sealed class OoxmlForceRequestFoundationIntegrationTests(NativeSqlServerF
     public async Task Reconciliation_terminalises_a_claimed_force_request_when_its_activity_is_cancelled()
     {
         var seeded = await SeedCurrentBlockedOoxmlAsync();
-        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System);
+        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(_fixture.ConnectionString)));
         var action = Assert.Single(await store.ListForceEligibleOoxmlActionsAsync(16, CancellationToken.None), value => value.BranchId == seeded.BranchId);
         var request = await store.RequestForceAsync(new OoxmlForceRequestCommand(action.ActionId, Guid.NewGuid(), action.RequestFingerprint, action.BlockedRowVersionToken), CancellationToken.None);
         var claim = Assert.Single(await store.ClaimForceAsync("cancelled-force-owner", 1, OoxmlStructuralTextProcessor.Capability.ProcessorFingerprint, CancellationToken.None));
@@ -1102,7 +1102,7 @@ public sealed class OoxmlForceRequestFoundationIntegrationTests(NativeSqlServerF
     {
         var disabled = await SeedCurrentBlockedOoxmlAsync();
         var cancelled = await SeedCurrentBlockedOoxmlAsync();
-        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System);
+        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(_fixture.ConnectionString)));
         var actions = await store.ListForceEligibleOoxmlActionsAsync(16, CancellationToken.None);
         var disabledAction = Assert.Single(actions, value => value.BranchId == disabled.BranchId);
         var cancelledAction = Assert.Single(actions, value => value.BranchId == cancelled.BranchId);
@@ -1132,7 +1132,7 @@ public sealed class OoxmlForceRequestFoundationIntegrationTests(NativeSqlServerF
     public async Task Expired_forced_lease_is_closed_before_a_later_normal_generation_and_is_never_rebound()
     {
         var seeded = await SeedCurrentBlockedOoxmlAsync();
-        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System);
+        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(_fixture.ConnectionString)));
         var action = Assert.Single(await store.ListForceEligibleOoxmlActionsAsync(16, CancellationToken.None), value => value.BranchId == seeded.BranchId);
         await store.RequestForceAsync(new OoxmlForceRequestCommand(action.ActionId, Guid.NewGuid(), action.RequestFingerprint, action.BlockedRowVersionToken), CancellationToken.None);
         var forceClaim = Assert.Single(await store.ClaimForceAsync("force-owner", 16, OoxmlStructuralTextProcessor.Capability.ProcessorFingerprint, CancellationToken.None),
@@ -1174,7 +1174,7 @@ public sealed class OoxmlForceRequestFoundationIntegrationTests(NativeSqlServerF
 
         var store = new SqlRetainedProcessorBranchStore(
             new ContextFactory(_fixture.ConnectionString),
-            new FixedTimeProvider(DateTimeOffset.Parse("2001-01-01T00:00:00+00:00")));
+            new FixedTimeProvider(DateTimeOffset.Parse("2001-01-01T00:00:00+00:00")), sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(_fixture.ConnectionString)));
 
         var claim = Assert.Single(await store.ClaimAsync("database-time-owner", 1, OoxmlStructuralTextProcessor.Capability.ProcessorFingerprint, CancellationToken.None));
         await using var verification = CreateContext();
@@ -1189,8 +1189,8 @@ public sealed class OoxmlForceRequestFoundationIntegrationTests(NativeSqlServerF
     public async Task Concurrent_distinct_operations_for_one_current_action_return_one_durable_request_and_one_audit_record()
     {
         var seeded = await SeedCurrentBlockedOoxmlAsync();
-        var firstStore = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System);
-        var secondStore = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System);
+        var firstStore = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(_fixture.ConnectionString)));
+        var secondStore = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(_fixture.ConnectionString)));
         var action = Assert.Single(await firstStore.ListForceEligibleOoxmlActionsAsync(16, CancellationToken.None), value => value.BranchId == seeded.BranchId);
 
         var receipts = await Task.WhenAll(
@@ -1207,14 +1207,14 @@ public sealed class OoxmlForceRequestFoundationIntegrationTests(NativeSqlServerF
     public async Task Arbitrary_persistence_failure_with_a_matching_action_winner_is_exposed_without_retrying_the_request()
     {
         var seeded = await SeedCurrentBlockedOoxmlAsync();
-        var discovery = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System);
+        var discovery = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(_fixture.ConnectionString)));
         var action = Assert.Single(await discovery.ListForceEligibleOoxmlActionsAsync(16, CancellationToken.None), value => value.BranchId == seeded.BranchId);
         var operationId = Guid.NewGuid();
         var failure = new ArbitraryActionSaveFailureInterceptor(
             _fixture.ConnectionString,
             action);
         var factory = new ContextFactory(_fixture.ConnectionString, failure);
-        var store = new SqlRetainedProcessorBranchStore(factory, TimeProvider.System);
+        var store = new SqlRetainedProcessorBranchStore(factory, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
 
         var thrown = await Assert.ThrowsAsync<DbUpdateException>(async () =>
             await store.RequestForceAsync(
@@ -1234,7 +1234,7 @@ public sealed class OoxmlForceRequestFoundationIntegrationTests(NativeSqlServerF
     public async Task Action_ledger_source_force_request_unique_violation_is_exposed_without_replaying_a_matching_action_winner(int errorNumber)
     {
         var seeded = await SeedCurrentBlockedOoxmlAsync();
-        var discovery = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System);
+        var discovery = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(_fixture.ConnectionString)));
         var action = Assert.Single(await discovery.ListForceEligibleOoxmlActionsAsync(16, CancellationToken.None), value => value.BranchId == seeded.BranchId);
         var operationId = Guid.NewGuid();
         var failure = new ActionLedgerSourceForceRequestUniqueViolationInterceptor(
@@ -1242,7 +1242,7 @@ public sealed class OoxmlForceRequestFoundationIntegrationTests(NativeSqlServerF
             action,
             errorNumber);
         var factory = new ContextFactory(_fixture.ConnectionString, failure);
-        var store = new SqlRetainedProcessorBranchStore(factory, TimeProvider.System);
+        var store = new SqlRetainedProcessorBranchStore(factory, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
 
         var thrown = await Assert.ThrowsAsync<DbUpdateException>(async () =>
             await store.RequestForceAsync(
@@ -1267,7 +1267,7 @@ public sealed class OoxmlForceRequestFoundationIntegrationTests(NativeSqlServerF
         var seeded = await SeedCurrentBlockedOoxmlAsync(outcomeCode: reasonCode, seedRetryPolicy: false);
         await SeedCapabilityPolicyAsync(reasonCode, RetryActionKind);
         await SeedCapabilityPolicyAsync(reasonCode, "policy-override");
-        var discovery = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System);
+        var discovery = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(_fixture.ConnectionString)));
         var action = Assert.Single(await discovery.ListForceEligibleOoxmlActionsAsync(16, CancellationToken.None), value => value.BranchId == seeded.BranchId);
         var operationId = Guid.NewGuid();
         var factory = new ActionLedgerPrimaryKeyRaceContextFactory(
@@ -1275,7 +1275,7 @@ public sealed class OoxmlForceRequestFoundationIntegrationTests(NativeSqlServerF
             action,
             RetryActionKind,
             winnerUsesRequestedOperation ? operationId : null);
-        var store = new SqlRetainedProcessorBranchStore(factory, TimeProvider.System);
+        var store = new SqlRetainedProcessorBranchStore(factory, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
 
         var rejection = await Assert.ThrowsAsync<OoxmlForceRequestRejectedException>(async () =>
             await store.RequestPolicyOverrideAsync(
@@ -1294,7 +1294,7 @@ public sealed class OoxmlForceRequestFoundationIntegrationTests(NativeSqlServerF
     public async Task Forced_transient_retry_finalises_only_its_generation_and_a_later_normal_claim_is_not_force_bound()
     {
         var seeded = await SeedCurrentBlockedOoxmlAsync();
-        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System);
+        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(_fixture.ConnectionString)));
         var action = Assert.Single(await store.ListForceEligibleOoxmlActionsAsync(16, CancellationToken.None), value => value.BranchId == seeded.BranchId);
         await store.RequestForceAsync(new OoxmlForceRequestCommand(action.ActionId, Guid.NewGuid(), action.RequestFingerprint, action.BlockedRowVersionToken), CancellationToken.None);
         var forceClaim = Assert.Single(await store.ClaimForceAsync("transient-force-owner", 16, OoxmlStructuralTextProcessor.Capability.ProcessorFingerprint, CancellationToken.None),
@@ -1315,7 +1315,7 @@ public sealed class OoxmlForceRequestFoundationIntegrationTests(NativeSqlServerF
     public async Task Claimed_force_work_is_cancelled_on_descriptor_disable_and_late_terminal_writes_are_fenced_out()
     {
         var seeded = await SeedCurrentBlockedOoxmlAsync();
-        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System);
+        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(_fixture.ConnectionString)));
         var action = Assert.Single(await store.ListForceEligibleOoxmlActionsAsync(16, CancellationToken.None), value => value.BranchId == seeded.BranchId);
         await store.RequestForceAsync(new OoxmlForceRequestCommand(action.ActionId, Guid.NewGuid(), action.RequestFingerprint, action.BlockedRowVersionToken), CancellationToken.None);
         var claim = Assert.Single(await store.ClaimForceAsync("disabled-force-owner", 16, OoxmlStructuralTextProcessor.Capability.ProcessorFingerprint, CancellationToken.None),

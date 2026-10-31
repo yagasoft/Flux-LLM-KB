@@ -85,23 +85,31 @@ public sealed class EmbeddingGpuExecutor(IEmbeddingGpuRequestStore requests, IGp
             using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
             if (!_executions.TryAdd(work.MiniTaskId, cancellation)) throw new InvalidOperationException("embedding-gpu-execution-duplicate");
             var ownership = new GpuOwnedWorkContext(handle, runtime.RuntimeKey, runtime.SettingsFingerprint, cancellation.Token);
+            var nativeStarted = false;
             try
             {
-                released = false;
-                var result = await inference.EmbedBatchAsync(ownership, work.Batch.Chunks.Select(chunk => chunk.SearchText).ToArray(), cancellation.Token).ConfigureAwait(false);
-                released = result.NativeCapacityReleased && ownership.InvalidateAndReadNativeRelease();
-                if (released && result.RefusalReason is null && result.Value is not null && !cancellation.IsCancellationRequested)
-                    await requests.CommitAsync(handle, _instance, work, result.Value, cancellation.Token).ConfigureAwait(false);
+                // Register cancellation first, then recheck durable withdrawal. This
+                // closes the interval in which an earlier cancellation signal had no owner.
+                if (await requests.IsExecutionSourceAvailableAsync(handle, _instance, work.MiniTaskId, cancellation.Token).ConfigureAwait(false))
+                {
+                    nativeStarted = true;
+                    released = false;
+                    var result = await inference.EmbedBatchAsync(ownership, work.Batch.Chunks.Select(chunk => chunk.SearchText).ToArray(), cancellation.Token).ConfigureAwait(false);
+                    released = result.NativeCapacityReleased && ownership.InvalidateAndReadNativeRelease();
+                    if (released && result.RefusalReason is null && result.Value is not null && !cancellation.IsCancellationRequested)
+                        await requests.CommitAsync(handle, _instance, work, result.Value, cancellation.Token).ConfigureAwait(false);
+                }
             }
             catch (Exception exception) when (exception is not OutOfMemoryException and not StackOverflowException)
             {
                 // The registered resource proof decides release. A failed/ambiguous
                 // checkpoint commit is recovered from its durable digest, never replayed here.
-                released = ownership.NativeCapacityReleased;
+                released = !nativeStarted || ownership.NativeCapacityReleased;
             }
             finally
             {
-                released &= ownership.InvalidateAndReadNativeRelease();
+                var nativeReleased = ownership.InvalidateAndReadNativeRelease();
+                if (nativeStarted) released &= nativeReleased;
                 if (!released) _unconfirmedNative.TryAdd(handle.DispatchId, 0);
                 _executions.TryRemove(work.MiniTaskId, out _);
             }

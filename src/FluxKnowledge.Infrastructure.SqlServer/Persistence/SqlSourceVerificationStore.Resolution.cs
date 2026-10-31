@@ -30,7 +30,7 @@ public sealed partial class SqlSourceVerificationStore
         (pending.ReasonFlags & SourcePendingReasons.GitMembership) != 0 ||
         SourcePathScope.Contains(pending.RelativePath, pending.IsSubtree, relativePath) &&
         (new JournalChange(0, "", "", "", (uint)pending.ReasonFlags, false).ContentChanged ||
-         (pending.ReasonFlags & SourcePendingReasons.ScopedNamespace) != 0);
+         (pending.ReasonFlags & (SourcePendingReasons.ScopedNamespace | SourcePendingReasons.RemovalPending | SourcePendingReasons.FullRecapture)) != 0);
 
     private static async Task ResolveCandidatesAsync(FluxKnowledgeDbContext db, SourceRootConfigurationEntity root,
         SourceRootScanStateEntity state, SourceVerificationRunEntity run, SourceVerificationAuthority authority,
@@ -66,7 +66,12 @@ public sealed partial class SqlSourceVerificationStore
             // the prior maximum gives bounded fair rotation even if the wall clock moves back.
             if (row.State == "AwaitingCapture") row.AttemptedAtUtc = checkedAt;
             var original = originals[row.Id];
-            if (pending.Any(x => AffectsCandidate(x, original.RelativePath))) continue;
+            if (pending.Any(x => AffectsCandidate(x, original.RelativePath)))
+            {
+                row.State = "AwaitingCapture";
+                row.Reason = "source-work-pending";
+                continue; // The independent obligation is already durable; do not read or recreate content debt.
+            }
             var fullPath = Path.GetFullPath(Path.Combine(root.CanonicalPath, original.RelativePath));
             entries.TryGetValue(SqlSourceChangeJournalStore.PathKey(original.RelativePath), out var entry);
             var revision = entry?.SourceRevisionId is { } revisionId ? revisions.GetValueOrDefault(revisionId) : null;
@@ -86,7 +91,23 @@ public sealed partial class SqlSourceVerificationStore
             if (entry is null || entry.Id != original.InventoryEntryId || entry.SourceRevisionId != original.RevisionId ||
                 entry.FileId != original.FileId || entry.BaselineEpoch != authority.BaselineEpoch ||
                 active.Any(x => x.CanonicalPath.Equals(fullPath, StringComparison.OrdinalIgnoreCase)) ||
-                original.RevisionId is not { } oldId || !revisions.TryGetValue(oldId, out var old) ||
+                original.RevisionId is not { } oldId || !revisions.TryGetValue(oldId, out var old)) continue;
+            if (ReadGuardedRemovalWitness(old.RetentionEvidenceJson) is { } guarded &&
+                old.SourceRootId == root.Id && old.OriginKind == 0 && old.CanonicalPath.Equals(fullPath, StringComparison.OrdinalIgnoreCase) &&
+                old.SuppressedAtUtc == guarded.SuppressedAtUtc && guarded.SuppressedAtUtc >= run.CreatedAtUtc && guarded.SuppressedAtUtc <= now &&
+                guarded.SourceRootId == root.Id && guarded.SourceRevisionId == oldId && guarded.RelativePath == original.RelativePath &&
+                guarded.ConfigurationRevision == authority.ConfigurationRevision &&
+                guarded.PhysicalIdentityFingerprint == SqlSourceScanStore.ParseAdmissionIdentityFingerprint(root.HealthEvidenceJson) &&
+                guarded.BaselineEpoch == authority.BaselineEpoch && guarded.RecoveryGeneration == authority.RecoveryGeneration &&
+                guarded.JournalId == authority.JournalId && guarded.CoveredThroughUsn <= barrier.NextUsn &&
+                guarded.PendingId != Guid.Empty && guarded.PendingGeneration > 0 && guarded.InventoryEntryId == original.InventoryEntryId &&
+                guarded.FileId == original.FileId && guarded.ArtifactId == original.ArtifactId)
+            {
+                row.State = "Deleted"; row.Reason = null; row.CompletedAtUtc = guarded.SuppressedAtUtc;
+                row.ReceiptJson = JsonSerializer.Serialize(guarded);
+                continue;
+            }
+            if (
                 witnesses.GetValueOrDefault(oldId) is not { Version: 1, Category: "Deleted" or "OutOfScope" } witness ||
                 old.SourceRootId != root.Id || old.OriginKind != 0 || !old.CanonicalPath.Equals(fullPath, StringComparison.OrdinalIgnoreCase) ||
                 old.SuppressedAtUtc != witness.SuppressedAtUtc || witness.SuppressedAtUtc < run.CreatedAtUtc || witness.SuppressedAtUtc > now ||
@@ -109,6 +130,15 @@ public sealed partial class SqlSourceVerificationStore
     private static SourceAuthoritativeRemovalWitness? ReadRemovalWitness(string? json)
     {
         try { return json is null ? null : JsonSerializer.Deserialize<SourceAuthoritativeRemovalWitness>(json); }
+        catch (JsonException) { return null; }
+    }
+    private static SourceGuardedRemovalWitness? ReadGuardedRemovalWitness(string? json)
+    {
+        try
+        {
+            var witness = json is null ? null : JsonSerializer.Deserialize<SourceGuardedRemovalWitness>(json);
+            return witness is { Version: 2, Kind: "guarded-path-removal" } ? witness : null;
+        }
         catch (JsonException) { return null; }
     }
     private static SourceIncrementalPlan? ReadManifest(string? json)

@@ -1178,7 +1178,7 @@ public sealed class LocalRetainedCsharpCodeReaderIntegrationTests(NativeSqlServe
         }
 
         var factory = SqlTestData.CreateFactory(fixture);
-        var store = new SqlRetainedProcessorBranchStore(factory, TimeProvider.System);
+        var store = new SqlRetainedProcessorBranchStore(factory, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         var claim = Assert.Single(await store.ClaimCsharpCodeAsync(
             "retained-csharp-local-detail",
             1,

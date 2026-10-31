@@ -161,7 +161,7 @@ public sealed class SourceJournalRecoveryIntegrationTests(NativeSqlServerFixture
             Assert.False(state.NamespaceComplete);
             Assert.Equal("JournalPartial", state.Mode);
             var debt = Assert.Single(await verify.SourcePendingChanges.Where(x => x.SourceRootId == claim.SourceRoot.Id.Value).ToArrayAsync());
-            Assert.Equal(SourcePendingReasons.NamespaceMetadata | (scopedWork ? SourcePendingReasons.ScopedNamespace : 0), debt.ReasonFlags);
+            Assert.Equal(SourcePendingReasons.NamespaceMetadata | SourcePendingReasons.RemovalPending | (scopedWork ? SourcePendingReasons.ScopedNamespace : 0), debt.ReasonFlags);
             if (scopedWork)
             {
                 Assert.NotEqual(debt.Generation, debt.RetryGeneration);
@@ -260,7 +260,9 @@ public sealed class SourceJournalRecoveryIntegrationTests(NativeSqlServerFixture
             Assert.All(entries, entry => Assert.Equal(plan.BaselineEpoch, entry.BaselineEpoch));
             Assert.Contains(entries, entry => entry.IsAncestor);
             Assert.Contains(entries, entry => entry.RelativePath == ".");
-            Assert.False(await verify.SourcePendingChanges.AnyAsync(x => x.SourceRootId == recovery.SourceRoot.Id.Value));
+            var removal = Assert.Single(await verify.SourcePendingChanges.Where(x => x.SourceRootId == recovery.SourceRoot.Id.Value).ToArrayAsync());
+            Assert.Equal(".", removal.RelativePath);
+            Assert.NotEqual(0, removal.ReasonFlags & SourcePendingReasons.RemovalPending);
             Assert.Equal(2ul, plan.Cursor!.JournalId);
             Assert.NotEqual(original.ManifestId, plan.ManifestId);
             if (keepRunning)

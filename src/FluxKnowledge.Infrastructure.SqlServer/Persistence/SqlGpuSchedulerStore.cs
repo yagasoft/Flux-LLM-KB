@@ -28,6 +28,7 @@ public sealed partial class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecu
     private readonly Lazy<GpuInteractiveOwnerIdentity> _interactiveOwner;
     private readonly IDeploymentValidationHold? _deploymentValidationHold;
     private readonly TimeSpan _interactiveExecutionTimeout;
+    private readonly ISourceWorkAdmission? _sourceAdmission;
 
     public SqlGpuSchedulerStore(
         IDbContextFactory<FluxKnowledgeDbContext> contextFactory,
@@ -41,7 +42,7 @@ public sealed partial class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecu
         Func<CancellationToken, ValueTask>? afterWakeConsumptionCommitted = null,
         GpuInteractiveOwnerIdentity? interactiveOwner = null,
         IDeploymentValidationHold? deploymentValidationHold = null,
-        TimeSpan? interactiveExecutionTimeout = null)
+        TimeSpan? interactiveExecutionTimeout = null, ISourceWorkAdmission? sourceAdmission = null)
     {
         _interactiveExecutionTimeout = interactiveExecutionTimeout ?? TimeSpan.FromSeconds(10);
         if (_interactiveExecutionTimeout < TimeSpan.FromSeconds(10) ||
@@ -57,6 +58,7 @@ public sealed partial class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecu
         _afterLifecycleCommitted = afterLifecycleCommitted;
         _afterWakeConsumptionCommitted = afterWakeConsumptionCommitted;
         _deploymentValidationHold = deploymentValidationHold;
+        _sourceAdmission = sourceAdmission;
         interactiveOwner?.Validate();
         _interactiveOwner = new(() => interactiveOwner ?? new FluxKnowledge.Integrations.Windows.WindowsInteractiveGpuOwnerProbe().Current);
     }
@@ -159,6 +161,7 @@ public sealed partial class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecu
             await _beforeAdmissionLockAttempt(cancellationToken).ConfigureAwait(false);
         }
 
+        await SqlPublishedPassageSelection.AcquireFenceAsync(context, cancellationToken).ConfigureAwait(false);
         await AcquireAdmissionLockAsync(context, transaction.GetDbTransaction(), cancellationToken).ConfigureAwait(false);
         await AcquireMutationLockAsync(context, transaction.GetDbTransaction(), cancellationToken).ConfigureAwait(false);
         var receipt = await context.GpuSchedulerOperationReceipts
@@ -1088,6 +1091,7 @@ public sealed partial class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecu
             await _beforeIdempotencyRead(cancellationToken).ConfigureAwait(false);
         }
 
+        await SqlPublishedPassageSelection.AcquireFenceAsync(context, cancellationToken).ConfigureAwait(false);
         await AcquireMutationLockAsync(context, transaction.GetDbTransaction(), cancellationToken).ConfigureAwait(false);
 
         // Recovery can inspect the parent before reaching a child. Exclude that shared
@@ -1129,6 +1133,7 @@ public sealed partial class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecu
         {
             throw new InvalidOperationException("The claimed parent Job lease does not match durable worker processing work.");
         }
+        await SqlSourceWorkEligibility.RequireAsync(context, parent.PipelineRecordId.Value, cancellationToken, _sourceAdmission).ConfigureAwait(false);
 
         var miniTask = new GpuMiniTaskEntity
         {
@@ -1240,12 +1245,14 @@ public sealed partial class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecu
         var rebuildJobSql = "SELECT * FROM [Jobs] WHERE " + SqlCorpusRebuildEligibility.ActiveJob("[Jobs].[Id]");
         var rebuildingJobs = context.Jobs.FromSqlRaw(rebuildJobSql)
             .Select(job => job.Id);
+        var eligibleRecordIds = SqlSourceWorkEligibility.Records(context, _sourceAdmission).Select(record => record.Id);
         var ready = context.GpuMiniTasks.Where(task => task.ExecutionState == readyState &&
             (task.ParentJobId == null
                 ? !task.InteractiveCancellationRequested && task.QueueDeadlineUtc > now
                 : task.ParentJob!.PublicState == (int)PublicJobState.GpuQueued &&
                   !context.CorpusRebuildSupersededJobs.Any(receipt => receipt.JobId == task.ParentJobId) &&
                   !task.ParentJob.PipelineRecord.IsDeleted &&
+                  eligibleRecordIds.Contains(task.ParentJob.PipelineRecordId) &&
                   (task.ParentJob.PipelineRecord.SourceRevisionId == null ||
                    task.ParentJob.PipelineRecord.SourceRevision!.SourceRoot.State == enabledRootState ||
                    rebuildingJobs.Contains(task.ParentJobId.Value))));

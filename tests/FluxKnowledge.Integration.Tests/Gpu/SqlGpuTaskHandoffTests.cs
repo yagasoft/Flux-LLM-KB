@@ -28,7 +28,7 @@ public sealed class SqlGpuTaskHandoffTests(NativeSqlServerFixture fixture)
         {
             inserted = true;
             return ValueTask.CompletedTask;
-        });
+        }, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new BoundedCommandFactory(_fixture.ConnectionString)));
         await using var reader = new SqlConnection(_fixture.ConnectionString);
         await reader.OpenAsync(timeout.Token);
         await using var transaction = (SqlTransaction)await reader.BeginTransactionAsync(System.Data.IsolationLevel.Serializable, timeout.Token);
@@ -56,7 +56,7 @@ public sealed class SqlGpuTaskHandoffTests(NativeSqlServerFixture fixture)
             await timeout.CancelAsync();
             try { await transaction.RollbackAsync(); } catch (InvalidOperationException) { }
         }
-        var retryStore = new SqlGpuSchedulerStore(factory);
+        var retryStore = new SqlGpuSchedulerStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         Assert.True((await retryStore.GpuTaskHandoffAsync(request, CancellationToken.None)).Committed);
         Assert.True((await retryStore.GpuTaskHandoffAsync(request, CancellationToken.None)).IsIdempotentReplay);
         await using var verification = await factory.CreateDbContextAsync();
@@ -75,7 +75,7 @@ public sealed class SqlGpuTaskHandoffTests(NativeSqlServerFixture fixture)
         {
             inserted.TrySetResult();
             await release.Task.WaitAsync(ct);
-        });
+        }, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         var handoff = store.GpuTaskHandoffAsync(request, timeout.Token).AsTask();
         try
         {
@@ -103,7 +103,7 @@ public sealed class SqlGpuTaskHandoffTests(NativeSqlServerFixture fixture)
     {
         var (factory, claim, request) = await CreateClaimedRequestAsync("handoff:once");
 
-        var result = await new SqlGpuSchedulerStore(factory).GpuTaskHandoffAsync(
+        var result = await new SqlGpuSchedulerStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory)).GpuTaskHandoffAsync(
             request,
             CancellationToken.None);
 
@@ -127,7 +127,7 @@ public sealed class SqlGpuTaskHandoffTests(NativeSqlServerFixture fixture)
     {
         var (factory, _, request) = await CreateClaimedRequestAsync("handoff:source-bound-id");
         var expectedMiniTaskId = Guid.NewGuid();
-        var store = new SqlGpuSchedulerStore(factory);
+        var store = new SqlGpuSchedulerStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
 
         var first = await store.GpuTaskHandoffAsync(
             request with { MiniTaskId = expectedMiniTaskId },
@@ -154,7 +154,7 @@ public sealed class SqlGpuTaskHandoffTests(NativeSqlServerFixture fixture)
         var (factory, claim, request) = await CreateClaimedRequestAsync("handoff:rollback");
         var store = new SqlGpuSchedulerStore(
             factory,
-            _ => ValueTask.FromException(new InvalidOperationException("injected hand-off failure")));
+            _ => ValueTask.FromException(new InvalidOperationException("injected hand-off failure")), sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
 
         await Assert.ThrowsAsync<InvalidOperationException>(
             async () => await store.GpuTaskHandoffAsync(request, CancellationToken.None));
@@ -190,7 +190,7 @@ public sealed class SqlGpuTaskHandoffTests(NativeSqlServerFixture fixture)
                 }
 
                 return ValueTask.CompletedTask;
-            });
+            }, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
 
         var first = store.GpuTaskHandoffAsync(request, timeout.Token).AsTask();
         Task<GpuMiniTaskHandoffResult>? second = null;
@@ -243,7 +243,7 @@ public sealed class SqlGpuTaskHandoffTests(NativeSqlServerFixture fixture)
     public async Task Identical_handoff_replays_after_its_mini_task_is_admitted()
     {
         var (factory, claim, request) = await CreateClaimedRequestAsync("handoff:replay-after-admission");
-        var handoff = await new SqlGpuSchedulerStore(factory).GpuTaskHandoffAsync(request, CancellationToken.None);
+        var handoff = await new SqlGpuSchedulerStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory)).GpuTaskHandoffAsync(request, CancellationToken.None);
         await using (var arrange = await factory.CreateDbContextAsync())
         {
             arrange.GpuCapacitySlots.Add(new GpuCapacitySlotEntity
@@ -259,7 +259,7 @@ public sealed class SqlGpuTaskHandoffTests(NativeSqlServerFixture fixture)
             SqlGpuAdmissionTests.Admit("slot-a"),
             new GpuSchedulerOptions(1, 1024, TimeSpan.FromMinutes(5), TimeSpan.FromMinutes(1), TimeSpan.FromMinutes(10)));
 
-        var replay = await new SqlGpuSchedulerStore(factory).GpuTaskHandoffAsync(request, CancellationToken.None);
+        var replay = await new SqlGpuSchedulerStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory)).GpuTaskHandoffAsync(request, CancellationToken.None);
 
         Assert.True(replay.Committed);
         Assert.True(replay.IsIdempotentReplay);
@@ -277,7 +277,7 @@ public sealed class SqlGpuTaskHandoffTests(NativeSqlServerFixture fixture)
     public async Task Invalid_or_conflicting_handoffs_leave_parent_queue_and_wake_state_unchanged()
     {
         var (factory, claim, request) = await CreateClaimedRequestAsync("handoff:invalid");
-        var store = new SqlGpuSchedulerStore(factory);
+        var store = new SqlGpuSchedulerStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
 
         await Assert.ThrowsAsync<InvalidOperationException>(
             async () => await store.GpuTaskHandoffAsync(
@@ -341,7 +341,7 @@ public sealed class SqlGpuTaskHandoffTests(NativeSqlServerFixture fixture)
     public async Task Case_only_handoff_lease_and_idempotency_fences_reject_without_mutation()
     {
         var (factory, claim, request) = await CreateClaimedRequestAsync("handoff:case-fence");
-        var store = new SqlGpuSchedulerStore(factory);
+        var store = new SqlGpuSchedulerStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         var caseOnlyLeaseOwner = claim.LeaseOwner!.ToUpperInvariant();
 
         Assert.NotEqual(claim.LeaseOwner, caseOnlyLeaseOwner, StringComparer.Ordinal);
@@ -374,7 +374,7 @@ public sealed class SqlGpuTaskHandoffTests(NativeSqlServerFixture fixture)
     public async Task Trailing_whitespace_handoff_fence_keys_reject_without_mutation()
     {
         var (factory, claim, request) = await CreateClaimedRequestAsync("handoff:trailing-fence");
-        var store = new SqlGpuSchedulerStore(factory);
+        var store = new SqlGpuSchedulerStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
 
         await Assert.ThrowsAsync<ArgumentException>(async () =>
             await store.GpuTaskHandoffAsync(
@@ -428,7 +428,7 @@ public sealed class SqlGpuTaskHandoffTests(NativeSqlServerFixture fixture)
             PublicJobState.WorkerQueued,
             leaseExpiresAtUtc: null);
         var factory = SqlTestData.CreateFactory(_fixture);
-        var claim = await new SqlJobClaimStore(factory).ClaimNextDueAsync(
+        var claim = await new SqlJobClaimStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory)).ClaimNextDueAsync(
             "gpu-handoff-worker",
             now,
             TimeSpan.FromMinutes(5),

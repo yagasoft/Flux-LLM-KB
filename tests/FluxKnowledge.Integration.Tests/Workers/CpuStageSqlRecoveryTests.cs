@@ -154,7 +154,7 @@ public sealed class CpuStageSqlRecoveryTests(NativeSqlServerFixture fixture) : I
             Calls++;
             if (Calls == 1 && failurePoint == "before-write") throw failure;
             var store = new SqlStageTransitionStore(factory,
-                Calls == 1 && failurePoint == "rolled-back" ? new Fault(failure) : null, clock);
+                Calls == 1 && failurePoint == "rolled-back" ? new Fault(failure) : null, clock, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
             var text = "retained CPU checkpoint";
             await store.TransitionAsync(new(work.DispatchMessage, work.Job,
                 new(Guid.NewGuid(), stage, Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(text))),

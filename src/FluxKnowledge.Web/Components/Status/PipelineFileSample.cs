@@ -72,7 +72,10 @@ internal sealed record PipelineFileSample(PipelineFileItem File, bool RequiresOc
             WHERE p.IsDeleted = 0 AND p.CompletionCriteriaMet = 0
             GROUP BY p.Id, p.Revision
             """;
-        var ocr = files.Any(f => f.Category == "Pending")
+        // An empty request table has no demand to project. Avoid expanding the
+        // OCR joins across the current file/job inventory in that snapshot.
+        var ocr = files.Any(f => f.Category == "Pending") &&
+            await context.DocumentOcrRequests.AnyAsync(cancellationToken).ConfigureAwait(false)
             ? await context.Database.SqlQueryRaw<PipelineFileOcrRow>(ocrSql,
                 new Microsoft.Data.SqlClient.SqlParameter("@roots", System.Data.SqlDbType.NVarChar, -1)
                     { Value = System.Text.Json.JsonSerializer.Serialize(rootIds) },

@@ -93,6 +93,7 @@ public sealed class SqlSourceRootWatchStore(IDbContextFactory<FluxKnowledgeDbCon
                 AcknowledgeBatch(context, state, batch);
                 return;
             }
+            await QueueFallbackRemovalsAsync(context, root, batch, now, cancellationToken).ConfigureAwait(false);
             // A running control is fenced to an earlier reconciliation snapshot.  A later watcher
             // generation must remain as a follow-up durable request rather than being folded into it.
             var existing = await context.SourceScanRequests.Where(request => request.SourceRootId == batch.SourceRootId.Value &&
@@ -162,14 +163,15 @@ public sealed class SqlSourceRootWatchStore(IDbContextFactory<FluxKnowledgeDbCon
         var pending = await context.SourcePendingChanges.Where(x => x.SourceRootId == root.Id).ToListAsync(ct).ConfigureAwait(false);
         var incoming = paths.Select(x => SqlSourceChangeJournalStore.PathKey(x.RelativePath)).ToHashSet(StringComparer.Ordinal);
         if (membership || uncertain) incoming.Add(SqlSourceChangeJournalStore.PathKey("."));
-        if (pending.Count + incoming.Count(key => !pending.Any(x => x.PathFingerprint == key)) > 10000)
+        if (SqlSourcePendingWork.HasFullRecapture(pending) ||
+            pending.Count + incoming.Count(key => !pending.Any(x => x.PathFingerprint == key)) > SqlSourcePendingWork.MaximumPaths)
         {
-            SqlSourceIncrementalState.InvalidateCoverage(scan, "pending-path-overflow", point?.NextUsn ?? scan.CoveredUsn);
+            SqlSourcePendingWork.Coalesce(context, scan, pending, now, unjournaled: true, firstObserved: batch.FirstSignalAtUtc);
             return true;
         }
         var generation = ++scan.Generation;
         foreach (var hint in paths) Merge(hint.RelativePath,
-            healthy && hint.IsSubtree ? SourcePendingReasons.ScopedNamespace : 1, hint.IsSubtree, now);
+            (healthy && hint.IsSubtree ? SourcePendingReasons.ScopedNamespace : 1) | SourcePendingReasons.RemovalPending, hint.IsSubtree, now);
         if (membership) Merge(".", SourcePendingReasons.GitMembership, false, now);
         if (uncertain)
         {
@@ -177,7 +179,7 @@ public sealed class SqlSourceRootWatchStore(IDbContextFactory<FluxKnowledgeDbCon
             scan.UnresolvedThroughUsn ??= scan.CoveredUsn;
             if (scan.Mode == "Journal") scan.Mode = "JournalPartial";
             var due = (scan.LastReconciliationAtUtc ?? batch.FirstSignalAtUtc).AddSeconds(root.ReconciliationCadenceSeconds);
-            Merge(".", SourcePendingReasons.NamespaceMetadata, true, due > now ? due : now);
+            Merge(".", SourcePendingReasons.NamespaceMetadata | SourcePendingReasons.RemovalPending, true, due > now ? due : now);
         }
         OperatorEventAppender.Add(context, new OperatorEventDraft("watch.batch_detected", "watch", "information", "source-watcher", now,
             SourceRootId: root.Id, CorrelationId: $"watch:{root.Id:N}:{batch.DebounceGeneration}", Details: new { kind = membership ? "membership-pending" : "degraded-pending", paths = paths.Count, uncertain }));
@@ -201,6 +203,41 @@ public sealed class SqlSourceRootWatchStore(IDbContextFactory<FluxKnowledgeDbCon
             if (new JournalChange(0, "", "", "", (uint)reasons, false).ContentChanged) item.LastUnjournaledGeneration = generation;
             item.FirstObservedAtUtc ??= batch.FirstSignalAtUtc;
             if (item.NotBeforeUtc is null || item.NotBeforeUtc > due) item.NotBeforeUtc = due;
+        }
+    }
+
+    private static async Task QueueFallbackRemovalsAsync(FluxKnowledgeDbContext db, SourceRootConfigurationEntity root,
+        ClaimedSourceWatchBatch batch, DateTimeOffset now, CancellationToken ct)
+    {
+        var signal = batch.Signal;
+        var paths = signal?.Paths;
+        var hints = signal is null || signal.PathsIncomplete || paths is null || paths.Count == 0
+            ? [new SourceWatchPathHint(".", true)] : paths;
+        var pending = await db.SourcePendingChanges.Where(x => x.SourceRootId == root.Id).ToListAsync(ct).ConfigureAwait(false);
+        var state = await db.SourceRootScanStates.SingleOrDefaultAsync(x => x.SourceRootId == root.Id, ct).ConfigureAwait(false);
+        var generation = Math.Max(state?.Generation ?? 0, pending.Select(x => x.Generation).DefaultIfEmpty(0).Max()) + 1;
+        if (state is not null) state.Generation = generation;
+        if (SqlSourcePendingWork.HasFullRecapture(pending) || pending.Count + hints.Count > SqlSourcePendingWork.MaximumPaths)
+        {
+            SqlSourcePendingWork.Coalesce(db, state ?? new SourceRootScanStateEntity { SourceRootId = root.Id, Generation = generation, Mode = "Legacy" },
+                pending, now, unjournaled: true, firstObserved: batch.FirstSignalAtUtc);
+            return;
+        }
+        foreach (var hint in hints)
+        {
+            var path = SqlSourceChangeJournalStore.NormaliseRelative(hint.RelativePath);
+            var key = SqlSourceChangeJournalStore.PathKey(path);
+            var item = pending.SingleOrDefault(x => x.PathFingerprint == key);
+            if (item is null)
+            {
+                item = new() { Id = Guid.NewGuid(), SourceRootId = root.Id, RelativePath = path, PathFingerprint = key };
+                db.SourcePendingChanges.Add(item); pending.Add(item);
+            }
+            item.IsSubtree |= hint.IsSubtree;
+            item.ReasonFlags |= SourcePendingReasons.RemovalPending;
+            item.Generation = generation;
+            item.NotBeforeUtc = now;
+            item.FirstObservedAtUtc ??= batch.FirstSignalAtUtc;
         }
     }
 
@@ -228,6 +265,7 @@ public sealed class SqlSourceRootWatchStore(IDbContextFactory<FluxKnowledgeDbCon
         {
             await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
             await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken).ConfigureAwait(false);
+            await SqlPublishedPassageSelection.AcquireFenceAsync(context, cancellationToken).ConfigureAwait(false);
             await action(context).ConfigureAwait(false); await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false); await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
         }).ConfigureAwait(false);
     }

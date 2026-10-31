@@ -42,6 +42,8 @@ public sealed class MediaMetadataProcessorPrivacyTests(NativeSqlServerFixture fi
             Directory.CreateDirectory(Path.Combine(privateRoot, "sha256", hash[..2]));
             await File.WriteAllBytesAsync(Path.Combine(privateRoot, relative), bytes);
             var (rootId, revisionId) = await SeedAsync(hash, bytes.Length, relative, sourceSecret);
+            var sourceAdmission = new SourceWorkAdmission();
+            sourceAdmission.Admit(rootId, 1);
 
             var factory = new ContextFactory(_fixture.ConnectionString);
             var writer = new SqlRetainedArtifactWriter(factory, privateRoot);
@@ -51,7 +53,7 @@ public sealed class MediaMetadataProcessorPrivacyTests(NativeSqlServerFixture fi
             await using var subscription = feed.Subscribe();
             var activation = new RetainedProcessorActivationService(
                 new SourceCapabilityService(new SqlSourceActivityStore(factory, TimeProvider.System), new LocalSourceCapabilityHandlerRegistry([zip, new MediaMetadataCapabilityHandler()])),
-                new SqlRetainedProcessorBranchStore(factory, TimeProvider.System), _resources.Own(new SqlRetainedSourceReader(factory, privateRoot)), zip,
+                new SqlRetainedProcessorBranchStore(factory, TimeProvider.System, sourceAdmission: sourceAdmission), _resources.Own(new SqlRetainedSourceReader(factory, privateRoot)), zip,
                 new RetainedProcessorOptions { MediaMetadataEnabled = true }, TimeProvider.System, statusEvents: feed, mediaMetadataProcessor: media);
 
             Assert.Equal(1, (await activation.RunOnceAsync(CancellationToken.None)).CompletedBranches);
@@ -90,6 +92,8 @@ public sealed class MediaMetadataProcessorPrivacyTests(NativeSqlServerFixture fi
             Directory.CreateDirectory(Path.Combine(privateRoot, "sha256", hash[..2]));
             await File.WriteAllBytesAsync(Path.Combine(privateRoot, relative), bytes);
             var (rootId, revisionId) = await SeedAsync(hash, bytes.Length, relative, "media-safe-source");
+            var sourceAdmission = new SourceWorkAdmission();
+            sourceAdmission.Admit(rootId, 1);
 
             var factory = new ContextFactory(_fixture.ConnectionString);
             var writer = new SqlRetainedArtifactWriter(factory, privateRoot);
@@ -99,7 +103,7 @@ public sealed class MediaMetadataProcessorPrivacyTests(NativeSqlServerFixture fi
             await using var subscription = feed.Subscribe();
             var activation = new RetainedProcessorActivationService(
                 new SourceCapabilityService(new SqlSourceActivityStore(factory, TimeProvider.System), new LocalSourceCapabilityHandlerRegistry([zip, new MediaMetadataCapabilityHandler()])),
-                new SqlRetainedProcessorBranchStore(factory, TimeProvider.System), _resources.Own(new SqlRetainedSourceReader(factory, privateRoot)), zip,
+                new SqlRetainedProcessorBranchStore(factory, TimeProvider.System, sourceAdmission: sourceAdmission), _resources.Own(new SqlRetainedSourceReader(factory, privateRoot)), zip,
                 new RetainedProcessorOptions { MediaMetadataEnabled = true }, TimeProvider.System, statusEvents: feed, mediaMetadataProcessor: media);
 
             Assert.Equal(1, (await activation.RunOnceAsync(CancellationToken.None)).CompletedBranches);

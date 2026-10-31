@@ -15,7 +15,7 @@ public sealed class CsharpSourceDeletionReadinessTests(NativeSqlServerFixture fi
     public async Task Script_created_source_deletion_guard_is_ready_but_changed_predicate_is_not()
     {
         var factory = SqlTestData.CreateFactory(fixture);
-        var store = new SqlRetainedProcessorBranchStore(factory, TimeProvider.System);
+        var store = new SqlRetainedProcessorBranchStore(factory, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         Assert.True(await store.IsRetainedCsharpCodeWriterReadyAsync(CancellationToken.None));
         await using var context = await factory.CreateDbContextAsync();
         var original = await context.Database.SqlQuery<string>($"""

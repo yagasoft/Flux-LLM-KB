@@ -38,14 +38,14 @@ public sealed partial class SqlDocumentOcrHandoffTests
     {
         var (factory, claim, revision, hash) = await CreateClaimedPdfAsync();
         var clock = new OcrClock(DateTimeOffset.UtcNow);
-        var store = new SqlDocumentOcrStore(factory, CreateCoordinator(factory), clock);
+        var store = new SqlDocumentOcrStore(factory, CreateCoordinator(factory), clock, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         var task = Assert.IsType<Guid>((await store.HandoffAsync(new(claim, revision, hash, [0]), CancellationToken.None)).MiniTaskId);
         var handle = await AdmitDocumentOcrTaskAsync(factory);
         var lease = Assert.IsType<DocumentOcrExecutionLease>((await store.TryClaimExecutionAsync(handle, task,
             Guid.NewGuid(), SyntheticSupervisor(), CancellationToken.None)).Lease);
         clock.Now = clock.Now.AddMinutes(14);
         Assert.True((await store.HeartbeatAsync(lease, CancellationToken.None)).Accepted);
-        Assert.Empty(await new SqlGpuSchedulerStore(factory).ReadStaleCapacityReservationsAsync(clock.Now.AddMinutes(-10), CancellationToken.None));
+        Assert.Empty(await new SqlGpuSchedulerStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory)).ReadStaleCapacityReservationsAsync(clock.Now.AddMinutes(-10), CancellationToken.None));
         await using var verify = await factory.CreateDbContextAsync();
         Assert.Equal((int)GpuBatchState.Active, await verify.GpuBatches.Select(b => b.State).SingleAsync());
         Assert.Equal(lease.DeadlineAtUtc, await verify.DocumentOcrRequests.Select(r => r.ExecutionDeadlineAtUtc).SingleAsync());
@@ -81,7 +81,7 @@ public sealed partial class SqlDocumentOcrHandoffTests
         var store = CreateStore(factory);
         var task = Assert.IsType<Guid>((await store.HandoffAsync(new(claim, revision, hash, [0]), CancellationToken.None)).MiniTaskId);
         var handle = await AdmitDocumentOcrTaskAsync(factory);
-        var scheduler = new SqlGpuSchedulerStore(factory);
+        var scheduler = new SqlGpuSchedulerStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         Assert.True((await scheduler.AcknowledgeAsync(new(Guid.NewGuid(), handle), CancellationToken.None)).Accepted);
         var reservation = Assert.Single(await scheduler.ReadStaleCapacityReservationsAsync(DateTimeOffset.UtcNow.AddDays(1), CancellationToken.None));
         Assert.True((await scheduler.MarkCapacityUncertainAsync(Guid.NewGuid(), reservation, CancellationToken.None)).Committed);
@@ -117,7 +117,7 @@ public sealed partial class SqlDocumentOcrHandoffTests
                         "document-ocr-claimed" or "document-ocr-cleanup-confirmed" or "document-ocr-settled" && lost.Add(result.ReasonCode))
                         throw new TimeoutException("synthetic commit response loss");
                     return ValueTask.CompletedTask;
-                }));
+                }, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory)));
         await provider.GetRequiredService<PaddleOcrVlmExecutorAdapter>().DeliverAsync(handle, CancellationToken.None);
         await provider.GetRequiredService<PaddleOcrVlmCompletionCoordinator>().RecoverAsync(CancellationToken.None);
         Assert.Equal(3, lost.Count);
@@ -159,7 +159,7 @@ public sealed partial class SqlDocumentOcrHandoffTests
     {
         var (factory, claim, revision, hash) = await CreateClaimedPdfAsync();
         var clock = new OcrClock(DateTimeOffset.UtcNow);
-        var store = new SqlDocumentOcrStore(factory, CreateCoordinator(factory), clock);
+        var store = new SqlDocumentOcrStore(factory, CreateCoordinator(factory), clock, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         var task = Assert.IsType<Guid>((await store.HandoffAsync(new(claim, revision, hash, [0]), CancellationToken.None)).MiniTaskId);
         var handle = await AdmitDocumentOcrTaskAsync(factory);
         await store.RecordBlockedAsync(handle, task, "document-ocr-legacy-owner-unproven", CancellationToken.None);
@@ -184,7 +184,7 @@ public sealed partial class SqlDocumentOcrHandoffTests
         var store = CreateStore(factory);
         await store.HandoffAsync(new(claim, revision, hash, [0]), CancellationToken.None);
         var handle = await AdmitDocumentOcrTaskAsync(factory);
-        var scheduler = new SqlGpuSchedulerStore(factory);
+        var scheduler = new SqlGpuSchedulerStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         var reservation = Assert.Single(await scheduler.ReadStaleCapacityReservationsAsync(DateTimeOffset.UtcNow.AddDays(1), CancellationToken.None));
         await scheduler.MarkCapacityUncertainAsync(Guid.NewGuid(), reservation, CancellationToken.None);
         var status = await scheduler.ReadGpuSchedulerStatusAsync(CancellationToken.None);

@@ -61,7 +61,7 @@ public sealed class RetainedCsharpCodeLifecycleCorrectionIntegrationTests(
         var seeded = await SeedCsharpBranchAsync(Encoding.UTF8.GetBytes("class RetryingClaim { }"));
         var store = new SqlRetainedProcessorBranchStore(
             new RetryingConnectionFactory(fixture.ConnectionString),
-            TimeProvider.System);
+            TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new RetryingConnectionFactory(fixture.ConnectionString)));
 
         var claim = Assert.Single(await store.ClaimCsharpCodeAsync(
             "csharp-retrying-claim-owner",
@@ -81,7 +81,7 @@ public sealed class RetainedCsharpCodeLifecycleCorrectionIntegrationTests(
         var ambiguousCommit = new AmbiguousCommitInterceptor();
         var store = new SqlRetainedProcessorBranchStore(
             new RetryingConnectionFactory(fixture.ConnectionString, ambiguousCommit),
-            TimeProvider.System);
+            TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new RetryingConnectionFactory(fixture.ConnectionString, ambiguousCommit)));
 
         var claim = Assert.Single(await store.ClaimCsharpCodeAsync(
             "csharp-ambiguous-commit-owner",
@@ -109,7 +109,7 @@ public sealed class RetainedCsharpCodeLifecycleCorrectionIntegrationTests(
         var interceptor = new ThrowBeforeFirstCommitInterceptor();
         var store = new SqlRetainedProcessorBranchStore(
             new RetryingConnectionFactory(fixture.ConnectionString, interceptor),
-            TimeProvider.System);
+            TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new RetryingConnectionFactory(fixture.ConnectionString, interceptor)));
 
         var claim = Assert.Single(await store.ClaimCsharpCodeAsync(
             "csharp-rolled-back-commit-owner",
@@ -136,7 +136,7 @@ public sealed class RetainedCsharpCodeLifecycleCorrectionIntegrationTests(
         var interceptor = new ThrowBeforeFirstCommitInterceptor();
         var store = new SqlRetainedProcessorBranchStore(
             new DelayedRetryingConnectionFactory(fixture.ConnectionString, interceptor),
-            TimeProvider.System);
+            TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new DelayedRetryingConnectionFactory(fixture.ConnectionString, interceptor)));
         using var cancellation = new CancellationTokenSource();
 
         var claimTask = store.ClaimCsharpCodeAsync(
@@ -312,7 +312,7 @@ public sealed class RetainedCsharpCodeLifecycleCorrectionIntegrationTests(
                 State = (int)SourceActivityState.Pending, CreatedAtUtc = DateTimeOffset.UtcNow, UpdatedAtUtc = DateTimeOffset.UtcNow });
             await setup.SaveChangesAsync();
         }
-        var store = Store(); var registration = new SqlRetainedTextRegistrationStore(SqlTestData.CreateFactory(fixture), TimeProvider.System);
+        var store = Store(); var registration = new SqlRetainedTextRegistrationStore(SqlTestData.CreateFactory(fixture), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(SqlTestData.CreateFactory(fixture)));
         var candidate = Assert.Single(await store.ReadPromotionCandidatesAsync(16, RetainedCsharpCodeProcessor.Capability, default),
             value => value.LegacyActivityId == seeded.HoldingActivityId);
         if (codeFirst) Assert.True(await store.PromoteAsync(candidate, RetainedCsharpCodeProcessor.Capability, default));
@@ -424,7 +424,7 @@ public sealed class RetainedCsharpCodeLifecycleCorrectionIntegrationTests(
         await using var previous = await fixture.CreateRetainedCsharpPreviousMigrationDatabaseAsync();
         var previousStore = new SqlRetainedProcessorBranchStore(
             new ConnectionFactory(previous.ConnectionString),
-            TimeProvider.System);
+            TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ConnectionFactory(previous.ConnectionString)));
 
         Assert.False(await previousStore.IsRetainedCsharpCodeWriterReadyAsync(CancellationToken.None));
         Assert.Empty(
@@ -933,39 +933,39 @@ public sealed class RetainedCsharpCodeLifecycleCorrectionIntegrationTests(
         await migrator.MigrateAsync();
         Assert.True(await new SqlRetainedProcessorBranchStore(
             new ConnectionFactory(database.ConnectionString),
-            TimeProvider.System).IsRetainedCsharpCodeWriterReadyAsync(CancellationToken.None));
+            TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ConnectionFactory(database.ConnectionString))).IsRetainedCsharpCodeWriterReadyAsync(CancellationToken.None));
 
         await context.Database.ExecuteSqlRawAsync(
             "DROP TRIGGER IF EXISTS [dbo].[TR_SourceProcessorCodeDocuments_InsertFence];");
         Assert.False(await new SqlRetainedProcessorBranchStore(
             new ConnectionFactory(database.ConnectionString),
-            TimeProvider.System).IsRetainedCsharpCodeWriterReadyAsync(CancellationToken.None));
+            TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ConnectionFactory(database.ConnectionString))).IsRetainedCsharpCodeWriterReadyAsync(CancellationToken.None));
 
         await migrator.MigrateAsync("20260820070404_HardenRetainedCsharpLifecycle");
         Assert.False(await new SqlRetainedProcessorBranchStore(
             new ConnectionFactory(database.ConnectionString),
-            TimeProvider.System).IsRetainedCsharpCodeWriterReadyAsync(CancellationToken.None));
+            TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ConnectionFactory(database.ConnectionString))).IsRetainedCsharpCodeWriterReadyAsync(CancellationToken.None));
 
         await migrator.MigrateAsync();
         Assert.True(await new SqlRetainedProcessorBranchStore(
             new ConnectionFactory(database.ConnectionString),
-            TimeProvider.System).IsRetainedCsharpCodeWriterReadyAsync(CancellationToken.None));
+            TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ConnectionFactory(database.ConnectionString))).IsRetainedCsharpCodeWriterReadyAsync(CancellationToken.None));
 
         await context.Database.ExecuteSqlRawAsync(
             "DROP TRIGGER [dbo].[TR_SourceProcessorCodeCompletionReceipts_Closure];");
         Assert.False(await new SqlRetainedProcessorBranchStore(
             new ConnectionFactory(database.ConnectionString),
-            TimeProvider.System).IsRetainedCsharpCodeWriterReadyAsync(CancellationToken.None));
+            TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ConnectionFactory(database.ConnectionString))).IsRetainedCsharpCodeWriterReadyAsync(CancellationToken.None));
 
         await migrator.MigrateAsync("20260820062157_AddRetainedCsharpCodeFacts");
         Assert.False(await new SqlRetainedProcessorBranchStore(
             new ConnectionFactory(database.ConnectionString),
-            TimeProvider.System).IsRetainedCsharpCodeWriterReadyAsync(CancellationToken.None));
+            TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ConnectionFactory(database.ConnectionString))).IsRetainedCsharpCodeWriterReadyAsync(CancellationToken.None));
 
         await migrator.MigrateAsync();
         Assert.True(await new SqlRetainedProcessorBranchStore(
             new ConnectionFactory(database.ConnectionString),
-            TimeProvider.System).IsRetainedCsharpCodeWriterReadyAsync(CancellationToken.None));
+            TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ConnectionFactory(database.ConnectionString))).IsRetainedCsharpCodeWriterReadyAsync(CancellationToken.None));
     }
 
     [NativeSqlServerFact]
@@ -976,7 +976,7 @@ public sealed class RetainedCsharpCodeLifecycleCorrectionIntegrationTests(
         var migrator = context.GetService<IMigrator>();
         var writer = new SqlRetainedProcessorBranchStore(
             new ConnectionFactory(database.ConnectionString),
-            TimeProvider.System);
+            TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ConnectionFactory(database.ConnectionString)));
 
         await migrator.MigrateAsync();
         Assert.Contains("20260918121829_AddSourceDeletionOperations", await context.Database
@@ -1214,7 +1214,7 @@ public sealed class RetainedCsharpCodeLifecycleCorrectionIntegrationTests(
         await context.GetService<IMigrator>().MigrateAsync();
         var store = new SqlRetainedProcessorBranchStore(
             new ConnectionFactory(database.ConnectionString),
-            TimeProvider.System);
+            TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ConnectionFactory(database.ConnectionString)));
         Assert.True(await store.IsRetainedCsharpCodeWriterReadyAsync(CancellationToken.None));
 
 #pragma warning disable EF1002 // The trigger names, parent tables and event clauses are fixed test contracts below.
@@ -1659,7 +1659,7 @@ public sealed class RetainedCsharpCodeLifecycleCorrectionIntegrationTests(
 
     private SqlRetainedProcessorBranchStore Store() => new(
         SqlTestData.CreateFactory(fixture),
-        TimeProvider.System);
+        TimeProvider.System, sourceAdmission: new FixtureSourceAdmission(SqlTestData.CreateFactory(fixture)));
 
     private FluxKnowledgeDbContext Context() => new(
         new DbContextOptionsBuilder<FluxKnowledgeDbContext>()

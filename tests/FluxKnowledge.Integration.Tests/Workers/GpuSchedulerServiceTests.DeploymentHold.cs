@@ -173,7 +173,7 @@ public sealed partial class GpuSchedulerServiceTests
         }
         var sql = new SqlGpuSchedulerStore(factory, timeProvider: clock, deploymentValidationHold: hold,
             interactiveExecutionTimeout: TimeSpan.FromSeconds(20),
-            afterAdmissionCommitted: _ => { admitted.TrySetResult(); return ValueTask.CompletedTask; });
+            afterAdmissionCommitted: _ => { admitted.TrySetResult(); return ValueTask.CompletedTask; }, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         var instance = Guid.NewGuid();
         var now = clock.GetUtcNow();
         var request = new GpuInteractiveHandoffRequest(Guid.NewGuid(), instance, $"retrieval-gpu:{instance:N}",

@@ -55,7 +55,7 @@ public sealed partial class DocumentPublicationIntegrationTests(NativeSqlServerF
             candidate = SeedCandidate(context, rootId, ownerId, now, "rebuild-document", 0, contract);
             await context.SaveChangesAsync();
         }
-        await PublishAsync(new SqlStageTransitionStore(environment.Factory), candidate, now);
+        await PublishAsync(new SqlStageTransitionStore(environment.Factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory)), candidate, now);
         await using var setup = Context();
         var publication = await setup.DocumentPublications.AsNoTracking().SingleAsync();
         const string text = "Published document INV-42 requires two signatures.";
@@ -127,10 +127,10 @@ public sealed partial class DocumentPublicationIntegrationTests(NativeSqlServerF
                 setup, rootId, ownerRevisionId, now, "successor", 1, DocumentProcessingInput.Visio);
             await setup.SaveChangesAsync();
 
-            await PublishAsync(new SqlStageTransitionStore(SqlTestData.CreateFactory(_fixture)), successor, now.AddMinutes(4));
+            await PublishAsync(new SqlStageTransitionStore(SqlTestData.CreateFactory(_fixture), sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(SqlTestData.CreateFactory(_fixture))), successor, now.AddMinutes(4));
             await AssertSelectedAsync(successor, ownerRevisionId);
 
-            await PublishAsync(new SqlStageTransitionStore(SqlTestData.CreateFactory(_fixture)), stale, now.AddMinutes(5));
+            await PublishAsync(new SqlStageTransitionStore(SqlTestData.CreateFactory(_fixture), sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(SqlTestData.CreateFactory(_fixture))), stale, now.AddMinutes(5));
             await AssertSelectedAsync(successor, ownerRevisionId);
         }
     }
@@ -164,7 +164,7 @@ public sealed partial class DocumentPublicationIntegrationTests(NativeSqlServerF
             await setup.SaveChangesAsync();
         }
 
-        var store = new SqlStageTransitionStore(SqlTestData.CreateFactory(_fixture));
+        var store = new SqlStageTransitionStore(SqlTestData.CreateFactory(_fixture), sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(SqlTestData.CreateFactory(_fixture)));
         await PublishAsync(store, current, now.AddMinutes(2));
         await AssertSelectedAsync(current, ownerRevisionId);
 
@@ -219,7 +219,7 @@ public sealed partial class DocumentPublicationIntegrationTests(NativeSqlServerF
             visio = SeedCandidate(setup, rootId, ownerId, now, "visio-successor", 1, DocumentProcessingInput.Visio);
             await setup.SaveChangesAsync();
         }
-        var store = new SqlStageTransitionStore(SqlTestData.CreateFactory(_fixture));
+        var store = new SqlStageTransitionStore(SqlTestData.CreateFactory(_fixture), sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(SqlTestData.CreateFactory(_fixture)));
         await PublishAsync(store, current, now);
         await AssertSelectedAsync(current, ownerId);
         await PublishAsync(store, visio, now.AddMinutes(2));
@@ -280,7 +280,7 @@ public sealed partial class DocumentPublicationIntegrationTests(NativeSqlServerF
             await setup.SaveChangesAsync();
         }
 
-        await PublishAsync(new SqlStageTransitionStore(SqlTestData.CreateFactory(_fixture)), candidate, now.AddMinutes(1));
+        await PublishAsync(new SqlStageTransitionStore(SqlTestData.CreateFactory(_fixture), sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(SqlTestData.CreateFactory(_fixture))), candidate, now.AddMinutes(1));
 
         await AssertSelectedAsync(candidate, ownerId);
         await using var verification = Context();
@@ -357,7 +357,7 @@ public sealed partial class DocumentPublicationIntegrationTests(NativeSqlServerF
         }
 
         var failure = await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            PublishAsync(new SqlStageTransitionStore(SqlTestData.CreateFactory(_fixture)), candidate, now.AddMinutes(1)));
+            PublishAsync(new SqlStageTransitionStore(SqlTestData.CreateFactory(_fixture), sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(SqlTestData.CreateFactory(_fixture))), candidate, now.AddMinutes(1)));
 
         Assert.Equal("The document publication has no exact completed retained-processor binding.", failure.Message);
         await using var verification = Context();
@@ -399,7 +399,7 @@ public sealed partial class DocumentPublicationIntegrationTests(NativeSqlServerF
             await setup.SaveChangesAsync();
         }
 
-        await PublishAsync(new SqlStageTransitionStore(SqlTestData.CreateFactory(_fixture)), candidate, now.AddMinutes(1));
+        await PublishAsync(new SqlStageTransitionStore(SqlTestData.CreateFactory(_fixture), sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(SqlTestData.CreateFactory(_fixture))), candidate, now.AddMinutes(1));
 
         await using var verification = Context();
         Assert.False(await verification.SourceRevisions.Where(value => value.Id == archiveMemberId)

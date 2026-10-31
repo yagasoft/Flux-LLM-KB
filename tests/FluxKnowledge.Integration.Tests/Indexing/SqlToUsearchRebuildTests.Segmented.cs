@@ -256,7 +256,7 @@ public sealed partial class SqlToUsearchRebuildTests
     {
         await using var environment = await PipelineEnvironment.CreateAsync(_fixture, "The first pending source.", publish: false, segmented: true);
         var request = await ClaimSegmentedPublishAsync(environment, sqlRetries);
-        var transition = new SqlStageTransitionStore(environment.Factory);
+        var transition = new SqlStageTransitionStore(environment.Factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory));
         var first = await transition.TransitionAsync(request, CancellationToken.None);
         var replay = await transition.TransitionAsync(request, CancellationToken.None);
         Assert.False(first.ExistingTransition);
@@ -318,17 +318,17 @@ public sealed partial class SqlToUsearchRebuildTests
         Assert.True(await context.Vectors.AnyAsync());
         Assert.True(File.Exists(Path.Combine(request.IndexingOutput.ActivateGeneration!.IndexPath, "manifest.json")));
         await Assert.ThrowsAsync<PublicationSnapshotConflictException>(async () =>
-            await new SqlStageTransitionStore(environment.Factory).TransitionAsync(request, CancellationToken.None));
+            await new SqlStageTransitionStore(environment.Factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory)).TransitionAsync(request, CancellationToken.None));
         Assert.Null((await context.IndexState.AsNoTracking().SingleAsync()).ActiveIndexGenerationId);
     }
 
     private static async Task<StageTransitionRequest> ClaimSegmentedPublishAsync(PipelineEnvironment environment, bool sqlRetries)
     {
         var now = DateTimeOffset.UtcNow;
-        var dispatch = await new SqlOutboxStore(environment.Factory).ClaimNextDueAsync("segment-test-dispatcher", now.AddMinutes(1),
+        var dispatch = await new SqlOutboxStore(environment.Factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory)).ClaimNextDueAsync("segment-test-dispatcher", now.AddMinutes(1),
             TimeSpan.FromMinutes(5), [PipelineOperations.Publish], CancellationToken.None);
         Assert.NotNull(dispatch);
-        var job = await new SqlJobClaimStore(environment.Factory).ClaimForDispatchAsync(dispatch, "segment-test-worker", now.AddMinutes(1),
+        var job = await new SqlJobClaimStore(environment.Factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory)).ClaimForDispatchAsync(dispatch, "segment-test-worker", now.AddMinutes(1),
             TimeSpan.FromMinutes(5), CancellationToken.None);
         Assert.NotNull(job);
         var source = await environment.Store.ReadStageSourceAsync(job.PipelineRecordId, job.SourceRevision, job.Stage, CancellationToken.None);

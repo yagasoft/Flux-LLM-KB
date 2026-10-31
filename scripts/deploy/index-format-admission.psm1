@@ -47,6 +47,22 @@ function Get-IndexEntryBinding {
     finally { $binding.Stream.Dispose() }
 }
 
+function Release-IndexAdmissionRecoveryLock {
+    param([Parameter(Mandatory)][Data.SqlClient.SqlConnection]$Connection)
+    $command = $Connection.CreateCommand()
+    try {
+        $command.CommandTimeout = 5
+        $command.CommandText = @'
+DECLARE @result int;
+EXEC @result = sys.sp_releaseapplock @Resource=N'FluxKnowledge.DerivedIndexRecovery', @LockOwner=N'Session';
+SELECT @result;
+'@
+        $result = $command.ExecuteScalar()
+        if ($result -isnot [int] -or $result -lt 0) { throw 'index-admission-recovery-release-unconfirmed' }
+    }
+    finally { $command.Dispose() }
+}
+
 function Invoke-IndexFormatAdmission {
     param(
         [Parameter(Mandatory)][string]$ConnectionString,
@@ -64,6 +80,7 @@ function Invoke-IndexFormatAdmission {
     if ($Payloads.Count -eq 0) { throw 'index-admission-payloads-required' }
     $held = [Collections.Generic.List[hashtable]]::new()
     $connection = $null; $transaction = $null; $configuration = $null
+    $recoveryHeld = $false; $admissionFailed = $false
     try {
         if([string]::IsNullOrEmpty($ExpectedConfigurationPath) -ne [string]::IsNullOrEmpty($ExpectedConfigurationSha256)) {
             throw 'index-admission-configuration-binding-incomplete'
@@ -104,6 +121,7 @@ EXEC @result = sys.sp_getapplock @Resource=N'FluxKnowledge.DerivedIndexRecovery'
 SELECT @result;
 '@
             if ([int]$command.ExecuteScalar() -lt 0) { throw 'index-admission-recovery-busy' }
+            $recoveryHeld = $true
             $transaction = $connection.BeginTransaction([Data.IsolationLevel]::Serializable)
             $command.Transaction=$transaction
             # This is the existing publication row fence, not a new lock resource.
@@ -135,11 +153,24 @@ ELSE
         }
         finally { $command.Dispose() }
     }
+    catch { $admissionFailed = $true; throw }
     finally {
-        if ($transaction) { $transaction.Dispose() }
-        if ($connection) { $connection.Dispose() }
-        foreach ($binding in $held) { $binding.Stream.Dispose() }
-        if ($configuration) { $configuration.Dispose() }
+        try {
+            try {
+                try { if ($transaction) { $transaction.Dispose() } }
+                finally {
+                    if ($recoveryHeld) { Release-IndexAdmissionRecoveryLock -Connection $connection }
+                }
+            }
+            finally {
+                try { if ($connection) { $connection.Dispose() } }
+                finally {
+                    try { foreach ($binding in $held) { $binding.Stream.Dispose() } }
+                    finally { if ($configuration) { $configuration.Dispose() } }
+                }
+            }
+        }
+        catch { if (-not $admissionFailed) { throw } } # Preserve the primary action/refusal error.
     }
 }
 

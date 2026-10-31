@@ -44,18 +44,18 @@ public sealed class CheckpointRecoveryPerformanceTests(NativeSqlServerFixture fi
     {
         await using var environment = await SqlToUsearchRebuildTests.PipelineEnvironment.CreateAsync(fixture, "Checkpoint integrity control.", publish: false, embed: false);
         var now = DateTimeOffset.UtcNow;
-        var dispatchClaim = await new SqlOutboxStore(environment.Factory).ClaimNextDueAsync("integrity-dispatch", now, TimeSpan.FromMinutes(2), [PipelineOperations.Embed], CancellationToken.None);
+        var dispatchClaim = await new SqlOutboxStore(environment.Factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory)).ClaimNextDueAsync("integrity-dispatch", now, TimeSpan.FromMinutes(2), [PipelineOperations.Embed], CancellationToken.None);
         Assert.NotNull(dispatchClaim);
-        var jobClaim = await new SqlJobClaimStore(environment.Factory).ClaimForDispatchAsync(dispatchClaim, "integrity-worker", now, TimeSpan.FromMinutes(2), CancellationToken.None);
+        var jobClaim = await new SqlJobClaimStore(environment.Factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory)).ClaimForDispatchAsync(dispatchClaim, "integrity-worker", now, TimeSpan.FromMinutes(2), CancellationToken.None);
         Assert.NotNull(jobClaim);
         var work = new StageWorkItem(dispatchClaim, jobClaim);
-        var checkpoints = new SqlEmbeddingCheckpointStore(environment.Factory, TimeProvider.System);
+        var checkpoints = new SqlEmbeddingCheckpointStore(environment.Factory, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory));
         var profile = new EmbeddingProfile(Infrastructure.Inference.DeterministicTokenHashEmbeddingProvider.Fingerprint, 256);
         var batch = await checkpoints.ReadNextAsync(work, profile, CancellationToken.None);
         var embedding = await environment.Embeddings.CreateEmbeddingAsync(batch.Chunks.Single().SearchText, CancellationToken.None);
         await checkpoints.CommitAsync(work, batch, [embedding], CancellationToken.None);
         var sealedBatch = await checkpoints.ReadNextAsync(work, profile, CancellationToken.None);
-        await new SqlStageTransitionStore(environment.Factory).TransitionAsync(new(work.DispatchMessage, work.Job,
+        await new SqlStageTransitionStore(environment.Factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory)).TransitionAsync(new(work.DispatchMessage, work.Job,
             new StageArtifact(Guid.NewGuid(), PipelineStage.Embed, sealedBatch.CompletedChecksum!, EmbedDraftDefaults.ArtifactContentType,
                 batch.GenerationId.ToString("D"), now), PipelineStage.Publish, PipelineOperations.Publish, nameof(CheckpointRecoveryPerformanceTests),
             new IndexingStageOutput(IndexGenerationId: batch.GenerationId, ModelFingerprint: profile.ModelFingerprint, UsePersistedEmbeddingDraft: true)), CancellationToken.None);

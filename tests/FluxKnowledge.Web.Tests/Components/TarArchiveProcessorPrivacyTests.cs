@@ -43,6 +43,8 @@ public sealed class TarArchiveProcessorPrivacyTests(NativeSqlServerFixture fixtu
             Directory.CreateDirectory(Path.Combine(privateRoot, "sha256", hash[..2]));
             await File.WriteAllBytesAsync(Path.Combine(privateRoot, relativePath), tar);
             var (rootId, revisionId) = await SeedDeferredTarAsync(hash, tar.Length, relativePath, privateRoot);
+            var sourceAdmission = new SourceWorkAdmission();
+            sourceAdmission.Admit(rootId, 1);
 
             var factory = new TestDbContextFactory(fixture.ConnectionString);
             var policy = PersistedOutlookSpoolRootPolicy.CreateForIsolatedTests(privateRoot);
@@ -53,7 +55,7 @@ public sealed class TarArchiveProcessorPrivacyTests(NativeSqlServerFixture fixtu
             await using var statusSubscription = statusFeed.Subscribe();
             var activation = new RetainedProcessorActivationService(
                 new SourceCapabilityService(new SqlSourceActivityStore(factory, TimeProvider.System), new LocalSourceCapabilityHandlerRegistry([zip, processor])),
-                new SqlRetainedProcessorBranchStore(factory, TimeProvider.System), _resources.Own(new SqlRetainedSourceReader(factory, privateRoot, policy)), zip,
+                new SqlRetainedProcessorBranchStore(factory, TimeProvider.System, sourceAdmission: sourceAdmission), _resources.Own(new SqlRetainedSourceReader(factory, privateRoot, policy)), zip,
                 new RetainedProcessorOptions { ArchiveTarExpandEnabled = true }, TimeProvider.System, processor, statusFeed);
 
             Assert.Equal(1, (await activation.RunOnceAsync(CancellationToken.None)).CompletedBranches);

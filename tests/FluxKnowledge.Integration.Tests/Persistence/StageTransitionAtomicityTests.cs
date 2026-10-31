@@ -29,7 +29,7 @@ public sealed class StageTransitionAtomicityTests(NativeSqlServerFixture fixture
             leaseExpiresAtUtc: null);
         var factory = new RetryingDbContextFactory(_fixture.ConnectionString);
         var request = await ClaimExtractAsync(factory, now);
-        var store = new SqlStageTransitionStore(factory, new ThrowAfterArtifactWrite());
+        var store = new SqlStageTransitionStore(factory, new ThrowAfterArtifactWrite(), sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
 
         await Assert.ThrowsAsync<InjectedTransitionException>(
             async () => await store.TransitionAsync(request, CancellationToken.None));
@@ -66,7 +66,7 @@ public sealed class StageTransitionAtomicityTests(NativeSqlServerFixture fixture
             leaseExpiresAtUtc: null);
         var factory = new RetryingDbContextFactory(_fixture.ConnectionString);
         var request = await ClaimExtractAsync(factory, now);
-        var store = new SqlStageTransitionStore(factory);
+        var store = new SqlStageTransitionStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
 
         var first = await store.TransitionAsync(request, CancellationToken.None);
         await using (var extra = factory.CreateDbContext())
@@ -109,7 +109,7 @@ public sealed class StageTransitionAtomicityTests(NativeSqlServerFixture fixture
         await SqlTestData.SeedWorkItemAsync(_fixture, now, PublicJobState.WorkerQueued, null);
         var factory = new RetryingDbContextFactory(_fixture.ConnectionString);
         var request = await ClaimExtractAsync(factory, now);
-        var store = new SqlStageTransitionStore(factory);
+        var store = new SqlStageTransitionStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         await store.TransitionAsync(request, CancellationToken.None);
         var replacementId = Guid.NewGuid();
         await using (var context = factory.CreateDbContext())
@@ -140,7 +140,7 @@ public sealed class StageTransitionAtomicityTests(NativeSqlServerFixture fixture
         await SqlTestData.SeedWorkItemAsync(_fixture, now, PublicJobState.WorkerQueued, null);
         var factory = new RetryingDbContextFactory(_fixture.ConnectionString);
         var request = await ClaimExtractAsync(factory, now);
-        var store = new SqlStageTransitionStore(factory);
+        var store = new SqlStageTransitionStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         var result = await store.TransitionAsync(request, CancellationToken.None);
         await using (var context = factory.CreateDbContext())
         {
@@ -167,7 +167,7 @@ public sealed class StageTransitionAtomicityTests(NativeSqlServerFixture fixture
         var factory = new RetryingDbContextFactory(_fixture.ConnectionString);
         var request = await ClaimExtractAsync(factory, now);
 
-        var result = await new SqlStageTransitionStore(factory)
+        var result = await new SqlStageTransitionStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory))
             .TransitionAsync(request, CancellationToken.None);
 
         Assert.False(result.ExistingTransition);
@@ -191,7 +191,7 @@ public sealed class StageTransitionAtomicityTests(NativeSqlServerFixture fixture
         var factory = new RetryingDbContextFactory(_fixture.ConnectionString);
         var request = await ClaimExtractAsync(factory, now);
 
-        await new SqlStageTransitionStore(factory).FailAsync(
+        await new SqlStageTransitionStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory)).FailAsync(
             new StageFailureRequest(
                 request.DispatchMessage,
                 request.CurrentJob,
@@ -209,14 +209,14 @@ public sealed class StageTransitionAtomicityTests(NativeSqlServerFixture fixture
         IDbContextFactory<FluxKnowledgeDbContext> factory,
         DateTimeOffset now)
     {
-        var outbox = await new SqlOutboxStore(factory).ClaimNextDueAsync(
+        var outbox = await new SqlOutboxStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory)).ClaimNextDueAsync(
             "dispatcher",
             now,
             TimeSpan.FromMinutes(2),
             [PipelineOperations.ExtractUtf8],
             CancellationToken.None);
         Assert.NotNull(outbox);
-        var job = await new SqlJobClaimStore(factory).ClaimForDispatchAsync(
+        var job = await new SqlJobClaimStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory)).ClaimForDispatchAsync(
             outbox,
             "worker",
             now,

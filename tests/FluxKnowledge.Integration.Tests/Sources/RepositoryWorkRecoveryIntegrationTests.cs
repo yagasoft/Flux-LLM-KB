@@ -57,7 +57,7 @@ public sealed class RepositoryWorkRecoveryIntegrationTests(NativeSqlServerFixtur
         var clock = new Clock();
         await using var environment = await SqlToUsearchRebuildTests.PipelineEnvironment.CreateAsync(fixture, "Baseline", embed: false, clock: clock);
         // Keep the unrelated unrooted baseline out of this exact-source claim.
-        var baseline = await new SqlOutboxStore(environment.Factory).ClaimNextDueAsync("baseline", clock.Now, TimeSpan.FromMinutes(2), [PipelineOperations.Embed], default);
+        var baseline = await new SqlOutboxStore(environment.Factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory)).ClaimNextDueAsync("baseline", clock.Now, TimeSpan.FromMinutes(2), [PipelineOperations.Embed], default);
         await using (var setup = await environment.Factory.CreateDbContextAsync())
         {
             await setup.Jobs.Where(value => value.PipelineRecordId == baseline!.PipelineRecordId.Value).ExecuteUpdateAsync(set => set.SetProperty(value => value.PublicState, (int)PublicJobState.Failed));
@@ -71,11 +71,11 @@ public sealed class RepositoryWorkRecoveryIntegrationTests(NativeSqlServerFixtur
         var rootId = await ScanAndPublish(environment, scans, clock);
         if (change == "revised-in-place")
         {
-            var originalDispatch = Assert.IsType<ClaimedDispatchMessage>(await new SqlOutboxStore(environment.Factory)
+            var originalDispatch = Assert.IsType<ClaimedDispatchMessage>(await new SqlOutboxStore(environment.Factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory))
                 .ClaimNextDueAsync("original-revision", clock.Now, TimeSpan.FromMinutes(2), [PipelineOperations.Embed], default));
-            var originalJob = Assert.IsType<ClaimedJob>(await new SqlJobClaimStore(environment.Factory)
+            var originalJob = Assert.IsType<ClaimedJob>(await new SqlJobClaimStore(environment.Factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory))
                 .ClaimForDispatchAsync(originalDispatch, "original-revision", clock.Now, TimeSpan.FromMinutes(2), default));
-            var originalTransitions = new StageTransitionService(new SqlStageTransitionStore(environment.Factory, null, clock),
+            var originalTransitions = new StageTransitionService(new SqlStageTransitionStore(environment.Factory, null, clock, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory)),
                 new RecoveryStatusPublisher(), new ChannelOutboxWakeSignal(), clock);
             await new EmbedStageWorker(environment.Store, new RecoveryEmbeddingProvider(), originalTransitions, clock)
                 .ExecuteAsync(new(originalDispatch, originalJob), default);
@@ -106,12 +106,12 @@ public sealed class RepositoryWorkRecoveryIntegrationTests(NativeSqlServerFixtur
             await previous.Database.ExecuteSqlInterpolatedAsync($"UPDATE SourceActivities SET ProcessorVersion={oldVersion}, DescriptorFingerprint={oldDescriptor} WHERE Id={activity.Id}");
             await previous.Database.ExecuteSqlInterpolatedAsync($"UPDATE PipelineRecords SET RepositoryRecoveryBindingJson={binding.ToJsonString()} WHERE Id={record.Id}");
         }
-        var dispatch = Assert.IsType<FluxKnowledge.Application.Workers.ClaimedDispatchMessage>(await new SqlOutboxStore(environment.Factory)
+        var dispatch = Assert.IsType<FluxKnowledge.Application.Workers.ClaimedDispatchMessage>(await new SqlOutboxStore(environment.Factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory))
             .ClaimNextDueAsync("withdrawal", clock.Now, TimeSpan.FromMinutes(2), [PipelineOperations.Embed], default));
-        var job = Assert.IsType<ClaimedJob>(await new SqlJobClaimStore(environment.Factory).ClaimForDispatchAsync(dispatch, "withdrawal", clock.Now, TimeSpan.FromMinutes(2), default));
+        var job = Assert.IsType<ClaimedJob>(await new SqlJobClaimStore(environment.Factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory)).ClaimForDispatchAsync(dispatch, "withdrawal", clock.Now, TimeSpan.FromMinutes(2), default));
         var work = new FluxKnowledge.Application.Workers.StageWorkItem(dispatch, job);
         var provider = new RecoveryEmbeddingProvider();
-        var checkpoints = new SqlEmbeddingCheckpointStore(environment.Factory, clock);
+        var checkpoints = new SqlEmbeddingCheckpointStore(environment.Factory, clock, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory));
         var batch = await checkpoints.ReadNextAsync(work, provider.Profile, default);
         var initialResults = await provider.CreateEmbeddingsAsync(batch.Chunks.Select(chunk => chunk.SearchText).ToArray(), default);
         await checkpoints.CommitAsync(work, batch, initialResults, default);
@@ -132,7 +132,7 @@ public sealed class RepositoryWorkRecoveryIntegrationTests(NativeSqlServerFixtur
             var retainedId = (await suppressed.PipelineRecords.SingleAsync(value => value.Id == job.PipelineRecordId.Value)).SourceRevisionId;
             Assert.NotNull((await suppressed.SourceRevisions.SingleAsync(value => value.Id == retainedId)).SuppressedAtUtc);
         }
-        var transitions = new FluxKnowledge.Application.Pipeline.StageTransitionService(new SqlStageTransitionStore(environment.Factory, null, clock),
+        var transitions = new FluxKnowledge.Application.Pipeline.StageTransitionService(new SqlStageTransitionStore(environment.Factory, null, clock, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory)),
             new RecoveryStatusPublisher(), new FluxKnowledge.Infrastructure.SqlServer.Workers.ChannelOutboxWakeSignal(), clock);
         var refusal = await Assert.ThrowsAsync<RepositorySourceDeferredException>(() =>
             new FluxKnowledge.Application.Indexing.EmbedStageWorker(environment.Store, provider, transitions, clock, checkpoints).ExecuteAsync(work, default).AsTask());
@@ -157,7 +157,7 @@ public sealed class RepositoryWorkRecoveryIntegrationTests(NativeSqlServerFixtur
             {
                 var waiting = await verification.Jobs.AsNoTracking().SingleAsync(value => value.Id == job.JobId.Value);
                 clock.Advance(waiting.DueAtUtc - clock.Now);
-                Assert.Null(await new SqlOutboxStore(environment.Factory).ClaimNextDueAsync("restarted-while-absent", clock.Now, TimeSpan.FromMinutes(2), [PipelineOperations.Embed], default));
+                Assert.Null(await new SqlOutboxStore(environment.Factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory)).ClaimNextDueAsync("restarted-while-absent", clock.Now, TimeSpan.FromMinutes(2), [PipelineOperations.Embed], default));
                 waiting = await verification.Jobs.AsNoTracking().SingleAsync(value => value.Id == job.JobId.Value);
                 using var details = JsonDocument.Parse(waiting.ErrorDetails!);
                 var delay = details.RootElement.GetProperty("CheckAfterSeconds").GetInt32();
@@ -172,8 +172,8 @@ public sealed class RepositoryWorkRecoveryIntegrationTests(NativeSqlServerFixtur
         clock.Advance(TimeSpan.FromDays(1));
         if (change != "rediscovery-before-deferral")
         {
-        Assert.Null(await new SqlOutboxStore(environment.Factory).ClaimNextDueAsync("still-absent", clock.Now, TimeSpan.FromMinutes(2), [PipelineOperations.Embed], default));
-        Assert.Null(await new SqlJobClaimStore(environment.Factory).ClaimNextDueAsync("still-absent", clock.Now, TimeSpan.FromMinutes(2), default));
+        Assert.Null(await new SqlOutboxStore(environment.Factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory)).ClaimNextDueAsync("still-absent", clock.Now, TimeSpan.FromMinutes(2), [PipelineOperations.Embed], default));
+        Assert.Null(await new SqlJobClaimStore(environment.Factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory)).ClaimNextDueAsync("still-absent", clock.Now, TimeSpan.FromMinutes(2), default));
         Assert.Equal(attempts, (await verification.Jobs.AsNoTracking().SingleAsync(value => value.Id == job.JobId.Value)).AttemptCount);
         Assert.Empty(provider.Inputs);
         }
@@ -198,7 +198,7 @@ public sealed class RepositoryWorkRecoveryIntegrationTests(NativeSqlServerFixtur
         }
         if (change is "paused" or "deletion")
         {
-            await new SqlOutboxStore(environment.Factory).ClaimNextDueAsync("ineligible", clock.Now, TimeSpan.FromMinutes(2), [PipelineOperations.Embed], default);
+            await new SqlOutboxStore(environment.Factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory)).ClaimNextDueAsync("ineligible", clock.Now, TimeSpan.FromMinutes(2), [PipelineOperations.Embed], default);
         }
         else
         {
@@ -231,14 +231,14 @@ public sealed class RepositoryWorkRecoveryIntegrationTests(NativeSqlServerFixtur
         Assert.Single(await verification.OutboxMessages.Where(value => value.JobId == job.JobId.Value).ToListAsync());
         while (true)
         {
-            var nextDispatch = Assert.IsType<ClaimedDispatchMessage>(await new SqlOutboxStore(environment.Factory).ClaimNextDueAsync("returned", clock.Now, TimeSpan.FromMinutes(2), [PipelineOperations.Embed], default));
-            var nextJob = Assert.IsType<ClaimedJob>(await new SqlJobClaimStore(environment.Factory).ClaimForDispatchAsync(nextDispatch, "returned", clock.Now, TimeSpan.FromMinutes(2), default));
+            var nextDispatch = Assert.IsType<ClaimedDispatchMessage>(await new SqlOutboxStore(environment.Factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory)).ClaimNextDueAsync("returned", clock.Now, TimeSpan.FromMinutes(2), [PipelineOperations.Embed], default));
+            var nextJob = Assert.IsType<ClaimedJob>(await new SqlJobClaimStore(environment.Factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory)).ClaimForDispatchAsync(nextDispatch, "returned", clock.Now, TimeSpan.FromMinutes(2), default));
             Assert.Equal(job.JobId, nextJob.JobId);
             Assert.Equal(dispatch.DispatchMessageId, nextDispatch.DispatchMessageId);
             await Assert.ThrowsAsync<InvalidOperationException>(() => transitions.RetryAsync(retry, default).AsTask());
             Assert.Equal("embedding-checkpoint-lease-lost", (await Assert.ThrowsAsync<InvalidOperationException>(() =>
                 checkpoints.CommitAsync(work, batch, initialResults, default).AsTask())).Message);
-            await new FluxKnowledge.Application.Indexing.EmbedStageWorker(environment.Store, provider, transitions, clock, new SqlEmbeddingCheckpointStore(environment.Factory, clock)).ExecuteAsync(new(nextDispatch, nextJob), default);
+            await new FluxKnowledge.Application.Indexing.EmbedStageWorker(environment.Store, provider, transitions, clock, new SqlEmbeddingCheckpointStore(environment.Factory, clock, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory))).ExecuteAsync(new(nextDispatch, nextJob), default);
             if (await verification.Artifacts.AnyAsync(value => value.PipelineRecordId == job.PipelineRecordId.Value && value.Stage == (int)PipelineStage.Embed)) break;
         }
         var vectors = await verification.Vectors.AsNoTracking().Where(value => value.IndexGenerationId == batch.GenerationId).OrderBy(value => value.VectorId).ToArrayAsync();
@@ -298,17 +298,17 @@ public sealed class RepositoryWorkRecoveryIntegrationTests(NativeSqlServerFixtur
         var runtime = new EmbeddingGpuRuntime("repository-recovery-synthetic", new string('b', 64), provider.Profile, 1024);
         var scans = new SqlSourceScanStore(environment.Factory, clock, runtime);
         var rootId = await ScanAndPublish(environment, scans, clock);
-        var dispatch = Assert.IsType<ClaimedDispatchMessage>(await new SqlOutboxStore(environment.Factory).ClaimNextDueAsync("gpu-withdrawal", clock.Now, TimeSpan.FromMinutes(2), [PipelineOperations.Embed], default));
-        var job = Assert.IsType<ClaimedJob>(await new SqlJobClaimStore(environment.Factory).ClaimForDispatchAsync(dispatch, "gpu-withdrawal", clock.Now, TimeSpan.FromMinutes(2), default));
+        var dispatch = Assert.IsType<ClaimedDispatchMessage>(await new SqlOutboxStore(environment.Factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory)).ClaimNextDueAsync("gpu-withdrawal", clock.Now, TimeSpan.FromMinutes(2), [PipelineOperations.Embed], default));
+        var job = Assert.IsType<ClaimedJob>(await new SqlJobClaimStore(environment.Factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory)).ClaimForDispatchAsync(dispatch, "gpu-withdrawal", clock.Now, TimeSpan.FromMinutes(2), default));
         var worker = new StageWorkItem(dispatch, job);
-        var checkpoints = new SqlEmbeddingCheckpointStore(environment.Factory, clock, runtime);
+        var checkpoints = new SqlEmbeddingCheckpointStore(environment.Factory, clock, runtime, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory));
         var batch = await checkpoints.ReadNextAsync(worker, provider.Profile, default);
         Assert.NotEmpty(batch.Chunks);
         await checkpoints.CommitAsync(worker, batch, await provider.CreateEmbeddingsAsync(batch.Chunks.Select(value => value.SearchText).ToArray(), default), default);
         var missing = await checkpoints.ReadNextAsync(worker, provider.Profile, default);
         Assert.NotEmpty(missing.Chunks);
-        var scheduler = new SqlGpuSchedulerStore(environment.Factory, timeProvider: clock);
-        var requests = new SqlEmbeddingGpuRequestStore(environment.Factory, scheduler, new ChannelGpuSchedulerWakeSignal(), runtime, clock);
+        var scheduler = new SqlGpuSchedulerStore(environment.Factory, timeProvider: clock, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory));
+        var requests = new SqlEmbeddingGpuRequestStore(environment.Factory, scheduler, new ChannelGpuSchedulerWakeSignal(), runtime, clock, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory));
         await requests.QueueAsync(worker, missing, default);
         await using var context = await environment.Factory.CreateDbContextAsync();
         context.GpuCapacitySlots.Add(new GpuCapacitySlotEntity { SlotKey = "gpu-0", UpdatedAtUtc = clock.Now });
@@ -359,8 +359,8 @@ public sealed class RepositoryWorkRecoveryIntegrationTests(NativeSqlServerFixtur
         if (outcome is "known" or "rediscovery-before-deferral-known")
         {
             Assert.Equal("repository-source-resumed", settled.Reason);
-            var nextDispatch = Assert.IsType<ClaimedDispatchMessage>(await new SqlOutboxStore(environment.Factory, embeddingRuntime: runtime).ClaimNextDueAsync("returned", clock.Now, TimeSpan.FromMinutes(2), [PipelineOperations.Embed], default));
-            var nextJob = Assert.IsType<ClaimedJob>(await new SqlJobClaimStore(environment.Factory).ClaimForDispatchAsync(nextDispatch, "returned", clock.Now, TimeSpan.FromMinutes(2), default));
+            var nextDispatch = Assert.IsType<ClaimedDispatchMessage>(await new SqlOutboxStore(environment.Factory, embeddingRuntime: runtime, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory)).ClaimNextDueAsync("returned", clock.Now, TimeSpan.FromMinutes(2), [PipelineOperations.Embed], default));
+            var nextJob = Assert.IsType<ClaimedJob>(await new SqlJobClaimStore(environment.Factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory)).ClaimForDispatchAsync(nextDispatch, "returned", clock.Now, TimeSpan.FromMinutes(2), default));
             if (outcome == "rediscovery-before-deferral-known")
             {
                 File.Move(Path.Combine(repository.Path, "Guide.md"), Path.Combine(repository.Path, "withdrawn.tmp"));
@@ -376,10 +376,10 @@ public sealed class RepositoryWorkRecoveryIntegrationTests(NativeSqlServerFixtur
                 await scope.ServiceProvider.GetRequiredService<IStageTransitionStore>().RetryAsync(new(nextDispatch, nextJob, clock.Now.AddMinutes(1), "repository-source-deferred", "test", refusal.Deferral), default);
                 Assert.Equal("repository-source-resumed", (await context.Jobs.AsNoTracking().SingleAsync(value => value.Id == job.JobId.Value)).Reason);
                 clock.Advance(TimeSpan.FromMinutes(1));
-                nextDispatch = Assert.IsType<ClaimedDispatchMessage>(await new SqlOutboxStore(environment.Factory, embeddingRuntime: runtime).ClaimNextDueAsync("returned-again", clock.Now, TimeSpan.FromMinutes(2), [PipelineOperations.Embed], default));
-                nextJob = Assert.IsType<ClaimedJob>(await new SqlJobClaimStore(environment.Factory).ClaimForDispatchAsync(nextDispatch, "returned-again", clock.Now, TimeSpan.FromMinutes(2), default));
+                nextDispatch = Assert.IsType<ClaimedDispatchMessage>(await new SqlOutboxStore(environment.Factory, embeddingRuntime: runtime, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory)).ClaimNextDueAsync("returned-again", clock.Now, TimeSpan.FromMinutes(2), [PipelineOperations.Embed], default));
+                nextJob = Assert.IsType<ClaimedJob>(await new SqlJobClaimStore(environment.Factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory)).ClaimForDispatchAsync(nextDispatch, "returned-again", clock.Now, TimeSpan.FromMinutes(2), default));
             }
-            var remaining = await new SqlEmbeddingCheckpointStore(environment.Factory, clock, runtime).ReadNextAsync(new(nextDispatch, nextJob), provider.Profile, default);
+            var remaining = await new SqlEmbeddingCheckpointStore(environment.Factory, clock, runtime, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory)).ReadNextAsync(new(nextDispatch, nextJob), provider.Profile, default);
             Assert.NotEmpty(remaining.Chunks);
             Assert.DoesNotContain(remaining.Chunks, value => batch.Chunks.Concat(missing.Chunks).Any(savedChunk => savedChunk.Id == value.Id));
         }
@@ -387,7 +387,7 @@ public sealed class RepositoryWorkRecoveryIntegrationTests(NativeSqlServerFixtur
         {
             var uncertain = outcome is "uncertain" or "paused-uncertain";
             Assert.Equal(uncertain ? "repository-source-blocked" : null, settled.Reason);
-            Assert.Null(await new SqlOutboxStore(environment.Factory, embeddingRuntime: runtime).ClaimNextDueAsync("blocked", clock.Now.AddDays(1), TimeSpan.FromMinutes(2), [PipelineOperations.Embed], default));
+            Assert.Null(await new SqlOutboxStore(environment.Factory, embeddingRuntime: runtime, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory)).ClaimNextDueAsync("blocked", clock.Now.AddDays(1), TimeSpan.FromMinutes(2), [PipelineOperations.Embed], default));
             Assert.Equal(uncertain ? (int)PublicJobState.WorkerQueued : (int)PublicJobState.GpuProcessing, settled.PublicState);
             if (uncertain) Assert.Contains("outcome-cleanup-or-binding-unconfirmed", settled.ErrorDetails!);
         }
@@ -398,7 +398,7 @@ public sealed class RepositoryWorkRecoveryIntegrationTests(NativeSqlServerFixtur
 
     private static async Task DiscardBaselineAsync(SqlToUsearchRebuildTests.PipelineEnvironment environment, Clock clock)
     {
-        var dispatch = Assert.IsType<ClaimedDispatchMessage>(await new SqlOutboxStore(environment.Factory).ClaimNextDueAsync("baseline", clock.Now, TimeSpan.FromMinutes(2), [PipelineOperations.Embed], default));
+        var dispatch = Assert.IsType<ClaimedDispatchMessage>(await new SqlOutboxStore(environment.Factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory)).ClaimNextDueAsync("baseline", clock.Now, TimeSpan.FromMinutes(2), [PipelineOperations.Embed], default));
         await using var setup = await environment.Factory.CreateDbContextAsync();
         await setup.Jobs.Where(value => value.PipelineRecordId == dispatch.PipelineRecordId.Value).ExecuteUpdateAsync(set => set.SetProperty(value => value.PublicState, (int)PublicJobState.Failed));
     }
@@ -500,17 +500,17 @@ public sealed class RepositoryWorkRecoveryIntegrationTests(NativeSqlServerFixtur
         await Commit(commands, Mutation("root_create", new { path = repository.Path, displayName = "Publish withdrawal", discoveryMode = "git-tracked", indexSourceText = true }));
         var scans = new SqlSourceScanStore(environment.Factory, clock);
         var rootId = await ScanAndPublish(environment, scans, clock);
-        var dispatch = Assert.IsType<ClaimedDispatchMessage>(await new SqlOutboxStore(environment.Factory).ClaimNextDueAsync("publisher", clock.Now, TimeSpan.FromMinutes(2), [PipelineOperations.Embed], default));
-        var job = Assert.IsType<ClaimedJob>(await new SqlJobClaimStore(environment.Factory).ClaimForDispatchAsync(dispatch, "publisher", clock.Now, TimeSpan.FromMinutes(2), default));
+        var dispatch = Assert.IsType<ClaimedDispatchMessage>(await new SqlOutboxStore(environment.Factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory)).ClaimNextDueAsync("publisher", clock.Now, TimeSpan.FromMinutes(2), [PipelineOperations.Embed], default));
+        var job = Assert.IsType<ClaimedJob>(await new SqlJobClaimStore(environment.Factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory)).ClaimForDispatchAsync(dispatch, "publisher", clock.Now, TimeSpan.FromMinutes(2), default));
         var transitionFactory = sqlRetries
             ? new Microsoft.EntityFrameworkCore.Infrastructure.PooledDbContextFactory<FluxKnowledgeDbContext>(
                 new DbContextOptionsBuilder<FluxKnowledgeDbContext>().UseSqlServer(fixture.ConnectionString, options => options.EnableRetryOnFailure()).Options)
             : environment.Factory;
-        var transitions = new StageTransitionService(new SqlStageTransitionStore(transitionFactory, null, clock), new RecoveryStatusPublisher(), new ChannelOutboxWakeSignal(), clock);
+        var transitions = new StageTransitionService(new SqlStageTransitionStore(transitionFactory, null, clock, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(transitionFactory)), new RecoveryStatusPublisher(), new ChannelOutboxWakeSignal(), clock);
         await new EmbedStageWorker(environment.Store, new RecoveryEmbeddingProvider(), transitions, clock,
-            checkpointed ? new SqlEmbeddingCheckpointStore(environment.Factory, clock) : null).ExecuteAsync(new(dispatch, job), default);
-        dispatch = Assert.IsType<ClaimedDispatchMessage>(await new SqlOutboxStore(environment.Factory).ClaimNextDueAsync("publisher", clock.Now, TimeSpan.FromMinutes(2), [PipelineOperations.Publish], default));
-        job = Assert.IsType<ClaimedJob>(await new SqlJobClaimStore(environment.Factory).ClaimForDispatchAsync(dispatch, "publisher", clock.Now, TimeSpan.FromMinutes(2), default));
+            checkpointed ? new SqlEmbeddingCheckpointStore(environment.Factory, clock, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory)) : null).ExecuteAsync(new(dispatch, job), default);
+        dispatch = Assert.IsType<ClaimedDispatchMessage>(await new SqlOutboxStore(environment.Factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory)).ClaimNextDueAsync("publisher", clock.Now, TimeSpan.FromMinutes(2), [PipelineOperations.Publish], default));
+        job = Assert.IsType<ClaimedJob>(await new SqlJobClaimStore(environment.Factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory)).ClaimForDispatchAsync(dispatch, "publisher", clock.Now, TimeSpan.FromMinutes(2), default));
         await transitions.ValidateRepositorySourceAsync(new(dispatch, job), default);
         Guid generation;
         byte[][] saved;
@@ -565,7 +565,7 @@ public sealed class RepositoryWorkRecoveryIntegrationTests(NativeSqlServerFixtur
         var claim = Assert.IsType<ClaimedSourceScan>(await store.ClaimNextReleasedAsync("coverage-worker", clock.Now, TimeSpan.FromMinutes(10), default));
         using var artifacts = new ContentAddressedSourceArtifactStore(environment.ArtifactRoot);
         var worker = new SourceScanWorker(new LocalSourceEnumerator(), store, artifacts, new SqlSourceActivityStore(environment.Factory, clock),
-            new RetainedTextActivityPlanner(new SqlRetainedTextRegistrationStore(environment.Factory, clock)));
+            new RetainedTextActivityPlanner(new SqlRetainedTextRegistrationStore(environment.Factory, clock, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory))));
         var result = await worker.ScanAsync(claim.SourceRoot, claim.ScanRequest, default);
         await store.CompleteAsync(claim, result, null, default); await environment.PumpAsync(); return claim.SourceRoot.Id.Value;
     }

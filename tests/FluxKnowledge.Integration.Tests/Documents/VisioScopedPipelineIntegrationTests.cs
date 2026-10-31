@@ -90,7 +90,7 @@ public sealed class VisioScopedPipelineIntegrationTests(NativeSqlServerFixture f
         RetainedProcessorBranchState terminalState)
     {
         var (request, predecessor) = await SeedAsync(terminalState);
-        var store = new SqlRetainedProcessorBranchStore(SqlTestData.CreateFactory(fixture), TimeProvider.System);
+        var store = new SqlRetainedProcessorBranchStore(SqlTestData.CreateFactory(fixture), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(SqlTestData.CreateFactory(fixture)));
         var results = await Task.WhenAll(Enumerable.Range(0, 3)
             .Select(_ => store.RequestDocumentReprocessAsync(request, default).AsTask()));
         Assert.All(results, result => Assert.True(result.Accepted));
@@ -126,7 +126,7 @@ public sealed class VisioScopedPipelineIntegrationTests(NativeSqlServerFixture f
             await setup.SaveChangesAsync();
         }
 
-        var result = await new SqlRetainedProcessorBranchStore(factory, TimeProvider.System)
+        var result = await new SqlRetainedProcessorBranchStore(factory, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory))
             .RequestDocumentReprocessAsync(request, default);
 
         Assert.True(result.Accepted);
@@ -174,7 +174,7 @@ public sealed class VisioScopedPipelineIntegrationTests(NativeSqlServerFixture f
             await setup.SaveChangesAsync();
         }
 
-        var result = await new SqlRetainedProcessorBranchStore(factory, TimeProvider.System)
+        var result = await new SqlRetainedProcessorBranchStore(factory, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory))
             .RequestDocumentReprocessAsync(request, default);
 
         Assert.False(result.Accepted);
@@ -310,7 +310,7 @@ public sealed class VisioScopedPipelineIntegrationTests(NativeSqlServerFixture f
             await setup.SaveChangesAsync();
         }
 
-        var result = await new SqlRetainedProcessorBranchStore(factory, TimeProvider.System)
+        var result = await new SqlRetainedProcessorBranchStore(factory, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory))
             .RequestDocumentReprocessAsync(request with { ExpectedProcessorFingerprint = correctedFingerprint }, default);
 
         Assert.Equal(expectedAccepted, result.Accepted);
@@ -332,17 +332,17 @@ public sealed class VisioScopedPipelineIntegrationTests(NativeSqlServerFixture f
         if (Environment.GetEnvironmentVariable("FLUX_KB_RUN_ACTUAL_VISIO") != "1" || !OperatingSystem.IsWindows()) return;
         var (request, _) = await SeedAsync(RetainedProcessorBranchState.Blocked);
         var factory = SqlTestData.CreateFactory(fixture);
-        var branches = new SqlRetainedProcessorBranchStore(factory, TimeProvider.System);
+        var branches = new SqlRetainedProcessorBranchStore(factory, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         var branchId = (await branches.RequestDocumentReprocessAsync(request, default)).SuccessorBranchId!.Value;
         var claim = (await branches.ClaimDocumentBranchAsync(branchId, request.SourceRevisionId,
             request.ExpectedInputSha256, request.ExpectedProcessorFingerprint, "desktop", default))!;
         var child = DocumentProcessingInput.CreateVisioChild(claim,
             new RetainedSourceBytes(request.SourceRevisionId, [1, 2, 3, 4], request.ExpectedInputSha256, 4));
         Assert.True(await branches.CommitAsync(claim, new RetainedProcessorCompletion([child], new string('c', 64)), default));
-        await new SqlRetainedTextRegistrationStore(factory, TimeProvider.System).RegisterVisioBranchAsync(request, branchId, default);
+        await new SqlRetainedTextRegistrationStore(factory, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory)).RegisterVisioBranchAsync(request, branchId, default);
         var now = DateTimeOffset.UtcNow.AddSeconds(1);
-        var dispatch = (await new SqlOutboxStore(factory).ClaimVisioDocumentAsync(request, branchId, "desktop", now, TimeSpan.FromMinutes(12), default))!;
-        var job = (await new SqlJobClaimStore(factory).ClaimForDispatchAsync(dispatch, "desktop", now, TimeSpan.FromMinutes(12), default))!;
+        var dispatch = (await new SqlOutboxStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory)).ClaimVisioDocumentAsync(request, branchId, "desktop", now, TimeSpan.FromMinutes(12), default))!;
+        var job = (await new SqlJobClaimStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory)).ClaimForDispatchAsync(dispatch, "desktop", now, TimeSpan.FromMinutes(12), default))!;
         await using var check = await factory.CreateDbContextAsync();
         await check.SourceRootConfigurations.ExecuteUpdateAsync(set => set.SetProperty(row => row.State, (int)SourceRootState.Paused));
         await check.Jobs.ExecuteUpdateAsync(set => set.SetProperty(row => row.LeaseExpiresAtUtc, DateTimeOffset.UtcNow.AddMinutes(-1)));
@@ -378,7 +378,7 @@ public sealed class VisioScopedPipelineIntegrationTests(NativeSqlServerFixture f
     {
         var (request, _) = await SeedAsync(RetainedProcessorBranchState.Blocked);
         var factory = SqlTestData.CreateFactory(fixture);
-        var store = new SqlRetainedProcessorBranchStore(factory, TimeProvider.System);
+        var store = new SqlRetainedProcessorBranchStore(factory, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         Assert.False((await store.RequestDocumentReprocessAsync(request with { ExpectedInputSha256 = new string('b', 64) }, default)).Accepted);
         await using var check = await factory.CreateDbContextAsync();
         await check.SourceRootConfigurations.ExecuteUpdateAsync(set => set.SetProperty(r => r.State, (int)SourceRootState.Paused));
@@ -393,7 +393,7 @@ public sealed class VisioScopedPipelineIntegrationTests(NativeSqlServerFixture f
         var first = (await SeedAsync(RetainedProcessorBranchState.Blocked)).Request;
         var factory = SqlTestData.CreateFactory(fixture);
         var firstBranch = await CompleteCurrentPreparationAsync(first, factory);
-        await new SqlRetainedTextRegistrationStore(factory, TimeProvider.System).RegisterVisioBranchAsync(first, firstBranch, default);
+        await new SqlRetainedTextRegistrationStore(factory, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory)).RegisterVisioBranchAsync(first, firstBranch, default);
         await using (var fail = await factory.CreateDbContextAsync())
         {
             await fail.Jobs.Where(job => job.Operation == PipelineOperations.ExtractVisio)
@@ -417,11 +417,11 @@ public sealed class VisioScopedPipelineIntegrationTests(NativeSqlServerFixture f
         var request = (await SeedAsync(RetainedProcessorBranchState.Blocked)).Request;
         var factory = SqlTestData.CreateFactory(fixture);
         var branchId = await CompleteCurrentPreparationAsync(request, factory);
-        await new SqlRetainedTextRegistrationStore(factory, TimeProvider.System).RegisterVisioBranchAsync(request, branchId, default);
+        await new SqlRetainedTextRegistrationStore(factory, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory)).RegisterVisioBranchAsync(request, branchId, default);
         var now = DateTimeOffset.UtcNow.AddSeconds(1);
-        var dispatch = (await new SqlOutboxStore(factory).ClaimVisioDocumentAsync(
+        var dispatch = (await new SqlOutboxStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory)).ClaimVisioDocumentAsync(
             request, branchId, "desktop", now, TimeSpan.FromMinutes(12), default))!;
-        Assert.NotNull(await new SqlJobClaimStore(factory).ClaimForDispatchAsync(
+        Assert.NotNull(await new SqlJobClaimStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory)).ClaimForDispatchAsync(
             dispatch, "desktop", now, TimeSpan.FromMinutes(12), default));
         await using (var drain = await factory.CreateDbContextAsync())
         {
@@ -459,18 +459,18 @@ public sealed class VisioScopedPipelineIntegrationTests(NativeSqlServerFixture f
     {
         var (request, _) = await SeedAsync(RetainedProcessorBranchState.Blocked);
         var factory = SqlTestData.CreateFactory(fixture);
-        var branches = new SqlRetainedProcessorBranchStore(factory, TimeProvider.System);
+        var branches = new SqlRetainedProcessorBranchStore(factory, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         var branchId = (await branches.RequestDocumentReprocessAsync(request, default)).SuccessorBranchId!.Value;
         var claim = (await branches.ClaimDocumentBranchAsync(branchId, request.SourceRevisionId,
             request.ExpectedInputSha256, request.ExpectedProcessorFingerprint, "desktop", default))!;
         var input = DocumentProcessingInput.CreateVisioChild(claim,
             new RetainedSourceBytes(request.SourceRevisionId, [1, 2, 3, 4], request.ExpectedInputSha256, 4));
         Assert.True(await branches.CommitAsync(claim, new RetainedProcessorCompletion([input], new string('c', 64)), default));
-        var registration = new SqlRetainedTextRegistrationStore(factory, TimeProvider.System);
+        var registration = new SqlRetainedTextRegistrationStore(factory, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         var recordId = await registration.RegisterVisioBranchAsync(request, branchId, default);
         Assert.NotNull(recordId);
         Assert.Equal(recordId, await registration.RegisterVisioBranchAsync(request, branchId, default));
-        var outbox = new SqlOutboxStore(factory);
+        var outbox = new SqlOutboxStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         var now = DateTimeOffset.UtcNow.AddSeconds(1);
         Assert.Null(await outbox.ClaimVisioDocumentAsync(request with { SourceRevisionId = SourceRevisionId.New() },
             branchId, "desktop", now, TimeSpan.FromMinutes(12), default));
@@ -480,14 +480,14 @@ public sealed class VisioScopedPipelineIntegrationTests(NativeSqlServerFixture f
         Assert.Equal(recordId, dispatch.PipelineRecordId.Value);
         Assert.Equal(PipelineOperations.ExtractVisio, dispatch.Operation);
         Assert.Null(await outbox.ClaimVisioDocumentAsync(request, branchId, "other-desktop", now, TimeSpan.FromMinutes(12), default));
-        var job = (await new SqlJobClaimStore(factory).ClaimForDispatchAsync(dispatch, "desktop", now, TimeSpan.FromMinutes(12), default))!;
+        var job = (await new SqlJobClaimStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory)).ClaimForDispatchAsync(dispatch, "desktop", now, TimeSpan.FromMinutes(12), default))!;
         await using var check = await factory.CreateDbContextAsync();
         Assert.Equal(2, await check.SourceRevisions.CountAsync());
         Assert.Single(await check.PipelineRecords.ToListAsync());
         Assert.Single(await check.Jobs.ToListAsync());
         await check.SourceRootConfigurations.ExecuteUpdateAsync(set => set.SetProperty(row => row.State, (int)SourceRootState.Paused));
         var exception = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
-            await new SqlStageTransitionStore(factory).TransitionAsync(new StageTransitionRequest(dispatch, job,
+            await new SqlStageTransitionStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory)).TransitionAsync(new StageTransitionRequest(dispatch, job,
                 new StageArtifact(Guid.NewGuid(), PipelineStage.Extract, request.ExpectedInputSha256,
                     "text/plain; charset=utf-8", "must not publish after pause", now),
                 PipelineStage.Normalise, PipelineOperations.NormaliseText, "visio-test"), default));
@@ -554,7 +554,7 @@ public sealed class VisioScopedPipelineIntegrationTests(NativeSqlServerFixture f
         DocumentReprocessRequest request,
         IDbContextFactory<FluxKnowledgeDbContext> factory)
     {
-        var branches = new SqlRetainedProcessorBranchStore(factory, TimeProvider.System);
+        var branches = new SqlRetainedProcessorBranchStore(factory, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         var branchId = (await branches.RequestDocumentReprocessAsync(request, default)).SuccessorBranchId!.Value;
         var claim = (await branches.ClaimDocumentBranchAsync(branchId, request.SourceRevisionId,
             request.ExpectedInputSha256, request.ExpectedProcessorFingerprint, "desktop", default))!;

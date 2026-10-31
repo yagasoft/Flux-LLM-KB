@@ -27,7 +27,7 @@ public sealed class OoxmlReplayIntegrationTests(NativeSqlServerFixture fixture) 
     [NativeSqlServerFact]
     public async Task Ooxml_branch_refuses_multiple_logical_document_children_before_persisting_any_member()
     {
-        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System);
+        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(_fixture.ConnectionString)));
         var seeded = await PromoteOoxmlBranchAsync(store, '9');
         var claim = Assert.Single(await store.ClaimAsync(
             "multiple-logical-output-owner",
@@ -209,7 +209,7 @@ public sealed class OoxmlReplayIntegrationTests(NativeSqlServerFixture fixture) 
             Directory.CreateDirectory(Path.Combine(privateRoot, "sha256", hash[..2]));
             await File.WriteAllBytesAsync(Path.Combine(privateRoot, relativePath), bytes);
             var seeded = await SeedDeferredOoxmlAsync(hash, bytes.Length, relativePath, ".docx", "force-activation");
-            var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System);
+            var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(_fixture.ConnectionString)));
             Assert.True(await store.PromoteAsync(
                 new RetainedProcessorPromotionCandidate(seeded.ActivityId, new SourceRevisionId(seeded.RevisionId), hash, ".docx"),
                 OoxmlStructuralTextProcessor.Capability,
@@ -257,7 +257,7 @@ public sealed class OoxmlReplayIntegrationTests(NativeSqlServerFixture fixture) 
             Directory.CreateDirectory(Path.Combine(privateRoot, "sha256", hash[..2]));
             await File.WriteAllBytesAsync(Path.Combine(privateRoot, relativePath), bytes);
             var seeded = await SeedDeferredOoxmlAsync(hash, bytes.Length, relativePath, ".docx", "override-activation");
-            var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System);
+            var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(_fixture.ConnectionString)));
             Assert.True(await store.PromoteAsync(
                 new RetainedProcessorPromotionCandidate(seeded.ActivityId, new SourceRevisionId(seeded.RevisionId), hash, ".docx"),
                 OoxmlStructuralTextProcessor.Capability,
@@ -324,7 +324,7 @@ public sealed class OoxmlReplayIntegrationTests(NativeSqlServerFixture fixture) 
             Directory.CreateDirectory(Path.Combine(privateRoot, "sha256", hash[..2]));
             await File.WriteAllBytesAsync(Path.Combine(privateRoot, relativePath), bytes);
             var seeded = await SeedDeferredOoxmlAsync(hash, bytes.Length, relativePath, ".docx", "force-blocked-activation");
-            var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System);
+            var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(_fixture.ConnectionString)));
             Assert.True(await store.PromoteAsync(
                 new RetainedProcessorPromotionCandidate(seeded.ActivityId, new SourceRevisionId(seeded.RevisionId), hash, ".docx"),
                 OoxmlStructuralTextProcessor.Capability,
@@ -371,7 +371,7 @@ public sealed class OoxmlReplayIntegrationTests(NativeSqlServerFixture fixture) 
             await File.WriteAllBytesAsync(Path.Combine(privateRoot, relativePath), bytes);
             var seeded = await SeedDeferredOoxmlAsync(hash, bytes.Length, relativePath, ".docx", "force-transient-activation");
             var factory = new ContextFactory(_fixture.ConnectionString);
-            var store = new SqlRetainedProcessorBranchStore(factory, TimeProvider.System);
+            var store = new SqlRetainedProcessorBranchStore(factory, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
             Assert.True(await store.PromoteAsync(
                 new RetainedProcessorPromotionCandidate(seeded.ActivityId, new SourceRevisionId(seeded.RevisionId), hash, ".docx"),
                 OoxmlStructuralTextProcessor.Capability,
@@ -476,7 +476,7 @@ public sealed class OoxmlReplayIntegrationTests(NativeSqlServerFixture fixture) 
                 Assert.Equal("legacy-office-binary-parser-unavailable", activity.Reason);
                 Assert.Empty(await verification.SourceProcessorBranches.Where(value => value.SourceRevisionId == seed.RevisionId).ToListAsync());
             }
-            Assert.Empty(await new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System)
+            Assert.Empty(await new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(_fixture.ConnectionString)))
                 .ClaimAsync("ooxml-owner", 16, OoxmlStructuralTextProcessor.Capability.ProcessorFingerprint, CancellationToken.None));
         }
         finally
@@ -492,7 +492,7 @@ public sealed class OoxmlReplayIntegrationTests(NativeSqlServerFixture fixture) 
         const string hash = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
         var seeded = await SeedDeferredOoxmlAsync(hash, 9, "ignored.bin", ".doc", "watched-file");
         var store = new SqlRetainedProcessorBranchStore(
-            new ContextFactory(_fixture.ConnectionString, useRetryingExecutionStrategy: true), TimeProvider.System);
+            new ContextFactory(_fixture.ConnectionString, useRetryingExecutionStrategy: true), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(_fixture.ConnectionString, useRetryingExecutionStrategy: true)));
 
         var designated = await store.DesignateLegacyOfficeAsync(
             new RetainedProcessorPromotionCandidate(seeded.ActivityId, new SourceRevisionId(seeded.RevisionId), hash, ".doc"),
@@ -512,7 +512,7 @@ public sealed class OoxmlReplayIntegrationTests(NativeSqlServerFixture fixture) 
         const string hash = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
         var seeded = await SeedDeferredOoxmlAsync(hash, 10, "ignored.bin", ".docx", "watched-file");
         var store = new SqlRetainedProcessorBranchStore(
-            new ContextFactory(_fixture.ConnectionString, useRetryingExecutionStrategy: true), TimeProvider.System);
+            new ContextFactory(_fixture.ConnectionString, useRetryingExecutionStrategy: true), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(_fixture.ConnectionString, useRetryingExecutionStrategy: true)));
 
         var promoted = await store.PromoteAsync(
             new RetainedProcessorPromotionCandidate(seeded.ActivityId, new SourceRevisionId(seeded.RevisionId), hash, ".docx"),
@@ -602,7 +602,7 @@ public sealed class OoxmlReplayIntegrationTests(NativeSqlServerFixture fixture) 
     [NativeSqlServerFact]
     public async Task Ooxml_branches_preserve_concurrent_stale_retry_and_restart_lease_fences()
     {
-        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System);
+        var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(_fixture.ConnectionString)));
         var concurrent = await PromoteOoxmlBranchAsync(store, 'a');
         var claims = await Task.WhenAll(
             store.ClaimAsync("ooxml-first", 16, OoxmlStructuralTextProcessor.Capability.ProcessorFingerprint, CancellationToken.None).AsTask(),
@@ -672,7 +672,7 @@ public sealed class OoxmlReplayIntegrationTests(NativeSqlServerFixture fixture) 
         var ooxml = new OoxmlStructuralTextProcessor(writer);
         return new RetainedProcessorActivationService(
             new SourceCapabilityService(new SqlSourceActivityStore(factory, TimeProvider.System), new LocalSourceCapabilityHandlerRegistry([zip, new OoxmlStructuralTextCapabilityHandler()])),
-            new SqlRetainedProcessorBranchStore(factory, TimeProvider.System), retainedReader ?? _resources.Own(new SqlRetainedSourceReader(factory, privateRoot, policy)), zip,
+            new SqlRetainedProcessorBranchStore(factory, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory)), retainedReader ?? _resources.Own(new SqlRetainedSourceReader(factory, privateRoot, policy)), zip,
             new RetainedProcessorOptions { OoxmlDocumentStructuralExtractEnabled = ooxmlEnabled, ArchiveZipExpandEnabled = zipEnabled }, TimeProvider.System,
             ooxmlProcessor: ooxml);
     }

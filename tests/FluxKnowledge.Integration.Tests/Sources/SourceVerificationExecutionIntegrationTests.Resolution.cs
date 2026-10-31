@@ -83,14 +83,26 @@ public sealed partial class SourceVerificationExecutionIntegrationTests
     }
 
     [NativeSqlServerTheory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task Authoritative_deletion_resolves_only_until_a_current_successor_reappears(bool recreate)
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public async Task Authoritative_deletion_resolves_only_until_a_current_successor_reappears(bool recreate, bool independent)
     {
         await using var scenario = await Scenario.CreateAsync(fixture.ConnectionString);
         await scenario.BaselineAsync();
         var run = await scenario.Verification.StartAsync(scenario.RootId, true, default);
         File.Delete(Path.Combine(scenario.Sources, "one.txt"));
+        if (independent)
+        {
+            await using var pending = scenario.Factory.CreateDbContext();
+            var state = await pending.SourceRootScanStates.SingleAsync();
+            pending.SourcePendingChanges.Add(new() { Id = Guid.NewGuid(), SourceRootId = scenario.RootId.Value,
+                RelativePath = "one.txt", PathFingerprint = SqlSourceChangeJournalStore.PathKey("one.txt"),
+                Generation = ++state.Generation, ReasonFlags = SourcePendingReasons.RemovalPending });
+            await pending.SaveChangesAsync();
+            Assert.Equal(1, await new SqlSourceRemovalReconciler(scenario.Factory, TimeProvider.System, new WindowsSourceObservationReader()).ReconcileAsync(default));
+        }
         await RunOrdinaryChangesAsync(scenario);
         if (recreate)
         {
@@ -149,10 +161,12 @@ public sealed partial class SourceVerificationExecutionIntegrationTests
             new SqlSourceActivityStore(scenario.Factory, TimeProvider.System), incrementalCoordinator: scenario.Incremental);
         await scenario.Control.CompleteAsync(claim, await worker.ScanAsync(claim.SourceRoot, claim.ScanRequest, default), null, default);
         await scenario.SettleNamespaceAsync(worker);
+        await new SqlSourceRemovalReconciler(scenario.Factory, TimeProvider.System, new WindowsSourceObservationReader()).ReconcileAsync(default);
     }
 
     private static async Task RunVerificationAsync(Scenario scenario)
     {
+        await new SqlSourceRemovalReconciler(scenario.Factory, TimeProvider.System, new WindowsSourceObservationReader()).ReconcileAsync(default);
         var claim = Assert.IsType<ClaimedSourceScan>(await scenario.Control.ClaimNextReleasedAsync("verification", DateTimeOffset.UtcNow, TimeSpan.FromMinutes(10), default));
         Assert.True(claim.ScanRequest.IsVerification);
         var worker = new SourceVerificationWorker(scenario.Verification, new WindowsSourceVerificationReaderSlot(scenario.Runtime),

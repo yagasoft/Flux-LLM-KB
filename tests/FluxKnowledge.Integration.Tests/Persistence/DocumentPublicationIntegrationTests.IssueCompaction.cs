@@ -24,7 +24,7 @@ public sealed partial class DocumentPublicationIntegrationTests
     public async Task Scan_completion_compacts_at_most_one_hundred_proved_events_only_with_fresh_authority(string change)
     {
         var seed = await SeedOfficeEventChainAsync();
-        await PublishAsync(new SqlStageTransitionStore(SqlTestData.CreateFactory(_fixture)), seed.Current, DateTimeOffset.UtcNow);
+        await PublishAsync(new SqlStageTransitionStore(SqlTestData.CreateFactory(_fixture), sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(SqlTestData.CreateFactory(_fixture))), seed.Current, DateTimeOffset.UtcNow);
         await AddRepeatedBlockedIssuesAsync(seed, 120);
         var now = DateTimeOffset.UtcNow;
         var store = new SqlSourceScanStore(SqlTestData.CreateFactory(_fixture), new IssueCleanupClock(now));
@@ -55,7 +55,7 @@ public sealed partial class DocumentPublicationIntegrationTests
     public async Task Ambiguous_cleanup_commit_is_reported_without_repeating_the_batch_or_reopening_the_scan()
     {
         var seed = await SeedOfficeEventChainAsync();
-        await PublishAsync(new SqlStageTransitionStore(SqlTestData.CreateFactory(_fixture)), seed.Current, DateTimeOffset.UtcNow);
+        await PublishAsync(new SqlStageTransitionStore(SqlTestData.CreateFactory(_fixture), sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(SqlTestData.CreateFactory(_fixture))), seed.Current, DateTimeOffset.UtcNow);
         await AddRepeatedBlockedIssuesAsync(seed, 220);
         var now = DateTimeOffset.UtcNow;
         var claim = await new SqlSourceScanStore(SqlTestData.CreateFactory(_fixture), new IssueCleanupClock(now))
@@ -81,7 +81,7 @@ public sealed partial class DocumentPublicationIntegrationTests
     public async Task Cleanup_rechecks_publication_and_scan_authority_after_the_completion_commit(string change)
     {
         var seed = await SeedOfficeEventChainAsync();
-        await PublishAsync(new SqlStageTransitionStore(SqlTestData.CreateFactory(_fixture)), seed.Current, DateTimeOffset.UtcNow);
+        await PublishAsync(new SqlStageTransitionStore(SqlTestData.CreateFactory(_fixture), sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(SqlTestData.CreateFactory(_fixture))), seed.Current, DateTimeOffset.UtcNow);
         var now = DateTimeOffset.UtcNow;
         var ordinary = new SqlSourceScanStore(SqlTestData.CreateFactory(_fixture), new IssueCleanupClock(now));
         var claim = await ordinary.ClaimNextReleasedAsync("cleanup-race", now, TimeSpan.FromMinutes(30), CancellationToken.None);
@@ -110,7 +110,7 @@ public sealed partial class DocumentPublicationIntegrationTests
     public async Task Current_issue_page_uses_one_bounded_set_query_with_a_large_unrelated_backlog()
     {
         var seed = await SeedOfficeEventChainAsync();
-        await PublishAsync(new SqlStageTransitionStore(SqlTestData.CreateFactory(_fixture)), seed.Current, DateTimeOffset.UtcNow);
+        await PublishAsync(new SqlStageTransitionStore(SqlTestData.CreateFactory(_fixture), sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(SqlTestData.CreateFactory(_fixture))), seed.Current, DateTimeOffset.UtcNow);
         await using (var arrange = Context())
         {
             for (var index = 0; index < 2_500; index++)
@@ -148,7 +148,7 @@ public sealed partial class DocumentPublicationIntegrationTests
     public async Task Cleanup_setup_failure_preserves_scan_completion_and_caller_cancellation(bool callerCancelled)
     {
         var seed = await SeedOfficeEventChainAsync();
-        await PublishAsync(new SqlStageTransitionStore(SqlTestData.CreateFactory(_fixture)), seed.Current, DateTimeOffset.UtcNow);
+        await PublishAsync(new SqlStageTransitionStore(SqlTestData.CreateFactory(_fixture), sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(SqlTestData.CreateFactory(_fixture))), seed.Current, DateTimeOffset.UtcNow);
         var now = DateTimeOffset.UtcNow;
         var claim = await new SqlSourceScanStore(SqlTestData.CreateFactory(_fixture), new IssueCleanupClock(now))
             .ClaimNextReleasedAsync("cleanup-setup", now, TimeSpan.FromMinutes(5), CancellationToken.None);
@@ -179,7 +179,7 @@ public sealed partial class DocumentPublicationIntegrationTests
     public async Task Bounded_cleanup_cursor_reaches_resolved_tail_without_discarding_unresolved_prefix_or_health_evidence()
     {
         var seed = await SeedOfficeEventChainAsync();
-        await PublishAsync(new SqlStageTransitionStore(SqlTestData.CreateFactory(_fixture)), seed.Current, DateTimeOffset.UtcNow);
+        await PublishAsync(new SqlStageTransitionStore(SqlTestData.CreateFactory(_fixture), sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(SqlTestData.CreateFactory(_fixture))), seed.Current, DateTimeOffset.UtcNow);
         await using (var arrange = Context())
         {
             (await arrange.SourceRootConfigurations.SingleAsync()).HealthEvidenceJson = "{\"existingEvidence\":\"preserve\"}";
@@ -216,7 +216,7 @@ public sealed partial class DocumentPublicationIntegrationTests
     public async Task Contended_cleanup_leaves_completed_scan_and_events_intact_while_an_ordinary_writer_progresses()
     {
         var seed = await SeedOfficeEventChainAsync();
-        await PublishAsync(new SqlStageTransitionStore(SqlTestData.CreateFactory(_fixture)), seed.Current, DateTimeOffset.UtcNow);
+        await PublishAsync(new SqlStageTransitionStore(SqlTestData.CreateFactory(_fixture), sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(SqlTestData.CreateFactory(_fixture))), seed.Current, DateTimeOffset.UtcNow);
         var now = DateTimeOffset.UtcNow;
         var log = new IssueCleanupLog();
         var store = new SqlSourceScanStore(SqlTestData.CreateFactory(_fixture), new IssueCleanupClock(now), logger: log);

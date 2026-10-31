@@ -47,7 +47,7 @@ public sealed class SqlGpuExecutorDispatchTests(NativeSqlServerFixture fixture) 
         var batch = await read.GpuBatches.SingleAsync();
         var handle = new GpuExecutorBatchHandle(batch.Id, "slot-a", "test-executor", batch.AdmissionGeneration, batch.Id);
         var operationId = Guid.NewGuid();
-        var store = new SqlGpuSchedulerStore(factory);
+        var store = new SqlGpuSchedulerStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
 
         Assert.True((await store.AcknowledgeAsync(new GpuExecutorAcknowledgement(operationId, handle), CancellationToken.None)).Accepted);
         Assert.True((await store.AcknowledgeAsync(new GpuExecutorAcknowledgement(operationId, handle), CancellationToken.None)).Accepted);
@@ -70,7 +70,7 @@ public sealed class SqlGpuExecutorDispatchTests(NativeSqlServerFixture fixture) 
         var setup = await admission.CreateEnvironmentAsync();
         var taskId = await admission.AddReadyAsync(setup, GpuPriorityLane.DocumentIndexing, "runtime", "settings", 10);
         var factory = new InterceptingDbContextFactory(_fixture.ConnectionString, new ThrowOnSecondSaveChangesInterceptor());
-        var store = new SqlGpuSchedulerStore(factory);
+        var store = new SqlGpuSchedulerStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
 
         await Assert.ThrowsAsync<InjectedMidTransactionFailure>(async () =>
             await store.RunAdmissionRoundAsync(
@@ -101,7 +101,7 @@ public sealed class SqlGpuExecutorDispatchTests(NativeSqlServerFixture fixture) 
         await admission.AddReadyAsync(factory, GpuPriorityLane.DocumentIndexing, "runtime", "settings", 10);
         var operationId = Guid.NewGuid();
         var decisions = 0;
-        var store = new SqlGpuSchedulerStore(factory);
+        var store = new SqlGpuSchedulerStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
 
         var first = await store.RunAdmissionRoundAsync(
             operationId, GpuSchedulerWakeReason.WorkReady, Options,
@@ -130,7 +130,7 @@ public sealed class SqlGpuExecutorDispatchTests(NativeSqlServerFixture fixture) 
     public async Task Rejected_result_receipts_leave_dispatch_task_slot_and_result_evidence_unchanged()
     {
         var (factory, taskId, handle) = await CreateAdmittedDispatchAsync();
-        var store = new SqlGpuSchedulerStore(factory);
+        var store = new SqlGpuSchedulerStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         var before = await ReadSnapshotAsync(factory, taskId);
         var firstOperationId = Guid.NewGuid();
 
@@ -155,7 +155,7 @@ public sealed class SqlGpuExecutorDispatchTests(NativeSqlServerFixture fixture) 
     public async Task Acknowledged_dispatch_rejects_stale_generation_and_mismatched_executor_receipts_without_mutation()
     {
         var (factory, taskId, handle) = await CreateAdmittedDispatchAsync();
-        var store = new SqlGpuSchedulerStore(factory);
+        var store = new SqlGpuSchedulerStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         Assert.True((await store.AcknowledgeAsync(new GpuExecutorAcknowledgement(Guid.NewGuid(), handle), CancellationToken.None)).Accepted);
         var before = await ReadSnapshotAsync(factory, taskId);
 
@@ -175,7 +175,7 @@ public sealed class SqlGpuExecutorDispatchTests(NativeSqlServerFixture fixture) 
     public async Task Terminal_dispatch_rejects_late_result_receipt_without_replacing_the_immutable_snapshot()
     {
         var (factory, taskId, handle) = await CreateAdmittedDispatchAsync();
-        var store = new SqlGpuSchedulerStore(factory);
+        var store = new SqlGpuSchedulerStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         Assert.True((await store.AcknowledgeAsync(new GpuExecutorAcknowledgement(Guid.NewGuid(), handle), CancellationToken.None)).Accepted);
         Assert.True((await store.RecordReceiptAsync(CompletedReceipt(Guid.NewGuid(), handle, taskId), CancellationToken.None)).Accepted);
         Assert.True((await store.ApplyBatchCallbackAsync(
@@ -195,7 +195,7 @@ public sealed class SqlGpuExecutorDispatchTests(NativeSqlServerFixture fixture) 
     public async Task Terminal_dispatch_rejects_new_trusted_evidence_without_replacing_the_preterminal_evidence_or_lifecycle_snapshot()
     {
         var (factory, taskId, handle) = await CreateAdmittedDispatchAsync();
-        var store = new SqlGpuSchedulerStore(factory);
+        var store = new SqlGpuSchedulerStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         var preterminalEvidence = new GpuExecutorTrustedEvidence(
             Guid.NewGuid(),
             handle,
@@ -239,7 +239,7 @@ public sealed class SqlGpuExecutorDispatchTests(NativeSqlServerFixture fixture) 
     public async Task Different_operation_duplicate_result_receipt_cannot_replace_the_first_immutable_receipt()
     {
         var (factory, taskId, handle) = await CreateAdmittedDispatchAsync();
-        var store = new SqlGpuSchedulerStore(factory);
+        var store = new SqlGpuSchedulerStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         Assert.True((await store.AcknowledgeAsync(new GpuExecutorAcknowledgement(Guid.NewGuid(), handle), CancellationToken.None)).Accepted);
         Assert.True((await store.RecordReceiptAsync(CompletedReceipt(Guid.NewGuid(), handle, taskId), CancellationToken.None)).Accepted);
         var afterFirst = await ReadSnapshotAsync(factory, taskId);
@@ -254,7 +254,7 @@ public sealed class SqlGpuExecutorDispatchTests(NativeSqlServerFixture fixture) 
     public async Task Delivery_uncertainty_and_trusted_evidence_replay_or_reject_divergence_without_unrelated_mutation()
     {
         var (factory, taskId, handle) = await CreateAdmittedDispatchAsync();
-        var store = new SqlGpuSchedulerStore(factory);
+        var store = new SqlGpuSchedulerStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         var deliveryOperationId = Guid.NewGuid();
         Assert.True((await store.MarkDeliveryUncertainAsync(new GpuExecutorDeliveryUncertainty(deliveryOperationId, handle), CancellationToken.None)).Accepted);
         Assert.True((await store.MarkDeliveryUncertainAsync(new GpuExecutorDeliveryUncertainty(deliveryOperationId, handle), CancellationToken.None)).Accepted);
@@ -287,7 +287,7 @@ public sealed class SqlGpuExecutorDispatchTests(NativeSqlServerFixture fixture) 
         var secondTaskId = await admission.AddReadyAsync(factory, GpuPriorityLane.DocumentIndexing, "runtime", "settings", 10);
         await SqlGpuAdmissionTests.AdmitAsync(factory, SqlGpuAdmissionTests.Admit("slot-a"));
         var handle = await ReadHandleAsync(factory);
-        var store = new SqlGpuSchedulerStore(factory);
+        var store = new SqlGpuSchedulerStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         var callback = new GpuBatchCallback(handle, GpuBatchCallbackKind.Completed,
             [new GpuMiniTaskBoundaryOutcome(firstTaskId, GpuMiniTaskBoundaryDisposition.Completed), new GpuMiniTaskBoundaryOutcome(secondTaskId, GpuMiniTaskBoundaryDisposition.Completed)], true);
         var before = await ReadSnapshotAsync(factory, firstTaskId);
@@ -311,7 +311,7 @@ public sealed class SqlGpuExecutorDispatchTests(NativeSqlServerFixture fixture) 
     public async Task Trusted_evidence_does_not_release_capacity_until_diagnostic_then_reconciliation()
     {
         var (factory, taskId, handle) = await CreateAdmittedDispatchAsync();
-        var store = new SqlGpuSchedulerStore(factory);
+        var store = new SqlGpuSchedulerStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         var evidenceOperationId = Guid.NewGuid();
         Assert.True((await store.RecordTrustedEvidenceAsync(new GpuExecutorTrustedEvidence(
             evidenceOperationId, handle, "test-verifier", DateTimeOffset.Parse("2026-08-05T08:00:00+00:00"),

@@ -24,7 +24,7 @@ public sealed class GpuInteractiveExecutorTests : IAsyncLifetime
     {
         await SqlTestData.ClearPipelineAsync(fixture);
         var factory = SqlTestData.CreateFactory(fixture);
-        var store = new SqlGpuSchedulerStore(factory);
+        var store = new SqlGpuSchedulerStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         await using (var setup = await factory.CreateDbContextAsync())
         {
             setup.GpuCapacitySlots.Add(new GpuCapacitySlotEntity
@@ -48,7 +48,7 @@ public sealed class GpuInteractiveExecutorTests : IAsyncLifetime
         var factory = SqlTestData.CreateFactory(fixture);
         var clock = new ManualClock(DateTimeOffset.UtcNow);
         var store = new SqlGpuSchedulerStore(factory, timeProvider: clock,
-            interactiveExecutionTimeout: TimeSpan.FromSeconds(20));
+            interactiveExecutionTimeout: TimeSpan.FromSeconds(20), sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         await using (var setup = await factory.CreateDbContextAsync())
         {
             setup.GpuCapacitySlots.Add(new GpuCapacitySlotEntity { SlotKey = "gpu-0", State = 0, UpdatedAtUtc = clock.GetUtcNow() });
@@ -91,7 +91,7 @@ public sealed class GpuInteractiveExecutorTests : IAsyncLifetime
         var factory = SqlTestData.CreateFactory(fixture);
         var clock = new ManualClock(DateTimeOffset.UtcNow);
         var store = new SqlGpuSchedulerStore(factory, timeProvider: clock,
-            interactiveExecutionTimeout: TimeSpan.FromSeconds(20));
+            interactiveExecutionTimeout: TimeSpan.FromSeconds(20), sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         await using (var setup = await factory.CreateDbContextAsync())
         {
             setup.GpuCapacitySlots.Add(new GpuCapacitySlotEntity { SlotKey = "gpu-0", State = 0, UpdatedAtUtc = clock.GetUtcNow() });
@@ -132,7 +132,7 @@ public sealed class GpuInteractiveExecutorTests : IAsyncLifetime
         await SqlTestData.ClearPipelineAsync(fixture);
         var factory = SqlTestData.CreateFactory(fixture);
         var clock = new ManualClock(DateTimeOffset.UtcNow);
-        var store = new SqlGpuSchedulerStore(factory, timeProvider: clock);
+        var store = new SqlGpuSchedulerStore(factory, timeProvider: clock, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         await using var context = await factory.CreateDbContextAsync();
         context.GpuCapacitySlots.Add(new GpuCapacitySlotEntity { SlotKey = "gpu-0", State = 0, UpdatedAtUtc = clock.GetUtcNow() });
         await context.SaveChangesAsync();
@@ -182,7 +182,7 @@ public sealed class GpuInteractiveExecutorTests : IAsyncLifetime
     {
         await SqlTestData.ClearPipelineAsync(fixture);
         var factory = SqlTestData.CreateFactory(fixture);
-        var store = new SqlGpuSchedulerStore(factory);
+        var store = new SqlGpuSchedulerStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         await using (var setup = await factory.CreateDbContextAsync())
         {
             setup.GpuCapacitySlots.Add(new GpuCapacitySlotEntity { SlotKey = "gpu-0", State = 0, UpdatedAtUtc = DateTimeOffset.UtcNow });
@@ -225,7 +225,7 @@ public sealed class GpuInteractiveExecutorTests : IAsyncLifetime
     {
         await SqlTestData.ClearPipelineAsync(fixture);
         var factory = SqlTestData.CreateFactory(fixture);
-        var store = new SqlGpuSchedulerStore(factory);
+        var store = new SqlGpuSchedulerStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         await using (var setup = await factory.CreateDbContextAsync())
         {
             setup.GpuCapacitySlots.Add(new GpuCapacitySlotEntity { SlotKey = "gpu-0", State = 0, UpdatedAtUtc = DateTimeOffset.UtcNow });
@@ -254,7 +254,7 @@ public sealed class GpuInteractiveExecutorTests : IAsyncLifetime
     {
         await SqlTestData.ClearPipelineAsync(fixture);
         var factory = SqlTestData.CreateFactory(fixture);
-        var store = new SqlGpuSchedulerStore(factory);
+        var store = new SqlGpuSchedulerStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         await using (var setup = await factory.CreateDbContextAsync())
         {
             setup.GpuCapacitySlots.Add(new GpuCapacitySlotEntity { SlotKey = "gpu-0", State = 0, UpdatedAtUtc = DateTimeOffset.UtcNow });
@@ -292,7 +292,7 @@ public sealed class GpuInteractiveExecutorTests : IAsyncLifetime
         await SqlTestData.ClearPipelineAsync(fixture);
         var factory = SqlTestData.CreateFactory(fixture);
         var clock = new ManualClock(DateTimeOffset.UtcNow);
-        var store = new SqlGpuSchedulerStore(factory, timeProvider: clock);
+        var store = new SqlGpuSchedulerStore(factory, timeProvider: clock, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         await using (var setup = await factory.CreateDbContextAsync())
         {
             setup.GpuCapacitySlots.Add(new GpuCapacitySlotEntity { SlotKey = "gpu-0", State = 0, UpdatedAtUtc = DateTimeOffset.UtcNow });
@@ -350,7 +350,7 @@ public sealed class GpuInteractiveExecutorTests : IAsyncLifetime
         {
             if (failureMode == 7 && Interlocked.Increment(ref uncertaintyResponses) == 1) throw new ResponseLostException();
             return ValueTask.CompletedTask;
-        });
+        }, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         await using (var setup = await factory.CreateDbContextAsync())
         {
             setup.GpuCapacitySlots.Add(new GpuCapacitySlotEntity { SlotKey = "gpu-0", State = 0, UpdatedAtUtc = DateTimeOffset.UtcNow });

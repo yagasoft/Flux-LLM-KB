@@ -100,7 +100,7 @@ public sealed partial class SourceJournalStoreIntegrationTests(NativeSqlServerFi
             Assert.Equal(5, state.NamespaceGeneration);
             var debt = Assert.Single(await verify.SourcePendingChanges.Where(x => x.SourceRootId == rootId).ToArrayAsync());
             Assert.Equal(".", debt.RelativePath);
-            Assert.Equal(SourcePendingReasons.NamespaceMetadata, debt.ReasonFlags);
+            Assert.Equal(SourcePendingReasons.NamespaceMetadata | SourcePendingReasons.RemovalPending, debt.ReasonFlags);
             Assert.Equal(started.AddMinutes(15), debt.NotBeforeUtc);
             Assert.False(await verify.SourceScanRequests.AnyAsync(x => x.SourceRootId == rootId));
             Assert.Equal(600, (await verify.SourceVolumeJournalCheckpoints.SingleAsync(x => x.VolumeIdentity == volume)).NextUsn);

@@ -809,6 +809,16 @@ public sealed class ScopedCorpusRetrievalTests(NativeSqlServerFixture fixture) :
         {
             AddPublishedText(context, rootId, @"C:\archive", "member-a.txt", ["archive marker a"], originKind: 1);
             AddPublishedText(context, rootId, @"C:\archive", "member-b.txt", ["archive marker b"], originKind: 1);
+            var physicalArchiveId = Guid.NewGuid();
+            context.SourceRevisions.Add(new SourceRevisionEntity
+            {
+                Id = physicalArchiveId, SourceRootId = rootId, OriginKind = 0, Revision = 1,
+                StableSourceIdentity = "physical-archive:" + physicalArchiveId,
+                CanonicalPath = @"C:\archive\container.zip", ContentSha256 = Hash("physical archive"),
+                ByteLength = 16, Classification = "Archive", Extension = ".zip", DiscoveredAtUtc = DateTimeOffset.UtcNow
+            });
+            foreach (var member in context.SourceRevisions.Local.Where(x => x.SourceRootId == rootId && x.OriginKind == 1))
+                member.ParentSourceRevisionId = physicalArchiveId;
             await context.SaveChangesAsync();
         }
         var codec = new TestEvidenceCodec();

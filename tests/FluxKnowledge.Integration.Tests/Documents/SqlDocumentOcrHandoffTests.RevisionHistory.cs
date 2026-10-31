@@ -21,7 +21,7 @@ public sealed partial class SqlDocumentOcrHandoffTests
         await using var arranged = await seed.Factory.CreateDbContextAsync();
         var previousId = Assert.IsType<Guid>((await arranged.SourceRevisions.SingleAsync(value => value.Id == seed.ParentId)).ParentSourceRevisionId);
         var descriptor = pdf ? PdfDocumentProcessor.Capability : ImageDocumentInputProcessor.Capability;
-        var store = new SqlRetainedProcessorBranchStore(seed.Factory, TimeProvider.System);
+        var store = new SqlRetainedProcessorBranchStore(seed.Factory, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(seed.Factory));
         var request = new DocumentReprocessRequest(new(seed.ParentId), seed.Hash, descriptor.ProcessorFingerprint, seed.FailedJobId, 1);
         var admitted = await store.RequestDocumentReprocessAsync(request, CancellationToken.None);
         Assert.True(admitted.Created);
@@ -47,7 +47,7 @@ public sealed partial class SqlDocumentOcrHandoffTests
     public async Task Physical_revision_history_never_recovers_an_ambiguous_current_binding(string phase)
     {
         var seed = await CreateSettledImageFailureAsync(withPhysicalHistory: true, differentHistoryIdentity: true);
-        var store = new SqlRetainedProcessorBranchStore(seed.Factory, TimeProvider.System);
+        var store = new SqlRetainedProcessorBranchStore(seed.Factory, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(seed.Factory));
         DocumentReprocessRequestResult? admitted = null;
         RetainedProcessorClaim? claim = null;
         RetainedProcessorCompletion? completion = null;
@@ -85,7 +85,7 @@ public sealed partial class SqlDocumentOcrHandoffTests
     public async Task Physical_revision_history_does_not_make_a_derived_owner_or_the_earlier_contract_eligible()
     {
         var seed = await CreateSettledImageFailureAsync(withPhysicalHistory: true, parentOriginKind: 2);
-        var store = new SqlRetainedProcessorBranchStore(seed.Factory, TimeProvider.System);
+        var store = new SqlRetainedProcessorBranchStore(seed.Factory, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(seed.Factory));
         Assert.False((await store.RequestDocumentReprocessAsync(ImageRecoveryRequest(seed), CancellationToken.None)).Created);
         seed = await CreateSettledImageFailureAsync(withPhysicalHistory: true);
         store = new(seed.Factory, TimeProvider.System);

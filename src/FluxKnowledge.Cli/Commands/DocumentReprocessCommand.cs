@@ -4,6 +4,7 @@ using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Sources;
 using FluxKnowledge.Domain.Sources;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
+using FluxKnowledge.Infrastructure.SqlServer.Workers;
 using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 
@@ -125,7 +126,8 @@ public static class DocumentReprocessCommand
             var factory = new CliDbContextFactory(connectionString);
             var sourceReader = new SqlRetainedSourceReader(factory, LiveRootLayout.Production.RetainedRoot);
             var artifactWriter = new SqlRetainedArtifactWriter(factory, LiveRootLayout.Production.RetainedRoot);
-            var branchStore = new SqlRetainedProcessorBranchStore(factory, TimeProvider.System);
+            var admission = new SourceWorkAdmission();
+            var branchStore = new SqlRetainedProcessorBranchStore(factory, TimeProvider.System, sourceAdmission: admission);
             var capabilityService = new SourceCapabilityService(
                 new SqlSourceActivityStore(factory, TimeProvider.System),
                 new LocalSourceCapabilityHandlerRegistry(
@@ -135,16 +137,28 @@ public static class DocumentReprocessCommand
                     new ImageDocumentInputCapabilityHandler()
                 ]));
             return new ExecutorLease(
-                new LocalDocumentReprocessExecutor(
+                new AdmittedExecutor(factory, admission, new LocalDocumentReprocessExecutor(
                     branchStore,
                     sourceReader,
                     capabilityService,
                     new VsdxStructuralTextProcessor(artifactWriter),
-                    new PdfDocumentProcessor(artifactWriter), imageProcessor: new ImageDocumentInputProcessor()),
+                    new PdfDocumentProcessor(artifactWriter), imageProcessor: new ImageDocumentInputProcessor())),
                 sourceReader);
         }
 
         public void Dispose() => sourceReader.Dispose();
+    }
+
+    private sealed class AdmittedExecutor(IDbContextFactory<FluxKnowledgeDbContext> factory,
+        SourceWorkAdmission admission, IDocumentReprocessExecutor inner) : IDocumentReprocessExecutor
+    {
+        public async ValueTask<DocumentReprocessCommandResult> ExecuteAsync(DocumentReprocessRequest request, CancellationToken ct)
+        {
+            var ready = await SourceCommandAdmission.PrepareAsync(factory, request.SourceRevisionId,
+                request.ExpectedInputSha256, LiveRootLayout.Production.RetainedRoot, ct).ConfigureAwait(false);
+            foreach (var root in ready.ReadAdmittedRoots()) admission.Admit(root.RootId, root.ConfigurationRevision);
+            return await inner.ExecuteAsync(request, ct).ConfigureAwait(false);
+        }
     }
 
     private sealed class CliDbContextFactory(string connectionString) : IDbContextFactory<FluxKnowledgeDbContext>
