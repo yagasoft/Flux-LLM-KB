@@ -226,7 +226,7 @@ public sealed partial class DeletedSourceRecoveryIntegrationTests(NativeSqlServe
         else Assert.Null(claimed);
     }
 
-    private sealed class Scenario : IAsyncDisposable
+    internal sealed class Scenario : IAsyncDisposable
     {
         private readonly string _area = Path.Combine(@"I:\Codex Workspaces\Staging\FluxKnowledge", "Removal-" + Guid.NewGuid().ToString("N"));
         internal string Files => Path.Combine(_area, "Sources");

@@ -137,7 +137,7 @@ public sealed class SegmentCatalogueMaintenanceTests(NativeSqlServerFixture fixt
         await SqlToUsearchRebuildTests.AssertSegmentedOracleAsync(environment);
     }
 
-    private static async Task<SqlSegmentRetirementOperations> OperationsAsync(SqlToUsearchRebuildTests.PipelineEnvironment environment, IGpuInteractiveOwnerProbe probe)
+    internal static async Task<SqlSegmentRetirementOperations> OperationsAsync(SqlToUsearchRebuildTests.PipelineEnvironment environment, IGpuInteractiveOwnerProbe probe)
     {
         var recovery = Path.Combine(environment.IndexRoot, "catalogue-recovery"); Directory.CreateDirectory(recovery);
         await SqlToUsearchRebuildTests.AuditRecoveryAsync(environment, recovery);

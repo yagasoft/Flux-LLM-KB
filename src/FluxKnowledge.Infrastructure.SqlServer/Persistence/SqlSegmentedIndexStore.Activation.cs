@@ -12,7 +12,7 @@ public sealed partial class SqlSegmentedIndexStore
     public async ValueTask AbandonAsync(Guid candidateId, CancellationToken cancellationToken)
     {
         await using var strategyContext = await contexts.CreateDbContextAsync(cancellationToken);
-        await strategyContext.Database.CreateExecutionStrategy().ExecuteAsync(async () =>
+        var cleanupRoot = await strategyContext.Database.CreateExecutionStrategy().ExecuteAsync(async () =>
         {
             await using var context = await contexts.CreateDbContextAsync(cancellationToken);
             await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
@@ -21,7 +21,7 @@ public sealed partial class SqlSegmentedIndexStore
             var candidate = await context.IndexPublicationCandidates.FromSqlInterpolated(
                 $"SELECT * FROM [IndexPublicationCandidates] WITH (UPDLOCK, HOLDLOCK) WHERE [Id] = {candidateId}")
                 .SingleOrDefaultAsync(cancellationToken);
-            if (candidate is null) return; // Preparation can conflict before its first committed row.
+            if (candidate is null) return false; // Preparation can conflict before its first committed row.
             if (candidate.BuildPurpose != 0)
                 throw new InvalidOperationException("index-rebuild-requires-explicit-abandonment");
             var owner = ownerProbe.Current;
@@ -29,14 +29,17 @@ public sealed partial class SqlSegmentedIndexStore
             if (candidate.OwnerProcessId != owner.ProcessId || candidate.OwnerStartedAtUtc != owner.StartedAtUtc ||
                 candidate.OwnerMachineFingerprint != owner.MachineFingerprint)
                 throw new InvalidOperationException("index-candidate-abandonment-owner-mismatch");
-            if (candidate.State is 2 or 3) return; // A committed activation wins; replay cannot revoke it.
+            var root = IsRootRefresh(candidate);
+            if (candidate.State is 2 or 3) return root; // Replay cannot revoke a committed activation.
             if (candidate.State is not (0 or 1)) throw new InvalidOperationException("index-candidate-state-unsupported");
             candidate.State = 3;
             candidate.CompletedAtUtc = clock.GetUtcNow();
-            await context.IndexCandidateMembers.Where(value => value.CandidateId == candidateId).ExecuteDeleteAsync(cancellationToken);
+            if (!root) await context.IndexCandidateMembers.Where(value => value.CandidateId == candidateId).ExecuteDeleteAsync(cancellationToken);
             await context.SaveChangesAsync(cancellationToken);
             await transaction.CommitAsync(cancellationToken);
+            return root;
         });
+        if (cleanupRoot) await CleanupTerminalRootWorklistAsync(candidateId, cancellationToken);
     }
 
     public async ValueTask<SegmentedProjectionState> ReadProjectionAsync(CancellationToken cancellationToken)
@@ -57,8 +60,11 @@ public sealed partial class SqlSegmentedIndexStore
         if (snapshot.SegmentedCandidateId is not { } id || snapshot.Generation.FormatVersion != 2 || snapshot.Vectors.Count != 0)
             throw new InvalidOperationException("segmented-refresh-proof-invalid");
         await using var strategyContext = await contexts.CreateDbContextAsync(cancellationToken);
-        return await strategyContext.Database.CreateExecutionStrategy().ExecuteAsync(async () =>
+        var result = await strategyContext.Database.CreateExecutionStrategy().ExecuteAsync(async () =>
         {
+            RootRefreshProof? rootProof;
+            try { rootProof = await ReadRootRefreshProofAsync(id, cancellationToken); }
+            catch (PublicationSnapshotConflictException) { return (Activated: false, Cleanup: false); }
             await using var context = await contexts.CreateDbContextAsync(cancellationToken);
             await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
             await AcquireSharedTransactionAsync(context, cancellationToken);
@@ -68,20 +74,22 @@ public sealed partial class SqlSegmentedIndexStore
                 throw new InvalidOperationException("segmented-refresh-proof-invalid");
             // Held validation may activate a sealed, derived-only refresh. Draft
             // publication and canonical mutations retain their separate hold fences.
-            if (deploymentHold?.IsHeld == true && candidate.State != 1) return false;
-            if (candidate.State == 2) return true;
-            try { candidate = await ValidateRefreshBeforeAsync(context, snapshot, cancellationToken); }
-            catch (PublicationSnapshotConflictException) { return false; }
+            if (deploymentHold?.IsHeld == true && candidate.State != 1) return (Activated: false, Cleanup: false);
+            if (candidate.State == 2) return (Activated: true, Cleanup: IsRootRefresh(candidate));
+            try { candidate = await ValidateRefreshBeforeAsync(context, snapshot, cancellationToken, rootProof); }
+            catch (PublicationSnapshotConflictException) { return (Activated: false, Cleanup: false); }
             var state = await context.IndexState.SingleAsync(value => value.Id == 1, cancellationToken);
-            await ActivateAsync(context, candidate, state, clock.GetUtcNow(), cancellationToken);
+            await ActivateAsync(context, candidate, state, clock.GetUtcNow(), cancellationToken, rootProof);
             await context.SaveChangesAsync(cancellationToken);
             await transaction.CommitAsync(cancellationToken);
-            return true;
+            return (Activated: true, Cleanup: rootProof is not null);
         });
+        if (result.Cleanup) await CleanupTerminalRootWorklistAsync(id, cancellationToken);
+        return result.Activated;
     }
 
     internal static async Task<IndexPublicationCandidateEntity> ValidateRefreshBeforeAsync(FluxKnowledgeDbContext context,
-        IndexGenerationCandidateSnapshot snapshot, CancellationToken cancellationToken)
+        IndexGenerationCandidateSnapshot snapshot, CancellationToken cancellationToken, RootRefreshProof? rootProof = null)
     {
         if (snapshot.SegmentedCandidateId is not { } id || snapshot.Generation.FormatVersion != 2 || snapshot.Vectors.Count != 0)
             throw new InvalidOperationException("segmented-refresh-proof-invalid");
@@ -90,9 +98,15 @@ public sealed partial class SqlSegmentedIndexStore
         if (candidate.BuildPurpose != 0 || candidate.State != 1 || candidate.DraftGenerationId is not null || candidate.ResultGenerationId != snapshot.Generation.Id ||
             !candidate.WorklistComplete || snapshot.ExpectedCorpusStamp != new CorpusPublicationStamp(candidate.CorpusEpoch, candidate.ExpectedCorpusVersion) ||
             snapshot.Generation.CorpusStamp != snapshot.ExpectedCorpusStamp ||
-            Describe(await context.IndexGenerations.AsNoTracking().SingleAsync(value => value.Id == snapshot.Generation.Id, cancellationToken)) != snapshot.Generation ||
-            await HashCurrentAsync(context, candidate, cancellationToken) != (candidate.BeforeCount, candidate.BeforeChecksum))
+            Describe(await context.IndexGenerations.AsNoTracking().SingleAsync(value => value.Id == snapshot.Generation.Id, cancellationToken)) != snapshot.Generation)
             throw new InvalidOperationException("segmented-refresh-proof-invalid");
+        if (rootProof is not null)
+        {
+            RequireRootProof(candidate, rootProof);
+            if (!await RootMembershipMatchesAsync(context, candidate, 0, cancellationToken)) throw InvalidRootProof();
+        }
+        else if (await HashCurrentAsync(context, candidate, cancellationToken) != (candidate.BeforeCount, candidate.BeforeChecksum))
+            throw InvalidRootProof();
         return candidate;
     }
 
@@ -111,6 +125,9 @@ public sealed partial class SqlSegmentedIndexStore
         await SqlPublishedPassageSelection.AcquireFenceAsync(context, cancellationToken);
         var candidate = await LockCandidateAsync(context, candidateId, cancellationToken);
         await ValidateBaseAsync(context, candidate, cancellationToken);
+        if (candidate.DraftGenerationId is not null &&
+            System.Text.Json.JsonSerializer.Deserialize<IndexAffectedScope[]>(candidate.AffectedScopesJson)!.Any(value => value.Kind == 3))
+            throw new PublicationSnapshotConflictException("Root-wide projection recovery must finish before draft activation.");
         var descriptor = manifest.Generation;
         if (candidate.State == 1 && candidate.ResultGenerationId == descriptor.Id)
         {
@@ -197,6 +214,8 @@ public sealed partial class SqlSegmentedIndexStore
     {
         var candidate = await LockCandidateAsync(context, candidateId, cancellationToken);
         await ValidateBaseAsync(context, candidate, cancellationToken);
+        if (System.Text.Json.JsonSerializer.Deserialize<IndexAffectedScope[]>(candidate.AffectedScopesJson)!.Any(value => value.Kind == 3))
+            throw new PublicationSnapshotConflictException("Root-wide projection recovery must finish before draft activation.");
         if (candidate.BuildPurpose != 0 || candidate.State != 1 || !candidate.WorklistComplete || candidate.ResultGenerationId != generation.Id ||
             candidate.DraftGenerationId is not { } draft || Describe(await context.IndexGenerations.AsNoTracking().SingleAsync(value => value.Id == generation.Id, cancellationToken)) != generation ||
             await SqlPipelineStore.ResolveDraftOriginAsync(context, draft, cancellationToken) != recordId ||
@@ -209,33 +228,47 @@ public sealed partial class SqlSegmentedIndexStore
     }
 
     internal static async Task ActivateAsync(FluxKnowledgeDbContext context, IndexPublicationCandidateEntity candidate,
-        IndexStateEntity state, DateTimeOffset now, CancellationToken cancellationToken)
+        IndexStateEntity state, DateTimeOffset now, CancellationToken cancellationToken, RootRefreshProof? rootProof = null)
     {
         if (candidate.BuildPurpose != 0) throw new InvalidOperationException("index-rebuild-requires-explicit-activation");
-        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-        long count = 0, last = 0;
-        while (true)
+        if (rootProof is not null)
         {
-            var page = await QueryEligible(context, candidate.AffectedScopesJson, last).ToArrayAsync(cancellationToken);
-            if (page.Length == 0) break;
-            AppendHash(hash, page); count += page.Length; last = page[^1].VectorId;
+            RequireRootProof(candidate, rootProof);
+            if (!await RootMembershipMatchesAsync(context, candidate, 1, cancellationToken))
+                throw new PublicationSnapshotConflictException("The affected publication changed; rebuild the candidate.");
         }
-        var digest = Convert.ToHexStringLower(hash.GetHashAndReset());
-        if (count != candidate.AfterCount || digest != candidate.AfterChecksum)
-            throw new PublicationSnapshotConflictException("The affected publication changed; rebuild the candidate.");
+        else
+        {
+            using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+            long count = 0;
+            var eligible = IsRootRefresh(candidate) ? QueryRootEligibleWindow(context, candidate.AffectedScopesJson, 0, long.MaxValue)
+                : QueryEligible(context, candidate.AffectedScopesJson, 0, paged: false);
+            await foreach (var page in ReadMemberPagesAsync(context, eligible, cancellationToken))
+            { AppendHash(hash, page); count += page.Length; }
+            var digest = Convert.ToHexStringLower(hash.GetHashAndReset());
+            if (count != candidate.AfterCount || digest != candidate.AfterChecksum)
+                throw new PublicationSnapshotConflictException("The affected publication changed; rebuild the candidate.");
+        }
         // Replace only changed ledger rows; shared segment membership is never copied per publication.
         var id = candidate.Id;
         var epoch = candidate.CorpusEpoch;
         var result = candidate.ResultGenerationId!.Value;
         var touched = await TouchedSegments(context, candidate).Distinct().ToArrayAsync(cancellationToken);
         var touchedJson = System.Text.Json.JsonSerializer.Serialize(touched);
+        var membershipChanged = candidate.BeforeCount != candidate.AfterCount || candidate.BeforeChecksum != candidate.AfterChecksum;
+        var remapSegments = touched.Length != 0;
         await context.Database.ExecuteSqlInterpolatedAsync($"""
+            IF {membershipChanged} = CAST(1 AS bit)
+            BEGIN
             DELETE [current] FROM [CurrentIndexMembers] AS [current]
             WHERE [current].[CorpusEpoch] = {epoch} AND EXISTS (
                 SELECT 1 FROM [IndexCandidateMembers] AS [before]
                 WHERE [before].[CandidateId] = {id} AND [before].[Phase] = 0 AND [before].[VectorId] = [current].[VectorId]
                   AND NOT EXISTS (SELECT 1 FROM [IndexCandidateMembers] AS [after]
                     WHERE [after].[CandidateId] = {id} AND [after].[Phase] = 1 AND [after].[VectorId] = [current].[VectorId]));
+            END;
+            IF {remapSegments} = CAST(1 AS bit)
+            BEGIN
             UPDATE [current] SET [SegmentId] = [member].[SegmentId]
             FROM [CurrentIndexMembers] AS [current]
             INNER JOIN [IndexSegmentVectors] AS [member] ON [member].[VectorId] = [current].[VectorId]
@@ -243,9 +276,19 @@ public sealed partial class SqlSegmentedIndexStore
             WHERE [current].[CorpusEpoch] = {epoch} AND [manifest].[GenerationId] = {result}
               AND [current].[SegmentId] IN (SELECT [Id] FROM OPENJSON({touchedJson}) WITH ([Id] char(64) '$'))
               AND [current].[SegmentId] <> [member].[SegmentId];
+            END;
+            IF {membershipChanged} = CAST(1 AS bit)
+            BEGIN
             UPDATE [current] SET [SourceIdentityId] = [after].[SourceIdentityId], [OwnerSourceRevisionId] = [after].[OwnerSourceRevisionId], [SourceRootId] = [after].[SourceRootId]
             FROM [CurrentIndexMembers] AS [current] INNER JOIN [IndexCandidateMembers] AS [after] ON [current].[VectorId] = [after].[VectorId]
-            WHERE [current].[CorpusEpoch] = {epoch} AND [after].[CandidateId] = {id} AND [after].[Phase] = 1;
+            WHERE [current].[CorpusEpoch] = {epoch} AND [after].[CandidateId] = {id} AND [after].[Phase] = 1
+              AND ([current].[SourceIdentityId] <> [after].[SourceIdentityId]
+                OR [current].[OwnerSourceRevisionId] <> [after].[OwnerSourceRevisionId]
+                OR ([current].[OwnerSourceRevisionId] IS NULL AND [after].[OwnerSourceRevisionId] IS NOT NULL)
+                OR ([current].[OwnerSourceRevisionId] IS NOT NULL AND [after].[OwnerSourceRevisionId] IS NULL)
+                OR [current].[SourceRootId] <> [after].[SourceRootId]
+                OR ([current].[SourceRootId] IS NULL AND [after].[SourceRootId] IS NOT NULL)
+                OR ([current].[SourceRootId] IS NOT NULL AND [after].[SourceRootId] IS NULL));
             INSERT INTO [CurrentIndexMembers] ([CorpusEpoch], [VectorId], [SegmentId], [SourceIdentityId], [OwnerSourceRevisionId], [SourceRootId])
             SELECT {epoch}, [after].[VectorId], [member].[SegmentId], [after].[SourceIdentityId], [after].[OwnerSourceRevisionId], [after].[SourceRootId]
             FROM [IndexCandidateMembers] AS [after]
@@ -253,6 +296,7 @@ public sealed partial class SqlSegmentedIndexStore
             INNER JOIN [IndexGenerationSegments] AS [manifest] ON [manifest].[SegmentId] = [member].[SegmentId]
             WHERE [after].[CandidateId] = {id} AND [after].[Phase] = 1 AND [manifest].[GenerationId] = {result}
               AND NOT EXISTS (SELECT 1 FROM [CurrentIndexMembers] AS [current] WHERE [current].[CorpusEpoch] = {epoch} AND [current].[VectorId] = [after].[VectorId]);
+            END;
             """, cancellationToken);
         // Eligibility changes are logged with the same commit, even when activation also catches up earlier changes.
         if (state.CorpusVersion != candidate.PublicationCorpusVersion)
@@ -269,24 +313,23 @@ public sealed partial class SqlSegmentedIndexStore
         state.UpdatedAtUtc = now;
         candidate.State = 2;
         candidate.CompletedAtUtc = now;
-        // The committed ledger and candidate digests are the durable proof. Drop the
-        // temporary preview rows in the activation transaction so they cannot grow
-        // with every successful publication; uncommitted candidates retain theirs.
-        await context.IndexCandidateMembers.Where(value => value.CandidateId == candidate.Id)
-            .ExecuteDeleteAsync(cancellationToken);
+        // Root worklists can contain millions of rows. Their authoritative ledger,
+        // pointer and terminal state commit together; bounded post-commit cleanup
+        // and existing catalogue maintenance remove only temporary preview rows.
+        if (rootProof is null)
+            await context.IndexCandidateMembers.Where(value => value.CandidateId == candidate.Id)
+                .ExecuteDeleteAsync(cancellationToken);
     }
 
     private static async Task<(long Count, string Digest)> HashCurrentAsync(FluxKnowledgeDbContext context,
         IndexPublicationCandidateEntity candidate, CancellationToken cancellationToken)
     {
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-        long count = 0, last = 0;
-        while (true)
-        {
-            var page = await QueryCurrent(context, candidate, last).ToArrayAsync(cancellationToken);
-            if (page.Length == 0) break;
-            AppendHash(hash, page); count += page.Length; last = page[^1].VectorId;
-        }
+        long count = 0;
+        var current = IsRootRefresh(candidate) ? QueryRootCurrentWindow(context, candidate, 0, long.MaxValue)
+            : QueryCurrent(context, candidate, 0, paged: false);
+        await foreach (var page in ReadMemberPagesAsync(context, current, cancellationToken))
+        { AppendHash(hash, page); count += page.Length; }
         return (count, Convert.ToHexStringLower(hash.GetHashAndReset()));
     }
 }

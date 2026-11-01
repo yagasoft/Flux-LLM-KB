@@ -20,7 +20,7 @@ using Xunit.Abstractions;
 namespace FluxKnowledge.Integration.Tests.Indexing;
 
 [Collection("sql-full-text")]
-public sealed class SegmentedSelectionScaleTests(NativeSqlServerFixture fixture, ITestOutputHelper output) : IClassFixture<NativeSqlServerFixture>
+public sealed partial class SegmentedSelectionScaleTests(NativeSqlServerFixture fixture, ITestOutputHelper output) : IClassFixture<NativeSqlServerFixture>
 {
     [NativeSqlServerFact]
     public async Task Indexed_scope_seeding_preserves_parent_document_owner_root_and_suppression_rules()
@@ -81,7 +81,30 @@ public sealed class SegmentedSelectionScaleTests(NativeSqlServerFixture fixture,
         {
             var rows = await SqlSegmentedIndexStore.QueryEligible(db, JsonSerializer.Serialize(new[] { scope }), 0).ToArrayAsync();
             Assert.Equal(expected.Order(), rows.Select(value => value.SourceIdentityId).Order());
+            foreach (var scopes in new[]
+            {
+                new[] { scope },
+                new[] { scope, new(1, child.SourceIdentityId), new(2, firstRevision.Id), new(3, ownerRevision.SourceRootId) }
+            })
+            {
+                var json = JsonSerializer.Serialize(scopes);
+                var ordinary = await SqlSegmentedIndexStore.QueryEligible(db, json, 0).ToArrayAsync();
+                var recovery = await SqlSegmentedIndexStore.QueryRootEligibleWindow(db, json, 0, long.MaxValue).ToArrayAsync();
+                Assert.Equal(ordinary.Select(Metadata), recovery.Select(Metadata));
+                var activation = await SqlSegmentedIndexStore.QueryRootEligibleWindow(db, json, 0, long.MaxValue, composable: true).ToArrayAsync();
+                Assert.Equal(ordinary.Select(Metadata), activation.OrderBy(value => value.VectorId).Select(Metadata));
+                var candidate = new IndexPublicationCandidateEntity
+                {
+                    CorpusEpoch = await db.IndexState.Select(value => value.CorpusEpoch).SingleAsync(), AffectedScopesJson = json
+                };
+                var oldCurrent = await SqlSegmentedIndexStore.QueryCurrent(db, candidate, 0).ToArrayAsync();
+                var boundedCurrent = await SqlSegmentedIndexStore.QueryRootCurrentWindow(db, candidate, 0, long.MaxValue).ToArrayAsync();
+                Assert.Equal(oldCurrent.Select(Metadata), boundedCurrent.Select(Metadata));
+            }
         }
+
+        static (long, string, Guid, Guid?, Guid?) Metadata(SqlSegmentedIndexStore.MemberRow row) =>
+            (row.VectorId, row.PayloadChecksum, row.SourceIdentityId, row.OwnerSourceRevisionId, row.SourceRootId);
     }
 
     [NativeSqlServerTheory]

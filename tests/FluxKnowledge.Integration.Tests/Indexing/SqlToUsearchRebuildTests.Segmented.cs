@@ -219,7 +219,19 @@ public sealed partial class SqlToUsearchRebuildTests
             await environment.Services.GetRequiredService<DerivedIndexRecoveryCoordinator>().RunOnceAsync(CancellationToken.None);
             Assert.Equal(DerivedIndexRecoveryState.Healthy, environment.Services.GetRequiredService<DerivedIndexRecoveryCoordinator>().Snapshot.State);
         }
-        else await environment.AddAndPumpAsync("A new source triggers bounded projection catch-up.");
+        else
+        {
+            await environment.AddAndPumpAsync("A new source waits for bounded root projection catch-up.");
+            await using var deferred = await environment.Factory.CreateDbContextAsync();
+            var pendingId = environment.LastReceipt!.PipelineRecordId.Value;
+            Assert.False(await deferred.PipelineRecords.Where(value => value.Id == pendingId).Select(value => value.CompletionCriteriaMet).SingleAsync());
+            Assert.False(await deferred.IndexPublicationCandidates.AnyAsync(value => value.State == 0 && value.DraftGenerationId != null));
+            await environment.Services.GetRequiredService<DerivedIndexRecoveryCoordinator>().RunOnceAsync(CancellationToken.None);
+            var request = await ClaimSegmentedPublishAsync(environment, false);
+            await new SqlStageTransitionStore(environment.Factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(environment.Factory))
+                .TransitionAsync(request, CancellationToken.None);
+            Assert.True(await deferred.PipelineRecords.Where(value => value.Id == pendingId).Select(value => value.CompletionCriteriaMet).SingleAsync());
+        }
         await AssertSegmentedOracleAsync(environment);
         await using var after = await environment.Factory.CreateDbContextAsync();
         Assert.False(await after.CurrentIndexMembers.AnyAsync(value => removed.Contains(value.VectorId)));

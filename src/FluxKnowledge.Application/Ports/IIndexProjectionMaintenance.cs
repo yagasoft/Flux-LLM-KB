@@ -9,9 +9,11 @@ public interface IIndexProjectionMaintenance
 // MaximumSegments bounds physical segment attempts; MaximumOrphanMarks separately
 // bounds orphan metadata intents. At most two manifests are marked and two reclaimed.
 // Marking a manifest examines its segment references, not just MaximumSegments rows.
+// The default member batch drains large terminal root previews without retaining
+// the publication fence over the entire cleanup. Explicit caller limits still apply.
 public sealed record IndexProjectionMaintenanceBudget(int MaximumSegments = 8, long MaximumBytes = 256 * 1024 * 1024,
     int MaximumSeconds = 15, int RetainedInactiveManifests = 2, int MaximumHistoryHours = 24, int MaximumOrphanMarks = 8,
-    int OrphanGraceMinutes = 30, int MaximumCandidateObservations = 8, int MaximumMemberDeletes = 256, int MaximumChangeDeletes = 256)
+    int OrphanGraceMinutes = 30, int MaximumCandidateObservations = 8, int MaximumMemberDeletes = 16_384, int MaximumChangeDeletes = 256)
 {
     public void Validate()
     {

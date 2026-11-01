@@ -63,6 +63,8 @@ public sealed partial class SqlSegmentedIndexStore(
     private async Task<SegmentedIndexCandidate> PrepareOwnedAsync(Guid id, Guid draftGenerationId, CancellationToken cancellationToken)
     {
         IndexPublicationCandidateEntity candidate;
+        var rootRecovery = false;
+        long rootHighWatermark = 0;
         await using (var context = await contexts.CreateDbContextAsync(cancellationToken))
         await using (var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken))
         {
@@ -99,6 +101,11 @@ public sealed partial class SqlSegmentedIndexStore(
                     await SqlPublishedPassageSelection.HasEligibleVectorsAsync(context, cancellationToken))
                     throw new InvalidOperationException("segmented-bootstrap-required");
             }
+            if (draftGenerationId != Guid.Empty && scopes.Any(value => value.Kind == 3))
+                throw new PublicationSnapshotConflictException("Root-wide projection recovery must finish before draft preview.");
+            rootRecovery = draftGenerationId == Guid.Empty && scopes.Any(value => value.Kind == 3);
+            if (rootRecovery)
+                rootHighWatermark = await context.Vectors.Select(value => (long?)value.VectorId).MaxAsync(cancellationToken) ?? 0;
             var owner = ownerProbe.Current;
             owner.Validate();
             candidate = new()
@@ -119,9 +126,15 @@ public sealed partial class SqlSegmentedIndexStore(
         long ordinal = -1;
         (long Count, string Digest) before;
         (long Count, string Digest) after;
-        await using (var preview = await contexts.CreateDbContextAsync(cancellationToken))
-        await using (var transaction = await preview.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken))
+        if (draftGenerationId == Guid.Empty)
         {
+            before = await CaptureRefreshAsync(0);
+            after = await CaptureRefreshAsync(1);
+        }
+        else
+        {
+            await using var preview = await contexts.CreateDbContextAsync(cancellationToken);
+            await using var transaction = await preview.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
             await AcquireSharedTransactionAsync(preview, cancellationToken);
             await SqlPublishedPassageSelection.AcquireFenceAsync(preview, cancellationToken);
             await ValidateBaseAsync(preview, candidate, cancellationToken);
@@ -134,20 +147,33 @@ public sealed partial class SqlSegmentedIndexStore(
             async Task<(long Count, string Digest)> CaptureAsync(int phase)
             {
                 using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-                long count = 0, last = 0;
-                while (true)
+                long count = 0;
+                var query = phase == 0 ? QueryCurrent(preview, candidate, 0, paged: false)
+                    : QueryEligible(preview, candidate.AffectedScopesJson, 0, paged: false);
+                await foreach (var page in ReadMemberPagesAsync(preview, query, cancellationToken))
                 {
                     // Before comes from the indexed active ledger, including entries invalidated by intervening changes.
-                    var page = await (phase == 0 ? QueryCurrent(preview, candidate, last) : QueryEligible(preview, candidate.AffectedScopesJson, last))
-                        .ToArrayAsync(cancellationToken);
-                    if (page.Length == 0) break;
                     AppendHash(hash, page);
                     count += page.Length;
-                    last = page[^1].VectorId;
                     await AppendPageAsync(id, phase, ++ordinal, page, cancellationToken);
                 }
                 return (count, Convert.ToHexStringLower(hash.GetHashAndReset()));
             }
+        }
+        (long Count, string Digest) actualBefore;
+        (long Count, string Digest) actualAfter;
+        byte[] stagingVersion;
+        await using (var staging = await contexts.CreateDbContextAsync(cancellationToken))
+        await using (var transaction = await staging.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken))
+        {
+            // Never retain the candidate lock while acquiring the publication
+            // fence. Staging is immutable under this lock and append ordinals.
+            var row = await LockCandidateAsync(staging, id, cancellationToken);
+            ValidateCaptureOwner(row, candidate, ordinal);
+            actualBefore = await HashWorklistAsync(staging, id, 0, cancellationToken);
+            actualAfter = await HashWorklistAsync(staging, id, 1, cancellationToken);
+            stagingVersion = row.RowVersion.ToArray();
+            await transaction.CommitAsync(cancellationToken);
         }
         await using (var context = await contexts.CreateDbContextAsync(cancellationToken))
         await using (var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken))
@@ -156,13 +182,9 @@ public sealed partial class SqlSegmentedIndexStore(
             await SqlPublishedPassageSelection.AcquireFenceAsync(context, cancellationToken);
             await ValidateBaseAsync(context, candidate, cancellationToken);
             var row = await LockCandidateAsync(context, id, cancellationToken);
-            if (row.State != 0 || row.WorklistComplete || row.LastAppendOrdinal != ordinal)
-                throw new InvalidOperationException("index-worklist-seal-conflict");
-            foreach (var phase in new[] { 0, 1 })
-            {
-                var actual = await HashWorklistAsync(context, id, phase, cancellationToken);
-                if (actual != (phase == 0 ? before : after)) throw new InvalidOperationException("index-worklist-proof-mismatch");
-            }
+            ValidateCaptureOwner(row, candidate, ordinal);
+            if (!row.RowVersion.SequenceEqual(stagingVersion)) throw new InvalidOperationException("index-worklist-seal-conflict");
+            if (actualBefore != before || actualAfter != after) throw new InvalidOperationException("index-worklist-proof-mismatch");
             row.BeforeCount = before.Count; row.BeforeChecksum = before.Digest;
             row.AfterCount = after.Count; row.AfterChecksum = after.Digest; row.WorklistComplete = true;
             row.PublicationCorpusVersion = checked(row.ExpectedCorpusVersion + (draftGenerationId == Guid.Empty || before == after ? 0 : 1));
@@ -180,6 +202,64 @@ public sealed partial class SqlSegmentedIndexStore(
             return new(id, new(row.CorpusEpoch, row.ExpectedCorpusVersion), new(row.CorpusEpoch, row.PublicationCorpusVersion),
                 draft.ModelFingerprint, draft.Dimensions, reused.Select(Describe).ToArray());
         }
+
+        async Task<(long Count, string Digest)> CaptureRefreshAsync(int phase)
+        {
+            using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+            long count = 0, last = 0;
+            while (true)
+            {
+                MemberRow[] page;
+                long through;
+                bool end;
+                await using (var context = await contexts.CreateDbContextAsync(cancellationToken))
+                await using (var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken))
+                {
+                    await AcquireSharedTransactionAsync(context, cancellationToken);
+                    await SqlPublishedPassageSelection.AcquireFenceAsync(context, cancellationToken);
+                    await ValidateBaseAsync(context, candidate, cancellationToken);
+                    if (rootRecovery)
+                    {
+                        // Bound physical work by raw keys, not the number of
+                        // eligible results. A suppressed/unrelated window may be empty.
+                        var keys = await context.Vectors.AsNoTracking().Where(value => value.VectorId > last && value.VectorId <= rootHighWatermark)
+                            .OrderBy(value => value.VectorId).Select(value => value.VectorId).Take(MetadataPageSize).ToArrayAsync(cancellationToken);
+                        end = keys.Length == 0;
+                        through = end ? last : keys[^1];
+                        page = end ? [] : await (phase == 0 ? QueryRootCurrentWindow(context, candidate, last, through)
+                            : QueryRootEligibleWindow(context, candidate.AffectedScopesJson, last, through)).ToArrayAsync(cancellationToken);
+                    }
+                    else
+                    {
+                        page = await (phase == 0 ? QueryCurrent(context, candidate, last, pageSize: MetadataPageSize)
+                            : QueryEligible(context, candidate.AffectedScopesJson, last, pageSize: MetadataPageSize)).ToArrayAsync(cancellationToken);
+                        end = page.Length == 0;
+                        through = end ? last : page[^1].VectorId;
+                    }
+                    await transaction.CommitAsync(cancellationToken);
+                }
+                if (end) break; // Raw exhaustion was fenced and stamp-checked too.
+                await AppendPageAsync(id, phase, ordinal + 1, page, cancellationToken);
+                ordinal++;
+                AppendHash(hash, page);
+                count += page.Length;
+                last = through;
+            }
+            return (count, Convert.ToHexStringLower(hash.GetHashAndReset()));
+        }
+    }
+
+    private static void ValidateCaptureOwner(IndexPublicationCandidateEntity row, IndexPublicationCandidateEntity expected, long ordinal)
+    {
+        if (row.State != 0 || row.WorklistComplete || row.LastAppendOrdinal != ordinal ||
+            row.BuildPurpose != expected.BuildPurpose || row.DraftGenerationId != expected.DraftGenerationId ||
+            row.ExpectedIndexFormat != expected.ExpectedIndexFormat || row.AffectedScopesJson != expected.AffectedScopesJson ||
+            row.RepackedSegmentsJson != expected.RepackedSegmentsJson ||
+            row.CorpusEpoch != expected.CorpusEpoch || row.ExpectedCorpusVersion != expected.ExpectedCorpusVersion ||
+            row.BaseGenerationId != expected.BaseGenerationId || row.OwnerInstanceId != expected.OwnerInstanceId ||
+            row.OwnerProcessId != expected.OwnerProcessId || row.OwnerStartedAtUtc != expected.OwnerStartedAtUtc ||
+            row.OwnerMachineFingerprint != expected.OwnerMachineFingerprint)
+            throw new InvalidOperationException("index-worklist-seal-conflict");
     }
 
     private async Task AppendPageAsync(Guid id, int phase, long ordinal, MemberRow[] page, CancellationToken cancellationToken, bool explicitRebuild = false)
@@ -195,11 +275,7 @@ public sealed partial class SqlSegmentedIndexStore(
         if (candidate.State != 0 || candidate.WorklistComplete) throw new InvalidOperationException("index-worklist-closed");
         if (candidate.LastAppendOrdinal == ordinal && candidate.LastPageChecksum == digest) return;
         if (candidate.LastAppendOrdinal + 1 != ordinal) throw new InvalidOperationException("index-worklist-page-conflict");
-        context.IndexCandidateMembers.AddRange(page.Select(value => new IndexCandidateMemberEntity
-        {
-            CandidateId = id, Phase = phase, VectorId = value.VectorId, PayloadChecksum = value.PayloadChecksum,
-            SourceIdentityId = value.SourceIdentityId, OwnerSourceRevisionId = value.OwnerSourceRevisionId, SourceRootId = value.SourceRootId
-        }));
+        await BulkAppendMembersAsync(context, id, phase, page, cancellationToken);
         candidate.LastAppendOrdinal = ordinal;
         candidate.LastPageChecksum = digest;
         await context.SaveChangesAsync(cancellationToken);
@@ -269,9 +345,11 @@ public sealed partial class SqlSegmentedIndexStore(
         INNER JOIN [DocumentPublications] AS [publication] ON [publication].[OwnerSourceRevisionId] = [owner].[Id] WHERE [scope].[Kind] = 3
         """;
 
-    internal static IQueryable<MemberRow> QueryEligible(FluxKnowledgeDbContext context, string scopes, long last) =>
-        context.Database.SqlQuery<MemberRow>(SqlPublishedPassageSelection.Bind(FormattableStringFactory.Create("""
-            SELECT TOP (256) [vector].[VectorId], [vector].[PayloadChecksum], [record].[SourceIdentityId],
+    internal static IQueryable<MemberRow> QueryEligible(FluxKnowledgeDbContext context, string scopes, long last, bool paged = true,
+        int pageSize = PageSize) =>
+        context.Database.SqlQuery<MemberRow>(SqlPublishedPassageSelection.Bind(FormattableStringFactory.Create(
+            SelectMetadata(paged, pageSize) + """
+            [vector].[VectorId], [vector].[PayloadChecksum], [record].[SourceIdentityId],
                 COALESCE([owner].[Id], CASE WHEN [retained].[OriginKind] <> 0 THEN [retained].[ParentSourceRevisionId] END, [retained].[Id]) AS [OwnerSourceRevisionId],
                 COALESCE([owner].[SourceRootId], [retained].[SourceRootId]) AS [SourceRootId]
             FROM (
@@ -291,9 +369,10 @@ public sealed partial class SqlSegmentedIndexStore(
             ORDER BY [vector].[VectorId]
             """, scopes, last)));
 
-    internal static IQueryable<MemberRow> QueryCurrent(FluxKnowledgeDbContext context, IndexPublicationCandidateEntity candidate, long last) =>
-        context.Database.SqlQuery<MemberRow>($"""
-            SELECT TOP (256) [member].[VectorId], [vector].[PayloadChecksum], [member].[SourceIdentityId], [member].[OwnerSourceRevisionId], [member].[SourceRootId]
+    internal static IQueryable<MemberRow> QueryCurrent(FluxKnowledgeDbContext context, IndexPublicationCandidateEntity candidate, long last, bool paged = true, int pageSize = PageSize)
+    {
+        FormattableString query = $"""
+            [member].[VectorId], [vector].[PayloadChecksum], [member].[SourceIdentityId], [member].[OwnerSourceRevisionId], [member].[SourceRootId]
             FROM (
                 SELECT [current].[VectorId] FROM OPENJSON({candidate.AffectedScopesJson}) WITH ([Kind] int '$.Kind', [Id] uniqueidentifier '$.Id') AS [scope]
                 INNER LOOP JOIN [CurrentIndexMembers] AS [current] ON [current].[CorpusEpoch] = {candidate.CorpusEpoch}
@@ -310,7 +389,16 @@ public sealed partial class SqlSegmentedIndexStore(
             INNER LOOP JOIN [CurrentIndexMembers] AS [member] ON [member].[CorpusEpoch] = {candidate.CorpusEpoch} AND [member].[VectorId] = [affected].[VectorId]
             INNER LOOP JOIN [Vectors] AS [vector] ON [member].[VectorId] = [vector].[VectorId]
             ORDER BY [member].[VectorId]
-            """);
+            """;
+        return context.Database.SqlQuery<MemberRow>(FormattableStringFactory.Create(
+            SelectMetadata(paged, pageSize) + query.Format, query.GetArguments()));
+    }
+
+    private static string SelectMetadata(bool paged, int pageSize)
+    {
+        if (pageSize <= 0 || pageSize > MetadataPageSize) throw new ArgumentOutOfRangeException(nameof(pageSize));
+        return paged ? "SELECT TOP (" + pageSize.ToString(CultureInfo.InvariantCulture) + ") " : "SELECT ";
+    }
 
     private static void AppendHash(IncrementalHash hash, IEnumerable<MemberRow> rows)
     {
@@ -322,18 +410,15 @@ public sealed partial class SqlSegmentedIndexStore(
     private static async Task<(long Count, string Digest)> HashWorklistAsync(FluxKnowledgeDbContext context, Guid id, int phase, CancellationToken cancellationToken)
     {
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-        long count = 0, last = 0;
-        while (true)
+        long count = 0;
+        var query = context.IndexCandidateMembers.AsNoTracking().Where(value => value.CandidateId == id && value.Phase == phase)
+            .OrderBy(value => value.VectorId).Select(value => new MemberRow
         {
-            var page = await context.IndexCandidateMembers.AsNoTracking().Where(value => value.CandidateId == id && value.Phase == phase && value.VectorId > last)
-                .OrderBy(value => value.VectorId).Take(PageSize).Select(value => new MemberRow
-                {
-                    VectorId = value.VectorId, PayloadChecksum = value.PayloadChecksum, SourceIdentityId = value.SourceIdentityId,
-                    OwnerSourceRevisionId = value.OwnerSourceRevisionId, SourceRootId = value.SourceRootId
-                }).ToArrayAsync(cancellationToken);
-            if (page.Length == 0) break;
-            AppendHash(hash, page); count += page.Length; last = page[^1].VectorId;
-        }
+            VectorId = value.VectorId, PayloadChecksum = value.PayloadChecksum, SourceIdentityId = value.SourceIdentityId,
+            OwnerSourceRevisionId = value.OwnerSourceRevisionId, SourceRootId = value.SourceRootId
+        });
+        await foreach (var page in ReadMemberPagesAsync(context, query, cancellationToken))
+        { AppendHash(hash, page); count += page.Length; }
         return (count, Convert.ToHexStringLower(hash.GetHashAndReset()));
     }
 

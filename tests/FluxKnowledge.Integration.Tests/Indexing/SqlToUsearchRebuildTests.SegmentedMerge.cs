@@ -62,6 +62,38 @@ public sealed partial class SqlToUsearchRebuildTests
     }
 
     [NativeSqlServerFact]
+    public async Task Segmented_equal_membership_refresh_remaps_repacked_segments_and_preserves_the_control()
+    {
+        await using var environment = await PipelineEnvironment.CreateAsync(_fixture,
+            string.Join(' ', Enumerable.Range(0, 350).Select(index => $"control_{index:000}")),
+            segmented: true, segmentMaximumVectors: 8);
+        await using var db = await environment.Factory.CreateDbContextAsync();
+        var control = await db.IndexSegments.AsNoTracking().SingleAsync();
+        var controlBytes = SHA256.HashData(await File.ReadAllBytesAsync(Path.Combine(control.DirectoryPath, "index.usearch")));
+        for (var index = 0; index < 4; index++) await environment.AddAndPumpAsync($"Small survivor {index}.");
+        var before = await db.CurrentIndexMembers.AsNoTracking().OrderBy(value => value.VectorId).ToArrayAsync();
+        using var scope = environment.Services.CreateScope();
+        var candidate = await scope.ServiceProvider.GetRequiredService<IIndexGenerationPublisher>()
+            .BuildAndPlaceAsync(Guid.Empty, CancellationToken.None);
+        var stored = await db.IndexPublicationCandidates.AsNoTracking().SingleAsync(value => value.Id == candidate.SegmentedCandidateId);
+        Assert.Equal(stored.BeforeCount, stored.AfterCount);
+        Assert.Equal(stored.BeforeChecksum, stored.AfterChecksum);
+        Assert.Equal(4, JsonSerializer.Deserialize<string[]>(stored.RepackedSegmentsJson)!.Length);
+        Assert.True(await scope.ServiceProvider.GetRequiredService<ISegmentedIndexStore>().TryActivateRefreshAsync(candidate, CancellationToken.None));
+        var after = await db.CurrentIndexMembers.AsNoTracking().OrderBy(value => value.VectorId).ToArrayAsync();
+        Assert.Equal(before.Select(Metadata), after.Select(Metadata));
+        Assert.Contains(before.Zip(after), pair => pair.First.SegmentId != pair.Second.SegmentId);
+        Assert.All(after.Where(value => before.Any(old => old.VectorId == value.VectorId && old.SegmentId == control.Id)),
+            value => Assert.Equal(control.Id, value.SegmentId));
+        Assert.Equal(controlBytes, SHA256.HashData(await File.ReadAllBytesAsync(Path.Combine(control.DirectoryPath, "index.usearch"))));
+        Assert.Equal(2, (await environment.ActiveGenerationAsync()).SegmentCount);
+        await AssertSegmentedOracleAsync(environment);
+
+        static (long, Guid, Guid?, Guid?) Metadata(FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.CurrentIndexMemberEntity member) =>
+            (member.VectorId, member.SourceIdentityId, member.OwnerSourceRevisionId, member.SourceRootId);
+    }
+
+    [NativeSqlServerFact]
     public async Task Segmented_small_merge_obeys_raw_byte_budget_even_when_vector_count_would_fit()
     {
         await using var environment = await PipelineEnvironment.CreateAsync(_fixture, "The first small source.", segmented: true,
