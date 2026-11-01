@@ -144,9 +144,10 @@ public sealed partial class PipelineActivitySqlTests
             }
         }
         var commands = new FileCommandTrace();
+        var runtimeTimings = new FileCostCommandTimings();
         // Match application retry/buffering policy. Statistics messages and result
         // draining above are setup diagnostics, not part of runtime qualification.
-        var runtimeFactory = new FileCostRuntimeFactory(_fixture.ConnectionString, commands);
+        var runtimeFactory = new FileCostRuntimeFactory(_fixture.ConnectionString, commands, runtimeTimings);
         await using (var policy = runtimeFactory.CreateDbContext())
             Assert.True(policy.Database.CreateExecutionStrategy().RetriesOnFailure);
         var reader = SnapshotReader(runtimeFactory);
@@ -155,6 +156,7 @@ public sealed partial class PipelineActivitySqlTests
         finally
         {
             output.WriteLine($"Initial public setup overview: elapsedMs={setupWatch.Elapsed.TotalMilliseconds:F1}; serverGc={System.Runtime.GCSettings.IsServerGC}; production retry policy; no statistics/drain instrumentation.");
+            output.WriteLine("Initial operation command timings: " + string.Join("; ", runtimeTimings.Samples));
         }
         _ = await reader.ReadPipelineFilesAsync(new(), root, 0, default);
         commands.Commands.Clear();
@@ -166,6 +168,7 @@ public sealed partial class PipelineActivitySqlTests
         {
             for (var i = 0; i < 12; i++)
             {
+                runtimeTimings.Reset();
                 var watch = Stopwatch.StartNew();
                 var overview = await reader.ReadOverviewAsync(default);
                 timings.Add(watch.Elapsed.TotalMilliseconds);
@@ -175,6 +178,7 @@ public sealed partial class PipelineActivitySqlTests
                 Assert.Equal(source.KnownFiles, PipelineFilePresentation.Categories(source).Sum(c => c.Count));
                 Assert.Equal(source.PendingFiles, overview.Activity.FileStages.Where(s => s.SourceRootId == root).Sum(s => s.Count));
                 watch.Restart();
+                runtimeTimings.Reset();
                 var page = await reader.ReadPipelineFilesAsync(new(), root, i % 1200, default);
                 timings.Add(watch.Elapsed.TotalMilliseconds);
                 Assert.Equal(30000, page.TotalCount); Assert.Equal(25, page.Items.Count);
@@ -186,9 +190,12 @@ public sealed partial class PipelineActivitySqlTests
         {
             await stopping.CancelAsync(); await writer;
             if (timings.Count != 24)
+            {
                 output.WriteLine($"Incomplete file-cost qualification: usableReads={timings.Count}/24; " +
                     $"completedReadMs={string.Join(",", timings.Select(ms => ms.ToString("F1", System.Globalization.CultureInfo.InvariantCulture)))}; " +
                     "production retry policy; no statistics/drain instrumentation.");
+                output.WriteLine("Incomplete operation command timings: " + string.Join("; ", runtimeTimings.Samples));
+            }
         }
         var p95 = timings.Order().ElementAt((int)Math.Ceiling(timings.Count * .95) - 1);
         output.WriteLine($"File-cost qualification: files=30000 currentJobs={currentJobCount} confirmedCodeProcessors=1 overlappingWrites={writerCount} usableReads={timings.Count}/24 " +
@@ -236,6 +243,12 @@ public sealed partial class PipelineActivitySqlTests
         private readonly Stopwatch _watch = Stopwatch.StartNew();
         private int _commands;
         public List<string> Samples { get; } = [];
+        public void Reset()
+        {
+            Samples.Clear();
+            _commands = 0;
+            _watch.Restart();
+        }
         public override ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(DbCommand command,
             CommandEventData eventData, InterceptionResult<DbDataReader> result, CancellationToken cancellationToken = default)
         {

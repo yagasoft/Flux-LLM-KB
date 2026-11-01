@@ -45,13 +45,14 @@ public sealed partial class SourceVerificationExecutionIntegrationTests
         await using var scenario = await Scenario.CreateAsync(fixture.ConnectionString);
         await scenario.BaselineAsync();
         var clock = new WatchClock { Now = DateTimeOffset.Parse("2026-11-01T02:00:00Z") };
+        var control = new SqlSourceScanStore(scenario.Factory, clock, sourceJournalOptions: scenario.Options);
         await SetScheduleAsync(scenario, clock.Now);
         var store = new SqlSourceVerificationStore(scenario.Factory, clock, scenario.Options, scenario.Incremental);
         await store.StartAsync(scenario.RootId, false, default);
-        var claim = Assert.IsType<ClaimedSourceScan>(await scenario.Control.ClaimNextReleasedAsync("window", clock.Now, TimeSpan.FromMinutes(10), default));
+        var claim = Assert.IsType<ClaimedSourceScan>(await control.ClaimNextReleasedAsync("window", clock.Now, TimeSpan.FromMinutes(10), default));
         var batch = (await store.PrepareAsync(claim.SourceRoot, claim.ScanRequest, default))!;
         await store.FinishBatchAsync(batch, 0, 0, "batch-limit", default);
-        await scenario.Control.CompleteAsync(claim, new(claim.SourceRoot.Id, claim.ScanRequest.Id, 0, 0, 0, 0) { IsCompleteInventory = false }, null, default);
+        await control.CompleteAsync(claim, new(claim.SourceRoot.Id, claim.ScanRequest.Id, 0, 0, 0, 0) { IsCompleteInventory = false }, null, default);
         clock.Now = DateTimeOffset.Parse("2026-11-01T09:00:00Z");
         await SetScheduleAsync(scenario, clock.Now);
         Assert.Equal(0, await store.PumpAsync(default));
@@ -70,6 +71,7 @@ public sealed partial class SourceVerificationExecutionIntegrationTests
         await using var scenario = await Scenario.CreateAsync(fixture.ConnectionString);
         await scenario.BaselineAsync();
         var clock = new WatchClock { Now = DateTimeOffset.Parse("2026-11-01T01:59:59Z") };
+        var control = new SqlSourceScanStore(scenario.Factory, clock, sourceJournalOptions: scenario.Options);
         await SetScheduleAsync(scenario, clock.Now);
         var store = new SqlSourceVerificationStore(scenario.Factory, clock, scenario.Options, scenario.Incremental);
         var scheduler = Assert.IsAssignableFrom<ISourceVerificationScheduler>(store);
@@ -78,11 +80,11 @@ public sealed partial class SourceVerificationExecutionIntegrationTests
         var started = await Task.WhenAll(scheduler.PumpAsync(default).AsTask(), scheduler.PumpAsync(default).AsTask());
         Assert.Equal(1, started.Sum());
         var runId = (await store.ReadAsync(scenario.RootId, default))!.Run!.Id;
-        var claim = Assert.IsType<ClaimedSourceScan>(await scenario.Control.ClaimNextReleasedAsync("scheduled", clock.Now, TimeSpan.FromMinutes(10), default));
+        var claim = Assert.IsType<ClaimedSourceScan>(await control.ClaimNextReleasedAsync("scheduled", clock.Now, TimeSpan.FromMinutes(10), default));
         var batch = Assert.IsType<SourceVerificationBatch>(await store.PrepareAsync(claim.SourceRoot, claim.ScanRequest, default));
         Assert.Equal(DateTimeOffset.Parse("2026-11-01T08:00:00Z"), batch.WindowEndUtc);
         await store.FinishBatchAsync(batch, 0, 0, "batch-limit", default);
-        await scenario.Control.CompleteAsync(claim, new(claim.SourceRoot.Id, claim.ScanRequest.Id, 0, 0, 0, 0) { IsCompleteInventory = false }, null, default);
+        await control.CompleteAsync(claim, new(claim.SourceRoot.Id, claim.ScanRequest.Id, 0, 0, 0, 0) { IsCompleteInventory = false }, null, default);
         Assert.Equal(0, await scheduler.PumpAsync(default)); // Five-second inter-batch floor.
         clock.Now = DateTimeOffset.Parse("2026-11-01T08:00:00Z");
         await SetScheduleAsync(scenario, clock.Now);

@@ -2,6 +2,7 @@ using System.Data;
 using FluxKnowledge.Application.Sources;
 using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
 
 namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
 
@@ -17,8 +18,35 @@ public static class SqlPipelineActivityQuery
         return context.Database.SqlQueryRaw<PipelineJobActivityRow>(sql, Parameters(now, admission, gpuEvidence));
     }
 
-    private static string JobsSql(bool facts)
+    public static IQueryable<PipelineJobClassificationRow> JobClassifications(FluxKnowledgeDbContext context, DateTimeOffset now,
+        DeploymentHoldAdmission admission, SqlSelectedBranchReadScope selectedBranches, SqlGpuActivityReadEvidence gpuEvidence)
     {
+        selectedBranches.EnsureFor(context);
+        selectedBranches.EnsureJobFactsFor(context, now, admission, gpuEvidence);
+        // These facts were selected from the same Snapshot image. Summary reads
+        // need no second join to Jobs/PipelineRecords just to recover these scalars.
+        if (selectedBranches.HasJobFacts)
+            return context.Database.SqlQueryRaw<PipelineJobClassificationRow>("""
+                SELECT SourceRootId, Stage, PublicState, IsHistorical, SourceAdmitted, HasWorkerLease,
+                  HasActiveGpu, HasReadyGpu, HasUncertainGpu, HasWaitingGpu, HasPendingDispatch, IsDue, Reason
+                FROM #FluxPipelineJobFacts
+                """);
+        return Jobs(context, now, admission, selectedBranches, gpuEvidence).Select(row => new PipelineJobClassificationRow
+        {
+            SourceRootId = row.SourceRootId, Stage = row.Stage, PublicState = row.PublicState, IsHistorical = row.IsHistorical,
+            SourceAdmitted = row.SourceAdmitted, HasWorkerLease = row.HasWorkerLease, HasActiveGpu = row.HasActiveGpu,
+            HasReadyGpu = row.HasReadyGpu, HasUncertainGpu = row.HasUncertainGpu, HasWaitingGpu = row.HasWaitingGpu,
+            HasPendingDispatch = row.HasPendingDispatch, IsDue = row.IsDue, Reason = row.Reason
+        });
+    }
+
+    private static string JobsSql(bool facts, bool noActiveRebuild = false)
+    {
+        var activeRebuildJob = noActiveRebuild ? "1 = 0" : SqlCorpusRebuildEligibility.ActiveJob("j.Id");
+        var rebuildAdmission = noActiveRebuild
+            ? "NOT EXISTS (SELECT 1 FROM [CorpusRebuildSupersededJobs] WHERE [JobId] = j.Id)"
+            : SqlCorpusRebuildEligibility.Admission("j.Id");
+        var deploymentAdmission = noActiveRebuild ? "@deploymentHeld = 0" : SqlCorpusRebuildEligibility.DeploymentAdmission("j.Id");
         var active = facts ? "COALESCE(gpu.HasActiveGpu, 0) = 1" : $$"""
             EXISTS (SELECT 1 FROM GpuMiniTasks t WHERE t.ParentJobId = j.Id
                 AND t.SourceRevision = j.SourceRevision AND {{OwnedTask("t", false)}})
@@ -51,10 +79,10 @@ public static class SqlPipelineActivityQuery
                   AND currentAttempt.LeaseOwner COLLATE Latin1_General_100_BIN2 = j.LeaseOwner COLLATE Latin1_General_100_BIN2
                   AND currentAttempt.CompletedAtUtc IS NULL
                   AND j.LeaseExpiresAtUtc > @nowUtc) AS AttemptStartedAtUtc,
-              CAST(CASE WHEN {{HistoricalBinding}} THEN 1 ELSE 0 END AS bit) AS IsHistorical,
-              CAST(CASE WHEN (s.Id IS NULL OR r.State = 0 OR {{SqlCorpusRebuildEligibility.ActiveJob("j.Id")}})
-                AND {{SqlCorpusRebuildEligibility.Admission("j.Id")}}
-                AND {{SqlCorpusRebuildEligibility.DeploymentAdmission("j.Id")}} THEN 1 ELSE 0 END AS bit) AS SourceAdmitted,
+              CAST(CASE WHEN {{HistoricalBindingFor(activeRebuildJob)}} THEN 1 ELSE 0 END AS bit) AS IsHistorical,
+              CAST(CASE WHEN (s.Id IS NULL OR r.State = 0 OR {{activeRebuildJob}})
+                AND {{rebuildAdmission}}
+                AND {{deploymentAdmission}} THEN 1 ELSE 0 END AS bit) AS SourceAdmitted,
               CAST(CASE WHEN j.LeaseOwner IS NOT NULL AND j.LeaseGeneration > 0 AND j.LeaseExpiresAtUtc > @nowUtc
                 THEN 1 ELSE 0 END AS bit) AS HasWorkerLease,
               CAST(CASE WHEN {{active}} THEN 1 ELSE 0 END AS bit) AS HasActiveGpu,
@@ -88,18 +116,29 @@ public static class SqlPipelineActivityQuery
         HasActiveGpu, HasReadyGpu, HasUncertainGpu, HasWaitingGpu, HasPendingDispatch, IsDue, Reason
         """;
 
-    internal static Task PopulateJobFactsAsync(FluxKnowledgeDbContext context, DateTimeOffset now,
+    internal static async Task PopulateJobFactsAsync(FluxKnowledgeDbContext context, DateTimeOffset now,
         DeploymentHoldAdmission admission, SqlGpuActivityReadEvidence evidence, CancellationToken cancellationToken)
     {
+        var transaction = context.Database.CurrentTransaction;
+        if (transaction is null || transaction.GetDbTransaction().IsolationLevel != IsolationLevel.Snapshot)
+            throw new InvalidOperationException("Job fact query selection requires the original Snapshot transaction.");
+        // Absence in this same Snapshot proves every ActiveJob predicate false.
+        // Keep the complete query when a rebuild is active; never cache this proof.
+        var activeRebuild = await context.IndexState.AsNoTracking()
+            .AnyAsync(state => state.Id == 1 && state.CorpusRebuildOperationId != null, cancellationToken).ConfigureAwait(false);
+        if (context.Database.CurrentTransaction?.TransactionId != transaction.TransactionId)
+            throw new InvalidOperationException("Job fact query selection cannot leave its Snapshot transaction.");
         // Interpolated fragments are fixed SQL definitions; runtime values remain
         // SqlParameters, as in the original composed job query.
         var sql = $$"""
             INSERT INTO #FluxPipelineJobFacts ({{JobFactColumns}})
             SELECT {{JobFactColumns}} FROM (
-            {{JobsSql(true)}}
+            {{JobsSql(true, noActiveRebuild: !activeRebuild)}}
             ) source;
             """;
-        return context.Database.ExecuteSqlRawAsync(sql, Parameters(now, admission, evidence), cancellationToken);
+        await context.Database.ExecuteSqlRawAsync(sql, Parameters(now, admission, evidence), cancellationToken).ConfigureAwait(false);
+        if (context.Database.CurrentTransaction?.TransactionId != transaction.TransactionId)
+            throw new InvalidOperationException("Job fact population cannot leave its Snapshot transaction.");
     }
 
     // Only identity/classification is retained. Paths and attempt metadata are read
@@ -160,12 +199,14 @@ public static class SqlPipelineActivityQuery
     }
 
     // Every condition here proves applicability; timestamps are deliberately not used.
-    private static string HistoricalBinding => $$"""
+    private static string HistoricalBinding => HistoricalBindingFor(SqlCorpusRebuildEligibility.ActiveJob("j.Id"));
+
+    private static string HistoricalBindingFor(string activeRebuildJob) => $$"""
         p.IsDeleted = 1 OR p.Revision <> j.SourceRevision
-        OR ((p.CompletionCriteriaMet = 1 OR p.CurrentStage <> j.Stage) AND NOT ({{SqlCorpusRebuildEligibility.ActiveJob("j.Id")}}))
+        OR ((p.CompletionCriteriaMet = 1 OR p.CurrentStage <> j.Stage) AND NOT ({{activeRebuildJob}}))
         OR s.SuppressedAtUtc IS NOT NULL OR (s.OriginKind <> 0 AND owner.SuppressedAtUtc IS NOT NULL) OR r.State = 2
         OR EXISTS (SELECT 1 FROM CorpusRebuildSupersededJobs superseded WHERE superseded.JobId = j.Id)
-        OR (NOT ({{SqlCorpusRebuildEligibility.ActiveJob("j.Id")}}) AND ({{DirectBranchMismatch}}))
+        OR (NOT ({{activeRebuildJob}}) AND ({{DirectBranchMismatch}}))
         OR (s.OriginKind IN (2,3) AND EXISTS (
           SELECT 1 FROM #FluxPipelineSelectedBranches selected
           WHERE selected.SourceRevisionId = s.ParentSourceRevisionId
@@ -229,6 +270,23 @@ public sealed class ActivityReadFence
     public long Version { get; set; }
     public bool IsStable { get; set; }
     public bool Accepts(ActivityReadFence after) => IsStable && after.IsStable && Version == after.Version;
+}
+
+public sealed class PipelineJobClassificationRow
+{
+    public Guid? SourceRootId { get; set; }
+    public int Stage { get; set; }
+    public int PublicState { get; set; }
+    public bool IsHistorical { get; set; }
+    public bool SourceAdmitted { get; set; }
+    public bool HasWorkerLease { get; set; }
+    public bool HasActiveGpu { get; set; }
+    public bool HasReadyGpu { get; set; }
+    public bool HasUncertainGpu { get; set; }
+    public bool HasWaitingGpu { get; set; }
+    public bool HasPendingDispatch { get; set; }
+    public bool IsDue { get; set; }
+    public string? Reason { get; set; }
 }
 
 public sealed class PipelineJobActivityRow

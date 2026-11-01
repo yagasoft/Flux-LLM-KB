@@ -35,7 +35,7 @@ internal sealed class SqlPipelineActivityReader(IDeploymentValidationHold? hold,
             await branches.MaterializeGpuFactsAsync(now, gpuEvidence, cancellationToken).ConfigureAwait(false);
             await branches.MaterializeJobFactsAsync(now, admission, gpuEvidence, cancellationToken).ConfigureAwait(false);
         }
-        var jobRows = await SqlPipelineActivityQuery.Jobs(context, now, admission, branches, gpuEvidence)
+        var jobRows = await SqlPipelineActivityQuery.JobClassifications(context, now, admission, branches, gpuEvidence)
             .GroupBy(row => new
             {
                 row.SourceRootId, row.Stage, row.PublicState, row.IsHistorical, row.SourceAdmitted, row.HasWorkerLease,
@@ -58,7 +58,10 @@ internal sealed class SqlPipelineActivityReader(IDeploymentValidationHold? hold,
             .Select(group => new PipelineWorkGroup(group.Key.SourceRootId, group.Key.SourceName, group.Key.Stage,
                 group.Key.State, group.Key.IsHistorical, group.Key.Reason, group.Sum(j => j.Count)))
             .OrderBy(j => j.State).ThenBy(j => j.SourceName).ThenBy(j => j.Stage).ToArray();
-        var gpuRows = await SqlPipelineActivityQuery.GpuTasks(context, now, admission, branches, gpuEvidence)
+        // This query is rooted in GpuMiniTasks. An empty committed image needs
+        // neither its ownership joins nor their plan compilation.
+        var gpuRows = !await context.GpuMiniTasks.AnyAsync(cancellationToken).ConfigureAwait(false) ? [] :
+            await SqlPipelineActivityQuery.GpuTasks(context, now, admission, branches, gpuEvidence)
             .GroupBy(row => new { row.SourceRootId, row.State, row.IsInteractive })
             .Select(group => new { group.Key, Count = group.Count() })
             .ToArrayAsync(cancellationToken).ConfigureAwait(false);

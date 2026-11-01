@@ -41,6 +41,7 @@ public sealed partial class PipelineActivitySqlTests
         var admission = new DeploymentHoldAdmission(false, null);
         var evidence = await SqlGpuActivityReadEvidence.ReadAsync(context, default);
         var original = await SqlPipelineActivityQuery.Jobs(context, now, admission, scope, evidence).OrderBy(j => j.Id).ToArrayAsync();
+        var originalClassifications = await SqlPipelineActivityQuery.JobClassifications(context, now, admission, scope, evidence).ToArrayAsync();
         var localIngress = Assert.Single(original, j => j.PipelineRecordId == ingressRecord.Id);
         Assert.Null(localIngress.SourceRootId); Assert.Null(localIngress.LogicalSourceRevisionId);
         Assert.Equal("Local ingress (synthetic ingress)", localIngress.FullPath);
@@ -51,14 +52,21 @@ public sealed partial class PipelineActivitySqlTests
                 .SetProperty(j => j.PublicState, (int)PublicJobState.Failed).SetProperty(j => j.Reason, "committed-after-facts"));
         var captured = await SqlPipelineActivityQuery.Jobs(context, now, admission, scope, evidence).OrderBy(j => j.Id).ToArrayAsync();
         Assert.Equal(JsonSerializer.Serialize(original), JsonSerializer.Serialize(captured));
+        var capturedClassifications = await SqlPipelineActivityQuery.JobClassifications(context, now, admission, scope, evidence).ToArrayAsync();
+        Assert.Equal(originalClassifications.Select(row => JsonSerializer.Serialize(row)).Order(StringComparer.Ordinal),
+            capturedClassifications.Select(row => JsonSerializer.Serialize(row)).Order(StringComparer.Ordinal));
         Assert.Equal(new string('r', 512), Assert.Single(captured, j => j.Id == jobId).Reason);
         Assert.Throws<InvalidOperationException>(() => SqlPipelineActivityQuery.Jobs(context, now.AddTicks(1), admission, scope, evidence));
         Assert.Throws<InvalidOperationException>(() => SqlPipelineActivityQuery.Jobs(context, now, new(true, null), scope, evidence));
         Assert.Throws<InvalidOperationException>(() => SqlPipelineActivityQuery.Jobs(context, now, admission, scope, new("[]", 0)));
+        Assert.Throws<InvalidOperationException>(() => SqlPipelineActivityQuery.JobClassifications(context, now.AddTicks(1), admission, scope, evidence));
+        Assert.Throws<InvalidOperationException>(() => SqlPipelineActivityQuery.JobClassifications(context, now, new(true, null), scope, evidence));
+        Assert.Throws<InvalidOperationException>(() => SqlPipelineActivityQuery.JobClassifications(context, now, admission, scope, new("[]", 0)));
         await scope.CompleteAsync(default);
         Assert.Equal(0, await JobFactsTableExistsAsync(context));
         await transaction.RollbackAsync();
         Assert.Throws<InvalidOperationException>(() => SqlPipelineActivityQuery.Jobs(context, now, admission, scope, evidence));
+        Assert.Throws<InvalidOperationException>(() => SqlPipelineActivityQuery.JobClassifications(context, now, admission, scope, evidence));
         await using var fresh = new TestDbContextFactory(_fixture.ConnectionString).CreateDbContext();
         var changed = await fresh.Jobs.AsNoTracking().SingleAsync(j => j.Id == jobId);
         Assert.Equal((int)PublicJobState.Failed, changed.PublicState);

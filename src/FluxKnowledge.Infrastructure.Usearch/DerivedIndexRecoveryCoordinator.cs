@@ -3,6 +3,7 @@ using System.Threading.Channels;
 using FluxKnowledge.Application.Contracts;
 using FluxKnowledge.Application.Indexing;
 using FluxKnowledge.Application.Ports;
+using FluxKnowledge.Application.Pipeline;
 using FluxKnowledge.Application.Sources;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -104,7 +105,18 @@ public sealed class DerivedIndexRecoveryCoordinator : IDerivedIndexRecoveryStatu
             if (scope.ServiceProvider.GetService<ISegmentedIndexStore>() is { } segmented &&
                 await segmented.IsRequiredAsync(cancellationToken))
             {
-                await ProbeSegmentedAsync(scope.ServiceProvider, segmented, beforeAttempt, cancellationToken);
+                try { await ProbeSegmentedAsync(scope.ServiceProvider, segmented, beforeAttempt, cancellationToken); }
+                catch (PublicationSnapshotConflictException)
+                {
+                    // A canonical mutation can invalidate capture or a native query
+                    // lease during startup. Re-probe fresh state without treating
+                    // normal contention as a permanent configuration failure.
+                    var updating = new DerivedIndexRecoverySnapshot(DerivedIndexRecoveryState.IndexUpdating,
+                        beforeAttempt.ActiveGenerationId, beforeAttempt.LastCompletedAtUtc, null, null, 0,
+                        IsProjectionUnavailable: true);
+                    if (ReferenceEquals(Interlocked.CompareExchange(ref _snapshot, updating, beforeAttempt), beforeAttempt))
+                        await PublishAsync(cancellationToken);
+                }
                 return;
             }
             if (beforeAttempt.State == DerivedIndexRecoveryState.Healthy)
