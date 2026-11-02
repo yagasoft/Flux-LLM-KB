@@ -13,7 +13,7 @@ $paths = @($paths | Sort-Object -Unique | Where-Object {
 })
 $allowedRoots = @('.config', '.github', 'docs', 'probes', 'scripts', 'src', 'tests', 'tools',
     '.gitattributes', '.gitignore', 'AGENTS.md', 'Directory.Build.props',
-    'Directory.Packages.props', 'FluxKnowledge.slnx', 'global.json', 'LICENSE', 'README.md')
+    'Directory.Packages.props', 'Directory.Solution.targets', 'FluxKnowledge.slnx', 'global.json', 'LICENSE', 'README.md')
 foreach ($path in $paths) {
     if (($path -split '/')[0] -notin $allowedRoots) {
         throw "Unexpected top-level repository entry: $path"

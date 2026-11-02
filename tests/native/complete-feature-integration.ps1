@@ -125,7 +125,8 @@ exit 0
         $nativeRoot = New-Item -ItemType Directory -Path (Join-Path $main 'tests\native')
         foreach ($contract in @('repository-contract', 'complete-feature-dryrun',
             'complete-feature-integration', 'complete-feature-parallel-contract', 'complete-feature-bootstrap-nondryrun', 'native-go-live-contract',
-            'native-go-live-recovery-removal-contract', 'native-deployment-plan', 'test-timing-summary-contract')) {
+            'native-go-live-recovery-removal-contract', 'native-deployment-plan', 'test-timing-summary-contract',
+            'solution-test-failfast-contract', 'complete-feature-isolated-contracts')) {
             @'
 param([string]$SourceRoot)
 if ($env:FLUXKNOWLEDGE_WORKFLOW_CASE -eq 'contract-failure') { exit 24 }

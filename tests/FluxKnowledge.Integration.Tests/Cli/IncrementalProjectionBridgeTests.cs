@@ -15,7 +15,6 @@ using Xunit;
 
 namespace FluxKnowledge.Integration.Tests.Cli;
 
-[Collection("sql-full-text")]
 public sealed class IncrementalProjectionBridgeTests(NativeSqlServerFixture fixture) : IClassFixture<NativeSqlServerFixture>
 {
     [NativeSqlServerFact]
@@ -118,7 +117,7 @@ public sealed class IncrementalProjectionBridgeTests(NativeSqlServerFixture fixt
         var observations = 0;
         using (var capability = packet.Begin(() => observations++))
         {
-            Assert.False(Task.Run(() => TryAcquire(packet.MutexName)).GetAwaiter().GetResult());
+            Assert.False(TryAcquireOnAnotherThread(packet.MutexName));
             Assert.Throws<IOException>(() => File.WriteAllText(packet.Configuration, "changed"));
             Assert.Throws<IOException>(() => File.WriteAllText(packet.Hold, "changed"));
             var result = packet.Run(capability);
@@ -127,7 +126,7 @@ public sealed class IncrementalProjectionBridgeTests(NativeSqlServerFixture fixt
             Assert.True(observations >= 3);
             Assert.Equal("index-projection-capability-consumed", Assert.Throws<InvalidOperationException>(() => packet.Run(capability)).Message);
         }
-        Assert.True(await Task.Run(() => TryAcquire(packet.MutexName)));
+        Assert.True(TryAcquireOnAnotherThread(packet.MutexName));
         await SqlToUsearchRebuildTests.AssertSegmentedOracleAsync(environment);
         await environment.AddAndPumpAsync("A newer valid publication must survive replay of the old conversion.");
         var later = await environment.ActiveGenerationAsync();
@@ -162,6 +161,27 @@ public sealed class IncrementalProjectionBridgeTests(NativeSqlServerFixture fixt
         using var mutex = new Mutex(false, name);
         if (!mutex.WaitOne(0)) return false;
         mutex.ReleaseMutex(); return true;
+    }
+
+    private static bool TryAcquireOnAnotherThread(string name)
+    {
+        // Blocking on Task.Run may inline it on the mutex-owning thread, where
+        // acquisition is reentrant. A real contender must have a distinct thread.
+        var ownerThread = Environment.CurrentManagedThreadId;
+        var contenderThread = 0;
+        var acquired = false;
+        Exception? failure = null;
+        var contender = new Thread(() =>
+        {
+            contenderThread = Environment.CurrentManagedThreadId;
+            try { acquired = TryAcquire(name); }
+            catch (Exception exception) { failure = exception; }
+        }) { IsBackground = true };
+        contender.Start();
+        Assert.True(contender.Join(TimeSpan.FromSeconds(30)), "The mutex contender did not finish.");
+        Assert.NotEqual(ownerThread, contenderThread);
+        if (failure is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
+        return acquired;
     }
 
     private static string SourceRoot([CallerFilePath] string path = "") => Directory.GetParent(Path.GetDirectoryName(path)!)!.Parent!.Parent!.FullName;

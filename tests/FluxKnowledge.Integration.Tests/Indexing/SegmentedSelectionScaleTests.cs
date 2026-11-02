@@ -19,7 +19,9 @@ using Xunit.Abstractions;
 
 namespace FluxKnowledge.Integration.Tests.Indexing;
 
-[Collection("sql-full-text")]
+// Each class fixture owns its catalogue and each environment owns unique file
+// roots. There is no full-text polling or process-wide native fixture here.
+// xUnit keeps this class's cases serial within the SQL assembly's four-worker cap.
 public sealed partial class SegmentedSelectionScaleTests(NativeSqlServerFixture fixture, ITestOutputHelper output) : IClassFixture<NativeSqlServerFixture>
 {
     [NativeSqlServerFact]
@@ -313,9 +315,12 @@ public sealed partial class SegmentedSelectionScaleTests(NativeSqlServerFixture 
     {
         await using var environment = await SqlToUsearchRebuildTests.PipelineEnvironment.CreateAsync(fixture,
             "The full rebuild membership fixture.", segmented: true);
+        output.WriteLine($"fixture_scope catalog={fixture.DatabaseName} index_root={environment.IndexRoot}");
         await using var db = await environment.Factory.CreateDbContextAsync();
+        var seedWatch = Stopwatch.StartNew();
         var template = await db.Vectors.Select(value => value.VectorId).FirstAsync();
         await SeedUnrelatedAsync(db, template, difference == 0 ? 100000 : 10000);
+        var vectorSeedSeconds = seedWatch.Elapsed.TotalSeconds;
         if (difference == 0)
         {
             // Retained generations make each vector occur in many historical
@@ -336,6 +341,7 @@ public sealed partial class SegmentedSelectionScaleTests(NativeSqlServerFixture 
                 SELECT [segment].[Id], [current].[VectorId] FROM @segments AS [segment] CROSS JOIN [CurrentIndexMembers] AS [current];
                 """);
         }
+        var historySeedSeconds = seedWatch.Elapsed.TotalSeconds - vectorSeedSeconds;
         var state = await db.IndexState.AsNoTracking().SingleAsync();
         var profile = await db.Vectors.AsNoTracking().FirstAsync();
         var members = await db.CurrentIndexMembers.AsNoTracking().OrderBy(value => value.VectorId).ToArrayAsync();
@@ -349,11 +355,6 @@ public sealed partial class SegmentedSelectionScaleTests(NativeSqlServerFixture 
             OwnerStartedAtUtc = DateTimeOffset.UtcNow
         };
         db.IndexPublicationCandidates.Add(candidate);
-        db.IndexCandidateMembers.AddRange(members.Select(value => new IndexCandidateMemberEntity
-        {
-            CandidateId = candidate.Id, Phase = 1, VectorId = value.VectorId, PayloadChecksum = profile.PayloadChecksum,
-            SourceIdentityId = value.SourceIdentityId, OwnerSourceRevisionId = value.OwnerSourceRevisionId, SourceRootId = value.SourceRootId
-        }));
         // SQL-only sealed metadata exercises the real membership proof. It is
         // never activated or supplied to an ANN reader and needs no model.
         var segments = new List<IndexSegmentDescriptor>();
@@ -373,9 +374,12 @@ public sealed partial class SegmentedSelectionScaleTests(NativeSqlServerFixture 
                 FileChecksum = segment.FileChecksum, FileLength = 1, VectorCount = ids.Length, State = 1,
                 ProducingCandidateId = candidate.Id, CreatedAtUtc = DateTimeOffset.UtcNow, SealedAtUtc = DateTimeOffset.UtcNow
             });
-            db.IndexSegmentVectors.AddRange(ids.Select(id => new IndexSegmentVectorEntity { SegmentId = segment.Id, VectorId = id }));
         }
-        await db.SaveChangesAsync();
+        await SeedFullManifestMembershipAsync(db, candidate.Id, profile.PayloadChecksum, segments);
+        seedWatch.Stop();
+        output.WriteLine($"full_manifest_seed difference={difference} members={members.Length} segments={segments.Count} seconds={seedWatch.Elapsed.TotalSeconds:F6}");
+        output.WriteLine($"full_manifest_seed_phases vectors_seconds={vectorSeedSeconds:F6} history_seconds={historySeedSeconds:F6} metadata_seconds={seedWatch.Elapsed.TotalSeconds - vectorSeedSeconds - historySeedSeconds:F6}");
+        await AssertFullManifestMembershipAsync(db, candidate.Id, profile.PayloadChecksum, members, segments);
         var first = members[0].VectorId;
         if (difference == 1) await db.IndexSegmentVectors.Where(value => value.SegmentId == segments[0].Id && value.VectorId == first).ExecuteDeleteAsync();
         if (difference == 2) await db.IndexCandidateMembers.Where(value => value.CandidateId == candidate.Id && value.VectorId == first).ExecuteDeleteAsync();

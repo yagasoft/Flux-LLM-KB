@@ -10,7 +10,6 @@ using Xunit;
 
 namespace FluxKnowledge.Integration.Tests.Indexing;
 
-[Collection("sql-full-text")]
 public sealed class HybridRebuildDeploymentTests(NativeSqlServerFixture fixture) : IClassFixture<NativeSqlServerFixture>
 {
     [NativeSqlServerFact]

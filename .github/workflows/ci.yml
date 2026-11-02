@@ -27,15 +27,18 @@ jobs:
       - name: Verify native closeout plan
         shell: pwsh
         run: ./tests/native/complete-feature-dryrun.ps1
-      - name: Verify disposable closeout failure paths
+      - name: Verify isolated closeout and deployment contracts
         shell: pwsh
-        run: ./tests/native/complete-feature-integration.ps1
+        run: ./tests/native/complete-feature-isolated-contracts.ps1
+      - name: Verify paired contract failure and cancellation
+        shell: pwsh
+        run: ./tests/native/complete-feature-isolated-contracts-proof.ps1
       - name: Verify scenario process isolation
         shell: pwsh
         run: ./tests/native/complete-feature-parallel-contract.ps1
       - name: Verify test timing summary
         shell: pwsh
         run: ./tests/native/test-timing-summary-contract.ps1
-      - name: Verify native deployment plan
+      - name: Verify solution test fail-fast behaviour
         shell: pwsh
-        run: ./tests/native/native-deployment-plan.ps1
+        run: ./tests/native/solution-test-failfast-contract.ps1

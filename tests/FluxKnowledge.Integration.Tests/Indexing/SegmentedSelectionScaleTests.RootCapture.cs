@@ -19,11 +19,10 @@ namespace FluxKnowledge.Integration.Tests.Indexing;
 public sealed partial class SegmentedSelectionScaleTests
 {
     [NativeSqlServerFact]
-    public async Task Existing_root_scope_debt_captures_production_sized_metadata_within_the_unchanged_writer_deadline()
-        => await VerifyRootCaptureAsync(30);
-
-    [NativeSqlServerFact]
-    public async Task Root_membership_proof_keeps_individual_commands_bounded_on_a_large_publication()
+    public async Task Root_capture_and_membership_commands_remain_bounded_at_production_scale_without_extending_the_writer_deadline()
+        // The strict comparison run also proves the normal 30-second command
+        // budget, while retaining the independent competing-writer deadline.
+        // Avoid rebuilding the same full-width 100k-member fixture a second time.
         => await VerifyRootCaptureAsync(5);
 
     private async Task VerifyRootCaptureAsync(int comparisonCommandSeconds)
@@ -47,6 +46,7 @@ public sealed partial class SegmentedSelectionScaleTests
                         new MetadataFactory(scaleFixture.ConnectionString, fence, comparison));
                     services.AddSingleton<IEmbeddingProvider, WideScaleEmbeddingProvider>();
                 });
+            output.WriteLine($"fixture_scope catalog={scaleFixture.DatabaseName} index_root={environment.IndexRoot}");
             var retained = await environment.AddRetainedAndPumpAsync("The retained root supplies metadata-only scale rows.");
             var controls = new List<Guid> { retained };
             for (var owner = 1; owner < 4; owner++)

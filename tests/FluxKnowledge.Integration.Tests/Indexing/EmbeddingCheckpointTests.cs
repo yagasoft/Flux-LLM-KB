@@ -19,7 +19,6 @@ using Xunit;
 
 namespace FluxKnowledge.Integration.Tests.Indexing;
 
-[Collection("sql-full-text")]
 public sealed class EmbeddingCheckpointTests(NativeSqlServerFixture fixture) : IClassFixture<NativeSqlServerFixture>, IAsyncLifetime
 {
     private static readonly EmbeddingProfile Profile = new(DeterministicTokenHashEmbeddingProvider.Fingerprint, 256);

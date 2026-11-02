@@ -40,14 +40,16 @@ public sealed partial class PipelineActivitySqlTests
         finally { await owned.DisposeAsync(); }
     }
 
-    private async Task<FileCostFixture> SeedFileCostFixtureAsync(int currentJobCount)
+    private async Task<FileCostFixture> SeedFileCostFixtureAsync(int currentJobCount, int discoveredCount = 30000)
     {
+        var seedWatch = Stopwatch.StartNew();
         await EnableOwnedSnapshotAsync();
         var now = DateTimeOffset.UtcNow;
         var root = await AddActivityRootAsync(now);
         var factory = new TestDbContextFactory(_fixture.ConnectionString);
         Guid toggledActivity;
         Guid toggledJob;
+        Guid templateRevision;
         var codeBranch = Guid.NewGuid();
         await using (var setup = factory.CreateDbContext())
         {
@@ -71,6 +73,7 @@ public sealed partial class PipelineActivitySqlTests
             toggledActivity = firstActivity.Id;
             toggledJob = setup.Jobs.Local.Single(j => j.PipelineRecordId == firstActivity.ResultingPipelineRecordId).Id;
             var firstRevision = setup.SourceRevisions.Local.Single(r => r.Id == firstActivity.SourceRevisionId);
+            templateRevision = setup.SourceRevisions.Local.Single(r => r.CanonicalPath.EndsWith("concurrent-0001.txt", StringComparison.Ordinal)).Id;
             var code = Activity(firstRevision.Id, SourceActivityState.Pending);
             code.ActivityKind = (int)SourceActivityKind.CodeParsing;
             code.ProcessorVersion = RetainedCsharpCodeProcessor.ProcessorVersion;
@@ -85,30 +88,16 @@ public sealed partial class PipelineActivitySqlTests
         // Include the wider discovered inventory, not only the files with admitted jobs.
         await using (var setup = factory.CreateDbContext())
         {
-            for (var offset = 1000; offset < 30000; offset += 1000)
+            var pathPrefix = Revision(Guid.Empty, root, "", now, false).CanonicalPath;
+            for (var offset = 1000; offset < discoveredCount; offset += 1000)
             {
-                foreach (var i in Enumerable.Range(offset, 1000))
-                {
-                    var revision = Revision(Guid.NewGuid(), root, $"discovered-{i:D5}.txt", now, false);
-                    setup.SourceRevisions.Add(revision);
-                    if (i >= currentJobCount) continue;
-                    var identity = new SourceIdentityEntity { Id = Guid.NewGuid(), SourceKind = "local file", StableKey = revision.CanonicalPath, CreatedAtUtc = now };
-                    var record = new PipelineRecordEntity { Id = Guid.NewGuid(), SourceIdentityId = identity.Id, SourceRevisionId = revision.Id,
-                        Revision = 1, ContentHash = revision.ContentSha256, CurrentStage = (int)PipelineStage.Extract, RegisteredAtUtc = now };
-                    record.RootLineageRecordId = record.Id;
-                    var job = new JobEntity { Id = Guid.NewGuid(), PipelineRecordId = record.Id, SourceRevision = 1,
-                        Stage = (int)PipelineStage.Extract, Operation = PipelineOperations.ExtractUtf8,
-                        PublicState = (int)PublicJobState.WorkerQueued, DueAtUtc = now };
-                    setup.SourceIdentities.Add(identity); setup.PipelineRecords.Add(record); setup.Jobs.Add(job);
-                    setup.SourceActivities.Add(Activity(revision.Id, SourceActivityState.Pending, record.Id));
-                    setup.OutboxMessages.Add(new() { Id = Guid.NewGuid(), JobId = job.Id, PipelineRecordId = record.Id,
-                        SourceRevision = 1, Stage = job.Stage, Operation = job.Operation, IdempotencyKey = $"file-cost:{record.Id:N}",
-                        DueAtUtc = now, CreatedAtUtc = now });
-                }
-                await setup.SaveChangesAsync();
-                setup.ChangeTracker.Clear();
+                await SeedFileCostTailBatchAsync(setup, root, templateRevision, pathPrefix, offset,
+                    Math.Min(1000, discoveredCount - offset), currentJobCount);
             }
         }
+        seedWatch.Stop();
+        output.WriteLine($"File-cost fixture seed: jobs={currentJobCount}; files={discoveredCount}; elapsedMs={seedWatch.Elapsed.TotalMilliseconds:F1}.");
+        await AssertFileCostSeedAsync(factory, root, currentJobCount, discoveredCount, now);
         return new(root, toggledActivity, toggledJob, codeBranch);
     }
 

@@ -65,34 +65,34 @@ internal static class SqlTestData
             new DbContextOptionsBuilder<FluxKnowledgeDbContext>()
                 .UseSqlServer(fixture.ConnectionString)
                 .Options);
-        await context.AuditEvents.ExecuteDeleteAsync();
-        await context.SourceDeletionCleanupItems.ExecuteDeleteAsync();
-        await context.SourceDeletionOperations.ExecuteDeleteAsync();
-        await context.DocumentPublications.ExecuteDeleteAsync();
-        await context.CorpusQueryLeases.ExecuteDeleteAsync();
-        await context.OperatorActionOperationLedger.ExecuteDeleteAsync();
-        await context.SourceProcessorActionIgnoreHeads.ExecuteDeleteAsync();
-        await context.OperatorActionActionLedger.ExecuteDeleteAsync();
-        await context.SourceProcessorForceRequests.ExecuteDeleteAsync();
-        await context.SourceProcessorAttempts.ExecuteDeleteAsync();
-        await context.SourceProcessorBranchMembers.ExecuteDeleteAsync();
-        await context.SourceProcessorBranches.ExecuteDeleteAsync();
-        await context.SourceActivityRelations.ExecuteDeleteAsync();
-        await context.SourceActivities.ExecuteDeleteAsync();
-        await context.GpuSchedulerOperationReceipts.ExecuteDeleteAsync();
-        await context.NativeWorkerLifecycleEvidence.ExecuteDeleteAsync();
-        await context.NativeWorkerInstances.ExecuteDeleteAsync();
-        await context.GpuExecutorEvidence.ExecuteDeleteAsync();
-        await context.GpuExecutorResultReceipts.ExecuteDeleteAsync();
-        await context.GpuExecutorDispatches.ExecuteDeleteAsync();
-        await context.DocumentOcrRequests.ExecuteDeleteAsync();
-        await context.EmbeddingGpuRequests.ExecuteDeleteAsync();
-        await context.GpuMiniTasks.ExecuteDeleteAsync();
-        await context.GpuCapacitySlots
-            .Where(slot => slot.ActiveBatchId != null)
-            .ExecuteUpdateAsync(setters => setters.SetProperty(slot => slot.ActiveBatchId, (Guid?)null));
-        await context.GpuBatches.ExecuteDeleteAsync();
-        await context.GpuCapacitySlots.ExecuteDeleteAsync();
+        await ExecuteResetBatchAsync(context, $"""
+            {Delete(context.AuditEvents)}
+            {Delete(context.SourceDeletionCleanupItems)}
+            {Delete(context.SourceDeletionOperations)}
+            {Delete(context.DocumentPublications)}
+            {Delete(context.CorpusQueryLeases)}
+            {Delete(context.OperatorActionOperationLedger)}
+            {Delete(context.SourceProcessorActionIgnoreHeads)}
+            {Delete(context.OperatorActionActionLedger)}
+            {Delete(context.SourceProcessorForceRequests)}
+            {Delete(context.SourceProcessorAttempts)}
+            {Delete(context.SourceProcessorBranchMembers)}
+            {Delete(context.SourceProcessorBranches)}
+            {Delete(context.SourceActivityRelations)}
+            {Delete(context.SourceActivities)}
+            {Delete(context.GpuSchedulerOperationReceipts)}
+            {Delete(context.NativeWorkerLifecycleEvidence)}
+            {Delete(context.NativeWorkerInstances)}
+            {Delete(context.GpuExecutorEvidence)}
+            {Delete(context.GpuExecutorResultReceipts)}
+            {Delete(context.GpuExecutorDispatches)}
+            {Delete(context.DocumentOcrRequests)}
+            {Delete(context.EmbeddingGpuRequests)}
+            {Delete(context.GpuMiniTasks)}
+            UPDATE {Table(context.GpuCapacitySlots)} SET [ActiveBatchId]=NULL WHERE [ActiveBatchId] IS NOT NULL;
+            {Delete(context.GpuBatches)}
+            {Delete(context.GpuCapacitySlots)}
+            """);
         var scheduler = await context.GpuSchedulerStates.SingleAsync(candidate => candidate.Id == 1);
         scheduler.WakeGeneration = 0;
         scheduler.SearchBatchesWhileOcrWaiting = 0;
@@ -110,32 +110,49 @@ internal static class SqlTestData
         state.RequiredIndexFormat = 1;
         state.ProjectionChangeFloorVersion = state.CorpusVersion;
         await context.SaveChangesAsync();
-        await context.CurrentIndexMembers.ExecuteDeleteAsync();
-        await context.IndexRecoveryWriters.ExecuteDeleteAsync();
-        await context.IndexRecoveryPins.ExecuteDeleteAsync();
-        await context.IndexRecoveryAudit.ExecuteUpdateAsync(setters => setters.SetProperty(value => value.IsValid, false)
-            .SetProperty(value => value.FailurePath, (string?)null));
-        await context.IndexSegmentOwners.ExecuteDeleteAsync();
-        await context.IndexGenerationSegments.ExecuteDeleteAsync();
-        await context.IndexSegmentVectors.ExecuteDeleteAsync();
-        await context.IndexSegments.ExecuteDeleteAsync();
-        await context.IndexCandidateMembers.ExecuteDeleteAsync();
-        await context.IndexPublicationCandidates.ExecuteDeleteAsync();
-        await context.IndexProjectionChanges.ExecuteDeleteAsync();
-        await context.CorpusRebuildWorkItems.ExecuteDeleteAsync();
-        await context.CorpusRebuildSupersededJobs.ExecuteDeleteAsync();
-        await context.CorpusRebuildOperations.ExecuteUpdateAsync(setters => setters.SetProperty(value => value.SupersedesOperationId, (Guid?)null));
-        await context.CorpusRebuildOperations.ExecuteDeleteAsync();
-        await context.IndexGenerationVectors.ExecuteDeleteAsync();
-        await context.Vectors.ExecuteDeleteAsync();
-        await context.IndexGenerations.ExecuteDeleteAsync();
-        await context.Artifacts.ExecuteDeleteAsync();
-        await context.OutboxMessages.ExecuteDeleteAsync();
-        await context.JobAttempts.ExecuteDeleteAsync();
-        await context.Jobs.ExecuteDeleteAsync();
-        await context.PipelineRecords.ExecuteDeleteAsync();
-        await context.SourceIdentities.ExecuteDeleteAsync();
-        await context.SaveChangesAsync();
+        await ExecuteResetBatchAsync(context, $"""
+            {Delete(context.CurrentIndexMembers)}
+            {Delete(context.IndexRecoveryWriters)}
+            {Delete(context.IndexRecoveryPins)}
+            UPDATE {Table(context.IndexRecoveryAudit)} SET [IsValid]=0, [FailurePath]=NULL;
+            {Delete(context.IndexSegmentOwners)}
+            {Delete(context.IndexGenerationSegments)}
+            {Delete(context.IndexSegmentVectors)}
+            {Delete(context.IndexSegments)}
+            {Delete(context.IndexCandidateMembers)}
+            {Delete(context.IndexPublicationCandidates)}
+            {Delete(context.IndexProjectionChanges)}
+            {Delete(context.CorpusRebuildWorkItems)}
+            {Delete(context.CorpusRebuildSupersededJobs)}
+            UPDATE {Table(context.CorpusRebuildOperations)} SET [SupersedesOperationId]=NULL;
+            {Delete(context.CorpusRebuildOperations)}
+            {Delete(context.IndexGenerationVectors)}
+            {Delete(context.Vectors)}
+            {Delete(context.IndexGenerations)}
+            {Delete(context.Artifacts)}
+            {Delete(context.OutboxMessages)}
+            {Delete(context.JobAttempts)}
+            {Delete(context.Jobs)}
+            {Delete(context.PipelineRecords)}
+            {Delete(context.SourceIdentities)}
+            """);
+    }
+
+    private static string Table<TEntity>(DbSet<TEntity> rows) where TEntity : class
+    {
+        var entity = rows.EntityType;
+        static string Quote(string name) => "[" + name.Replace("]", "]]", StringComparison.Ordinal) + "]";
+        return Quote(entity.GetSchema() ?? "dbo") + "." + Quote(entity.GetTableName()!);
+    }
+
+    private static string Delete<TEntity>(DbSet<TEntity> rows) where TEntity : class => $"DELETE FROM {Table(rows)};";
+
+    private static Task ExecuteResetBatchAsync(FluxKnowledgeDbContext context, string statements)
+    {
+        // Keep the existing autocommit boundaries and EF singleton SaveChanges.
+        // Unlike an unguarded batch, the first failed statement must stop all later work.
+        var sql = $"SET NOCOUNT ON; BEGIN TRY {statements} END TRY BEGIN CATCH THROW; END CATCH;";
+        return context.Database.ExecuteSqlRawAsync(sql);
     }
 
     public static async Task ClearPhase3SourceDataAsync(NativeSqlServerFixture fixture)
@@ -145,11 +162,13 @@ internal static class SqlTestData
                              .UseSqlServer(fixture.ConnectionString)
                              .Options))
         {
-            await context.AuditEvents.ExecuteDeleteAsync();
-            await context.SourceRootWatchStates.ExecuteDeleteAsync();
-            await context.SourceScanOutbox.ExecuteDeleteAsync();
-            await context.SourceScanJobs.ExecuteDeleteAsync();
-            await context.SourceScanRequests.ExecuteDeleteAsync();
+            await ExecuteResetBatchAsync(context, $"""
+                {Delete(context.AuditEvents)}
+                {Delete(context.SourceRootWatchStates)}
+                {Delete(context.SourceScanOutbox)}
+                {Delete(context.SourceScanJobs)}
+                {Delete(context.SourceScanRequests)}
+                """);
         }
 
         await ClearPipelineAsync(fixture);

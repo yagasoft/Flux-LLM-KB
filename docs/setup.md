@@ -339,6 +339,13 @@ contracts there. Candidate-owned build outputs override any inherited
 `FluxKnowledgeArtifactsPath`. There is no separate admission-test repeat: those
 tests remain in the full integration project.
 
+Solution-level test execution stops after the first failed project so a known
+failed candidate does not run later expensive projects. A successful run still
+discovers and tests every project selected by the solution. The override in
+`Directory.Solution.targets` preserves solution validation, configuration mapping
+and normal project test arguments; project-level focused commands are unchanged.
+Its disposable contract uses the pinned SDK and no SQL or external services.
+
 After verification, the script checks that the candidate's tracked content,
 index and base commit have not changed, commits it, and checks the resulting
 tree again to detect hook changes. It fast-forwards `main` to that pinned commit,
@@ -353,6 +360,10 @@ files. Its deliberate timeout probes run alone afterwards. For a sequential
 comparison or debugging, run `tests/native/complete-feature-integration.ps1
 -MaxParallelScenarios 1`. A failed aggregate retains per-scenario logs and exit
 codes; this concurrency does not parallelise the solution's SQL/native projects.
+Closeout runs this harness alongside the independent native deployment-plan
+contract in two contained outer workers. The harness keeps its four-scenario
+limit internally. Each child retains its own exit code and logs under the
+closeout evidence root; a child failure fails `native-isolated-contracts`.
 Windows process jobs contain each worker and its descendants before scenario
 code starts. Cancellation, launcher failures, inherited output pipes and log
 failures have bounded cleanup checks; a worker leaving descendants fails.
@@ -372,6 +383,32 @@ assembly identity. An attempted restore with an uncertain outcome fails closed
 and preserves its catalogue, backup and `template-restore-<catalogue>.json` receipt
 in that owned storage root. Required recovery receipts are independent of optional
 timing output. Inspect preserved evidence before any explicit cleanup.
+
+Disposable files keep their server-selected initial sizes but grow in fixed
+8 MiB steps, avoiding a 64 MiB allocation for a small fixture increment. Recovery
+and commit durability settings are unchanged. Teardown clears the owned raw
+SqlClient pool, the pool derived by EF (which adds its application name), and the
+explicit fixture-admission pool, without opening a connection. Other variants
+and active sessions still use the
+guarded forced-disconnection/drop path; sibling catalogues are not cleared.
+
+Each SQL-backed test assembly schedules at most four xUnit collections at once
+to limit simultaneous database restore and write bursts. Tests may exercise
+additional concurrency internally; existing serial resource collections and
+explicit concurrency checks are unchanged.
+Audited scale, projection, command and recovery classes own their catalogues and
+unique native-file roots and may overlap other SQL classes under that cap. Their
+cases remain serial within each class. Successful lexical/full-text consumers
+and fixtures with process-wide native state retain their isolation.
+The full-text/native isolation collections retain their nonparallel scheduling.
+Full-manifest fixtures retain all scale and historical membership rows. Their
+candidate and segment headers plus set-based membership inserts share the same
+transaction boundary, with exact metadata and segment-mapping parity checks.
+Pipeline resets batch ordered statements without adding a transaction around
+the reset; the first SQL failure stops later statements, and tracked singleton
+updates retain their existing `SaveChanges` boundary. Large dashboard fixtures
+keep their original row counts and use constrained set-based tail inserts with
+one transaction per 1,000 revisions. Hashes and rowversions remain SQL-generated.
 
 Per-run JSON summaries, step logs, TRX files and SQL fixture phase timings remain
 under `.agents/run-logs/closeout-<run-id>/`, outside the disposable candidate.

@@ -18,5 +18,6 @@
   <ItemGroup>
     <Compile Include="../FluxKnowledge.Testing/RepositoryFiles.cs" Link="Support/RepositoryFiles.cs" />
     <Compile Include="../FluxKnowledge.Testing/TestResources.cs" Link="Support/TestResources.cs" />
+    <None Include="../FluxKnowledge.Testing/xunit.sql.runner.json" Link="xunit.runner.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

@@ -6,6 +6,7 @@ using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Hosting;
 using Xunit;
 
 namespace FluxKnowledge.Web.Tests.Components;
@@ -574,9 +575,12 @@ public sealed class OverviewProjectionTests
             builder.UseSetting("LocalIngress:AllowedRoots:0", Path.GetTempPath());
             builder.UseSetting(
                 "Usearch:RootPath",
-                Path.Combine(Path.GetTempPath(), "FluxKnowledgeOverviewProjectionTests"));
+                Path.Combine(Path.GetTempPath(), $"FluxKnowledgeOverviewProjectionTests_{Guid.NewGuid():N}"));
             builder.ConfigureTestServices(services =>
             {
+                // Rendering uses the fake projection reader. Unrelated hosted
+                // SQL workers must not stop this host on its placeholder server.
+                services.RemoveAll<IHostedService>();
                 services.RemoveAll<IProjectionReader>();
                 if (projection is null) services.AddScoped<IProjectionReader, NoActiveSchedulerProjectionReader>();
                 else services.AddScoped<IProjectionReader>(_ => new FakeProjectionReader(projection)

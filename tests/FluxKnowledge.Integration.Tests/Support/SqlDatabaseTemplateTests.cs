@@ -18,6 +18,9 @@ public sealed class SqlDatabaseTemplateTests
             try
             {
                 await Task.WhenAll(first.InitializeAsync(), second.InitializeAsync());
+                await SqlStorageAssertions.HasDisposableLayoutAsync(direct.ConnectionString);
+                await SqlStorageAssertions.HasDisposableLayoutAsync(first.ConnectionString);
+                await SqlStorageAssertions.HasDisposableLayoutAsync(second.ConnectionString);
                 var expected = await FingerprintAsync(direct.ConnectionString);
                 Assert.Equal(expected, await FingerprintAsync(first.ConnectionString));
                 Assert.Equal(expected, await FingerprintAsync(second.ConnectionString));

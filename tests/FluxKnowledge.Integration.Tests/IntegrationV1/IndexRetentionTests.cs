@@ -17,7 +17,6 @@ using Xunit.Abstractions;
 
 namespace FluxKnowledge.Integration.Tests.IntegrationV1;
 
-[Collection("sql-full-text")]
 public sealed class IndexRetentionTests(NativeSqlServerFixture fixture, ITestOutputHelper output) : IClassFixture<NativeSqlServerFixture>
 {
     [NativeSqlServerTheory]

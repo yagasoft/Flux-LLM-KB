@@ -16,7 +16,6 @@ using Xunit;
 
 namespace FluxKnowledge.Integration.Tests.Cli;
 
-[Collection("sql-full-text")]
 public sealed class IndexProjectionCommandTests(NativeSqlServerFixture fixture) : IClassFixture<NativeSqlServerFixture>
 {
     [NativeSqlServerFact]

@@ -74,7 +74,7 @@ public sealed class DisposableSqlLifecycleTests
     }
 
     [Fact]
-    public async Task Disposing_one_catalogue_preserves_a_sibling_catalogues_pooled_connection()
+    public async Task Disposing_one_catalogue_clears_its_known_pools_and_preserves_every_sibling_pool()
     {
         var target = new NativeSqlServerFixture();
         var sibling = new NativeSqlServerFixture();
@@ -84,6 +84,54 @@ public sealed class DisposableSqlLifecycleTests
             await sibling.InitializeAsync();
             try
             {
+                await using var targetEf = new FluxKnowledge.Infrastructure.SqlServer.Persistence.FluxKnowledgeDbContext(
+                    new DbContextOptionsBuilder<FluxKnowledge.Infrastructure.SqlServer.Persistence.FluxKnowledgeDbContext>()
+                        .UseSqlServer(target.ConnectionString).Options);
+                await using var siblingEf = new FluxKnowledge.Infrastructure.SqlServer.Persistence.FluxKnowledgeDbContext(
+                    new DbContextOptionsBuilder<FluxKnowledge.Infrastructure.SqlServer.Persistence.FluxKnowledgeDbContext>()
+                        .UseSqlServer(sibling.ConnectionString).Options);
+                await using var targetAdmission = new SqlConnection(FixtureSourceAdmission.ConnectionStringFor(targetEf.Database.GetConnectionString()));
+                await using var siblingAdmission = new SqlConnection(FixtureSourceAdmission.ConnectionStringFor(siblingEf.Database.GetConnectionString()));
+                var targetConnection = (SqlConnection)targetEf.Database.GetDbConnection();
+                var siblingConnection = (SqlConnection)siblingEf.Database.GetDbConnection();
+                await targetEf.Database.OpenConnectionAsync();
+                var targetOriginal = targetConnection.ClientConnectionId;
+                await targetEf.Database.CloseConnectionAsync();
+                await siblingEf.Database.OpenConnectionAsync();
+                var siblingOriginal = siblingConnection.ClientConnectionId;
+                await siblingEf.Database.CloseConnectionAsync();
+                await targetEf.Database.OpenConnectionAsync();
+                Assert.Equal(targetOriginal, targetConnection.ClientConnectionId);
+                await targetEf.Database.CloseConnectionAsync();
+                await targetAdmission.OpenAsync();
+                var targetAdmissionOriginal = targetAdmission.ClientConnectionId;
+                await targetAdmission.CloseAsync();
+                await targetAdmission.OpenAsync();
+                Assert.Equal(targetAdmissionOriginal, targetAdmission.ClientConnectionId);
+                await targetAdmission.CloseAsync();
+                await siblingAdmission.OpenAsync();
+                var siblingAdmissionOriginal = siblingAdmission.ClientConnectionId;
+                await siblingAdmission.CloseAsync();
+                await siblingAdmission.OpenAsync();
+                Assert.Equal(siblingAdmissionOriginal, siblingAdmission.ClientConnectionId);
+                await siblingAdmission.CloseAsync();
+                // A pool clear must not open a new connection, even when the
+                // generated catalogue does not exist.
+                NativeSqlServerFixture.ClearOwnedPool(new SqlConnectionStringBuilder(target.ConnectionString)
+                    { InitialCatalog = $"FluxKnowledge_Phase1Tests_{Guid.NewGuid():N}", ConnectTimeout = 1 }.ConnectionString);
+                NativeSqlServerFixture.ClearOwnedPool(target.ConnectionString);
+                await targetEf.Database.OpenConnectionAsync();
+                Assert.NotEqual(targetOriginal, targetConnection.ClientConnectionId);
+                await targetEf.Database.CloseConnectionAsync();
+                await siblingEf.Database.OpenConnectionAsync();
+                Assert.Equal(siblingOriginal, siblingConnection.ClientConnectionId);
+                await siblingEf.Database.CloseConnectionAsync();
+                await targetAdmission.OpenAsync();
+                Assert.NotEqual(targetAdmissionOriginal, targetAdmission.ClientConnectionId);
+                await targetAdmission.CloseAsync();
+                await siblingAdmission.OpenAsync();
+                Assert.Equal(siblingAdmissionOriginal, siblingAdmission.ClientConnectionId);
+                await siblingAdmission.CloseAsync();
                 await using var connection = new SqlConnection(sibling.ConnectionString);
                 await connection.OpenAsync();
                 var originalConnection = connection.ClientConnectionId;
@@ -92,6 +140,12 @@ public sealed class DisposableSqlLifecycleTests
                 await connection.OpenAsync();
                 Assert.Equal(originalConnection, connection.ClientConnectionId);
                 Assert.Equal(1, await new SqlCommand("SELECT 1", connection).ExecuteScalarAsync());
+                await siblingEf.Database.OpenConnectionAsync();
+                Assert.Equal(siblingOriginal, siblingConnection.ClientConnectionId);
+                await siblingEf.Database.CloseConnectionAsync();
+                await siblingAdmission.OpenAsync();
+                Assert.Equal(siblingAdmissionOriginal, siblingAdmission.ClientConnectionId);
+                await siblingAdmission.CloseAsync();
             }
             finally { await sibling.DisposeAsync(); }
         }
@@ -137,12 +191,14 @@ public sealed class DisposableSqlLifecycleTests
         string previousName;
         try
         {
+            await SqlStorageAssertions.HasDisposableLayoutAsync(fixture.ConnectionString);
             await using var context = new FluxKnowledge.Infrastructure.SqlServer.Persistence.FluxKnowledgeDbContext(
                 new DbContextOptionsBuilder<FluxKnowledge.Infrastructure.SqlServer.Persistence.FluxKnowledgeDbContext>()
                     .UseSqlServer(fixture.ConnectionString).Options);
             Assert.Empty(await context.Database.GetPendingMigrationsAsync());
             var previous = await fixture.CreatePreviousMigrationDatabaseAsync();
             previousName = previous.DatabaseName;
+            await SqlStorageAssertions.HasDisposableLayoutAsync(previous.ConnectionString);
             await previous.DisposeAsync();
             await previous.DisposeAsync();
             await AssertAbsentAsync(previousName);

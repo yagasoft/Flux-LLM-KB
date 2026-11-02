@@ -16,7 +16,6 @@ using Xunit.Abstractions;
 
 namespace FluxKnowledge.Integration.Tests.Indexing;
 
-[Collection("sql-full-text")]
 public sealed class PublishedPassageSelectionPerformanceTests(NativeSqlServerFixture fixture, ITestOutputHelper output)
     : IClassFixture<NativeSqlServerFixture>
 {

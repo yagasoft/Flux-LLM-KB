@@ -373,7 +373,13 @@ public sealed class NativeSqlServerFixture : IAsyncLifetime
     {
         ValidateGeneratedCatalog(name);
         root = ValidateTestFileRoot(root);
-        return $"CREATE DATABASE [{name}] ON PRIMARY (NAME=N'{name}', FILENAME=N'{Path.Combine(root, name + ".mdf")}') LOG ON (NAME=N'{name}_log', FILENAME=N'{Path.Combine(root, name + "_log.ldf")}');";
+        // Small fixtures should not inherit a server's much larger growth step.
+        // Keep ordinary logging/durability and permit genuine scale tests to grow.
+        return $"""
+            CREATE DATABASE [{name}]
+            ON PRIMARY (NAME=N'{name}', FILENAME=N'{Path.Combine(root, name + ".mdf")}', FILEGROWTH=8MB)
+            LOG ON (NAME=N'{name}_log', FILENAME=N'{Path.Combine(root, name + "_log.ldf")}', FILEGROWTH=8MB);
+            """;
     }
 
     internal static async Task RunCreateSequenceAsync(
@@ -545,10 +551,21 @@ public sealed class NativeSqlServerFixture : IAsyncLifetime
         }).ConfigureAwait(false);
     }
 
-    private static void ClearOwnedPool(string connectionString)
+    internal static void ClearOwnedPool(string connectionString)
     {
         using var owned = new SqlConnection(connectionString);
         SqlConnection.ClearPool(owned);
+        // EF adds its application name to otherwise ordinary connections, which
+        // creates a separate pool. Derive that exact pool through the provider;
+        // neither this context nor its connection is opened during cleanup.
+        using var context = new FluxKnowledgeDbContext(new DbContextOptionsBuilder<FluxKnowledgeDbContext>()
+            .UseSqlServer(connectionString).Options);
+        var admissionBinding = FixtureSourceAdmission.ConnectionStringFor(context.Database.GetConnectionString());
+        SqlConnection.ClearPool((SqlConnection)context.Database.GetDbConnection());
+        // Admission metadata deliberately uses a third pool to avoid consuming
+        // a caller's single connection slot. Clear only this known owned binding.
+        using var admission = new SqlConnection(admissionBinding);
+        SqlConnection.ClearPool(admission);
     }
 
     internal static void ValidateGeneratedCatalog(string databaseName)

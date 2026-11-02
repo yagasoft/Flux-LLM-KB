@@ -20,6 +20,7 @@ using Microsoft.AspNetCore.TestHost;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Hosting;
 using Xunit;
 
 namespace FluxKnowledge.Web.Tests.Endpoints;
@@ -132,9 +133,12 @@ public sealed class GpuStatusEndpointTests : IClassFixture<GpuStatusEndpointTest
             builder.UseSetting("LocalIngress:AllowedRoots:0", Path.GetTempPath());
             builder.UseSetting(
                 "Usearch:RootPath",
-                Path.Combine(Path.GetTempPath(), "FluxKnowledgeGpuStatusEndpointTests"));
+                Path.Combine(Path.GetTempPath(), $"FluxKnowledgeGpuStatusEndpointTests_{Guid.NewGuid():N}"));
             builder.ConfigureTestServices(services =>
             {
+                // Endpoint contracts use fake projections, without SQL workers
+                // stopping the host on its deliberately unreachable server.
+                services.RemoveAll<IHostedService>();
                 services.RemoveAll<IProjectionReader>();
                 services.AddScoped<IProjectionReader, FixedProjectionReader>();
             });
@@ -152,9 +156,10 @@ public sealed class GpuStatusEndpointTests : IClassFixture<GpuStatusEndpointTest
             builder.UseSetting("LocalIngress:AllowedRoots:0", Path.GetTempPath());
             builder.UseSetting(
                 "Usearch:RootPath",
-                Path.Combine(Path.GetTempPath(), "FluxKnowledgeGpuStatusEndpointFailureTests"));
+                Path.Combine(Path.GetTempPath(), $"FluxKnowledgeGpuStatusEndpointFailureTests_{Guid.NewGuid():N}"));
             builder.ConfigureTestServices(services =>
             {
+                services.RemoveAll<IHostedService>();
                 services.RemoveAll<IProjectionReader>();
                 services.AddScoped<IProjectionReader, FailingProjectionReader>();
             });

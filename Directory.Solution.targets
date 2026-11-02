@@ -1,0 +1,12 @@
+<Project>
+  <!-- Keep solution testing serial and stop after a failed project. The solution's
+       initial validation targets and each project's normal VSTest target still run.
+       Pass the original items so solution configuration metadata remains intact. -->
+  <Target Name="VSTest">
+    <MSBuild Projects="@(ProjectReference)"
+             Targets="VSTest"
+             BuildInParallel="false"
+             StopOnFirstFailure="true"
+             Properties="BuildingSolutionFile=true;CurrentSolutionConfigurationContents=$(CurrentSolutionConfigurationContents);SolutionDir=$(SolutionDir);SolutionExt=$(SolutionExt);SolutionFileName=$(SolutionFileName);SolutionName=$(SolutionName);SolutionPath=$(SolutionPath)" />
+  </Target>
+</Project>

@@ -1340,13 +1340,14 @@ try {
     Invoke-FeatureStep -Name 'dotnet-test-native-candidate' -Cwd $script:CandidateRoot -Command "dotnet test FluxKnowledge.slnx -m:1 -c Release --no-build --logger 'console;verbosity=minimal' --logger trx --results-directory '$safeResults'" -TimeoutSeconds $TestStepTimeoutSeconds
     Invoke-FeatureStep -Name "native-repository-contract" -Cwd $script:CandidateRoot -Command 'pwsh -NoProfile -File .\tests\native\repository-contract.ps1 -SourceRoot .'
     Invoke-FeatureStep -Name "native-closeout-contract" -Cwd $script:CandidateRoot -Command 'pwsh -NoProfile -File .\tests\native\complete-feature-dryrun.ps1 -SourceRoot .'
-    Invoke-FeatureStep -Name 'native-closeout-integration-contract' -Cwd $script:CandidateRoot -Command 'pwsh -NoProfile -File .\tests\native\complete-feature-integration.ps1 -SourceRoot .'
+    $safeContractOutput = (Join-Path (Split-Path -Parent $script:ResultsRoot) 'isolated-native-contracts').Replace("'", "''")
+    Invoke-FeatureStep -Name 'native-isolated-contracts' -Cwd $script:CandidateRoot -Command "pwsh -NoProfile -File .\tests\native\complete-feature-isolated-contracts.ps1 -SourceRoot . -OutputRoot '$safeContractOutput'"
     Invoke-FeatureStep -Name 'native-closeout-parallel-contract' -Cwd $script:CandidateRoot -Command 'pwsh -NoProfile -File .\tests\native\complete-feature-parallel-contract.ps1 -SourceRoot .'
     Invoke-FeatureStep -Name "native-go-live-bootstrap-nondryrun-contract" -Cwd $script:CandidateRoot -Command 'pwsh -NoProfile -File .\tests\native\complete-feature-bootstrap-nondryrun.ps1 -SourceRoot .'
     Invoke-FeatureStep -Name "native-go-live-contract" -Cwd $script:CandidateRoot -Command 'pwsh -NoProfile -File .\tests\native\native-go-live-contract.ps1 -SourceRoot .'
     Invoke-FeatureStep -Name "native-go-live-recovery-removal-contract" -Cwd $script:CandidateRoot -Command 'pwsh -NoProfile -File .\tests\native\native-go-live-recovery-removal-contract.ps1 -SourceRoot .'
-    Invoke-FeatureStep -Name "native-deployment-contract" -Cwd $script:CandidateRoot -Command 'pwsh -NoProfile -File .\tests\native\native-deployment-plan.ps1 -SourceRoot .'
     Invoke-FeatureStep -Name 'native-test-timing-contract' -Cwd $script:CandidateRoot -Command 'pwsh -NoProfile -File .\tests\native\test-timing-summary-contract.ps1 -SourceRoot .'
+    Invoke-FeatureStep -Name 'native-solution-test-contract' -Cwd $script:CandidateRoot -Command 'pwsh -NoProfile -File .\tests\native\solution-test-failfast-contract.ps1 -SourceRoot .'
     Invoke-CloseoutAction -Name 'verify-candidate-tree' -Cwd $script:CandidateRoot -Action {
         Assert-CloseoutWorktree $script:CandidateRoot -Head $script:BaseSha -Tree $script:CandidateTree -AllowStaged
     }

@@ -161,9 +161,8 @@ public sealed class SqlGpuInteractiveRequestTests(NativeSqlServerFixture fixture
         await context.Database.MigrateAsync();
         await SqlTestData.ClearPipelineAsync(fixture);
         await migrator.MigrateAsync("20260926183316_AddGpuOcrTurnBound");
-        await context.Database.MigrateAsync();
-        Assert.Equal(0, await context.GpuMiniTasks.CountAsync());
-        await migrator.MigrateAsync("20260926183316_AddGpuOcrTurnBound");
+        // The final empty upgrade below completes this roundtrip after proving
+        // that populated predecessor data blocks the process-identity upgrade.
         await context.Database.ExecuteSqlInterpolatedAsync($"""
             INSERT INTO [GpuMiniTasks] ([Id], [SourceRevision], [PriorityLane], [InteractiveExecutorInstanceId], [RequiredExecutorKey],
                 [ModelRuntimeKey], [SettingsFingerprint], [EstimatedBytes], [QueueDeadlineUtc], [ExecutionDeadlineUtc], [IdempotencyKey],
@@ -177,6 +176,7 @@ public sealed class SqlGpuInteractiveRequestTests(NativeSqlServerFixture fixture
         Assert.Equal(0, await context.Database.SqlQueryRaw<int>("SELECT COUNT(*) AS [Value] FROM sys.columns WHERE object_id = OBJECT_ID('GpuMiniTasks') AND name = 'InteractiveOwnerProcessId'").SingleAsync());
         await context.Database.ExecuteSqlRawAsync("DELETE FROM GpuMiniTasks");
         await context.Database.MigrateAsync();
+        Assert.Equal(0, await context.GpuMiniTasks.CountAsync());
     }
 
     [NativeSqlServerFact]
