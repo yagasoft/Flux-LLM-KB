@@ -150,7 +150,9 @@ independent paced namespace/Git reconciliation and scoped degraded-mode work
 preserve discovery and deletion authority. See the [incremental scanning design](design/incremental-source-scanning.md).
 
 The rejected-cursor correction distinguishes a historical native read rejection
-from unavailability only after one valid control read on the same volume handle.
+from unavailability after a valid control read on the same volume handle and
+one retry at the original historical position. Transient success returns that
+original history; control bytes never advance coverage. Healthy reads add no I/O.
 Its paired helper protocol preserves that diagnosis. A shared reset records the
 previous/replacement cursor atomically with recovery debt and refuses to alter
 paused participants' coverage or pending metadata. New automatic whole-root work

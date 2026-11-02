@@ -36,7 +36,13 @@ hints was not captured; scan/provider feedback remains a hypothesis.
   the same journal ID, buffer bound and fields, changing only `StartUsn` to the
   previously queried head. The control must parse successfully. Failed or
   malformed controls retain unavailability; cancellation propagates before and
-  after the probe. General error-87 handling remains unchanged.
+  after the probe. A valid control permits exactly one retry at the original
+  position on that same handle. Successful retry returns the original history,
+  never control bytes; only another error 87 becomes cursor-rejected. Other
+  retry errors retain their existing availability or explicit gap semantics.
+  Cancellation is checked before retry and after success or failure. Healthy
+  reads remain one read IOCTL; the exceptional path makes at most three read
+  IOCTLs, with no general retry loop or successful-path overhead.
 - The closed pipe value `cursor-rejected` preserves the diagnosis and native
   error. Existing generic gaps and availability failures retain their contracts.
   Old clients treat the new value as unavailable, so a paired helper/application
@@ -88,6 +94,37 @@ an invalid cursor only into that owned database, proves paused metadata remains
 unchanged, explicitly resumes only the synthetic sources, observes recovery and
 a quiet interval, then pauses those sources again. This qualifies reconciliation;
 it is not an OCR, semantic-search or production-publication acceptance claim.
+
+The resilience follow-up also exercises real NTFS create, content edit, file
+rename, directory move and deletion in separate functional staging with
+deterministic embeddings and no real models or GPU. Validate current publication
+and public retained readback as well as file hashes. A scoped directory capture
+alone does not certify the whole namespace. If metadata debt remains, preserve
+it until the ordinary reconciliation sweep, and retain any newer uncertainty. Do not
+require immediate zero debt, infer publication from pipeline completion alone,
+or use an unqualified fixture to claim unchanged-content byte savings.
+
+The qualified functional run on 2 November passed all five file operations,
+current REST search and retained readback, and deletion withdrawal while all
+20 unchanged documents remained published. Their revision IDs, hashes and paths
+were unchanged. Across the interval, enumeration read 18,008 source bytes
+(four changed-file lengths), retention read 9,004 bytes (two changed versions),
+and verification read zero bytes. One root-wide namespace sweep respected the
+fixture's normal 60-second cadence; the production 900-second cadence was not
+changed. No requests appeared in the final 20-second quiet interval. Namespace
+coverage was complete and pending work empty before the fixture was paused.
+Deterministic embeddings qualify the functional publication/readback path,
+not semantic quality, real-model latency or OneDrive provider behaviour. The
+earlier capture-only and harness failures remain preserved as separate evidence.
+
+Journal positions are offsets in a volume's journal stream; records are
+appended and old history can be trimmed. A file rename adds change records; it
+does not relocate an earlier USN. The original error87 position was inside the
+advertised retained range with the same journal ID. This excludes neither every
+possible cursor/protocol defect nor every filesystem fault; the exact origin
+remains unproved. The successful head control returned no historical records.
+See Microsoft's [journal record description](https://learn.microsoft.com/en-us/windows/win32/fileio/change-journal-records)
+and [read cursor contract](https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ns-winioctl-read_usn_journal_data_v0).
 
 Use `scripts/dev/complete-feature.ps1` for canonical source closeout. The concrete
 release packet must include the incremental updater's reviewed `-PlanOnly`

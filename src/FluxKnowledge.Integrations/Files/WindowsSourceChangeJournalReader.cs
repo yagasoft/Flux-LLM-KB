@@ -68,16 +68,28 @@ public sealed class WindowsSourceChangeJournalReader : ISourceChangeJournalReade
         try { return read(startUsn); }
         catch (IOException error) when (error.InnerException is Win32Exception { NativeErrorCode: 87 } && startUsn < currentHead)
         {
-            // Error87 is ambiguous. Only a valid read with identical parameters at
-            // the known head proves this historical cursor, rather than transport,
-            // permissions or the request itself, was rejected.
+            // Error87 is ambiguous. Check the same request shape at the known
+            // head, then retry the original position once before treating its
+            // rejection as persistent. Control bytes never advance coverage.
             ct.ThrowIfCancellationRequested();
             var validControl = false;
             try { _ = UsnJournalParser.Parse(read(currentHead), currentHead); validControl = true; }
             catch (IOException) { }
             ct.ThrowIfCancellationRequested();
             if (!validControl) throw;
-            throw new SourceJournalGapException("SourceJournalCursorRejected", error);
+            try
+            {
+                var retry = read(startUsn);
+                ct.ThrowIfCancellationRequested();
+                return retry;
+            }
+            catch (IOException retryError)
+            {
+                ct.ThrowIfCancellationRequested();
+                if (retryError is SourceJournalGapException ||
+                    retryError.InnerException is not Win32Exception { NativeErrorCode: 87 }) throw;
+                throw new SourceJournalGapException("SourceJournalCursorRejected", retryError);
+            }
         }
     }
 
