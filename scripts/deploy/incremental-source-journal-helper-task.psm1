@@ -73,8 +73,9 @@ function Get-SourceJournalHelperTaskObservation {
 }
 
 function Get-SourceJournalHelperNativeProcesses {
-    param([Parameter(Mandatory)][string]$Executable)
+    param([Parameter(Mandatory)][string]$Executable,[scriptblock]$IsExitedProcess)
     foreach($process in @(Get-CimInstance Win32_Process -Filter "Name='FluxKnowledge.Cli.exe'" -ErrorAction Stop)){
+        if($null -ne $IsExitedProcess -and (&$IsExitedProcess $process)){continue}
         if(!$process.ExecutablePath){throw 'journal-helper-native-process-path-unavailable'}
         if($process.ExecutablePath.Equals($Executable,[StringComparison]::OrdinalIgnoreCase)){$process}
     }
@@ -84,7 +85,26 @@ function New-SourceJournalHelperNativeTaskPorts {
     param([Parameter(Mandatory)][hashtable]$State,[Parameter(Mandatory)][scriptblock]$AssertApplicationStopped,
         [Parameter(Mandatory)][scriptblock]$Probe)
     $null=Assert-SourceJournalHelperNativeTaskTarget $State.InstallRoot $State.TaskName
-    $context=@{State=$State;Captured=[Collections.Generic.List[Diagnostics.Process]]::new()}
+    $context=@{State=$State;Captured=[Collections.Generic.Dictionary[string,Diagnostics.Process]]::new([StringComparer]::Ordinal);
+        ExitedIncarnations=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)}
+    $context.IsExitedProcess={
+        param($Observation)
+        # CIM can retain a row after the native process has exited. Only an
+        # already-held handle may prove that exact incarnation exited. Retain
+        # immutable identity strings until this operation closes, including its
+        # rollback, restart and held IIS transport checks. Never persist them.
+        foreach($entry in $context.Captured.GetEnumerator()){
+            if($entry.Value.HasExited){$null=$context.ExitedIncarnations.Add($entry.Key)}
+        }
+        if($null -eq $Observation -or !$Observation.PSObject.Properties['Name'] -or
+            $Observation.Name -ine 'FluxKnowledge.Cli.exe' -or !$Observation.PSObject.Properties['ProcessId'] -or
+            $Observation.ProcessId -isnot [int] -and $Observation.ProcessId -isnot [uint32] -or
+            [long]$Observation.ProcessId -le 0 -or [long]$Observation.ProcessId -gt [int]::MaxValue -or
+            !$Observation.PSObject.Properties['CreationDate'] -or $Observation.CreationDate -isnot [datetime]){return $false}
+        $key=$Observation.ProcessId.ToString([Globalization.CultureInfo]::InvariantCulture)+'|'+
+            $Observation.CreationDate.ToUniversalTime().Ticks.ToString([Globalization.CultureInfo]::InvariantCulture)
+        $context.ExitedIncarnations.Contains($key)
+    }.GetNewClosure()
     $read={incremental-source-journal-helper-task\Get-SourceJournalHelperTaskObservation -InstallRoot $context.State.InstallRoot -TaskName $context.State.TaskName}.GetNewClosure()
     $owned={
         $current=&$read
@@ -99,15 +119,18 @@ function New-SourceJournalHelperNativeTaskPorts {
     }.GetNewClosure()
     $stop={
         $null=&$owned
-        foreach($row in @(incremental-source-journal-helper-task\Get-SourceJournalHelperNativeProcesses $context.State.OriginalTask.Executable)){
+        foreach($row in @(incremental-source-journal-helper-task\Get-SourceJournalHelperNativeProcesses -Executable $context.State.OriginalTask.Executable -IsExitedProcess $context.IsExitedProcess)){
             $process=$null
             try{
+                if($row.CreationDate -isnot [datetime]){throw 'journal-helper-native-process-identity-unavailable'}
                 $process=[Diagnostics.Process]::GetProcessById([int]$row.ProcessId)
                 $null=$process.SafeHandle # Hold the native process incarnation, not a reusable PID.
-                if($process.StartTime.ToUniversalTime().AddTicks(-($process.StartTime.Ticks%10)) -ne $row.CreationDate.ToUniversalTime()){
+                $created=$process.StartTime.ToUniversalTime();$created=$created.AddTicks(-($created.Ticks%10))
+                if($created -ne $row.CreationDate.ToUniversalTime()){
                     throw 'journal-helper-native-process-incarnation-changed'
                 }
-                $context.Captured.Add($process);$process=$null
+                $key=$process.Id.ToString([Globalization.CultureInfo]::InvariantCulture)+'|'+$created.Ticks.ToString([Globalization.CultureInfo]::InvariantCulture)
+                if(!$context.Captured.ContainsKey($key)){$context.Captured.Add($key,$process);$process=$null}
             }catch [ArgumentException] { } # Recheck absence below; never kill a replacement PID.
             finally{if($null -ne $process){$process.Dispose()}}
         }
@@ -117,10 +140,11 @@ function New-SourceJournalHelperNativeTaskPorts {
         $watch=[Diagnostics.Stopwatch]::StartNew()
         do{
             $current=&$owned
-            $remaining=@(incremental-source-journal-helper-task\Get-SourceJournalHelperNativeProcesses $context.State.OriginalTask.Executable)
-            $live=@($context.Captured|Where-Object {!$_.HasExited})
+            $null=&$context.IsExitedProcess $null # Preserve proof even if CIM currently omits every exited row.
+            $remaining=@(incremental-source-journal-helper-task\Get-SourceJournalHelperNativeProcesses -Executable $context.State.OriginalTask.Executable -IsExitedProcess $context.IsExitedProcess)
+            $live=@($context.Captured.Values|Where-Object {!$_.HasExited})
             if(!$current.Enabled -and !$current.Running -and !$remaining.Count -and !$live.Count){
-                foreach($process in $context.Captured){$process.Dispose()};$context.Captured.Clear();return
+                foreach($process in $context.Captured.Values){$process.Dispose()};$context.Captured.Clear();return
             }
             Start-Sleep -Milliseconds 200
         }while($watch.Elapsed.TotalSeconds -lt 15)
@@ -136,11 +160,14 @@ function New-SourceJournalHelperNativeTaskPorts {
         Start-ScheduledTask -TaskName $context.State.TaskName -TaskPath '\' -ErrorAction Stop
     }.GetNewClosure()
     @{ReadTask=$read;AssertApplicationStopped=$AssertApplicationStopped;DisableTask=$disable;StopTask=$stop;AssertExited=$exit;
-        EnableTask=$enable;StartTask=$start;Probe=$Probe;Context=$context}
+        EnableTask=$enable;StartTask=$start;Probe=$Probe;IsExitedProcess=$context.IsExitedProcess;Context=$context}
 }
 
 function Close-SourceJournalHelperNativeTaskPorts([hashtable]$Ports){
-    if($Ports -and $Ports.ContainsKey('Context')){foreach($process in $Ports.Context.Captured){$process.Dispose()};$Ports.Context.Captured.Clear()}
+    if($Ports -and $Ports.ContainsKey('Context')){
+        foreach($process in $Ports.Context.Captured.Values){$process.Dispose()};$Ports.Context.Captured.Clear()
+        $Ports.Context.ExitedIncarnations.Clear()
+    }
 }
 Export-ModuleMember -Function ConvertFrom-SourceJournalHelperTaskSnapshot,Get-SourceJournalHelperTaskObservation,
     Get-SourceJournalHelperNativeProcesses,New-SourceJournalHelperNativeTaskPorts,Close-SourceJournalHelperNativeTaskPorts

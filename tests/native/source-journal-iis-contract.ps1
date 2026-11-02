@@ -20,7 +20,7 @@ function Get-RepositoryRecoveryTaskObservation {@{Enabled=$box.CompanionEnabled;
 function Wait-InteractiveHostStopped {param($TaskName,$TimeoutSeconds)}
 function Get-CimInstance {param($ClassName,$Filter,$OperationTimeoutSec,$ErrorAction);$box.Processes}
 function Invoke-CimMethod {param($InputObject,$MethodName,$OperationTimeoutSec,$ErrorAction);@{ReturnValue=0;Sid=$box.Sid}}
-function Get-SourceJournalHelperNativeProcesses {param($Executable);[pscustomobject]@{ProcessId=123}}
+function Get-SourceJournalHelperNativeProcesses {param($Executable,$IsExitedProcess);[pscustomobject]@{ProcessId=123}}
 function Get-SourceJournalHelperPayloadManifest {param($Path);@{Sha256=(Get-HybridPayloadFingerprint $Path)}}
 function Invoke-RestMethod {
  param($Uri,$Method,$TimeoutSec)
@@ -66,7 +66,7 @@ try{
   OriginalPayloadSha256=(Get-HybridPayloadFingerprint (Join-Path $SourceJournalHelperRoot 'payload'));
   RepairPolicySha256=(Get-FileHash -LiteralPath $policyPath).Hash;RootReadPlanSha256=(Get-FileHash -LiteralPath $planPath).Hash;
   Policy=@{Path=$journalPath;AfterHash=(Get-FileHash -LiteralPath $journalPath).Hash}}
- $sourceJournalNativePorts=@{ReadTask={$box.Task}}
+ $sourceJournalNativePorts=@{ReadTask={$box.Task};IsExitedProcess={param($Observation);$false}}
  $sourceJournalRelease=@{TransportConfirmed=$false;TransportDeferred=$false;RepairMode=(Get-DeploymentSourceJournalRepairMode)}
  [IO.File]::WriteAllText($ValidationHoldPath,($releaseId|ConvertTo-Json -Compress))
  $allowed=[pscustomobject]@{Name='FluxKnowledge.Cli.exe';ExecutablePath=$exe;CommandLine=('"'+$exe+'" '+$box.Task.Arguments)}

@@ -32,6 +32,8 @@ function Assert-DeploymentSourceJournalCliWritersStopped {
     $helperArguments='source-access serve --broker-root "'+$SourceJournalHelperRoot+'"'
     $helperProcesses=0
     foreach($process in @(Get-CimInstance Win32_Process -Filter "Name='FluxKnowledge.Cli.exe' OR Name='dotnet.exe'" -OperationTimeoutSec 5 -ErrorAction Stop)){
+        if($null -ne $sourceJournalNativePorts -and $sourceJournalNativePorts.ContainsKey('IsExitedProcess') -and
+            (&$sourceJournalNativePorts.IsExitedProcess $process)){continue}
         if(!$process.ExecutablePath -or !$process.CommandLine){throw 'journal-release-cli-command-line-unavailable'}
         if($process.Name -ieq 'dotnet.exe'){
             if($process.CommandLine -imatch 'FluxKnowledge\.Cli\.dll(?=["\s]|$)'){throw 'journal-release-other-cli-writer-exit-unproved'}
@@ -74,7 +76,7 @@ function Test-DeploymentSourceJournalHelperNativeState([bool]$Candidate) {
         foreach($key in @('TaskName','PrincipalSid','Executable','Arguments','WorkingDirectory','DefinitionSha256','SecuritySha256')){
             if($task[$key] -cne $sourceJournalHelperState.OriginalTask[$key]){throw 'journal-release-helper-task-binding-changed'}
         }
-        $processes=@(Get-SourceJournalHelperNativeProcesses $sourceJournalHelperState.OriginalTask.Executable)
+        $processes=@(Get-SourceJournalHelperNativeProcesses -Executable $sourceJournalHelperState.OriginalTask.Executable -IsExitedProcess $sourceJournalNativePorts.IsExitedProcess)
         if($task.Enabled -eq $sourceJournalHelperState.OriginalTask.Enabled -and
             $task.Running -eq $sourceJournalHelperState.OriginalTask.Running -and
             (!$task.Running -or $processes.Count -eq 1)){break}

@@ -64,8 +64,15 @@ hints was not captured; scan/provider feedback remains a hypothesis.
   normal full-scan interval, recovery debt and paused admission, with a link to
   source details. Health comes from the checkpoint in the same committed sample,
   so a stale fallback mode alone cannot misreport a successfully restored journal.
+- Helper replacement retains operation-local exit proof through rollback,
+  restart and held IIS checks. A stale CIM row may be ignored only when its
+  helper name, PID and creation time match an incarnation whose previously
+  captured native handle proves exit. Immutable identity receipts survive
+  handle disposal until the update closes, then are cleared. Unknown or live
+  processes, reused PIDs and missing identities still block the update. No
+  persistent process allowlist or time-based grace period is introduced.
 
-Source contents, public APIs, schema, native cleanup rules, model configuration,
+Source contents, public APIs, schema, native cleanup invariants, model configuration,
 search and the user manual are outside this correction.
 
 ## Verification and release boundary
@@ -111,3 +118,24 @@ compatible recovery path; do not substitute manual copies or an unapproved
 feature-off operation. Preserve current SQL, index and recovery evidence, and
 never restore an old database or cursor to make rollback appear complete. If
 recovery has begun, its durable debt remains required.
+
+## Interim production result, 2 November
+
+Canonical release `ba9de046` passed 5,018 .NET tests and nine native contract
+steps with zero build warnings. The paired update refused a missing-path native
+process observation while stopping the helper. It restored the old helper and
+retained the Web deployment hold. The failing CIM row was not preserved, so the
+exact original process race remains unproved. A stale row for an exited,
+previously captured process reproduces the same refusal in isolation.
+
+Separately approved Web-only recovery started the installed new Web app using
+the existing native, schema, index, source and transport guards, then released
+only that failed release's hold. The companion stayed disabled and both sources
+stayed paused. Ten-minute validation confirmed live/readiness health, unchanged
+cursor, exact pending work and published index generation, with no new scan
+attempts. Desktop and mobile dashboard warnings passed inspection. A bounded
+file trace observed ordinary index-manifest reads and no E: source-file reads.
+
+The paired helper correction remains pending. Its release needs canonical
+closeout, independent operational review and fresh deployment approval. Neither
+the interim recovery nor the next helper release authorises source resumption.
