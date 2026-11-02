@@ -3,6 +3,7 @@ param([string]$SourceRoot=(Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
 Import-Module (Join-Path $SourceRoot 'scripts/deploy/incremental-source-journal-migration.psm1') -Force
+Import-Module (Join-Path $SourceRoot 'scripts/deploy/incremental-vector-publication-metadata-migration.psm1') -Force
 Import-Module (Join-Path $SourceRoot 'scripts/deploy/incremental-segmented-index-schema.psm1') -Force
 function Assert-True([bool]$Value,[string]$Message){if(!$Value){throw $Message}}
 function Expect-Refusal([scriptblock]$Action){$refused=$false;try{&$Action}catch{$refused=$true};Assert-True $refused ('Expected refusal: '+$Action.ToString())}
@@ -83,6 +84,43 @@ try{
  $receipt.ReleaseId='20261025T170000Z-aaaaaaaaaaaa'
  [IO.File]::WriteAllText($state.IntentPath,($receipt|ConvertTo-Json -Depth 12))
  Expect-Refusal {Get-SourceJournalHeldMigrationIntent -HoldPath $hold -RecoveryRoot $recovery -ExpectedDatabaseIdentity $baseline.Identity}
+ # Already-applied databases retain their complete supported history, including
+ # the vector metadata successor. Exercise the real writer -> disk -> reader.
+ $metadata=Get-VectorPublicationMetadataMigrationContract
+ $completeObserved=[pscustomobject]@{Identity=$complete.Identity;History=$complete.History;SchemaSha256=$complete.SchemaSha256;CanAlter=$false;VectorPublicationIndexSha256=$metadata.AbsentIndexSha256}
+ $successor=[pscustomobject]@{Identity=$complete.Identity;History=($complete.History+$metadata.Target);SchemaSha256=$complete.SchemaSha256;CanAlter=$false;VectorPublicationIndexSha256=$metadata.IndexSha256}
+ foreach($observation in @($completeObserved,$successor)){
+  $id=if($observation.History.Count -eq 79){'20261025T170002Z-cccccccccccc'}else{'20261025T170001Z-bbbbbbbbbbbb'}
+  $directory=Join-Path $recovery $id;$null=New-Item -ItemType Directory -Path $directory
+  [IO.File]::WriteAllText($hold,($id|ConvertTo-Json -Compress))
+  $applied=New-SourceJournalMigrationState -DatabaseState $observation -ReceiptDirectory $directory -ReleaseId $id -SqlSha256 $contract.UpSha256
+  Invoke-SourceJournalMigrationAttempt -State $applied -ReadState {$observation} -AssertStopped {} -RunUp {throw 'Already-applied schema must not replay SQL'}
+  $located=Get-SourceJournalHeldMigrationIntent -HoldPath $hold -RecoveryRoot $recovery -ExpectedDatabaseIdentity $observation.Identity
+  Assert-True ($located -ceq $applied.IntentPath) 'Already-applied receipt did not round trip.'
+  $saved=Get-Content -LiteralPath $located -Raw|ConvertFrom-Json -AsHashtable
+  Assert-True ($saved.OriginalVectorPublicationIndexSha256 -ceq $observation.VectorPublicationIndexSha256) 'Receipt lost the observed vector-index fingerprint.'
+  Assert-True (($saved.ExpectedHistory -join '|') -ceq ($observation.History -join '|')) 'Receipt lost the supported already-applied successor.'
+  if($observation.History.Count -eq 78){
+   $null=$saved.Remove('OriginalVectorPublicationIndexSha256')
+   [IO.File]::WriteAllText($located,($saved|ConvertTo-Json -Depth 12))
+   Assert-True ((Get-SourceJournalHeldMigrationIntent -HoldPath $hold -RecoveryRoot $recovery -ExpectedDatabaseIdentity $observation.Identity) -ceq $located) 'Legacy 78-entry receipts lost compatibility.'
+  }
+ }
+ $valid=Get-Content -LiteralPath $applied.IntentPath -Raw
+ foreach($bad in @(
+  @{Name='missing proof';Value=$null;Remove=$true},
+  @{Name='wrong index';Value=('F'*64);Remove=$false},
+  @{Name='absent successor index';Value=$metadata.AbsentIndexSha256;Remove=$false},
+  @{Name='array instead of fingerprint';Value=@($metadata.IndexSha256);Remove=$false}
+ )){
+  $changed=$valid|ConvertFrom-Json -AsHashtable
+  if($bad.Remove){$null=$changed.Remove('OriginalVectorPublicationIndexSha256')}else{$changed.OriginalVectorPublicationIndexSha256=$bad.Value}
+  [IO.File]::WriteAllText($applied.IntentPath,($changed|ConvertTo-Json -Depth 12))
+  Expect-Refusal {Get-SourceJournalHeldMigrationIntent -HoldPath $hold -RecoveryRoot $recovery -ExpectedDatabaseIdentity $successor.Identity}
+ }
+ $changed=$valid|ConvertFrom-Json -AsHashtable;$changed.ExpectedHistory=@($complete.History)
+ [IO.File]::WriteAllText($applied.IntentPath,($changed|ConvertTo-Json -Depth 12))
+ Expect-Refusal {Get-SourceJournalHeldMigrationIntent -HoldPath $hold -RecoveryRoot $recovery -ExpectedDatabaseIdentity $successor.Identity}
  Write-Output 'Source journal composed schema and held-intent recovery passed; zero production operations.'
 }finally{
  $resolved=[IO.Path]::GetFullPath($area)

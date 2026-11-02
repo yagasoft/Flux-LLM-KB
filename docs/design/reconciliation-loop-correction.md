@@ -173,6 +173,48 @@ cursor, exact pending work and published index generation, with no new scan
 attempts. Desktop and mobile dashboard warnings passed inspection. A bounded
 file trace observed ordinary index-manifest reads and no E: source-file reads.
 
-The paired helper correction remains pending. Its release needs canonical
-closeout, independent operational review and fresh deployment approval. Neither
-the interim recovery nor the next helper release authorises source resumption.
+The paired helper correction was subsequently delivered as described below.
+Neither recovery operation authorises source resumption.
+
+## Paired release and paused validation, 2 November
+
+Canonical release `8592d74a` passed 5,030 .NET tests and nine native contract
+steps with zero build warnings. The approved incremental update installed its
+Web, helper and inactive companion payloads. Its final admission guard then
+rejected a saved migration intent: the writer had omitted the observed vector
+index fingerprint, and the reader assumed a 78-entry history even when the
+validated original schema already contained the supported 79th migration.
+Read-only checks confirmed the actual schema and index were valid.
+
+A separately reviewed and approved, receipt-bound Web-only recovery validated
+that exact original intent against current schema evidence and retained all
+canonical native, index, source, held IIS transport and readiness guards. It
+started the installed Web app and released only that failed update's hold. The
+completed helper was not restarted; the companion remained disabled. The
+original intent, payloads and recovery evidence were preserved.
+
+Paused live validation passed for 601.8 seconds. Both roots kept their pause
+revisions, 1,640 pending changes, original shared cursor, zero recovery receipts
+and the same healthy published index. No new scan requests or attempts appeared.
+Journal lease progress and `journal-recovery-paused` status confirmed continued
+retry activity. Desktop and mobile warnings passed inspection. A separate
+20.1-second file trace had zero lost events and observed no file-content reads
+attributable to either the Web worker or helper. This bounded sample does not
+mean all disk or journal activity stopped.
+
+The permanent deployment-tool correction records the observed vector index
+fingerprint in new intents and derives expected history from the full validated
+original state. Focused native tests cover writer/reader round trips for both
+supported completed histories and refusal of missing, malformed or mismatched
+successor evidence. Existing baseline and 78-entry intents retain compatibility;
+79-entry intents without index proof still fail closed. This source-only
+correction does not alter production runtime or rewrite existing receipts. An
+actual disposable SQL database also passed the 79-entry writer/disk/reader round
+trip without replaying migration SQL or changing its observed schema or index.
+
+The three delivery gates for containment, correction and paused deployment
+validation are satisfied. The exact origin of the rejected original cursor
+remains unknown. A bounded retry can recover a transient read failure; it cannot
+make a persistently rejected position valid or replace missing history. Shared
+journal recovery and source resumption remain separate, explicitly approved
+operations. Both production roots remain paused.

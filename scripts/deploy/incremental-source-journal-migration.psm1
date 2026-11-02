@@ -146,10 +146,16 @@ function New-SourceJournalMigrationState {
     }
     $intent=Join-Path $root 'source-journal-migration-intent.json'
     if(Test-Path -LiteralPath $intent){throw 'journal-schema-existing-intent-requires-reconciliation'}
-    @{Version=1;ReleaseId=$ReleaseId;Identity=$DatabaseState.Identity;OriginalHistory=@($DatabaseState.History);
+    $state=@{Version=1;ReleaseId=$ReleaseId;Identity=$DatabaseState.Identity;OriginalHistory=@($DatabaseState.History);
         OriginalSchemaSha256=$DatabaseState.SchemaSha256;ExpectedHistory=$(if($already){@($DatabaseState.History)}else{@($DatabaseState.History)+@($contract.Migrations)});
         ExpectedSchemaSha256=$contract.SchemaSha256;SqlSha256=$SqlSha256;IntentPath=$intent;
         AlreadyApplied=$already;Attempted=$false;Applied=$false}
+    $index=$DatabaseState.PSObject.Properties['VectorPublicationIndexSha256']
+    if($index){
+        if($index.Value -isnot [string] -or $index.Value -cnotmatch '^[A-F0-9]{64}$'){throw 'journal-schema-index-observation-invalid'}
+        $state.OriginalVectorPublicationIndexSha256=$index.Value
+    }
+    $state
 }
 
 function Invoke-SourceJournalMigrationAttempt {
@@ -168,6 +174,9 @@ function Invoke-SourceJournalMigrationAttempt {
         RecordedAtUtc=[DateTimeOffset]::UtcNow;Identity=$State.Identity;SqlSha256=$State.SqlSha256;
         OriginalHistory=$State.OriginalHistory;OriginalSchemaSha256=$State.OriginalSchemaSha256;
         ExpectedHistory=$State.ExpectedHistory;ExpectedSchemaSha256=$State.ExpectedSchemaSha256;Attempted=$true}
+    if($State.ContainsKey('OriginalVectorPublicationIndexSha256')){
+        $receipt.OriginalVectorPublicationIndexSha256=$State.OriginalVectorPublicationIndexSha256
+    }
     $bytes=[Text.UTF8Encoding]::new($false).GetBytes(($receipt|ConvertTo-Json -Depth 12))
     $file=[IO.FileStream]::new($State.IntentPath,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::Read)
     try{$file.Write($bytes);$file.Flush($true)}finally{$file.Dispose()}
@@ -297,10 +306,18 @@ function Get-SourceJournalHeldMigrationIntent {
         $intent.SqlSha256 -cne $contract.UpSha256 -or $intent.ExpectedSchemaSha256 -cne $contract.SchemaSha256){
         throw 'journal-schema-held-intent-binding-changed'
     }
-    Assert-SourceJournalSchema ([pscustomobject]@{Identity=$intent.Identity;History=@($intent.OriginalHistory);
-        SchemaSha256=$intent.OriginalSchemaSha256}) -AllowBaseline
-    $prefix=@($intent.OriginalHistory[0..($contract.BaselineHistoryCount-1)])
-    if(($intent.ExpectedHistory -join '|') -cne (($prefix+@($contract.Migrations)) -join '|')){
+    $original=[pscustomobject]@{Identity=$intent.Identity;History=@($intent.OriginalHistory);SchemaSha256=$intent.OriginalSchemaSha256}
+    if($intent.Contains('OriginalVectorPublicationIndexSha256')){
+        $index=$intent.OriginalVectorPublicationIndexSha256
+        if($index -isnot [string] -or $index -cnotmatch '^[A-F0-9]{64}$'){throw 'journal-schema-held-intent-index-observation-invalid'}
+        $original|Add-Member -NotePropertyName VectorPublicationIndexSha256 -NotePropertyValue $index
+    }
+    # Legacy receipts without index evidence remain valid only for the states
+    # already accepted by the schema contract. A metadata successor requires it.
+    Assert-SourceJournalSchema $original -AllowBaseline
+    $expected=@($original.History)
+    if($expected.Count -eq $contract.BaselineHistoryCount){$expected+=@($contract.Migrations)}
+    if(($intent.ExpectedHistory -join '|') -cne ($expected -join '|')){
         throw 'journal-schema-held-intent-history-changed'
     }
     $path

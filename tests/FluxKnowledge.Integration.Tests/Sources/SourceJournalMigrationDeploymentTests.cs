@@ -11,6 +11,38 @@ namespace FluxKnowledge.Integration.Tests.Sources;
 
 public sealed class SourceJournalMigrationDeploymentTests(NativeSqlServerFixture fixture) : IClassFixture<NativeSqlServerFixture>
 {
+    [NativeSqlServerFact]
+    public async Task Already_applied_metadata_successor_round_trips_its_durable_journal_intent()
+    {
+        var factory = SqlTestData.CreateFactory(fixture);
+        await using var db = await factory.CreateDbContextAsync();
+        await db.GetService<IMigrator>().MigrateAsync();
+        var area = Path.Combine(@"I:\Codex Workspaces\Staging\FluxKnowledge", "JournalHeldIntent-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(area);
+        try
+        {
+            var source = FluxKnowledge.Testing.RepositoryFiles.Root();
+            var start = new ProcessStartInfo("pwsh") { UseShellExecute = false, CreateNoWindow = true,
+                RedirectStandardOutput = true, RedirectStandardError = true };
+            foreach (var argument in new[] { "-NoProfile", "-File", Path.Combine(source, "tests/native/source-journal-held-intent-sql.ps1"),
+                "-SourceRoot", source, "-ReceiptDirectory", area }) start.ArgumentList.Add(argument);
+            start.Environment["FLUXKNOWLEDGE_JOURNAL_DISPOSABLE_SQL"] = fixture.ConnectionString;
+            using var process = Process.Start(start)!;
+            var output = process.StandardOutput.ReadToEndAsync(); var errors = process.StandardError.ReadToEndAsync();
+            using var deadline = new CancellationTokenSource(TimeSpan.FromMinutes(1));
+            try { await process.WaitForExitAsync(deadline.Token); }
+            catch { process.Kill(true); await process.WaitForExitAsync(); throw; }
+            Assert.True(process.ExitCode == 0, await output + await errors);
+        }
+        finally
+        {
+            var resolved = Path.GetFullPath(area);
+            if (!resolved.StartsWith(@"I:\Codex Workspaces\Staging\FluxKnowledge\JournalHeldIntent-", StringComparison.OrdinalIgnoreCase))
+                throw new IOException("Unsafe held-intent fixture cleanup.");
+            Directory.Delete(resolved, true);
+        }
+    }
+
     [NativeSqlServerTheory]
     [InlineData(false, false)]
     [InlineData(true, false)]
