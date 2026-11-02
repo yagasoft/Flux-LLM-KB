@@ -51,11 +51,19 @@ hints was not captured; scan/provider feedback remains a hypothesis.
   with `journal-recovery-paused`. A foreground proof barrier yields promptly
   to conservative fallback. One paused participant therefore defers volume-wide
   recovery; it is never enabled automatically.
-- Creation of new automatic fallback whole-root work respects
-  `LastReconciliationAtUtc + ReconciliationCadence`. Existing owned requests
-  remain recoverable. Pacing applies only while current journal availability is
-  degraded; a successful same-epoch page admits due work immediately. Healthy
-  scoped work is unaffected. No pending obligation is consumed to achieve quiet.
+- Creation of new automatic whole-root work respects
+  `LastReconciliationAtUtc + ReconciliationCadence`, falling back to the last
+  completed scan when there is no reconciliation timestamp. This applies to
+  degraded work, healthy root-wide work and recovery baselines after journal
+  restoration. An initial baseline has no previous completion to pace. Existing
+  owned requests remain recoverable, and explicit user requests retain their
+  contract. Journal retries and scoped work continue independently. No pending
+  obligation is consumed to achieve quiet.
+- The pipeline overview warns prominently when a checkpoint is unavailable or a
+  baseline is required. It shows the unavailable-since and next-retry timestamps,
+  normal full-scan interval, recovery debt and paused admission, with a link to
+  source details. Health comes from the checkpoint in the same committed sample,
+  so a stale fallback mode alone cannot misreport a successfully restored journal.
 
 Source contents, public APIs, schema, native cleanup rules, model configuration,
 search and the user manual are outside this correction.

@@ -161,9 +161,11 @@ public sealed partial class SourceJournalRecoveryIntegrationTests
     }
 
     [NativeSqlServerTheory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task Same_epoch_journal_availability_recovery_admits_due_whole_root_work_without_waiting_for_fallback_cadence(bool unavailable)
+    [InlineData("Fallback", false)]
+    [InlineData("Fallback", true)]
+    [InlineData("Journal", false)]
+    [InlineData("BaselineRequired", false)]
+    public async Task Automatic_whole_root_work_waits_for_its_schedule_while_journal_retries_continue(string mode, bool unavailable)
     {
         var factory = new SourceJournalStoreIntegrationTests.ContextFactory(fixture.ConnectionString);
         var volume = $@"\\?\Volume{{{Guid.NewGuid()}}}\";
@@ -174,7 +176,7 @@ public sealed partial class SourceJournalRecoveryIntegrationTests
             db.SourceRootConfigurations.Add(new() { Id = id, CanonicalPath = $@"I:\availability-fixture-{id:N}", DisplayName = "Availability fixture",
                 ConfigurationRevision = 1, ReconciliationCadenceSeconds = 900, CreatedAtUtc = clock.Now, UpdatedAtUtc = clock.Now,
                 LastScanCompletedAtUtc = clock.Now });
-            db.SourceRootScanStates.Add(new() { SourceRootId = id, VolumeIdentity = volume, Mode = "Fallback", RecoveryRequired = true,
+            db.SourceRootScanStates.Add(new() { SourceRootId = id, VolumeIdentity = volume, Mode = mode, RecoveryRequired = true,
                 LastReconciliationAtUtc = clock.Now, BaselineEpoch = 3, CoveredUsn = 100 });
             db.SourceVolumeJournalCheckpoints.Add(new() { VolumeIdentity = volume, JournalId = "0000000000000001", NextUsn = 100,
                 UnavailableSinceUtc = clock.Now.AddMinutes(-1), LastFailureCode = "journal-unavailable" });
@@ -184,14 +186,22 @@ public sealed partial class SourceJournalRecoveryIntegrationTests
             await db.SaveChangesAsync();
         }
         using var artifacts = new ContentAddressedSourceArtifactStore(NewArea());
-        var coordinator = new SqlSourceIncrementalCoordinator(factory, clock, new GapReader(volume) { Unavailable = unavailable },
+        var reader = new GapReader(volume) { Unavailable = unavailable };
+        var coordinator = new SqlSourceIncrementalCoordinator(factory, clock, reader,
             new WindowsSourceObservationReader(), artifacts, new() { Enabled = true, ApprovedVolumes = [volume] });
-        Assert.Equal(unavailable ? 0 : 1, await coordinator.PumpAsync(default));
-        await using var verify = factory.CreateDbContext();
-        Assert.Equal("Fallback", (await verify.SourceRootScanStates.SingleAsync()).Mode);
-        Assert.Equal(unavailable, (await verify.SourceVolumeJournalCheckpoints.SingleAsync()).UnavailableSinceUtc is not null);
-        Assert.Equal(unavailable ? 0 : 1, await verify.SourceScanRequests.CountAsync());
-        Assert.Equal(5, (await verify.SourcePendingChanges.SingleAsync()).Generation);
+        for (var attempt = 0; attempt < 3; attempt++)
+        {
+            Assert.Equal(0, await coordinator.PumpAsync(default));
+            await using var verify = factory.CreateDbContext();
+            Assert.Equal(mode, (await verify.SourceRootScanStates.SingleAsync()).Mode);
+            Assert.Equal(unavailable, (await verify.SourceVolumeJournalCheckpoints.SingleAsync()).UnavailableSinceUtc is not null);
+            Assert.Empty(await verify.SourceScanRequests.ToArrayAsync());
+            Assert.Equal(5, (await verify.SourcePendingChanges.SingleAsync()).Generation);
+            clock.Now += TimeSpan.FromSeconds(10);
+        }
+        Assert.Equal(3, reader.ReadCalls);
+        clock.Now += TimeSpan.FromMinutes(15);
+        Assert.Equal(1, await coordinator.PumpAsync(default));
     }
 
     [NativeSqlServerTheory]

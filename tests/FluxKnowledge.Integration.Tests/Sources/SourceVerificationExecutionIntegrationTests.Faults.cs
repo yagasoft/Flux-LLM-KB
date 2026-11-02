@@ -56,7 +56,7 @@ public sealed partial class SourceVerificationExecutionIntegrationTests
         await scenario.BaselineAsync();
         var clock = new OffsetClock();
         var journal = new VerificationFaultJournal { LostHistory = lostHistory };
-        var coordinator = new SqlSourceIncrementalCoordinator(scenario.Factory, TimeProvider.System, journal,
+        var coordinator = new SqlSourceIncrementalCoordinator(scenario.Factory, clock, journal,
             new WindowsSourceObservationReader(), scenario.Artifacts, scenario.Options);
         var store = new SqlSourceVerificationStore(scenario.Factory, clock, scenario.Options, coordinator);
         await store.StartAsync(scenario.RootId, true, default);
@@ -83,9 +83,16 @@ public sealed partial class SourceVerificationExecutionIntegrationTests
             var state = await db.SourceRootScanStates.SingleAsync();
             Assert.True(state.RecoveryRequired);
             Assert.False(state.NamespaceComplete);
-            Assert.True(await db.SourceScanRequests.AnyAsync(x => x.RequestKind != SqlSourceVerificationStore.RequestKind && x.State == (int)SourceScanRequestState.Released));
+            Assert.False(await db.SourceScanRequests.AnyAsync(x => x.RequestKind != SqlSourceVerificationStore.RequestKind && x.State == (int)SourceScanRequestState.Released));
             Assert.False(await db.SourceVerificationItems.AnyAsync(x => x.ReceiptJson != null));
             await Assert.ThrowsAsync<InvalidOperationException>(() => store.StartAsync(scenario.RootId, true, default).AsTask());
+            // Recovery debt blocks verification immediately. Its automatic full scan
+            // still waits for the normal reconciliation interval.
+            clock.Offset = claim.SourceRoot.ReconciliationCadence + TimeSpan.FromSeconds(1);
+            await coordinator.PumpAsync(default);
+            Assert.True(await db.SourceScanRequests.AnyAsync(x => x.RequestKind != SqlSourceVerificationStore.RequestKind && x.State == (int)SourceScanRequestState.Released));
+            Assert.False(await db.SourceVerificationItems.AnyAsync(x => x.ReceiptJson != null));
+            Assert.Null((await store.ReadAsync(scenario.RootId, default))!.LastVerifiedAtUtc);
         }
         else
         {

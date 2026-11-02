@@ -318,15 +318,13 @@ public sealed partial class SqlSourceIncrementalCoordinator(
                     return;
                 }
                 var state = await db.SourceRootScanStates.SingleOrDefaultAsync(x => x.SourceRootId == id, ct).ConfigureAwait(false);
-                var point = state?.Mode == "Fallback"
-                    ? await db.SourceVolumeJournalCheckpoints.SingleOrDefaultAsync(x => x.VolumeIdentity == state.VolumeIdentity, ct).ConfigureAwait(false)
-                    : null;
-                if (state is { Mode: "Fallback", LastReconciliationAtUtc: { } completed } &&
-                    (point is null || point.UnavailableSinceUtc is not null) &&
+                // Journal polling is independent of full-scan admission. Recovery or a
+                // restored journal must not bypass the ordinary whole-root schedule.
+                if ((state?.LastReconciliationAtUtc ?? root.LastScanCompletedAtUtc) is { } completed &&
                     completed.AddSeconds(root.ReconciliationCadenceSeconds) > now &&
-                    (SqlSourceIncrementalState.RequiresBaseline(state) ||
+                    (state is not null && SqlSourceIncrementalState.RequiresBaseline(state) ||
                      await db.SourcePendingChanges.AnyAsync(x => x.SourceRootId == id && x.RelativePath == "." && x.IsSubtree &&
-                         (x.ReasonFlags & ~(SourcePendingReasons.RemovalPending | SourcePendingReasons.GitMembership)) != 0 &&
+                         (x.ReasonFlags & ~SourcePendingReasons.RemovalPending) != 0 &&
                          (x.NotBeforeUtc == null || x.NotBeforeUtc <= now), ct).ConfigureAwait(false)))
                     return;
                 var request = Guid.NewGuid();

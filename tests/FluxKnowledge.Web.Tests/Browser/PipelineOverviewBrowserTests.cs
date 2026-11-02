@@ -14,6 +14,55 @@ namespace FluxKnowledge.Web.Tests.Browser;
 public sealed class PipelineOverviewBrowserTests
 {
     [BrowserFact]
+    public async Task Journal_failure_is_visible_with_retry_schedule_and_pause_state_after_filter_and_refresh()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var reader = new ControlledOverviewReader { FirstRootLifecycle = "Paused", JournalHealth = new("Fallback", true, true,
+            "journal-recovery-paused", now.AddDays(-2), now.AddSeconds(10), now.AddMinutes(15), 900) };
+        var root = BrowserTestRoots.Create($"FluxJournalWarning_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            await using var host = await PhaseOneVerticalSliceBrowserTests.BrowserHost.StartAsync(
+                "Server=unreachable.invalid;Database=unreachable;Integrated Security=true;Encrypt=true;TrustServerCertificate=true",
+                root, Path.Combine(root, "indexes"), services =>
+                {
+                    services.RemoveAll<IHostedService>(); services.RemoveAll<IProjectionReader>();
+                    services.AddSingleton<IProjectionReader>(reader);
+                });
+            using var playwright = await Playwright.CreateAsync();
+            await using var browser = await playwright.Chromium.LaunchAsync(BrowserLaunchOptions.Create());
+            foreach (var width in new[] { 1440, 390 })
+            {
+                await using var page = await browser.NewPageAsync(new() { ViewportSize = new() { Width = width, Height = 1000 } });
+                var errors = new List<string>();
+                page.PageError += (_, message) => errors.Add(message);
+                page.Console += (_, message) => { if (message.Type is "error" or "warning") errors.Add(message.Text); };
+                await page.GotoAsync(host.BaseAddress.AbsoluteUri, new() { WaitUntil = WaitUntilState.NetworkIdle });
+                Assert.Equal(host.BaseAddress.AbsoluteUri, page.Url);
+                Assert.Equal("Overview | Flux Knowledge", await page.TitleAsync());
+                var warning = page.Locator(".source-journal-warning");
+                await Assertions.Expect(warning).ToContainTextAsync("Change journal unavailable");
+                await Assertions.Expect(warning).ToContainTextAsync("Example workspace");
+                await Assertions.Expect(warning).ToContainTextAsync("Journal checks keep retrying automatically");
+                await Assertions.Expect(warning).ToContainTextAsync("15 minutes");
+                await Assertions.Expect(warning).ToContainTextAsync("Full scans remain blocked while this source is paused");
+                Assert.Equal($"/sources/{ControlledOverviewReader.FirstRoot}", await warning.GetByRole(AriaRole.Link).GetAttributeAsync("href"));
+                await page.GetByLabel("Source scope").SelectOptionAsync(ControlledOverviewReader.SecondRoot.ToString());
+                await Assertions.Expect(warning).ToHaveCountAsync(0);
+                await page.GetByLabel("Source scope").SelectOptionAsync(ControlledOverviewReader.FirstRoot.ToString());
+                await page.GetByRole(AriaRole.Button, new() { Name = "Refresh status" }).ClickAsync();
+                await Assertions.Expect(warning).ToContainTextAsync("Full scans remain blocked while this source is paused");
+                Assert.False(await page.Locator("#blazor-error-ui").IsVisibleAsync());
+                Assert.True(await page.EvaluateAsync<bool>("document.documentElement.scrollWidth <= window.innerWidth"));
+                Assert.Empty(errors);
+                await ScreenshotAsync(page, $"journal-warning-{width}.png");
+            }
+        }
+        finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
+    }
+
+    [BrowserFact]
     public async Task Blocked_OCR_owner_stays_visible_after_source_filter_and_refresh_at_desktop_and_narrow_widths()
     {
         var reader = new ControlledOverviewReader { OcrOwner = new(Guid.NewGuid(), null, "PaddleOCR-VL", "Blocked", 5400, null,
@@ -300,6 +349,8 @@ public sealed class PipelineOverviewBrowserTests
         public Exception? AttentionFailure { get; set; }
         public bool RemoveFirstRoot { get; set; }
         public GpuOcrOwnerStatus? OcrOwner { get; set; }
+        public string FirstRootLifecycle { get; set; } = "Enabled";
+        public SourceJournalHealth? JournalHealth { get; set; }
         private TaskCompletionSource<PipelineAttentionPage>? _delayedAttention;
         private TaskCompletionSource _attentionStarted = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public Task AttentionStarted => _attentionStarted.Task;
@@ -318,8 +369,8 @@ public sealed class PipelineOverviewBrowserTests
             {
                 GpuSchedulerStatus = GpuSchedulerStatusProjection.Empty with { OcrOwner = OcrOwner },
                 Activity = new(now, now,
-                    [new(FirstRoot, "Example workspace", "C:\\example-workspace", "Enabled", 1100, 1096, 4, 0, 0, 0, 0, 0,
-                        now.AddMinutes(-2), now.AddHours(-1), now.AddMinutes(-1), false, null),
+                    [new(FirstRoot, "Example workspace", "C:\\example-workspace", FirstRootLifecycle, 1100, 1096, 4, 0, 0, 0, 0, 0,
+                        now.AddMinutes(-2), now.AddHours(-1), now.AddMinutes(-1), false, null) { JournalHealth = JournalHealth },
                      new(SecondRoot, "Acceptance source", "C:\\acceptance-source", "Enabled", 10, 9, 0, 0, 1, 0, 0, 0,
                         now.AddMinutes(-2), now.AddHours(-1), null, false, null)],
                     [new(FirstRoot, "Example workspace", "Publish", PipelineWorkState.Running, false, "Owned", 1),

@@ -43,6 +43,10 @@
     {
         <p class="status-freshness">Status as of <time datetime="@observed.ToString("O")">@Time(observed)</time>. Activity is confirmed in this committed sample; changes appear in later samples. Updates automatically every 10 seconds and when status changes.</p>
     }
+    @foreach (var source in view.Sources.Where(s => s.JournalHealth is { IsUnavailable: true } or { RecoveryRequired: true }))
+    {
+        <SourceJournalWarning Source="source" />
+    }
     <section aria-labelledby="current-activity-heading" class="activity-banner">
         <div class="activity-heading">
             <div><h2 id="current-activity-heading">Current activity</h2><p class="activity-state">@view.State</p></div>

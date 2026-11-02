@@ -1,0 +1,45 @@
+@using FluxKnowledge.Application.Contracts
+
+@if (Source.JournalHealth is { } health)
+{
+    <aside class="pipeline-warning source-journal-warning" role="alert" aria-label="Change detection needs attention">
+        <h2>@Source.Name: @(health.IsUnavailable ? "Change journal unavailable" : "Journal recovery needs reconciliation")</h2>
+        @if (health.IsUnavailable)
+        {
+            <p>Some file changes may not appear until reconciliation completes. Journal checks keep retrying automatically.</p>
+            @if (health.UnavailableSinceUtc is { } since)
+            {
+                <p>Unavailable since <time datetime="@since.ToString("O")">@Utc(since)</time>.</p>
+            }
+            @if (health.NextRetryAtUtc is { } retry)
+            {
+                <p>Next journal check due: <time datetime="@retry.ToString("O")">@Utc(retry)</time>.</p>
+            }
+            @if (health.Reason == "journal-recovery-paused")
+            {
+                <p>Journal recovery is waiting because a source on this volume is paused.</p>
+            }
+        }
+        @if (health.RecoveryRequired)
+        {
+            <p>A full reconciliation is still required. Pending changes are preserved.</p>
+        }
+        <p>Automatic full scans follow the configured interval of @Interval(health.ReconciliationCadenceSeconds).
+            @if (Source.Lifecycle != "Enabled")
+            {
+                <span>Full scans remain blocked while this source is @Source.Lifecycle.ToLowerInvariant(). It will not resume automatically.</span>
+            }
+            else if (health.NextReconciliationAtUtc is { } next)
+            {
+                <span>Next scheduled full scan due: <time datetime="@next.ToString("O")">@Utc(next)</time>.</span>
+            }
+        </p>
+        <a href="@($"/sources/{Source.Id}")">View source status</a>
+    </aside>
+}
+
+@code {
+    [Parameter, EditorRequired] public SourcePipelineProgress Source { get; set; } = default!;
+    private static string Utc(DateTimeOffset value) => value.UtcDateTime.ToString("dd MMM yyyy HH:mm:ss 'UTC'", System.Globalization.CultureInfo.GetCultureInfo("en-GB"));
+    private static string Interval(long seconds) => seconds % 60 == 0 ? $"{seconds / 60} minutes" : $"{seconds} seconds";
+}

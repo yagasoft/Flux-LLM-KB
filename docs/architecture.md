@@ -153,9 +153,11 @@ The rejected-cursor correction distinguishes a historical native read rejection
 from unavailability only after one valid control read on the same volume handle.
 Its paired helper protocol preserves that diagnosis. A shared reset records the
 previous/replacement cursor atomically with recovery debt and refuses to alter
-paused participants' coverage or pending metadata. Automatic degraded whole-root
-retries honour the completed reconciliation cadence; successful journal recovery
-admits due work immediately. Production release and resumption remain separate
+paused participants' coverage or pending metadata. New automatic whole-root work
+honours the normal reconciliation cadence even after journal recovery; journal
+retries and scoped changes continue independently. The overview shows checkpoint
+availability, retry timing, recovery debt and paused scan admission in its committed
+status sample. Production release and resumption remain separate
 gates in the [correction record](design/reconciliation-loop-correction.md).
 
 Cloud seal profiles additionally bind the provider name/version read from Cloud

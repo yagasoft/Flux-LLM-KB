@@ -226,12 +226,13 @@ public sealed partial class SourceJournalRecoveryIntegrationTests(NativeSqlServe
         try
         {
             var factory = new SourceJournalStoreIntegrationTests.ContextFactory(fixture.ConnectionString);
-            var control = new SqlSourceScanStore(factory, TimeProvider.System);
+            var clock = new LoopClock(DateTimeOffset.UtcNow);
+            var control = new SqlSourceScanStore(factory, clock);
             var first = await RegisterAndClaimAsync(factory, control, area);
             var volume = WindowsSourceChangeJournalReader.CanonicalVolume(area);
             using var artifacts = new ContentAddressedSourceArtifactStore(Path.Combine(area, "Retained"));
             var reader = new GapReader(volume);
-            var coordinator = new SqlSourceIncrementalCoordinator(factory, TimeProvider.System, reader,
+            var coordinator = new SqlSourceIncrementalCoordinator(factory, clock, reader,
                 new WindowsSourceObservationReader(), artifacts, new() { Enabled = true, ApprovedVolumes = [volume] });
             var original = Assert.IsType<SourceIncrementalPlan>(await coordinator.PrepareAsync(first.SourceRoot, first.ScanRequest, default));
             await using (var setup = factory.CreateDbContext())
@@ -243,14 +244,21 @@ public sealed partial class SourceJournalRecoveryIntegrationTests(NativeSqlServe
             if (!keepRunning)
                 await control.CompleteAsync(first, new(first.SourceRoot.Id, first.ScanRequest.Id, 0, 0, 0, 0), null, default);
             reader.LoseHistory = true;
-            Assert.Equal(keepRunning ? 0 : 1, await coordinator.PumpAsync(default));
+            Assert.Equal(0, await coordinator.PumpAsync(default));
+            if (!keepRunning)
+            {
+                // Lost history creates recovery debt immediately, but a new automatic
+                // whole-root scan still waits for the user's normal schedule.
+                clock.Now += first.SourceRoot.ReconciliationCadence;
+                Assert.Equal(1, await coordinator.PumpAsync(default));
+            }
             if (keepRunning)
             {
                 await Assert.ThrowsAsync<SourceSnapshotChangedException>(() => coordinator.CompleteAsync(first.SourceRoot, first.ScanRequest,
                     original, [], [], new HashSet<SourceRevisionId>(), null, default).AsTask());
                 await control.CompleteAsync(first, new(first.SourceRoot.Id, first.ScanRequest.Id, 0, 0, 0, 0) { IsCompleteInventory = false }, "source-scan-epoch-changed", default);
             }
-            var recovery = Assert.IsType<ClaimedSourceScan>(await control.ClaimNextReleasedAsync("recovery", DateTimeOffset.UtcNow.AddMinutes(2), TimeSpan.FromMinutes(10), default));
+            var recovery = Assert.IsType<ClaimedSourceScan>(await control.ClaimNextReleasedAsync("recovery", clock.Now.AddMinutes(2), TimeSpan.FromMinutes(10), default));
             var plan = Assert.IsType<SourceIncrementalPlan>(await coordinator.PrepareAsync(recovery.SourceRoot, recovery.ScanRequest, default));
             Assert.True(plan.IsBaseline);
             Assert.Equal(2, plan.BaselineEpoch);
@@ -289,6 +297,7 @@ public sealed partial class SourceJournalRecoveryIntegrationTests(NativeSqlServe
     private sealed class GapReader(string volume) : ISourceChangeJournalReader
     {
         private int _queries;
+        public int ReadCalls { get; private set; }
         public bool LoseHistory { get; set; }
         public bool Unavailable { get; set; }
         public long NextUsn { get; set; } = 100;
@@ -301,6 +310,7 @@ public sealed partial class SourceJournalRecoveryIntegrationTests(NativeSqlServe
         }
         public ValueTask<JournalPage> ReadAsync(JournalCursor cursor, int maximumBytes, CancellationToken ct)
         {
+            ReadCalls++;
             if (Unavailable) throw new IOException("Fixture journal unavailable");
             if (LoseHistory && cursor.JournalId != 2) throw new SourceJournalGapException("Fixture history replaced");
             return ValueTask.FromResult(new JournalPage(cursor, cursor, []));

@@ -18,7 +18,7 @@ internal sealed class SqlPipelineActivityReader(IDeploymentValidationHold? hold,
     {
         var now = startedAt;
         var roots = await context.SourceRootConfigurations.AsNoTracking().OrderBy(r => r.DisplayName).ThenBy(r => r.Id)
-            .Select(r => new RootRow(r.Id, r.DisplayName, r.CanonicalPath, r.State, r.LastScanCompletedAtUtc,
+            .Select(r => new RootRow(r.Id, r.DisplayName, r.CanonicalPath, r.State, r.LastScanCompletedAtUtc, r.ReconciliationCadenceSeconds,
                 context.SourceScanRequests.Where(request => request.SourceRootId == r.Id && request.RequestKind != SqlSourceVerificationStore.RequestKind &&
                         (request.State == (int)SourceScanRequestState.Completed || request.State == (int)SourceScanRequestState.Failed))
                     .OrderByDescending(request => request.RequestedAtUtc).ThenByDescending(request => request.Id)
@@ -99,9 +99,18 @@ internal sealed class SqlPipelineActivityReader(IDeploymentValidationHold? hold,
             .Select(group => new { group.Key, Count = group.Count() }).ToArrayAsync(cancellationToken).ConfigureAwait(false);
         var deletions = await context.SourceDeletionOperations.AsNoTracking()
             .ToDictionaryAsync(d => d.SourceRootId, cancellationToken).ConfigureAwait(false);
+        var journalStates = await (from state in context.SourceRootScanStates.AsNoTracking()
+                join checkpoint in context.SourceVolumeJournalCheckpoints.AsNoTracking() on state.VolumeIdentity equals checkpoint.VolumeIdentity into checkpoints
+                from checkpoint in checkpoints.DefaultIfEmpty()
+                select new { state.SourceRootId, state.Mode, state.RecoveryRequired, state.LastReconciliationAtUtc,
+                    HasCheckpoint = checkpoint != null, UnavailableSinceUtc = checkpoint == null ? null : checkpoint.UnavailableSinceUtc,
+                    Reason = checkpoint == null ? state.Reason : checkpoint.LastFailureCode,
+                    NextRetryAtUtc = checkpoint == null ? null : checkpoint.DueAtUtc })
+            .ToDictionaryAsync(x => x.SourceRootId, cancellationToken).ConfigureAwait(false);
         var sources = roots.Select(root =>
         {
             var counts = sourceStates.GetValueOrDefault(root.Id) ?? SourceRootProjectionReader.SourceStateSummary.Empty;
+            var journal = journalStates.GetValueOrDefault(root.Id);
             return new SourcePipelineProgress(root.Id, root.Name, root.Path, ((SourceRootState)root.State).ToString(),
                 counts.Known, counts.Indexed, counts.Pending, counts.Deferred, counts.Blocked, counts.Error,
                 counts.MetadataOnly, counts.WithoutText, root.LastScanCompletedAtUtc,
@@ -113,7 +122,15 @@ internal sealed class SqlPipelineActivityReader(IDeploymentValidationHold? hold,
                 scans.Where(s => s.Key.SourceRootId == root.Id && s.Key.State == (int)SourceScanJobState.Pending && s.Key.Admitted && s.Key.IsDue).Sum(s => s.Count),
                 scans.Where(s => s.Key.SourceRootId == root.Id && s.Key.State == (int)SourceScanJobState.Pending && !(s.Key.Admitted && s.Key.IsDue)).Sum(s => s.Count),
                 scans.Where(s => s.Key.SourceRootId == root.Id && s.Key.State == (int)SourceScanJobState.Running && !s.Key.Confirmed).Sum(s => s.Count) +
-                    processors.Where(p => p.Key.SourceRootId == root.Id && !p.Key.Confirmed).Sum(p => p.Count));
+                    processors.Where(p => p.Key.SourceRootId == root.Id && !p.Key.Confirmed).Sum(p => p.Count))
+            {
+                JournalHealth = journal is null ? null : new(journal.Mode,
+                    journal.UnavailableSinceUtc is not null || !journal.HasCheckpoint && journal.Mode == "Fallback",
+                    journal.RecoveryRequired || journal.Mode is "BaselineRequired" or "Baselining", journal.Reason,
+                    journal.UnavailableSinceUtc, journal.NextRetryAtUtc,
+                    (journal.LastReconciliationAtUtc ?? root.LastScanCompletedAtUtc)?.AddSeconds(root.ReconciliationCadenceSeconds),
+                    root.ReconciliationCadenceSeconds)
+            };
         }).ToArray();
         var jobQuery = SqlPipelineActivityQuery.Jobs(context, now, admission, branches, gpuEvidence);
         var files = await PipelineFileSample.ReadAsync(context, sourceStates, jobQuery, names,
@@ -249,5 +266,5 @@ internal sealed class SqlPipelineActivityReader(IDeploymentValidationHold? hold,
     private static string SourceName(Guid? root, IReadOnlyDictionary<Guid, string> names) =>
         root is { } id ? names.GetValueOrDefault(id) ?? "Source binding unavailable" : "Local ingress";
 
-    private sealed record RootRow(Guid Id, string Name, string Path, int State, DateTimeOffset? LastScanCompletedAtUtc, int ScanErrors);
+    private sealed record RootRow(Guid Id, string Name, string Path, int State, DateTimeOffset? LastScanCompletedAtUtc, long ReconciliationCadenceSeconds, int ScanErrors);
 }
