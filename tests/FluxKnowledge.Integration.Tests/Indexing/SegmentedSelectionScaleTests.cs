@@ -22,6 +22,7 @@ namespace FluxKnowledge.Integration.Tests.Indexing;
 // Each class fixture owns its catalogue and each environment owns unique file
 // roots. There is no full-text polling or process-wide native fixture here.
 // xUnit keeps this class's cases serial within the SQL assembly's four-worker cap.
+[Collection(ScaleTestCollection.Name)]
 public sealed partial class SegmentedSelectionScaleTests(NativeSqlServerFixture fixture, ITestOutputHelper output) : IClassFixture<NativeSqlServerFixture>
 {
     [NativeSqlServerFact]

@@ -8,6 +8,8 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Hosting;
 using Xunit;
 
 namespace FluxKnowledge.Web.Tests.Endpoints;
@@ -52,8 +54,12 @@ public sealed class SearchEndpointTests : IClassFixture<SearchEndpointTests.Sear
                 "Server=unreachable.invalid;Initial Catalog=FluxKnowledge;Integrated Security=true;Encrypt=true;TrustServerCertificate=true");
             builder.UseSetting("LocalIngress:AllowedRoots:0", Path.GetTempPath());
             builder.UseSetting("Usearch:RootPath", Path.Combine(Path.GetTempPath(), "FluxKnowledgeSearchTests"));
-            builder.ConfigureTestServices(
-                services => services.AddSingleton<ISearchService, HydratedSearchService>());
+            builder.ConfigureTestServices(services =>
+            {
+                // The endpoint uses a fixed search port, not production SQL workers.
+                services.RemoveAll<IHostedService>();
+                services.AddSingleton<ISearchService, HydratedSearchService>();
+            });
         }
     }
 

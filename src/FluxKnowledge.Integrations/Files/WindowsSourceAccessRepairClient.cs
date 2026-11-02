@@ -22,7 +22,7 @@ public sealed class WindowsSourceAccessRepairClient : ISourceAccessRepairClient
     public SourceAccessRepairOutcome TryRepair(SourceAccessRepairRequest request, CancellationToken cancellationToken) =>
         RepairAsync(request, cancellationToken).GetAwaiter().GetResult();
 
-    private async Task<SourceAccessRepairOutcome> RepairAsync(SourceAccessRepairRequest request, CancellationToken cancellationToken)
+    internal async Task<SourceAccessRepairOutcome> RepairAsync(SourceAccessRepairRequest request, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         var absoluteDeadline = DateTime.UtcNow.Add(SourceAccessPipeProtocol.RequestTimeout).Ticks;

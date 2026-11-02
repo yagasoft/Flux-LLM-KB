@@ -396,6 +396,10 @@ Each SQL-backed test assembly schedules at most four xUnit collections at once
 to limit simultaneous database restore and write bursts. Tests may exercise
 additional concurrency internally; existing serial resource collections and
 explicit concurrency checks are unchanged.
+Integration gives the isolated scale collection scheduling priority through
+xUnit's existing collection orderer. All other collections keep their default
+relative order. This favours an early start without guaranteeing thread admission;
+the four-worker limit and nonparallel resource collections still apply.
 Audited scale, projection, command and recovery classes own their catalogues and
 unique native-file roots and may overlap other SQL classes under that cap. Their
 cases remain serial within each class. Successful lexical/full-text consumers

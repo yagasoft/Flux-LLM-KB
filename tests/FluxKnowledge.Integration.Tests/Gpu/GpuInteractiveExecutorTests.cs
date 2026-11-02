@@ -1,3 +1,5 @@
+using System.Collections.Concurrent;
+using System.Diagnostics;
 using FluxKnowledge.Application.Gpu;
 using FluxKnowledge.Domain.Gpu;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
@@ -8,11 +10,12 @@ using FluxKnowledge.Integration.Tests.Models;
 using FluxKnowledge.Integration.Tests.Support;
 using Microsoft.EntityFrameworkCore;
 using Xunit;
+using Xunit.Abstractions;
 
 namespace FluxKnowledge.Integration.Tests.Gpu;
 
 [Collection("sql-hosted-recovery")]
-public sealed class GpuInteractiveExecutorTests : IAsyncLifetime
+public sealed class GpuInteractiveExecutorTests(ITestOutputHelper output) : IAsyncLifetime
 {
     // Cancellation may finish after the caller returns; never share that database with the next test.
     private readonly NativeSqlServerFixture fixture = new();
@@ -363,9 +366,10 @@ public sealed class GpuInteractiveExecutorTests : IAsyncLifetime
         }
         // This case mutates ownership after preflight, before acknowledgement.
         // Synchronise its materialised SQL reads to keep that interleaving deterministic.
-        var requests = new TransientRecoveryReads(store, failureMode == 7,
+        var probe = new StoreProbe();
+        var requests = new TransientRecoveryReads(store, probe, failureMode == 7,
             initialReadRendezvous: failureMode == 6 ? duplicateDeliveries : 0);
-        var scheduler = new TransientReservationRead(store, failureMode == 7);
+        var scheduler = new TransientReservationRead(store, probe, failureMode == 7);
         using var stopping = new CancellationTokenSource();
         var executor = new GpuInteractiveExecutor(requests, new Lifecycle(store, failureMode == 4, failureMode == 6 ? MarkUncertain : null, failureMode == 7), scheduler, new ChannelGpuSchedulerWakeSignal(),
             clock, "synthetic-retrieval-v1", "synthetic-settings-v1", 10, stoppingToken: stopping.Token);
@@ -384,7 +388,7 @@ public sealed class GpuInteractiveExecutorTests : IAsyncLifetime
         Task[] deliveries = [];
         Exception? testFailure = null;
         string TaskStates() => $"result={result.Status}; started={started.Task.Status}; cleanup={cleaned.Task.Status}; " +
-            $"deliveries={string.Join(',', deliveries.Select(task => task.Status))}; recovery-reads={requests.RecoveryReads}; reservation-reads={scheduler.ReservationReads}";
+            $"deliveries={string.Join(',', deliveries.Select(task => task.Status))}; recovery-reads={requests.RecoveryReads}; reservation-reads={scheduler.ReservationReads}; events={probe}";
         try
         {
             Assert.False(result.IsCompleted);
@@ -447,6 +451,7 @@ public sealed class GpuInteractiveExecutorTests : IAsyncLifetime
                 if (testFailure is not null) throw new AggregateException(testFailure, cleanupFailure);
                 throw cleanupFailure;
             }
+            output.WriteLine(probe.ToString());
         }
     }
 
@@ -472,17 +477,44 @@ public sealed class GpuInteractiveExecutorTests : IAsyncLifetime
             : LoseOnce(operation, store.ApplyBatchCallbackAsync(operation, request, ct));
     }
 
-    private sealed class TransientRecoveryReads(SqlGpuSchedulerStore store, bool failOnce, int initialReadRendezvous = 0) : IGpuInteractiveRequestStore
+    private sealed class StoreProbe
+    {
+        private readonly long _started = Stopwatch.GetTimestamp();
+        private readonly TimeSpan _initialGcPause = GC.GetTotalPauseDuration();
+        private readonly ConcurrentQueue<string> _events = new();
+        private void Record(string value) => _events.Enqueue($"{Stopwatch.GetElapsedTime(_started).TotalSeconds:F3}s {value}");
+        public async ValueTask<T> ObserveAsync<T>(string operation, Func<ValueTask<T>> action)
+        {
+            Record(operation + " start");
+            try
+            {
+                var result = await action().ConfigureAwait(false);
+                Record(operation + " end");
+                return result;
+            }
+            catch (Exception exception)
+            {
+                Record($"{operation} error {exception.GetType().Name}" +
+                    (exception is Microsoft.Data.SqlClient.SqlException sql ? $" SQL={sql.Number}" : ""));
+                throw;
+            }
+        }
+        public override string ToString() =>
+            $"GC pause during scenario={(GC.GetTotalPauseDuration() - _initialGcPause).TotalMilliseconds:F3}ms; " +
+            string.Join("; ", _events);
+    }
+
+    private sealed class TransientRecoveryReads(SqlGpuSchedulerStore store, StoreProbe probe, bool failOnce, int initialReadRendezvous = 0) : IGpuInteractiveRequestStore
     {
         private readonly TaskCompletionSource? _initialReads = initialReadRendezvous == 0
             ? null : new(TaskCreationOptions.RunContinuationsAsynchronously);
         private int _initialReadCount;
         public int RecoveryReads { get; private set; }
-        public ValueTask<GpuMiniTaskHandoffResult> HandoffInteractiveAsync(GpuInteractiveHandoffRequest request, CancellationToken ct) => store.HandoffInteractiveAsync(request, ct);
-        public ValueTask<bool> CancelInteractiveAsync(Guid request, Guid instance, CancellationToken ct) => store.CancelInteractiveAsync(request, instance, ct);
+        public ValueTask<GpuMiniTaskHandoffResult> HandoffInteractiveAsync(GpuInteractiveHandoffRequest request, CancellationToken ct) => probe.ObserveAsync($"handoff:{request.RequestId:N}", () => store.HandoffInteractiveAsync(request, ct));
+        public ValueTask<bool> CancelInteractiveAsync(Guid request, Guid instance, CancellationToken ct) => probe.ObserveAsync($"cancel:{request:N}", () => store.CancelInteractiveAsync(request, instance, ct));
         public async ValueTask<GpuInteractiveExecutionWork?> ReadInteractiveExecutionAsync(GpuExecutorBatchHandle handle, Guid instance, GpuExecutorDispatchState state, CancellationToken ct)
         {
-            var work = await store.ReadInteractiveExecutionAsync(handle, instance, state, ct);
+            var work = await probe.ObserveAsync($"execution:{handle.BatchId:N}:{state}", () => store.ReadInteractiveExecutionAsync(handle, instance, state, ct));
             if (_initialReads is not null && state == GpuExecutorDispatchState.PendingDelivery)
             {
                 var reader = Interlocked.Increment(ref _initialReadCount);
@@ -498,24 +530,24 @@ public sealed class GpuInteractiveExecutorTests : IAsyncLifetime
         public ValueTask<bool> CancelLostInteractiveReadyAsync(Guid request, GpuInteractiveOwnerIdentity owner, CancellationToken ct) => store.CancelLostInteractiveReadyAsync(request, owner, ct);
         public async ValueTask<IReadOnlyList<GpuInteractiveRecoveryWork>> ReadInteractiveRecoveryAsync(CancellationToken ct)
         {
-            var work = await store.ReadInteractiveRecoveryAsync(ct);
+            var work = await probe.ObserveAsync("recovery-read", () => store.ReadInteractiveRecoveryAsync(ct));
             if (++RecoveryReads == 1 && failOnce) throw new ResponseLostException();
             return work;
         }
     }
 
-    private sealed class TransientReservationRead(SqlGpuSchedulerStore store, bool failOnce) : IGpuSchedulerStore
+    private sealed class TransientReservationRead(SqlGpuSchedulerStore store, StoreProbe probe, bool failOnce) : IGpuSchedulerStore
     {
         public int ReservationReads { get; private set; }
         public async ValueTask<IReadOnlyList<GpuCapacityUncertaintyRequest>> ReadStaleCapacityReservationsAsync(DateTimeOffset before, CancellationToken ct)
         {
             if (++ReservationReads == 1 && failOnce) throw new ResponseLostException();
-            return await store.ReadStaleCapacityReservationsAsync(before, ct);
+            return await probe.ObserveAsync($"reservation-read:{ReservationReads}", () => store.ReadStaleCapacityReservationsAsync(before, ct));
         }
         public ValueTask<GpuMiniTaskHandoffResult> GpuTaskHandoffAsync(GpuMiniTaskHandoffRequest request, CancellationToken ct) => store.GpuTaskHandoffAsync(request, ct);
         public ValueTask<GpuSchedulerAdmissionRoundResult> RunAdmissionRoundAsync(Guid operation, GpuSchedulerWakeReason reason, GpuSchedulerOptions options, Func<GpuBatchCandidate, CancellationToken, ValueTask<GpuAdmissionDecision>> gate, CancellationToken ct) => store.RunAdmissionRoundAsync(operation, reason, options, gate, ct);
         public ValueTask<GpuBatchCallbackResult> ApplyBatchCallbackAsync(Guid operation, GpuBatchCallback request, CancellationToken ct) => store.ApplyBatchCallbackAsync(operation, request, ct);
-        public ValueTask<GpuDiagnosticTransitionResult> MarkCapacityUncertainAsync(Guid operation, GpuCapacityUncertaintyRequest request, CancellationToken ct) => store.MarkCapacityUncertainAsync(operation, request, ct);
+        public ValueTask<GpuDiagnosticTransitionResult> MarkCapacityUncertainAsync(Guid operation, GpuCapacityUncertaintyRequest request, CancellationToken ct) => probe.ObserveAsync($"uncertain:{operation:N}", () => store.MarkCapacityUncertainAsync(operation, request, ct));
         public ValueTask<GpuTrustedReconciliationResult> ReconcileCapacityAsync(Guid operation, GpuTrustedCapacityReconciliation request, CancellationToken ct) => store.ReconcileCapacityAsync(operation, request, ct);
         public ValueTask<GpuTrustedReconciliationResult> ReconcileTaskOutcomeAsync(Guid operation, GpuTaskOutcomeReconciliation request, CancellationToken ct) => store.ReconcileTaskOutcomeAsync(operation, request, ct);
         public ValueTask<GpuSchedulerWakeSnapshot> ReadWakeStateAsync(CancellationToken ct) => store.ReadWakeStateAsync(ct);

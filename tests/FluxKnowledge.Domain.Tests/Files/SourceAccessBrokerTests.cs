@@ -610,13 +610,12 @@ public sealed class SourceAccessBrokerTests
         var repairClient = new WindowsSourceAccessRepairClient(policy.PipeName, owner);
         var repairRequest = fixture.Request("request.txt");
         using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-        var started = new TaskCompletionSource<long>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var client = Task.Run(() =>
-        {
-            started.SetResult(DateTime.UtcNow.Ticks);
-            return repairClient.TryRepair(repairRequest, cancellation.Token);
-        });
-        var began = await started.Task;
+        // Bracket the synchronous async-method entry, including cold JIT work.
+        // An external task marker does not bound when the method actually starts.
+        var began = DateTime.UtcNow.Ticks;
+        var client = repairClient.RepairAsync(repairRequest, cancellation.Token);
+        var waiting = DateTime.UtcNow.Ticks;
+        Assert.False(client.IsCompleted);
         await Task.Delay(TimeSpan.FromMilliseconds(500), cancellation.Token);
         using var pipe = SourceAccessPipeServer.Create(policy, owner);
         await pipe.WaitForConnectionAsync(cancellation.Token);
@@ -624,7 +623,8 @@ public sealed class SourceAccessBrokerTests
         await SourceAccessPipeProtocol.WriteAsync(pipe,
             new SourceAccessPipeProtocol.Response(1, SourceAccessRepairOutcome.NotApproved), cancellation.Token);
         Assert.Equal(SourceAccessRepairOutcome.NotApproved, await client);
-        Assert.InRange(request.DeadlineUtcTicks, began, began + SourceAccessPipeProtocol.RequestTimeout.Ticks + TimeSpan.FromMilliseconds(100).Ticks);
+        Assert.InRange(request.DeadlineUtcTicks, began + SourceAccessPipeProtocol.RequestTimeout.Ticks,
+            waiting + SourceAccessPipeProtocol.RequestTimeout.Ticks);
     }
 
     internal static SafeAccessTokenHandle RestrictedToken(SecurityIdentifier? restrictTo = null)

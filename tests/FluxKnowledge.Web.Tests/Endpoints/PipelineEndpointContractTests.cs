@@ -8,6 +8,8 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Hosting;
 using Xunit;
 
 namespace FluxKnowledge.Web.Tests.Endpoints;
@@ -63,6 +65,9 @@ public sealed class PipelineEndpointContractTests : IClassFixture<PipelineEndpoi
             builder.UseSetting("Usearch:RootPath", Path.Combine(Path.GetTempPath(), "FluxKnowledgePipelineEndpointTests"));
             builder.ConfigureTestServices(services =>
             {
+                // These contracts use in-memory ports. Production workers would
+                // contact the unreachable placeholder database and stop this host.
+                services.RemoveAll<IHostedService>();
                 services.AddSingleton<IUtf8FileSourceReader, FakeUtf8FileSourceReader>();
                 services.AddSingleton<IRegistrationStore, FakeRegistrationStore>();
                 services.AddSingleton<IProjectionReader, FakeProjectionReader>();
