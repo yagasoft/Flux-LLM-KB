@@ -275,10 +275,10 @@ public sealed partial class SqlSourceIncrementalCoordinator(
                 await _journal.AcceptAsync(claim, page, ct).ConfigureAwait(false);
                 return page.Next.NextUsn > page.Start.NextUsn ? JournalPollResult.Advanced : JournalPollResult.Idle;
             }
-            catch (SourceJournalGapException)
+            catch (SourceJournalGapException error)
             {
                 var current = await reader.QueryAsync(claim.Cursor.VolumeIdentity, ct).ConfigureAwait(false);
-                return await ResetCoverageAsync(claim, current, ct).ConfigureAwait(false) ? JournalPollResult.Reset : JournalPollResult.NoClaim;
+                return await ResetCoverageAsync(claim, current, ct, error.Message).ConfigureAwait(false);
             }
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException ||
@@ -317,6 +317,18 @@ public sealed partial class SqlSourceIncrementalCoordinator(
                             x.State == (int)SourceScanJobState.Running && x.LeaseExpiresAtUtc <= now, ct).ConfigureAwait(false);
                     return;
                 }
+                var state = await db.SourceRootScanStates.SingleOrDefaultAsync(x => x.SourceRootId == id, ct).ConfigureAwait(false);
+                var point = state?.Mode == "Fallback"
+                    ? await db.SourceVolumeJournalCheckpoints.SingleOrDefaultAsync(x => x.VolumeIdentity == state.VolumeIdentity, ct).ConfigureAwait(false)
+                    : null;
+                if (state is { Mode: "Fallback", LastReconciliationAtUtc: { } completed } &&
+                    (point is null || point.UnavailableSinceUtc is not null) &&
+                    completed.AddSeconds(root.ReconciliationCadenceSeconds) > now &&
+                    (SqlSourceIncrementalState.RequiresBaseline(state) ||
+                     await db.SourcePendingChanges.AnyAsync(x => x.SourceRootId == id && x.RelativePath == "." && x.IsSubtree &&
+                         (x.ReasonFlags & ~(SourcePendingReasons.RemovalPending | SourcePendingReasons.GitMembership)) != 0 &&
+                         (x.NotBeforeUtc == null || x.NotBeforeUtc <= now), ct).ConfigureAwait(false)))
+                    return;
                 var request = Guid.NewGuid();
                 db.SourceScanRequests.Add(new() { Id = request, SourceRootId = id, RequestedBy = "journal", RequestKind = 3,
                     State = (int)SourceScanRequestState.Released, IsReleased = true, RequestedAtUtc = now, ReleasedAtUtc = now });
@@ -362,7 +374,7 @@ public sealed partial class SqlSourceIncrementalCoordinator(
         return barrier;
     }
 
-    private async Task<bool> ResetCoverageAsync(JournalReadClaim claim, JournalCapability current, CancellationToken ct)
+    private async Task<JournalPollResult> ResetCoverageAsync(JournalReadClaim claim, JournalCapability current, CancellationToken ct, string reason)
     {
         if (!current.VolumeIdentity.Equals(claim.Cursor.VolumeIdentity, StringComparison.OrdinalIgnoreCase))
             throw new InvalidDataException("SourceJournalResetBindingInvalid");
@@ -370,10 +382,10 @@ public sealed partial class SqlSourceIncrementalCoordinator(
         await using (var lookup = await factory.CreateDbContextAsync(ct).ConfigureAwait(false))
             rootIds = await lookup.SourceRootScanStates.AsNoTracking().Where(x => x.VolumeIdentity == current.VolumeIdentity)
                 .Select(x => x.SourceRootId).ToArrayAsync(ct).ConfigureAwait(false);
-        var accepted = false;
+        var result = JournalPollResult.NoClaim;
         await _journal.ExecuteAsync(async db =>
         {
-            accepted = false;
+            result = JournalPollResult.NoClaim;
             foreach (var id in rootIds.Order())
                 await db.Database.ExecuteSqlInterpolatedAsync($"SELECT [Id] FROM [SourceRootConfigurations] WITH (UPDLOCK,HOLDLOCK) WHERE [Id]={id}", ct).ConfigureAwait(false);
             var point = await db.SourceVolumeJournalCheckpoints.FromSqlInterpolated(
@@ -385,6 +397,16 @@ public sealed partial class SqlSourceIncrementalCoordinator(
                 point.LeaseOwner = null; point.LeaseExpiresAtUtc = null; point.DueAtUtc = null;
                 return;
             }
+            if (await db.SourceRootConfigurations.AnyAsync(x => rootIds.Contains(x.Id) && x.State != (int)SourceRootState.Enabled, ct).ConfigureAwait(false))
+            {
+                // A shared reset would change paused roots' cursor/epoch and
+                // coalesce their exact pending rows. Keep their evidence intact.
+                point.LeaseOwner = null; point.LeaseExpiresAtUtc = null;
+                point.DueAtUtc = time.GetUtcNow().AddSeconds(options.PollSeconds);
+                point.UnavailableSinceUtc ??= time.GetUtcNow(); point.LastFailureCode = "journal-recovery-paused";
+                result = JournalPollResult.Unavailable;
+                return;
+            }
             var states = await db.SourceRootScanStates.Where(x => x.VolumeIdentity == current.VolumeIdentity && rootIds.Contains(x.SourceRootId)).ToListAsync(ct).ConfigureAwait(false);
             foreach (var state in states)
             {
@@ -393,12 +415,25 @@ public sealed partial class SqlSourceIncrementalCoordinator(
                 var pending = await db.SourcePendingChanges.Where(x => x.SourceRootId == state.SourceRootId).ToListAsync(ct).ConfigureAwait(false);
                 SqlSourcePendingWork.Coalesce(db, state, pending, time.GetUtcNow(), unjournaled: true);
             }
+            // Closed, metadata-only recovery receipt, in the same fenced commit
+            // as the replacement cursor and every affected root's recovery debt.
+            db.AuditEvents.Add(new AuditEventEntity
+            {
+                EventType = "source.journal.recovery_required", EventFamily = "source-journal", Severity = "warning", Actor = "source-journal",
+                OccurredAtUtc = time.GetUtcNow(), DetailsJson = JsonSerializer.Serialize(new
+                {
+                    reason = reason == "SourceJournalCursorRejected" ? reason : "journal-continuity-lost",
+                    nativeError = reason == "SourceJournalCursorRejected" ? (int?)87 : null,
+                    previous = claim.Cursor, replacement = new JournalCursor(current.VolumeIdentity, current.JournalId, current.NextUsn),
+                    affectedRootIds = rootIds
+                })
+            });
             point.JournalId = current.JournalId.ToString("X16"); point.NextUsn = current.NextUsn;
             point.RegistrationGeneration++; point.LeaseOwner = null; point.LeaseExpiresAtUtc = null; point.DueAtUtc = null;
             point.LastBatchFingerprint = null; point.UnavailableSinceUtc = null; point.LastFailureCode = null;
-            accepted = true;
+            result = JournalPollResult.Reset;
         }, ct).ConfigureAwait(false);
-        return accepted;
+        return result;
     }
 
     private async Task<SourceRootConfigurationEntity> RequireOwnedAsync(FluxKnowledgeDbContext db, SourceRootConfiguration root, SourceScanRequest request, CancellationToken ct)

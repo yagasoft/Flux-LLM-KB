@@ -39,7 +39,12 @@ public sealed class WindowsSourceChangeJournalReader : ISourceChangeJournalReade
         BinaryPrimitives.WriteUInt64LittleEndian(input.AsSpan(32), cursor.JournalId);
         BinaryPrimitives.WriteUInt16LittleEndian(input.AsSpan(40), 2);
         BinaryPrimitives.WriteUInt16LittleEndian(input.AsSpan(42), 3);
-        var bytes = Control(handle, 0x000900bb, input, maximumBytes);
+        var bytes = ReadWithCursorValidation(cursor.NextUsn, current.NextUsn, cancellationToken, start =>
+        {
+            // The control probe changes only StartUsn, on this same held volume handle.
+            BinaryPrimitives.WriteInt64LittleEndian(input, start);
+            return Control(handle, 0x000900bb, input, maximumBytes);
+        });
         cancellationToken.ThrowIfCancellationRequested();
         var parsed = UsnJournalParser.Parse(bytes, cursor.NextUsn);
         var parents = new Dictionary<string, string?>();
@@ -55,6 +60,25 @@ public sealed class WindowsSourceChangeJournalReader : ISourceChangeJournalReade
             changes.Add(change with { ParentPath = parent });
         }
         return new(cursor, cursor with { NextUsn = parsed.NextUsn }, changes);
+    }
+
+    internal static byte[] ReadWithCursorValidation(long startUsn, long currentHead, CancellationToken ct, Func<long, byte[]> read)
+    {
+        ct.ThrowIfCancellationRequested();
+        try { return read(startUsn); }
+        catch (IOException error) when (error.InnerException is Win32Exception { NativeErrorCode: 87 } && startUsn < currentHead)
+        {
+            // Error87 is ambiguous. Only a valid read with identical parameters at
+            // the known head proves this historical cursor, rather than transport,
+            // permissions or the request itself, was rejected.
+            ct.ThrowIfCancellationRequested();
+            var validControl = false;
+            try { _ = UsnJournalParser.Parse(read(currentHead), currentHead); validControl = true; }
+            catch (IOException) { }
+            ct.ThrowIfCancellationRequested();
+            if (!validControl) throw;
+            throw new SourceJournalGapException("SourceJournalCursorRejected", error);
+        }
     }
 
     public static string CanonicalVolume(string path)

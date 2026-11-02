@@ -149,6 +149,15 @@ files to reuse retained observations. Baseline and journal-gap recovery,
 independent paced namespace/Git reconciliation and scoped degraded-mode work
 preserve discovery and deletion authority. See the [incremental scanning design](design/incremental-source-scanning.md).
 
+The rejected-cursor correction distinguishes a historical native read rejection
+from unavailability only after one valid control read on the same volume handle.
+Its paired helper protocol preserves that diagnosis. A shared reset records the
+previous/replacement cursor atomically with recovery debt and refuses to alter
+paused participants' coverage or pending metadata. Automatic degraded whole-root
+retries honour the completed reconciliation cadence; successful journal recovery
+admits due work immediately. Production release and resumption remain separate
+gates in the [correction record](design/reconciliation-loop-correction.md).
+
 Cloud seal profiles additionally bind the provider name/version read from Cloud
 Files metadata at the root. A mismatch or unavailable provider evidence revokes
 reuse and advisory-only watcher trust. Local qualification remains separate.

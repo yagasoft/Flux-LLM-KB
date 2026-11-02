@@ -49,6 +49,8 @@ public sealed class SourceJournalPipeClient : ISourceChangeJournalReader
         await pipe.WriteAsync(new byte[] { 1 }, deadline.Token).ConfigureAwait(false);
         await pipe.FlushAsync(deadline.Token).ConfigureAwait(false);
         if (response.Version != 1) throw new InvalidDataException("SourceJournalProtocolMismatch");
+        if (response.Error == "cursor-rejected")
+            throw new SourceJournalGapException("SourceJournalCursorRejected", new Win32Exception(87));
         if (response.Error == "gap") throw new SourceJournalGapException("SourceJournalContinuityLost");
         if (response.Error is not null) throw new IOException("SourceJournalHelperUnavailable");
         return response;

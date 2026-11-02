@@ -13,7 +13,7 @@ using Xunit;
 
 namespace FluxKnowledge.Integration.Tests.Sources;
 
-public sealed class SourceJournalRecoveryIntegrationTests(NativeSqlServerFixture fixture) : IClassFixture<NativeSqlServerFixture>, IAsyncLifetime
+public sealed partial class SourceJournalRecoveryIntegrationTests(NativeSqlServerFixture fixture) : IClassFixture<NativeSqlServerFixture>, IAsyncLifetime
 {
     public async Task InitializeAsync()
     {

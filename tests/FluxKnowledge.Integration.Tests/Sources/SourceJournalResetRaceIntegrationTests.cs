@@ -47,6 +47,7 @@ public sealed class SourceJournalResetRaceIntegrationTests(NativeSqlServerFixtur
                 Assert.Equal("0000000000000001", point.JournalId);
                 Assert.Null(point.LeaseOwner);
                 Assert.Equal(1, (await first.SourceRootScanStates.SingleAsync(x => x.SourceRootId == ids[0])).BaselineEpoch);
+                Assert.False(await first.AuditEvents.AnyAsync(x => x.EventType == "source.journal.recovery_required"));
             }
             await coordinator.PumpAsync(default);
             await using var final = factory.CreateDbContext();
@@ -58,6 +59,7 @@ public sealed class SourceJournalResetRaceIntegrationTests(NativeSqlServerFixtur
             Assert.All(states, state => { Assert.True(state.RecoveryRequired); Assert.Equal(2, state.RecoveryGeneration); });
             Assert.Equal(2, states.Single(x => x.SourceRootId == ids[0]).BaselineEpoch);
             Assert.Equal(1, states.Single(x => x.SourceRootId == ids[1]).BaselineEpoch); // Unstarted recovery coalesces.
+            Assert.Single(await final.AuditEvents.Where(x => x.EventType == "source.journal.recovery_required").ToArrayAsync());
         }
         finally
         {
