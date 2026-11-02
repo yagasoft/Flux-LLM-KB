@@ -37,6 +37,9 @@ public sealed partial class SegmentedSelectionScaleTests(NativeSqlServerFixture 
         var firstRevision = await db.SourceRevisions.AsNoTracking().SingleAsync(value => value.Id == first.SourceRevisionId);
         var childRevision = await db.SourceRevisions.AsNoTracking().SingleAsync(value => value.Id == child.SourceRevisionId);
         var ownerRevision = await db.SourceRevisions.AsNoTracking().SingleAsync(value => value.Id == owner.SourceRevisionId);
+        var plainIdentity = await db.PipelineRecords.Where(value => value.SourceRevisionId == null)
+            .Select(value => value.SourceIdentityId).FirstAsync();
+        await AssertScopeAsync(new(1, plainIdentity), plainIdentity);
         await db.SourceRevisions.Where(value => value.Id == childRevision.Id).ExecuteUpdateAsync(setters =>
             setters.SetProperty(value => value.OriginKind, 1).SetProperty(value => value.ParentSourceRevisionId, firstRevision.Id)
                 .SetProperty(value => value.SourceRootId, firstRevision.SourceRootId));
@@ -45,6 +48,11 @@ public sealed partial class SegmentedSelectionScaleTests(NativeSqlServerFixture 
         await AssertScopeAsync(new(3, firstRevision.SourceRootId), first.SourceIdentityId, child.SourceIdentityId);
         await AssertScopeAsync(new(3, childRevision.SourceRootId));
         await AssertScopeAsync(new(1, child.SourceIdentityId), child.SourceIdentityId);
+        await db.SourceRevisions.Where(value => value.Id == firstRevision.Id).ExecuteUpdateAsync(setters =>
+            setters.SetProperty(value => value.SuppressedAtUtc, DateTimeOffset.UtcNow));
+        await AssertScopeAsync(new(1, child.SourceIdentityId));
+        await db.SourceRevisions.Where(value => value.Id == firstRevision.Id).ExecuteUpdateAsync(setters =>
+            setters.SetProperty(value => value.SuppressedAtUtc, (DateTimeOffset?)null));
 
         var branchId = Guid.NewGuid();
         var activity = await db.SourceActivities.AsNoTracking().SingleAsync(value => value.SourceRevisionId == ownerRevision.Id);
@@ -93,6 +101,14 @@ public sealed partial class SegmentedSelectionScaleTests(NativeSqlServerFixture 
                 Assert.Equal(ordinary.Select(Metadata), recovery.Select(Metadata));
                 var activation = await SqlSegmentedIndexStore.QueryRootEligibleWindow(db, json, 0, long.MaxValue, composable: true).ToArrayAsync();
                 Assert.Equal(ordinary.Select(Metadata), activation.OrderBy(value => value.VectorId).Select(Metadata));
+                await using (var transaction = await db.Database.BeginTransactionAsync(System.Data.IsolationLevel.Serializable))
+                {
+                    await SqlPublishedPassageSelection.AcquireFenceAsync(db, default);
+                    await SqlSegmentedIndexStore.CreateRootEligibilityMapAsync(db, json, default);
+                    var mapped = await SqlSegmentedIndexStore.QueryMappedRootEligibleWindow(db, 0, long.MaxValue).ToArrayAsync();
+                    Assert.Equal(ordinary.Select(Metadata), mapped.Select(Metadata));
+                    await transaction.RollbackAsync();
+                }
                 var candidate = new IndexPublicationCandidateEntity
                 {
                     CorpusEpoch = await db.IndexState.Select(value => value.CorpusEpoch).SingleAsync(), AffectedScopesJson = json
@@ -403,7 +419,7 @@ public sealed partial class SegmentedSelectionScaleTests(NativeSqlServerFixture 
         }
     }
 
-    private static Task SeedUnrelatedAsync(FluxKnowledgeDbContext db, long templateVector, int count) => db.Database.ExecuteSqlInterpolatedAsync($"""
+    private static Task SeedUnrelatedAsync(FluxKnowledgeDbContext db, long templateVector, int count, bool unpublished = false) => db.Database.ExecuteSqlInterpolatedAsync($"""
             DECLARE @chunks TABLE ([Id] bigint NOT NULL);
             DECLARE @ordinal int = (SELECT MAX([Ordinal]) FROM [TextChunks] WHERE [ArtifactId] =
                 (SELECT [ArtifactId] FROM [TextChunks] WHERE [Id] = (SELECT [TextChunkId] FROM [Vectors] WHERE [VectorId] = {templateVector})));
@@ -412,14 +428,17 @@ public sealed partial class SegmentedSelectionScaleTests(NativeSqlServerFixture 
             OUTPUT INSERTED.[Id] INTO @chunks
             SELECT TOP ({count}) [template].[ArtifactId], [template].[SourceRevision],
                 @ordinal + CONVERT(int, ROW_NUMBER() OVER (ORDER BY (SELECT NULL))), [template].[StartOffset], [template].[Length],
-                [template].[Content], [template].[ContentHash], [template].[PassagePolicyFingerprint], [template].[ContextHeader], [template].[SearchInputHash]
+                [template].[Content], [template].[ContentHash], [template].[PassagePolicyFingerprint],
+                [template].[ContextHeader], [template].[SearchInputHash]
             FROM [TextChunks] AS [template] CROSS JOIN sys.all_objects AS [a] CROSS JOIN sys.all_objects AS [b]
             WHERE [template].[Id] = (SELECT [TextChunkId] FROM [Vectors] WHERE [VectorId] = {templateVector});
             INSERT [Vectors] ([TextChunkId], [ModelFingerprint], [Dimensions], [Values], [TextChunkContentHash], [PayloadChecksum],
                 [SearchInputHash], [SourceRevision], [IsDeleted], [IndexGenerationId], [CreatedAtUtc])
-            SELECT [chunk].[Id], [template].[ModelFingerprint], [template].[Dimensions], [template].[Values], [template].[TextChunkContentHash],
-                [template].[PayloadChecksum], [template].[SearchInputHash], [template].[SourceRevision], 0, [template].[IndexGenerationId], SYSDATETIMEOFFSET()
+            SELECT [chunk].[Id], [template].[ModelFingerprint], [template].[Dimensions],
+                [template].[Values], [template].[TextChunkContentHash], [template].[PayloadChecksum], [template].[SearchInputHash],
+                [template].[SourceRevision], 0, [template].[IndexGenerationId], SYSDATETIMEOFFSET()
             FROM @chunks AS [chunk] CROSS JOIN [Vectors] AS [template] WHERE [template].[VectorId] = {templateVector};
+            IF {unpublished}=1 RETURN;
             DECLARE @segment char(64) = LOWER(CONVERT(varchar(64), HASHBYTES('SHA2_256', CONVERT(varbinary(16), NEWID())), 2));
             INSERT [IndexSegments] ([Id], [ModelFingerprint], [Dimensions], [NativeFormat], [DirectoryPath], [MembershipChecksum],
                 [FileChecksum], [FileLength], [VectorCount], [State], [CreatedAtUtc], [SealedAtUtc])

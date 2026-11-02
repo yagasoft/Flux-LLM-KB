@@ -26,6 +26,33 @@ public sealed class DisposableSqlIsolationTests
     public void Refuses_unowned_or_ambiguous_test_file_roots(string? root) =>
         Assert.Throws<InvalidOperationException>(() => NativeSqlServerFixture.ValidateTestFileRoot(root));
 
+    [Theory]
+    [InlineData(@"E:\Codex Workspaces\Staging\FluxKnowledge\SqlTests-GuardTests\Data\Sql\Disposable")]
+    [InlineData(@"I:\Codex Workspaces\Staging\FluxKnowledge\SqlTests-GuardTests\Data\Sql\Disposable")]
+    public void Accepts_only_the_named_staging_bases_on_e_or_i(string root)
+    {
+        Assert.Equal(root, NativeSqlServerFixture.ValidateTestFileRoot(root));
+        NativeSqlServerFixture.ValidateOwnedDatabaseFiles(Name, root,
+            [Path.Combine(root, Name + ".mdf"), Path.Combine(root, Name + "_log.ldf")]);
+    }
+
+    [Theory]
+    [InlineData(@"I:\Codex Workspaces\Staging\FluxKnowledge\SqlTests-GuardTests\Data\Sql\..\Disposable")]
+    [InlineData(@"I:\Codex Workspaces\Staging\FluxKnowledge\SqlTests-GuardTests\Data\Sql\Disposable\child")]
+    [InlineData(@"I:\Codex Workspaces\Staging\Other\SqlTests-GuardTests\Data\Sql\Disposable")]
+    [InlineData(@"\\?\I:\Codex Workspaces\Staging\FluxKnowledge\SqlTests-GuardTests\Data\Sql\Disposable")]
+    [InlineData(@"\\server\Codex Workspaces\Staging\FluxKnowledge\SqlTests-GuardTests\Data\Sql\Disposable")]
+    public void I_drive_support_does_not_admit_other_roots_or_aliases(string root) =>
+        Assert.Throws<InvalidOperationException>(() => NativeSqlServerFixture.ValidateTestFileRoot(root));
+
+    [Fact]
+    public void Refuses_mixed_staging_roots_in_one_database_manifest()
+    {
+        var other = Root.Replace("E:", "I:", StringComparison.Ordinal);
+        Assert.Throws<InvalidOperationException>(() => NativeSqlServerFixture.ValidateOwnedDatabaseFiles(Name, Root,
+            [Path.Combine(Root, Name + ".mdf"), Path.Combine(other, Name + "_log.ldf")]));
+    }
+
     [Fact]
     public void Allocates_only_the_generated_catalogue_files_under_the_owned_root()
     {

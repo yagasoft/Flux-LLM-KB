@@ -353,13 +353,13 @@ public sealed class NativeSqlServerFixture : IAsyncLifetime
 
     internal static string ValidateTestFileRoot(string? root)
     {
-        const string stageBase = @"E:\Codex Workspaces\Staging\FluxKnowledge";
+        string[] stageBases = [@"E:\Codex Workspaces\Staging\FluxKnowledge", @"I:\Codex Workspaces\Staging\FluxKnowledge"];
         if (string.IsNullOrWhiteSpace(root) || !Path.IsPathFullyQualified(root))
             throw new InvalidOperationException($"{FileRootEnvironmentVariable} must name the provisioned disposable SQL file root.");
         var canonical = Path.TrimEndingDirectorySeparator(Path.GetFullPath(root));
         var deployment = Path.GetDirectoryName(Path.GetDirectoryName(Path.GetDirectoryName(canonical)))!;
         if (!string.Equals(root, canonical, StringComparison.OrdinalIgnoreCase) ||
-            !string.Equals(Path.GetDirectoryName(deployment), stageBase, StringComparison.OrdinalIgnoreCase) ||
+            !stageBases.Contains(Path.GetDirectoryName(deployment), StringComparer.OrdinalIgnoreCase) ||
             !System.Text.RegularExpressions.Regex.IsMatch(Path.GetFileName(deployment), @"\ASqlTests-[A-Za-z0-9_-]{1,48}\z") ||
             !string.Equals(canonical, Path.Combine(deployment, "Data", "Sql", "Disposable"), StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("Disposable SQL files must stay within an explicit owned SqlTests staging deployment.");
@@ -398,22 +398,22 @@ public sealed class NativeSqlServerFixture : IAsyncLifetime
     internal static void ValidateCreatedDatabaseFiles(IReadOnlyList<string?> filePaths)
     {
         ArgumentNullException.ThrowIfNull(filePaths);
+        const string message = "Every native SQL test database file must be verified under an approved disposable staging root.";
         if (filePaths.Count < 2)
         {
-            throw new InvalidOperationException(
-                "Every native SQL test database file must be verified outside I:.");
+            throw new InvalidOperationException(message);
         }
 
         foreach (var filePath in filePaths)
         {
             if (string.IsNullOrWhiteSpace(filePath) ||
                 !Path.IsPathFullyQualified(filePath) ||
-                !TryGetPathRoot(filePath, out var root) ||
-                IsIFileSystemRoot(root))
+                !string.Equals(filePath, Path.GetFullPath(filePath), StringComparison.OrdinalIgnoreCase))
             {
-                throw new InvalidOperationException(
-                    "Every native SQL test database file must be verified outside I:.");
+                throw new InvalidOperationException(message);
             }
+            try { _ = ValidateTestFileRoot(Path.GetDirectoryName(filePath)); }
+            catch (InvalidOperationException error) { throw new InvalidOperationException(message, error); }
         }
     }
 
@@ -560,33 +560,6 @@ public sealed class NativeSqlServerFixture : IAsyncLifetime
             throw new InvalidOperationException(
                 "Native SQL tests may create or drop only a generated FluxKnowledge_Phase1Tests_<guid> catalog.");
         }
-    }
-
-    private static bool TryGetPathRoot(string path, out string root)
-    {
-        root = string.Empty;
-        try
-        {
-            root = Path.GetPathRoot(Path.GetFullPath(path)) ?? string.Empty;
-            return root.Length > 0;
-        }
-        catch (Exception exception) when (
-            exception is ArgumentException or NotSupportedException or PathTooLongException)
-        {
-            return false;
-        }
-    }
-
-    private static bool IsIFileSystemRoot(string root)
-    {
-        var normalisedRoot = root.Replace('/', '\\');
-        if (normalisedRoot.StartsWith("\\\\?\\", StringComparison.Ordinal) ||
-            normalisedRoot.StartsWith("\\\\.\\", StringComparison.Ordinal))
-        {
-            normalisedRoot = normalisedRoot[4..];
-        }
-
-        return string.Equals(normalisedRoot, "I:\\", StringComparison.OrdinalIgnoreCase);
     }
 
     internal sealed class PreviousMigrationDatabase : IAsyncDisposable

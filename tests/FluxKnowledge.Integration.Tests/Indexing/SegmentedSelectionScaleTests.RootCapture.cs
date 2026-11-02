@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Data.Common;
+using System.Xml.Linq;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Pipeline;
 using FluxKnowledge.Domain.Sources;
@@ -9,6 +10,7 @@ using FluxKnowledge.Integration.Tests.Sources;
 using FluxKnowledge.Integration.Tests.Support;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
+using Microsoft.EntityFrameworkCore.Storage;
 using Microsoft.Extensions.DependencyInjection;
 using Xunit;
 
@@ -18,6 +20,13 @@ public sealed partial class SegmentedSelectionScaleTests
 {
     [NativeSqlServerFact]
     public async Task Existing_root_scope_debt_captures_production_sized_metadata_within_the_unchanged_writer_deadline()
+        => await VerifyRootCaptureAsync(30);
+
+    [NativeSqlServerFact]
+    public async Task Root_membership_proof_keeps_individual_commands_bounded_on_a_large_publication()
+        => await VerifyRootCaptureAsync(5);
+
+    private async Task VerifyRootCaptureAsync(int comparisonCommandSeconds)
     {
         var scaleFixture = new NativeSqlServerFixture();
         await scaleFixture.InitializeAsync();
@@ -26,15 +35,25 @@ public sealed partial class SegmentedSelectionScaleTests
             await SqlTestData.ClearPhase3SourceDataAsync(scaleFixture);
             var additionalMembers = Environment.GetEnvironmentVariable("FLUXKNOWLEDGE_ROOT_SCALE_MEMBERS") is { } configured
                 ? int.Parse(configured, System.Globalization.CultureInfo.InvariantCulture) : 100_000;
+            var unpublishedVectors = Environment.GetEnvironmentVariable("FLUXKNOWLEDGE_ROOT_SCALE_UNPUBLISHED") is { } unpublished
+                ? int.Parse(unpublished, System.Globalization.CultureInfo.InvariantCulture) : 0;
             var fence = new MetadataFenceObserver(message => output.WriteLine(message));
+            var comparison = new RootComparisonDeadline(comparisonCommandSeconds, message => output.WriteLine(message));
             await using var environment = await SqlToUsearchRebuildTests.PipelineEnvironment.CreateAsync(scaleFixture,
                 "The root-wide metadata capture keeps canonical work available.", segmented: true,
-                configureServices: services => services.AddSingleton<IDbContextFactory<FluxKnowledgeDbContext>>(
-                    new MetadataFactory(scaleFixture.ConnectionString, fence)));
+                configureServices: services =>
+                {
+                    services.AddSingleton<IDbContextFactory<FluxKnowledgeDbContext>>(
+                        new MetadataFactory(scaleFixture.ConnectionString, fence, comparison));
+                    services.AddSingleton<IEmbeddingProvider, WideScaleEmbeddingProvider>();
+                });
             var retained = await environment.AddRetainedAndPumpAsync("The retained root supplies metadata-only scale rows.");
+            var controls = new List<Guid> { retained };
+            for (var owner = 1; owner < 4; owner++)
+                controls.Add(await environment.AddRetainedAndPumpAsync($"Retained root control owner {owner}."));
             var removedRecord = await environment.AddRetainedAndPumpAsync("This one rooted member is removed while the large sibling survives.");
             Guid root;
-            Guid retainedRevision;
+            Guid[] retainedRevisions;
             Guid removedRevision;
             long removedVector;
             long expected;
@@ -51,16 +70,40 @@ public sealed partial class SegmentedSelectionScaleTests
                 var identity = await seed.PipelineRecords.Where(value => value.Id == retained).Select(value => value.SourceIdentityId).SingleAsync();
                 var vector = await seed.CurrentIndexMembers.Where(value => value.SourceIdentityId == identity).Select(value => value.VectorId).FirstAsync();
                 root = await seed.CurrentIndexMembers.Where(value => value.VectorId == vector).Select(value => value.SourceRootId!.Value).SingleAsync();
-                retainedRevision = await seed.PipelineRecords.Where(value => value.Id == retained).Select(value => value.SourceRevisionId!.Value).SingleAsync();
+                retainedRevisions = await seed.PipelineRecords.Where(value => controls.Contains(value.Id))
+                    .Select(value => value.SourceRevisionId!.Value).ToArrayAsync();
+                await seed.SourceRevisions.Where(value => retainedRevisions.Contains(value.Id))
+                    .ExecuteUpdateAsync(setters => setters.SetProperty(value => value.SourceRootId, root));
+                await seed.CurrentIndexMembers.Where(value => value.OwnerSourceRevisionId.HasValue &&
+                    retainedRevisions.Contains(value.OwnerSourceRevisionId.Value))
+                    .ExecuteUpdateAsync(setters => setters.SetProperty(value => value.SourceRootId, (Guid?)root));
+                var controlVectors = await seed.CurrentIndexMembers.Where(value => value.OwnerSourceRevisionId.HasValue &&
+                    retainedRevisions.Contains(value.OwnerSourceRevisionId.Value)).OrderBy(value => value.VectorId)
+                    .Select(value => value.VectorId).ToArrayAsync();
                 removedRevision = await seed.PipelineRecords.Where(value => value.Id == removedRecord).Select(value => value.SourceRevisionId!.Value).SingleAsync();
                 removedVector = await seed.CurrentIndexMembers.Where(value => value.OwnerSourceRevisionId == removedRevision).Select(value => value.VectorId).SingleAsync();
                 await seed.SourceRevisions.Where(value => value.Id == removedRevision).ExecuteUpdateAsync(setters => setters.SetProperty(value => value.SourceRootId, root));
                 await seed.CurrentIndexMembers.Where(value => value.OwnerSourceRevisionId == removedRevision).ExecuteUpdateAsync(setters => setters.SetProperty(value => value.SourceRootId, (Guid?)root));
                 for (var seeded = 0; seeded < additionalMembers; seeded += 25_000)
                 {
-                    await SeedUnrelatedAsync(seed, vector, Math.Min(25_000, additionalMembers - seeded));
+                    await SeedUnrelatedAsync(seed, controlVectors[(seeded / 25_000) % controlVectors.Length],
+                        Math.Min(25_000, additionalMembers - seeded));
                     if ((seeded + 25_000) % 100_000 == 0) await seed.Database.ExecuteSqlRawAsync("CHECKPOINT;");
                 }
+                var unrelated = await seed.CurrentIndexMembers.Where(value => value.SourceRootId == null)
+                    .Select(value => value.VectorId).FirstAsync();
+                for (var seeded = 0; seeded < unpublishedVectors; seeded += 25_000)
+                {
+                    var fileRoot = Environment.GetEnvironmentVariable(NativeSqlServerFixture.FileRootEnvironmentVariable)!;
+                    if (new DriveInfo(Path.GetPathRoot(fileRoot)!).AvailableFreeSpace < 1_000_000_000)
+                        throw new InvalidOperationException("The owned staging volume lacks the scale-test storage reserve.");
+                    // Unpublished/checkpoint vectors occupy the raw key space
+                    // without current membership. They retain the same full-width
+                    // payload and headers as the compared rows.
+                    await SeedUnrelatedAsync(seed, unrelated, Math.Min(25_000, unpublishedVectors - seeded), unpublished: true);
+                    if ((seeded + 25_000) % 100_000 == 0) await seed.Database.ExecuteSqlRawAsync("CHECKPOINT;");
+                }
+                output.WriteLine($"Raw vectors: {await seed.Vectors.LongCountAsync():N0}; unpublished controls: {unpublishedVectors:N0}; all scale rows at 1024 dimensions with unchanged template headers.");
                 // Keep the SQL metadata ledger/manifest coherent. The synthetic
                 // segment descriptors are never handed to a native reader.
                 await seed.Database.ExecuteSqlRawAsync("""
@@ -78,7 +121,22 @@ public sealed partial class SegmentedSelectionScaleTests
                 expected = await seed.CurrentIndexMembers.LongCountAsync(value => value.SourceRootId == root);
             }
             await new SqlSourceScanStore(environment.Factory, TimeProvider.System).SuppressUnseenAsync(new SourceRootId(root),
-                new HashSet<SourceRevisionId> { new(retainedRevision) }, CancellationToken.None);
+                retainedRevisions.Select(value => new SourceRevisionId(value)).ToHashSet(), CancellationToken.None);
+            var additionalOwners = Environment.GetEnvironmentVariable("FLUXKNOWLEDGE_ROOT_SCALE_OWNERS") is { } owners
+                ? int.Parse(owners, System.Globalization.CultureInfo.InvariantCulture) : 0;
+            if (additionalOwners > 0)
+            {
+                await using var ownerSeed = await environment.Factory.CreateDbContextAsync();
+                ownerSeed.Database.SetCommandTimeout(180);
+                await using var ownerTransaction = await ownerSeed.Database.BeginTransactionAsync(System.Data.IsolationLevel.Serializable);
+                await SqlPublishedPassageSelection.AcquireFenceAsync(ownerSeed, default);
+                var template = await ownerSeed.CurrentIndexMembers.Where(value => value.OwnerSourceRevisionId == retainedRevisions[0])
+                    .Select(value => value.VectorId).FirstAsync();
+                await SeedMetadataOwnersAsync(ownerSeed, template, additionalOwners);
+                await SqlPublishedPassageSelection.AdvanceVersionAsync(ownerSeed, DateTimeOffset.UtcNow, default, [new(3, root)]);
+                await ownerTransaction.CommitAsync();
+                output.WriteLine($"Additional eligible metadata-only owners: {additionalOwners:N0}; no vectors added.");
+            }
             using var scope = environment.Services.CreateScope();
             var store = scope.ServiceProvider.GetRequiredService<ISegmentedIndexStore>();
             var watcherTurn = 0;
@@ -99,6 +157,32 @@ public sealed partial class SegmentedSelectionScaleTests
                 prepared.PublicationStamp, 2, prepared.ReusedSegments.Count);
             await RunWithWatcherAsync("manifest seal", token => store.SealManifestAsync(prepared.Id,
                 new(generation, prepared.ReusedSegments), token).AsTask());
+            if (Environment.GetEnvironmentVariable("FLUXKNOWLEDGE_ROOT_SCALE_COVERING_INDEX") == "1")
+            {
+                await using var planTransaction = await after.Database.BeginTransactionAsync(System.Data.IsolationLevel.Serializable);
+                await SqlPublishedPassageSelection.AcquireFenceAsync(after, default);
+                var compare = typeof(SqlSegmentedIndexStore).GetMethod("CompareRootWindowAsync",
+                    System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
+                foreach (var phase in new[] { 0, 1 })
+                {
+                    if (phase == 1) await SqlSegmentedIndexStore.CreateRootEligibilityMapAsync(after, candidate.AffectedScopesJson, default);
+                    if (phase == 1) Assert.Equal(4 + additionalOwners,
+                        await after.Database.SqlQuery<int>($"SELECT COUNT(*) AS [Value] FROM #RootEligibleArtifacts").SingleAsync());
+                    var raw = phase == 0
+                        ? after.CurrentIndexMembers.Where(value => value.CorpusEpoch == prepared.ExpectedStamp.CorpusEpoch).Select(value => value.VectorId)
+                        : after.Vectors.Select(value => value.VectorId);
+                    var keys = await raw.Order().Take(16_384).ToArrayAsync();
+                    var staged = await after.IndexCandidateMembers.Where(value => value.CandidateId == prepared.Id && value.Phase == phase)
+                        .OrderBy(value => value.VectorId).Select(value => value.VectorId).Take(16_384).ToArrayAsync();
+                    var through = keys.Concat(staged).Distinct().Order().Take(16_384).Last();
+                    var execution = (Task)compare.Invoke(null, [after, candidate, phase, 0L, through, CancellationToken.None])!;
+                    await execution;
+                    var result = execution.GetType().GetProperty("Result")!.GetValue(execution)!;
+                    Assert.Equal(0L, (long)result.GetType().GetProperty("Differences")!.GetValue(result)!);
+                }
+                await comparison.VerifyCoveringPlansAsync(after);
+                await planTransaction.RollbackAsync();
+            }
             var activated = false;
             await RunWithWatcherAsync("activation", async token => activated = await store.TryActivateRefreshAsync(
                 new(generation, [], prepared.ExpectedStamp, prepared.Id), token));
@@ -348,6 +432,89 @@ public sealed partial class SegmentedSelectionScaleTests
             .UseSqlServer(connection).AddInterceptors(observers).Options);
     }
 
+    private sealed class RootComparisonDeadline(int seconds, Action<string> trace) : DbCommandInterceptor
+    {
+        private readonly Dictionary<int, (string Sql, DbParameter[] Parameters)> _examples = [];
+        private static bool IsComparison(DbCommand command) => command.Parameters.Cast<DbParameter>()
+            .Any(value => value.ParameterName == "@rootProofCandidate");
+
+        public override ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(DbCommand command,
+            CommandEventData eventData, InterceptionResult<DbDataReader> result, CancellationToken cancellationToken = default)
+        {
+            // A stricter disposable-test budget exposes a whole-root command
+            // even on a fast test server. Production's 30-second limit is unchanged.
+            if (IsComparison(command))
+            {
+                command.CommandTimeout = seconds;
+                var phase = (int)command.Parameters["@rootProofPhase"].Value!;
+                lock (_examples)
+                    if (!_examples.ContainsKey(phase))
+                        _examples.Add(phase, (command.CommandText, command.Parameters.Cast<DbParameter>()
+                            .Select(value => (DbParameter)((ICloneable)value).Clone()).ToArray()));
+            }
+            return ValueTask.FromResult(result);
+        }
+
+        public override ValueTask<DbDataReader> ReaderExecutedAsync(DbCommand command,
+            CommandExecutedEventData eventData, DbDataReader result, CancellationToken cancellationToken = default)
+        {
+            if (IsComparison(command)) trace($"Root membership command: {eventData.Duration.TotalSeconds:F3}s; budget {seconds}s.");
+            return ValueTask.FromResult(result);
+        }
+
+        public async Task VerifyCoveringPlansAsync(FluxKnowledgeDbContext context)
+        {
+            if (context.Database.GetDbConnection().State != System.Data.ConnectionState.Open)
+                await context.Database.OpenConnectionAsync();
+            foreach (var phase in new[] { 0, 1 })
+            {
+                var example = _examples[phase];
+                await using var command = context.Database.GetDbConnection().CreateCommand();
+                command.CommandTimeout = seconds;
+                command.Transaction = context.Database.CurrentTransaction?.GetDbTransaction();
+                command.CommandText = "SET STATISTICS XML ON;\n" + example.Sql + ";\nSET STATISTICS XML OFF;";
+                foreach (var parameter in example.Parameters) command.Parameters.Add(((ICloneable)parameter).Clone());
+                await using var reader = await command.ExecuteReaderAsync();
+                while (await reader.ReadAsync()) { } // Read-only replay with sealed staging still present.
+                XDocument? plan = null;
+                while (await reader.NextResultAsync())
+                    if (reader.FieldCount == 1 && await reader.ReadAsync()) plan = XDocument.Parse(reader.GetString(0));
+                Assert.NotNull(plan);
+                XNamespace ns = "http://schemas.microsoft.com/sqlserver/2004/07/showplan";
+                var vectorOperators = plan.Descendants(ns + "RelOp").Where(op => op.Elements().Any(access =>
+                    (string?)access.Element(ns + "Object")?.Attribute("Table") == "[Vectors]")).ToArray();
+                Assert.NotEmpty(vectorOperators);
+                Assert.All(vectorOperators, op => Assert.All(op.Elements().Select(access => access.Element(ns + "Object"))
+                    .Where(value => (string?)value?.Attribute("Table") == "[Vectors]"), value =>
+                        Assert.Equal("[IX_Vectors_PublicationMetadata]", (string?)value!.Attribute("Index"))));
+                var reads = vectorOperators.Sum(op => op.Descendants(ns + "RunTimeCountersPerThread")
+                    .Sum(value => long.Parse((string?)value.Attribute("ActualRowsRead") ?? (string?)value.Attribute("ActualRows") ?? "0",
+                        System.Globalization.CultureInfo.InvariantCulture)));
+                var stagedOperators = plan.Descendants(ns + "RelOp").Where(op => op.Elements().Any(access =>
+                    (string?)access.Element(ns + "Object")?.Attribute("Table") == "[IndexCandidateMembers]")).ToArray();
+                var stagedRows = stagedOperators.Sum(op => op.Descendants(ns + "RunTimeCountersPerThread")
+                    .Sum(value => long.Parse((string?)value.Attribute("ActualRows") ?? "0",
+                        System.Globalization.CultureInfo.InvariantCulture)));
+                Assert.True(stagedRows > 0, "The actual equality plan must include non-empty sealed staging.");
+                trace($"Phase {phase} actual equality plan: publication metadata index only; Vectors rows read {reads:N0}; staged rows {stagedRows:N0}; wide-row lookups 0.");
+                if (Environment.GetEnvironmentVariable(SqlFixtureTimings.EnvironmentVariable) is { } directory)
+                    await File.WriteAllTextAsync(Path.Combine(directory, $"root-proof-stage-present-phase-{phase}.sqlplan"), plan.ToString());
+            }
+        }
+    }
+
+    private sealed class WideScaleEmbeddingProvider : IEmbeddingProvider
+    {
+        public ValueTask<EmbeddingResult> CreateEmbeddingAsync(string text, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            // Model-free test bytes reproduce the production SQL row width.
+            var values = new float[1024];
+            values[0] = 1;
+            return ValueTask.FromResult(new EmbeddingResult(values, "synthetic-root-scale-1024-v1"));
+        }
+    }
+
     internal sealed class MetadataAppendObserver : DbCommandInterceptor
     {
         private int _armed;
@@ -396,7 +563,12 @@ public sealed partial class SegmentedSelectionScaleTests
         { TraceMutation(command, "started"); return ValueTask.FromResult(result); }
         public override ValueTask<int> NonQueryExecutedAsync(DbCommand command, CommandExecutedEventData eventData,
             int result, CancellationToken cancellationToken = default)
-        { TraceMutation(command, "finished"); return ValueTask.FromResult(result); }
+        {
+            TraceMutation(command, "finished");
+            if (command.CommandText.Contains("INSERT #RootEligibleArtifacts", StringComparison.Ordinal))
+                trace?.Invoke($"Eligibility map ({_phase}): {result:N0} artifacts in {eventData.Duration.TotalSeconds:F3}s.");
+            return ValueTask.FromResult(result);
+        }
         private static bool IsFence(DbCommand command) => command.CommandText.Contains("[IndexState]", StringComparison.Ordinal)
             && command.CommandText.Contains("UPDLOCK", StringComparison.Ordinal);
         public override ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(DbCommand command,

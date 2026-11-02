@@ -537,6 +537,14 @@ public sealed class VectorConfiguration : IEntityTypeConfiguration<VectorEntity>
         SchemaConfiguration.ConfigureHash(builder.Property(entity => entity.TextChunkContentHash));
         SchemaConfiguration.ConfigureHash(builder.Property(entity => entity.PayloadChecksum));
         builder.Property(entity => entity.SearchInputHash).HasMaxLength(64).IsUnicode(false).IsFixedLength();
+        // Publication proofs read these fields for both live and deleted rows.
+        // Keep the vector payload out of this access path.
+        builder.HasIndex(entity => entity.VectorId).HasDatabaseName("IX_Vectors_PublicationMetadata")
+            .IncludeProperties(entity => new
+            {
+                entity.TextChunkId, entity.SourceRevision, entity.PayloadChecksum,
+                entity.TextChunkContentHash, entity.SearchInputHash, entity.IsDeleted
+            });
         builder.Property(entity => entity.CreatedAtUtc).HasColumnType("datetimeoffset(7)");
         SchemaConfiguration.ConfigureRowVersion(builder.Property(entity => entity.RowVersion));
         builder.HasIndex(entity => new

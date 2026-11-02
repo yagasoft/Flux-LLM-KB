@@ -97,6 +97,20 @@ public sealed class SchemaMappingTests
     }
 
     [Fact]
+    public void Vector_publication_metadata_index_is_narrow_unfiltered_and_nonunique()
+    {
+        using var context = CreateContext();
+        // SQL INCLUDE annotations are intentionally omitted from EF's runtime model.
+        var entityType = FindTable(context.GetService<IDesignTimeModel>().Model, "Vectors");
+        var index = Assert.Single(entityType.GetIndexes(), value => value.GetDatabaseName() == "IX_Vectors_PublicationMetadata");
+        Assert.Equal(["VectorId"], index.Properties.Select(value => value.Name));
+        Assert.False(index.IsUnique);
+        Assert.Null(index.GetFilter());
+        Assert.Equal(["TextChunkId", "SourceRevision", "PayloadChecksum", "TextChunkContentHash", "SearchInputHash", "IsDeleted"],
+            Assert.IsType<string[]>(index.FindAnnotation("SqlServer:Include")?.Value));
+    }
+
+    [Fact]
     public void Vector_mapping_preserves_stable_identity_and_rebuild_metadata()
     {
         using var context = CreateContext();
@@ -884,24 +898,24 @@ public sealed class NativeSqlServerFixtureValidationTests
     [InlineData("I:/FluxKnowledge/Tests/test.ldf")]
     [InlineData("\\\\?\\I:\\FluxKnowledge\\Tests\\test.mdf")]
     [InlineData("\\\\.\\I:\\FluxKnowledge\\Tests\\test.ldf")]
-    public void Native_fixture_fails_closed_for_unverifiable_or_i_drive_file_paths(string? path)
+    public void Native_fixture_fails_closed_for_unverifiable_or_unowned_file_paths(string? path)
     {
         var error = Assert.Throws<InvalidOperationException>(
             () => NativeSqlServerFixture.ValidateCreatedDatabaseFiles(
-                [path, "C:\\SqlData\\known-valid.mdf"]));
+                [path, "E:\\Codex Workspaces\\Staging\\FluxKnowledge\\SqlTests-GuardTests\\Data\\Sql\\Disposable\\known-valid.mdf"]));
 
-        Assert.Contains("verified outside I:", error.Message, StringComparison.Ordinal);
+        Assert.Contains("approved disposable staging", error.Message, StringComparison.Ordinal);
     }
 
-    [Fact]
-    public void Native_fixture_accepts_only_verified_non_i_drive_file_paths()
+    [Theory]
+    [InlineData("E:")]
+    [InlineData("I:")]
+    public void Native_fixture_accepts_only_verified_disposable_staging_file_paths(string drive)
     {
         NativeSqlServerFixture.ValidateCreatedDatabaseFiles(
             [
-                "C:\\SqlData\\test.mdf",
-                "D:\\SqlLog\\test.ldf",
-                "\\\\?\\C:\\SqlData\\device-test.mdf",
-                "\\\\.\\D:\\SqlLog\\device-test.ldf"
+                drive + "\\Codex Workspaces\\Staging\\FluxKnowledge\\SqlTests-GuardTests\\Data\\Sql\\Disposable\\test.mdf",
+                drive + "\\Codex Workspaces\\Staging\\FluxKnowledge\\SqlTests-GuardTests\\Data\\Sql\\Disposable\\test_log.ldf"
             ]);
     }
 

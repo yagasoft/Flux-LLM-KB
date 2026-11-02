@@ -1,4 +1,5 @@
 Set-StrictMode -Version Latest
+Import-Module (Join-Path $PSScriptRoot 'incremental-vector-publication-metadata-migration.psm1') -ErrorAction Stop
 
 function Get-SourceJournalMigrationContract {
     [pscustomobject]@{
@@ -102,8 +103,10 @@ function Get-SourceJournalDatabaseState {
                 $schema=[string]$command.ExecuteScalar()
                 if(!$schema){throw 'journal-schema-observation-missing'}
                 $null=$schema|ConvertFrom-Json
+                $vectorIndexSha256=Get-VectorPublicationMetadataIndexSha256 -Connection $connection -Transaction $transaction
                 $transaction.Commit()
-                [pscustomobject]@{Identity=$identity;History=$history.ToArray();CanAlter=$canAlter;SchemaSha256=(Get-SourceJournalValueHash $schema)}
+                [pscustomobject]@{Identity=$identity;History=$history.ToArray();CanAlter=$canAlter;SchemaSha256=(Get-SourceJournalValueHash $schema);
+                    VectorPublicationIndexSha256=$vectorIndexSha256}
             }finally{$command.Dispose()}
         }finally{$transaction.Dispose()}
     }finally{$connection.Dispose()}
@@ -112,6 +115,12 @@ function Get-SourceJournalDatabaseState {
 function Assert-SourceJournalSchema {
     param([Parameter(Mandatory)]$DatabaseState,[switch]$AllowBaseline)
     $contract=Get-SourceJournalMigrationContract;$history=@($DatabaseState.History)
+    $metadata=Get-VectorPublicationMetadataMigrationContract
+    $indexObservation=$DatabaseState.PSObject.Properties['VectorPublicationIndexSha256']
+    if($history.Count -eq ($contract.BaselineHistoryCount+$contract.Migrations.Count+1) -and $history[-1] -ceq $metadata.Target){
+        if(-not $indexObservation -or $indexObservation.Value -cne $metadata.IndexSha256){throw 'journal-schema-metadata-successor-index-invalid'}
+        $history=@($history[0..($history.Count-2)])
+    } elseif($indexObservation -and $indexObservation.Value -cne $metadata.AbsentIndexSha256){throw 'journal-schema-unrecorded-vector-metadata-index'}
     if(!$DatabaseState.Identity -or $history.Count -lt $contract.BaselineHistoryCount){throw 'journal-schema-history-or-incarnation-invalid'}
     $prefix=@($history[0..($contract.BaselineHistoryCount-1)])
     if((Get-SourceJournalValueHash ($prefix -join "`n")) -cne $contract.BaselineHistorySha256){throw 'journal-schema-baseline-history-changed'}

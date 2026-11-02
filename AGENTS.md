@@ -16,13 +16,13 @@
   classification does not waive the production boundary above. Preserve technical
   eligibility, ownership, idempotency and native-cleanup checks; database edits
   alone cannot prove GPU cleanup. The historical authority receipts remain under
-  `E:\Codex Workspaces\Operational Evidence\FluxKnowledge\startup-shutdown-stability-20261013`.
+  `I:\Codex Workspaces\Operational Evidence\FluxKnowledge\startup-shutdown-stability-20261013`.
 - Deliver a usable, reliably running personal app for indexing real workspaces.
   Keep effort proportional; optional hardening and investigation must not become
   an indefinite delivery barrier. Subsequent releases must pair necessary
   supporting work with tangible user improvements. Preserve these priorities
   through compaction and handoffs; the delivery record is
-  `E:\Codex Workspaces\Operational Evidence\FluxKnowledge\startup-shutdown-stability-20261013\delivery-priorities-and-post-mvp-roadmap.md`.
+  `I:\Codex Workspaces\Operational Evidence\FluxKnowledge\startup-shutdown-stability-20261013\delivery-priorities-and-post-mvp-roadmap.md`.
 - For feature closeout on `codex/...`, use `scripts/dev/complete-feature.ps1`;
   do not manually substitute its sequence. On failure, report JSON `failed_step`
   and `log_path`, fix the failure within authorised scope and rerun. Script use

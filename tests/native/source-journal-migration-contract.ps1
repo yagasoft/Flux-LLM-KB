@@ -3,6 +3,7 @@ param([string]$SourceRoot=(Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
 Import-Module (Join-Path $SourceRoot 'scripts/deploy/incremental-source-journal-migration.psm1') -Force
+Import-Module (Join-Path $SourceRoot 'scripts/deploy/incremental-vector-publication-metadata-migration.psm1') -Force
 function Assert-True([bool]$Value,[string]$Message) {if(!$Value){throw $Message}}
 function Expect-Refusal([scriptblock]$Action) {
  $refused=$false;try{&$Action}catch{$refused=$true};Assert-True $refused ('Expected migration refusal was not observed: '+$Action.ToString())
@@ -17,6 +18,15 @@ $baseline=[pscustomobject]@{Identity='owned-database-incarnation';History=$base;
 $complete=[pscustomobject]@{Identity=$baseline.Identity;History=($base+@($contract.Migrations));SchemaSha256=$contract.SchemaSha256;CanAlter=$true}
 Assert-SourceJournalSchema -DatabaseState $baseline -AllowBaseline
 Assert-SourceJournalSchema -DatabaseState $complete
+$metadata=Get-VectorPublicationMetadataMigrationContract
+$successor=[pscustomobject]@{Identity=$complete.Identity;History=($complete.History+$metadata.Target);SchemaSha256=$complete.SchemaSha256;CanAlter=$true;VectorPublicationIndexSha256=$metadata.IndexSha256}
+Assert-SourceJournalSchema -DatabaseState $successor
+foreach($indexHash in @($metadata.AbsentIndexSha256,('F'*64))){
+ $badSuccessor=[pscustomobject]@{Identity=$complete.Identity;History=$successor.History;SchemaSha256=$complete.SchemaSha256;VectorPublicationIndexSha256=$indexHash}
+ Expect-Refusal {Assert-SourceJournalSchema -DatabaseState $badSuccessor}
+}
+$unrecorded=[pscustomobject]@{Identity=$complete.Identity;History=$complete.History;SchemaSha256=$complete.SchemaSha256;VectorPublicationIndexSha256=$metadata.IndexSha256}
+Expect-Refusal {Assert-SourceJournalSchema -DatabaseState $unrecorded}
 Expect-Refusal {Assert-SourceJournalSchema -DatabaseState $baseline}
 foreach($bad in @(
  [pscustomobject]@{Identity=$baseline.Identity;History=($base+@($contract.Migrations)[0]);SchemaSha256=$contract.SchemaSha256;CanAlter=$true},

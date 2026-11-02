@@ -298,6 +298,10 @@ if ($rejected.ExitCode -eq 0 -or $rejected.Output -notmatch 'Maintenance impleme
 
 & (Join-Path $PSScriptRoot 'source-verification-slot-provisioning.ps1') -SourceRoot $SourceRoot
 & (Join-Path $PSScriptRoot 'incremental-stopped-release-recovery.ps1') -SourceRoot $SourceRoot
+foreach($test in @('vector-publication-metadata-migration-contract.ps1','vector-publication-metadata-updater.ps1','vector-publication-metadata-stopped-recovery.ps1')){
+    & pwsh -NoProfile -File (Join-Path $PSScriptRoot $test) -SourceRoot $SourceRoot
+    if($LASTEXITCODE -ne 0){throw ('Vector publication metadata deployment contract failed: '+$test)}
+}
 foreach ($arguments in @(
     @('-StoppedRecoveryBindingPath','unused.json'),
     @('-RecoverStoppedPool','-StoppedRecoveryBindingPath','unused.json'),

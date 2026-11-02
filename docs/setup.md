@@ -215,6 +215,40 @@ transfer requires reconciliation; repeating the same transfer state is refused.
 This mode permits no migration, configuration change or readiness deferral and
 retains the compatible candidate set and hold on failure.
 
+For the additive publication-metadata index, use
+`-ApplyVectorPublicationMetadataMigration` in both `-PlanOnly` and the specifically
+authorised `-Apply`. Supply the reviewed source-journal payload hashes and exact
+database incarnation through `-ReviewedSourceJournalPayloads` and
+`-ExpectedSourceJournalDatabaseIdentity`. This mode accepts only the complete
+78-migration predecessor with no metadata index, or the exact 79-migration
+successor with the enabled, physical `IX_Vectors_PublicationMetadata` index.
+It rejects other migration, rebuild, repair, configuration and readiness-deferral
+modes. The plan identifies the SQL bytes and database identity. Bind the source
+commit/tree and candidate payload hashes in the reviewed deployment packet;
+`-PlanOnly` does not emit a source-commit field. The
+immutable release binding and manifest precede task, hold and payload changes;
+stopped owners and native drain precede the immutable migration intent. Index
+creation and the EF history entry commit in one transaction before payload
+replacement. The DDL budget is 120 seconds; use the reviewed readiness budget,
+up to the unchanged 300-second maximum.
+
+A migration failure retains the owned hold and records a fresh Old/New/Unknown
+observation. Never run automatic Down or start the predecessor. Resume through
+`-RecoverStoppedPool -ApplyVectorPublicationMetadataMigration` with an independently
+reviewed, hash-bound version-2 `vector-publication-metadata-resume` stopped binding.
+It additionally pins the prior metadata release binding and immutable migration
+intent. Each installed role must match its recorded original or candidate hash;
+all intended candidate roles must match before startup. A confirmed successor
+executes zero DDL. The existing version-1 ordinary recovery contract is unchanged.
+
+An interruption before intent is a narrower version-2 case: the fixed intent
+path must be physically absent, every installed role must still equal its original
+hash, and fresh schema classification must equal the original release binding's
+`InitialKind`. Partial intent files, access errors, linked paths, candidate roles
+or changed schema refuse. The new attempt records `ResumeReleaseBindingSha256`
+without inventing an intent hash. Hold transfer remains atomic and durable;
+unknown or partially migrated state stays held for explicit reconciliation.
+
 The one-time `-ApplyCorpusChunkFullTextMigration` switch applies only
 `20260924125920_AddCorpusChunkFullTextIndex` from the exact OCR-metadata baseline
 `20260920122758_AddDocumentOcrRequestsAndArtifactMetadata`. Include that switch

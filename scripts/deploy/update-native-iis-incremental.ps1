@@ -7,6 +7,7 @@ param(
     [ValidateRange(10, 300)]
     [int]$ReadinessTimeoutSeconds = 120,
     [switch]$ApplyMigrations,
+    [switch]$ApplyVectorPublicationMetadataMigration,
     [switch]$ApplyResumableSourceDeletionCleanupMigration,
     [switch]$EnterSourceDeletionAcceptanceMaintenance,
     [string]$SourceDeletionAcceptanceMaintenanceReceipt = '',
@@ -87,6 +88,100 @@ $sourceJournalRelease = @{ TransportDeferred=$false; TransportConfirmed=$false; 
 $SourceDeletionMigrationBaseline = "20260826160702_AddEmptyCatalogueReadiness"
 $SourceDeletionMigrationTarget = "20260918121829_AddSourceDeletionOperations"
 $SourceDeletionMigrationScriptSha256 = "355F7B8499D0CE333E6FA50142B76C9F7B6CA92B3057A5F1A740C794756ABC90"
+$vectorMetadataMigrationState = $null
+$vectorMetadataReleaseBinding = $null
+$vectorMetadataPreparationStarted = $false
+
+function Assert-VectorPublicationMetadataUpdateOptions {
+    param([Collections.IDictionary]$Parameters)
+    if($Parameters.Keys -cnotcontains 'ApplyVectorPublicationMetadataMigration' -or !$Parameters['ApplyVectorPublicationMetadataMigration']){return}
+    $allowed=@('SourceRoot','SiteName','SiteUrl','DeployRoot','ReadinessTimeoutSeconds','PlanOnly','Apply',
+        'ApplyVectorPublicationMetadataMigration','RecoverStoppedPool','StoppedRecoveryBindingPath',
+        'ExpectedStoppedRecoveryBindingSha256','ReviewedSourceJournalPayloads','ExpectedSourceJournalDatabaseIdentity','ReviewedLegacyIndexPayloads')
+    if(@($Parameters.Keys|Where-Object {$_ -cnotin $allowed}).Count){throw 'vector-metadata-incompatible-deployment-mode'}
+    if(!$Parameters['ExpectedSourceJournalDatabaseIdentity']){throw 'vector-metadata-reviewed-database-identity-required'}
+    if($Parameters['RecoverStoppedPool']){
+        if(!$Parameters['StoppedRecoveryBindingPath'] -or $Parameters['ExpectedStoppedRecoveryBindingSha256'] -cnotmatch '^[A-Fa-f0-9]{64}$'){
+            throw 'vector-metadata-resume-requires-exact-stopped-binding'
+        }
+    } elseif($Parameters['StoppedRecoveryBindingPath'] -or $Parameters['ExpectedStoppedRecoveryBindingSha256']){
+        throw 'vector-metadata-binding-requires-stopped-recovery'
+    }
+}
+
+function Get-VectorPublicationMetadataUpdateSql {
+    param([string]$Root)
+    $contract=Get-VectorPublicationMetadataMigrationContract
+    $path=Assert-SegmentedUpdatePath (Join-Path $Root 'scripts/deploy/vector-publication-metadata-up.sql')
+    $migration=Assert-SegmentedUpdatePath (Join-Path $Root ('src/FluxKnowledge.Infrastructure.SqlServer/Persistence/Migrations/'+$contract.Target+'.cs'))
+    if((Get-FileHash -LiteralPath $path).Hash -cne $contract.UpSha256){throw 'vector-metadata-reviewed-up-sql-changed'}
+    @{From=$contract.Baseline;To=$contract.Target;Path=$path;Sha256=$contract.UpSha256;MigrationFileSha256=(Get-FileHash -LiteralPath $migration).Hash}
+}
+
+function Get-VectorPublicationMetadataUpdatePlan {
+    param($DatabaseState,[string]$ExpectedDatabaseIdentity,$Sql)
+    $contract=Get-VectorPublicationMetadataMigrationContract
+    $kind=Get-VectorPublicationMetadataStateKind $DatabaseState $ExpectedDatabaseIdentity
+    if(!$DatabaseState.ResolvesDbo -or ($kind -ceq 'Old' -and !$DatabaseState.CanAlter)){throw 'vector-metadata-ddl-identity-or-permission-invalid'}
+    if($Sql.Sha256 -cne $contract.UpSha256){throw 'vector-metadata-reviewed-up-sql-changed'}
+    [ordered]@{baseline=$contract.Baseline;target=$contract.Target;database_identity=$DatabaseState.Identity;
+        current_history=@($DatabaseState.History);prior_history_sha256=$contract.PriorHistorySha256;
+        state=$kind;already_applied=($kind -ceq 'New');ddl=$(if($kind -ceq 'New'){'none'}else{'one additive publication metadata index and migration history row'});
+        generated_up_sha256=$contract.UpSha256;migration_timeout_seconds=$contract.TimeoutSeconds;
+        rollback='no Down or predecessor start; retain exact old/new schema, payloads and hold for typed stopped recovery';
+        resume='same commit and bound payloads; Old creates a linked attempt; New performs zero DDL'}
+}
+
+function Assert-VectorPublicationMetadataStopped {
+    param([hashtable]$State,[hashtable]$Binding)
+    Assert-StoppedPoolRecoveryBaseline
+    Assert-HybridDeploymentHoldOwner -Path $ValidationHoldPath -ReleaseId $State.ReleaseId
+    $task=Get-RepositoryRecoveryTaskObservation
+    if($task.Enabled -or $task.State -ceq 'Running' -or $task.IdentityHash -cne $Binding.TaskIdentityHash -or
+        $task.LauncherSha256 -cne $Binding.LauncherSha256){throw 'vector-metadata-stopped-task-binding-changed'}
+    Wait-InteractiveHostStopped -TaskName $InteractiveHostTaskName -TimeoutSeconds $ReadinessTimeoutSeconds
+    Assert-DeploymentSourceJournalCliWritersStopped
+    foreach($pair in @(@{Path=(Join-Path $CanonicalLiveRoot 'Config/appsettings.Production.json');Hash=$Binding.ConfigurationSha256},
+        @{Path=(Join-Path (Split-Path -Parent $InteractiveHostRoot) 'appsettings.Production.json');Hash=$Binding.CompanionConfigurationSha256})){
+        if((Get-FileHash -LiteralPath (Assert-SegmentedUpdatePath $pair.Path)).Hash -cne $pair.Hash){throw 'vector-metadata-configuration-changed'}
+    }
+    foreach($payload in $Binding.CandidatePayloads){
+        $original=@($Binding.OriginalPayloads|Where-Object Role -CEQ $payload.Role)[0]
+        $hash=Get-HybridPayloadFingerprint (Assert-SegmentedUpdatePath $payload.Root)
+        if($hash -cnotin @($payload.Sha256,$original.Sha256)){throw 'vector-metadata-installed-payload-unrecognised'}
+    }
+    foreach($connection in @((Get-DeploymentSqlConnectionString),(Get-RepositoryRecoveryCompanionConnectionString))){
+        $null=Get-VectorPublicationMetadataStateKind (Get-VectorPublicationMetadataDatabaseState -ConnectionString $connection) $State.Identity
+    }
+}
+
+function Invoke-VectorPublicationMetadataStoppedAttempt {
+    param([hashtable]$State,[hashtable]$Binding,[string]$SqlPath)
+    # The payload swap can stop again on failure. A fresh observation is safe;
+    # replaying this release's migration intent is not.
+    if($State.Attempted){
+        $null=Confirm-VectorPublicationMetadataMigrationOutcome -State $State `
+            -ReadState {Get-VectorPublicationMetadataDatabaseState -ConnectionString (Get-DeploymentSqlConnectionString)}
+    } else {
+        Invoke-VectorPublicationMetadataMigrationAttempt -State $State `
+            -AssertStopped {Assert-VectorPublicationMetadataStopped $State $Binding} `
+            -ReadState {Get-VectorPublicationMetadataDatabaseState -ConnectionString (Get-DeploymentSqlConnectionString)} `
+            -RunUp {Invoke-VectorPublicationMetadataMigrationSql -ConnectionString (Get-DeploymentSqlConnectionString) `
+                -SqlPath $SqlPath -ExpectedDatabaseIdentity $State.Identity}
+    }
+}
+
+function Invoke-VectorPublicationMetadataPreparation {
+    param([hashtable]$State,[hashtable]$Binding,[string]$SqlPath)
+    $task=Get-ScheduledTask -TaskName $InteractiveHostTaskName -ErrorAction Stop
+    if($task.Settings.Enabled){Disable-ScheduledTask -TaskName $InteractiveHostTaskName -ErrorAction Stop|Out-Null}
+    Wait-InteractiveHostStopped -TaskName $InteractiveHostTaskName -TimeoutSeconds $ReadinessTimeoutSeconds
+    Stop-HybridIisAfterGpuDrain
+    [void](New-DeploymentValidationHold -Path $ValidationHoldPath -ReleaseId $State.ReleaseId)
+    $deploymentValidation.HoldCreated=$true
+    if($null -eq $deploymentValidation.Baseline){$deploymentValidation.Baseline=Get-RetainedPipelineStateBaseline}
+    Invoke-VectorPublicationMetadataStoppedAttempt $State $Binding $SqlPath
+}
 
 function Assert-CanonicalPath {
     param(
@@ -2225,6 +2320,7 @@ if(($OfflineProjectionMaintenance -or $ResumeOfflineProjectionMaintenance) -and 
 if($ResumeOfflineProjectionMaintenance -and !$Apply){throw 'index-update-offline-resume-requires-apply'}
 $sourceAccessRequested = ![string]::IsNullOrEmpty($SourceAccessPipeName) -or $DisableSourceAccessRecovery
 $sourceJournalMode = $ApplyIncrementalSourceScanning -or $DisableIncrementalSourceScanning
+Assert-VectorPublicationMetadataUpdateOptions $PSBoundParameters
 if ($sourceJournalMode) {
     $allowed=@('SourceRoot','SiteName','SiteUrl','DeployRoot','ReadinessTimeoutSeconds','RecoverStoppedPool','PlanOnly','Apply',
         'ApplyIncrementalSourceScanning','DisableIncrementalSourceScanning','SourceJournalOptionsPath','ExpectedSourceJournalOptionsSha256',
@@ -2239,6 +2335,7 @@ if ($StoppedRecoveryBindingPath -or $ExpectedStoppedRecoveryBindingSha256) {
     $allowed=@('SourceRoot','SiteName','SiteUrl','DeployRoot','ReadinessTimeoutSeconds','RecoverStoppedPool',
         'StoppedRecoveryBindingPath','ExpectedStoppedRecoveryBindingSha256','ReviewedSourceJournalPayloads',
         'ExpectedSourceJournalDatabaseIdentity','InspectIndexAdmissionPayloads','PlanOnly','Apply')
+    if($ApplyVectorPublicationMetadataMigration){$allowed+=@('ApplyVectorPublicationMetadataMigration','ReviewedLegacyIndexPayloads')}
     if (!$RecoverStoppedPool -or !$StoppedRecoveryBindingPath -or $ExpectedStoppedRecoveryBindingSha256 -cnotmatch '^[A-Fa-f0-9]{64}$' -or
         @($PSBoundParameters.Keys | Where-Object {$_ -cnotin $allowed}).Count) {
         throw 'Stopped release adoption requires explicit stopped-pool recovery and one exact binding; migrations, configuration changes and readiness deferral are forbidden.'
@@ -2362,7 +2459,7 @@ if ($PatchHybridRebuildRelease -and ($ExpectedPatchCandidateHash -cnotmatch '^[0
 }
 if (-not $PatchHybridRebuildRelease -and ($ExpectedPatchCandidateHash -or $ExpectedPatchOperatorHash)) { throw 'Reviewed patch hashes only apply to initial patch.' }
 if (($PatchHybridRebuildRelease -or $ResumeHybridPatchRelease) -and $RebuildTimeoutSeconds -gt 1800) { throw 'Hybrid patch drain timeout maximum is 1800 seconds.' }
-$applyAnyMigration = $ApplyIncrementalSourceScanning -or $ApplyMigrations -or $ApplyResumableSourceDeletionCleanupMigration -or $ApplyCorpusChunkFullTextMigration -or $ApplyCodeDisclosureProofMigration -or $ApplyRepositoryRecoveryAuthorityMigration -or ($ApplyHybridPassageRebuild -and -not ($PatchHybridRebuildRelease -or $ResumeHybridPatchRelease))
+$applyAnyMigration = $ApplyVectorPublicationMetadataMigration -or $ApplyIncrementalSourceScanning -or $ApplyMigrations -or $ApplyResumableSourceDeletionCleanupMigration -or $ApplyCorpusChunkFullTextMigration -or $ApplyCodeDisclosureProofMigration -or $ApplyRepositoryRecoveryAuthorityMigration -or ($ApplyHybridPassageRebuild -and -not ($PatchHybridRebuildRelease -or $ResumeHybridPatchRelease))
 
 if ($EnterSourceDeletionAcceptanceMaintenance) {
     $maintenanceImplementationHash=Get-SourceDeletionMaintenanceImplementationHash
@@ -2385,6 +2482,7 @@ if ($sourceAccessRequested) {
 }
 Import-Module (Join-Path $PSScriptRoot 'incremental-corpus-fulltext-migration.psm1') -Force -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'incremental-code-disclosure-migration.psm1') -Force -ErrorAction Stop
+Import-Module (Join-Path $PSScriptRoot 'incremental-vector-publication-metadata-migration.psm1') -Force -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'incremental-source-deletion-cleanup-migration.psm1') -Force -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'incremental-source-journal-migration.psm1') -Force -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'incremental-source-journal-release.psm1') -Force -ErrorAction Stop
@@ -2397,7 +2495,7 @@ if ($sourceJournalMode) {
         -OptionsPath $SourceJournalOptionsPath -ExpectedOptionsSha256 $ExpectedSourceJournalOptionsSha256 -Disable:$DisableIncrementalSourceScanning
     if ($ApplyIncrementalSourceScanning) {$sourceJournalRelease.RepairMode=Get-DeploymentSourceJournalRepairMode}
 }
-if ($Apply -and $applyAnyMigration -and !$ApplyIncrementalSourceScanning) { Assert-DeploymentSourceJournalLegacyMigrationAllowed }
+if ($Apply -and $applyAnyMigration -and !$ApplyIncrementalSourceScanning -and !$ApplyVectorPublicationMetadataMigration) { Assert-DeploymentSourceJournalLegacyMigrationAllowed }
 Import-Module (Join-Path $PSScriptRoot 'incremental-segmented-index-schema.psm1') -Force -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'incremental-segmented-index-update.psm1') -Force -ErrorAction Stop
 . (Join-Path $PSScriptRoot 'offline-code-maintenance.ps1')
@@ -2507,11 +2605,24 @@ if ($EnterSourceDeletionAcceptanceMaintenance) {
 if ($StoppedRecoveryBindingPath) {
     Import-Module WebAdministration -ErrorAction Stop
     $stoppedRecoveryBinding=Read-IncrementalStoppedRecoveryBinding -Path $StoppedRecoveryBindingPath -ExpectedSha256 $ExpectedStoppedRecoveryBindingSha256
+    Assert-IncrementalStoppedRecoveryMode -Binding $stoppedRecoveryBinding -VectorMetadataMigration ([bool]$ApplyVectorPublicationMetadataMigration)
     Assert-IncrementalStoppedRecoveryBinding $stoppedRecoveryBinding
+    if($ApplyVectorPublicationMetadataMigration){
+        if(!$SourceRoot){$SourceRoot=Split-Path -Parent (Split-Path -Parent $PSScriptRoot)}
+        $resumeCommit=(& git -C $SourceRoot rev-parse HEAD 2>&1|Out-String).Trim()
+        if($LASTEXITCODE -ne 0 -or $resumeCommit -cne $stoppedRecoveryBinding.PriorCommit){throw 'vector-metadata-resume-source-commit-changed'}
+    }
 }
 if ($PlanOnly) {
     $migrationPlan = $null
     $sourceJournalPlan = $null
+    if($ApplyVectorPublicationMetadataMigration){
+        if(!$SourceRoot){$SourceRoot=Split-Path -Parent (Split-Path -Parent $PSScriptRoot)}
+        $SourceRoot=(Resolve-Path -LiteralPath $SourceRoot).Path
+        $migrationPlan=Get-VectorPublicationMetadataUpdatePlan `
+            -DatabaseState (Get-VectorPublicationMetadataDatabaseState -ConnectionString (Get-DeploymentSqlConnectionString)) `
+            -ExpectedDatabaseIdentity $ExpectedSourceJournalDatabaseIdentity -Sql (Get-VectorPublicationMetadataUpdateSql $SourceRoot)
+    }
     if ($sourceJournalMode) {
         $journalDatabase=Get-SourceJournalDatabaseState -ConnectionString (Get-DeploymentSqlConnectionString)
         Assert-SourceJournalSchema -DatabaseState $journalDatabase -AllowBaseline:(!$DisableIncrementalSourceScanning)
@@ -2758,7 +2869,7 @@ if ($PlanOnly) {
         } } else { $null }
         payload_acl = "inherit-from-live-root"
         rollback_boundary = 'all restoration paths require an available source-journal boundary with no feature, configuration, intent or interrupted helper evidence; otherwise retain the current compatible set and deployment hold'
-        rollback = if ($stoppedRecoveryBinding) { 'forward-only; retain compatible candidate set and owned hold on failure' } elseif ($OfflineCodeMaintenanceReceipt) { 'before start: stopped rollback; after start intent: matching pair retained for fresh stopped forward recovery; after hold release: reconcile current state' } elseif ($ApplyResumableSourceDeletionCleanupMigration -or $ApplyRepositoryRecoveryAuthorityMigration) { 'preserve-schema-and-evidence; verified-prior-payloads-stopped-task-disabled-hold-retained' } elseif ($RecoverStoppedPool) { 'restore-prior-payloads-with-pool-stopped-and-hold-retained' } elseif ($PatchHybridRebuildRelease -or $ResumeHybridPatchRelease) { 'forward-only after activation intent; predecessor payload/packet retained, hold denied on failure' } elseif ($ApplyHybridPassageRebuild) { 'before-schema: original payload; after-schema: held forward recovery with retained original payload/configuration' } else { "automatic-application-and-interactive-host-payload-restore" }
+        rollback = if ($ApplyVectorPublicationMetadataMigration) { 'no Down or predecessor start; retain old/new schema and exact payload set under hold for typed stopped recovery' } elseif ($stoppedRecoveryBinding) { 'forward-only; retain compatible candidate set and owned hold on failure' } elseif ($OfflineCodeMaintenanceReceipt) { 'before start: stopped rollback; after start intent: matching pair retained for fresh stopped forward recovery; after hold release: reconcile current state' } elseif ($ApplyResumableSourceDeletionCleanupMigration -or $ApplyRepositoryRecoveryAuthorityMigration) { 'preserve-schema-and-evidence; verified-prior-payloads-stopped-task-disabled-hold-retained' } elseif ($RecoverStoppedPool) { 'restore-prior-payloads-with-pool-stopped-and-hold-retained' } elseif ($PatchHybridRebuildRelease -or $ResumeHybridPatchRelease) { 'forward-only after activation intent; predecessor payload/packet retained, hold denied on failure' } elseif ($ApplyHybridPassageRebuild) { 'before-schema: original payload; after-schema: held forward recovery with retained original payload/configuration' } else { "automatic-application-and-interactive-host-payload-restore" }
         gpu_drain = if ($OfflineCodeMaintenanceReceipt) { 'fresh reviewed stopped-owner proof; no GPU settlement claimed' } else { 'deny admissions; allow active OCR page and native cleanup to finish; prove exact IIS worker exit before each payload swap stop' }
         deployment_validation_hold = $true
         candidate_validation = if ($PatchHybridRebuildRelease -or $ResumeHybridPatchRelease) { 'same-operation-epoch-checkpoint-continuity-preserved-inputs-and-loopback-probes' } elseif ($ApplyHybridPassageRebuild) { 'held-exact-rebuild-finalisation-preserved-inputs-and-loopback-probes' } elseif ($DeferReadinessForScopedRemediation) {
@@ -2805,6 +2916,12 @@ $corpusMigrationState = $null
 $codeDisclosureMigrationState = $null
 $sourceDeletionCleanupState = $null
 $sourceDeletionMaintenance = $null
+if($ApplyVectorPublicationMetadataMigration){
+    $migrationPlan=@{Up=(Get-VectorPublicationMetadataUpdateSql $SourceRoot)}
+    $vectorMetadataDatabase=Get-VectorPublicationMetadataDatabaseState -ConnectionString (Get-DeploymentSqlConnectionString)
+    $null=Get-VectorPublicationMetadataUpdatePlan -DatabaseState $vectorMetadataDatabase `
+        -ExpectedDatabaseIdentity $ExpectedSourceJournalDatabaseIdentity -Sql $migrationPlan.Up
+}
 $sourceDeletionCleanupDatabase=Get-SourceDeletionCleanupCandidateDatabase -Root $SourceRoot -MigrationMode ([bool]$ApplyResumableSourceDeletionCleanupMigration) `
     -ReadState { Get-SourceDeletionCleanupDatabaseState -ConnectionString (Get-DeploymentSqlConnectionString) }
 if ($ApplyResumableSourceDeletionCleanupMigration) { $migrationPlan=@{ Up=$null } }
@@ -2850,7 +2967,7 @@ $interactiveHostRollbackVerified = $true
 $holdReleaseAttempted = $false
 $holdReleased = $false
 $hostingChange = @{ Original=$null; Desired=@{ StartMode='AlwaysRunning'; IdleTimeout='00:00:00'; PreloadEnabled=$true }
-    Attempted=$false; RollbackVerified=$true }
+    Attempted=$false; RollbackVerified=$true; PreloadReceipt=$null }
 try {
     try {
         $leaseAcquired = $mutex.WaitOne([TimeSpan]::FromMinutes(1))
@@ -2862,6 +2979,7 @@ try {
         throw "Another incremental IIS deployment is already in progress."
     }
     if ($stoppedRecoveryBinding) { Assert-IncrementalStoppedRecoveryBinding $stoppedRecoveryBinding }
+    if($ApplyVectorPublicationMetadataMigration -and $stoppedRecoveryBinding -and $commit -cne $stoppedRecoveryBinding.PriorCommit){throw 'vector-metadata-resume-source-commit-changed'}
     # Register before every Recovery write, including continuation/failure packets.
     # This scope launches external children; parent exit is insufficient on failure.
     $recoveryWriter = Start-RecoveryReferenceWrite -ConnectionString (Get-DeploymentSqlConnectionString) -RecoveryRoot $CanonicalRecoveryRoot
@@ -3018,6 +3136,52 @@ try {
                 MaintenanceReceipt=$SourceDeletionAcceptanceMaintenanceReceipt;
                 MaintenanceReceiptSha256=$ExpectedSourceDeletionAcceptanceMaintenanceReceiptSha256 }
     }
+    if($ApplyVectorPublicationMetadataMigration){
+        $sqlTarget=Join-Path $releaseRoot 'vector-publication-metadata-up.sql'
+        Copy-Item -LiteralPath $migrationPlan.Up.Path -Destination $sqlTarget -ErrorAction Stop
+        if((Get-FileHash -LiteralPath $sqlTarget).Hash -cne (Get-VectorPublicationMetadataMigrationContract).UpSha256){throw 'vector-metadata-release-sql-changed'}
+        $migrationPlan.Up.Path=$sqlTarget
+        $taskBinding=Get-RepositoryRecoveryTaskObservation
+        $originalPayloads=@();$candidatePayloads=@()
+        foreach($payload in @(Get-DeploymentSourceJournalPayloads)){
+            $originalPayloads+=@{Role=$payload.Role;Root=$payload.Root;Sha256=(Get-HybridPayloadFingerprint (Assert-SegmentedUpdatePath $payload.Root))}
+            $candidatePath=if($payload.Role -ceq 'Web'){$candidateRoot}elseif($payload.Role -ceq 'OutlookHost'){$interactiveHostCandidateRoot}else{$payload.Root}
+            $candidateHash=Get-HybridPayloadFingerprint (Assert-SegmentedUpdatePath $candidatePath)
+            if($candidateHash -cne (Get-DeploymentSourceJournalReviewedHash $payload.Role)){throw 'vector-metadata-reviewed-candidate-payload-changed'}
+            $candidatePayloads+=@{Role=$payload.Role;Root=$payload.Root;Sha256=$candidateHash}
+        }
+        if($stoppedRecoveryBinding){
+            $priorRelease=Join-Path $IncrementalRecoveryRoot $stoppedRecoveryBinding.PriorReleaseId
+            $priorBinding=Read-SegmentedUpdateJson (Join-Path $priorRelease 'vector-publication-metadata-release-binding.json') $stoppedRecoveryBinding.MigrationReleaseBindingSha256
+            foreach($candidate in $candidatePayloads){
+                $prior=@($priorBinding.CandidatePayloads|Where-Object Role -CEQ $candidate.Role)
+                if($prior.Count -ne 1 -or $prior[0].Root -cne $candidate.Root -or $prior[0].Sha256 -cne $candidate.Sha256){throw 'vector-metadata-resume-target-payload-changed'}
+            }
+        }
+        $freshDatabase=Get-VectorPublicationMetadataDatabaseState -ConnectionString (Get-DeploymentSqlConnectionString)
+        $initialKind=Get-VectorPublicationMetadataStateKind $freshDatabase $ExpectedSourceJournalDatabaseIdentity
+        $vectorMetadataReleaseBinding=@{Version=1;Purpose='vector-publication-metadata-release';ReleaseId=$releaseId;Commit=$commit;InitialKind=$initialKind;
+            Identity=$ExpectedSourceJournalDatabaseIdentity;Target=(Get-VectorPublicationMetadataMigrationContract).Target;SqlSha256=$migrationPlan.Up.Sha256;
+            OriginalPayloads=$originalPayloads;CandidatePayloads=$candidatePayloads;
+            ConfigurationSha256=(Get-FileHash -LiteralPath (Assert-SegmentedUpdatePath (Join-Path $CanonicalLiveRoot 'Config/appsettings.Production.json'))).Hash;
+            CompanionConfigurationSha256=(Get-FileHash -LiteralPath (Assert-SegmentedUpdatePath (Join-Path (Split-Path -Parent $InteractiveHostRoot) 'appsettings.Production.json'))).Hash;
+            TaskIdentityHash=$taskBinding.IdentityHash;LauncherSha256=$taskBinding.LauncherSha256;
+            EnableCompanionAfterValidation=$(if($stoppedRecoveryBinding){$stoppedRecoveryBinding.EnableCompanionAfterValidation}else{[bool]$taskBinding.Enabled})}
+        $vectorBindingPath=Join-Path $releaseRoot 'vector-publication-metadata-release-binding.json'
+        if(Test-Path -LiteralPath $vectorBindingPath){throw 'vector-metadata-release-binding-already-exists'}
+        Write-SegmentedUpdateJson $vectorBindingPath $vectorMetadataReleaseBinding
+        $vectorBindingSha256=(Get-FileHash -LiteralPath $vectorBindingPath).Hash
+        $vectorMetadataMigrationState=New-VectorPublicationMetadataMigrationState -DatabaseState $freshDatabase `
+            -ReceiptDirectory $releaseRoot -ReleaseId $releaseId -Commit $commit -SqlSha256 $migrationPlan.Up.Sha256 `
+            -ResumeIntentSha256 $(if($stoppedRecoveryBinding){$stoppedRecoveryBinding.MigrationIntentSha256}else{''}) `
+            -ResumeReleaseBindingSha256 $(if($stoppedRecoveryBinding){$stoppedRecoveryBinding.MigrationReleaseBindingSha256}else{''})
+        # This receipt must exist even if stop/hold succeeds but intent creation
+        # is interrupted. No payload has changed at this point.
+        Write-SegmentedUpdateJson (Join-Path $releaseRoot 'manifest.json') @{
+            commit=$commit;staged_at_utc=[DateTime]::UtcNow.ToString('O');reviewed_legacy_index_payloads=@($ReviewedLegacyIndexPayloads);
+            application_root=$CanonicalDeployRoot;migrations=$true;clean_slate=$false;
+            vector_publication_metadata=@{Target=$vectorMetadataMigrationState.Target;SqlSha256=$vectorMetadataMigrationState.SqlSha256;ReleaseBindingSha256=$vectorBindingSha256}}
+    }
     if ($RecoverStoppedPool) {
         # Recovery never starts the failed predecessor just to admit deployment.
         # Deny work and capture exact rollback bytes before either payload changes.
@@ -3051,8 +3215,12 @@ try {
             offline_code_receipt_sha256=if($offlineCodeState){$offlineCodeState.ReceiptSha256}else{$null} } |
             ConvertTo-Json | Set-Content -LiteralPath (Join-Path $releaseRoot 'stopped-pool-recovery-baseline.json') -Encoding utf8
     }
+    if($ApplyVectorPublicationMetadataMigration){
+        $vectorMetadataPreparationStarted=$true
+        Invoke-VectorPublicationMetadataPreparation $vectorMetadataMigrationState $vectorMetadataReleaseBinding $migrationPlan.Up.Path
+    }
     $interactiveHostTask = Get-ScheduledTask -TaskName $InteractiveHostTaskName -ErrorAction Stop
-    $interactiveHostTaskWasEnabled = if ($stoppedRecoveryBinding) { $stoppedRecoveryBinding.EnableCompanionAfterValidation } elseif ($null -ne $sourceDeletionMaintenance) { [bool]$sourceDeletionMaintenance.Original.Task.Enabled } else { [bool]$interactiveHostTask.Settings.Enabled }
+    $interactiveHostTaskWasEnabled = if($ApplyVectorPublicationMetadataMigration){$vectorMetadataReleaseBinding.EnableCompanionAfterValidation} elseif ($stoppedRecoveryBinding) { $stoppedRecoveryBinding.EnableCompanionAfterValidation } elseif ($null -ne $sourceDeletionMaintenance) { [bool]$sourceDeletionMaintenance.Original.Task.Enabled } else { [bool]$interactiveHostTask.Settings.Enabled }
     if ($interactiveHostTask.Settings.Enabled) {
         Disable-ScheduledTask -TaskName $InteractiveHostTaskName -ErrorAction Stop | Out-Null
     }
@@ -3084,16 +3252,22 @@ try {
         application_root = $CanonicalDeployRoot
         migrations = [bool]$applyAnyMigration
         clean_slate = $false
+        vector_publication_metadata = if($ApplyVectorPublicationMetadataMigration){
+            @{Target=$vectorMetadataMigrationState.Target;SqlSha256=$vectorMetadataMigrationState.SqlSha256;ReleaseBindingSha256=$vectorBindingSha256}
+        }else{$null}
     } | ConvertTo-Json
-    [IO.File]::WriteAllText((Join-Path $releaseRoot "manifest.json"), $manifest, [Text.UTF8Encoding]::new($false))
+    if(!$ApplyVectorPublicationMetadataMigration){[IO.File]::WriteAllText((Join-Path $releaseRoot "manifest.json"), $manifest, [Text.UTF8Encoding]::new($false))}
 
     $swap = Invoke-IncrementalApplicationPayloadSwap `
         -ApplicationRoot $CanonicalDeployRoot `
         -CandidateRoot $candidateRoot `
         -PreviousRoot $previousRoot `
         -FailedRoot $failedRoot `
-        -AssertRollbackAllowed { Assert-DeploymentSourceJournalPredecessorRestorationAllowed } `
-        -RestartPreviousApplication:(-not ($RecoverStoppedPool -or $ApplyResumableSourceDeletionCleanupMigration)) `
+        -AssertRollbackAllowed {
+            if($ApplyVectorPublicationMetadataMigration){throw 'vector-metadata-forward-recovery-required-retain-hold'}
+            Assert-DeploymentSourceJournalPredecessorRestorationAllowed
+        } `
+        -RestartPreviousApplication:(-not ($ApplyVectorPublicationMetadataMigration -or $RecoverStoppedPool -or $ApplyResumableSourceDeletionCleanupMigration)) `
         -ActivateCandidate {
             Invoke-CandidatePayloadActivation -CandidateRoot $candidateRoot -ApplicationRoot $CanonicalDeployRoot
             if ($sourceJournalMode) {
@@ -3139,6 +3313,9 @@ try {
             if ($null -eq $deploymentValidation.Baseline) {
                 $deploymentValidation.Baseline = Get-RetainedPipelineStateBaseline
             }
+            if($ApplyVectorPublicationMetadataMigration){
+                Invoke-VectorPublicationMetadataStoppedAttempt $vectorMetadataMigrationState $vectorMetadataReleaseBinding $migrationPlan.Up.Path
+            }
             if ($ApplyResumableSourceDeletionCleanupMigration -and !$sourceDeletionCleanupState.Attempted) {
                 Assert-SourceDeletionCleanupReleaseBinding -State $sourceDeletionCleanupState
                 Invoke-SourceDeletionCleanupMigrationAttempt -State $sourceDeletionCleanupState `
@@ -3170,6 +3347,14 @@ try {
             }
         } `
         -StartApplication {
+            if($ApplyVectorPublicationMetadataMigration){
+                if(!$vectorMetadataMigrationState.Applied -or
+                    (Confirm-VectorPublicationMetadataMigrationOutcome -State $vectorMetadataMigrationState `
+                        -ReadState {Get-VectorPublicationMetadataDatabaseState -ConnectionString (Get-DeploymentSqlConnectionString)}) -cne 'New'){
+                    throw 'vector-metadata-start-requires-complete-successor'
+                }
+                Assert-DeploymentSourceJournalReleasePayloadSet $true
+            }
             if ($OfflineCodeMaintenanceReceipt) { Start-OfflineCodeMaintenanceIntent -StatePath $offlineCodeState.StatePath -State $offlineCodeState }
             if ($ApplyResumableSourceDeletionCleanupMigration) {
                 Assert-SourceDeletionCleanupReleaseBinding -State $sourceDeletionCleanupState
@@ -3355,6 +3540,29 @@ catch {
     }
     if ($OfflineCodeMaintenanceReceipt -and $offlineCodeState -and $offlineCodeState.StartIntentUtc) {
         throw "Offline code maintenance start was attempted; retain matching payloads, predecessor and hold for a fresh reviewed stop and forward recovery. Recovery=$releaseRoot. Failure: $($_.Exception.Message)"
+    }
+    if($ApplyVectorPublicationMetadataMigration -and $null -ne $vectorMetadataMigrationState -and
+        ($vectorMetadataPreparationStarted -or $vectorMetadataMigrationState.Attempted -or $interactiveHostMutationStarted -or $deploymentValidation.HoldCreated)){
+        # Additive schema is retained. Do not send this release through legacy
+        # Down or predecessor-restore handlers, even when SQL rolled back fully.
+        [void](New-DeploymentValidationHold -Path $ValidationHoldPath -ReleaseId $releaseId)
+        $deploymentValidation.HoldCreated=$true
+        try {
+            Disable-ScheduledTask -TaskName $InteractiveHostTaskName -ErrorAction Stop|Out-Null
+            Wait-InteractiveHostStopped -TaskName $InteractiveHostTaskName -TimeoutSeconds $ReadinessTimeoutSeconds
+            Stop-HybridIisAfterGpuDrain
+        } catch {
+            throw "Vector metadata recovery requires a proved stop; preserve payloads and hold. Recovery=$releaseRoot. Original: $($deploymentFailure.Exception.Message) Stop: $($_.Exception.Message)"
+        }
+        try {
+            $null=Confirm-VectorPublicationMetadataMigrationOutcome -State $vectorMetadataMigrationState `
+                -ReadState {Get-VectorPublicationMetadataDatabaseState -ConnectionString (Get-DeploymentSqlConnectionString)}
+        } catch {$vectorMetadataMigrationState.SettledState='Unknown'}
+        Write-SegmentedUpdateJson (Join-Path $releaseRoot 'vector-publication-metadata-failure-reconciliation.json') @{
+            ReleaseId=$releaseId;Identity=$vectorMetadataMigrationState.Identity;Target=$vectorMetadataMigrationState.Target;
+            Attempted=$vectorMetadataMigrationState.Attempted;SettledState=$vectorMetadataMigrationState.SettledState;
+            Error=$deploymentFailure.Exception.Message;HoldRetained=$true;PredecessorStarted=$false}
+        throw "Vector metadata deployment failed; state=$($vectorMetadataMigrationState.SettledState), hosts stopped and hold retained; no Down or automatic replay. Use the exact typed stopped-recovery binding after review. Recovery=$releaseRoot. Original: $($deploymentFailure.Exception.Message)"
     }
     if ($interactiveHostMutationStarted) {
         try { Assert-DeploymentSourceJournalPredecessorRestorationAllowed }

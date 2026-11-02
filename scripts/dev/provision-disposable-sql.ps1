@@ -2,11 +2,13 @@
 param(
     [ValidatePattern('^SqlTests-[A-Za-z0-9_-]{1,48}$')][string]$StageName='SqlTests-20261014',
     [ValidatePattern('^fluxknowledge_staging_tests_[a-z0-9_]{1,48}$')][string]$Login='fluxknowledge_staging_tests_r1',
+    [ValidateSet('E:\Codex Workspaces\Staging\FluxKnowledge', 'I:\Codex Workspaces\Staging\FluxKnowledge')]
+    [string]$StageBaseRoot='I:\Codex Workspaces\Staging\FluxKnowledge',
     [Parameter(ParameterSetName='Plan')][switch]$PlanOnly,
     [Parameter(Mandatory,ParameterSetName='Apply')][switch]$Apply
 )
 $ErrorActionPreference='Stop'
-$root=Join-Path 'E:\Codex Workspaces\Staging\FluxKnowledge' $StageName
+$root=Join-Path $StageBaseRoot $StageName
 $fileRoot=Join-Path $root 'Data\Sql\Disposable'
 $config=Join-Path $root 'Config\test-sql.json'
 $receipt=Join-Path $root 'Config\provisioning-receipt.json'

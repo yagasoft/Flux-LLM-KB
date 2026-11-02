@@ -36,20 +36,13 @@ public sealed partial class SqlSegmentedIndexStore
     internal static IQueryable<MemberRow> QueryRootEligibleWindow(FluxKnowledgeDbContext context, string scopes, long after, long through,
         bool composable = false)
     {
-        // The final whole-root comparison resolves record-level eligibility before
-        // expanding passages. Otherwise SQL can sort the full vector population
-        // repeatedly to join the small publication/owner/root relations.
-        var joins = composable ? """
-            FROM [Artifacts] AS [artifact]
-            INNER JOIN [PipelineRecords] AS [record] ON [record].[Id] = [artifact].[PipelineRecordId]
-            /*publication-bindings*/
-            INNER HASH JOIN [TextChunks] AS [chunk] ON [chunk].[ArtifactId] = [artifact].[Id]
-            INNER HASH JOIN [Vectors] AS [vector] WITH (FORCESEEK) ON [vector].[TextChunkId] = [chunk].[Id]
-            """ : """
+        // Root capture uses bounded raw-vector windows.
+        // Start with that range instead of expanding the whole root per window.
+        var joins = """
             FROM [Vectors] AS [vector] WITH (FORCESEEK)
-            INNER JOIN [TextChunks] AS [chunk] ON [chunk].[Id] = [vector].[TextChunkId]
-            INNER JOIN [Artifacts] AS [artifact] ON [artifact].[Id] = [chunk].[ArtifactId]
-            INNER JOIN [PipelineRecords] AS [record] ON [record].[Id] = [artifact].[PipelineRecordId]
+            INNER LOOP JOIN [TextChunks] AS [chunk] ON [chunk].[Id] = [vector].[TextChunkId]
+            INNER LOOP JOIN [Artifacts] AS [artifact] ON [artifact].[Id] = [chunk].[ArtifactId]
+            INNER LOOP JOIN [PipelineRecords] AS [record] ON [record].[Id] = [artifact].[PipelineRecordId]
             /*publication-bindings*/
             """;
         var query = SqlPublishedPassageSelection.Bind(FormattableStringFactory.Create("""
@@ -70,6 +63,52 @@ public sealed partial class SqlSegmentedIndexStore
     private static FormattableString OrderedMetadata(FormattableString query, string alias, bool composable) =>
         FormattableStringFactory.Create(query.Format + (composable ? "" :
             "\nORDER BY [" + alias + "].[VectorId]\nOPTION (LOOP JOIN, FORCE ORDER, MAXDOP 1)"), query.GetArguments());
+
+    internal static async Task CreateRootEligibilityMapAsync(FluxKnowledgeDbContext context, string scopes, CancellationToken token)
+    {
+        if (context.Database.CurrentTransaction?.GetDbTransaction().IsolationLevel != IsolationLevel.Serializable)
+            throw new InvalidOperationException("The root eligibility map requires the serializable publication transaction.");
+        // CREATE must be a parameterless session batch. Creating this table
+        // inside sp_executesql would discard it before the later windows run.
+        await context.Database.ExecuteSqlRawAsync("""
+            CREATE TABLE #RootEligibleArtifacts (
+                [ArtifactId] uniqueidentifier NOT NULL PRIMARY KEY,
+                [SourceRevision] bigint NOT NULL,
+                [SourceIdentityId] uniqueidentifier NOT NULL,
+                [OwnerSourceRevisionId] uniqueidentifier NULL,
+                [SourceRootId] uniqueidentifier NULL
+            );
+            """, token);
+        var insert = SqlPublishedPassageSelection.Bind(FormattableStringFactory.Create("""
+            INSERT #RootEligibleArtifacts (ArtifactId,SourceRevision,SourceIdentityId,OwnerSourceRevisionId,SourceRootId)
+            SELECT [artifact].[Id], [artifact].[SourceRevision], [record].[SourceIdentityId],
+                COALESCE([owner].[Id], CASE WHEN [retained].[OriginKind] <> 0 THEN [retained].[ParentSourceRevisionId] END, [retained].[Id]),
+                COALESCE([owner].[SourceRootId], [retained].[SourceRootId])
+            FROM [Artifacts] AS [artifact]
+            INNER JOIN [PipelineRecords] AS [record] ON [record].[Id] = [artifact].[PipelineRecordId]
+            /*publication-bindings*/
+            WHERE /*publication-artifact-eligibility*/ AND
+            """ + " " + ScopeFilter, scopes));
+        await context.Database.ExecuteSqlInterpolatedAsync(insert, token);
+    }
+
+    internal static IQueryable<MemberRow> QueryMappedRootEligibleWindow(FluxKnowledgeDbContext context, long after, long through,
+        bool composable = false)
+    {
+        FormattableString query = $"""
+            SELECT [vector].[VectorId], [vector].[PayloadChecksum], [eligible].[SourceIdentityId],
+                [eligible].[OwnerSourceRevisionId], [eligible].[SourceRootId]
+            FROM [Vectors] AS [vector] WITH (FORCESEEK)
+            INNER LOOP JOIN [TextChunks] AS [chunk] ON [chunk].[Id] = [vector].[TextChunkId]
+            INNER LOOP JOIN #RootEligibleArtifacts AS [eligible]
+              ON [eligible].[ArtifactId] = [chunk].[ArtifactId] AND [eligible].[SourceRevision] = [chunk].[SourceRevision]
+            WHERE [vector].[VectorId] > {after} AND [vector].[VectorId] <= {through} AND [vector].[IsDeleted] = 0
+              AND [vector].[SourceRevision] = [chunk].[SourceRevision]
+              AND [vector].[TextChunkContentHash] COLLATE Latin1_General_100_BIN2 = [chunk].[ContentHash] COLLATE Latin1_General_100_BIN2
+              AND ([vector].[SearchInputHash] IS NULL OR [vector].[SearchInputHash] COLLATE Latin1_General_100_BIN2 = [chunk].[SearchInputHash] COLLATE Latin1_General_100_BIN2)
+            """;
+        return context.Database.SqlQuery<MemberRow>(OrderedMetadata(query, "vector", composable));
+    }
 
     private static async IAsyncEnumerable<MemberRow[]> ReadMemberPagesAsync(FluxKnowledgeDbContext context,
         IQueryable<MemberRow> query, [EnumeratorCancellation] CancellationToken cancellationToken)

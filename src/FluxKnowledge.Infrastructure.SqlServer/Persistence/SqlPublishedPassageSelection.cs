@@ -41,11 +41,10 @@ internal static class SqlPublishedPassageSelection
           ON COALESCE([owner].[SourceRootId], [retained].[SourceRootId]) = [root].[Id]
         """;
 
-    private static readonly string Eligibility = $"""
+    private static readonly string ArtifactEligibility = $"""
         [record].[IsDeleted] = 0 AND [record].[CompletionCriteriaMet] = 1
         AND [record].[CurrentStage] = {(int)PipelineStage.Publish}
         AND [artifact].[Stage] = {(int)PipelineStage.CanonicalIndex}
-        AND [chunk].[SourceRevision] = [artifact].[SourceRevision]
         AND [artifact].[SourceRevision] = [record].[Revision]
         AND [retained].[SuppressedAtUtc] IS NULL AND [owner].[SuppressedAtUtc] IS NULL
         AND {SqlSourceWorkEligibility.Source("[record].[SourceRevisionId]", includePending: false, includeAdmission: false)}
@@ -59,10 +58,14 @@ internal static class SqlPublishedPassageSelection
                AND [current].[CompletionCriteriaMet] = 1 AND [current].[CurrentStage] = {(int)PipelineStage.Publish}))
         """;
 
+    private static readonly string Eligibility = ArtifactEligibility +
+        "\nAND [chunk].[SourceRevision] = [artifact].[SourceRevision]";
+
     // Only these application-owned SQL constants are inserted. All caller values remain parameters.
     internal static FormattableString Bind(FormattableString query) => FormattableStringFactory.Create(
         query.Format.Replace("/*publication-bindings*/", Bindings, StringComparison.Ordinal)
-            .Replace("/*publication-eligibility*/", Eligibility, StringComparison.Ordinal), query.GetArguments());
+            .Replace("/*publication-eligibility*/", Eligibility, StringComparison.Ordinal)
+            .Replace("/*publication-artifact-eligibility*/", ArtifactEligibility, StringComparison.Ordinal), query.GetArguments());
 
     internal static FormattableString BindSources(FormattableString query) => FormattableStringFactory.Create(
         query.Format.Replace("/*publication-bindings*/", Bindings, StringComparison.Ordinal), query.GetArguments());

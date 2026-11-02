@@ -27,7 +27,7 @@ foreach ($drift in @('unknown-successor','duplicate-successor','changed-index-sc
         'duplicate-successor' { $changed.History=@($actualSchema.History)+@('20261024061418_AddDocumentOcrExecutionLifecycle') }
         'changed-index-schema' { $changed.SchemaSha256='F'*64 }
     }
-    $refused=$false
+    $refused=$false;$failure=$null
     try {
         if($journalSchema) {
             $journal=Get-SourceJournalDatabaseState -ConnectionString $target.ConnectionString
@@ -35,9 +35,14 @@ foreach ($drift in @('unknown-successor','duplicate-successor','changed-index-sc
             Assert-SourceJournalComposedApplicationSchema -JournalState $journal -ProjectionState $changed
         } else { Assert-SegmentedIndexApplicationSchema $changed }
     } catch {
-        $refused=$_.Exception.Message -match '^(index-schema-reconciliation-required|journal-schema-partial-or-unreviewed-state-retain-hold|journal-schema-baseline-history-changed)'
+        $failure=$_.Exception.Message
+        $refused=$failure -match '^(index-schema-reconciliation-required|journal-schema-partial-or-unreviewed-state-retain-hold|journal-schema-baseline-history-changed)' -or
+            $failure -ceq 'journal-schema-unrecorded-vector-metadata-index'
     }
-    if (!$refused) { throw ('Unreviewed index schema/history accepted: '+$drift) }
+    if (!$refused) {
+        if ($null -ne $failure) { throw ('Unexpected index admission refusal for '+$drift+': '+$failure) }
+        throw ('Unreviewed index schema/history accepted: '+$drift)
+    }
 }
 if($journalSchema) {
     [void](Sql 'ALTER TABLE dbo.SourceVolumeJournalCheckpoints ADD UnreviewedOfflineBinding bit NULL;')

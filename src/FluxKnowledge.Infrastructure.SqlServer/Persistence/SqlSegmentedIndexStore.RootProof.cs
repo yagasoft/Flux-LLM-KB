@@ -70,18 +70,66 @@ public sealed partial class SqlSegmentedIndexStore
     private static async Task<bool> RootMembershipMatchesAsync(FluxKnowledgeDbContext context,
         IndexPublicationCandidateEntity candidate, int phase, CancellationToken token)
     {
-        var query = phase == 0 ? QueryRootCurrentWindow(context, candidate, 0, long.MaxValue, composable: true)
-            : QueryRootEligibleWindow(context, candidate.AffectedScopesJson, 0, long.MaxValue, composable: true);
+        if (phase == 1) await CreateRootEligibilityMapAsync(context, candidate.AffectedScopesJson, token);
+        var matches = await RootMembershipWindowsMatchAsync(context, candidate, phase, token);
+        // On error/cancellation the owning transaction rolls back and the
+        // connection is disposed. Cleanup must not replace that original error.
+        if (phase == 1) await context.Database.ExecuteSqlRawAsync("DROP TABLE #RootEligibleArtifacts;", token);
+        return matches;
+    }
+
+    private static async Task<bool> RootMembershipWindowsMatchAsync(FluxKnowledgeDbContext context,
+        IndexPublicationCandidateEntity candidate, int phase, CancellationToken token)
+    {
+        // The caller retains its serializable transaction and publication fence
+        // throughout this proof and activation. Bound physical work by raw keys,
+        // including staged-only keys which have no remaining vector row.
+        var raw = phase == 0
+            ? context.CurrentIndexMembers.AsNoTracking().Where(value => value.CorpusEpoch == candidate.CorpusEpoch).Select(value => value.VectorId)
+            : context.Vectors.AsNoTracking().Select(value => value.VectorId);
+        var maximumRaw = await raw.Select(value => (long?)value).MaxAsync(token) ?? 0;
+        var maximumStaged = await context.IndexCandidateMembers
+            .Where(value => value.CandidateId == candidate.Id && value.Phase == phase)
+            .Select(value => (long?)value.VectorId).MaxAsync(token) ?? 0;
+        var highWater = Math.Max(maximumRaw, maximumStaged);
+        long last = 0, count = 0;
+        while (last < highWater)
+        {
+            var rawKeys = await raw.Where(value => value > last && value <= highWater)
+                .Order().Take(MetadataPageSize).ToArrayAsync(token);
+            var stagedKeys = await context.IndexCandidateMembers.AsNoTracking()
+                .Where(value => value.CandidateId == candidate.Id && value.Phase == phase &&
+                    value.VectorId > last && value.VectorId <= highWater)
+                .OrderBy(value => value.VectorId).Select(value => value.VectorId).Take(MetadataPageSize).ToArrayAsync(token);
+            var keys = rawKeys.Concat(stagedKeys).Distinct().Order().Take(MetadataPageSize).ToArray();
+            if (keys.Length == 0) return false;
+            var through = keys[^1];
+            var result = await CompareRootWindowAsync(context, candidate, phase, last, through, token);
+            if (result.Differences != 0) return false;
+            count = checked(count + result.CanonicalCount);
+            last = through;
+        }
+        return count == (phase == 0 ? candidate.BeforeCount : candidate.AfterCount);
+    }
+
+    private static async Task<RootMembershipComparison> CompareRootWindowAsync(FluxKnowledgeDbContext context,
+        IndexPublicationCandidateEntity candidate, int phase, long after, long through, CancellationToken token)
+    {
+        var query = phase == 0 ? QueryRootCurrentWindow(context, candidate, after, through, composable: true)
+            : QueryMappedRootEligibleWindow(context, after, through, composable: true);
         await using var canonical = query.CreateDbCommand();
         // Only application-owned SQL is composed. Caller values remain the
         // provider's parameters; no SQL literals are built from source data.
         var parameters = canonical.Parameters.Cast<DbParameter>().Select(value => (object)((ICloneable)value).Clone()).ToList();
         parameters.Add(new SqlParameter("@rootProofCandidate", SqlDbType.UniqueIdentifier) { Value = candidate.Id });
         parameters.Add(new SqlParameter("@rootProofPhase", SqlDbType.Int) { Value = phase });
+        parameters.Add(new SqlParameter("@rootProofAfter", SqlDbType.BigInt) { Value = after });
+        parameters.Add(new SqlParameter("@rootProofThrough", SqlDbType.BigInt) { Value = through });
         var sql = "WITH [canonical] AS (" + canonical.CommandText + """
             ), [staged] AS (
                 SELECT [VectorId], [PayloadChecksum], [SourceIdentityId], [OwnerSourceRevisionId], [SourceRootId]
                 FROM [IndexCandidateMembers] WHERE [CandidateId]=@rootProofCandidate AND [Phase]=@rootProofPhase
+                    AND [VectorId]>@rootProofAfter AND [VectorId]<=@rootProofThrough
             )
             SELECT COUNT_BIG([canonical].[VectorId]) AS [CanonicalCount],
                 COUNT_BIG(CASE WHEN [canonical].[VectorId] IS NULL OR [staged].[VectorId] IS NULL
@@ -98,8 +146,7 @@ public sealed partial class SqlSegmentedIndexStore
             FROM [canonical] FULL OUTER JOIN [staged] ON [canonical].[VectorId]=[staged].[VectorId]
             OPTION (FORCE ORDER, MAXDOP 1)
             """;
-        var result = (await context.Database.SqlQueryRaw<RootMembershipComparison>(sql, parameters.ToArray()).ToArrayAsync(token)).Single();
-        return result.Differences == 0 && result.CanonicalCount == (phase == 0 ? candidate.BeforeCount : candidate.AfterCount);
+        return (await context.Database.SqlQueryRaw<RootMembershipComparison>(sql, parameters.ToArray()).ToArrayAsync(token)).Single();
     }
 
     private sealed class RootMembershipComparison
