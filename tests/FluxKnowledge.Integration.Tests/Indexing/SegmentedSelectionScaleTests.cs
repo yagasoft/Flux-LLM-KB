@@ -312,7 +312,15 @@ public sealed partial class SegmentedSelectionScaleTests(NativeSqlServerFixture 
     [InlineData(0)]
     [InlineData(1)]
     [InlineData(2)]
-    public async Task Full_manifest_membership_proof_scales_across_many_segments_and_rejects_differences(int difference)
+    public Task Full_manifest_membership_proof_scales_across_many_segments_and_rejects_differences(int difference)
+        => VerifyFullManifestMembershipAsync(difference, 2_048, difference == 0 ? 2 : 0);
+
+    [SqlServerScaleFact]
+    [Trait("Category", "Scale")]
+    public Task Full_manifest_membership_proof_remains_bounded_with_retained_history_at_scale()
+        => VerifyFullManifestMembershipAsync(0, 100_000, 20);
+
+    private async Task VerifyFullManifestMembershipAsync(int difference, int additionalMembers, int historicalSegments)
     {
         await using var environment = await SqlToUsearchRebuildTests.PipelineEnvironment.CreateAsync(fixture,
             "The full rebuild membership fixture.", segmented: true);
@@ -320,14 +328,14 @@ public sealed partial class SegmentedSelectionScaleTests(NativeSqlServerFixture 
         await using var db = await environment.Factory.CreateDbContextAsync();
         var seedWatch = Stopwatch.StartNew();
         var template = await db.Vectors.Select(value => value.VectorId).FirstAsync();
-        await SeedUnrelatedAsync(db, template, difference == 0 ? 100000 : 10000);
+        await SeedUnrelatedAsync(db, template, additionalMembers);
         var vectorSeedSeconds = seedWatch.Elapsed.TotalSeconds;
-        if (difference == 0)
+        if (historicalSegments > 0)
         {
             // Retained generations make each vector occur in many historical
             // segments, as in a long-lived catalogue. A clean tiny table hides
             // the row-goal anti-join regression seen during full rebuilds.
-            await db.Database.ExecuteSqlRawAsync("""
+            await db.Database.ExecuteSqlInterpolatedAsync($"""
                 DECLARE @segments TABLE ([Id] char(64) NOT NULL);
                 INSERT [IndexSegments] ([Id], [ModelFingerprint], [Dimensions], [NativeFormat], [DirectoryPath],
                     [MembershipChecksum], [FileChecksum], [FileLength], [VectorCount], [State], [CreatedAtUtc], [SealedAtUtc])
@@ -336,7 +344,7 @@ public sealed partial class SegmentedSelectionScaleTests(NativeSqlServerFixture 
                     [template].[ModelFingerprint], [template].[Dimensions], N'synthetic-sql-only', N'sql-only-no-native-payload',
                     REPLICATE('0',64), REPLICATE('0',64), 1, (SELECT COUNT_BIG(*) FROM [CurrentIndexMembers]), 1,
                     SYSDATETIMEOFFSET(), SYSDATETIMEOFFSET()
-                FROM (SELECT TOP (20) [object_id] FROM sys.all_objects) AS [history]
+                FROM (SELECT TOP ({historicalSegments}) [object_id] FROM sys.all_objects) AS [history]
                 CROSS JOIN (SELECT TOP (1) [ModelFingerprint], [Dimensions] FROM [Vectors]) AS [template];
                 INSERT [IndexSegmentVectors] ([SegmentId], [VectorId])
                 SELECT [segment].[Id], [current].[VectorId] FROM @segments AS [segment] CROSS JOIN [CurrentIndexMembers] AS [current];

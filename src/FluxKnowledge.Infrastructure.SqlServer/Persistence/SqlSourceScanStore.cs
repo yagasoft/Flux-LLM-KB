@@ -521,7 +521,7 @@ public sealed partial class SqlSourceScanStore(
         TimeSpan leaseDuration,
         CancellationToken cancellationToken)
     {
-        var allowVerification = sourceJournalOptions?.Enabled == true;
+        var allowVerification = sourceJournalOptions?.Enabled == true && SourcePolicyDefaults.ChecksumVerificationEnabled;
         await using var executionContext = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         var strategy = executionContext.Database.CreateExecutionStrategy();
         return await strategy.ExecuteAsync(async () =>
@@ -539,6 +539,7 @@ public sealed partial class SqlSourceScanStore(
                 value.SourceScanRequest.IsReleased &&
                 (value.SourceScanRequest.RequestKind != SqlSourceVerificationStore.RequestKind || allowVerification) &&
                 value.SourceScanRequest.SourceRoot.State == (int)SourceRootState.Enabled &&
+                value.SourceScanRequest.SourceRoot.ReconciliationCadenceSeconds == SourcePolicyDefaults.MetadataReconciliationSeconds &&
                 !context.SourceScanJobs.Any(other => other.Id != value.Id &&
                         other.SourceScanRequest.SourceRootId == value.SourceScanRequest.SourceRootId &&
                         other.State == (int)SourceScanJobState.Running && other.LeaseExpiresAtUtc > nowUtc) &&

@@ -7,6 +7,13 @@ namespace FluxKnowledge.Domain.Tests.Sources;
 public sealed class SourceRootConfigurationTests
 {
     [Fact]
+    public void New_root_defaults_to_weekly_metadata_reconciliation()
+    {
+        var root = SourceRootConfiguration.Create(@"I:\Corpus", "Corpus", true, false, 1024);
+        Assert.Equal(TimeSpan.FromDays(7), root.ReconciliationCadence);
+    }
+
+    [Fact]
     public void Source_text_policy_allows_inert_code_text_without_changing_filesystem_discovery()
     {
         var root = SourceRootConfiguration.Create(
@@ -92,11 +99,11 @@ public sealed class SourceRootConfigurationTests
             includePatterns: ["**/*.md"],
             excludePatterns: ["**/.git/**"],
             allowedClassifications: ["utf8-text"],
-            reconciliationCadence: TimeSpan.FromMinutes(15));
+            reconciliationCadence: TimeSpan.FromDays(7));
 
         Assert.Equal(new[] { "**/*.md" }, root.IncludePatterns);
         Assert.Equal(new[] { "**/.git/**" }, root.ExcludePatterns);
         Assert.Equal(new[] { "utf8-text" }, root.AllowedClassifications);
-        Assert.Equal(TimeSpan.FromMinutes(15), root.ReconciliationCadence);
+        Assert.Equal(TimeSpan.FromDays(7), root.ReconciliationCadence);
     }
 }

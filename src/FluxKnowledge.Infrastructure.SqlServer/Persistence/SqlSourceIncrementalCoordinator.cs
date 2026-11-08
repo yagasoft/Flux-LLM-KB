@@ -12,41 +12,25 @@ public sealed partial class SqlSourceIncrementalCoordinator(
     ISourceObservationReader observations, ISourceArtifactStore artifacts, SourceJournalOptions options) : ISourceIncrementalCoordinator
 {
     private readonly SqlSourceChangeJournalStore _journal = new(factory, time);
-    private readonly WindowsSourceJournalSealQualification _qualifications = new(options);
     private sealed record CachedObservation(int Version, SourceFileObservation Source, RetainedFileObservation Retained,
         bool JournalCovered, long RecoveryGeneration, long? SealUsn = null, string? SealProfileId = null,
-        long? CaptureGeneration = null, string? JournalId = null);
+        long? CaptureGeneration = null, string? JournalId = null, bool MetadataOnly = false);
 
     public async ValueTask<SourceIncrementalPlan?> PrepareAsync(SourceRootConfiguration root, SourceScanRequest request, CancellationToken ct)
     {
         if (request.Lease is null) return null;
-        if (!options.Enabled)
-        {
-            await _journal.ExecuteAsync(async db =>
-            {
-                await RequireOwnedAsync(db, root, request, ct).ConfigureAwait(false);
-                var state = await db.SourceRootScanStates.SingleOrDefaultAsync(x => x.SourceRootId == root.Id.Value, ct).ConfigureAwait(false);
-                if (state is null) return;
-                if (state.Mode != "Legacy") SqlSourceIncrementalState.InvalidateCoverage(state, "incremental-disabled", state.CoveredUsn);
-                state.Mode = "Legacy"; state.Reason = "incremental-disabled";
-                var row = await db.SourceScanRequests.SingleAsync(x => x.Id == request.Id.Value, ct).ConfigureAwait(false);
-                row.IncrementalManifestJson = null; // This owned request now executes a conservative whole-root scan.
-            }, ct).ConfigureAwait(false);
-            return null;
-        }
         var volume = "";
         JournalCapability? capability = null;
         try
         {
+            if (!options.Enabled) throw new IOException("SourceJournalDisabled");
             volume = WindowsSourceChangeJournalReader.CanonicalVolume(root.CanonicalPath);
             if (!options.ApprovedVolumes.Contains(volume, StringComparer.OrdinalIgnoreCase))
                 throw new UnauthorizedAccessException("SourceJournalVolumeNotApproved");
             capability = await reader.QueryAsync(volume, ct).ConfigureAwait(false);
             await EnrolAsync(root, request, capability, ct).ConfigureAwait(false);
-            await DrainThroughAsync(capability, ct).ConfigureAwait(false);
         }
-        catch (Exception error) when (error is not SourceJournalGapException &&
-            (error is IOException or UnauthorizedAccessException || error is OperationCanceledException && !ct.IsCancellationRequested))
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException || error is OperationCanceledException && !ct.IsCancellationRequested)
         {
             capability = null;
             await EnterFallbackAsync(root, request, volume, ct).ConfigureAwait(false);
@@ -59,8 +43,6 @@ public sealed partial class SqlSourceIncrementalCoordinator(
         {
             var current = await RequireOwnedAsync(db, root, request, ct).ConfigureAwait(false);
             var state = await db.SourceRootScanStates.SingleAsync(x => x.SourceRootId == root.Id.Value, ct).ConfigureAwait(false);
-            await QueueUnsealedChecksAsync(db, current, state, ct).ConfigureAwait(false);
-            await db.SaveChangesAsync(ct).ConfigureAwait(false); // Include newly queued scoped debt in the frozen claim.
             var row = await db.SourceScanRequests.SingleAsync(x => x.Id == request.Id.Value, ct).ConfigureAwait(false);
             SourceIncrementalPlan? superseded = null;
             if (row.IncrementalManifestJson is { } manifest)
@@ -68,7 +50,8 @@ public sealed partial class SqlSourceIncrementalCoordinator(
                 var saved = JsonSerializer.Deserialize<SourceIncrementalPlan>(manifest) ?? throw new InvalidDataException("SourceScanManifestInvalid");
                 if (saved.Version != 1 || saved.LeaseGeneration <= 0) throw new InvalidDataException("SourceScanManifestVersionUnsupported");
                 if (saved.LeaseGeneration > request.Lease.Generation) throw new SourceSnapshotChangedException("SourceScanClaimChanged");
-                var availabilityChanged = fallback && !saved.IsFallback;
+                var availabilityChanged = fallback && !saved.IsFallback || saved.GitInventoryGeneration != git?.Generation ||
+                    saved.DetectionPolicy != SourcePolicyDefaults.DetectionPolicy;
                 if (saved.BaselineEpoch == state.BaselineEpoch && saved.RecoveryGeneration == state.RecoveryGeneration && !availabilityChanged &&
                     (!saved.IsBaseline || saved.LeaseGeneration == request.Lease.Generation))
                 { result = saved; return; }
@@ -81,13 +64,15 @@ public sealed partial class SqlSourceIncrementalCoordinator(
             }
             if (!fallback && state.Mode == "Fallback")
             {
-                await QueueUnprovedCapturesAsync(db, root, state, ct).ConfigureAwait(false);
-                await db.SaveChangesAsync(ct).ConfigureAwait(false); // Include newly durable recaptures in this manifest, within the same transaction.
                 state.Mode = SqlSourceIncrementalState.RequiresBaseline(state) ? "BaselineRequired" :
                     state.NamespaceComplete && (state.DeferredEvidenceJson is null or "[]") ? "Journal" : "JournalPartial";
             }
-            var baseline = SqlSourceIncrementalState.RequiresBaseline(state) || superseded?.IsBaseline == true;
             var now = time.GetUtcNow();
+            var metadataDue = (state.LastReconciliationAtUtc ?? current.LastScanCompletedAtUtc) is not { } completed ||
+                completed.Add(SourcePolicyDefaults.MetadataReconciliationCadence) <= now;
+            var requestedSweep = row.RequestKind is 1 or 5;
+            var baseline = SqlSourceIncrementalState.RequiresBaseline(state) && (metadataDue || requestedSweep) ||
+                superseded is { IsBaseline: true, DetectionPolicy: SourcePolicyDefaults.DetectionPolicy };
             var pending = await db.SourcePendingChanges.Where(x => x.SourceRootId == root.Id.Value &&
                 (x.ReasonFlags & ~SourcePendingReasons.RemovalPending) != 0 &&
                 (x.NotBeforeUtc == null || x.NotBeforeUtc <= now)).ToArrayAsync(ct).ConfigureAwait(false);
@@ -99,24 +84,31 @@ public sealed partial class SqlSourceIncrementalCoordinator(
                 item.LastContentUsn ??= item.LastUsn;
                 item.LastUnjournaledGeneration = item.Generation;
             }
-            var targets = pending.Select(x => new SourceScanTarget(x.RelativePath, x.Generation, x.IsSubtree, x.ReasonFlags)
+            var targets = pending.Where(x => x.RelativePath != "." || metadataDue || requestedSweep ||
+                (x.ReasonFlags & SourcePendingReasons.GitMembership) != 0).Select(x => new SourceScanTarget(x.RelativePath, x.Generation, x.IsSubtree, x.ReasonFlags)
                 { LastContentUsn = x.LastContentUsn, LastUnjournaledGeneration = x.LastUnjournaledGeneration }).ToList();
+            // Old frozen manifests can hold real file events no longer present in the
+            // coalesced queue. Carry those exact scopes into the newly owned plan.
+            if (superseded is not null)
+                foreach (var target in superseded.Targets.Where(x => x.RelativePath != "."))
+                    if (!targets.Any(x => x.RelativePath.Equals(target.RelativePath, StringComparison.OrdinalIgnoreCase) &&
+                        x.Generation >= target.Generation && (x.ReasonFlags & target.ReasonFlags) == target.ReasonFlags))
+                        targets.Add(target);
             // Dispatch may queue the next target before the recurring scheduler claims.
             // Promote only a fresh manifest; a frozen retry returned above stays immutable.
-            var reconciliation = row.RequestKind == 1 || superseded?.IsReconciliation == true ||
-                !baseline && (current.LastScanCompletedAtUtc is null ||
-                    current.LastScanCompletedAtUtc.Value.AddSeconds(current.ReconciliationCadenceSeconds) <= now);
+            var reconciliation = requestedSweep || metadataDue ||
+                superseded is { IsReconciliation: true, DetectionPolicy: SourcePolicyDefaults.DetectionPolicy };
             if (reconciliation && !baseline)
                 targets.Add(new(".", 0, true, SourcePendingReasons.NamespaceMetadata)); // Generation0 never acknowledges durable pending work.
             if (git is not null && !baseline)
             {
                 var prior = await db.SourceInventoryEntries.AsNoTracking().Where(x => x.SourceRootId == root.Id.Value &&
-                    x.BaselineEpoch == state.BaselineEpoch && !x.IsDirectory).Select(x => x.RelativePath).ToArrayAsync(ct).ConfigureAwait(false);
+                    !x.IsDirectory).Select(x => x.RelativePath).ToArrayAsync(ct).ConfigureAwait(false);
                 var tracked = git.Paths.Select(x => x.Replace('/', Path.DirectorySeparatorChar)).ToHashSet(StringComparer.OrdinalIgnoreCase);
                 foreach (var path in tracked.Except(prior, StringComparer.OrdinalIgnoreCase).Concat(prior.Except(tracked, StringComparer.OrdinalIgnoreCase)))
-                    targets.Add(new(path, 0, false, 0x100));
-                state.GitInventoryGeneration = git.Generation;
+                    targets.Add(new(path, 0, false, SourcePendingReasons.GitMembership | SourcePendingReasons.ScopedNamespace));
             }
+            if (git is not null) state.GitInventoryGeneration = git.Generation;
             if (baseline) { state.Mode = fallback ? "Fallback" : "Baselining"; state.RecoveryRequired = true; state.RecoveryInProgress = true; }
             result = new(Guid.NewGuid(), state.BaselineEpoch, baseline, state.Mode,
                 fallback ? null : new(volume, capability!.JournalId, state.CoveredUsn), state.Generation, targets)
@@ -124,6 +116,8 @@ public sealed partial class SqlSourceIncrementalCoordinator(
                 IsReconciliation = reconciliation ||
                     targets.Any(x => x.RelativePath == "." && (x.ReasonFlags & SourcePendingReasons.NamespaceMetadata) != 0),
                 LeaseGeneration = request.Lease.Generation, RecoveryGeneration = state.RecoveryGeneration,
+                GitInventoryGeneration = git?.Generation,
+                DetectionPolicy = SourcePolicyDefaults.DetectionPolicy, ForceFullContent = row.RequestKind == 5,
                 NamespaceGeneration = state.NamespaceGeneration, SupersedesManifestId = superseded?.ManifestId,
                 MetadataEntriesPerSecond = options.MetadataEntriesPerSecond
             };
@@ -162,36 +156,6 @@ public sealed partial class SqlSourceIncrementalCoordinator(
                 entry.IsAncestor = ancestor.IsAncestor; entry.IsDirectory = true; entry.BaselineEpoch = state.BaselineEpoch;
             }
         }, ct).ConfigureAwait(false);
-    }
-
-    private async Task QueueUnprovedCapturesAsync(FluxKnowledgeDbContext db, SourceRootConfiguration root, SourceRootScanStateEntity state, CancellationToken ct)
-    {
-        if (SqlSourceIncrementalState.RequiresBaseline(state)) return;
-        var entries = await db.SourceInventoryEntries.AsNoTracking().Where(x => x.SourceRootId == root.Id.Value &&
-            x.BaselineEpoch == state.BaselineEpoch && !x.IsDirectory && x.ObservationJson != null).ToArrayAsync(ct).ConfigureAwait(false);
-        var unproved = entries.Where(x =>
-        {
-            var proof = JsonSerializer.Deserialize<CachedObservation>(x.ObservationJson!);
-            return !x.IsSealed || proof is not { Version: 3, JournalCovered: true } || proof.RecoveryGeneration != state.RecoveryGeneration ||
-                proof.SealProfileId != _qualifications.GetProfile(root.PhysicalIdentityFingerprint, root.CanonicalPath);
-        }).ToArray();
-        var pending = await db.SourcePendingChanges.Where(x => x.SourceRootId == root.Id.Value).ToListAsync(ct).ConfigureAwait(false);
-        if (SqlSourcePendingWork.HasFullRecapture(pending)) return;
-        if (pending.Count + unproved.Count(entry => pending.All(x => x.PathFingerprint != entry.PathFingerprint)) > SqlSourcePendingWork.MaximumPaths)
-        { SqlSourcePendingWork.Coalesce(db, state, pending, time.GetUtcNow()); return; }
-        if (unproved.Length == 0) return;
-        var generation = ++state.Generation;
-        foreach (var entry in unproved)
-        {
-            var item = pending.SingleOrDefault(x => x.PathFingerprint == entry.PathFingerprint);
-            if (item is null)
-            {
-                item = new() { Id = Guid.NewGuid(), SourceRootId = root.Id.Value, RelativePath = entry.RelativePath, PathFingerprint = entry.PathFingerprint };
-                pending.Add(item); db.SourcePendingChanges.Add(item);
-            }
-            item.ReasonFlags |= 1; item.Generation = generation; item.FirstObservedAtUtc ??= time.GetUtcNow(); item.NotBeforeUtc ??= time.GetUtcNow();
-            item.LastContentUsn ??= item.LastUsn; item.LastUnjournaledGeneration = generation;
-        }
     }
 
     private async Task EnrolAsync(SourceRootConfiguration root, SourceScanRequest request, JournalCapability capability, CancellationToken ct)
@@ -238,8 +202,9 @@ public sealed partial class SqlSourceIncrementalCoordinator(
 
     public async ValueTask<int> PumpAsync(CancellationToken ct)
     {
-        if (!options.Enabled) return 0;
+        if (!options.Enabled) return await QueuePendingAsync(ct).ConfigureAwait(false);
         var pages = 0;
+        var registrationAttempts = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var burst = System.Diagnostics.Stopwatch.StartNew();
         while (pages < 32)
         {
@@ -249,24 +214,25 @@ public sealed partial class SqlSourceIncrementalCoordinator(
             foreach (var volume in options.ApprovedVolumes)
             {
                 if (pages >= 32) break;
-                var result = await PollVolumeAsync(volume, false, ct).ConfigureAwait(false);
+                var result = await PollVolumeAsync(volume, false, ct, registrationAttempts.Add(volume)).ConfigureAwait(false);
                 if (result != JournalPollResult.NoClaim) pages++;
                 advanced |= result == JournalPollResult.Advanced;
             }
             if (!advanced || burst.Elapsed >= TimeSpan.FromSeconds(1)) break;
         }
-        await QueueUnsealedChecksAsync(ct).ConfigureAwait(false);
         return await QueuePendingAsync(ct).ConfigureAwait(false);
     }
 
     private enum JournalPollResult { NoClaim, Idle, Advanced, Reset, Unavailable }
 
-    private async ValueTask<JournalPollResult> PollVolumeAsync(string volume, bool ignoreIdleDelay, CancellationToken ct)
+    private async ValueTask<JournalPollResult> PollVolumeAsync(string volume, bool ignoreIdleDelay, CancellationToken ct,
+        bool allowFirstRegistration = false)
     {
         if (!options.ApprovedVolumes.Contains(volume, StringComparer.OrdinalIgnoreCase))
             throw new UnauthorizedAccessException("SourceJournalVolumeNotApproved");
         var claim = await _journal.ClaimVolumeAsync(volume, time.GetUtcNow(), ignoreIdleDelay, ct).ConfigureAwait(false);
-        if (claim is null) return JournalPollResult.NoClaim;
+        if (claim is null) return allowFirstRegistration
+            ? await RegisterMissingCheckpointAsync(volume, ct).ConfigureAwait(false) : JournalPollResult.NoClaim;
         try
         {
             try
@@ -280,6 +246,12 @@ public sealed partial class SqlSourceIncrementalCoordinator(
                 var current = await reader.QueryAsync(claim.Cursor.VolumeIdentity, ct).ConfigureAwait(false);
                 return await ResetCoverageAsync(claim, current, ct, error.Message).ConfigureAwait(false);
             }
+        }
+        catch (SourcePendingCapacityException error)
+        {
+            await _journal.MarkUnavailableAsync(claim, time.GetUtcNow().AddSeconds(options.PollSeconds),
+                error.PageTooLarge ? "journal-pending-page-capacity" : "journal-pending-capacity", ct).ConfigureAwait(false);
+            return JournalPollResult.Unavailable;
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException ||
             error is OperationCanceledException && !ct.IsCancellationRequested)
@@ -322,6 +294,9 @@ public sealed partial class SqlSourceIncrementalCoordinator(
                 // restored journal must not bypass the ordinary whole-root schedule.
                 if ((state?.LastReconciliationAtUtc ?? root.LastScanCompletedAtUtc) is { } completed &&
                     completed.AddSeconds(root.ReconciliationCadenceSeconds) > now &&
+                    !await db.SourcePendingChanges.AnyAsync(x => x.SourceRootId == id && x.RelativePath != "." &&
+                        (x.ReasonFlags & ~SourcePendingReasons.RemovalPending) != 0 &&
+                        (x.NotBeforeUtc == null || x.NotBeforeUtc <= now), ct).ConfigureAwait(false) &&
                     (state is not null && SqlSourceIncrementalState.RequiresBaseline(state) ||
                      await db.SourcePendingChanges.AnyAsync(x => x.SourceRootId == id && x.RelativePath == "." && x.IsSubtree &&
                          (x.ReasonFlags & ~SourcePendingReasons.RemovalPending) != 0 &&
@@ -411,7 +386,7 @@ public sealed partial class SqlSourceIncrementalCoordinator(
                 SqlSourceIncrementalState.InvalidateCoverage(state, "journal-continuity-lost", current.NextUsn);
                 state.CoveredUsn = current.NextUsn;
                 var pending = await db.SourcePendingChanges.Where(x => x.SourceRootId == state.SourceRootId).ToListAsync(ct).ConfigureAwait(false);
-                SqlSourcePendingWork.Coalesce(db, state, pending, time.GetUtcNow(), unjournaled: true);
+                SqlSourcePendingWork.RequireMetadata(db, state, pending, time.GetUtcNow());
             }
             // Closed, metadata-only recovery receipt, in the same fenced commit
             // as the replacement cursor and every affected root's recovery debt.

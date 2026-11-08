@@ -1,5 +1,7 @@
 # Reconciliation loop correction
 
+Current operating policy: [events and weekly metadata reconciliation](low-disk-source-updates.md) supersedes this record's automatic checksum, seal and full-recapture requirements from 3 November 2026. Historical observations and receipts below remain evidence, not current guarantees.
+
 ## Incident and demonstrated cause
 
 On 2 November 2026, two production sources were paused through the supported

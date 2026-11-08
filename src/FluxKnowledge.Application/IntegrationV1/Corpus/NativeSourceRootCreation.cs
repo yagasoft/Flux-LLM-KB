@@ -22,7 +22,7 @@ public static class NativeSourceRootCreation
             Bool(payload, "recursive", true), Rules(payload, "includePatterns"), Rules(payload, "excludePatterns"),
             Bool(payload, "followLinks", false), Long(payload, "maximumFileBytes", SourcePolicyDefaults.MaximumTextBytes),
             sourceText ? ["text/plain", "text/x-source-code"] : [],
-            TimeSpan.FromSeconds(Long(payload, "reconciliationSeconds", 900)), actor, DiscoveryMode: mode);
+            TimeSpan.FromSeconds(Long(payload, "reconciliationSeconds", SourcePolicyDefaults.MetadataReconciliationSeconds)), actor, DiscoveryMode: mode);
     }
 
     private static IReadOnlyList<string> Rules(JsonElement payload, string name)

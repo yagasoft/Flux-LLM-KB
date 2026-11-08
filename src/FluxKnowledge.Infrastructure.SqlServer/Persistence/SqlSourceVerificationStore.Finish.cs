@@ -1,4 +1,5 @@
 using FluxKnowledge.Application.Ports;
+using FluxKnowledge.Domain.Sources;
 using Microsoft.EntityFrameworkCore;
 
 namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
@@ -19,6 +20,12 @@ public sealed partial class SqlSourceVerificationStore
             if (old.Completed) return;
             SaveBatchProgress(run, request, old, sourceBytesRead, retainedBytesRead, completed: true);
             var now = time.GetUtcNow();
+            if (!SourcePolicyDefaults.ChecksumVerificationEnabled)
+            {
+                await InvalidateRunAsync(db, run, now, ct, request.Id, "source-verification-policy-retired").ConfigureAwait(false);
+                run.NextBatchAtUtc = null;
+                return;
+            }
             if (!Matches(root, state, batch.Authority))
             { await InvalidateRunAsync(db, run, now, ct, request.Id).ConfigureAwait(false); return; }
             var counts = await db.SourceVerificationItems.Where(x => x.RunId == run.Id).GroupBy(x => x.State)

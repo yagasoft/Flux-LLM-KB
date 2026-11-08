@@ -91,7 +91,7 @@ public sealed partial class DocumentPublicationIntegrationTests
             if (count != 1) return;
             if (change == "new-active-scan")
             {
-                Assert.NotNull(await ordinary.ClaimNextReleasedAsync("new-scan", now.AddMinutes(16), TimeSpan.FromMinutes(30), CancellationToken.None));
+                Assert.NotNull(await ordinary.ClaimNextReleasedAsync("new-scan", now.AddDays(7).AddSeconds(1), TimeSpan.FromMinutes(30), CancellationToken.None));
                 return;
             }
             await using var mutate = Context();
@@ -195,7 +195,7 @@ public sealed partial class DocumentPublicationIntegrationTests
         var commands = new IssueReadObserver();
         for (var pass = 0; pass < 4; pass++)
         {
-            var at = now.AddMinutes(16 * pass);
+            var at = now.AddDays(7 * pass).AddSeconds(pass);
             var store = new SqlSourceScanStore(new IssueContextFactory(_fixture.ConnectionString, commands), new IssueCleanupClock(at), logger: log);
             var claim = await store.ClaimNextReleasedAsync("cleanup-pass", at, TimeSpan.FromMinutes(5), CancellationToken.None);
             Assert.NotNull(claim);

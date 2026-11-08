@@ -1,9 +1,11 @@
 using System.Diagnostics;
+using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using FluxKnowledge.Application.Operations;
 using FluxKnowledge.Application.Ports;
+using FluxKnowledge.Domain.Sources;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
 using FluxKnowledge.Integrations.Files;
 using Microsoft.Data.SqlClient;
@@ -14,6 +16,7 @@ namespace FluxKnowledge.Cli.Commands;
 /// <summary>Model-free, stopped-updater operation; absent from standalone CLI routes.</summary>
 internal static class IncrementalSourceJournalRetirementBridge
 {
+    internal static string DetectionPolicy => SourcePolicyDefaults.DetectionPolicy;
     private static readonly JsonSerializerOptions Json = new()
     { UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow, RespectRequiredConstructorParameters = true, RespectNullableAnnotations = true };
 
@@ -43,6 +46,7 @@ internal static class IncrementalSourceJournalRetirementBridge
         ArgumentNullException.ThrowIfNull(assertQuiescent);
         var bindings = JsonSerializer.Deserialize<Bindings>(json, Json) ?? throw Invalid("bindings-invalid");
         if (bindings.ReleaseId.Length is < 1 or > 256 || bindings.DatabaseIncarnation == Guid.Empty ||
+            bindings.MetadataPolicy is not null && bindings.MetadataPolicy != SourcePolicyDefaults.DetectionPolicy ||
             new[] { bindings.ConfigurationSha256, bindings.HoldSha256, bindings.RuntimeIdentityFingerprint,
                 bindings.OperatorEntrySha256, bindings.StoppedWritersEvidenceSha256 }.Any(hash => hash.Length != 64 || !hash.All(Uri.IsHexDigit)))
             throw Invalid("bindings-invalid");
@@ -61,8 +65,10 @@ internal static class IncrementalSourceJournalRetirementBridge
             using (var settings = JsonDocument.Parse(capability.Pin(configuration, bindings.ConfigurationSha256, 2 * 1024 * 1024)))
             {
                 var journal = settings.RootElement.GetProperty("SourceJournal");
-                if (journal.GetProperty("Enabled").ValueKind != JsonValueKind.False || journal.GetProperty("SealingEnabled").ValueKind != JsonValueKind.False)
+                if ((bindings.MetadataPolicy is null || bindings.RequireFeatureOff) &&
+                    (journal.GetProperty("Enabled").ValueKind != JsonValueKind.False || journal.GetProperty("SealingEnabled").ValueKind != JsonValueKind.False))
                     throw Invalid("feature-off-required");
+                capability.JournalEnabled = journal.GetProperty("Enabled").GetBoolean();
                 var sql = new SqlConnectionStringBuilder(settings.RootElement.GetProperty("ConnectionStrings").GetProperty("FluxKnowledge").GetString())
                 { ConnectRetryCount = 0, ConnectTimeout = 5, Pooling = false, Enlist = false };
                 if (string.IsNullOrWhiteSpace(sql.DataSource) || string.IsNullOrWhiteSpace(sql.InitialCatalog) ||
@@ -92,16 +98,38 @@ internal static class IncrementalSourceJournalRetirementBridge
         capability.Consumed = true;
         capability.AssertQuiescent();
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSeconds));
-        var store = new SqlSourceVerificationStore(capability.Factory, TimeProvider.System, new SourceJournalOptions { Enabled = false });
-        var result = store.RetireForFeatureOffAsync(new WindowsSourceVerificationReaderSlot(capability.Runtime), capability.RequireDatabaseAsync, timeout.Token)
-            .AsTask().GetAwaiter().GetResult();
+        using var stoppedChecks = new BlockingCollection<TaskCompletionSource>();
+        async ValueTask RequireStoppedAsync(CancellationToken ct)
+        {
+            await capability.RequireDatabaseAsync(ct).ConfigureAwait(false);
+            var check = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            stoppedChecks.Add(check, ct);
+            await check.Task.WaitAsync(ct).ConfigureAwait(false);
+        }
+        var store = new SqlSourceVerificationStore(capability.Factory, TimeProvider.System, new SourceJournalOptions { Enabled = capability.JournalEnabled });
+        var retirement = capability.MetadataPolicy is not null ? MetadataAsync() : FeatureOffAsync();
+        // The transaction awaits both current live stop checks. Execute the PowerShell
+        // callback on its owning runspace thread, including the final pre-commit guard.
+        while (!retirement.IsCompleted)
+            if (stoppedChecks.TryTake(out var check, 50))
+            {
+                try { capability.AssertQuiescent(); check.SetResult(); }
+                catch (Exception error) { check.SetException(error); }
+            }
+        var result = retirement.GetAwaiter().GetResult();
         capability.AssertQuiescent();
         return JsonSerializer.Serialize(result);
+
+        async Task<object> MetadataAsync() => await store.RetireForMetadataPolicyAsync(
+            new WindowsSourceVerificationReaderSlot(capability.Runtime), RequireStoppedAsync, timeout.Token).ConfigureAwait(false);
+        async Task<object> FeatureOffAsync() => await store.RetireForFeatureOffAsync(
+            new WindowsSourceVerificationReaderSlot(capability.Runtime), RequireStoppedAsync, timeout.Token).ConfigureAwait(false);
     }
 
     private static InvalidOperationException Invalid(string reason) => new("source-journal-retirement-" + reason);
     private sealed record Bindings(string ReleaseId, string ConfigurationSha256, string HoldSha256, string RuntimeIdentityFingerprint,
-        Guid DatabaseIncarnation, string OperatorEntrySha256, string StoppedWritersEvidencePath, string StoppedWritersEvidenceSha256);
+        Guid DatabaseIncarnation, string OperatorEntrySha256, string StoppedWritersEvidencePath, string StoppedWritersEvidenceSha256,
+        string? MetadataPolicy = null, bool RequireFeatureOff = false);
     private sealed record StoppedWriters(int Version, string ReleaseId, Guid DatabaseIncarnation, string RuntimeRoot,
         string RuntimeIdentityFingerprint, string ConfigurationSha256, bool WritersStopped, int[] StoppedProcessIds, DateTimeOffset ObservedAtUtc);
     private sealed class Factory(string connection) : IDbContextFactory<FluxKnowledgeDbContext>
@@ -112,6 +140,8 @@ internal static class IncrementalSourceJournalRetirementBridge
     {
         private readonly int _thread = Environment.CurrentManagedThreadId;
         internal string Runtime { get; } = Path.GetFullPath(runtime);
+        internal string? MetadataPolicy { get; } = bindings.MetadataPolicy;
+        internal bool JournalEnabled { get; set; }
         internal Action AssertQuiescent { get; } = assertQuiescent;
         internal List<IDisposable> Held { get; } = [];
         internal IDbContextFactory<FluxKnowledgeDbContext> Factory { get; set; } = null!;

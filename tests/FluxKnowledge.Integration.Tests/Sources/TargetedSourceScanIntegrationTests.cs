@@ -25,7 +25,7 @@ public sealed class TargetedSourceScanIntegrationTests(NativeSqlServerFixture fi
     public Task DisposeAsync() => Task.CompletedTask;
 
     [NativeSqlServerFact]
-    public async Task Feature_off_fences_incremental_proofs_once_and_reenable_requires_a_new_baseline()
+    public async Task Feature_off_and_reenable_keep_the_weekly_metadata_policy_without_assurance_reads()
     {
         var area = Path.Combine(@"I:\Codex Workspaces\Staging\FluxKnowledge", "JournalFeatureOff-" + Guid.NewGuid().ToString("N"));
         var files = Path.Combine(area, "Sources");
@@ -54,25 +54,28 @@ public sealed class TargetedSourceScanIntegrationTests(NativeSqlServerFixture fi
 
             options.Enabled = false;
             clock.Now += root.ReconciliationCadence + TimeSpan.FromSeconds(1);
-            await Scan("legacy");
+            reads = 0;
+            await Scan("journal-disabled");
+            Assert.Equal(0, reads);
             long disabledEpoch;
             await using (var inspect = factory.CreateDbContext())
             {
                 var state = await inspect.SourceRootScanStates.SingleAsync();
-                Assert.Equal("Legacy", state.Mode);
-                Assert.True(state.RecoveryRequired);
+                Assert.Equal("Fallback", state.Mode);
+                Assert.False(state.RecoveryRequired);
                 disabledEpoch = state.BaselineEpoch;
-                Assert.True(disabledEpoch > previousEpoch);
+                Assert.Equal(previousEpoch, disabledEpoch);
             }
             clock.Now += root.ReconciliationCadence + TimeSpan.FromSeconds(1);
-            await Scan("legacy-again");
+            await Scan("journal-disabled-again");
+            Assert.Equal(0, reads);
             await using (var inspect = factory.CreateDbContext()) Assert.Equal(disabledEpoch, (await inspect.SourceRootScanStates.SingleAsync()).BaselineEpoch);
 
             options.Enabled = true;
             clock.Now += root.ReconciliationCadence + TimeSpan.FromSeconds(1);
             reads = 0;
             await Scan("reenabled");
-            Assert.Equal("first evidence"u8.Length, reads);
+            Assert.Equal(0, reads);
             await using var verify = factory.CreateDbContext();
             Assert.False((await verify.SourceRootScanStates.SingleAsync()).RecoveryRequired);
 
@@ -135,8 +138,8 @@ public sealed class TargetedSourceScanIntegrationTests(NativeSqlServerFixture fi
             Assert.Null((await verify.SourceRevisions.SingleAsync(x => x.CanonicalPath == inaccessible)).SuppressedAtUtc);
             var state = await verify.SourceRootScanStates.SingleAsync();
             Assert.Equal("Fallback", state.Mode);
-            Assert.True(state.RecoveryRequired);
-            Assert.False(state.NamespaceComplete);
+            Assert.False(state.RecoveryRequired); // Membership completed; inaccessible content remains a specific deferred obligation.
+            Assert.True(state.NamespaceComplete);
             Assert.Contains("locked.txt", state.DeferredEvidenceJson!);
             var parked = await verify.SourcePendingChanges.SingleAsync(x => x.RelativePath == "locked.txt");
             Assert.Equal(parked.Generation, parked.RetryGeneration);
@@ -146,7 +149,7 @@ public sealed class TargetedSourceScanIntegrationTests(NativeSqlServerFixture fi
     }
 
     [NativeSqlServerFact]
-    public async Task Unavailable_startup_preserves_baseline_debt_and_forced_unsealed_backstops_until_journal_returns()
+    public async Task Unavailable_startup_retries_journal_before_the_weekly_deadline_without_scans_or_assurance_reads()
     {
         var area = Path.Combine(@"I:\Codex Workspaces\Staging\FluxKnowledge", "JournalStartupFallback-" + Guid.NewGuid().ToString("N"));
         var files = Path.Combine(area, "Sources");
@@ -173,25 +176,35 @@ public sealed class TargetedSourceScanIntegrationTests(NativeSqlServerFixture fi
             var first = Assert.IsType<ClaimedSourceScan>(await control.ClaimNextReleasedAsync("startup", clock.Now, TimeSpan.FromMinutes(10), default));
             await control.CompleteAsync(first, await worker.ScanAsync(first.SourceRoot, first.ScanRequest, default), null, default);
             Assert.Equal("startup evidence"u8.Length, reads);
-            Assert.Equal(0, await coordinator.PumpAsync(default)); // Baseline debt cannot make unavailable mode spin.
+            Assert.Equal(0, await coordinator.PumpAsync(default));
+            string rootEvidence;
             await using (var inspect = factory.CreateDbContext())
             {
                 var state = await inspect.SourceRootScanStates.SingleAsync();
                 Assert.Equal("Fallback", state.Mode);
-                Assert.True(state.RecoveryRequired);
+                Assert.False(state.RecoveryRequired);
                 Assert.False(await inspect.SourceVolumeJournalCheckpoints.AnyAsync());
+                rootEvidence = JsonSerializer.Serialize(state);
             }
+            clock.Now += TimeSpan.FromMinutes(15) + TimeSpan.FromSeconds(1);
+            reader.Unavailable = false;
+            reads = 0;
+            Assert.Equal(0, await coordinator.PumpAsync(default));
+            Assert.Null(await control.ClaimNextReleasedAsync("journal-returned", clock.Now, TimeSpan.FromMinutes(10), default));
+            await using (var registered = factory.CreateDbContext())
+            {
+                Assert.True(await registered.SourceVolumeJournalCheckpoints.AnyAsync());
+                Assert.Equal(rootEvidence, JsonSerializer.Serialize(await registered.SourceRootScanStates.SingleAsync()));
+                Assert.Empty(await registered.SourcePendingChanges.ToArrayAsync());
+                var receipt = await registered.AuditEvents.SingleAsync(x => x.EventType == "source.journal.first_registration");
+                Assert.Contains("no-historical-coverage", receipt.DetailsJson);
+            }
+            Assert.Equal(0, reads);
             clock.Now += first.SourceRoot.ReconciliationCadence + TimeSpan.FromSeconds(1);
             var retry = Assert.IsType<ClaimedSourceScan>(await control.ClaimNextReleasedAsync("backstop", clock.Now, TimeSpan.FromMinutes(10), default));
             reads = 0;
             await control.CompleteAsync(retry, await worker.ScanAsync(retry.SourceRoot, retry.ScanRequest, default), null, default);
-            Assert.Equal("startup evidence"u8.Length, reads); // Unsealed entries retain their ordinary forced-check deadline.
-            reader.Unavailable = false;
-            clock.Now += first.SourceRoot.ReconciliationCadence + TimeSpan.FromSeconds(1);
-            var restored = Assert.IsType<ClaimedSourceScan>(await control.ClaimNextReleasedAsync("restored", clock.Now, TimeSpan.FromMinutes(10), default));
-            reads = 0;
-            await control.CompleteAsync(restored, await worker.ScanAsync(restored.SourceRoot, restored.ScanRequest, default), null, default);
-            Assert.Equal("startup evidence"u8.Length, reads); // A first journal baseline cannot inherit heuristic trust.
+            Assert.Equal(0, reads); // Missing historical journal proof never forces quiet content reads.
             await using var verify = factory.CreateDbContext();
             Assert.False((await verify.SourceRootScanStates.SingleAsync()).RecoveryRequired);
             Assert.True(await verify.SourceVolumeJournalCheckpoints.AnyAsync());
@@ -276,7 +289,7 @@ public sealed class TargetedSourceScanIntegrationTests(NativeSqlServerFixture fi
             var backstop = Assert.IsType<ClaimedSourceScan>(await control.ClaimNextReleasedAsync("backstop", clock.Now, TimeSpan.FromMinutes(10), default));
             reads = 0;
             await control.CompleteAsync(backstop, await worker.ScanAsync(backstop.SourceRoot, backstop.ScanRequest, default), null, default);
-            Assert.Equal("later evidence"u8.Length, reads); // Only the unsealed fallback capture reaches its forced deadline.
+            Assert.Equal(0, reads); // Quiet unsealed content has no separate assurance deadline.
             Assert.Equal(2, enumeration.LastEnumeratedEntries); // The independent authority backstop enumerates metadata.
             await using (var verify = factory.CreateDbContext())
             {
@@ -288,15 +301,25 @@ public sealed class TargetedSourceScanIntegrationTests(NativeSqlServerFixture fi
             await incremental.PumpAsync(default);
             clock.Now += TimeSpan.FromSeconds(3);
             await incremental.PumpAsync(default);
-            var restored = Assert.IsType<ClaimedSourceScan>(await control.ClaimNextReleasedAsync("restored", clock.Now, TimeSpan.FromMinutes(10), default));
+            var journalEvent = Assert.IsType<ClaimedSourceScan>(await control.ClaimNextReleasedAsync("journal-restored", clock.Now, TimeSpan.FromMinutes(10), default));
+            var eventPlan = Assert.IsType<SourceIncrementalPlan>(await incremental.PrepareAsync(journalEvent.SourceRoot, journalEvent.ScanRequest, default));
+            Assert.False(eventPlan.ForceFullContent);
+            Assert.False(eventPlan.IsNamespaceSweep);
+            Assert.All(eventPlan.Targets, item => Assert.Equal("one.txt", item.RelativePath));
+            // The native journal still contains the real edit already seen by the watcher.
+            // Replaying that actual file event may ingest it, but cannot reread its sibling.
+            await control.CompleteAsync(journalEvent, await worker.ScanAsync(journalEvent.SourceRoot, journalEvent.ScanRequest, default), null, default);
+            Assert.Equal("later evidence"u8.Length, reads);
+            clock.Now += baseline.SourceRoot.ReconciliationCadence + TimeSpan.FromSeconds(1);
+            var restored = Assert.IsType<ClaimedSourceScan>(await control.ClaimNextReleasedAsync("weekly-after-recovery", clock.Now, TimeSpan.FromMinutes(10), default));
             reads = 0;
             await control.CompleteAsync(restored, await worker.ScanAsync(restored.SourceRoot, restored.ScanRequest, default), null, default);
-            Assert.Equal("later evidence"u8.Length, reads);
+            Assert.Equal(0, reads);
             await using var restoredState = factory.CreateDbContext();
             Assert.True((await restoredState.SourceVolumeJournalCheckpoints.SingleAsync()).NextUsn > savedCursor);
             Assert.NotEqual("Fallback", (await restoredState.SourceRootScanStates.SingleAsync()).Mode);
             var observation = (await restoredState.SourceInventoryEntries.SingleAsync(x => x.RelativePath == "one.txt")).ObservationJson!;
-            Assert.True(JsonDocument.Parse(observation).RootElement.GetProperty("JournalCovered").GetBoolean());
+            Assert.False(JsonDocument.Parse(observation).RootElement.GetProperty("JournalCovered").GetBoolean());
         }
         finally { Directory.Delete(area, true); }
     }

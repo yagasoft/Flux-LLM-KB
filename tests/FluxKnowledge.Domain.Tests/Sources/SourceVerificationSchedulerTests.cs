@@ -6,9 +6,9 @@ namespace FluxKnowledge.Domain.Tests.Sources;
 public sealed class SourceVerificationSchedulerTests
 {
     [Fact]
-    public void Defaults_use_the_explicit_installation_timezone_and_combined_read_budget()
+    public void Historical_policy_retains_timezone_and_budget_fields_for_receipt_readback()
     {
-        var policy = SourceVerificationPolicy.Default("UTC");
+        var policy = SourceVerificationPolicy.Default("UTC") with { Enabled = true };
         Assert.Equal(DayOfWeek.Sunday, policy.Weekday);
         Assert.Equal(new TimeOnly(2, 0), policy.LocalStart);
         Assert.Equal(TimeSpan.FromHours(6), policy.WindowDuration);
@@ -20,7 +20,7 @@ public sealed class SourceVerificationSchedulerTests
     [Fact]
     public void Weekly_cycle_starts_once_and_an_active_cycle_never_overlaps_a_new_week()
     {
-        var policy = SourceVerificationPolicy.Default("UTC");
+        var policy = SourceVerificationPolicy.Default("UTC") with { Enabled = true };
         var sunday = DateTimeOffset.Parse("2026-10-25T02:00:00Z");
         Assert.Null(SourceVerificationSchedule.DueCycle(policy, sunday.AddTicks(-1), null, false, TimeZoneInfo.Utc));
         Assert.Equal(sunday, SourceVerificationSchedule.DueCycle(policy, sunday, null, false, TimeZoneInfo.Utc));
@@ -33,7 +33,7 @@ public sealed class SourceVerificationSchedulerTests
     [Fact]
     public void Unfinished_cycle_has_daily_continuation_windows_and_exact_end_is_closed()
     {
-        var policy = SourceVerificationPolicy.Default("UTC");
+        var policy = SourceVerificationPolicy.Default("UTC") with { Enabled = true };
         var monday = DateTimeOffset.Parse("2026-10-26T03:00:00Z");
         var open = SourceVerificationSchedule.CurrentOrNextWindow(policy, monday, TimeZoneInfo.Utc);
         Assert.True(open.Contains(monday));
@@ -50,7 +50,7 @@ public sealed class SourceVerificationSchedulerTests
     public void Overnight_continuation_uses_the_previous_local_dates_window()
     {
         var zone = TimeZoneInfo.CreateCustomTimeZone("verification-plus-two", TimeSpan.FromHours(2), "test", "test");
-        var policy = SourceVerificationPolicy.Default(zone.Id) with { LocalStart = new(23, 0), WindowDuration = TimeSpan.FromHours(4) };
+        var policy = SourceVerificationPolicy.Default(zone.Id) with { Enabled = true, LocalStart = new(23, 0), WindowDuration = TimeSpan.FromHours(4) };
         var now = DateTimeOffset.Parse("2026-10-26T00:00:00Z"); // Local02:00, still in Sunday's window.
         var window = SourceVerificationSchedule.CurrentOrNextWindow(policy, now, zone);
         Assert.True(window.Contains(now));
@@ -62,7 +62,7 @@ public sealed class SourceVerificationSchedulerTests
     public void Invalid_DST_start_advances_to_the_next_valid_instant()
     {
         var zone = DstZone();
-        var policy = SourceVerificationPolicy.Default(zone.Id) with { LocalStart = new(2, 30) };
+        var policy = SourceVerificationPolicy.Default(zone.Id) with { Enabled = true, LocalStart = new(2, 30) };
         var now = DateTimeOffset.Parse("2026-03-08T06:50:00Z");
         var window = SourceVerificationSchedule.CurrentOrNextWindow(policy, now, zone);
         Assert.Equal(DateTimeOffset.Parse("2026-03-08T07:00:00Z"), window.Start); //03:00 local.
@@ -75,7 +75,7 @@ public sealed class SourceVerificationSchedulerTests
     public void Ambiguous_DST_start_selects_the_first_occurrence_and_cannot_create_a_second_cycle()
     {
         var zone = DstZone();
-        var policy = SourceVerificationPolicy.Default(zone.Id) with { LocalStart = new(1, 30) };
+        var policy = SourceVerificationPolicy.Default(zone.Id) with { Enabled = true, LocalStart = new(1, 30) };
         var first = DateTimeOffset.Parse("2026-11-01T05:30:00Z");
         var second = first.AddHours(1);
         Assert.Equal(first, SourceVerificationSchedule.DueCycle(policy, first, null, false, zone));

@@ -27,14 +27,15 @@ public sealed partial class SourceJournalSealIntegrationTests(NativeSqlServerFix
     public Task DisposeAsync() => Task.CompletedTask;
 
     [NativeSqlServerFact]
-    public async Task Self_generated_close_is_consumed_without_leaving_new_work_for_the_capture_it_attests()
+    public async Task Ordinary_capture_and_its_read_handles_leave_no_assurance_obligation()
     {
         await using var scenario = await Scenario.CreateAsync(fixture.ConnectionString, qualified: true);
         await scenario.ScanAsync("self-close-baseline");
+        await scenario.DrainAsync();
         await using var db = scenario.Factory.CreateDbContext();
         var entry = await db.SourceInventoryEntries.SingleAsync(x => x.RelativePath == "one.txt");
-        Assert.True(entry.IsSealed);
-        Assert.True((await db.SourceVolumeJournalCheckpoints.SingleAsync()).NextUsn > entry.LatestJournalUsn);
+        Assert.False(entry.IsSealed);
+        Assert.Null(entry.NextForcedCheckAtUtc);
         var pending = await db.SourcePendingChanges.Where(x => x.RelativePath == "one.txt").ToArrayAsync();
         Assert.True(pending.Length == 0, JsonSerializer.Serialize(new { entry.LatestJournalUsn, entry.ObservationJson,
             Pending = pending.Select(x => new { x.RelativePath, x.Generation, x.FirstUsn, x.LastUsn, x.LastContentUsn, x.LastUnjournaledGeneration, x.IsSubtree, Reason = x.ReasonFlags.ToString("X") }) }));
@@ -50,16 +51,14 @@ public sealed partial class SourceJournalSealIntegrationTests(NativeSqlServerFix
         await using (var db = scenario.Factory.CreateDbContext())
         {
             Assert.False(await db.SourceInventoryEntries.AnyAsync(x => !x.IsDirectory));
-            var pending = await db.SourcePendingChanges.SingleAsync(x => x.RelativePath == "one.txt");
-            Assert.Equal(0x80000000L, pending.ReasonFlags);
-            Assert.True((await db.SourceVolumeJournalCheckpoints.SingleAsync()).NextUsn > pending.LastUsn);
+            Assert.True(await db.SourceScanJobs.AnyAsync(x => x.State == 1));
             Assert.True(await db.SourceArtifacts.AnyAsync());
         }
         scenario.BeforeAttestationCommit = null;
         await scenario.RunAsync(claim);
         await scenario.DrainAsync();
         await using var verify = scenario.Factory.CreateDbContext();
-        Assert.True((await verify.SourceInventoryEntries.SingleAsync(x => x.RelativePath == "one.txt")).IsSealed);
+        Assert.False((await verify.SourceInventoryEntries.SingleAsync(x => x.RelativePath == "one.txt")).IsSealed);
         Assert.False(await verify.SourcePendingChanges.AnyAsync(x => x.RelativePath == "one.txt"));
     }
 
@@ -72,14 +71,15 @@ public sealed partial class SourceJournalSealIntegrationTests(NativeSqlServerFix
     [InlineData("older")]
     [InlineData("later")]
     [InlineData("subtree")]
-    public async Task Self_close_acknowledgement_preserves_every_unmatched_or_uncertain_obligation(string kind)
+    public async Task Capture_metadata_commit_preserves_every_later_specific_pending_generation(string kind)
     {
         await using var scenario = await Scenario.CreateAsync(fixture.ConnectionString, qualified: true);
         string? expected = null;
         scenario.BeforeAttestation = () =>
         {
             using var db = scenario.Factory.CreateDbContext();
-            var row = db.SourcePendingChanges.Single(x => x.RelativePath == "one.txt");
+            var row = db.SourcePendingChanges.SingleOrDefault(x => x.RelativePath == "one.txt");
+            if (row is null) { row = new() { Id = Guid.NewGuid(), SourceRootId = db.SourceRootConfigurations.Single().Id, RelativePath = "one.txt", PathFingerprint = SqlSourceChangeJournalStore.PathKey("one.txt"), FirstUsn = 10, LastUsn = 20 }; db.SourcePendingChanges.Add(row); }
             var state = db.SourceRootScanStates.Single();
             row.Generation = ++state.Generation;
             switch (kind)
@@ -108,30 +108,32 @@ public sealed partial class SourceJournalSealIntegrationTests(NativeSqlServerFix
         await using var db = scenario.Factory.CreateDbContext();
         var proof = JsonDocument.Parse((await db.SourceInventoryEntries.SingleAsync(x => x.RelativePath == "one.txt")).ObservationJson!);
         Assert.False(proof.RootElement.GetProperty("JournalCovered").GetBoolean());
-        Assert.Equal(3, proof.RootElement.GetProperty("Version").GetInt32());
+        Assert.Equal(4, proof.RootElement.GetProperty("Version").GetInt32());
     }
 
     [NativeSqlServerFact]
-    public async Task Unsealed_ordinary_backstop_captures_a_missed_repeated_write_with_preserved_timestamps()
+    public async Task Metadata_backstop_accepts_an_undetected_same_size_write_with_preserved_timestamps()
     {
         await using var scenario = await Scenario.CreateAsync(fixture.ConnectionString);
         using var persistent = new FileStream(scenario.Path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
         scenario.Overwrite(0, 65);
         var root = await scenario.ScanAsync("baseline");
-        scenario.Overwrite(1, 66); // Same reason and timestamp; a different reader keeps aggregation open.
+        var capturedHash = Convert.ToHexStringLower(SHA256.HashData(await File.ReadAllBytesAsync(scenario.Path)));
+        scenario.Overwrite(1, 66); // Intentionally undetected: same size and timestamp, aggregated native event.
         scenario.Clock.Now += root.ReconciliationCadence + TimeSpan.FromSeconds(1);
         scenario.SourceBytes = 0;
         await scenario.ScanAsync("ordinary-backstop");
-        Assert.Equal(64, scenario.SourceBytes);
+        Assert.Equal(0, scenario.SourceBytes);
         await using var db = scenario.Factory.CreateDbContext();
         var current = await db.SourceRevisions.OrderByDescending(x => x.Revision).FirstAsync(x => x.CanonicalPath == scenario.Path);
-        Assert.Equal(Convert.ToHexStringLower(SHA256.HashData(await File.ReadAllBytesAsync(scenario.Path))), current.ContentSha256);
+        Assert.Equal(capturedHash, current.ContentSha256);
+        Assert.NotEqual(Convert.ToHexStringLower(SHA256.HashData(await File.ReadAllBytesAsync(scenario.Path))), current.ContentSha256);
     }
 
     [NativeSqlServerTheory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task Qualified_seals_detect_three_later_edits_across_restart_without_rereading_a_sealed_sibling(bool watcherFirst)
+    public async Task File_events_detect_three_later_edits_across_restart_without_rereading_a_quiet_sibling(bool watcherFirst)
     {
         await using var scenario = await Scenario.CreateAsync(fixture.ConnectionString, qualified: true);
         await File.WriteAllTextAsync(System.IO.Path.Combine(System.IO.Path.GetDirectoryName(scenario.Path)!, "sibling.txt"), new string('s', 64));
@@ -141,10 +143,10 @@ public sealed partial class SourceJournalSealIntegrationTests(NativeSqlServerFix
         await using (var db = scenario.Factory.CreateDbContext())
         {
             var receipt = JsonDocument.Parse((await db.SourceInventoryEntries.SingleAsync(x => x.RelativePath == "one.txt")).ObservationJson!);
-            Assert.Equal(3, receipt.RootElement.GetProperty("Version").GetInt32());
-            Assert.True(receipt.RootElement.GetProperty("JournalCovered").GetBoolean());
-            Assert.True(receipt.RootElement.GetProperty("SealUsn").GetInt64() > 0);
-            Assert.False(string.IsNullOrEmpty(receipt.RootElement.GetProperty("SealProfileId").GetString()));
+            Assert.Equal(4, receipt.RootElement.GetProperty("Version").GetInt32());
+            Assert.False(receipt.RootElement.GetProperty("JournalCovered").GetBoolean());
+            Assert.Equal(JsonValueKind.Null, receipt.RootElement.GetProperty("SealUsn").ValueKind);
+            Assert.Null(receipt.RootElement.GetProperty("SealProfileId").GetString());
         }
         scenario.SourceBytes = scenario.ArtifactSourceBytes = 0;
         scenario.ReadTrace.Clear();
@@ -202,7 +204,7 @@ public sealed partial class SourceJournalSealIntegrationTests(NativeSqlServerFix
     }
 
     [NativeSqlServerFact]
-    public async Task Qualified_multiply_linked_capture_completes_with_unsealed_debt_instead_of_retrying_forever()
+    public async Task Multiply_linked_capture_keeps_ingestion_evidence_without_periodic_assurance_debt()
     {
         await using var scenario = await Scenario.CreateAsync(fixture.ConnectionString, qualified: true);
         Assert.True(CreateHardLink(System.IO.Path.Combine(System.IO.Path.GetDirectoryName(scenario.Path)!, "alias.txt"), scenario.Path, IntPtr.Zero));
@@ -213,14 +215,14 @@ public sealed partial class SourceJournalSealIntegrationTests(NativeSqlServerFix
         Assert.All(entries, entry =>
         {
             Assert.False(entry.IsSealed);
-            Assert.Equal("multiple-links", entry.SealFailureCode);
-            Assert.NotNull(entry.NextForcedCheckAtUtc);
+            Assert.Null(entry.SealFailureCode);
+            Assert.Null(entry.NextForcedCheckAtUtc);
         });
         Assert.False((await db.SourceRootScanStates.SingleAsync()).RecoveryRequired);
     }
 
     [NativeSqlServerFact]
-    public async Task Refused_seal_preserves_retention_and_an_explicit_ordinary_retry_deadline()
+    public async Task Absent_seal_support_preserves_retention_without_a_forced_reread_deadline()
     {
         await using var scenario = await Scenario.CreateAsync(fixture.ConnectionString, qualified: true);
         scenario.SealBehaviour = SealBehaviour.Refuse;
@@ -228,33 +230,12 @@ public sealed partial class SourceJournalSealIntegrationTests(NativeSqlServerFix
         await using var db = scenario.Factory.CreateDbContext();
         var entry = await db.SourceInventoryEntries.SingleAsync(x => x.RelativePath == "one.txt");
         Assert.False(entry.IsSealed);
-        Assert.Equal("seal-unavailable", entry.SealFailureCode);
-        Assert.NotNull(entry.NextForcedCheckAtUtc);
+        Assert.Null(entry.SealFailureCode);
+        Assert.Null(entry.NextForcedCheckAtUtc);
         Assert.NotNull(entry.SourceRevisionId);
         Assert.True(await db.SourceArtifacts.AnyAsync(x => x.SourceRevisionId == entry.SourceRevisionId));
     }
 
-    [NativeSqlServerFact]
-    public async Task Cancellation_after_native_append_cannot_commit_a_receipt_and_the_frozen_claim_can_retry()
-    {
-        await using var scenario = await Scenario.CreateAsync(fixture.ConnectionString, qualified: true);
-        scenario.SealBehaviour = SealBehaviour.CancelAfterAppend;
-        var claim = await scenario.ClaimAsync("cancel-after-seal");
-        await Assert.ThrowsAsync<OperationCanceledException>(() => scenario.RunAsync(claim));
-        await scenario.IntakeAsync();
-        await using (var db = scenario.Factory.CreateDbContext())
-        {
-            Assert.True(await db.SourceArtifacts.AnyAsync());
-            Assert.False(await db.SourceInventoryEntries.AnyAsync(x => !x.IsDirectory));
-            Assert.True((await db.SourceRootScanStates.SingleAsync()).RecoveryRequired);
-            Assert.True(await db.SourcePendingChanges.AnyAsync(x => x.RelativePath == "one.txt"));
-        }
-        scenario.SealBehaviour = SealBehaviour.Normal;
-        await scenario.RunAsync(claim);
-        await using var verify = scenario.Factory.CreateDbContext();
-        Assert.True((await verify.SourceInventoryEntries.SingleAsync(x => x.RelativePath == "one.txt")).IsSealed);
-        Assert.False((await verify.SourceRootScanStates.SingleAsync()).RecoveryRequired);
-    }
 
     [NativeSqlServerFact]
     public async Task An_unjournaled_hint_arriving_during_capture_survives_the_pre_capture_generation_cutoff()
@@ -292,6 +273,7 @@ public sealed partial class SourceJournalSealIntegrationTests(NativeSqlServerFix
         internal SourceJournalStoreIntegrationTests.ContextFactory Factory { get; }
         internal Clock Clock { get; } = new();
         internal SourceJournalOptions Options { get; } = new() { Enabled = true };
+        internal ISourceChangeJournalReader? JournalReader;
         internal long SourceBytes;
         internal long ArtifactSourceBytes;
         internal long RetainedBytes;
@@ -353,7 +335,7 @@ public sealed partial class SourceJournalSealIntegrationTests(NativeSqlServerFix
 
         internal void Restart()
         {
-            _coordinator = new(Factory, Clock, new WindowsSourceChangeJournalReader(), new WindowsSourceObservationReader(), _artifacts, Options)
+            _coordinator = new(Factory, Clock, JournalReader ?? new WindowsSourceChangeJournalReader(), new WindowsSourceObservationReader(), _artifacts, Options)
             {
                 ReuseRejected = (path, reason) => ReadTrace.Add(JsonSerializer.Serialize(new { ReusePath = path, reason })),
                 BeforeCaptureAttestation = () => BeforeAttestation?.Invoke(), BeforeCaptureAttestationCommit = () => BeforeAttestationCommit?.Invoke()

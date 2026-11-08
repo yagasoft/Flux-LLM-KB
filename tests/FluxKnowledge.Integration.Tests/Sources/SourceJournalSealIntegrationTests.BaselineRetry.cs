@@ -19,7 +19,7 @@ public sealed partial class SourceJournalSealIntegrationTests
     [InlineData("receipt-v2")]
     [InlineData("epoch-lost")]
     [InlineData("partial-namespace")]
-    public async Task Failed_baseline_reuses_only_current_qualified_seals_and_still_walks_the_namespace(string change)
+    public async Task Failed_baseline_reuses_current_metadata_without_requiring_seals_and_still_walks_the_namespace(string change)
     {
         await using var scenario = await Scenario.CreateAsync(fixture.ConnectionString, qualified: true);
         var failed = await scenario.ClaimAsync("baseline-before-completion");
@@ -32,7 +32,7 @@ public sealed partial class SourceJournalSealIntegrationTests
             Assert.True(state.RecoveryRequired);
             Assert.False(state.NamespaceComplete);
             epoch = state.BaselineEpoch; recovery = state.RecoveryGeneration;
-            Assert.True((await db.SourceInventoryEntries.SingleAsync(x => x.RelativePath == "one.txt")).IsSealed);
+            Assert.False((await db.SourceInventoryEntries.SingleAsync(x => x.RelativePath == "one.txt")).IsSealed);
             if (change == "receipt-v2")
             {
                 var entry = await db.SourceInventoryEntries.SingleAsync(x => x.RelativePath == "one.txt");
@@ -44,7 +44,7 @@ public sealed partial class SourceJournalSealIntegrationTests
                 SqlSourceIncrementalState.InvalidateCoverage(state, "fixture-lost-journal-history", state.CoveredUsn);
             await db.SaveChangesAsync();
         }
-        if (change == "later-edit") scenario.Overwrite(0, 66); // Same size, restored timestamp.
+        if (change == "later-edit") { scenario.Overwrite(0, 66); await scenario.SignalAsync(); } // Identified event forces capture even with matching metadata.
         if (change == "qualification-lost") scenario.Options.SealQualifications = [];
         if (change == "new-seal-writes-disabled") scenario.Options.SealingEnabled = false;
         if (change == "partial-namespace")
@@ -64,13 +64,13 @@ public sealed partial class SourceJournalSealIntegrationTests
         else { Assert.Equal(epoch, plan.BaselineEpoch); Assert.Equal(recovery, plan.RecoveryGeneration); }
         scenario.SourceBytes = scenario.ArtifactSourceBytes = scenario.RetainedBytes = 0;
         await scenario.RunAsync(retry);
-        var mayReuse = change is "unchanged" or "partial-namespace" or "new-seal-writes-disabled";
+        var mayReuse = change != "later-edit";
         Assert.Equal(mayReuse ? 0 : 64, scenario.SourceBytes);
         if (mayReuse) Assert.Equal(0, scenario.ArtifactSourceBytes + scenario.RetainedBytes);
         Assert.Equal(1, scenario.Enumeration.LastEnumeratedEntries);
         await using var verified = scenario.Factory.CreateDbContext();
         var final = await verified.SourceRootScanStates.SingleAsync();
-        Assert.False(final.RecoveryRequired);
+        Assert.Equal(change == "partial-namespace", final.RecoveryRequired);
         if (change == "partial-namespace")
         {
             Assert.False(final.NamespaceComplete);

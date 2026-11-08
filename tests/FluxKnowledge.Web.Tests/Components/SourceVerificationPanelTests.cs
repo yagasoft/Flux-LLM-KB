@@ -145,7 +145,7 @@ public sealed class SourceVerificationPanelTests
     public async Task Panel_shows_real_counts_policy_and_scanning_health_without_mutating_or_polling_during_prerender()
     {
         var (html, reads, writes) = await RenderAsync();
-        Assert.Contains("Integrity verification", html);
+        Assert.Contains("Source updates", html);
         Assert.Contains("Journal", html);
         Assert.Contains("2026-10-24 10:00:00 UTC", html);
         Assert.Contains("3 verified", html);
@@ -153,31 +153,31 @@ public sealed class SourceVerificationPanelTests
         Assert.Contains("2 deferred", html);
         Assert.Contains("1,024", html);
         Assert.Contains("512", html);
-        Assert.Contains("Sunday", html);
-        Assert.Contains("02:00", html);
+        Assert.Contains("Weekly metadata reconciliation", html);
+        Assert.Contains("Automatic checksum verification is disabled", html);
         Assert.Contains("UTC", html);
-        Assert.Contains("Verify now", html);
+        Assert.Contains("Full content rescan", html);
         Assert.Equal(1, reads.Calls);
         Assert.Equal(0, writes.Previews);
     }
 
     [Fact]
-    public async Task Paused_and_uninitialised_source_explains_why_manual_verification_is_unavailable()
+    public async Task Uninitialised_source_shows_metadata_policy_without_verification_schedule_controls()
     {
         var (html, _, _) = await RenderAsync(paused: true, baseline: false);
-        Assert.Contains("Resume verification", html);
-        Assert.Contains("complete baseline", html);
-        Assert.Matches("(?s)<button[^>]*disabled[^>]*>\\s*Verify now", html);
+        Assert.DoesNotContain("Resume verification", html);
+        Assert.Contains("Quiet, unchanged files are not reread", html);
+        Assert.DoesNotContain("Verify now", html);
     }
 
     [Fact]
     public async Task Interrupted_byte_measurement_is_labelled_as_a_lower_bound_without_downgrading_integrity()
     {
         var (html, _, _) = await RenderAsync(readCountsIncomplete: true);
-        Assert.Contains("Durably recorded content read", html);
-        Assert.Contains("at least 1,024 source bytes", html);
-        Assert.Contains("at least 512 retained bytes", html);
-        Assert.Contains("interrupted attempt", html);
+        Assert.Contains("At least", html);
+        Assert.Contains("1,024 source bytes", html);
+        Assert.Contains("512 retained bytes", html);
+        Assert.Contains("Historical checksum verification", html);
         Assert.DoesNotContain("Actual content read:", html);
         Assert.Contains("3 verified", html);
     }
@@ -208,7 +208,7 @@ public sealed class SourceVerificationPanelTests
             false, null, new(Guid.NewGuid(), "Running", 10, 3, 1, 2, 1024, 512,
                 DateTimeOffset.Parse("2026-10-25T01:00:00Z"), null, null, "pending-capture"))
         {
-            FeatureEnabled = true, Scanning = new("Journal", null, 1, true, false, null, 0, 0,
+            FeatureEnabled = true, Scanning = new("Journal", null, 1, true, false, DateTimeOffset.Parse("2026-10-24T10:00:00Z"), 0, 0,
                 DateTimeOffset.Parse("2026-10-24T10:00:00Z"))
         };
         public bool Fail { get; set; }

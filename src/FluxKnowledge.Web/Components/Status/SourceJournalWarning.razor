@@ -7,6 +7,10 @@
         @if (health.IsUnavailable)
         {
             <p>Some file changes may not appear until reconciliation completes. Journal checks keep retrying automatically.</p>
+            @if (health.Reason is "journal-pending-capacity" or "journal-pending-page-capacity")
+            {
+                <p>The journal backlog has reached the processing limit. Saved changes and the cursor are retained. Weekly metadata reconciliation continues; journal updates are delayed.</p>
+            }
             @if (health.UnavailableSinceUtc is { } since)
             {
                 <p>Unavailable since <time datetime="@since.ToString("O")">@Utc(since)</time>.</p>
@@ -22,16 +26,16 @@
         }
         @if (health.RecoveryRequired)
         {
-            <p>A full reconciliation is still required. Pending changes are preserved.</p>
+            <p>Metadata reconciliation is pending. File events and pending changes are preserved; missing journal history does not trigger a full content rescan.</p>
         }
-        <p>Automatic full scans follow the configured interval of @Interval(health.ReconciliationCadenceSeconds).
+        <p>Metadata reconciliation runs weekly. Quiet, unchanged files are not reread.
             @if (Source.Lifecycle != "Enabled")
             {
-                <span>Full scans remain blocked while this source is @Source.Lifecycle.ToLowerInvariant(). It will not resume automatically.</span>
+                <span>Updates remain blocked while this source is @Source.Lifecycle.ToLowerInvariant(). It will not resume automatically.</span>
             }
             else if (health.NextReconciliationAtUtc is { } next)
             {
-                <span>Next scheduled full scan due: <time datetime="@next.ToString("O")">@Utc(next)</time>.</span>
+                <span>Next metadata reconciliation due: <time datetime="@next.ToString("O")">@Utc(next)</time>.</span>
             }
         </p>
         <a href="@($"/sources/{Source.Id}")">View source status</a>
@@ -41,5 +45,4 @@
 @code {
     [Parameter, EditorRequired] public SourcePipelineProgress Source { get; set; } = default!;
     private static string Utc(DateTimeOffset value) => value.UtcDateTime.ToString("dd MMM yyyy HH:mm:ss 'UTC'", System.Globalization.CultureInfo.GetCultureInfo("en-GB"));
-    private static string Interval(long seconds) => seconds % 60 == 0 ? $"{seconds / 60} minutes" : $"{seconds} seconds";
 }

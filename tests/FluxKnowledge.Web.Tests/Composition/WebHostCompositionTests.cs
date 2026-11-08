@@ -1068,6 +1068,10 @@ public sealed class WebHostCompositionTests : IDisposable
         services.AddLogging();
         WebHostComposition.AddFluxKnowledgeServices(services, configuration);
         services.AddScoped<ISourceRootProjectionReader, ReplayAvailableProjectionReader>();
+        // Event history is unrelated to reprocessor composition; retain its
+        // registration without reaching the deliberately unavailable SQL host.
+        services.RemoveAll<IOperatorEventProjectionReader>();
+        services.AddScoped<IOperatorEventProjectionReader, EmptyOperatorEventReader>();
         using var provider = services.BuildServiceProvider();
         using var scope = provider.CreateScope();
         var state = scope.ServiceProvider.GetRequiredService<SourceRootDetailPageState>();
@@ -1358,6 +1362,12 @@ public sealed class WebHostCompositionTests : IDisposable
             DateTimeOffset dueAtUtc,
             CancellationToken cancellationToken) =>
             ValueTask.CompletedTask;
+    }
+
+    private sealed class EmptyOperatorEventReader : IOperatorEventProjectionReader
+    {
+        public ValueTask<OperatorEventPage> ReadPageAsync(OperatorEventQuery query, CancellationToken cancellationToken)
+            => ValueTask.FromResult(new OperatorEventPage([], null));
     }
 
     private sealed class ReplayAvailableProjectionReader : ISourceRootProjectionReader

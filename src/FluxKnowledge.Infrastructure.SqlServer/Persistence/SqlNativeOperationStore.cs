@@ -556,7 +556,7 @@ public sealed class SqlNativeOperationStore(
             await LockCanonicalRootAsync(context, path, cancellationToken);
             if (await context.SourceRootConfigurations.AnyAsync(value => value.CanonicalPath == path, cancellationToken)) throw new NativeOperationException("operation-fenced");
             var rootId = Guid.NewGuid();
-            var recursive = Bool(payload, "recursive", true); var followLinks = Bool(payload, "followLinks", false); var maximumFileBytes = Long(payload, "maximumFileBytes", SourcePolicyDefaults.MaximumTextBytes); var cadenceSeconds = Long(payload, "reconciliationSeconds", 900);
+            var recursive = Bool(payload, "recursive", true); var followLinks = Bool(payload, "followLinks", false); var maximumFileBytes = Long(payload, "maximumFileBytes", SourcePolicyDefaults.MaximumTextBytes);
             var creation = NativeSourceRootCreation.Parse(payload, actor) with { FullPath = path };
             var configuration = SourceRootControlConfiguration.From(creation);
             context.SourceRootConfigurations.Add(new SourceRootConfigurationEntity
@@ -564,7 +564,7 @@ public sealed class SqlNativeOperationStore(
                 Id = rootId, CanonicalPath = path, DisplayName = name, State = (int)SourceRootState.Enabled,
                 Recursive = recursive, FollowLinks = followLinks, IncludePatternsJson = configuration.IncludePatternsJson,
                 ExcludePatternsJson = configuration.ExcludePatternsJson, AllowedClassificationsJson = configuration.AllowedClassificationsJson,
-                MaximumFileBytes = maximumFileBytes, CrawlMode = (int)creation.DiscoveryMode, ReconciliationCadenceSeconds = cadenceSeconds,
+                MaximumFileBytes = maximumFileBytes, CrawlMode = (int)creation.DiscoveryMode, ReconciliationCadenceSeconds = checked((long)creation.ReconciliationCadence.TotalSeconds),
                 PermissionEvidenceJson = operation.RootAdmission.PermissionEvidenceJson,
                 HealthEvidenceJson = SourceRootControlAuditEvidence.CreateHealthEvidence(operation.RootAdmission, configuration),
                 ConfigurationRevision = 1, CreatedAtUtc = now, UpdatedAtUtc = now
@@ -791,7 +791,8 @@ public sealed class SqlNativeOperationStore(
         }
         if (operation.Action == "source_sync")
         {
-            await EnqueueAsync(context, targets, rootIdValue, actor, now, requestKind: 0, SourceRootControlConfiguration.From(root!), cancellationToken);
+            await EnqueueAsync(context, targets, rootIdValue, actor, now, requestKind: Bool(payload, "fullContent", false) ? 5 : 0,
+                SourceRootControlConfiguration.From(root!), cancellationToken);
             return;
         }
         throw new NativeOperationException("invalid-corpus-mutation");
@@ -940,7 +941,7 @@ public sealed class SqlNativeOperationStore(
 
     private static bool IsRetryable(SourceScanJobEntity job, SourceScanRequestEntity request, SourceScanOutboxEntity outbox, DateTimeOffset now)
     {
-        if (request.RequestKind == SqlSourceVerificationStore.RequestKind && job.Reason == SqlSourceVerificationStore.FeatureOffReason) return false;
+        if (request.RequestKind == SqlSourceVerificationStore.RequestKind && !SourcePolicyDefaults.ChecksumVerificationEnabled) return false;
         var failed = job.State == (int)SourceScanJobState.Failed && request.State == (int)SourceScanRequestState.Failed;
         var expiredRunning = job.State == (int)SourceScanJobState.Running &&
             request.State == (int)SourceScanRequestState.Running &&

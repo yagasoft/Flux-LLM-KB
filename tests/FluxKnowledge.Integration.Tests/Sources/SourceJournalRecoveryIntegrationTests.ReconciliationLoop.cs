@@ -65,13 +65,13 @@ public sealed partial class SourceJournalRecoveryIntegrationTests
             {
                 await HintAsync();
                 await using var before = factory.CreateDbContext();
-                var pendingBefore = JsonSerializer.Serialize(await before.SourcePendingChanges.SingleAsync());
+                var pendingBefore = JsonSerializer.Serialize(await before.SourcePendingChanges.OrderBy(x => x.RelativePath).ToArrayAsync());
                 Assert.Equal(0, await coordinator.PumpAsync(default));
                 Assert.Null(await control.ClaimNextReleasedAsync("must-stay-idle", clock.Now, TimeSpan.FromMinutes(10), default));
                 await using var after = factory.CreateDbContext();
-                Assert.Equal(pendingBefore, JsonSerializer.Serialize(await after.SourcePendingChanges.SingleAsync()));
+                Assert.Equal(pendingBefore, JsonSerializer.Serialize(await after.SourcePendingChanges.OrderBy(x => x.RelativePath).ToArrayAsync()));
                 Assert.Equal(recoveryRequired, (await after.SourceRootScanStates.SingleAsync()).RecoveryRequired);
-                Assert.True((await after.SourcePendingChanges.SingleAsync()).Generation > plan.Generation);
+                Assert.True((await after.SourcePendingChanges.SingleAsync(x => x.RelativePath == ".")).Generation > plan.Generation);
             }
             clock.Now = completedAt + claim.SourceRoot.ReconciliationCadence;
             Assert.Equal(1, await coordinator.PumpAsync(default));
@@ -150,7 +150,13 @@ public sealed partial class SourceJournalRecoveryIntegrationTests
             Assert.Contains("SourceJournalCursorRejected", receipt.DetailsJson);
             Assert.Contains("1000", receipt.DetailsJson);
             Assert.All(ids, id => Assert.Contains(id.ToString(), receipt.DetailsJson, StringComparison.OrdinalIgnoreCase));
-            Assert.Equal(2, await verify.SourcePendingChanges.CountAsync());
+            Assert.Equal(4, await verify.SourcePendingChanges.CountAsync());
+            Assert.Equal(beforePending, JsonSerializer.Serialize(await verify.SourcePendingChanges.Where(x => x.RelativePath != ".").OrderBy(x => x.SourceRootId).ToArrayAsync()));
+            Assert.All(await verify.SourcePendingChanges.Where(x => x.RelativePath == ".").ToArrayAsync(), x =>
+            {
+                Assert.Equal(0, x.ReasonFlags & SourcePendingReasons.FullRecapture);
+                Assert.Equal(SourcePendingReasons.NamespaceMetadata | SourcePendingReasons.RemovalPending, x.ReasonFlags);
+            });
         }
     }
 

@@ -405,14 +405,53 @@ unique native-file roots and may overlap other SQL classes under that cap. Their
 cases remain serial within each class. Successful lexical/full-text consumers
 and fixtures with process-wide native state retain their isolation.
 The full-text/native isolation collections retain their nonparallel scheduling.
-Full-manifest fixtures retain all scale and historical membership rows. Their
-candidate and segment headers plus set-based membership inserts share the same
-transaction boundary, with exact metadata and segment-mapping parity checks.
+Routine manifest fixtures retain 70 segments and exact membership/rejection
+assertions with smaller inputs. The explicit scale case retains 100,001 members
+and twenty historical segments, including approximately two million historical
+links. Candidate and segment headers plus set-based membership inserts share the
+same transaction boundary, with exact metadata and segment-mapping parity checks.
 Pipeline resets batch ordered statements without adding a transaction around
 the reset; the first SQL failure stops later statements, and tracked singleton
-updates retain their existing `SaveChanges` boundary. Large dashboard fixtures
-keep their original row counts and use constrained set-based tail inserts with
-one transaction per 1,000 revisions. Hashes and rowversions remain SQL-generated.
+updates retain their existing `SaveChanges` boundary. Routine dashboard fixtures
+use 3,000 files with either 100 or 2,000 admitted jobs, preserving sparse and dense
+distributions, twelve concurrent overview/page pairs and the existing read
+deadlines. Explicit scale cases retain the original 30,000 files and 1,000 or
+20,000 jobs. Constrained set-based tail inserts keep one transaction per 1,000
+revisions; hashes and rowversions remain SQL-generated.
+
+The complete root-membership mutation matrix still runs in both phases. Equality,
+late mismatch, staged-only keys and cancellation cross actual 16,384-key windows;
+other metadata mutations use small fixtures. Routine root capture and guarded
+removal retain multi-page workloads, while the full-width 100,000-member capture
+remains an explicit scale case. Scoped retrieval retains exact-page boundaries
+and the 10,001-vector winner beyond the former cutoff; the overlapping 10,000
+variant is removed.
+
+Scale checks use the existing xUnit `Category=Scale` filter and require
+`FLUXKNOWLEDGE_TEST_SCALE=1`. Default closeout reports these cases as opt-in skips;
+it no longer qualifies their original large workloads on every feature. Run them
+after changes to the relevant SQL queries, indexes/migrations, paging, projection
+or fixture setup, and before claiming their scale/performance guarantees. Use the
+same restricted disposable SQL configuration and Release build as ordinary
+testing. Run the projects sequentially:
+
+```powershell
+$previousScale = $env:FLUXKNOWLEDGE_TEST_SCALE
+$env:FLUXKNOWLEDGE_TEST_SCALE = '1'
+try {
+    dotnet test tests/FluxKnowledge.Integration.Tests/FluxKnowledge.Integration.Tests.csproj -c Release --no-build --filter 'Category=Scale' --logger trx
+    if ($LASTEXITCODE -ne 0) { throw 'Integration scale qualification failed.' }
+    dotnet test tests/FluxKnowledge.Web.Tests/FluxKnowledge.Web.Tests.csproj -c Release --no-build --filter 'Category=Scale' --logger trx
+    if ($LASTEXITCODE -ne 0) { throw 'Web scale qualification failed.' }
+} finally {
+    $env:FLUXKNOWLEDGE_TEST_SCALE = $previousScale
+}
+```
+
+Dashboard scheduling/deadline and disclosure-recovery tests use controlled time.
+They assert the full two-second and fifteen-second boundaries, cancellation and
+cleanup without waiting through those intervals. Application defaults and actual
+timeouts are unchanged.
 
 Per-run JSON summaries, step logs, TRX files and SQL fixture phase timings remain
 under `.agents/run-logs/closeout-<run-id>/`, outside the disposable candidate.

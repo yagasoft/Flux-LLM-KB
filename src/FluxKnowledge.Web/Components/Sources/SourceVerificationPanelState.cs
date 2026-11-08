@@ -50,6 +50,8 @@ public sealed class SourceVerificationPanelState(ISourceVerificationStore store,
 
     public Task VerifyAsync(Guid rootId) => ExecuteAsync(rootId, "source_verify", new { rootId }, "Verification was requested.");
 
+    public Task FullRescanAsync(Guid rootId) => ExecuteAsync(rootId, "source_sync", new { rootId, fullContent = true }, "Full content rescan was requested.");
+
     public Task SavePolicyAsync(Guid rootId, SourceVerificationPolicy policy) => ExecuteAsync(rootId,
         "source_verification_set", new { rootId, policy }, "Verification schedule was saved.");
 

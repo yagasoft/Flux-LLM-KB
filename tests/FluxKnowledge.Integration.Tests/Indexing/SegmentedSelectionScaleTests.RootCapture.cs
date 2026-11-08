@@ -19,22 +19,27 @@ namespace FluxKnowledge.Integration.Tests.Indexing;
 public sealed partial class SegmentedSelectionScaleTests
 {
     [NativeSqlServerFact]
+    public Task Root_capture_and_membership_commands_remain_bounded_across_pages()
+        => VerifyRootCaptureAsync(5, 16_385);
+
+    [SqlServerScaleFact]
+    [Trait("Category", "Scale")]
     public async Task Root_capture_and_membership_commands_remain_bounded_at_production_scale_without_extending_the_writer_deadline()
         // The strict comparison run also proves the normal 30-second command
         // budget, while retaining the independent competing-writer deadline.
         // Avoid rebuilding the same full-width 100k-member fixture a second time.
-        => await VerifyRootCaptureAsync(5);
+        => await VerifyRootCaptureAsync(5, 100_000, readScaleOverrides: true);
 
-    private async Task VerifyRootCaptureAsync(int comparisonCommandSeconds)
+    private async Task VerifyRootCaptureAsync(int comparisonCommandSeconds, int additionalMembers, bool readScaleOverrides = false)
     {
         var scaleFixture = new NativeSqlServerFixture();
         await scaleFixture.InitializeAsync();
         try
         {
             await SqlTestData.ClearPhase3SourceDataAsync(scaleFixture);
-            var additionalMembers = Environment.GetEnvironmentVariable("FLUXKNOWLEDGE_ROOT_SCALE_MEMBERS") is { } configured
-                ? int.Parse(configured, System.Globalization.CultureInfo.InvariantCulture) : 100_000;
-            var unpublishedVectors = Environment.GetEnvironmentVariable("FLUXKNOWLEDGE_ROOT_SCALE_UNPUBLISHED") is { } unpublished
+            if (readScaleOverrides && Environment.GetEnvironmentVariable("FLUXKNOWLEDGE_ROOT_SCALE_MEMBERS") is { } configured)
+                additionalMembers = int.Parse(configured, System.Globalization.CultureInfo.InvariantCulture);
+            var unpublishedVectors = readScaleOverrides && Environment.GetEnvironmentVariable("FLUXKNOWLEDGE_ROOT_SCALE_UNPUBLISHED") is { } unpublished
                 ? int.Parse(unpublished, System.Globalization.CultureInfo.InvariantCulture) : 0;
             var fence = new MetadataFenceObserver(message => output.WriteLine(message));
             var comparison = new RootComparisonDeadline(comparisonCommandSeconds, message => output.WriteLine(message));
@@ -122,7 +127,7 @@ public sealed partial class SegmentedSelectionScaleTests
             }
             await new SqlSourceScanStore(environment.Factory, TimeProvider.System).SuppressUnseenAsync(new SourceRootId(root),
                 retainedRevisions.Select(value => new SourceRevisionId(value)).ToHashSet(), CancellationToken.None);
-            var additionalOwners = Environment.GetEnvironmentVariable("FLUXKNOWLEDGE_ROOT_SCALE_OWNERS") is { } owners
+            var additionalOwners = readScaleOverrides && Environment.GetEnvironmentVariable("FLUXKNOWLEDGE_ROOT_SCALE_OWNERS") is { } owners
                 ? int.Parse(owners, System.Globalization.CultureInfo.InvariantCulture) : 0;
             if (additionalOwners > 0)
             {
@@ -147,6 +152,7 @@ public sealed partial class SegmentedSelectionScaleTests
             var candidate = await after.IndexPublicationCandidates.SingleAsync(value => value.Id == prepared.Id);
             Assert.True(candidate.WorklistComplete);
             Assert.Equal(expected, candidate.BeforeCount);
+            Assert.True(candidate.BeforeCount > 16_384);
             Assert.Equal(expected - 1, candidate.AfterCount);
             Assert.NotEqual(candidate.BeforeChecksum, candidate.AfterChecksum);
             Assert.Equal(expected, await after.IndexCandidateMembers.LongCountAsync(value => value.CandidateId == prepared.Id && value.Phase == 0));
@@ -272,7 +278,7 @@ public sealed partial class SegmentedSelectionScaleTests
 
     [NativeSqlServerTheory]
     [InlineData(0)]
-    [InlineData(100_000)]
+    [InlineData(16_385)]
     public async Task Guarded_removal_between_capture_pages_commits_and_invalidates_the_entire_candidate(int members)
     {
         await SqlTestData.ClearPhase3SourceDataAsync(fixture);
@@ -288,6 +294,7 @@ public sealed partial class SegmentedSelectionScaleTests
             var identity = await seed.PipelineRecords.Where(value => value.Id == retained).Select(value => value.SourceIdentityId).SingleAsync();
             var vector = await seed.CurrentIndexMembers.Where(value => value.SourceIdentityId == identity).Select(value => value.VectorId).FirstAsync();
             for (var count = 0; count < members; count += 25_000) await SeedUnrelatedAsync(seed, vector, Math.Min(25_000, members - count));
+            if (members > 0) Assert.True(await seed.CurrentIndexMembers.CountAsync() > 16_384);
             var state = await seed.IndexState.SingleAsync();
             state.CorpusVersion++;
             seed.IndexProjectionChanges.Add(new()

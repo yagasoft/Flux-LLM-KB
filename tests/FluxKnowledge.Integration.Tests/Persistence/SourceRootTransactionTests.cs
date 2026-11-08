@@ -203,7 +203,7 @@ public sealed class SourceRootTransactionTests(NativeSqlServerFixture fixture)
 
     private static SourceRootCreateRequest Request(string path) => new(
         path, "Transaction corpus", true, ["*.txt"], ["bin/**"], false, 1024,
-        ["text/plain"], TimeSpan.FromMinutes(15), "integration-test");
+        ["text/plain"], TimeSpan.FromDays(7), "integration-test");
 
     private static SourceRootPathValidation Validation(string identityFingerprint) => new(
         "C:\\source-transaction-tests\\identity",

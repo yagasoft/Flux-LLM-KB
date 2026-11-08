@@ -13,7 +13,6 @@ public sealed class SqlSourceRootWatchStore(IDbContextFactory<FluxKnowledgeDbCon
     SourceJournalOptions? journalOptions = null) : ISourceRootWatchStore
 {
     private SourceJournalOptions JournalOptions { get; } = journalOptions ?? new();
-    private readonly WindowsSourceJournalSealQualification _sealQualifications = new(journalOptions ?? new());
     private static readonly TimeSpan QuietPeriod = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan MaximumDelay = TimeSpan.FromSeconds(30);
 
@@ -145,15 +144,9 @@ public sealed class SqlSourceRootWatchStore(IDbContextFactory<FluxKnowledgeDbCon
             (scan.Mode is "Journal" or "JournalPartial" || scan.Mode == "Baselining" && scan.RecoveryInProgress) &&
             scan.PolicyFingerprint == SqlRepositoryWorkRecovery.Policy(root);
         var hinted = signal.Paths ?? [];
-        var profile = _sealQualifications.GetProfile(SqlSourceScanStore.ParseAdmissionIdentityFingerprint(root.HealthEvidenceJson), root.CanonicalPath);
-        var keys = hinted.Select(x => SqlSourceChangeJournalStore.PathKey(x.RelativePath)).ToArray();
-        var sealedPaths = healthy && profile is not null
-            ? await context.SourceInventoryEntries.Where(x => x.SourceRootId == root.Id && x.BaselineEpoch == scan.BaselineEpoch &&
-                !x.IsDirectory && x.IsSealed && x.SealProfileId == profile && keys.Contains(x.PathFingerprint))
-                .Select(x => x.PathFingerprint).ToArrayAsync(ct).ConfigureAwait(false) : [];
-        IReadOnlyList<SourceWatchPathHint> paths = hinted.Where(x => !healthy || x.IsSubtree ||
-            !sealedPaths.Contains(SqlSourceChangeJournalStore.PathKey(x.RelativePath), StringComparer.Ordinal)).ToArray();
-        var uncertain = signal.PathsIncomplete || hinted.Count == 0 && !membership;
+        IReadOnlyList<SourceWatchPathHint> paths = hinted;
+        var uncertain = signal.PathsIncomplete || hinted.Count == 0 && !membership ||
+            hinted.Any(x => x.RelativePath == "." && x.IsSubtree);
         if (healthy && paths.Count == 0 && !uncertain && !membership)
         {
             OperatorEventAppender.Add(context, new OperatorEventDraft("watch.batch_detected", "watch", "information", "source-watcher", now,
@@ -163,15 +156,13 @@ public sealed class SqlSourceRootWatchStore(IDbContextFactory<FluxKnowledgeDbCon
         var pending = await context.SourcePendingChanges.Where(x => x.SourceRootId == root.Id).ToListAsync(ct).ConfigureAwait(false);
         var incoming = paths.Select(x => SqlSourceChangeJournalStore.PathKey(x.RelativePath)).ToHashSet(StringComparer.Ordinal);
         if (membership || uncertain) incoming.Add(SqlSourceChangeJournalStore.PathKey("."));
-        if (SqlSourcePendingWork.HasFullRecapture(pending) ||
-            pending.Count + incoming.Count(key => !pending.Any(x => x.PathFingerprint == key)) > SqlSourcePendingWork.MaximumPaths)
-        {
-            SqlSourcePendingWork.Coalesce(context, scan, pending, now, unjournaled: true, firstObserved: batch.FirstSignalAtUtc);
-            return true;
-        }
+        var additions = incoming.Count(key => !pending.Any(x => x.PathFingerprint == key));
+        if (additions > 0 && pending.Count + additions > SqlSourcePendingWork.MaximumPaths)
+            throw new SourcePendingCapacityException();
         var generation = ++scan.Generation;
         foreach (var hint in paths) Merge(hint.RelativePath,
-            (healthy && hint.IsSubtree ? SourcePendingReasons.ScopedNamespace : 1) | SourcePendingReasons.RemovalPending, hint.IsSubtree, now);
+            (healthy && hint.IsSubtree ? SourcePendingReasons.ScopedNamespace : 1) | SourcePendingReasons.RemovalPending |
+            (hint.RelativePath != "." ? SourcePendingReasons.FileEvent : 0), hint.IsSubtree, now);
         if (membership) Merge(".", SourcePendingReasons.GitMembership, false, now);
         if (uncertain)
         {
@@ -200,7 +191,8 @@ public sealed class SqlSourceRootWatchStore(IDbContextFactory<FluxKnowledgeDbCon
             item.ReasonFlags |= reasons;
             item.IsSubtree |= subtree;
             item.Generation = generation;
-            if (new JournalChange(0, "", "", "", (uint)reasons, false).ContentChanged) item.LastUnjournaledGeneration = generation;
+            if ((reasons & SourcePendingReasons.FileEvent) != 0 || new JournalChange(0, "", "", "", (uint)reasons, false).ContentChanged)
+                item.LastUnjournaledGeneration = generation;
             item.FirstObservedAtUtc ??= batch.FirstSignalAtUtc;
             if (item.NotBeforeUtc is null || item.NotBeforeUtc > due) item.NotBeforeUtc = due;
         }
@@ -210,19 +202,17 @@ public sealed class SqlSourceRootWatchStore(IDbContextFactory<FluxKnowledgeDbCon
         ClaimedSourceWatchBatch batch, DateTimeOffset now, CancellationToken ct)
     {
         var signal = batch.Signal;
-        var paths = signal?.Paths;
-        var hints = signal is null || signal.PathsIncomplete || paths is null || paths.Count == 0
-            ? [new SourceWatchPathHint(".", true)] : paths;
+        var paths = signal?.Paths ?? [];
+        var uncertain = signal is null || signal.PathsIncomplete || paths.Count == 0;
+        var hints = paths.Concat(uncertain ? [new SourceWatchPathHint(".", true)] : Array.Empty<SourceWatchPathHint>())
+            .DistinctBy(x => x.RelativePath, StringComparer.OrdinalIgnoreCase).ToArray();
         var pending = await db.SourcePendingChanges.Where(x => x.SourceRootId == root.Id).ToListAsync(ct).ConfigureAwait(false);
         var state = await db.SourceRootScanStates.SingleOrDefaultAsync(x => x.SourceRootId == root.Id, ct).ConfigureAwait(false);
         var generation = Math.Max(state?.Generation ?? 0, pending.Select(x => x.Generation).DefaultIfEmpty(0).Max()) + 1;
         if (state is not null) state.Generation = generation;
-        if (SqlSourcePendingWork.HasFullRecapture(pending) || pending.Count + hints.Count > SqlSourcePendingWork.MaximumPaths)
-        {
-            SqlSourcePendingWork.Coalesce(db, state ?? new SourceRootScanStateEntity { SourceRootId = root.Id, Generation = generation, Mode = "Legacy" },
-                pending, now, unjournaled: true, firstObserved: batch.FirstSignalAtUtc);
-            return;
-        }
+        if (uncertain && state is not null) { state.NamespaceComplete = false; state.NamespaceGeneration++; }
+        if (pending.Count + hints.Count(x => pending.All(p => p.PathFingerprint != SqlSourceChangeJournalStore.PathKey(x.RelativePath))) > SqlSourcePendingWork.MaximumPaths)
+            throw new SourcePendingCapacityException();
         foreach (var hint in hints)
         {
             var path = SqlSourceChangeJournalStore.NormaliseRelative(hint.RelativePath);
@@ -234,9 +224,14 @@ public sealed class SqlSourceRootWatchStore(IDbContextFactory<FluxKnowledgeDbCon
                 db.SourcePendingChanges.Add(item); pending.Add(item);
             }
             item.IsSubtree |= hint.IsSubtree;
-            item.ReasonFlags |= SourcePendingReasons.RemovalPending;
+            item.ReasonFlags |= SourcePendingReasons.RemovalPending | (path == "." ? SourcePendingReasons.NamespaceMetadata :
+                SourcePendingReasons.FileEvent | (hint.IsSubtree ? SourcePendingReasons.ScopedNamespace : 0));
             item.Generation = generation;
-            item.NotBeforeUtc = now;
+            if (path != ".") item.LastUnjournaledGeneration = generation;
+            item.LastContentUsn ??= 0;
+            var metadataDue = (state?.LastReconciliationAtUtc ?? root.LastScanCompletedAtUtc ?? batch.FirstSignalAtUtc)
+                .Add(SourcePolicyDefaults.MetadataReconciliationCadence);
+            item.NotBeforeUtc = path == "." && metadataDue > now ? metadataDue : now;
             item.FirstObservedAtUtc ??= batch.FirstSignalAtUtc;
         }
     }

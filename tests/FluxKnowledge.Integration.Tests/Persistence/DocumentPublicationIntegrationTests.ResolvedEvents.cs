@@ -133,7 +133,7 @@ public sealed partial class DocumentPublicationIntegrationTests
         {
             Id = rootId, CanonicalPath = "C:\\office-event-proof", DisplayName = "Office event proof", State = 0,
             IncludePatternsJson = "[]", ExcludePatternsJson = "[]", AllowedClassificationsJson = "[]",
-            MaximumFileBytes = 256 * 1024 * 1024, ReconciliationCadenceSeconds = 900, ConfigurationRevision = 1,
+            MaximumFileBytes = 256 * 1024 * 1024, ReconciliationCadenceSeconds = SourcePolicyDefaults.MetadataReconciliationSeconds, ConfigurationRevision = 1,
             CreatedAtUtc = now, UpdatedAtUtc = now
         });
         context.SourceRevisions.Add(new SourceRevisionEntity

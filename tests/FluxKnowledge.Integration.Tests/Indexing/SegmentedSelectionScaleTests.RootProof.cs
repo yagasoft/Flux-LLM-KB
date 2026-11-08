@@ -47,12 +47,18 @@ public sealed partial class SegmentedSelectionScaleTests
             .Select(value => value.VectorId).FirstAsync();
         var source = await seed.PipelineRecords.Where(value => value.Id == record).Select(value => value.SourceIdentityId).SingleAsync();
         var rooted = await seed.CurrentIndexMembers.Where(value => value.SourceIdentityId == source).SingleAsync();
-        await SeedUnrelatedAsync(seed, unrelated, 17_000);
+        // Keep every mutation in both phases. Equality, a late mismatch, staged
+        // keys and cancellation also cross real raw-key pages; the remaining
+        // metadata mutations need only a small, independently reset catalogue.
+        var crossesPages = difference is "equal" or "checksum" or "staged-only" or "cancel";
+        var unrelatedCount = crossesPages ? 17_000 : 8;
+        await SeedUnrelatedAsync(seed, unrelated, unrelatedCount);
         await SeedUnrelatedAsync(seed, rooted.VectorId, 2);
-        await SeedUnrelatedAsync(seed, unrelated, 17_000);
+        await SeedUnrelatedAsync(seed, unrelated, unrelatedCount);
         var root = rooted.SourceRootId!.Value;
         var late = await seed.CurrentIndexMembers.Where(value => value.SourceRootId == root).MaxAsync(value => value.VectorId);
-        Assert.True(late > 16_384);
+        if (crossesPages)
+            Assert.True(await seed.Vectors.CountAsync(value => value.VectorId < late) > 16_384);
         var state = await seed.IndexState.AsNoTracking().SingleAsync();
         var expected = await seed.CurrentIndexMembers.LongCountAsync(value => value.SourceRootId == root);
         var candidate = new IndexPublicationCandidateEntity
@@ -115,6 +121,7 @@ public sealed partial class SegmentedSelectionScaleTests
         var operation = Assert.IsAssignableFrom<Task<bool>>(method.Invoke(null, [comparison, candidate, phase, cancellation.Token]));
         if (difference == "cancel") await Assert.ThrowsAnyAsync<OperationCanceledException>(() => operation);
         else Assert.Equal(difference == "equal", await operation);
+        if (crossesPages) Assert.True(observer.ComparedWindows >= 2);
         if (difference != "cancel")
             Assert.Null(await comparison.Database.SqlQuery<int?>($"SELECT OBJECT_ID(N'tempdb..#RootEligibleArtifacts') AS [Value]").SingleAsync());
         await transaction.RollbackAsync();
@@ -124,11 +131,15 @@ public sealed partial class SegmentedSelectionScaleTests
 
     private sealed class CancelRootComparison(CancellationTokenSource cancellation, bool enabled) : DbCommandInterceptor
     {
+        public int ComparedWindows { get; private set; }
         public override ValueTask<DbDataReader> ReaderExecutedAsync(DbCommand command, CommandExecutedEventData eventData,
             DbDataReader result, CancellationToken cancellationToken = default)
         {
-            if (enabled && command.Parameters.Cast<DbParameter>().Any(value => value.ParameterName == "@rootProofCandidate"))
-                cancellation.Cancel();
+            if (command.Parameters.Cast<DbParameter>().Any(value => value.ParameterName == "@rootProofCandidate"))
+            {
+                ComparedWindows++;
+                if (enabled && ComparedWindows == 2) cancellation.Cancel();
+            }
             return ValueTask.FromResult(result);
         }
     }

@@ -51,6 +51,7 @@ public sealed partial class SourceJournalSealIntegrationTests
         await using (var db = scenario.Factory.CreateDbContext())
         {
             // Put the independent deadline just ahead, within this same ten-minute lease.
+            (await db.SourceRootScanStates.SingleAsync()).LastReconciliationAtUtc =
             (await db.SourceRootConfigurations.SingleAsync()).LastScanCompletedAtUtc =
                 scenario.Clock.Now - root.ReconciliationCadence + TimeSpan.FromSeconds(30);
             await db.SaveChangesAsync();

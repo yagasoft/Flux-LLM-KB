@@ -28,15 +28,11 @@ public sealed partial class SqlSourceIncrementalCoordinator
     {
         var evidence = enumerationEvidence.ToList();
         using var rootAuthority = observations.OpenRoot(root);
-        JournalCapability? closingBarrier = null;
-        if (plan.Cursor is { } cursor)
-        {
-            closingBarrier = await reader.QueryAsync(cursor.VolumeIdentity, ct).ConfigureAwait(false);
-            await DrainThroughAsync(closingBarrier, ct).ConfigureAwait(false);
-        }
         var closingGit = root.DiscoveryMode == SourceDiscoveryMode.GitTracked
             ? RequireGitCompletionInventory(root, inventory, await new GitTrackedSourceDiscovery().ReadAsync(root.CanonicalPath, ct).ConfigureAwait(false))
             : null;
+        if (plan.GitInventoryGeneration is { } plannedGit && closingGit?.Generation != plannedGit)
+            throw new SourceSnapshotChangedException("GitInventoryChanged");
         var seenIds = seen.Select(x => x.Value).ToArray();
         var seenSet = seenIds.ToHashSet();
         bool full = false;
@@ -126,7 +122,7 @@ public sealed partial class SqlSourceIncrementalCoordinator
                                 revision.RetentionEvidenceJson = JsonSerializer.Serialize(new SourceAuthoritativeRemovalWitness(1,
                                     root.Id.Value, revision.Id, relative, root.ConfigurationRevision, state.BaselineEpoch, state.RecoveryGeneration,
                                     request.Id.Value, plan.ManifestId, request.Lease!.Generation, excluded ? "OutOfScope" : "Deleted",
-                                    revision.SuppressedAtUtc.Value, closingBarrier?.JournalId.ToString("X16"), closingBarrier?.NextUsn ?? 0,
+                                    revision.SuppressedAtUtc.Value, null, 0,
                                     closingGit?.Repository.Identity, closingGit?.Generation));
                                 revision.CurrentDiscoveryEvidenceJson = SqlRepositoryWorkRecovery.Withdraw();
                                 scopes.Add(new(3, revision.SourceRootId));
@@ -158,7 +154,7 @@ public sealed partial class SqlSourceIncrementalCoordinator
             if (plan.IsBaseline)
             {
                 state.LastBaselineAtUtc = time.GetUtcNow();
-                if (!plan.IsFallback)
+                if (namespaceComplete)
                 {
                     state.RecoveryRequired = false;
                     if (state.Mode == "Baselining") state.Mode = "JournalPartial";
@@ -204,7 +200,6 @@ public sealed partial class SqlSourceIncrementalCoordinator
             if (!plan.IsFallback && !SqlSourceIncrementalState.RequiresBaseline(state) && state.UnresolvedThroughUsn is null &&
                 !deferred.Any(NamespaceIssue) && !remaining.Any(x => (x.ReasonFlags & SourcePendingReasons.NamespaceMask) != 0))
                 state.NamespaceComplete = true;
-            if (plan.IsFallback) state.NamespaceComplete = false;
             if (plan.IsNamespaceSweep)
                 foreach (var item in remaining.Where(x => (x.ReasonFlags & ~SourcePendingReasons.RemovalPending) == SourcePendingReasons.NamespaceMetadata))
                 {
@@ -232,9 +227,8 @@ public sealed partial class SqlSourceIncrementalCoordinator
         bool InDeclaredScope(string relative) => plan.IsBaseline || plan.Targets.Any(x => x.HasCaptureScope &&
             SourcePathScope.Contains(x.RelativePath, x.IsSubtree, relative));
 
-        bool HasCompleteNamespace(SourceRootScanStateEntity state) => !plan.IsFallback && plan.IsNamespaceSweep &&
-            !evidence.Any(NamespaceIssue) && state.NamespaceGeneration == plan.NamespaceGeneration && closingBarrier is not null &&
-            state.CoveredUsn >= closingBarrier.NextUsn && (state.UnresolvedThroughUsn is null || state.UnresolvedThroughUsn <= closingBarrier.NextUsn);
+        bool HasCompleteNamespace(SourceRootScanStateEntity state) => plan.IsNamespaceSweep &&
+            !evidence.Any(NamespaceIssue) && state.NamespaceGeneration == plan.NamespaceGeneration;
     }
 
     private static bool NamespaceIssue(SourceEnumerationEvidence issue) => issue.NamespaceIncomplete ||

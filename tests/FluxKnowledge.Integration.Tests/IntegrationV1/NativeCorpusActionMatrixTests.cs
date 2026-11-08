@@ -886,7 +886,7 @@ public sealed class NativeCorpusActionMatrixTests(NativeSqlServerFixture fixture
         return JsonSerializer.Serialize(snapshot);
     }
 
-    private static SourceRootConfigurationEntity Root(Guid id) => new() { Id = id, CanonicalPath = $"C:\\native-action-matrix\\{id:N}", DisplayName = "Root", State = (int)SourceRootState.Enabled, Recursive = true, IncludePatternsJson = "[]", ExcludePatternsJson = "[]", FollowLinks = false, MaximumFileBytes = 1024, AllowedClassificationsJson = "[]", CrawlMode = 0, ReconciliationCadenceSeconds = 900, ConfigurationRevision = 1, CreatedAtUtc = Now, UpdatedAtUtc = Now, HealthEvidenceJson = "{\"physicalIdentity\":{\"identityFingerprint\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}}" };
+    private static SourceRootConfigurationEntity Root(Guid id) => new() { Id = id, CanonicalPath = $"C:\\native-action-matrix\\{id:N}", DisplayName = "Root", State = (int)SourceRootState.Enabled, Recursive = true, IncludePatternsJson = "[]", ExcludePatternsJson = "[]", FollowLinks = false, MaximumFileBytes = 1024, AllowedClassificationsJson = "[]", CrawlMode = 0, ReconciliationCadenceSeconds = 604800, ConfigurationRevision = 1, CreatedAtUtc = Now, UpdatedAtUtc = Now, HealthEvidenceJson = "{\"physicalIdentity\":{\"identityFingerprint\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}}" };
 
     private static string? EvidenceValue(string? evidenceJson, string property)
     {

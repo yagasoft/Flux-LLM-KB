@@ -177,7 +177,7 @@ public sealed partial class DeletedSourceRecoveryIntegrationTests(NativeSqlServe
         using var artifacts = new ContentAddressedSourceArtifactStore(Path.Combine(scenario.Files, "unused-retained"));
         var coordinator = new SqlSourceIncrementalCoordinator(scenario.Factory, TimeProvider.System, reader, observations, artifacts, options);
         var recovery = new SqlSourceWorkRecovery(scenario.Factory, admission,
-            new SqlSourceRemovalReconciler(scenario.Factory, TimeProvider.System, observations), reader, observations, coordinator, options, TimeProvider.System);
+            new SqlSourceRemovalReconciler(scenario.Factory, TimeProvider.System, observations), observations, TimeProvider.System);
         var claims = new SqlJobClaimStore(scenario.Factory, sourceAdmission: admission);
         Assert.Null(await claims.ClaimWorkerAsync("before-startup", DateTimeOffset.UtcNow, DateTimeOffset.UtcNow.AddMinutes(1), default));
         await recovery.AdvanceAsync(default);
@@ -186,7 +186,9 @@ public sealed partial class DeletedSourceRecoveryIntegrationTests(NativeSqlServe
         await using var verify = scenario.Factory.CreateDbContext();
         Assert.NotNull((await verify.SourceRevisions.SingleAsync(x => x.Id == removedId)).SuppressedAtUtc);
         Assert.Null((await verify.SourceRevisions.SingleAsync(x => x.Id == keeperId)).SuppressedAtUtc);
-        if (journal) Assert.Equal(200, (await verify.SourceVolumeJournalCheckpoints.SingleAsync()).NextUsn);
+        // Startup authorises known paths using current root/absence guards. Journal intake
+        // is independent and must not claim cursor progress on behalf of that check.
+        if (journal) Assert.Equal(100, (await verify.SourceVolumeJournalCheckpoints.SingleAsync()).NextUsn);
     }
 
     [NativeSqlServerTheory]

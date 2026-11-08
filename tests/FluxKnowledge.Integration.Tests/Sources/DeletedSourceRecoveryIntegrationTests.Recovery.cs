@@ -126,8 +126,7 @@ public sealed partial class DeletedSourceRecoveryIntegrationTests
         var options = new SourceJournalOptions();
         var reader = new WindowsSourceChangeJournalReader();
         var admission = new SourceWorkAdmission();
-        var recovery = new SqlSourceWorkRecovery(scenario.Factory, admission, removals, reader, observations,
-            new SqlSourceIncrementalCoordinator(scenario.Factory, TimeProvider.System, reader, observations, artifacts, options), options, TimeProvider.System);
+        var recovery = new SqlSourceWorkRecovery(scenario.Factory, admission, removals, observations, TimeProvider.System);
         await recovery.AdvanceAsync(default);
         Assert.True(await db.SourcePendingChanges.Where(x => x.Id == pendingId).Select(x => x.Generation > oldGeneration).SingleAsync());
         for (var turn = 0; turn < 4 && !admission.IsAdmitted(scenario.Claim.SourceRoot.Id.Value, scenario.Claim.SourceRoot.ConfigurationRevision); turn++)

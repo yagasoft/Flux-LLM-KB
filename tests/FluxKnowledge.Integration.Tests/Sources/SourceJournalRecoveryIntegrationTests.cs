@@ -27,7 +27,7 @@ public sealed partial class SourceJournalRecoveryIntegrationTests(NativeSqlServe
     [InlineData("gap")]
     [InlineData("unavailable")]
     [InlineData("epoch")]
-    public async Task Capture_barrier_failure_keeps_retention_but_cannot_publish_an_observation_proof(string fault)
+    public async Task Capture_needs_no_journal_proof_but_a_real_epoch_change_still_fences_its_metadata_receipt(string fault)
     {
         var area = NewArea();
         var files = Path.Combine(area, "Sources");
@@ -51,17 +51,27 @@ public sealed partial class SourceJournalRecoveryIntegrationTests(NativeSqlServe
                 await invalidate.SaveChangesAsync(ct);
             } };
             var coordinator = new SqlSourceIncrementalCoordinator(factory, TimeProvider.System, reader,
-                new WindowsSourceObservationReader(), artifacts, new() { Enabled = true, ApprovedVolumes = [volume] });
+                new WindowsSourceObservationReader(), artifacts, new() { Enabled = true, ApprovedVolumes = [volume] })
+            {
+                BeforeCaptureAttestation = fault == "epoch" ? () =>
+                {
+                    using var db = factory.CreateDbContext();
+                    var state = db.SourceRootScanStates.Single(x => x.SourceRootId == claim.SourceRoot.Id.Value);
+                    SqlSourceIncrementalState.InvalidateCoverage(state, "ancestor-authority-changed", 100);
+                    db.SaveChanges();
+                } : null
+            };
             var worker = new SourceScanWorker(new LocalSourceEnumerator(), control, artifacts,
                 new SqlSourceActivityStore(factory, TimeProvider.System), incrementalCoordinator: coordinator);
-            var error = await Assert.ThrowsAnyAsync<IOException>(() => worker.ScanAsync(claim.SourceRoot, claim.ScanRequest, default).AsTask());
-            if (fault == "gap") Assert.IsType<SourceJournalGapException>(error);
-            if (fault == "epoch") Assert.IsType<SourceSnapshotChangedException>(error);
+            if (fault == "epoch")
+                await Assert.ThrowsAsync<SourceSnapshotChangedException>(() => worker.ScanAsync(claim.SourceRoot, claim.ScanRequest, default).AsTask());
+            else
+                await worker.ScanAsync(claim.SourceRoot, claim.ScanRequest, default);
             await using var verify = factory.CreateDbContext();
             Assert.Equal(1, await verify.SourceArtifacts.CountAsync());
             Assert.Equal(1, await verify.SourceRevisions.CountAsync(x => x.SuppressedAtUtc == null));
-            Assert.False(await verify.SourceInventoryEntries.AnyAsync(x => x.SourceRootId == claim.SourceRoot.Id.Value && !x.IsDirectory));
-            Assert.False(await verify.SourceActivities.AnyAsync());
+            Assert.Equal(fault != "epoch", await verify.SourceInventoryEntries.AnyAsync(x => x.SourceRootId == claim.SourceRoot.Id.Value && !x.IsDirectory));
+            Assert.Equal(fault != "epoch", await verify.SourceActivities.AnyAsync());
         }
         finally { Directory.Delete(area, true); }
     }
@@ -114,7 +124,7 @@ public sealed partial class SourceJournalRecoveryIntegrationTests(NativeSqlServe
             Assert.True(pending.Generation > obligation.Generation);
             var state = await verify.SourceRootScanStates.SingleAsync();
             Assert.Equal("Fallback", state.Mode);
-            Assert.True(state.RecoveryRequired);
+            Assert.False(state.RecoveryRequired); // The completed metadata baseline does not require continuous journal proof.
         }
         finally { Directory.Delete(area, true); }
     }
@@ -122,7 +132,7 @@ public sealed partial class SourceJournalRecoveryIntegrationTests(NativeSqlServe
     [NativeSqlServerTheory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task New_uncertainty_during_namespace_completion_survives_without_invalidating_covered_content(bool scopedWork)
+    public async Task Unresolved_volume_evidence_does_not_fence_metadata_but_a_known_later_namespace_event_survives(bool scopedWork)
     {
         var area = NewArea();
         Directory.CreateDirectory(area);
@@ -146,20 +156,30 @@ public sealed partial class SourceJournalRecoveryIntegrationTests(NativeSqlServe
             {
                 await using var update = factory.CreateDbContext();
                 var current = await update.SourceRootScanStates.SingleAsync(x => x.SourceRootId == claim.SourceRoot.Id.Value);
-                var newer = await update.SourcePendingChanges.SingleAsync(x => x.SourceRootId == claim.SourceRoot.Id.Value);
+                var newer = new FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.SourcePendingChangeEntity { Id = Guid.NewGuid(), SourceRootId = claim.SourceRoot.Id.Value, RelativePath = ".", PathFingerprint = SqlSourceChangeJournalStore.PathKey("."), IsSubtree = true, ReasonFlags = SourcePendingReasons.NamespaceMetadata | SourcePendingReasons.RemovalPending };
+                update.SourcePendingChanges.Add(newer);
+                current.NamespaceGeneration++;
                 newer.ReasonFlags |= SourcePendingReasons.ScopedNamespace;
                 newer.Generation = ++current.Generation;
                 newer.NotBeforeUtc = DateTimeOffset.UtcNow;
                 await update.SaveChangesAsync();
             }
-            Assert.False(await coordinator.CompleteAsync(claim.SourceRoot, claim.ScanRequest, plan, [], [], new HashSet<SourceRevisionId>(), null, default));
+            Assert.Equal(!scopedWork, await coordinator.CompleteAsync(claim.SourceRoot, claim.ScanRequest, plan, [], [], new HashSet<SourceRevisionId>(), null, default));
             await using var verify = factory.CreateDbContext();
             var state = await verify.SourceRootScanStates.SingleAsync(x => x.SourceRootId == claim.SourceRoot.Id.Value);
             Assert.Equal(plan.BaselineEpoch, state.BaselineEpoch);
             Assert.Equal(plan.RecoveryGeneration, state.RecoveryGeneration);
+            if (!scopedWork)
+            {
+                Assert.Equal(plan.NamespaceGeneration, state.NamespaceGeneration);
+                Assert.True(state.NamespaceComplete);
+                Assert.False(state.RecoveryRequired);
+                Assert.Empty(await verify.SourcePendingChanges.ToArrayAsync());
+                return;
+            }
             Assert.True(state.NamespaceGeneration > plan.NamespaceGeneration);
             Assert.False(state.NamespaceComplete);
-            Assert.Equal("JournalPartial", state.Mode);
+            Assert.Equal("BaselineRequired", state.Mode);
             var debt = Assert.Single(await verify.SourcePendingChanges.Where(x => x.SourceRootId == claim.SourceRoot.Id.Value).ToArrayAsync());
             Assert.Equal(SourcePendingReasons.NamespaceMetadata | SourcePendingReasons.RemovalPending | (scopedWork ? SourcePendingReasons.ScopedNamespace : 0), debt.ReasonFlags);
             if (scopedWork)

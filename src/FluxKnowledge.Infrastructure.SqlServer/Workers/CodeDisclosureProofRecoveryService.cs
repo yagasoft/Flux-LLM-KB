@@ -10,7 +10,7 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Workers;
 public sealed class CodeDisclosureProofRecoveryService(
     ICodeDisclosureProofStore store, CsharpDisclosureProofBuilder builder,
     IDeploymentValidationHold hold, ILogger<CodeDisclosureProofRecoveryService> logger,
-    IDatabaseStartupReadiness? databaseStartupReadiness = null) : BackgroundService
+    IDatabaseStartupReadiness? databaseStartupReadiness = null, TimeProvider? timeProvider = null) : BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -40,7 +40,8 @@ public sealed class CodeDisclosureProofRecoveryService(
                     logger.LogWarning("Code disclosure projection deferred after {FailureType}; canonical publication is unchanged.",
                         exception.GetType().Name);
                 }
-                await Task.Delay(progressed ? TimeSpan.FromMilliseconds(250) : TimeSpan.FromSeconds(15), stoppingToken)
+                await Task.Delay(progressed ? TimeSpan.FromMilliseconds(250) : TimeSpan.FromSeconds(15),
+                    timeProvider ?? TimeProvider.System, stoppingToken)
                     .ConfigureAwait(false);
             }
         }

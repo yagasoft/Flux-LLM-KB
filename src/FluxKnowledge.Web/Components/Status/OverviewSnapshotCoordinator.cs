@@ -134,8 +134,8 @@ public sealed class OverviewSnapshotCoordinator : IAsyncDisposable
             if (wait > TimeSpan.Zero) await Task.Delay(wait, _clock, _stopping.Token).ConfigureAwait(false);
             lock (_sync) { _lastStart = attemptStarted = _clock.GetUtcNow(); sampledVersion = _invalidationVersion; attemptNumber = ++_attempts; }
             elapsed = System.Diagnostics.Stopwatch.StartNew();
-            using var budget = CancellationTokenSource.CreateLinkedTokenSource(_stopping.Token);
-            budget.CancelAfter(TimeSpan.FromSeconds(2));
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(2), _clock);
+            using var budget = CancellationTokenSource.CreateLinkedTokenSource(_stopping.Token, deadline.Token);
             try
             {
                 await using var scope = _scopes.CreateAsyncScope();

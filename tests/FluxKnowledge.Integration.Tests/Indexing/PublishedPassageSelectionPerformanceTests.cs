@@ -20,10 +20,21 @@ public sealed class PublishedPassageSelectionPerformanceTests(NativeSqlServerFix
     : IClassFixture<NativeSqlServerFixture>
 {
     [NativeSqlServerTheory]
+    [InlineData(16, false, false)]
+    [InlineData(32, false, true)]
+    [InlineData(32, true, true)]
+    public Task Publication_queries_resolve_chunk_identity_with_input_proportional_work_and_exact_payloads(int records, bool mostlyWithdrawn, bool retainInitialPlan)
+        => VerifyPublicationQueriesAsync(records, mostlyWithdrawn, retainInitialPlan);
+
+    [SqlServerScaleTheory]
+    [Trait("Category", "Scale")]
     [InlineData(512, false, false)]
     [InlineData(1024, false, true)]
     [InlineData(1024, true, true)]
-    public async Task Publication_queries_resolve_chunk_identity_with_input_proportional_work_and_exact_payloads(int records, bool mostlyWithdrawn, bool retainInitialPlan)
+    public Task Publication_query_plans_remain_bounded_at_scale(int records, bool mostlyWithdrawn, bool retainInitialPlan)
+        => VerifyPublicationQueriesAsync(records, mostlyWithdrawn, retainInitialPlan);
+
+    private async Task VerifyPublicationQueriesAsync(int records, bool mostlyWithdrawn, bool retainInitialPlan)
     {
         const int chunksPerRecord = 24;
         await using var environment = await SqlToUsearchRebuildTests.PipelineEnvironment.CreateAsync(fixture, "Synthetic initial passage.");

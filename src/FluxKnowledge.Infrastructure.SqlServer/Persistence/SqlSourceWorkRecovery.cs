@@ -8,8 +8,7 @@ using Microsoft.EntityFrameworkCore;
 namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
 
 public sealed class SqlSourceWorkRecovery(IDbContextFactory<FluxKnowledgeDbContext> factory, SourceWorkAdmission admission,
-    ISourceRemovalReconciler removals, ISourceChangeJournalReader reader, ISourceObservationReader observations,
-    SqlSourceIncrementalCoordinator incremental, SourceJournalOptions options, TimeProvider clock,
+    ISourceRemovalReconciler removals, ISourceObservationReader observations, TimeProvider clock,
     ISourceWorkRetirement? retirement = null, Guid? targetRootId = null) : ISourceWorkRecovery
 {
     public async ValueTask AdvanceAsync(CancellationToken cancellationToken)
@@ -24,24 +23,16 @@ public sealed class SqlSourceWorkRecovery(IDbContextFactory<FluxKnowledgeDbConte
         {
             if (admission.IsPrepared(root.Id, root.ConfigurationRevision)) continue;
             if (outlook.Contains(root.Id)) { admission.Admit(root.Id, root.ConfigurationRevision); continue; }
-            var fullSweep = true;
+            var fullSweep = root.LastScanCompletedAtUtc is not { } completed ||
+                completed.Add(SourcePolicyDefaults.MetadataReconciliationCadence) <= clock.GetUtcNow();
             try
             {
                 var restored = SqlSourceRemovalReconciler.Restore(root);
                 if (restored.PhysicalIdentityFingerprint is null) throw new IOException("SourceStartupIdentityUnavailable");
                 using (var authority = observations.OpenRoot(restored)) authority.ValidateCurrent();
-                var state = await lookup.SourceRootScanStates.AsNoTracking().SingleOrDefaultAsync(x => x.SourceRootId == root.Id, cancellationToken).ConfigureAwait(false);
-                if (options.Enabled && state is not null && options.ApprovedVolumes.Contains(state.VolumeIdentity, StringComparer.OrdinalIgnoreCase))
-                {
-                    var barrier = await reader.QueryAsync(state.VolumeIdentity, cancellationToken).ConfigureAwait(false);
-                    await incremental.CatchUpStartupAsync(barrier, cancellationToken).ConfigureAwait(false);
-                    var current = await lookup.SourceRootScanStates.AsNoTracking().SingleAsync(x => x.SourceRootId == root.Id, cancellationToken).ConfigureAwait(false);
-                    fullSweep = current.RecoveryRequired || !current.NamespaceComplete || current.Mode is not ("Journal" or "JournalPartial") ||
-                        current.CoveredUsn < barrier.NextUsn || current.PolicyFingerprint != SqlRepositoryWorkRecovery.Policy(root);
-                }
             }
             catch (Exception error) when (error is IOException or UnauthorizedAccessException || error is OperationCanceledException && !cancellationToken.IsCancellationRequested)
-            { fullSweep = true; }
+            { continue; } // Keep admission closed until root identity/access can be proved.
             await PrepareScopesAsync(root, fullSweep, cancellationToken).ConfigureAwait(false);
             admission.MarkPrepared(root.Id, root.ConfigurationRevision);
         }

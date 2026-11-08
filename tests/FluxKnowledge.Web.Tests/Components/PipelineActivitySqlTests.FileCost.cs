@@ -27,11 +27,21 @@ public sealed partial class PipelineActivitySqlTests
         // Keep this representative inventory out of the shared regression fixture.
         var owned = new NativeSqlServerFixture();
         await owned.InitializeAsync();
-        try { await new PipelineActivitySqlTests(owned, output).MeasureFileReadCostAsync(); }
+        try { await new PipelineActivitySqlTests(owned, output).MeasureFileReadCostAsync(100, 3_000); }
         finally { await owned.DisposeAsync(); }
     }
 
     [NativeSqlServerFact]
+    public async Task File_summary_and_pages_remain_usable_with_dense_current_jobs()
+    {
+        var owned = new NativeSqlServerFixture();
+        await owned.InitializeAsync();
+        try { await new PipelineActivitySqlTests(owned, output).MeasureFileReadCostAsync(2_000, 3_000); }
+        finally { await owned.DisposeAsync(); }
+    }
+
+    [SqlServerScaleFact]
+    [Trait("Category", "Scale")]
     public async Task File_summary_and_pages_remain_usable_with_twenty_thousand_current_jobs()
     {
         var owned = new NativeSqlServerFixture();
@@ -40,8 +50,20 @@ public sealed partial class PipelineActivitySqlTests
         finally { await owned.DisposeAsync(); }
     }
 
+    [SqlServerScaleFact]
+    [Trait("Category", "Scale")]
+    public async Task File_summary_and_pages_remain_coherent_with_sparse_current_jobs_at_scale()
+    {
+        var owned = new NativeSqlServerFixture();
+        await owned.InitializeAsync();
+        try { await new PipelineActivitySqlTests(owned, output).MeasureFileReadCostAsync(); }
+        finally { await owned.DisposeAsync(); }
+    }
+
     private async Task<FileCostFixture> SeedFileCostFixtureAsync(int currentJobCount, int discoveredCount = 30000)
     {
+        Assert.InRange(currentJobCount, 2, discoveredCount);
+        var initialCount = Math.Min(1000, currentJobCount);
         var seedWatch = Stopwatch.StartNew();
         await EnableOwnedSnapshotAsync();
         var now = DateTimeOffset.UtcNow;
@@ -53,7 +75,7 @@ public sealed partial class PipelineActivitySqlTests
         var codeBranch = Guid.NewGuid();
         await using (var setup = factory.CreateDbContext())
         {
-            for (var i = 0; i < 1000; i++)
+            for (var i = 0; i < initialCount; i++)
             {
                 var revision = Revision(Guid.NewGuid(), root, $"concurrent-{i:D4}." + (i == 0 ? "cs" : "txt"), now, false);
                 var identity = new SourceIdentityEntity { Id = Guid.NewGuid(), SourceKind = "local file", StableKey = revision.CanonicalPath, CreatedAtUtc = now };
@@ -89,7 +111,7 @@ public sealed partial class PipelineActivitySqlTests
         await using (var setup = factory.CreateDbContext())
         {
             var pathPrefix = Revision(Guid.Empty, root, "", now, false).CanonicalPath;
-            for (var offset = 1000; offset < discoveredCount; offset += 1000)
+            for (var offset = initialCount; offset < discoveredCount; offset += 1000)
             {
                 await SeedFileCostTailBatchAsync(setup, root, templateRevision, pathPrefix, offset,
                     Math.Min(1000, discoveredCount - offset), currentJobCount);
@@ -97,15 +119,15 @@ public sealed partial class PipelineActivitySqlTests
         }
         seedWatch.Stop();
         output.WriteLine($"File-cost fixture seed: jobs={currentJobCount}; files={discoveredCount}; elapsedMs={seedWatch.Elapsed.TotalMilliseconds:F1}.");
-        await AssertFileCostSeedAsync(factory, root, currentJobCount, discoveredCount, now);
+        await AssertFileCostSeedAsync(factory, root, currentJobCount, discoveredCount, now, initialCount);
         return new(root, toggledActivity, toggledJob, codeBranch);
     }
 
     private sealed record FileCostFixture(Guid Root, Guid ToggledActivity, Guid ToggledJob, Guid CodeBranch);
 
-    private async Task MeasureFileReadCostAsync(int currentJobCount = 1000)
+    private async Task MeasureFileReadCostAsync(int currentJobCount = 1000, int discoveredCount = 30000)
     {
-        var (root, toggledActivity, toggledJob, codeBranch) = await SeedFileCostFixtureAsync(currentJobCount);
+        var (root, toggledActivity, toggledJob, codeBranch) = await SeedFileCostFixtureAsync(currentJobCount, discoveredCount);
         var factory = new TestDbContextFactory(_fixture.ConnectionString);
         // One bounded setup read prepares this warm-read qualification. It does not
         // alter the public deadline or retry any asserted/measurement operation.
@@ -123,7 +145,7 @@ public sealed partial class PipelineActivitySqlTests
                     .ReadAsync(context, DateTimeOffset.UtcNow, setupDeadline.Token, materializeGpuFacts: true);
                 var task = Assert.Single(warm.RunningTasks, t => t.Stage == "Code analysis");
                 Assert.Equal(codeBranch, task.Id); Assert.Equal(root, task.SourceRootId);
-                Assert.Equal(30000, Assert.Single(warm.Sources, s => s.Id == root).KnownFiles);
+                Assert.Equal(discoveredCount, Assert.Single(warm.Sources, s => s.Id == root).KnownFiles);
                 await transaction.CommitAsync(setupDeadline.Token);
             }
             finally
@@ -163,14 +185,14 @@ public sealed partial class PipelineActivitySqlTests
                 timings.Add(watch.Elapsed.TotalMilliseconds);
                 Assert.True(overview.Activity.IsConsistent);
                 var source = Assert.Single(overview.Activity.Sources, s => s.Id == root);
-                Assert.Equal(30000, source.KnownFiles);
+                Assert.Equal(discoveredCount, source.KnownFiles);
                 Assert.Equal(source.KnownFiles, PipelineFilePresentation.Categories(source).Sum(c => c.Count));
                 Assert.Equal(source.PendingFiles, overview.Activity.FileStages.Where(s => s.SourceRootId == root).Sum(s => s.Count));
                 watch.Restart();
                 runtimeTimings.Reset();
                 var page = await reader.ReadPipelineFilesAsync(new(), root, i % 1200, default);
                 timings.Add(watch.Elapsed.TotalMilliseconds);
-                Assert.Equal(30000, page.TotalCount); Assert.Equal(25, page.Items.Count);
+                Assert.Equal(discoveredCount, page.TotalCount); Assert.Equal(25, page.Items.Count);
                 Assert.Equal(25, page.Items.Select(f => f.SourceRevisionId).Distinct().Count());
                 await Task.Delay(25);
             }
@@ -187,7 +209,7 @@ public sealed partial class PipelineActivitySqlTests
             }
         }
         var p95 = timings.Order().ElementAt((int)Math.Ceiling(timings.Count * .95) - 1);
-        output.WriteLine($"File-cost qualification: files=30000 currentJobs={currentJobCount} confirmedCodeProcessors=1 overlappingWrites={writerCount} usableReads={timings.Count}/24 " +
+        output.WriteLine($"File-cost qualification: files={discoveredCount} currentJobs={currentJobCount} confirmedCodeProcessors=1 overlappingWrites={writerCount} usableReads={timings.Count}/24 " +
             $"p95Ms={p95:F1} maxMs={timings.Max():F1} readerCommands={commands.Commands.Count} setupLogicalReads={warmStatistics.LogicalReads}; " +
             "production retry policy; scalar metadata only; no statistics/drain instrumentation in measured reads; shared polling unchanged.");
         Assert.True(writerCount >= 2);

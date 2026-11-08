@@ -189,7 +189,8 @@ public sealed class SqlNativeCorpusActionStore(
                 "root_create" => new[] { "path", "displayName", "recursive", "followLinks", "maximumFileBytes", "reconciliationSeconds", "discoveryMode", "indexSourceText", "includePatterns", "excludePatterns" },
                 "root_update" => new[] { "rootId", "displayName", "applyDefaultPolicy", "reconcile" },
                 "policy_reprocess" => new[] { "rootId", "sourceRevisionId", "predecessorActivityId", "inputSha256", "configurationRevision" },
-                "root_disable" or "root_pause" or "root_resume" or "root_delete" or "source_sync" => new[] { "rootId" },
+                "root_disable" or "root_pause" or "root_resume" or "root_delete" => new[] { "rootId" },
+                "source_sync" => new[] { "rootId", "fullContent" },
                 "source_verify" => new[] { "rootId" },
                 "source_verification_set" => new[] { "rootId", "policy", "paused" },
                 "watcher_set" => new[] { "rootId", "enabled" },
@@ -204,14 +205,15 @@ public sealed class SqlNativeCorpusActionStore(
                 case "root_create":
                     _ = RequiredString(root, "path", 2048); RequireSafeDisplayName(RequiredString(root, "displayName", 256));
                     _ = OptionalBool(root, "recursive", true); _ = OptionalBool(root, "followLinks", false);
-                    _ = OptionalLong(root, "maximumFileBytes", SourcePolicyDefaults.MaximumTextBytes); _ = OptionalLong(root, "reconciliationSeconds", 900);
+                    _ = OptionalLong(root, "maximumFileBytes", SourcePolicyDefaults.MaximumTextBytes); _ = OptionalLong(root, "reconciliationSeconds", SourcePolicyDefaults.MetadataReconciliationSeconds);
                     _ = NativeSourceRootCreation.Parse(root, "native-v1");
                     break;
                 case "root_update":
                     _ = RequiredGuid(root, "rootId"); RequireSafeDisplayName(RequiredString(root, "displayName", 256));
                     _ = OptionalBool(root, "applyDefaultPolicy", false); _ = OptionalBool(root, "reconcile", true);
                     break;
-                case "root_disable": case "root_pause": case "root_resume": case "root_delete": case "source_sync": _ = RequiredGuid(root, "rootId"); break;
+                case "root_disable": case "root_pause": case "root_resume": case "root_delete": _ = RequiredGuid(root, "rootId"); break;
+                case "source_sync": _ = RequiredGuid(root, "rootId"); _ = OptionalBool(root, "fullContent", false); break;
                 case "source_verify": _ = RequiredGuid(root, "rootId"); break;
                 case "source_verification_set":
                     _ = RequiredGuid(root, "rootId");

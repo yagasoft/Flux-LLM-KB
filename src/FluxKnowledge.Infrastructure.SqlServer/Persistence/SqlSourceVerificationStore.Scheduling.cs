@@ -8,7 +8,7 @@ public sealed partial class SqlSourceVerificationStore
 {
     public async ValueTask<int> PumpAsync(CancellationToken ct)
     {
-        if (!options.Enabled) return 0;
+        if (!options.Enabled || !SourcePolicyDefaults.ChecksumVerificationEnabled) return 0;
         await using var lookup = await factory.CreateDbContextAsync(ct).ConfigureAwait(false);
         var roots = await (from root in lookup.SourceRootConfigurations.AsNoTracking()
             join state in lookup.SourceRootScanStates.AsNoTracking() on root.Id equals state.SourceRootId

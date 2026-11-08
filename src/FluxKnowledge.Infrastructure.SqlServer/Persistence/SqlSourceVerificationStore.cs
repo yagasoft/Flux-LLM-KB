@@ -15,6 +15,7 @@ public sealed partial class SqlSourceVerificationStore(IDbContextFactory<FluxKno
     private readonly SqlSourceChangeJournalStore _transactions = new(factory, time);
     public async ValueTask<Guid> StartAsync(SourceRootId rootId, bool manual, CancellationToken cancellationToken)
     {
+        if (!SourcePolicyDefaults.ChecksumVerificationEnabled) throw new InvalidOperationException("SourceVerificationPolicyRetired");
         if (!options.Enabled) throw new InvalidOperationException("SourceVerificationFeatureDisabled");
         var result = Guid.Empty;
         await _transactions.ExecuteAsync(async db =>
@@ -29,6 +30,7 @@ public sealed partial class SqlSourceVerificationStore(IDbContextFactory<FluxKno
     internal static async Task<SourceVerificationRunEntity> StartInTransactionAsync(FluxKnowledgeDbContext db,
         SourceRootConfigurationEntity root, bool manual, DateTimeOffset now, CancellationToken cancellationToken)
     {
+            if (!SourcePolicyDefaults.ChecksumVerificationEnabled) throw new InvalidOperationException("SourceVerificationPolicyRetired");
             var state = await db.SourceRootScanStates.SingleOrDefaultAsync(x => x.SourceRootId == root.Id, cancellationToken).ConfigureAwait(false);
             if (root.State != (int)SourceRootState.Enabled || state is null || state.BaselineEpoch <= 0 ||
                 SqlSourceIncrementalState.RequiresBaseline(state) || state.Mode == "Legacy" ||
@@ -115,9 +117,11 @@ public sealed partial class SqlSourceVerificationStore(IDbContextFactory<FluxKno
         var pending = await db.SourcePendingChanges.CountAsync(x => x.SourceRootId == rootId.Value, cancellationToken).ConfigureAwait(false);
         return new(rootId, policy, state?.VerificationPaused ?? false, state?.LastVerifiedAtUtc, status)
         {
-            FeatureEnabled = options.Enabled, NextWindowAtUtc = window.Start, WindowEndAtUtc = window.End,
-            Scanning = new(options.Enabled ? state?.Mode ?? "BaselineRequired" : "Legacy",
-                options.Enabled ? state?.Reason : "incremental-disabled", state?.BaselineEpoch ?? 0, state?.NamespaceComplete ?? false,
+            FeatureEnabled = options.Enabled && SourcePolicyDefaults.ChecksumVerificationEnabled,
+            NextWindowAtUtc = SourcePolicyDefaults.ChecksumVerificationEnabled ? window.Start : null,
+            WindowEndAtUtc = SourcePolicyDefaults.ChecksumVerificationEnabled ? window.End : null,
+            Scanning = new(state?.Mode ?? (options.Enabled ? "BaselineRequired" : "Fallback"),
+                options.Enabled ? state?.Reason : "journal-disabled-metadata-fallback", state?.BaselineEpoch ?? 0, state?.NamespaceComplete ?? false,
                 state is null || state.RecoveryRequired, state?.LastReconciliationAtUtc, Math.Max(0, nextUsn - (state?.CoveredUsn ?? 0)), pending,
                 state?.LastBaselineAtUtc)
         };

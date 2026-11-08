@@ -29,40 +29,6 @@ public sealed partial class SourceVerificationExecutionIntegrationTests(NativeSq
     }
     public Task DisposeAsync() => Task.CompletedTask;
 
-    [NativeSqlServerFact]
-    public async Task Concurrent_starts_freeze_one_finite_cycle_and_enqueue_its_request_atomically()
-    {
-        await using var scenario = await Scenario.CreateAsync(fixture.ConnectionString);
-        await scenario.BaselineAsync();
-        await using var before = scenario.Factory.CreateDbContext();
-        var ordinary = await before.SourceRootConfigurations.AsNoTracking().SingleAsync();
-        var revisionIds = await before.SourceInventoryEntries.Where(x => !x.IsDirectory).Select(x => x.SourceRevisionId).ToArrayAsync();
-        var starts = await Task.WhenAll(scenario.Verification.StartAsync(scenario.RootId, true, default).AsTask(),
-            scenario.Verification.StartAsync(scenario.RootId, true, default).AsTask());
-        Assert.NotEqual(Guid.Empty, starts[0]);
-        Assert.Equal(starts[0], starts[1]);
-        await using var db = scenario.Factory.CreateDbContext();
-        var run = await db.SourceVerificationRuns.SingleAsync();
-        Assert.True(run.Active);
-        Assert.True(run.Manual);
-        var items = await db.SourceVerificationItems.Where(x => x.RunId == run.Id).ToArrayAsync();
-        Assert.Equal(2, items.Length);
-        Assert.Equal(revisionIds.Order(), items.Select(x => x.ExpectedRevisionId).Order());
-        Assert.All(items, item => Assert.NotEqual("{}", item.BindingJson));
-        var request = await db.SourceScanRequests.SingleAsync(x => x.RequestKind == SqlSourceVerificationStore.RequestKind);
-        Assert.Equal(run.Id, request.VerificationRunId);
-        Assert.True(request.IsReleased);
-        Assert.True(await db.SourceScanJobs.AnyAsync(x => x.SourceScanRequestId == request.Id));
-        Assert.True(await db.SourceScanOutbox.AnyAsync(x => x.SourceScanRequestId == request.Id));
-        var after = await db.SourceRootConfigurations.SingleAsync();
-        Assert.Equal(ordinary.LastScanStartedAtUtc, after.LastScanStartedAtUtc);
-        Assert.Equal(ordinary.LastScanCompletedAtUtc, after.LastScanCompletedAtUtc);
-        Assert.Equal(ordinary.LastScanEvidenceJson, after.LastScanEvidenceJson);
-        var status = Assert.IsType<SourceVerificationStatus>(await scenario.Verification.ReadAsync(scenario.RootId, default));
-        Assert.Equal(TimeZoneInfo.Local.Id, status.Policy.TimeZoneId);
-        Assert.Equal(2, status.Run!.Total);
-        Assert.Equal(0, status.Run.Verified);
-    }
 
     [NativeSqlServerFact]
     public async Task Missing_baseline_cannot_start_an_empty_successful_cycle()

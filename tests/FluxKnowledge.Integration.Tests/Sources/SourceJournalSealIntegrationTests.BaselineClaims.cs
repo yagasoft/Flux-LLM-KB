@@ -74,15 +74,15 @@ public sealed partial class SourceJournalSealIntegrationTests
         {
             var pending = await db.SourcePendingChanges.SingleAsync(x => x.RelativePath == "one.txt");
             Assert.Equal(SourcePendingReasons.ScopedNamespace, pending.ReasonFlags & SourcePendingReasons.ScopedNamespace);
-            Assert.Equal(0, pending.LastUnjournaledGeneration);
-            if (watcherFirst) Assert.True(pending.LastContentUsn > 0); // Real native content evidence is retained too.
+            Assert.True(pending.LastUnjournaledGeneration > 0);
+            // The pending watcher event remains durable without fabricated journal/seal proof.
             Assert.False((await db.SourceRootScanStates.SingleAsync()).NamespaceComplete);
         }
         scenario.Clock.Now += TimeSpan.FromMinutes(11); scenario.Restart();
         var retry = await scenario.ClaimAsync("baseline-order-retry");
         scenario.SourceBytes = scenario.ArtifactSourceBytes = 0;
         await scenario.RunAsync(retry);
-        Assert.Equal(watcherFirst ? 0 : 64, scenario.SourceBytes);
+        Assert.Equal(64, scenario.SourceBytes);
         await using var verified = scenario.Factory.CreateDbContext();
         var current = await verified.SourceRevisions.OrderByDescending(x => x.Revision).FirstAsync(x => x.CanonicalPath == scenario.Path);
         Assert.Equal(Convert.ToHexStringLower(SHA256.HashData(await File.ReadAllBytesAsync(scenario.Path))), current.ContentSha256);
@@ -111,7 +111,7 @@ public sealed partial class SourceJournalSealIntegrationTests
         await using (var db = scenario.Factory.CreateDbContext())
         {
             var pending = await db.SourcePendingChanges.SingleAsync(x => x.RelativePath == "one.txt");
-            Assert.Equal(expectedReason | SourcePendingReasons.RemovalPending, pending.ReasonFlags);
+            Assert.Equal(expectedReason | SourcePendingReasons.RemovalPending, pending.ReasonFlags & ~SourcePendingReasons.FileEvent);
             if (expectedReason == 1) Assert.True(pending.LastUnjournaledGeneration > 0);
             if (git) Assert.True(await db.SourcePendingChanges.AnyAsync(x => x.RelativePath == "." && (x.ReasonFlags & SourcePendingReasons.GitMembership) != 0));
         }
@@ -135,7 +135,7 @@ public sealed partial class SourceJournalSealIntegrationTests
     private static async Task SignalDegradedAsync(Scenario scenario)
     {
         // Journal admission is unavailable for this notification, then restored. A
-        // healthy sealed-leaf hint would correctly be advisory and create no debt.
+        // file hint creates explicit event debt even when metadata matches.
         var approved = scenario.Options.ApprovedVolumes;
         scenario.Options.ApprovedVolumes = [];
         try { await scenario.SignalAsync(); }

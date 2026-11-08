@@ -65,7 +65,7 @@ public sealed partial class SourceJournalStoreIntegrationTests(NativeSqlServerFi
     }
 
     [NativeSqlServerFact]
-    public async Task Repeated_unresolved_records_keep_paced_namespace_debt_without_content_epoch_churn()
+    public async Task Unresolved_volume_records_preserve_the_cursor_without_invalidating_root_metadata_or_queuing_recapture()
     {
         var rootId = Guid.NewGuid();
         var volume = $@"\\?\Volume{{{Guid.NewGuid()}}}\";
@@ -97,11 +97,9 @@ public sealed partial class SourceJournalStoreIntegrationTests(NativeSqlServerFi
             Assert.Equal(4, state.BaselineEpoch);
             Assert.Equal(7, state.RecoveryGeneration);
             Assert.False(state.RecoveryRequired);
-            Assert.Equal(5, state.NamespaceGeneration);
-            var debt = Assert.Single(await verify.SourcePendingChanges.Where(x => x.SourceRootId == rootId).ToArrayAsync());
-            Assert.Equal(".", debt.RelativePath);
-            Assert.Equal(SourcePendingReasons.NamespaceMetadata | SourcePendingReasons.RemovalPending, debt.ReasonFlags);
-            Assert.Equal(started.AddMinutes(15), debt.NotBeforeUtc);
+            Assert.Equal(0, state.NamespaceGeneration);
+            Assert.Equal(600, state.UnresolvedThroughUsn);
+            Assert.Empty(await verify.SourcePendingChanges.Where(x => x.SourceRootId == rootId).ToArrayAsync());
             Assert.False(await verify.SourceScanRequests.AnyAsync(x => x.SourceRootId == rootId));
             Assert.Equal(600, (await verify.SourceVolumeJournalCheckpoints.SingleAsync(x => x.VolumeIdentity == volume)).NextUsn);
         }

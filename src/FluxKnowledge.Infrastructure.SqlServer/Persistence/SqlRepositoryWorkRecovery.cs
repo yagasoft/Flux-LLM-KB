@@ -26,7 +26,10 @@ internal static class SqlRepositoryWorkRecovery
         Guid SourceId, Guid ArtifactId, string Hash, long Bytes, Guid ActivityId, string Activity);
     internal sealed record Discovery(int Version, bool Authoritative, Guid SourceId, Guid ArtifactId,
         string Hash, long Bytes, long ConfigurationRevision, string Policy, string Repository,
-        Guid ScanRequestId, long LeaseGeneration, string Inventory, DateTimeOffset ObservedAtUtc, bool EligibleText);
+        Guid ScanRequestId, long LeaseGeneration, string Inventory, DateTimeOffset ObservedAtUtc, bool EligibleText)
+    {
+        public string? ObservationPolicy { get; init; }
+    }
     private sealed record DiscoveryState(int Version, Discovery? Current, Discovery? Observed, bool RecoveryRequired = false);
     private sealed record WaitingDetails(string Reason, int CheckAfterSeconds);
 
@@ -82,6 +85,28 @@ internal static class SqlRepositoryWorkRecovery
             repository is not null && proof.Repository == repository && proof.ScanRequestId != Guid.Empty && proof.Inventory.All(Uri.IsHexDigit);
     }
     internal static string Withdraw() => JsonSerializer.Serialize(new DiscoveryState(1, null, null, true));
+    internal static bool ObserveMetadata(SourceRootConfigurationEntity root, SourceRevisionEntity source,
+        SourceArtifactEntity artifact, Guid requestId, long leaseGeneration, string inventory, DateTimeOffset now)
+    {
+        var prior = ReadDiscovery(source.CurrentDiscoveryEvidenceJson);
+        var repository = SqlSourceScanStore.ParseGitAdmissionIdentity(root.HealthEvidenceJson);
+        if (root.State != (int)SourceRootState.Enabled || source.SourceRootId != root.Id || source.OriginKind != 0 ||
+            source.SuppressedAtUtc is not null || artifact.SourceRevisionId != source.Id ||
+            artifact.ContentSha256 != source.ContentSha256 || artifact.ByteLength != source.ByteLength ||
+            prior is not { Version: 1, Authoritative: true, LeaseGeneration: > 0 } ||
+            prior.SourceId != source.Id || prior.ArtifactId != artifact.Id || prior.Hash != artifact.ContentSha256 ||
+            prior.Bytes != artifact.ByteLength || prior.Policy != Policy(root) || repository is null ||
+            prior.Repository != repository || inventory.Length != 64 || !inventory.All(Uri.IsHexDigit) ||
+            requestId == Guid.Empty || leaseGeneration <= 0) return false;
+
+        // The hash retains its earlier ingestion provenance. Completion must
+        // separately authorise this current metadata/membership observation.
+        var observed = prior with { Authoritative = false, ConfigurationRevision = root.ConfigurationRevision,
+            ScanRequestId = requestId, LeaseGeneration = leaseGeneration, Inventory = inventory, ObservedAtUtc = now,
+            ObservationPolicy = SourcePolicyDefaults.DetectionPolicy };
+        source.CurrentDiscoveryEvidenceJson = JsonSerializer.Serialize(new DiscoveryState(1, prior, observed, RequiresRecovery(source)));
+        return true;
+    }
     internal static bool RequiresRecovery(SourceRevisionEntity source)
     {
         try { return JsonSerializer.Deserialize<DiscoveryState>(source.CurrentDiscoveryEvidenceJson ?? "{}")?.RecoveryRequired == true; }

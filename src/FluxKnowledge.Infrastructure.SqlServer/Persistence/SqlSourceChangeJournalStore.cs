@@ -105,10 +105,7 @@ public sealed class SqlSourceChangeJournalStore(IDbContextFactory<FluxKnowledgeD
             foreach (var root in roots.Where(x => x.State == (int)SourceRootState.Enabled))
             {
                 var state = states.Single(x => x.SourceRootId == root.Id);
-                var owned = entries.Where(x => x.SourceRootId == root.Id && x.BaselineEpoch == state.BaselineEpoch).ToArray();
-                var rootKey = PathKey(".");
-                var coalesced = await db.SourcePendingChanges.AnyAsync(x => x.SourceRootId == root.Id && x.PathFingerprint == rootKey &&
-                    x.RelativePath == "." && x.IsSubtree && (x.ReasonFlags & SourcePendingReasons.FullRecapture) != 0, ct).ConfigureAwait(false);
+                var owned = entries.Where(x => x.SourceRootId == root.Id).ToArray();
                 var targets = new Dictionary<string, (long Reasons, bool Subtree, long First, long Last, long Content)>(StringComparer.OrdinalIgnoreCase);
                 var namespaceChanged = false;
                 foreach (var change in page.Changes)
@@ -121,7 +118,7 @@ public sealed class SqlSourceChangeJournalStore(IDbContextFactory<FluxKnowledgeD
                         // A CLOSE never promotes an old capture. Only the guarded capture
                         // receipt grants a seal; later content evidence revokes it.
                         if (!alias.IsDirectory && change.ContentChanged)
-                        { alias.IsSealed = false; alias.NextForcedCheckAtUtc ??= time.GetUtcNow().AddSeconds(root.ReconciliationCadenceSeconds); }
+                        { alias.IsSealed = false; }
                     }
                     if (aliases.Any(x => x.IsAncestor) && (change.Reason & 0x00113800) != 0)
                     {
@@ -135,11 +132,10 @@ public sealed class SqlSourceChangeJournalStore(IDbContextFactory<FluxKnowledgeD
                         Add(Path.GetRelativePath(root.CanonicalPath, Path.Combine(parentPath, change.Name)), change, change.IsDirectory);
                     else if (aliases.Length == 0 && !state.NamespaceComplete && change.ParentPath is null)
                     {
+                        // The volume can contain unrelated, no-longer-resolvable parents.
+                        // Keep the gap evidence for the weekly metadata backstop, without
+                        // letting unrelated records repeatedly invalidate this root's walk.
                         state.UnresolvedThroughUsn = page.Next.NextUsn;
-                        namespaceChanged = true;
-                        targets["."] = targets.TryGetValue(".", out var debt)
-                            ? (debt.Reasons | SourcePendingReasons.NamespaceMetadata | SourcePendingReasons.RemovalPending, true, debt.First, change.Usn, debt.Content)
-                            : (SourcePendingReasons.NamespaceMetadata | SourcePendingReasons.RemovalPending, true, change.Usn, change.Usn, 0);
                     }
                 }
                 if (namespaceChanged)
@@ -151,14 +147,10 @@ public sealed class SqlSourceChangeJournalStore(IDbContextFactory<FluxKnowledgeD
                 {
                     state.Generation++;
                     var pending = await db.SourcePendingChanges.Where(x => x.SourceRootId == root.Id).ToListAsync(ct).ConfigureAwait(false);
-                    if (SqlSourcePendingWork.HasFullRecapture(pending) ||
-                        pending.Count + targets.Keys.Count(path => pending.All(x => x.PathFingerprint != PathKey(path))) > SqlSourcePendingWork.MaximumPaths)
-                    {
-                        SqlSourcePendingWork.Coalesce(db, state, pending, time.GetUtcNow(),
-                            targets.Values.Aggregate(0L, (value, item) => value | item.Reasons),
-                            targets.Values.Min(x => x.First), targets.Values.Max(x => x.Last), targets.Values.Max(x => x.Content));
-                    }
-                    else foreach (var (path, item) in targets)
+                    var additions = targets.Keys.Count(path => pending.All(x => x.PathFingerprint != PathKey(path)));
+                    if (additions > 0 && pending.Count + additions > SqlSourcePendingWork.MaximumPaths)
+                        throw new SourcePendingCapacityException(additions > SqlSourcePendingWork.MaximumPaths);
+                    foreach (var (path, item) in targets)
                     {
                         var key = PathKey(path);
                         var row = pending.SingleOrDefault(x => x.PathFingerprint == key);
@@ -170,7 +162,7 @@ public sealed class SqlSourceChangeJournalStore(IDbContextFactory<FluxKnowledgeD
                                 FirstUsn = item.First, LastContentUsn = 0, LastUnjournaledGeneration = 0 };
                             pending.Add(row); db.SourcePendingChanges.Add(row);
                         }
-                        row.ReasonFlags |= item.Reasons; row.IsSubtree |= item.Subtree;
+                    row.ReasonFlags |= item.Reasons; row.IsSubtree |= item.Subtree;
                         row.Generation = state.Generation; row.LastUsn = item.Last;
                         if (row.LastContentUsn is { } priorContent) row.LastContentUsn = Math.Max(priorContent, item.Content);
                         row.FirstObservedAtUtc ??= time.GetUtcNow();
@@ -197,7 +189,7 @@ public sealed class SqlSourceChangeJournalStore(IDbContextFactory<FluxKnowledgeD
                     // cannot extend an existing full recapture, including for unsealed
                     // captures; it is not sealing or content evidence. New paths/IDs and
                     // mixed data/namespace reasons still create conservative work.
-                    if (!subtree && change.Reason == 0x80000000u && owned.Any(entry => (entry.IsSealed || coalesced) && !entry.IsDirectory &&
+                    if (!subtree && change.Reason == 0x80000000u && owned.Any(entry => !entry.IsDirectory &&
                         entry.FileId == change.FileId && entry.RelativePath.Equals(path, StringComparison.OrdinalIgnoreCase))) return;
                     // Directory BASIC_INFO/CLOSE notifications do not imply changed descendants.
                     if (subtree && (change.Reason & ~0x80008000u) == 0) return;
@@ -206,10 +198,11 @@ public sealed class SqlSourceChangeJournalStore(IDbContextFactory<FluxKnowledgeD
                             JsonSerializer.Deserialize<string[]>(root.IncludePatternsJson) ?? [],
                             JsonSerializer.Deserialize<string[]>(root.ExcludePatternsJson) ?? [])) return;
                     long reasons = change.Reason;
+                    if (!subtree && change.Reason != 0x80000000u) reasons |= SourcePendingReasons.FileEvent;
                     if ((change.Reason & 0x3300) != 0) reasons |= SourcePendingReasons.RemovalPending;
                     if (subtree && (change.Reason & 0x00103300) != 0)
                     { reasons |= SourcePendingReasons.ScopedNamespace; namespaceChanged = true; }
-                    var content = change.ContentChanged ? change.Usn : 0;
+                    var content = change.ContentChanged || (reasons & SourcePendingReasons.FileEvent) != 0 ? change.Usn : 0;
                     if (targets.TryGetValue(path, out var old)) targets[path] = (old.Reasons | reasons, old.Subtree || subtree, old.First, change.Usn, Math.Max(old.Content, content));
                     else targets.Add(path, (reasons, subtree, change.Usn, change.Usn, content));
                 }
@@ -222,6 +215,9 @@ public sealed class SqlSourceChangeJournalStore(IDbContextFactory<FluxKnowledgeD
     }
 
     public async ValueTask MarkUnavailableAsync(JournalReadClaim claim, DateTimeOffset retryAt, CancellationToken ct)
+        => await MarkUnavailableAsync(claim, retryAt, "journal-unavailable", ct).ConfigureAwait(false);
+
+    internal async ValueTask MarkUnavailableAsync(JournalReadClaim claim, DateTimeOffset retryAt, string reason, CancellationToken ct)
     {
         await ExecuteAsync(async db =>
         {
@@ -234,7 +230,7 @@ public sealed class SqlSourceChangeJournalStore(IDbContextFactory<FluxKnowledgeD
             if (point.RegistrationGeneration != claim.RegistrationGeneration)
             { point.LeaseOwner = null; point.LeaseExpiresAtUtc = null; point.DueAtUtc = null; return; }
             point.LeaseOwner = null; point.LeaseExpiresAtUtc = null; point.DueAtUtc = retryAt;
-            point.UnavailableSinceUtc ??= time.GetUtcNow(); point.LastFailureCode = "journal-unavailable";
+            point.UnavailableSinceUtc ??= time.GetUtcNow(); point.LastFailureCode = reason;
         }, ct).ConfigureAwait(false);
     }
 

@@ -120,9 +120,28 @@ function Confirm-DeploymentSourceJournalHelperTransport {
     }
 }
 
+function Get-DeploymentSourceJournalPolicyOperatorRoot {
+    $root=if($DisableIncrementalSourceScanning){$SourceJournalPolicyOperatorRoot}else{Join-Path $SourceJournalHelperRoot 'payload'}
+    if(!$root -or ![IO.Path]::IsPathFullyQualified($root)){throw 'metadata-policy-operator-path-required'}
+    $root=(Resolve-Path -LiteralPath $root -ErrorAction Stop).Path
+    if($DisableIncrementalSourceScanning -and (Get-HybridPayloadFingerprint $root) -ine $ExpectedSourceJournalPolicyOperatorSha256){
+        throw 'metadata-policy-operator-binding-changed'
+    }
+    if(!('FluxKnowledge.Deployment.ProjectionOperatorLoadContext' -as [type])){
+        Add-Type -Path (Join-Path $PSScriptRoot 'ProjectionOperatorLoadContext.cs') -ErrorAction Stop
+    }
+    $entry=Join-Path $root 'FluxKnowledge.Cli.dll'
+    $context=[FluxKnowledge.Deployment.ProjectionOperatorLoadContext]::new($entry,(Get-ProjectionOperatorFramework $root))
+    $assembly=$context.LoadFromAssemblyPath($entry)
+    $type=$assembly.GetType('FluxKnowledge.Cli.Commands.IncrementalSourceJournalRetirementBridge',$true)
+    $property=$type.GetProperty('DetectionPolicy',[Reflection.BindingFlags]'Static,NonPublic')
+    if(!$property -or $property.GetValue($null) -cne 'events-weekly-metadata-v1'){throw 'metadata-policy-operator-incompatible'}
+    return $root
+}
+
 function Invoke-DeploymentSourceJournalVerificationRetirement {
     Assert-DeploymentSourceJournalReleaseStopped
-    $operatorRoot=Join-Path $SourceJournalHelperRoot 'payload'
+    $operatorRoot=Get-DeploymentSourceJournalPolicyOperatorRoot
     $entry=Join-Path $operatorRoot 'FluxKnowledge.Cli.dll'
     if(!('FluxKnowledge.Deployment.ProjectionOperatorLoadContext' -as [type])){
         Add-Type -Path (Join-Path $PSScriptRoot 'ProjectionOperatorLoadContext.cs') -ErrorAction Stop
@@ -143,6 +162,8 @@ function Invoke-DeploymentSourceJournalVerificationRetirement {
         RuntimeIdentityFingerprint=$identity.IdentityFingerprint;DatabaseIncarnation=$incarnation;
         OperatorEntrySha256=(Get-FileHash -LiteralPath $entry).Hash;StoppedWritersEvidencePath=$evidencePath;
         StoppedWritersEvidenceSha256=(Get-FileHash -LiteralPath $evidencePath).Hash}
+    $binding.MetadataPolicy='events-weekly-metadata-v1'
+    $binding.RequireFeatureOff=[bool]$DisableIncrementalSourceScanning
     $receipt=Invoke-IncrementalSourceJournalRetirement -OperatorRoot $operatorRoot -BindingsJson ($binding|ConvertTo-Json -Depth 5) `
         -AssertQuiescent {Assert-DeploymentSourceJournalReleaseStopped}
     Write-SegmentedUpdateJson (Join-Path $releaseRoot 'source-journal-retirement.json') $receipt

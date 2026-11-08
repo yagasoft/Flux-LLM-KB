@@ -45,14 +45,14 @@ public sealed class PipelineOverviewBrowserTests
                 await Assertions.Expect(warning).ToContainTextAsync("Change journal unavailable");
                 await Assertions.Expect(warning).ToContainTextAsync("Example workspace");
                 await Assertions.Expect(warning).ToContainTextAsync("Journal checks keep retrying automatically");
-                await Assertions.Expect(warning).ToContainTextAsync("15 minutes");
-                await Assertions.Expect(warning).ToContainTextAsync("Full scans remain blocked while this source is paused");
+                await Assertions.Expect(warning).ToContainTextAsync("Metadata reconciliation runs weekly");
+                await Assertions.Expect(warning).ToContainTextAsync("Updates remain blocked while this source is paused");
                 Assert.Equal($"/sources/{ControlledOverviewReader.FirstRoot}", await warning.GetByRole(AriaRole.Link).GetAttributeAsync("href"));
                 await page.GetByLabel("Source scope").SelectOptionAsync(ControlledOverviewReader.SecondRoot.ToString());
                 await Assertions.Expect(warning).ToHaveCountAsync(0);
                 await page.GetByLabel("Source scope").SelectOptionAsync(ControlledOverviewReader.FirstRoot.ToString());
                 await page.GetByRole(AriaRole.Button, new() { Name = "Refresh status" }).ClickAsync();
-                await Assertions.Expect(warning).ToContainTextAsync("Full scans remain blocked while this source is paused");
+                await Assertions.Expect(warning).ToContainTextAsync("Updates remain blocked while this source is paused");
                 Assert.False(await page.Locator("#blazor-error-ui").IsVisibleAsync());
                 Assert.True(await page.EvaluateAsync<bool>("document.documentElement.scrollWidth <= window.innerWidth"));
                 Assert.Empty(errors);

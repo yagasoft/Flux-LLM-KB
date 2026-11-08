@@ -64,6 +64,8 @@ param(
     [switch]$DisableIncrementalSourceScanning,
     [string]$SourceJournalOptionsPath = '',
     [string]$ExpectedSourceJournalOptionsSha256 = '',
+    [string]$SourceJournalPolicyOperatorRoot = '',
+    [string]$ExpectedSourceJournalPolicyOperatorSha256 = '',
     [switch]$InspectIndexAdmissionPayloads,
     [switch]$PlanOnly,
     [switch]$Apply
@@ -2324,13 +2326,20 @@ Assert-VectorPublicationMetadataUpdateOptions $PSBoundParameters
 if ($sourceJournalMode) {
     $allowed=@('SourceRoot','SiteName','SiteUrl','DeployRoot','ReadinessTimeoutSeconds','RecoverStoppedPool','PlanOnly','Apply',
         'ApplyIncrementalSourceScanning','DisableIncrementalSourceScanning','SourceJournalOptionsPath','ExpectedSourceJournalOptionsSha256',
-        'ReviewedSourceJournalPayloads','ExpectedSourceJournalDatabaseIdentity','ReviewedLegacyIndexPayloads','InspectIndexAdmissionPayloads')
+        'ReviewedSourceJournalPayloads','ExpectedSourceJournalDatabaseIdentity','ReviewedLegacyIndexPayloads','InspectIndexAdmissionPayloads',
+        'SourceJournalPolicyOperatorRoot','ExpectedSourceJournalPolicyOperatorSha256')
     if ($PSVersionTable.PSVersion.Major -lt 7 -or ($ApplyIncrementalSourceScanning -and $DisableIncrementalSourceScanning) -or
         @($PSBoundParameters.Keys|Where-Object {$_ -cnotin $allowed}).Count) {throw 'journal-release-incompatible-deployment-mode'}
     if (!$ExpectedSourceJournalDatabaseIdentity -or ($Apply -and $ReviewedSourceJournalPayloads.Count -ne 3)) {
         throw 'journal-release-reviewed-database-and-payload-set-required'
     }
-} elseif ($SourceJournalOptionsPath -or $ExpectedSourceJournalOptionsSha256) {throw 'journal-release-explicit-mode-required'}
+    if($DisableIncrementalSourceScanning -and (!$SourceJournalPolicyOperatorRoot -or $ExpectedSourceJournalPolicyOperatorSha256 -cnotmatch '^[A-Fa-f0-9]{64}$')){
+        throw 'metadata-policy-reviewed-operator-required-for-feature-off'
+    }
+    if($ApplyIncrementalSourceScanning -and ($SourceJournalPolicyOperatorRoot -or $ExpectedSourceJournalPolicyOperatorSha256)){
+        throw 'metadata-policy-external-operator-requires-feature-off'
+    }
+} elseif ($SourceJournalOptionsPath -or $ExpectedSourceJournalOptionsSha256 -or $SourceJournalPolicyOperatorRoot -or $ExpectedSourceJournalPolicyOperatorSha256) {throw 'journal-release-explicit-mode-required'}
 if ($StoppedRecoveryBindingPath -or $ExpectedStoppedRecoveryBindingSha256) {
     $allowed=@('SourceRoot','SiteName','SiteUrl','DeployRoot','ReadinessTimeoutSeconds','RecoverStoppedPool',
         'StoppedRecoveryBindingPath','ExpectedStoppedRecoveryBindingSha256','ReviewedSourceJournalPayloads',
@@ -2494,6 +2503,7 @@ if ($sourceJournalMode) {
     $sourceJournalChange=New-SourceJournalConfigurationChange -Path (Join-Path $CanonicalLiveRoot 'Config/appsettings.Production.json') `
         -OptionsPath $SourceJournalOptionsPath -ExpectedOptionsSha256 $ExpectedSourceJournalOptionsSha256 -Disable:$DisableIncrementalSourceScanning
     if ($ApplyIncrementalSourceScanning) {$sourceJournalRelease.RepairMode=Get-DeploymentSourceJournalRepairMode}
+    if ($DisableIncrementalSourceScanning) {[void](Get-DeploymentSourceJournalPolicyOperatorRoot)}
 }
 if ($Apply -and $applyAnyMigration -and !$ApplyIncrementalSourceScanning -and !$ApplyVectorPublicationMetadataMigration) { Assert-DeploymentSourceJournalLegacyMigrationAllowed }
 Import-Module (Join-Path $PSScriptRoot 'incremental-segmented-index-schema.psm1') -Force -ErrorAction Stop
@@ -2627,13 +2637,16 @@ if ($PlanOnly) {
         $journalDatabase=Get-SourceJournalDatabaseState -ConnectionString (Get-DeploymentSqlConnectionString)
         Assert-SourceJournalSchema -DatabaseState $journalDatabase -AllowBaseline:(!$DisableIncrementalSourceScanning)
         if ($journalDatabase.Identity -cne $ExpectedSourceJournalDatabaseIdentity) {throw 'journal-release-database-incarnation-changed'}
-        $sourceJournalPlan=@{Mode=$(if($DisableIncrementalSourceScanning){'feature-off-with-stopped-retirement'}else{'journal-activation'});
+        $sourceJournalPlan=@{Mode=$(if($DisableIncrementalSourceScanning){'feature-off-with-stopped-retirement'}else{'events-and-weekly-metadata'});
+            DetectionPolicy='events-weekly-metadata-v1';MetadataReconciliationSeconds=604800;
+            PolicyOperator=$(if($DisableIncrementalSourceScanning){@{Root=$SourceJournalPolicyOperatorRoot;Sha256=$ExpectedSourceJournalPolicyOperatorSha256}}else{'reviewed newly installed helper payload'});
+            Transition='stopped native-slot-fenced retirement of verification-only debt; exact prior state/manifests archived; specific pending changes preserved; root pause state preserved';
             DatabaseIdentity=$journalDatabase.Identity;SqlSha256=(Get-SourceJournalMigrationContract).UpSha256;
             ConfigurationBeforeSha256=$sourceJournalChange.BeforeHash;ConfigurationAfterSha256=$sourceJournalChange.AfterHash;
             OptionsSha256=$sourceJournalChange.OptionsSha256;HelperRoot=$SourceJournalHelperRoot;
             RepairMode=$sourceJournalRelease.RepairMode;
             HelperTask=$(if($ApplyIncrementalSourceScanning){Get-SourceJournalHelperTaskObservation -InstallRoot $SourceJournalHelperRoot -TaskName 'FluxKnowledge.SourceAccess'}else{'not required for feature-off'});
-            Ordering=$(if($DisableIncrementalSourceScanning){'stop and hold; reviewed installed set; feature-off configuration; native-slot-fenced verification retirement; compatible candidate start and release'}else{'stop and hold; complete reviewed Web/Outlook/helper set; configuration; durable intent; exact additive SQL; held IIS-identity transport; release'});
+            Ordering=$(if($DisableIncrementalSourceScanning){'stop and hold; reviewed installed set; feature-off configuration; native-slot-fenced verification retirement; compatible candidate start and release'}else{'stop and hold; complete reviewed Web/Outlook/helper set; configuration; durable intent; exact schema admission without replay; stopped audited metadata-policy transition; held IIS-identity transport; release'});
             Recovery='no Down or predecessor restoration after any feature/intent/config evidence or unavailable rollback boundary; retain matching set and hold';
             Transport=$(if($DisableIncrementalSourceScanning){'independent of helper availability; no transport or repair-mode admission'}else{'pre-migration native state only, transport explicitly deferred; query/read and bound repair mode under held IIS before activation release'});
             Models='no acquisition or model-store changes'}
@@ -3391,7 +3404,7 @@ try {
                 -Baseline $deploymentValidation.Baseline `
                 -Current (Get-RetainedPipelineStateBaseline)
             if ($ApplyIncrementalSourceScanning) {Confirm-DeploymentSourceJournalHelperTransport}
-            if ($DisableIncrementalSourceScanning -and !$sourceJournalRelease.RetirementConfirmed) {throw 'journal-release-verification-retirement-unconfirmed'}
+            if ($sourceJournalMode -and !$sourceJournalRelease.RetirementConfirmed) {throw 'journal-release-policy-transition-unconfirmed'}
             if ($ApplyResumableSourceDeletionCleanupMigration) {
                 Assert-SourceDeletionCleanupReleaseBinding -State $sourceDeletionCleanupState
                 Assert-SourceDeletionCleanupActivation -State $sourceDeletionCleanupState `

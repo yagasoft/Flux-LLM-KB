@@ -52,60 +52,39 @@ unmeasured Codex/client/proxy ceilings remain unverified.
 | `operations.status` | `GET /api/v1/operations/status` | `FluxKnowledge.Cli operations status` |
 | `operations.audit` | `POST /api/v1/operations/audit/query` | `FluxKnowledge.Cli operations audit` |
 
-### Incremental source and integrity status
+### Incremental source and historical integrity status
 
-`corpus.query` accepts `view: "verification"` with one `root_id` and `limit: 1`;
-omit branch, job and cursor filters. This SQL-only view reports change-detection
-mode/reason, baseline and reconciliation times, namespace/recovery status,
-pending obligations and durable journal lag (USN distance, not elapsed time).
-It also returns the persisted verification policy, pause state, current/next
-quiet window, last clean verification and latest cycle's counts, actual source
-and retained read bytes and reason. Reading this view never opens source content.
+Normal updates follow journal and watcher events. A weekly metadata reconciliation
+checks membership, physical identity, size and modification time. Identified file
+events still trigger ingestion when metadata matches. Quiet files have no periodic
+checksum or unsealed-file reread. Journal gaps and unavailable history retain their
+evidence, retry within bounded attempts and show a dashboard warning; they do not
+request automatic full content recapture.
 
-The same `corpus.write` preview/confirmed-commit contract supports:
+`corpus.write` uses the existing preview/confirmed-commit contract:
 
-- `source_verify`, payload `{ "rootId": "<guid>" }`: start or reuse the one
-  active verification cycle. An enabled incremental feature and a usable
-  baseline are required. Manual work overrides the quiet window for that cycle;
-  verification pause, source state, read pacing and ordinary-work priority remain.
-- `source_verification_set`, payload `{ "rootId": "<guid>", "paused": true }`:
-  pause or resume integrity checks independently of ordinary source processing.
-- `source_verification_set` with `policy` (optionally also `paused`): replace
-  the complete policy without changing the source configuration revision or
-  requesting a full scan. Unknown policy fields and invalid time zones fail
-  validation. For example:
+- `source_sync`, payload `{ "rootId": "<guid>" }`, processes pending changes;
+  metadata reconciliation follows its weekly deadline.
+- `source_sync`, payload `{ "rootId": "<guid>", "fullContent": true }`, explicitly
+  requests a full content rescan through normal ingestion and reindexes changes.
+- `root_resume` resumes event processing without requesting a full content scan.
+- `root_create` uses 604,800 seconds for metadata reconciliation. Its compatibility
+  `reconciliationSeconds` field rejects other explicit values.
 
-```json
-{
-  "rootId": "<guid>",
-  "policy": {
-    "version": 1,
-    "enabled": true,
-    "timeZoneId": "UTC",
-    "weekday": 0,
-    "localStart": "02:00:00",
-    "windowDuration": "06:00:00",
-    "maximumBytesPerSecond": 2097152
-  }
-}
-```
+`source_verify` and `source_verification_set` are retired and refuse new work.
+`corpus.query` still accepts `view: "verification"` with one `root_id` and `limit: 1`
+for read-only status and historical evidence. It returns `featureEnabled: false`,
+no next verification window, current metadata/journal status and retained original
+cycle counts, receipts and timestamps. `run.readCountsIncomplete` continues to
+identify durably recorded lower bounds after interrupted historical reads. The
+policy transition invalidates outstanding verification-only work without recording
+it as successful, and preserves actual pending changes and ingestion hashes.
 
-`weekday` is numeric, Sunday 0 through Saturday 6. The read limit combines
-source and retained bytes; it is not a separate allowance for each. New automatic
-cycles are weekly, and unfinished cycles continue in daily local quiet windows.
-Missed weekly checks start in the next daily quiet window.
-`enabled: false` disables automatic work; manual verification remains
-available. Retain the exact payload, confirmation and idempotency key after an
-uncertain commit and retry them to recover its receipt. Resolved successors and
-authoritative removals have separate counts; deferred or incomplete coverage
-cannot produce a clean verification timestamp. Verification does not repair
-missing or corrupt retained objects or clear ordinary pending work.
-
-The verification view exposes `run.readCountsIncomplete`. If true, source and
-retained byte totals are the durably recorded lower bounds: an interrupted attempt
-may have read additional bytes after its last file checkpoint. The marker remains
-set after recovery or authority invalidation. It does not downgrade valid file
-receipts or a subsequently completed clean integrity check.
+Retain the exact payload, confirmation and idempotency key after an uncertain
+commit and retry them to recover its receipt. Access checks, safe paths, ownership,
+normal ingestion hashes and publication safeguards remain required. See
+[the operating policy](design/low-disk-source-updates.md) for the explicitly accepted
+freshness limits and the auditable transition.
 
 The trusted-local `corpus-rebuild` CLI is an operator interface used by
 the incremental IIS updater. It accepts `plan --operation <guid>`,

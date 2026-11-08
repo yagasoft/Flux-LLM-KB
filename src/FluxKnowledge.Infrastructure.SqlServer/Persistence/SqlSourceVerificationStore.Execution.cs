@@ -10,6 +10,7 @@ public sealed partial class SqlSourceVerificationStore
 {
     public async ValueTask<SourceVerificationBatch?> PrepareAsync(SourceRootConfiguration root, SourceScanRequest request, CancellationToken ct)
     {
+        if (!SourcePolicyDefaults.ChecksumVerificationEnabled) throw new InvalidOperationException("SourceVerificationPolicyRetired");
         if (!options.Enabled) throw new InvalidOperationException("SourceVerificationFeatureDisabled");
         SourceVerificationAuthority? admission = null;
         await _transactions.ExecuteAsync(async db =>
@@ -78,7 +79,7 @@ public sealed partial class SqlSourceVerificationStore
     public async ValueTask<bool> MayReadAsync(SourceVerificationBatch batch, CancellationToken ct)
     {
         var now = time.GetUtcNow();
-        if (!options.Enabled || now >= batch.WindowEndUtc || batch.Request.Lease is not { } lease) return false;
+        if (!options.Enabled || !SourcePolicyDefaults.ChecksumVerificationEnabled || now >= batch.WindowEndUtc || batch.Request.Lease is not { } lease) return false;
         await using var db = await factory.CreateDbContextAsync(ct).ConfigureAwait(false);
         return await db.SourceScanJobs.AsNoTracking().AnyAsync(job => job.Id == lease.JobId &&
             job.SourceScanRequestId == batch.Request.Id.Value && job.LeaseOwner == lease.Owner && job.LeaseGeneration == lease.Generation &&

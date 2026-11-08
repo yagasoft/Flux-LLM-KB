@@ -76,10 +76,10 @@ public sealed record SourceRootConfiguration
         {
             throw new DomainInvariantException("Git source discovery requires a recognised mode, recursive scanning and no links.");
         }
-        var effectiveReconciliationCadence = reconciliationCadence ?? TimeSpan.FromMinutes(15);
-        if (effectiveReconciliationCadence <= TimeSpan.Zero)
+        var effectiveReconciliationCadence = reconciliationCadence ?? SourcePolicyDefaults.MetadataReconciliationCadence;
+        if (effectiveReconciliationCadence != SourcePolicyDefaults.MetadataReconciliationCadence)
         {
-            throw new DomainInvariantException("Source root reconciliation cadence must be positive.");
+            throw new DomainInvariantException("Source roots use weekly metadata reconciliation.");
         }
 
         return new SourceRootConfiguration(
@@ -127,12 +127,17 @@ public sealed record SourceRootConfiguration
             throw new DomainInvariantException("Source root configuration revision must be positive.");
         }
 
+        if (reconciliationCadence <= TimeSpan.Zero)
+            throw new DomainInvariantException("Persisted reconciliation cadence must be positive.");
+        // History and the explicit stopped transition must still be able to read
+        // prior persisted intervals. New creation accepts only the current policy.
         var created = Create(canonicalPath, displayName, recursive, followLinks, maximumFileBytes,
-            includePatterns, excludePatterns, allowedClassifications, reconciliationCadence, discoveryMode, repositoryIdentityFingerprint);
+            includePatterns, excludePatterns, allowedClassifications, null, discoveryMode, repositoryIdentityFingerprint);
         return created with
         {
             Id = id,
             State = state,
+            ReconciliationCadence = reconciliationCadence,
             ConfigurationRevision = configurationRevision,
             StateReason = stateReason,
             PhysicalIdentityFingerprint = physicalIdentityFingerprint,

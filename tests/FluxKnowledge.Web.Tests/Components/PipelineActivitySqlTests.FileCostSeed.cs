@@ -80,7 +80,7 @@ public sealed partial class PipelineActivitySqlTests
     }
 
     private static async Task AssertFileCostSeedAsync(TestDbContextFactory factory, Guid root,
-        int jobs, int files, DateTimeOffset now)
+        int jobs, int files, DateTimeOffset now, int initialCount = 1000)
     {
         await using var context = factory.CreateDbContext();
         Assert.Equal(files, await context.SourceRevisions.CountAsync());
@@ -90,9 +90,9 @@ public sealed partial class PipelineActivitySqlTests
         Assert.Equal(jobs, await context.OutboxMessages.CountAsync());
         Assert.Equal(jobs+1, await context.SourceActivities.CountAsync());
         Assert.Equal(1, await context.SourceProcessorBranches.CountAsync());
-        foreach (var ordinal in new[] { 999, 1000, jobs-1, jobs, files-1 }.Distinct().Where(i => i<files))
+        foreach (var ordinal in new[] { initialCount-1, initialCount, jobs-1, jobs, files-1 }.Distinct().Where(i => i<files))
         {
-            var path = ordinal<1000 ? $"concurrent-{ordinal:D4}.txt" : $"discovered-{ordinal:D5}.txt";
+            var path = ordinal<initialCount ? $"concurrent-{ordinal:D4}.txt" : $"discovered-{ordinal:D5}.txt";
             var canonical = $"C:\\overview-source-indexing\\{root:N}\\{path}";
             var revision = await context.SourceRevisions.AsNoTracking().SingleAsync(r => r.CanonicalPath==canonical);
             Assert.Equal(root, revision.SourceRootId);

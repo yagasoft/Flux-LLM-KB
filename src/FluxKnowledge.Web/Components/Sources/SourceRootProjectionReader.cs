@@ -289,7 +289,7 @@ public sealed class SourceRootProjectionReader(
             request.IncludePatterns,
             request.ExcludePatterns,
             request.AllowedClassifications,
-            TimeSpan.FromMinutes(15), SourceRootState.Enabled, 1,
+            SourcePolicyDefaults.MetadataReconciliationCadence, SourceRootState.Enabled, 1,
             physicalIdentityFingerprint: validation.PhysicalIdentity.IdentityFingerprint,
             requiresPhysicalIdentityValidation: true,
             discoveryMode: request.DiscoveryMode,
@@ -574,7 +574,7 @@ public sealed class SourceRootProjectionReader(
             FollowLinks: false,
             draft.MaximumFileBytes,
             draft.IndexSourceText ? ["text/plain", "text/x-source-code"] : ["text/plain"],
-            TimeSpan.FromMinutes(15),
+            SourcePolicyDefaults.MetadataReconciliationCadence,
             string.IsNullOrWhiteSpace(draft.RequestedBy) ? "local-operator" : draft.RequestedBy, DiscoveryMode: draft.DiscoveryMode);
 
     private static IReadOnlyList<SourceFileProjection> ProjectFiles(

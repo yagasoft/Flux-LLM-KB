@@ -12,11 +12,11 @@ public sealed partial class SourceJournalStoreIntegrationTests
 {
     [NativeSqlServerTheory]
     [InlineData("sealed-known", null)]
-    [InlineData("unsealed-known", "one.txt")]
+    [InlineData("unsealed-known", null)]
     [InlineData("known-id-new-path", "new.txt")]
     [InlineData("unknown-id", "unknown.txt")]
-    [InlineData("old-epoch", "one.txt")]
-    public async Task Pure_close_advances_evidence_and_only_suppresses_the_same_current_sealed_path(string kind, string? expectedPath)
+    [InlineData("old-epoch", null)]
+    public async Task Pure_close_advances_evidence_without_requeuing_a_known_file_regardless_of_old_seal_or_epoch(string kind, string? expectedPath)
     {
         await using var scenario = await CloseScenario.CreateAsync(fixture.ConnectionString, kind);
         var change = new JournalChange(200, kind == "unknown-id" ? "000000000000002B" : "000000000000002A", "0000000000000007",

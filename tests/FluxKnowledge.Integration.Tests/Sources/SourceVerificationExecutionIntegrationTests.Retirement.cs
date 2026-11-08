@@ -28,7 +28,7 @@ public sealed partial class SourceVerificationExecutionIntegrationTests
     {
         await using var scenario = await Scenario.CreateAsync(fixture.ConnectionString);
         await scenario.BaselineAsync();
-        await scenario.Verification.StartAsync(scenario.RootId, true, default);
+        await SeedLegacyVerificationAsync(scenario);
         Guid requestId, jobId;
         await using (var db = scenario.Factory.CreateDbContext())
         {
@@ -72,48 +72,13 @@ public sealed partial class SourceVerificationExecutionIntegrationTests
         Assert.Equal(snapshot, await RetirementSnapshotAsync(scenario));
     }
 
-    [NativeSqlServerFact]
-    public async Task Feature_off_retirement_preserves_receipts_content_debt_outboxes_and_fences_the_old_owner()
-    {
-        await using var scenario = await Scenario.CreateAsync(fixture.ConnectionString);
-        await scenario.BaselineAsync();
-        await scenario.Verification.StartAsync(scenario.RootId, true, default);
-        var store = scenario.Verification;
-        var claim = Assert.IsType<ClaimedSourceScan>(await scenario.Control.ClaimNextReleasedAsync("retire-stopped-owner", DateTimeOffset.UtcNow, TimeSpan.FromMinutes(10), default));
-        var interrupted = new CheckpointHook(store, (_, _) => Task.CompletedTask,
-            afterCheckpoint: accepted => { if (accepted) throw new InvalidOperationException("fixture-stopped-after-receipt"); }, suppressFinish: true);
-        var worker = new SourceVerificationWorker(interrupted, new WindowsSourceVerificationReaderSlot(scenario.Runtime),
-            new WindowsSourceVerificationContentReader(TimeProvider.System), scenario.Artifacts, scenario.Artifacts, TimeProvider.System);
-        await Assert.ThrowsAsync<InvalidOperationException>(() => worker.ScanAsync(claim.SourceRoot, claim.ScanRequest, default).AsTask());
-        await using (var db = scenario.Factory.CreateDbContext())
-        {
-            var now = DateTimeOffset.UtcNow;
-            var targeted = Guid.NewGuid();
-            db.SourceScanRequests.Add(new() { Id = targeted, SourceRootId = scenario.RootId.Value, RequestKind = 3, RequestedAtUtc = now,
-                RequestedBy = "preserved-targeted-work", State = (int)SourceScanRequestState.Held });
-            db.SourcePendingChanges.Add(new() { Id = Guid.NewGuid(), SourceRootId = scenario.RootId.Value, RelativePath = "later.txt",
-                PathFingerprint = new string('d', 64), ReasonFlags = 1, Generation = 9, FirstUsn = 31, LastUsn = 32, LastContentUsn = 32 });
-            await db.SaveChangesAsync();
-        }
-        var before = await RetirementPreservedSnapshotAsync(scenario);
-        scenario.Options.Enabled = false;
-        await store.RetireForFeatureOffAsync(new WindowsSourceVerificationReaderSlot(scenario.Runtime), _ => ValueTask.CompletedTask, default);
-        Assert.Equal(before, await RetirementPreservedSnapshotAsync(scenario));
-        await using (var db = scenario.Factory.CreateDbContext())
-        {
-            Assert.True((await db.SourceVerificationRuns.SingleAsync()).ReadCountsIncomplete);
-            Assert.Single(await db.SourceVerificationItems.Where(x => x.ReceiptJson != null).ToArrayAsync());
-        }
-        await Assert.ThrowsAsync<InvalidOperationException>(() => scenario.Control.CompleteAsync(claim,
-            new SourceScanResult(scenario.RootId, claim.ScanRequest.Id, 0, 0, 0, 0) { IsCompleteInventory = false }, null, default).AsTask());
-    }
 
     [NativeSqlServerFact]
     public async Task Feature_off_retirement_refuses_a_busy_native_slot_or_unproved_stopped_binding_without_mutation()
     {
         await using var scenario = await Scenario.CreateAsync(fixture.ConnectionString);
         await scenario.BaselineAsync();
-        await scenario.Verification.StartAsync(scenario.RootId, true, default);
+        await SeedLegacyVerificationAsync(scenario);
         var store = scenario.Verification;
         var slot = new WindowsSourceVerificationReaderSlot(scenario.Runtime);
         var before = await RetirementSnapshotAsync(scenario);

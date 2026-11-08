@@ -47,7 +47,7 @@ public sealed class SourceReconciliationIntegrationTests(NativeSqlServerFixture 
     public async Task Targeted_completion_does_not_postpone_the_independent_reconciliation_deadline()
     {
         var now = DateTimeOffset.Parse("2026-08-06T12:00:00+00:00");
-        var lastReconciliation = now.AddMinutes(-14);
+        var lastReconciliation = now.AddDays(-7).AddMinutes(1);
         var rootId = Guid.NewGuid();
         await using (var setup = CreateContext())
         {
@@ -77,7 +77,7 @@ public sealed class SourceReconciliationIntegrationTests(NativeSqlServerFixture 
         await using (var setup = CreateContext())
         {
             var root = Root(rootId, now);
-            root.LastScanCompletedAtUtc = now.AddMinutes(-16);
+            root.LastScanCompletedAtUtc = now.AddDays(-7).AddMinutes(-1);
             setup.SourceRootConfigurations.Add(root);
             await setup.SaveChangesAsync();
         }
@@ -234,7 +234,7 @@ public sealed class SourceReconciliationIntegrationTests(NativeSqlServerFixture 
             false,
             1024,
             ["text/plain"],
-            TimeSpan.FromMinutes(15),
+            TimeSpan.FromDays(7),
             "test");
         var receipt = await new SqlSourceRootStore(
                 new ContextFactory(_fixture.ConnectionString),
@@ -272,7 +272,7 @@ public sealed class SourceReconciliationIntegrationTests(NativeSqlServerFixture 
         await using (var setup = CreateContext())
         {
             var root = Root(rootId, now);
-            root.LastScanCompletedAtUtc = now.AddMinutes(-16);
+            root.LastScanCompletedAtUtc = now.AddDays(-7).AddMinutes(-1);
             setup.SourceRootConfigurations.Add(root);
             await setup.SaveChangesAsync();
         }
@@ -286,7 +286,7 @@ public sealed class SourceReconciliationIntegrationTests(NativeSqlServerFixture 
             null,
             CancellationToken.None);
 
-        var nextDue = now.AddMinutes(15);
+        var nextDue = now.AddDays(7);
         var second = await store.ClaimNextReleasedAsync("second", nextDue, TimeSpan.FromMinutes(1), CancellationToken.None);
 
         Assert.NotNull(second);
@@ -335,7 +335,7 @@ public sealed class SourceReconciliationIntegrationTests(NativeSqlServerFixture 
         await using (var setup = CreateContext())
         {
             var root = Root(rootId, now);
-            root.LastScanCompletedAtUtc = now.AddMinutes(-16);
+            root.LastScanCompletedAtUtc = now.AddDays(-7).AddMinutes(-1);
             setup.SourceRootConfigurations.Add(root);
             await setup.SaveChangesAsync();
         }
@@ -380,7 +380,7 @@ public sealed class SourceReconciliationIntegrationTests(NativeSqlServerFixture 
         var rootId = Guid.NewGuid();
         var root = SourceRootConfiguration.Restore(
             new SourceRootId(rootId), "C:\\source-reconciliation-tests", "Test", true, false,
-            16 * 1024 * 1024, [], [], [], TimeSpan.FromMinutes(15), SourceRootState.Enabled, 1);
+            16 * 1024 * 1024, [], [], [], TimeSpan.FromDays(7), SourceRootState.Enabled, 1);
         await using (var setup = CreateContext())
         {
             setup.SourceRootConfigurations.Add(new SourceRootConfigurationEntity
@@ -396,7 +396,7 @@ public sealed class SourceReconciliationIntegrationTests(NativeSqlServerFixture 
                 MaximumFileBytes = root.MaximumFileBytes,
                 AllowedClassificationsJson = "[]",
                 CrawlMode = 0,
-                ReconciliationCadenceSeconds = 900,
+                ReconciliationCadenceSeconds = 604800,
                 ConfigurationRevision = 1,
                 CreatedAtUtc = DateTimeOffset.UtcNow,
                 UpdatedAtUtc = DateTimeOffset.UtcNow
@@ -441,7 +441,7 @@ public sealed class SourceReconciliationIntegrationTests(NativeSqlServerFixture 
         var rootId = Guid.NewGuid();
         var root = SourceRootConfiguration.Restore(
             new SourceRootId(rootId), "C:\\source-reconciliation-tests", "Test", true, false,
-            16 * 1024 * 1024, [], [], [], TimeSpan.FromMinutes(15), SourceRootState.Enabled, 1);
+            16 * 1024 * 1024, [], [], [], TimeSpan.FromDays(7), SourceRootState.Enabled, 1);
         await using (var setup = CreateContext())
         {
             setup.SourceRootConfigurations.Add(Root(rootId, now));
@@ -472,7 +472,7 @@ public sealed class SourceReconciliationIntegrationTests(NativeSqlServerFixture 
     {
         var now = DateTimeOffset.Parse("2026-08-06T12:00:00+00:00");
         var rootId = Guid.NewGuid();
-        var root = SourceRootConfiguration.Restore(new SourceRootId(rootId), "C:\\source-reconciliation-tests", "Test", true, false, 16 * 1024 * 1024, [], [], [], TimeSpan.FromMinutes(15), SourceRootState.Enabled, 1);
+        var root = SourceRootConfiguration.Restore(new SourceRootId(rootId), "C:\\source-reconciliation-tests", "Test", true, false, 16 * 1024 * 1024, [], [], [], TimeSpan.FromDays(7), SourceRootState.Enabled, 1);
         await using (var setup = CreateContext())
         {
             setup.SourceRootConfigurations.Add(Root(rootId, now));
@@ -506,7 +506,7 @@ public sealed class SourceReconciliationIntegrationTests(NativeSqlServerFixture 
     {
         var now = DateTimeOffset.Parse("2026-08-06T12:00:00+00:00");
         var rootId = Guid.NewGuid();
-        var root = SourceRootConfiguration.Restore(new SourceRootId(rootId), "C:\\source-reconciliation-tests", "Test", true, false, 16 * 1024 * 1024, [], [], [], TimeSpan.FromMinutes(15), SourceRootState.Enabled, 1);
+        var root = SourceRootConfiguration.Restore(new SourceRootId(rootId), "C:\\source-reconciliation-tests", "Test", true, false, 16 * 1024 * 1024, [], [], [], TimeSpan.FromDays(7), SourceRootState.Enabled, 1);
         await using (var setup = CreateContext())
         {
             setup.SourceRootConfigurations.Add(Root(rootId, now));
@@ -542,7 +542,7 @@ public sealed class SourceReconciliationIntegrationTests(NativeSqlServerFixture 
     {
         var now = DateTimeOffset.Parse("2026-08-06T12:00:00+00:00");
         var rootId = Guid.NewGuid();
-        var root = SourceRootConfiguration.Restore(new SourceRootId(rootId), "C:\\source-reconciliation-tests", "Test", true, false, 16 * 1024 * 1024, [], [], [], TimeSpan.FromMinutes(15), SourceRootState.Enabled, 1);
+        var root = SourceRootConfiguration.Restore(new SourceRootId(rootId), "C:\\source-reconciliation-tests", "Test", true, false, 16 * 1024 * 1024, [], [], [], TimeSpan.FromDays(7), SourceRootState.Enabled, 1);
         await using (var setup = CreateContext())
         {
             setup.SourceRootConfigurations.Add(Root(rootId, now));
@@ -562,7 +562,7 @@ public sealed class SourceReconciliationIntegrationTests(NativeSqlServerFixture 
     {
         var now = DateTimeOffset.Parse("2026-08-06T12:00:00+00:00");
         var rootId = Guid.NewGuid();
-        var root = SourceRootConfiguration.Restore(new SourceRootId(rootId), "C:\\source-reconciliation-tests", "Test", true, false, 16 * 1024 * 1024, [], [], [], TimeSpan.FromMinutes(15), SourceRootState.Enabled, 1);
+        var root = SourceRootConfiguration.Restore(new SourceRootId(rootId), "C:\\source-reconciliation-tests", "Test", true, false, 16 * 1024 * 1024, [], [], [], TimeSpan.FromDays(7), SourceRootState.Enabled, 1);
         await using (var setup = CreateContext())
         {
             setup.SourceRootConfigurations.Add(Root(rootId, now));
@@ -583,7 +583,7 @@ public sealed class SourceReconciliationIntegrationTests(NativeSqlServerFixture 
     {
         var now = DateTimeOffset.Parse("2026-08-06T12:00:00+00:00");
         var rootId = Guid.NewGuid();
-        var root = SourceRootConfiguration.Restore(new SourceRootId(rootId), "C:\\source-reconciliation-tests", "Test", true, false, 16 * 1024 * 1024, [], [], [], TimeSpan.FromMinutes(15), SourceRootState.Enabled, 1);
+        var root = SourceRootConfiguration.Restore(new SourceRootId(rootId), "C:\\source-reconciliation-tests", "Test", true, false, 16 * 1024 * 1024, [], [], [], TimeSpan.FromDays(7), SourceRootState.Enabled, 1);
         await using (var setup = CreateContext())
         {
             setup.SourceRootConfigurations.Add(Root(rootId, now));
@@ -643,7 +643,7 @@ public sealed class SourceReconciliationIntegrationTests(NativeSqlServerFixture 
     {
         var now = DateTimeOffset.Parse("2026-08-06T12:00:00+00:00");
         var rootId = Guid.NewGuid();
-        var root = SourceRootConfiguration.Restore(new SourceRootId(rootId), "C:\\source-reconciliation-tests", "Test", true, false, 16 * 1024 * 1024, [], [], [], TimeSpan.FromMinutes(15), SourceRootState.Enabled, 1);
+        var root = SourceRootConfiguration.Restore(new SourceRootId(rootId), "C:\\source-reconciliation-tests", "Test", true, false, 16 * 1024 * 1024, [], [], [], TimeSpan.FromDays(7), SourceRootState.Enabled, 1);
         await using (var setup = CreateContext())
         {
             setup.SourceRootConfigurations.Add(Root(rootId, now));
@@ -674,7 +674,7 @@ public sealed class SourceReconciliationIntegrationTests(NativeSqlServerFixture 
     {
         var now = DateTimeOffset.Parse("2026-08-06T12:00:00+00:00");
         var rootId = Guid.NewGuid();
-        var root = SourceRootConfiguration.Restore(new SourceRootId(rootId), "C:\\source-reconciliation-tests", "Test", true, false, 16 * 1024 * 1024, [], [], [], TimeSpan.FromMinutes(15), SourceRootState.Enabled, 1);
+        var root = SourceRootConfiguration.Restore(new SourceRootId(rootId), "C:\\source-reconciliation-tests", "Test", true, false, 16 * 1024 * 1024, [], [], [], TimeSpan.FromDays(7), SourceRootState.Enabled, 1);
         await using (var setup = CreateContext())
         {
             setup.SourceRootConfigurations.Add(Root(rootId, now));
@@ -700,7 +700,7 @@ public sealed class SourceReconciliationIntegrationTests(NativeSqlServerFixture 
     {
         var now = DateTimeOffset.Parse("2026-08-06T12:00:00+00:00");
         var rootId = Guid.NewGuid();
-        var root = SourceRootConfiguration.Restore(new SourceRootId(rootId), "C:\\source-reconciliation-tests", "Test", true, false, 16 * 1024 * 1024, [], [], [], TimeSpan.FromMinutes(15), SourceRootState.Enabled, 1);
+        var root = SourceRootConfiguration.Restore(new SourceRootId(rootId), "C:\\source-reconciliation-tests", "Test", true, false, 16 * 1024 * 1024, [], [], [], TimeSpan.FromDays(7), SourceRootState.Enabled, 1);
         var file = File("collision.txt", new string('9', 64));
         await using (var setup = CreateContext())
         {
@@ -728,7 +728,7 @@ public sealed class SourceReconciliationIntegrationTests(NativeSqlServerFixture 
     {
         var now = DateTimeOffset.Parse("2026-08-09T00:00:00+00:00");
         var rootId = Guid.NewGuid();
-        var root = SourceRootConfiguration.Restore(new SourceRootId(rootId), "C:\\source-reconciliation-tests", "Test", true, false, 16 * 1024 * 1024, [], [], [], TimeSpan.FromMinutes(15), SourceRootState.Enabled, 1);
+        var root = SourceRootConfiguration.Restore(new SourceRootId(rootId), "C:\\source-reconciliation-tests", "Test", true, false, 16 * 1024 * 1024, [], [], [], TimeSpan.FromDays(7), SourceRootState.Enabled, 1);
         await using (var setup = CreateContext())
         {
             setup.SourceRootConfigurations.Add(Root(rootId, now));
@@ -757,7 +757,7 @@ public sealed class SourceReconciliationIntegrationTests(NativeSqlServerFixture 
     {
         var now = DateTimeOffset.Parse("2026-08-09T00:00:00+00:00");
         var rootId = Guid.NewGuid();
-        var root = SourceRootConfiguration.Restore(new SourceRootId(rootId), "C:\\source-reconciliation-tests", "Test", true, false, 16 * 1024 * 1024, [], [], [], TimeSpan.FromMinutes(15), SourceRootState.Enabled, 1);
+        var root = SourceRootConfiguration.Restore(new SourceRootId(rootId), "C:\\source-reconciliation-tests", "Test", true, false, 16 * 1024 * 1024, [], [], [], TimeSpan.FromDays(7), SourceRootState.Enabled, 1);
         await using (var setup = CreateContext())
         {
             setup.SourceRootConfigurations.Add(Root(rootId, now));
@@ -792,7 +792,7 @@ public sealed class SourceReconciliationIntegrationTests(NativeSqlServerFixture 
         Id = id, CanonicalPath = $"C:\\source-reconciliation-tests\\{id:N}", DisplayName = "Test",
         State = (int)SourceRootState.Enabled, Recursive = true, IncludePatternsJson = "[]", ExcludePatternsJson = "[]",
         FollowLinks = false, MaximumFileBytes = 16 * 1024 * 1024, AllowedClassificationsJson = "[]", CrawlMode = 0,
-        ReconciliationCadenceSeconds = 900, ConfigurationRevision = 1, CreatedAtUtc = now, UpdatedAtUtc = now
+        ReconciliationCadenceSeconds = 604800, ConfigurationRevision = 1, CreatedAtUtc = now, UpdatedAtUtc = now
     };
 
     private static SourceScanRequestEntity Request(Guid id, Guid rootId, DateTimeOffset now, bool released, SourceScanRequestState state) => new()

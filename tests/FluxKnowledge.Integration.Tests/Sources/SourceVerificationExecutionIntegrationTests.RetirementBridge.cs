@@ -32,7 +32,7 @@ public sealed partial class SourceVerificationExecutionIntegrationTests
     {
         await using var scenario = await Scenario.CreateAsync(fixture.ConnectionString);
         await scenario.BaselineAsync();
-        await scenario.Verification.StartAsync(scenario.RootId, true, default);
+        await SeedLegacyVerificationAsync(scenario);
         using var packet = await RetirementPacket.CreateAsync(scenario, fixture.ConnectionString);
         var before = await RetirementSnapshotAsync(scenario);
         Assert.Throws<InvalidOperationException>(() => packet.Begin(() => { }, evidenceFault: fault));
@@ -44,7 +44,7 @@ public sealed partial class SourceVerificationExecutionIntegrationTests
     {
         await using var scenario = await Scenario.CreateAsync(fixture.ConnectionString);
         await scenario.BaselineAsync();
-        await scenario.Verification.StartAsync(scenario.RootId, true, default);
+        await SeedLegacyVerificationAsync(scenario);
         using var packet = await RetirementPacket.CreateAsync(scenario, fixture.ConnectionString);
         var driver = Path.Combine(scenario.Runtime, "retirement-driver.ps1");
         var bindings = Path.Combine(scenario.Runtime, "retirement-bindings.json");
@@ -61,7 +61,7 @@ public sealed partial class SourceVerificationExecutionIntegrationTests
                 Invoke-ProjectionOperatorBridge -OperatorRoot $OperatorRoot -Operation SourceJournalRetirement -BeginMethod BeginForIsolatedTests `
                     -BeginArguments @($Runtime,$Configuration,$Hold,$Json,$Guard,$MutexName) -TimeoutSeconds 30
             } $OperatorRoot $Runtime $Configuration $Hold $json $guard $MutexName
-            if($calls.Value -ne 3){throw 'Stopped callback did not remain on the updater runspace.'}
+            if($calls.Value -ne 5){throw 'Stopped callback did not remain on the updater runspace.'}
             $result|ConvertTo-Json -Compress
             """);
         var start = new ProcessStartInfo("pwsh") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
@@ -86,7 +86,7 @@ public sealed partial class SourceVerificationExecutionIntegrationTests
     {
         await using var scenario = await Scenario.CreateAsync(fixture.ConnectionString);
         await scenario.BaselineAsync();
-        await scenario.Verification.StartAsync(scenario.RootId, true, default);
+        await SeedLegacyVerificationAsync(scenario);
         using var packet = await RetirementPacket.CreateAsync(scenario, fixture.ConnectionString);
         var before = await RetirementSnapshotAsync(scenario);
         var stopped = true;
@@ -128,13 +128,13 @@ public sealed partial class SourceVerificationExecutionIntegrationTests
         internal string Evidence => evidence;
         internal string Release { get; } = "isolated-source-retirement";
         internal string MutexName { get; } = @"Local\FluxKnowledge.SourceJournalRetirementTest." + Guid.NewGuid().ToString("N");
-        internal static async Task<RetirementPacket> CreateAsync(Scenario scenario, string connection)
+        internal static async Task<RetirementPacket> CreateAsync(Scenario scenario, string connection, bool metadataPolicy = false)
         {
             var configuration = Path.Combine(scenario.Runtime, "retirement-settings.json");
             var hold = Path.Combine(scenario.Runtime, "deployment-validation-hold.json");
             var evidence = Path.Combine(scenario.Runtime, "stopped-writers.json");
             await File.WriteAllTextAsync(configuration, JsonSerializer.Serialize(new { ConnectionStrings = new { FluxKnowledge = connection },
-                SourceJournal = new { Enabled = false, SealingEnabled = false } }));
+                SourceJournal = new { Enabled = metadataPolicy, SealingEnabled = metadataPolicy } }));
             await File.WriteAllTextAsync(hold, JsonSerializer.Serialize("isolated-source-retirement"));
             await using var db = scenario.Factory.CreateDbContext();
             await db.Database.OpenConnectionAsync();
@@ -144,9 +144,9 @@ public sealed partial class SourceVerificationExecutionIntegrationTests
             var identity = PhysicalFileIdentity.GetDirectory(scenario.Runtime).IdentityFingerprint;
             return new(scenario.Runtime, configuration, hold, evidence, identity, database);
         }
-        internal IDisposable Begin(Action assertStopped, bool wrongDatabase = false, string? evidenceFault = null) =>
-            (IDisposable)IncrementalSourceJournalRetirementBridge.BeginForIsolatedTests(runtime, configuration, hold, PrepareBindings(wrongDatabase, evidenceFault), assertStopped, MutexName);
-        internal string PrepareBindings(bool wrongDatabase = false, string? evidenceFault = null)
+        internal IDisposable Begin(Action assertStopped, bool wrongDatabase = false, string? evidenceFault = null, string? metadataPolicy = null, bool requireFeatureOff = false) =>
+            (IDisposable)IncrementalSourceJournalRetirementBridge.BeginForIsolatedTests(runtime, configuration, hold, PrepareBindings(wrongDatabase, evidenceFault, metadataPolicy, requireFeatureOff), assertStopped, MutexName);
+        internal string PrepareBindings(bool wrongDatabase = false, string? evidenceFault = null, string? metadataPolicy = null, bool requireFeatureOff = false)
         {
             var incarnation = wrongDatabase ? Guid.NewGuid() : database;
             var proof = JsonSerializer.SerializeToNode(new { Version = 1, ReleaseId = Release, DatabaseIncarnation = incarnation,
@@ -163,7 +163,7 @@ public sealed partial class SourceVerificationExecutionIntegrationTests
             var bindings = JsonSerializer.Serialize(new { ReleaseId = Release, ConfigurationSha256 = _configurationHash, HoldSha256 = _holdHash,
                 RuntimeIdentityFingerprint = runtimeIdentity, DatabaseIncarnation = incarnation,
                 OperatorEntrySha256 = Hash(typeof(IndexProjectionCommand).Assembly.Location),
-                StoppedWritersEvidencePath = evidence, StoppedWritersEvidenceSha256 = Hash(evidence) });
+                StoppedWritersEvidencePath = evidence, StoppedWritersEvidenceSha256 = Hash(evidence), MetadataPolicy = metadataPolicy, RequireFeatureOff = requireFeatureOff });
             return bindings;
         }
         private static string Hash(string path) => Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path)));

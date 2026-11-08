@@ -238,6 +238,24 @@ rather than relabelling immutable history. The handle prevents writes and rename
 hard-link and access-control changes are checked but are not atomically excluded
 with the SQL commit.
 
+The source detection policy is `events-weekly-metadata-v1`. Journal and watcher
+file events drive ingestion, including identified events with unchanged metadata.
+The weekly fallback compares membership, physical identity, size and modification
+time. Quiet unchanged files are reused without source or retained assurance reads,
+including missing seals, pause/resume and journal recovery. Same-size edits with
+preserved timestamps can be missed without events; silent corruption need not be
+automatically detected. These are accepted freshness limits. Normal ingestion,
+deduplication and publication retain their hashes and ownership/access safeguards.
+
+Automatic checksum verification and forced unsealed-file rereads are retired.
+The stopped updater archives prior policy, strict root obligations and frozen
+manifests, invalidates verification-only work under its physical native-reader
+slot, and adopts the weekly interval for enabled and paused non-deleting roots.
+Specific pending file events and historical receipts remain intact. Journal
+retry and warnings continue independently of scan scheduling. Only explicit
+`source_sync` with `fullContent: true` requests a full content rescan. See
+[the source update policy](design/low-disk-source-updates.md).
+
 Owned filesystem scans carry the discovery hashing handle directly into retained
 publication and SQL convergence. The final snapshot already contains scan
 ownership and keeps its object identity through the receipt. Existing retained

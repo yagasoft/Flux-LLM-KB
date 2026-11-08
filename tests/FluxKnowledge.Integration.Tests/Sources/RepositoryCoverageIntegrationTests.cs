@@ -146,12 +146,12 @@ public sealed class RepositoryCoverageIntegrationTests(NativeSqlServerFixture fi
 
         // Periodic-only scan: rename, working-file deletion, and untracking with bytes left on disk.
         repository.Git("mv", "Guide.md", "Renamed.md"); repository.Git("add", "Code.cs"); repository.Git("rm", "--cached", "Code.cs");
-        File.Delete(System.IO.Path.Combine(repository.Path, "Added.py")); clock.Advance(TimeSpan.FromMinutes(16));
+        File.Delete(System.IO.Path.Combine(repository.Path, "Added.py")); clock.Advance(TimeSpan.FromDays(7) + TimeSpan.FromSeconds(1));
         await ScanAndPublish(environment, scanStore, clock);
         var final = Assert.Single((await retrieval.SearchAsync(new CorpusSearchRequest("amber", 10, "root", rootId, null), default)).Results);
         Assert.Equal("Renamed.md", final.Title);
         Assert.Empty((await retrieval.SearchAsync(new CorpusSearchRequest("quartz", 10, "root", rootId, null), default)).Results);
-        repository.Git("add", "-u"); repository.Git("rm", "--cached", "-r", "."); clock.Advance(TimeSpan.FromMinutes(16));
+        repository.Git("add", "-u"); repository.Git("rm", "--cached", "-r", "."); clock.Advance(TimeSpan.FromDays(7) + TimeSpan.FromSeconds(1));
         await ScanAndPublish(environment, scanStore, clock);
         Assert.Empty((await retrieval.SearchAsync(new CorpusSearchRequest("lighthouse", 20, "root", rootId, null), default)).Results);
         await Assert.ThrowsAsync<NativeOperationException>(() => retrieval.ReadAsync(new CorpusReadRequest(final.EvidenceRef, 0), default).AsTask());

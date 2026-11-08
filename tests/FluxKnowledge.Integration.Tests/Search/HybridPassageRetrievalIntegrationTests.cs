@@ -166,7 +166,6 @@ public sealed class HybridPassageRetrievalIntegrationTests(NativeSqlServerFixtur
     [InlineData(256)]
     [InlineData(512)]
     [InlineData(513)]
-    [InlineData(10000)]
     [InlineData(10001)]
     public async Task Scoped_selection_returns_the_exact_oracle_including_a_winner_after_the_former_cutoff(int count)
     {

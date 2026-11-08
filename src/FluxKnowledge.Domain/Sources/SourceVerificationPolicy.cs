@@ -3,7 +3,7 @@ namespace FluxKnowledge.Domain.Sources;
 public sealed record SourceVerificationPolicy
 {
     public int Version { get; init; } = 1;
-    public bool Enabled { get; init; } = true;
+    public bool Enabled { get; init; }
     public string TimeZoneId { get; init; } = "UTC";
     public DayOfWeek Weekday { get; init; } = DayOfWeek.Sunday;
     public TimeOnly LocalStart { get; init; } = new(2, 0);

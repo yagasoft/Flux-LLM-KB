@@ -1,5 +1,7 @@
 # Incremental source scanning implementation plan
 
+Current operating policy: [events and weekly metadata reconciliation](low-disk-source-updates.md) supersedes this record's automatic checksum, seal and full-recapture requirements from 3 November 2026. Historical observations and receipts below remain evidence, not current guarantees.
+
 Status: implemented and released on 26 October 2026 after independent GPT-6 Astra/high review, complete staging qualification and canonical verification. The user authorised production deployment, journal configuration, live validation, squash merge and task-worktree purge. The reviewed release passed bounded production acceptance; the initial production baseline and namespace establishment continued as normal runtime work. Production steady-state content-byte savings and natural-change latency remain unmeasured. Earlier dated checkpoints below record the evidence and unresolved work at that time; this delivery record supersedes their outstanding-work statements.
 
 **Goal:** stop ordinary whole-source scans and unchanged-content reads while preserving discovery, integrity, physical scope and recovery.

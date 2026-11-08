@@ -35,6 +35,7 @@ public sealed partial class SqlSourceVerificationStore
     internal static async Task ApplyControlInTransactionAsync(FluxKnowledgeDbContext db, SourceRootConfigurationEntity root,
         SourceRootScanStateEntity? state, string action, JsonElement payload, bool enabled, DateTimeOffset now, CancellationToken ct)
     {
+        if (!SourcePolicyDefaults.ChecksumVerificationEnabled) throw new NativeOperationException("source-verification-disabled");
         if (action == "source_verify")
         {
             if (!enabled) throw new NativeOperationException("source-verification-disabled");

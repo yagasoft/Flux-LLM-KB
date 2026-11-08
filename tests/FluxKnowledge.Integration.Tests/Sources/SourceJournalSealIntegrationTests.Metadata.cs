@@ -55,10 +55,10 @@ public sealed partial class SourceJournalSealIntegrationTests
     }
 
     [NativeSqlServerTheory]
-    [InlineData(1L)] // A forced content obligation merged with metadata still requires hashing.
+    [InlineData(1L)] // A whole-root old strict-policy flag is metadata debt under the current policy.
     [InlineData(SourcePendingReasons.ScopedNamespace)]
     [InlineData(SourcePendingReasons.GitMembership)]
-    public async Task Later_substantive_work_merged_with_metadata_still_refuses_reuse(long additionalReason)
+    public async Task Later_namespace_work_stays_pending_without_forcing_unchanged_content_reads(long additionalReason)
     {
         await using var scenario = await Scenario.CreateAsync(fixture.ConnectionString, qualified: true);
         var root = await scenario.ScanAsync("mixed-metadata-baseline");
@@ -82,8 +82,8 @@ public sealed partial class SourceJournalSealIntegrationTests
         scenario.ReadTrace.Clear();
         await scenario.ScanAsync("mixed-metadata-frozen-plan");
         Assert.NotNull(frozen);
-        Assert.True(scenario.SourceBytes >= 64, "Later substantive obligations cannot be hidden by the metadata-only optimisation.");
-        Assert.Contains(scenario.ReadTrace, trace => trace.Contains("current-pending-obligation", StringComparison.Ordinal));
+        Assert.Equal(0, scenario.SourceBytes + scenario.ArtifactSourceBytes);
+        Assert.DoesNotContain(scenario.ReadTrace, trace => trace.Contains("current-pending-obligation", StringComparison.Ordinal));
         await using var verified = scenario.Factory.CreateDbContext();
         var remaining = await verified.SourcePendingChanges.SingleAsync(x => x.RelativePath == ".");
         Assert.True(remaining.Generation > frozen.Generation);

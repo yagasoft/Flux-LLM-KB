@@ -9,6 +9,54 @@ namespace FluxKnowledge.Web.Tests.Components;
 
 public sealed class OverviewSnapshotCoordinatorTests
 {
+    [Fact]
+    public async Task Forced_refresh_still_waits_the_full_two_second_start_interval()
+    {
+        var clock = new ManualClock();
+        var reader = new ControlledReader();
+        reader.Release.SetResult();
+        using var services = new ServiceCollection().AddSingleton<IProjectionReader>(reader).BuildServiceProvider();
+        await using var shared = new OverviewSnapshotCoordinator(services.GetRequiredService<IServiceScopeFactory>(), new StatusEventFeed(), clock);
+        await shared.RefreshAsync(default);
+        var refresh = shared.RefreshAsync(default, force: true).AsTask();
+        await WaitUntilAsync(() => clock.HasOneShotTimer);
+        Assert.Equal(TimeSpan.FromSeconds(2), clock.OneShotDelay);
+        clock.Advance(TimeSpan.FromMilliseconds(1999));
+        Assert.Equal(TimeSpan.FromMilliseconds(1), clock.OneShotDelay);
+        Assert.Equal(1, reader.Reads);
+        Assert.False(refresh.IsCompleted);
+        clock.Advance(TimeSpan.FromMilliseconds(1));
+        await refresh.WaitAsync(TimeSpan.FromSeconds(3));
+        Assert.Equal(2, reader.Reads);
+        Assert.Equal(2, shared.Metrics.Completed);
+    }
+
+    [Fact]
+    public async Task Owned_deadline_uses_the_supplied_clock_and_preserves_the_full_two_second_budget()
+    {
+        var clock = new ManualClock();
+        var reader = new ControlledReader { HoldCancellation = true };
+        using var services = new ServiceCollection().AddSingleton<IProjectionReader>(reader).BuildServiceProvider();
+        await using var shared = new OverviewSnapshotCoordinator(services.GetRequiredService<IServiceScopeFactory>(), new StatusEventFeed(), clock);
+        var refresh = shared.RefreshAsync(default).AsTask();
+        await reader.Started.Task.WaitAsync(TimeSpan.FromSeconds(3));
+        Assert.Equal(TimeSpan.FromSeconds(2), clock.OneShotDelay);
+        clock.Advance(TimeSpan.FromMilliseconds(1999));
+        Assert.Equal(TimeSpan.FromMilliseconds(1), clock.OneShotDelay);
+        Assert.False(reader.CancellationObserved.Task.IsCompleted);
+        Assert.False(refresh.IsCompleted);
+        clock.Advance(TimeSpan.FromMilliseconds(1));
+        try
+        {
+            await reader.CancellationObserved.Task.WaitAsync(TimeSpan.FromSeconds(1));
+            Assert.False(refresh.IsCompleted); // Deadline cancellation still awaits reader cleanup.
+        }
+        finally { reader.CleanupRelease.TrySetResult(); }
+        await refresh.WaitAsync(TimeSpan.FromSeconds(3));
+        Assert.Equal("Status is busy. Waiting for a consistent sample.", shared.Current.RefreshIssue);
+        Assert.Null(shared.Current.Projection);
+        Assert.Equal(1, shared.Metrics.Failed);
+    }
     [Theory]
     [InlineData(true, 0, 0, true)]
     [InlineData(true, 0, 3621, true)]
@@ -20,22 +68,28 @@ public sealed class OverviewSnapshotCoordinatorTests
     public async Task Only_SQL_command_cancellation_at_the_owned_deadline_is_busy(
         bool waitForDeadline, int firstError, int secondError, bool busy)
     {
+        var clock = new ManualClock();
         var reader = new ControlledReader();
         reader.Release.SetResult();
         using var services = new ServiceCollection().AddSingleton<IProjectionReader>(reader).BuildServiceProvider();
-        await using var shared = new OverviewSnapshotCoordinator(services.GetRequiredService<IServiceScopeFactory>(), new StatusEventFeed());
+        await using var shared = new OverviewSnapshotCoordinator(services.GetRequiredService<IServiceScopeFactory>(), new StatusEventFeed(), clock);
         await shared.RefreshAsync(default);
         var original = shared.Current;
         reader.Failure = SqlProjectionReadBudgetTests.SqlFailure(firstError, secondError);
         reader.WaitForDeadline = waitForDeadline;
-        await shared.RefreshAsync(default, force: true).AsTask().WaitAsync(TimeSpan.FromSeconds(6));
+        clock.Advance(TimeSpan.FromSeconds(2));
+        var failedRefresh = shared.RefreshAsync(default, force: true).AsTask();
+        await reader.SecondRead.Task.WaitAsync(TimeSpan.FromSeconds(3));
+        if (waitForDeadline) clock.Advance(TimeSpan.FromSeconds(2));
+        await failedRefresh.WaitAsync(TimeSpan.FromSeconds(3));
         Assert.Equal(busy ? "Status is busy. Waiting for a consistent sample." : "Status refresh failed.", shared.Current.RefreshIssue);
         Assert.Same(original.Projection, shared.Current.Projection);
         Assert.Equal(original.PublishedAtUtc, shared.Current.PublishedAtUtc);
         reader.Failure = null;
         reader.WaitForDeadline = false;
         reader.Result = Sample(9);
-        await shared.RefreshAsync(default, force: true).AsTask().WaitAsync(TimeSpan.FromSeconds(6));
+        clock.Advance(TimeSpan.FromSeconds(2));
+        await shared.RefreshAsync(default, force: true).AsTask().WaitAsync(TimeSpan.FromSeconds(3));
         Assert.Null(shared.Current.RefreshIssue);
         Assert.Equal(9, shared.Current.Projection!.IndexedRecordCount);
     }
@@ -45,13 +99,14 @@ public sealed class OverviewSnapshotCoordinatorTests
     [InlineData(false)]
     public async Task Connection_hints_reuse_a_fresh_sample_and_refresh_an_old_sample(bool fresh)
     {
-        var now = DateTimeOffset.UtcNow;
+        var clock = new ManualClock();
+        var now = clock.GetUtcNow();
         var feed = new StatusEventFeed();
         var reader = new ControlledReader { Result = Sample(7) with
             { Activity = new(now.AddSeconds(fresh ? 0 : -20), now, [], [], [], 0, 0, 0) } };
         reader.Release.SetResult();
         using var services = new ServiceCollection().AddSingleton<IProjectionReader>(reader).BuildServiceProvider();
-        await using var shared = new OverviewSnapshotCoordinator(services.GetRequiredService<IServiceScopeFactory>(), feed);
+        await using var shared = new OverviewSnapshotCoordinator(services.GetRequiredService<IServiceScopeFactory>(), feed, clock);
         using var subscription = shared.Subscribe();
         await shared.RefreshAsync(default);
         await feed.PublishAsync(new(null, "reconnect", now), default);
@@ -64,6 +119,8 @@ public sealed class OverviewSnapshotCoordinatorTests
         }
         else
         {
+            await WaitUntilAsync(() => clock.HasOneShotTimer);
+            clock.Advance(TimeSpan.FromSeconds(2));
             await reader.SecondRead.Task.WaitAsync(TimeSpan.FromSeconds(4));
             Assert.Equal(2, reader.Reads);
         }
@@ -72,14 +129,16 @@ public sealed class OverviewSnapshotCoordinatorTests
     [Fact]
     public async Task Inconsistent_samples_keep_the_original_sample_and_the_specific_refresh_notice()
     {
+        var clock = new ManualClock();
         var reader = new ControlledReader();
         reader.Release.SetResult();
         using var services = new ServiceCollection().AddSingleton<IProjectionReader>(reader).BuildServiceProvider();
-        await using var shared = new OverviewSnapshotCoordinator(services.GetRequiredService<IServiceScopeFactory>(), new StatusEventFeed());
+        await using var shared = new OverviewSnapshotCoordinator(services.GetRequiredService<IServiceScopeFactory>(), new StatusEventFeed(), clock);
         await shared.RefreshAsync(default);
         var original = shared.Current.Projection;
         var changed = Sample(9);
         reader.Result = changed with { Activity = changed.Activity with { IsConsistent = false } };
+        clock.Advance(TimeSpan.FromSeconds(2));
         await shared.RefreshAsync(default, force: true);
         Assert.Same(original, shared.Current.Projection);
         Assert.Equal("Status changed during the read. Waiting for a consistent sample.", shared.Current.RefreshIssue);
@@ -111,26 +170,35 @@ public sealed class OverviewSnapshotCoordinatorTests
     [InlineData(true)]
     public async Task Invalidation_stays_visible_until_a_sample_started_after_it_covers_it(bool duringRead)
     {
+        var clock = new ManualClock();
         var feed = new StatusEventFeed();
         var reader = new ControlledReader();
         reader.Release.SetResult();
         using var services = new ServiceCollection().AddSingleton<IProjectionReader>(reader).BuildServiceProvider();
-        await using var shared = new OverviewSnapshotCoordinator(services.GetRequiredService<IServiceScopeFactory>(), feed);
+        await using var shared = new OverviewSnapshotCoordinator(services.GetRequiredService<IServiceScopeFactory>(), feed, clock);
         using var subscription = shared.Subscribe();
         await shared.RefreshAsync(default);
         reader.Release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        if (duringRead) clock.Advance(TimeSpan.FromSeconds(2));
         var second = shared.RefreshAsync(default, force: true).AsTask();
         if (duringRead) await reader.SecondRead.Task.WaitAsync(TimeSpan.FromSeconds(4));
         var coalesced = shared.Metrics.Coalesced;
         await feed.PublishAsync(new(null, "sources", DateTimeOffset.UtcNow), default);
         await WaitUntilAsync(() => shared.Metrics.Coalesced > coalesced);
         Assert.NotNull(shared.Current.RefreshIssue);
+        if (!duringRead)
+        {
+            await WaitUntilAsync(() => clock.HasOneShotTimer);
+            clock.Advance(TimeSpan.FromSeconds(2));
+        }
         reader.Release.SetResult();
         await second;
         Assert.Equal(2, shared.Metrics.Completed);
         if (duringRead)
         {
             Assert.NotNull(shared.Current.RefreshIssue);
+            await WaitUntilAsync(() => clock.HasOneShotTimer);
+            clock.Advance(TimeSpan.FromSeconds(2));
             await shared.RefreshAsync(default);
         }
         Assert.Null(shared.Current.RefreshIssue);
@@ -140,16 +208,19 @@ public sealed class OverviewSnapshotCoordinatorTests
     [Fact]
     public async Task Observing_a_changed_deployment_hold_queues_one_coalesced_refresh()
     {
+        var clock = new ManualClock();
         var hold = new MutableHold();
         var reader = new ControlledReader();
         reader.Release.SetResult();
         using var services = new ServiceCollection().AddSingleton<IProjectionReader>(reader).BuildServiceProvider();
-        await using var shared = new OverviewSnapshotCoordinator(services.GetRequiredService<IServiceScopeFactory>(), new StatusEventFeed(), hold: hold);
+        await using var shared = new OverviewSnapshotCoordinator(services.GetRequiredService<IServiceScopeFactory>(), new StatusEventFeed(), clock, hold: hold);
         using var subscription = shared.Subscribe();
         await shared.RefreshAsync(default);
         reader.Result = Sample(9) with { DeploymentHeld = true };
         hold.IsHeld = true;
         for (var i = 0; i < 20; i++) Assert.NotNull(shared.Current.RefreshIssue);
+        await WaitUntilAsync(() => clock.HasOneShotTimer);
+        clock.Advance(TimeSpan.FromSeconds(2));
         await reader.SecondRead.Task.WaitAsync(TimeSpan.FromSeconds(4));
         await shared.RefreshAsync(default);
         Assert.Equal(2, reader.Reads);
@@ -240,18 +311,21 @@ public sealed class OverviewSnapshotCoordinatorTests
     [Fact]
     public async Task Failure_preserves_the_last_good_sample_and_a_later_success_clears_the_issue()
     {
+        var clock = new ManualClock();
         var reader = new ControlledReader();
         reader.Release.SetResult();
         using var services = new ServiceCollection().AddSingleton<IProjectionReader>(reader).BuildServiceProvider();
-        await using var shared = new OverviewSnapshotCoordinator(services.GetRequiredService<IServiceScopeFactory>(), new StatusEventFeed());
+        await using var shared = new OverviewSnapshotCoordinator(services.GetRequiredService<IServiceScopeFactory>(), new StatusEventFeed(), clock);
         await shared.RefreshAsync(default);
         var original = shared.Current.Projection;
         reader.Fail = true;
+        clock.Advance(TimeSpan.FromSeconds(2));
         await shared.RefreshAsync(default, force: true);
         Assert.Same(original, shared.Current.Projection);
         Assert.NotNull(shared.Current.RefreshIssue);
         reader.Fail = false;
         reader.Result = Sample(9);
+        clock.Advance(TimeSpan.FromSeconds(2));
         await shared.RefreshAsync(default, force: true);
         Assert.Equal(9, shared.Current.Projection!.IndexedRecordCount);
         Assert.Null(shared.Current.RefreshIssue);
@@ -260,18 +334,20 @@ public sealed class OverviewSnapshotCoordinatorTests
     [Fact]
     public async Task A_status_event_during_a_read_queues_one_follow_up_without_delaying_the_first_caller()
     {
+        var clock = new ManualClock();
         var feed = new StatusEventFeed();
         var reader = new ControlledReader();
         using var services = new ServiceCollection().AddSingleton<IProjectionReader>(reader).BuildServiceProvider();
-        await using var shared = new OverviewSnapshotCoordinator(services.GetRequiredService<IServiceScopeFactory>(), feed);
+        await using var shared = new OverviewSnapshotCoordinator(services.GetRequiredService<IServiceScopeFactory>(), feed, clock);
         using var subscription = shared.Subscribe();
         var first = shared.RefreshAsync(default).AsTask();
         await reader.Started.Task.WaitAsync(TimeSpan.FromSeconds(3));
         for (var i = 0; i < 100; i++) await feed.PublishAsync(new(null, "sources", DateTimeOffset.UtcNow), default);
-        // Let the event observer consume the burst while the first read is held.
-        await Task.Delay(100);
+        await WaitUntilAsync(() => shared.Metrics.Coalesced > 0);
         reader.Release.SetResult();
         await first.WaitAsync(TimeSpan.FromSeconds(3));
+        await WaitUntilAsync(() => clock.HasOneShotTimer);
+        clock.Advance(TimeSpan.FromSeconds(2));
         await reader.SecondRead.Task.WaitAsync(TimeSpan.FromSeconds(5));
         Assert.Equal(2, reader.Reads);
     }
@@ -359,6 +435,7 @@ public sealed class OverviewSnapshotCoordinatorTests
         private readonly List<ManualTimer> _timers = [];
         public override DateTimeOffset GetUtcNow() { lock (_sync) return _now; }
         public bool HasOneShotTimer { get { lock (_sync) return _timers.Any(t => t.Due != DateTimeOffset.MaxValue && t.Period == Timeout.InfiniteTimeSpan); } }
+        public TimeSpan? OneShotDelay { get { lock (_sync) return _timers.Where(t => t.Due != DateTimeOffset.MaxValue && t.Period == Timeout.InfiniteTimeSpan).Select(t => (TimeSpan?)(t.Due - _now)).Min(); } }
         public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period)
         {
             lock (_sync)

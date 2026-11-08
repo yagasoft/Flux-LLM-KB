@@ -2,6 +2,7 @@
 @implements IAsyncDisposable
 @using FluxKnowledge.Application.Contracts
 @using FluxKnowledge.Application.Sources
+@using FluxKnowledge.Domain.Sources
 @using FluxKnowledge.Web.Components.Sources
 @using FluxKnowledge.Web.Components.Status
 @inject SourceRootPageState PageState
@@ -172,7 +173,7 @@
                 FollowLinks: false,
                 _draft.MaximumFileBytes,
                 _draft.IndexSourceText ? ["text/plain", "text/x-source-code"] : ["text/plain"],
-                TimeSpan.FromMinutes(15),
+                SourcePolicyDefaults.MetadataReconciliationCadence,
                 _draft.RequestedBy, DiscoveryMode: _draft.DiscoveryMode);
             var receipt = await SourceRootService.CreateAsync(request, intent, _stopping.Token);
             _savedRootId = receipt.SourceRootId.Value;

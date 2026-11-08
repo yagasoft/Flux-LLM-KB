@@ -44,7 +44,7 @@ public sealed partial class SourceJournalSealIntegrationTests
     }
 
     [NativeSqlServerFact]
-    public async Task A_Git_seal_before_failed_completion_cannot_strand_an_unauthorised_revision_on_a_higher_claim()
+    public async Task A_failed_Git_completion_cannot_publish_an_unauthorised_revision_on_a_higher_claim()
     {
         await using var scenario = await Scenario.CreateAsync(fixture.ConnectionString, qualified: true, gitTracked: true);
         await scenario.ScanAsync("git-baseline");
@@ -58,7 +58,7 @@ public sealed partial class SourceJournalSealIntegrationTests
         {
             var latest = await db.SourceRevisions.OrderByDescending(x => x.Revision).FirstAsync(x => x.CanonicalPath == scenario.Path);
             Assert.Null(SqlRepositoryWorkRecovery.ReadDiscovery(latest.CurrentDiscoveryEvidenceJson));
-            Assert.True((await db.SourceInventoryEntries.SingleAsync(x => x.RelativePath == "one.txt")).IsSealed);
+            Assert.False((await db.SourceInventoryEntries.SingleAsync(x => x.RelativePath == "one.txt")).IsSealed);
         }
         scenario.Clock.Now += TimeSpan.FromMinutes(11);
         scenario.Restart();

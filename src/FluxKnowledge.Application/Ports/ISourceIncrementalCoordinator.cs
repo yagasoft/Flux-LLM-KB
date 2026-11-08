@@ -11,6 +11,7 @@ public static class SourcePendingReasons
     public const long ScopedNamespace = 1L << 34;
     public const long FullRecapture = 1L << 35;
     public const long RemovalPending = 1L << 36;
+    public const long FileEvent = 1L << 37;
     public const long NamespaceMask = NamespaceMetadata | ScopedNamespace;
 }
 public sealed record SourceScanTarget(string RelativePath, long Generation, bool IsSubtree, long ReasonFlags)
@@ -27,6 +28,9 @@ public sealed record SourceIncrementalPlan(Guid ManifestId, long BaselineEpoch, 
     public long LeaseGeneration { get; init; }
     public long RecoveryGeneration { get; init; }
     public long NamespaceGeneration { get; init; }
+    public string? GitInventoryGeneration { get; init; }
+    public string? DetectionPolicy { get; init; }
+    public bool ForceFullContent { get; init; }
     public Guid? SupersedesManifestId { get; init; }
     public bool IsReconciliation { get; init; }
     public int MetadataEntriesPerSecond { get; init; }
