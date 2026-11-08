@@ -149,7 +149,7 @@ function Invoke-DeploymentSourceJournalVerificationRetirement {
     $context=[FluxKnowledge.Deployment.ProjectionOperatorLoadContext]::new($entry,(Get-ProjectionOperatorFramework $operatorRoot))
     $assembly=$context.LoadFromAssemblyPath((Join-Path $operatorRoot 'FluxKnowledge.Integrations.dll'))
     $identity=$assembly.GetType('FluxKnowledge.Integrations.Files.PhysicalFileIdentity',$true).GetMethod('GetDirectory').Invoke(
-        $null,@((Join-Path $CanonicalLiveRoot 'Runtime')))
+        $null,[object[]]@([string](Join-Path $CanonicalLiveRoot 'Runtime')))
     $configurationHash=(Get-FileHash -LiteralPath $sourceJournalChange.Path).Hash
     $incarnation=[Guid]::Parse($ExpectedSourceJournalDatabaseIdentity.Split('|')[-1])
     $evidencePath=Join-Path $releaseRoot 'source-journal-stopped-writers.json'

@@ -28,7 +28,8 @@ public sealed partial class SourceVerificationExecutionIntegrationTests
         catch { if (!process.HasExited) { process.Kill(true); await process.WaitForExitAsync(); } throw; }
         Assert.True(process.ExitCode == 0, await error);
         using var receipt = JsonDocument.Parse(await output);
-        Assert.Equal(3, receipt.RootElement.GetProperty("Passed").GetInt32());
+        Assert.Equal(4, receipt.RootElement.GetProperty("Passed").GetInt32());
+        Assert.True(receipt.RootElement.GetProperty("ComposedRetirementBound").GetBoolean());
         Assert.Equal(0, receipt.RootElement.GetProperty("ProductionCalls").GetInt32());
     }
 

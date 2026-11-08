@@ -68,17 +68,37 @@ function SyntheticAppCmd {
  $evidence.Commands.Add(($args -join ' '))
  $global:LASTEXITCODE=$evidence.ExitCode
  if($evidence.AfterStop -and $evidence.Mode -eq 'remaining') { '<appcmd><WP WP.NAME="404" APPPOOL.NAME="FluxKnowledge" /></appcmd>' }
- elseif($evidence.AfterStop -and $evidence.Mode -eq 'inventory-failure') { $global:LASTEXITCODE=1; '<appcmd />' }
+ elseif($evidence.AfterStop -and $evidence.Mode -eq 'inventory-failure') { $global:LASTEXITCODE=2; '<appcmd />' }
+ elseif($evidence.AfterStop -and $evidence.Mode -eq 'empty-exited') { $global:LASTEXITCODE=1; '<appcmd />' }
  elseif($evidence.AfterStop) { '<appcmd><WP WP.NAME="202" APPPOOL.NAME="ForeignPool" /></appcmd>' }
  else { $evidence.Xml }
 }
-$evidence=@{Commands=[Collections.Generic.List[string]]::new();ExitCode=0;AfterStop=$false;Mode='';Xml='<appcmd />'}
+$evidence=@{Commands=[Collections.Generic.List[string]]::new();ExitCode=0;AfterStop=$false;Mode='';Xml='<appcmd />';NativeWorkers=@();NativeInventoryFails=$false;NativeQueries=0}
+function Get-CimInstance {
+ param($ClassName,$Filter,$OperationTimeoutSec,$ErrorAction)
+ if($ClassName -cne 'Win32_Process' -or $Filter -cne "Name='w3wp.exe'" -or $OperationTimeoutSec -ne 5 -or $ErrorAction -cne 'Stop') { throw 'Unexpected native absence query.' }
+ $evidence.NativeQueries++
+ if($evidence.NativeInventoryFails) { throw 'Synthetic native inventory failure.' }
+ $evidence.NativeWorkers
+}
 if(@(Get-HybridIisWorkerIds -AppCmdPath SyntheticAppCmd -PoolName FluxKnowledge).Count -ne 0) { throw 'Empty successful inventory did not prove absence.' }
+# IIS also returns 1 when the complete, unfiltered worker inventory is empty.
+# This response is authoritative only with a separate successful native absence.
+$evidence.ExitCode=1;$evidence.Xml="<?xml version=`"1.0`" encoding=`"UTF-8`"?>`n<appcmd>`n</appcmd>"
+if(@(Get-HybridIisWorkerIds -AppCmdPath SyntheticAppCmd -PoolName FluxKnowledge).Count -ne 0 -or $evidence.NativeQueries -ne 1) { throw 'Genuinely empty IIS/native inventories were refused or not corroborated.' }
+foreach($case in @(@{Workers=@([pscustomobject]@{ProcessId=900});Fails=$false},@{Workers=@();Fails=$true})) {
+ $evidence.NativeWorkers=$case.Workers;$evidence.NativeInventoryFails=$case.Fails
+ try { Get-HybridIisWorkerIds -AppCmdPath SyntheticAppCmd -PoolName FluxKnowledge | Out-Null; throw 'Uncorroborated native absence accepted.' }
+ catch { if($_.Exception.Message -cne 'hybrid-iis-worker-inventory-unavailable') { throw } }
+}
+$evidence.ExitCode=0;$evidence.NativeWorkers=@();$evidence.NativeInventoryFails=$false
 $evidence.Xml='<appcmd><WP WP.NAME="101" APPPOOL.NAME="FluxKnowledge" /><WP WP.NAME="202" APPPOOL.NAME="ForeignPool" /></appcmd>'
 $ids=@(Get-HybridIisWorkerIds -AppCmdPath SyntheticAppCmd -PoolName FluxKnowledge)
 if($ids.Count -ne 1 -or $ids[0] -ne 101) { throw 'Exact target pool selection failed.' }
 foreach($case in @(
- @{Exit=1;Xml='<appcmd />'},@{Exit=0;Xml='<unexpected />'},
+ @{Exit=2;Xml='<appcmd />'},@{Exit=0;Xml='<unexpected />'},
+ @{Exit=1;Xml='<appcmd><WP WP.NAME="101" APPPOOL.NAME="FluxKnowledge" /></appcmd>'},
+ @{Exit=1;Xml='<appcmd ERROR="unavailable" />'},@{Exit=1;Xml='<appcmd><ERROR /></appcmd>'},
  @{Exit=0;Xml='<appcmd><WP WP.NAME="101" /></appcmd>'},
  @{Exit=0;Xml='<appcmd><WP WP.NAME="0" APPPOOL.NAME="FluxKnowledge" /></appcmd>'},
  @{Exit=0;Xml='<appcmd><ERROR /></appcmd>'})) {
@@ -97,17 +117,21 @@ function Get-WebAppPoolState { param($Name) @{Value=$evidence.PoolState} }
 function Stop-WebAppPool { param($Name) if(-not $evidence.OwnsStop) { throw 'Stop ownership not recorded before mutation.' }; $evidence.PoolState='Stopped'; $evidence.AfterStop=$true }
 function Wait-IisAppPoolState { param($Name,$ExpectedState,$TimeoutSeconds) if($evidence.PoolState -cne $ExpectedState) { throw 'Unexpected pool state.' } }
 function Get-CimInstance {
- param($ClassName,$Filter,$ErrorAction)
+ param($ClassName,$Filter,$OperationTimeoutSec,$ErrorAction)
+ if($Filter -ceq "Name='w3wp.exe'") {
+  if($OperationTimeoutSec -ne 5 -or $ErrorAction -cne 'Stop') { throw 'Unbounded native absence query.' }
+  return @()
+ }
  if($Filter) { return @() }
  @([pscustomobject]@{ProcessId=101;ParentProcessId=0;CreationDate=[DateTime]'2026-01-01'},[pscustomobject]@{ProcessId=303;ParentProcessId=101;CreationDate=[DateTime]'2026-01-01'})
 }
 $SiteName='FluxKnowledge';$RebuildTimeoutSeconds=30;$ReadinessTimeoutSeconds=0
-foreach($mode in @('exited','remaining','inventory-failure')) {
+foreach($mode in @('exited','empty-exited','remaining','inventory-failure')) {
  $evidence.ExitCode=0;$evidence.AfterStop=$false;$evidence.Mode=$mode;$evidence.PoolState='Started';$evidence.OwnsStop=$false
  $evidence.Xml='<appcmd><WP WP.NAME="101" APPPOOL.NAME="FluxKnowledge" /><WP WP.NAME="202" APPPOOL.NAME="ForeignPool" /></appcmd>'
  try {
   Stop-HybridIisAfterGpuDrain -OnStopRequested { $evidence.OwnsStop=$true }
-  if($mode -ne 'exited') { throw 'Unproven target worker exit accepted.' }
+  if($mode -notin @('exited','empty-exited')) { throw 'Unproven target worker exit accepted.' }
  } catch {
   $expected=if($mode -eq 'remaining') {'hybrid-iis-worker-exit-not-proven'} elseif($mode -eq 'inventory-failure') {'hybrid-iis-worker-inventory-unavailable'} else {''}
   if(-not $expected -or $_.Exception.Message -cne $expected) { throw }
@@ -117,4 +141,4 @@ foreach($mode in @('exited','remaining','inventory-failure')) {
 $evidence.ExitCode=0;$evidence.AfterStop=$true;$evidence.Mode='exited';$evidence.PoolState='Stopped';$evidence.OwnsStop=$false
 Stop-HybridIisAfterGpuDrain -OnStopRequested { $evidence.OwnsStop=$true }
 if($evidence.OwnsStop) { throw 'Already stopped pool falsely acquired stop ownership.' }
-Write-Output 'Hybrid IIS worker proof contract passed: unfiltered exact-pool inventory, empty/foreign workers, failed/invalid inventory, remaining workers and pre-proof stop ownership.'
+Write-Output 'Hybrid IIS worker proof contract passed: unfiltered exact-pool inventory, corroborated empty exit1, native presence/failure refusal, empty/foreign workers, failed/invalid inventory, remaining workers and pre-proof stop ownership.'

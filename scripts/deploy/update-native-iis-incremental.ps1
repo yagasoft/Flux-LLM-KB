@@ -1196,13 +1196,23 @@ function Ensure-SourceVerificationReaderFile {
 
 function Get-HybridIisWorkerIds {
     param([Parameter(Mandatory)][string]$AppCmdPath, [Parameter(Mandatory)][string]$PoolName)
-    # Appcmd's filtered list returns exit 1 for an empty result. Obtain a successful
-    # complete inventory, validate it, then select the exact application pool.
+    # Obtain the complete inventory, validate it, then select the exact pool.
+    # IIS also returns exit 1 when no workers exist. Accept only its strict empty
+    # XML response corroborated by an independent successful native inventory.
     $output = (& $AppCmdPath list wp /xml | Out-String)
-    if ($LASTEXITCODE -ne 0) { throw 'hybrid-iis-worker-inventory-unavailable' }
+    $inventoryExitCode = $LASTEXITCODE
+    if ($inventoryExitCode -notin @(0, 1)) { throw 'hybrid-iis-worker-inventory-unavailable' }
     try {
         $inventory = [xml]$output
         if ($inventory.DocumentElement.Name -cne 'appcmd') { throw 'Invalid inventory root.' }
+        if ($inventoryExitCode -eq 1) {
+            if ($inventory.DocumentElement.HasAttributes -or
+                @($inventory.DocumentElement.ChildNodes | Where-Object NodeType -ne ([System.Xml.XmlNodeType]::Whitespace)).Count -ne 0 -or
+                @(Get-CimInstance Win32_Process -Filter "Name='w3wp.exe'" -OperationTimeoutSec 5 -ErrorAction Stop).Count -ne 0) {
+                throw 'Empty worker inventory is not corroborated.'
+            }
+            return
+        }
         foreach ($worker in $inventory.DocumentElement.ChildNodes) {
             if ($worker.NodeType -eq [System.Xml.XmlNodeType]::Whitespace) { continue }
             $id = 0
