@@ -1,6 +1,45 @@
 # Scoped semantic retrieval implementation plan
 
-Status: normal-runtime accuracy, concurrent GPU indexing, publication and latency qualified in isolated staging on 12 November 2026, with independent Astra revalidation. Exact native fixture cleanup and Release/native checks passed. Canonical delivery uses the prescribed complete-feature sequence. One implementation owner; no search-feature production deployment.
+Status: search release `ec928805` deployed on 12 November 2026. Staging qualification and production semantic/citation checks passed. Full production performance and previous-answer non-regression acceptance remain open. See the [production release record](../operations/2026-11-12-scoped-search-release.md).
+
+## Production validation, 12 November 2026
+
+The reviewed incremental stopped-pool update installed the qualified Web and
+Outlook payloads. The unchanged source-access helper remains installed; CLI
+search and read forward to the updated Web endpoints. No migration, configuration
+change, model acquisition or index rebuild was required. Production already had
+the exact publication-metadata index and a validated format-2 projection.
+
+The production projection contains 1,257,687 vectors in 284 sealed segments,
+compared with the staging snapshot's 1,113,836 vectors in 136 segments. All forty
+frozen requests returned trained hybrid results. All four hundred cited reads
+matched their authority, boundaries and text, with no scope leaks. Independent
+answer review found eighteen of twenty answering questions in each round,
+meeting the unchanged 90% target. One previously passing CRM question was lost;
+the registration prerequisite remains a miss. This does not pass the separate
+previous-answer non-regression requirement.
+
+Nearest-rank API p95 was 10,803.6675 ms and the maximum was 11,860.6847 ms.
+All requests remained inside the existing twenty-five-second outer deadline,
+but the ten-second API p95 target was not met. Different corpus and segment
+populations prevent attributing the difference to a code regression. Production
+dense-phase timing is unavailable: automatic approval review rejected the
+metadata-only trace capture before execution. No alternative capture bypass ran.
+
+Initial preparation returned useful lexical results in about two seconds with
+explicit `warming` status. The first subsequent MCP request also retained ten
+lexical results on semantic timeout. Its dispatch acknowledgement followed its
+four-second queue deadline; durable records do not establish model-load or
+scoring time. Later normal MCP and CLI searches returned trained hybrid results
+in about 7.72 and 7.13 seconds, and the MCP cited read matched exactly.
+
+The configured root pauses, publication identity and configuration hashes were
+unchanged after live validation. Current serving GPU batches were terminal and
+capacity was available. Current rollback/recovery material, the ten existing
+recovery-writer records and all 105 native pins remain preserved. Obsolete
+worktrees and isolated databases are removed through reviewed exact manifests;
+unique working and index contents are retained and restoration-verified before
+purge. File cleanup does not close the two open production acceptance criteria.
 
 ## Normal runtime qualification, 12 November 2026
 
