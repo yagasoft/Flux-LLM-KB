@@ -61,6 +61,7 @@ public static class ServiceCollectionExtensions
         services.AddScoped<ICorpusGenerationLeaseStore, SqlCorpusGenerationLeaseStore>();
         services.AddScoped<ILexicalSearch, SqlFullTextSearch>();
         services.AddScoped<ISearchHydrator, SqlSearchHydrator>();
+        services.AddSingleton<CorpusAnnBindingCache>();
         services.AddScoped<ICorpusRetrievalReader, SqlCorpusRetrievalReader>();
 
         return services;

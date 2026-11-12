@@ -46,7 +46,9 @@ public sealed class SourceDeletionCoordinator(
                     await indexMaintenance.AdvanceAsync(workItem, cancellationToken) is { } blocked)
                 {
                     await store.DeferAsync(workItem, blocked, cancellationToken);
-                    return progressed;
+                    // This disposition follows committed native segment reclamation;
+                    // another claimed unit must still finish its manifest and targets.
+                    return progressed || blocked == "source-delete-segment-retirement-progressing";
                 }
                 if (string.Equals(workItem.Phase, "rebuild-index", StringComparison.Ordinal))
                 {

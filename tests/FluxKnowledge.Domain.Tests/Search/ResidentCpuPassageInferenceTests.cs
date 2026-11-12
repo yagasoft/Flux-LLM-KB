@@ -5,8 +5,30 @@ using Xunit;
 
 namespace FluxKnowledge.Domain.Tests.Search;
 
-public sealed class ResidentCpuPassageInferenceTests
+public sealed partial class ResidentCpuPassageInferenceTests
 {
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    [InlineData(3)]
+    public async Task Invalid_reranker_thread_option_cannot_acquire_ownership_or_open_models(int threads)
+    {
+        var owners = 0;
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => BgeCpuResidentModelFactory.LoadAsync(null!,
+            _ => { owners++; return Task.FromResult<IDisposable>(new NoopOwner()); }, CancellationToken.None,
+            rerankerShards: 4, rerankerThreads: threads));
+        Assert.Equal(0, owners);
+    }
+
+    [Fact]
+    public async Task Invalid_reranker_shard_option_cannot_acquire_ownership_or_open_models()
+    {
+        var owners = 0;
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => BgeCpuResidentModelFactory.LoadAsync(null!,
+            _ => { owners++; return Task.FromResult<IDisposable>(new NoopOwner()); }, CancellationToken.None, rerankerShards: 3));
+        Assert.Equal(0, owners);
+    }
+
     [Fact]
     public async Task Two_lanes_run_concurrently_and_a_blocked_native_callback_keeps_its_lane_until_settled()
     {

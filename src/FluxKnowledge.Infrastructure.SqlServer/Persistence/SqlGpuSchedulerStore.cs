@@ -28,6 +28,7 @@ public sealed partial class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecu
     private readonly Lazy<GpuInteractiveOwnerIdentity> _interactiveOwner;
     private readonly IDeploymentValidationHold? _deploymentValidationHold;
     private readonly TimeSpan _interactiveExecutionTimeout;
+    private readonly TimeSpan _interactiveQueueTimeout;
     private readonly ISourceWorkAdmission? _sourceAdmission;
 
     public SqlGpuSchedulerStore(
@@ -42,9 +43,12 @@ public sealed partial class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecu
         Func<CancellationToken, ValueTask>? afterWakeConsumptionCommitted = null,
         GpuInteractiveOwnerIdentity? interactiveOwner = null,
         IDeploymentValidationHold? deploymentValidationHold = null,
-        TimeSpan? interactiveExecutionTimeout = null, ISourceWorkAdmission? sourceAdmission = null)
+        TimeSpan? interactiveExecutionTimeout = null, ISourceWorkAdmission? sourceAdmission = null,TimeSpan? interactiveQueueTimeout = null)
     {
         _interactiveExecutionTimeout = interactiveExecutionTimeout ?? TimeSpan.FromSeconds(10);
+        _interactiveQueueTimeout=interactiveQueueTimeout??TimeSpan.FromSeconds(2);
+        if(_interactiveQueueTimeout<TimeSpan.FromSeconds(2) || _interactiveQueueTimeout>TimeSpan.FromSeconds(4) || _interactiveQueueTimeout>=_interactiveExecutionTimeout)
+            throw new ArgumentOutOfRangeException(nameof(interactiveQueueTimeout));
         if (_interactiveExecutionTimeout < TimeSpan.FromSeconds(10) ||
             _interactiveExecutionTimeout > TimeSpan.FromSeconds(25))
             throw new ArgumentOutOfRangeException(nameof(interactiveExecutionTimeout));

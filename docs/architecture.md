@@ -418,7 +418,7 @@ The deployed initial [repository retrieval corrections](design/repository-retrie
 add optional, versioned canonical C# disclosure proofs in two derived SQL tables.
 New indexing writes proofs atomically; a model-free worker backfills retained
 artifacts under the deployment hold. Credential, parser and transport protections
-remain. Root/workspace semantic search scans exact SQL membership in 256-vector
+remain. The installed root/workspace semantic path scans exact SQL membership in 256-vector
 keyset pages under its generation lease and retains at most 100 candidates,
 without a total-vector cap or opening global ANN. All-corpus search still uses
 USearch. Release `a248811a` applied the additive migration and automatic proof
@@ -429,6 +429,28 @@ Scoped SQL now uses constant serial ordered membership seek/loop hints without c
 eligibility or deadlines. Full guards retain credential checks and proof spans;
 Protected refusal applies to returned text, and completed bounded code candidates
 are not enlarged by unrelated trailing guard text.
+
+The [scoped ANN correction](design/scoped-ann-retrieval-plan.md) replaces this
+serving scan in the staging branch with native filtered searches over immutable
+USearch segments. SQL returns eligible identifiers and selected passages, preserving
+publication and path guards. Read leases survive unrelated publication; final
+citation validation remains fenced. The native view cache retains at most 8 GiB
+of segment file lengths, with pressure, retirement and shutdown eviction; mapped
+length is not a RAM measurement. Model-free background preparation owns its own
+lease. It verifies every segment member before excluding IDs whose complete
+context-zero disclosure window cannot be constructed. SQL materialises bounded
+windows once; only metadata and an availability flag leave SQL. The flag grants
+no disclosure permission. Fresh publication checks, credential/proof checks and
+final citation reads remain mandatory. A request allows at most 250 ms for incremental preparation on its original
+captured generation, then reports explicit warming degradation; it never loads
+the full projection inline. Exact duplicate search inputs are grouped before
+fusion and the 50-input rerank budget, with each returned equivalent retaining
+its own current citation. Lexical selection materialises scoped keys
+before body inspection, preserving ordinal and Full-Text ordering while excluding
+historical bodies. Full-size exact recall passed at staging width 512 on both the
+original scope population and the current window-available population. Full API
+latency, answer relevance and indexing-overlap acceptance remain pending; no
+production activation is included.
 
 Automatic repository discovery also requires the IIS Web process to stay available
 without user requests. A normal idle shutdown exposed the OnDemand/20-minute/
@@ -896,9 +918,11 @@ of this recovery.
 
 The shared query engine retrieves at most 100 lexical and 100 dense passage IDs,
 fuses by identity, reranks at most 50 and revalidates complete bodies/citations.
-Root/workspace dense retrieval scores the entire eligible captured scope up to
-10,000 vectors; larger scopes explicitly refuse semantic retrieval. The current
-25-second budget includes scope resolution, SQL, models and final hydration. Timeout stops
+The former 10,000-vector scoped refusal was superseded by exact SQL paging and
+is now being replaced by filtered segment ANN in staging. The
+25-second budget includes scope resolution, SQL, models and final hydration. A
+separate semantic cutoff reserves five seconds for lexical fallback. Overall
+deadline exhaustion raises a retryable refusal. Timeout stops
 caller waiting while late native work retains its leases until confirmed cleanup.
 Search scores are reciprocal returned positions, not calibrated probabilities.
 Corpus and useful existing-search fallback results expose degradation; an empty

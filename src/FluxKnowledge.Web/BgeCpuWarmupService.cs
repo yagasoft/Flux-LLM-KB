@@ -57,7 +57,7 @@ internal sealed class BgeCpuWarmupService(ResidentCpuPassageInference pool, ILog
         try
         {
             await warm.ConfigureAwait(false);
-            logger.LogInformation("Resident CPU passage search is ready with two lanes and four reranking shards per lane. Process {ProcessId}, warmup {WarmupId}.",
+            logger.LogInformation("Resident CPU passage search is ready with two bounded lanes. Process {ProcessId}, warmup {WarmupId}.",
                 Environment.ProcessId, _warmupId);
         }
         catch (OperationCanceledException)

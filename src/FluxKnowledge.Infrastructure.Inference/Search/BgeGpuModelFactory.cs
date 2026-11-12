@@ -6,6 +6,7 @@ namespace FluxKnowledge.Infrastructure.Inference.Search;
 
 public interface IBgeGpuModelFactory
 {
+    BgeRerankerPrecision Precision => BgeRerankerPrecision.Fp32;
     ValueTask<BgeGpuModelLease<IBatchedEmbeddingProvider>> OpenEmbeddingAsync(GpuOwnedWorkContext ownership);
     ValueTask<BgeGpuModelLease<IPassageReranker>> OpenRerankerAsync(GpuOwnedWorkContext ownership);
 }
@@ -29,15 +30,25 @@ public sealed record BgeGpuModelStores(ILocalModelStore Embedding, ILocalModelSt
 }
 
 /// <summary>Fixed verified local models; each lease owns its native session and tokenizer.</summary>
-public sealed class BgeGpuModelFactory(BgeGpuModelStores stores) : IBgeGpuModelFactory
+public sealed class BgeGpuModelFactory : IBgeGpuModelFactory
 {
+    private readonly BgeGpuModelStores _stores;
+    public BgeGpuModelFactory(BgeGpuModelStores stores) : this(stores, BgeRerankerPrecision.Fp32) { }
+    public BgeGpuModelFactory(BgeGpuModelStores stores, BgeRerankerPrecision precision)
+    {
+        ArgumentNullException.ThrowIfNull(stores);
+        _ = BgeOfflineModels.GetRerankerFingerprint(precision);
+        _stores = stores; Precision = precision;
+    }
+    public BgeRerankerPrecision Precision { get; }
+
     public async ValueTask<BgeGpuModelLease<IBatchedEmbeddingProvider>> OpenEmbeddingAsync(GpuOwnedWorkContext ownership)
     {
-        ownership.RequireActive(BgeOfflineModels.GpuRuntimeKey, BgeOfflineModels.GpuSettingsFingerprint);
-        var tokenizer = await BgeOfflineModels.CreateTokenizerAsync(stores.Embedding, stores.TokenizerRuntime, false, ownership.CancellationToken).ConfigureAwait(false);
+        ownership.RequireActive(BgeOfflineModels.GetGpuRuntimeKey(Precision), BgeOfflineModels.GpuSettingsFingerprint);
+        var tokenizer = await BgeOfflineModels.CreateTokenizerAsync(_stores.Embedding, _stores.TokenizerRuntime, false, ownership.CancellationToken).ConfigureAwait(false);
         try
         {
-            var model = await BgeOfflineModels.OpenGpuEmbeddingAsync(stores.Embedding, tokenizer, ownership).ConfigureAwait(false);
+            var model = await BgeOfflineModels.OpenGpuEmbeddingAsync(_stores.Embedding, tokenizer, ownership, Precision).ConfigureAwait(false);
             return new(model, () => { try { model.Dispose(); } finally { tokenizer.Dispose(); } });
         }
         catch { tokenizer.Dispose(); throw; }
@@ -45,11 +56,11 @@ public sealed class BgeGpuModelFactory(BgeGpuModelStores stores) : IBgeGpuModelF
 
     public async ValueTask<BgeGpuModelLease<IPassageReranker>> OpenRerankerAsync(GpuOwnedWorkContext ownership)
     {
-        ownership.RequireActive(BgeOfflineModels.GpuRuntimeKey, BgeOfflineModels.GpuSettingsFingerprint);
-        var tokenizer = await BgeOfflineModels.CreateTokenizerAsync(stores.RerankerTokenizer, stores.TokenizerRuntime, true, ownership.CancellationToken).ConfigureAwait(false);
+        ownership.RequireActive(BgeOfflineModels.GetGpuRuntimeKey(Precision), BgeOfflineModels.GpuSettingsFingerprint);
+        var tokenizer = await BgeOfflineModels.CreateTokenizerAsync(_stores.RerankerTokenizer, _stores.TokenizerRuntime, true, ownership.CancellationToken).ConfigureAwait(false);
         try
         {
-            var model = await BgeOfflineModels.OpenGpuRerankerAsync(stores.Reranker, tokenizer, ownership).ConfigureAwait(false);
+            var model = await BgeOfflineModels.OpenGpuRerankerAsync(_stores.Reranker, tokenizer, ownership, Precision).ConfigureAwait(false);
             return new(model, () => { try { model.Dispose(); } finally { tokenizer.Dispose(); } });
         }
         catch { tokenizer.Dispose(); throw; }

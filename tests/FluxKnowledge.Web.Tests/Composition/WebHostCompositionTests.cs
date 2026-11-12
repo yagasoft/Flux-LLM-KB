@@ -17,6 +17,7 @@ using FluxKnowledge.Infrastructure.SqlServer.Configuration;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
 using FluxKnowledge.Infrastructure.SqlServer.Provisioning;
 using FluxKnowledge.Infrastructure.SqlServer.Workers;
+using FluxKnowledge.Infrastructure.Inference.Search;
 using FluxKnowledge.Infrastructure.Usearch;
 using FluxKnowledge.Integrations.Files;
 using FluxKnowledge.Integrations.Documents;
@@ -199,7 +200,7 @@ public sealed class WebHostCompositionTests : IDisposable
     }
 
     [Fact]
-    public void Hybrid_runtime_composes_shared_slot_exact_profiles_and_both_executors_without_loading_models()
+    public async Task Hybrid_runtime_composes_shared_slot_exact_profiles_and_both_executors_without_loading_models()
     {
         var configuration = new ConfigurationBuilder().AddConfiguration(CreateProductionConfiguration())
             .AddInMemoryCollection(new Dictionary<string, string?>
@@ -211,12 +212,21 @@ public sealed class WebHostCompositionTests : IDisposable
         var services = new ServiceCollection();
         services.AddSingleton(host.Services.GetRequiredService<IHostApplicationLifetime>());
         WebHostComposition.AddProductionFluxKnowledgeServicesForTests(services, configuration);
-        using var provider = services.BuildServiceProvider(new ServiceProviderOptions { ValidateScopes = true, ValidateOnBuild = true });
-        using var scope = provider.CreateScope();
+        await using var provider = services.BuildServiceProvider(new ServiceProviderOptions { ValidateScopes = true, ValidateOnBuild = true });
+        await using var scope = provider.CreateAsyncScope();
         Assert.IsType<SqlIndexRetentionOperations>(scope.ServiceProvider.GetRequiredService<SqlIndexRetentionOperations>());
         Assert.IsType<SharedGpuAdmissionGate>(provider.GetRequiredService<IGpuAdmissionGate>());
-        Assert.Equal(2, provider.GetRequiredService<GpuSchedulerOptions>().WorkloadPolicy!.Profiles.Count);
+        var policy = provider.GetRequiredService<GpuSchedulerOptions>().WorkloadPolicy!;
+        GpuWorkloadProfile[] expectedProfiles = [
+            new(PaddleOcrVlmRuntimeContract.ModelRuntimeKey, PaddleOcrVlmRuntimeContract.SettingsFingerprint, GpuWorkloadKind.Ocr),
+            new(BgeOfflineModels.GpuRuntimeKey, BgeOfflineModels.GpuSettingsFingerprint, GpuWorkloadKind.Retrieval),
+            new(BgeExpandedGpuRankBackend.Profile.RuntimeKey, BgeExpandedGpuRankBackend.Profile.SettingsFingerprint, GpuWorkloadKind.Retrieval)];
+        Assert.Equal(expectedProfiles.OrderBy(p => p.ModelRuntimeKey, StringComparer.Ordinal)
+            .ThenBy(p => p.SettingsFingerprint, StringComparer.Ordinal), policy.Profiles);
+        Assert.Null(policy.Classify(BgeExpandedGpuRankBackend.Profile.RuntimeKey + "-unapproved",
+            BgeExpandedGpuRankBackend.Profile.SettingsFingerprint));
         Assert.Contains(provider.GetServices<IGpuExecutorAdapter>(), value => value is GpuInteractiveExecutor && value is IGpuExecutorRecoveryAdapter);
+        Assert.Single(provider.GetServices<IGpuExecutorAdapter>().OfType<GpuInteractiveExecutor>());
         var interactive = provider.GetRequiredService<GpuInteractiveExecutor>();
         var executionTimeout = typeof(GpuInteractiveExecutor).GetField("_executionTimeout",
             System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
@@ -224,7 +234,8 @@ public sealed class WebHostCompositionTests : IDisposable
         Assert.Contains(provider.GetServices<IGpuExecutorAdapter>(), value => value is EmbeddingGpuExecutor);
         Assert.Contains(provider.GetServices<IGpuExecutorAdapter>(), value => value is PaddleOcrVlmExecutorAdapter);
         Assert.IsType<SqlEmbeddingGpuRequestStore>(scope.ServiceProvider.GetRequiredService<IEmbeddingGpuHandoff>());
-        Assert.IsType<HybridPassageRetrievalEngine>(scope.ServiceProvider.GetRequiredService<IHybridPassageRetrieval>());
+        Assert.IsType<ExpandedPassageRetrieval>(scope.ServiceProvider.GetRequiredService<IHybridPassageRetrieval>());
+        Assert.IsType<HybridPassageRetrievalEngine>(scope.ServiceProvider.GetRequiredService<HybridPassageRetrievalEngine>());
         Assert.IsType<GpuFirstPassageInference>(provider.GetRequiredService<IScheduledPassageInference>());
         Assert.Single(provider.GetServices<IHostedService>().OfType<BgeCpuWarmupService>());
         Assert.Single(provider.GetServices<IHostedService>().OfType<DerivedIndexRecoveryService>());

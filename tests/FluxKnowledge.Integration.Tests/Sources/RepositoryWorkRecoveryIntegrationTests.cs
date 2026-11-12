@@ -246,6 +246,7 @@ public sealed class RepositoryWorkRecoveryIntegrationTests(NativeSqlServerFixtur
         Assert.Equal(saved, vectors.Take(saved.Length).Select(value => value.Values).ToArray());
         await environment.PumpAsync();
         Assert.True((await verification.PipelineRecords.AsNoTracking().SingleAsync(value => value.Id == job.PipelineRecordId.Value)).CompletionCriteriaMet);
+        await SqlTestData.WaitForFullTextAsync(environment.Factory);
         var retrieval = new CorpusRetrievalService(new SqlCorpusRetrievalReader(environment.Factory), new EvidenceCodec(), new LocalPrivateContentDisclosure());
         var hits = (await retrieval.SearchAsync(new CorpusSearchRequest("Recovery section", 10, "root", rootId, null), default)).Results;
         Assert.NotEmpty(hits);
@@ -414,6 +415,7 @@ public sealed class RepositoryWorkRecoveryIntegrationTests(NativeSqlServerFixtur
         await Commit(commands, Mutation("root_create", new { path = repository.Path, displayName = "Policy refusal", discoveryMode = "git-tracked", indexSourceText = true }));
         var scans = new SqlSourceScanStore(environment.Factory, clock);
         var rootId = await ScanAndPublish(environment, scans, clock);
+        await SqlTestData.WaitForFullTextAsync(environment.Factory);
         var retrieval = new CorpusRetrievalService(new SqlCorpusRetrievalReader(environment.Factory), new EvidenceCodec(), new LocalPrivateContentDisclosure());
         await AssertRepositoryPublishedAsync(environment);
         var original = Assert.Single((await retrieval.SearchAsync(new CorpusSearchRequest("Policy refusal sentinel", 10, "root", rootId, null), default)).Results);
@@ -555,6 +557,7 @@ public sealed class RepositoryWorkRecoveryIntegrationTests(NativeSqlServerFixtur
         }
         Assert.True((await verify.PipelineRecords.SingleAsync(value => value.Id == job.PipelineRecordId.Value)).CompletionCriteriaMet);
         Assert.Single(await verify.Jobs.Where(value => value.PipelineRecordId == job.PipelineRecordId.Value && value.Stage == (int)PipelineStage.Publish).ToListAsync());
+        await SqlTestData.WaitForFullTextAsync(environment.Factory);
         var retrieval = new CorpusRetrievalService(new SqlCorpusRetrievalReader(environment.Factory), new EvidenceCodec(), new LocalPrivateContentDisclosure());
         var hit = Assert.Single((await retrieval.SearchAsync(new CorpusSearchRequest("Publish recovery", 10, "root", rootId, null), default)).Results);
         Assert.Contains("Publish recovery", (await retrieval.ReadAsync(new CorpusReadRequest(hit.EvidenceRef, 0), default)).Text);

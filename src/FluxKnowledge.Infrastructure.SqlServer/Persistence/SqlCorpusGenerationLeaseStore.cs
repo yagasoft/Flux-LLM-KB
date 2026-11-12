@@ -33,8 +33,16 @@ public sealed class SqlCorpusGenerationLeaseStore(
         return await SqlCorpusQueryLeaseRecovery.TryDrainAbandonedAsync(context, probe, cancellationToken).ConfigureAwait(false);
     }
 
-    public async ValueTask<ICorpusGenerationLease?> TryAcquireAsync(Guid ownerInstanceId,
-        GpuInteractiveOwnerIdentity owner, string modelFingerprint, int dimensions, CancellationToken cancellationToken)
+    public ValueTask<ICorpusGenerationLease?> TryAcquireAsync(Guid ownerInstanceId,
+        GpuInteractiveOwnerIdentity owner, string modelFingerprint, int dimensions, CancellationToken cancellationToken) =>
+        TryAcquireCoreAsync(ownerInstanceId, owner, modelFingerprint, dimensions, false, cancellationToken);
+
+    public ValueTask<ICorpusGenerationLease?> TryAcquireReadableAsync(Guid ownerInstanceId,
+        GpuInteractiveOwnerIdentity owner, string modelFingerprint, int dimensions, CancellationToken cancellationToken) =>
+        TryAcquireCoreAsync(ownerInstanceId, owner, modelFingerprint, dimensions, true, cancellationToken);
+
+    private async ValueTask<ICorpusGenerationLease?> TryAcquireCoreAsync(Guid ownerInstanceId,
+        GpuInteractiveOwnerIdentity owner, string modelFingerprint, int dimensions, bool readable, CancellationToken cancellationToken)
     {
         owner.Validate();
         if (ownerInstanceId == Guid.Empty || dimensions <= 0 || string.IsNullOrWhiteSpace(modelFingerprint) ||
@@ -86,14 +94,17 @@ public sealed class SqlCorpusGenerationLeaseStore(
             var generation = await context.IndexGenerations.AsNoTracking().SingleOrDefaultAsync(value =>
                 value.Id == state.ActiveIndexGenerationId && value.RetiredAtUtc == null && value.IndexPath != string.Empty &&
                 EF.Functions.Collate(value.ModelFingerprint, "Latin1_General_100_BIN2") == modelFingerprint && value.Dimensions == dimensions &&
-                value.CorpusEpoch == state.CorpusEpoch && value.CorpusVersion == state.CorpusVersion, cancellationToken).ConfigureAwait(false);
+                value.CorpusEpoch == state.CorpusEpoch &&
+                (readable && value.FormatVersion == 2 ? value.CorpusVersion <= state.CorpusVersion : value.CorpusVersion == state.CorpusVersion),
+                cancellationToken).ConfigureAwait(false);
             var validMembership = generation is not null && (generation.FormatVersion == 1
                 ? state.RequiredIndexFormat == 1 && await context.IndexGenerationVectors.LongCountAsync(value => value.GenerationId == generation.Id, cancellationToken).ConfigureAwait(false) == generation.VectorCount
                 : generation.FormatVersion == 2 && state.RequiredIndexFormat == 2 &&
                     await context.IndexGenerationSegments.CountAsync(value => value.GenerationId == generation.Id, cancellationToken).ConfigureAwait(false) == generation.SegmentCount &&
                     (await (from member in context.IndexGenerationSegments join segment in context.IndexSegments on member.SegmentId equals segment.Id
                         where member.GenerationId == generation.Id && segment.State == 1 select (long?)segment.VectorCount).SumAsync(cancellationToken).ConfigureAwait(false) ?? 0) == generation.VectorCount);
-            if (generation is null || generation.VectorCount < 0 || generation.FormatVersion == 1 && generation.VectorCount == 0 || generation.ValidatedAtUtc is null || !validMembership)
+            if (generation is null || generation.VectorCount < 0 || generation.FormatVersion == 1 && generation.VectorCount == 0 ||
+                generation.ValidatedAtUtc is null || generation.ReclaimedAtUtc is not null || !validMembership)
             { Phase("generation-validation", generation is null ? "generation-unavailable" : "membership-invalid"); return null; }
             Phase("generation-validation", "completed");
             await using var sessionCommand = new SqlCommand("SELECT @@SPID", connection, (SqlTransaction)transaction.GetDbTransaction());
@@ -101,7 +112,7 @@ public sealed class SqlCorpusGenerationLeaseStore(
             var id = Guid.NewGuid();
             context.CorpusQueryLeases.Add(new CorpusQueryLeaseEntity
             {
-                Id = id, GenerationId = generation.Id, CorpusEpoch = state.CorpusEpoch, CorpusVersion = state.CorpusVersion,
+                Id = id, GenerationId = generation.Id, CorpusEpoch = generation.CorpusEpoch!.Value, CorpusVersion = generation.CorpusVersion!.Value,
                 ModelFingerprint = modelFingerprint, Dimensions = dimensions, OwnerInstanceId = ownerInstanceId,
                 OwnerProcessId = owner.ProcessId, OwnerStartedAtUtc = owner.StartedAtUtc,
                 OwnerMachineFingerprint = owner.MachineFingerprint, SqlSessionId = sessionId, CreatedAtUtc = timeProvider.GetUtcNow()
@@ -113,7 +124,7 @@ public sealed class SqlCorpusGenerationLeaseStore(
                 new SqlConnectionStringBuilder(connectionString) { Pooling = false }.ConnectionString,
                 new IndexGenerationDescriptor(generation.Id, generation.ModelFingerprint,
                 generation.Dimensions, generation.IndexPath, generation.MetadataChecksum, generation.VectorCount,
-                new CorpusPublicationStamp(state.CorpusEpoch, state.CorpusVersion), generation.FormatVersion, generation.SegmentCount));
+                new CorpusPublicationStamp(generation.CorpusEpoch!.Value, generation.CorpusVersion!.Value), generation.FormatVersion, generation.SegmentCount));
             return lease;
         }
         finally
@@ -149,6 +160,35 @@ public sealed class SqlCorpusGenerationLeaseStore(
                                 AND generation.ModelFingerprint COLLATE Latin1_General_100_BIN2 = lease.ModelFingerprint
                                 AND generation.Dimensions = lease.Dimensions
                                 AND generation.RetiredAtUtc IS NULL)
+                        THEN 1 ELSE 0 END);
+                    """, held);
+                command.Parameters.Add("@resource", SqlDbType.NVarChar, 255).Value = SqlDerivedIndexRecoveryStore.LockResource;
+                command.Parameters.Add("@leaseId", SqlDbType.UniqueIdentifier).Value = id;
+                return (int)(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) ?? 0) == 1;
+            }
+            catch (SqlException) when (!cancellationToken.IsCancellationRequested) { return false; }
+            finally { _gate.Release(); }
+        }
+
+        public async ValueTask<bool> IsReadableAsync(CancellationToken cancellationToken)
+        {
+            if (Generation.FormatVersion != 2) return await IsCurrentAsync(cancellationToken).ConfigureAwait(false);
+            await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                if (_connection is not { State: ConnectionState.Open } held) return false;
+                await using var command = new SqlCommand("""
+                    SELECT CONVERT(int, CASE WHEN APPLOCK_MODE('public', @resource, 'Session') = 'Shared'
+                        AND EXISTS (SELECT 1 FROM [CorpusQueryLeases] AS lease JOIN [IndexState] AS state ON state.Id = 1
+                            JOIN [IndexGenerations] AS generation ON generation.Id = lease.GenerationId
+                            WHERE lease.Id = @leaseId AND lease.SqlSessionId = @@SPID
+                                AND state.CorpusEpoch = lease.CorpusEpoch AND state.CorpusVersion >= lease.CorpusVersion
+                                AND state.CorpusRebuildOperationId IS NULL
+                                AND generation.CorpusEpoch = lease.CorpusEpoch AND generation.CorpusVersion = lease.CorpusVersion
+                                AND generation.ModelFingerprint COLLATE Latin1_General_100_BIN2 = lease.ModelFingerprint
+                                AND generation.Dimensions = lease.Dimensions AND generation.FormatVersion = 2
+                                AND generation.ValidatedAtUtc IS NOT NULL AND generation.RetiredAtUtc IS NULL
+                                AND generation.ReclaimedAtUtc IS NULL)
                         THEN 1 ELSE 0 END);
                     """, held);
                 command.Parameters.Add("@resource", SqlDbType.NVarChar, 255).Value = SqlDerivedIndexRecoveryStore.LockResource;

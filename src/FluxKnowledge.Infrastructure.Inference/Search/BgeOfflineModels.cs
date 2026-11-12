@@ -12,6 +12,7 @@ public static class BgeOfflineModels
     public const string EmbeddingRevision = "5617a9f61b028005a4858fdac845db406aefb181";
     public const string RerankerRevision = "953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e";
     public const string RerankerExport = "f083b9dbba6d1b56869a6572e5d7f9f5fd17f961d3c521ea2424d80c5f800580";
+    public const string Fp16RerankerRecipe = "4e36b214ab2d28ea4540980aa776679ec60878a09d6978beb677a4576a5b9844";
     private const string EmbeddingTokenizerHash = "6710678b12670bc442b99edc952c4d996ae309a7020c1fa0096dd245c2faf790";
     private const string RerankerTokenizerHash = "69564b696052886ed0ac63fa393e928384e0f8caada38c1f4864a9bfbf379c15";
 
@@ -35,17 +36,32 @@ public static class BgeOfflineModels
         RuntimeFile("System.Runtime.CompilerServices.Unsafe.dll", "60e5957ad8ceddc68650747a71598c0d84c291943c8693135333335d3dbaaf3b", 19232)
     ]);
 
+    // Separate disabled probe artifact, derived offline from the unchanged FP32
+    // source. External INT64 inputs and FP32 logits are byte-identical in metadata.
+    internal static readonly ModelBundleSpecification Fp16RerankerModel = new(1,
+    [
+        new(RerankerRevision, "model.onnx", "56d4de1833a96c7f1723078a49ffc4869de1ae5ee3aeb04ae4a30398b7e985bf", 712554),
+        new(RerankerRevision, "model.onnx_data", "22146757162e027fea6b96911a78e0233b3636640d75e2ac7135cc1cfea654e4", 1135511554)
+    ]);
+
     public static string EmbeddingFingerprint { get; } = Fingerprint(EmbeddingModel, EmbeddingTokenizerHash, "xlmr-single/cls/l2/1024/fp32/max512/v1");
     public static string EmbeddingTokenizerFingerprint { get; } = ModelManifestCodec.Fingerprint(new(1,
         [new(EmbeddingRevision, "tokenizer.json", EmbeddingTokenizerHash, 17082821)]));
     public static string RerankerFingerprint { get; } = Fingerprint(RerankerModel, RerankerTokenizerHash, "xlmr-pair/raw-logit/fp32/max512/batch4/v1");
+    private static string Fp16RerankerFingerprint { get; } = Fingerprint(Fp16RerankerModel, RerankerTokenizerHash,
+        "xlmr-pair/raw-logit/fp16-internal-fp32-io/max512/batch4/v1/" + Fp16RerankerRecipe);
     public static string GpuRuntimeKey { get; } = "bge-passage:" + Hash(EmbeddingFingerprint + "\n" + RerankerFingerprint);
+    private static string Fp16GpuRuntimeKey { get; } = "bge-passage:" + Hash(EmbeddingFingerprint + "\n" + Fp16RerankerFingerprint);
     public static string GpuSettingsFingerprint { get; } = Hash("ort1.24.4/directml/device0/sequential/mempattern0/threads4/inter1/batch4/load-run-unload/v1");
 
-    public static async ValueTask VerifyGpuFilesAsync(BgeGpuModelStores stores, CancellationToken ct)
+    public static ValueTask VerifyGpuFilesAsync(BgeGpuModelStores stores, CancellationToken ct) =>
+        VerifyGpuFilesAsync(stores, BgeRerankerPrecision.Fp32, ct);
+
+    public static async ValueTask VerifyGpuFilesAsync(BgeGpuModelStores stores, BgeRerankerPrecision precision, CancellationToken ct)
     {
+        var rerankerSpecification = RerankerSpecification(precision);
         using var embedding = await ResolveLeaseAsync(stores.Embedding, EmbeddingModel, ct).ConfigureAwait(false);
-        using var reranker = await ResolveLeaseAsync(stores.Reranker, RerankerModel, ct).ConfigureAwait(false);
+        using var reranker = await ResolveLeaseAsync(stores.Reranker, rerankerSpecification, ct).ConfigureAwait(false);
         using var embeddingTokenizer = await ResolveLeaseAsync(stores.Embedding, new(1,
             [new(EmbeddingRevision, "tokenizer.json", EmbeddingTokenizerHash, 17082821)]), ct).ConfigureAwait(false);
         using var rerankerTokenizer = await ResolveLeaseAsync(stores.RerankerTokenizer, new(1,
@@ -98,25 +114,54 @@ public static class BgeOfflineModels
             cpuIntraOpThreads: intraOpThreads), RerankerFingerprint);
     }
 
-    public static async ValueTask<BgeEmbeddingProvider> OpenGpuEmbeddingAsync(
+    public static ValueTask<BgeEmbeddingProvider> OpenGpuEmbeddingAsync(
         ILocalModelStore store, IBgeTokenizer tokenizer, GpuOwnedWorkContext ownership)
+        => OpenGpuEmbeddingAsync(store, tokenizer, ownership, BgeRerankerPrecision.Fp32);
+
+    public static async ValueTask<BgeEmbeddingProvider> OpenGpuEmbeddingAsync(
+        ILocalModelStore store, IBgeTokenizer tokenizer, GpuOwnedWorkContext ownership, BgeRerankerPrecision precision)
     {
         ArgumentNullException.ThrowIfNull(ownership);
-        ownership.RequireActive(GpuRuntimeKey, GpuSettingsFingerprint);
+        ownership.RequireActive(GetGpuRuntimeKey(precision), GpuSettingsFingerprint);
         RequireTokenizer(tokenizer, reranker: false);
         var lease = await ResolveLeaseAsync(store, EmbeddingModel, ownership.CancellationToken).ConfigureAwait(false);
-        return new(tokenizer, BgeOnnxTensorRunner.Open(lease, embedding: true, ownership.CancellationToken, ownership), EmbeddingFingerprint);
+        return new(tokenizer, BgeOnnxTensorRunner.Open(lease, embedding: true, ownership.CancellationToken, ownership, 4, precision), EmbeddingFingerprint);
     }
 
-    public static async ValueTask<BgeReranker> OpenGpuRerankerAsync(
+    public static ValueTask<BgeReranker> OpenGpuRerankerAsync(
         ILocalModelStore store, IBgeTokenizer tokenizer, GpuOwnedWorkContext ownership)
+        => OpenGpuRerankerAsync(store, tokenizer, ownership, BgeRerankerPrecision.Fp32);
+
+    public static async ValueTask<BgeReranker> OpenGpuRerankerAsync(
+        ILocalModelStore store, IBgeTokenizer tokenizer, GpuOwnedWorkContext ownership, BgeRerankerPrecision precision)
     {
         ArgumentNullException.ThrowIfNull(ownership);
-        ownership.RequireActive(GpuRuntimeKey, GpuSettingsFingerprint);
+        ownership.RequireActive(GetGpuRuntimeKey(precision), GpuSettingsFingerprint);
         RequireTokenizer(tokenizer, reranker: true);
-        var lease = await ResolveLeaseAsync(store, RerankerModel, ownership.CancellationToken).ConfigureAwait(false);
-        return new(tokenizer, BgeOnnxTensorRunner.Open(lease, embedding: false, ownership.CancellationToken, ownership), RerankerFingerprint);
+        var lease = await ResolveLeaseAsync(store, RerankerSpecification(precision), ownership.CancellationToken).ConfigureAwait(false);
+        return new(tokenizer, BgeOnnxTensorRunner.Open(lease, embedding: false, ownership.CancellationToken, ownership, 4, precision), GetRerankerFingerprint(precision));
     }
+
+    public static string GetRerankerFingerprint(BgeRerankerPrecision precision) => precision switch
+    {
+        BgeRerankerPrecision.Fp32 => RerankerFingerprint,
+        BgeRerankerPrecision.Fp16Internal => Fp16RerankerFingerprint,
+        _ => throw new ArgumentOutOfRangeException(nameof(precision))
+    };
+
+    public static string GetGpuRuntimeKey(BgeRerankerPrecision precision) => precision switch
+    {
+        BgeRerankerPrecision.Fp32 => GpuRuntimeKey,
+        BgeRerankerPrecision.Fp16Internal => Fp16GpuRuntimeKey,
+        _ => throw new ArgumentOutOfRangeException(nameof(precision))
+    };
+
+    private static ModelBundleSpecification RerankerSpecification(BgeRerankerPrecision precision) => precision switch
+    {
+        BgeRerankerPrecision.Fp32 => RerankerModel,
+        BgeRerankerPrecision.Fp16Internal => Fp16RerankerModel,
+        _ => throw new ArgumentOutOfRangeException(nameof(precision))
+    };
 
     private static void RequireTokenizer(IBgeTokenizer tokenizer, bool reranker)
     {

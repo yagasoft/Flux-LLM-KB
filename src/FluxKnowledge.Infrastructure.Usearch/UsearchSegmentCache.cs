@@ -1,7 +1,9 @@
 using System.Security.Cryptography;
-using Cloud.Unum.USearch;
 using FluxKnowledge.Application.Indexing;
 using FluxKnowledge.Application.Ports;
+using FluxKnowledge.Application.Search;
+using System.Diagnostics;
+using System.Collections.Concurrent;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -9,20 +11,65 @@ using Microsoft.Extensions.Logging;
 namespace FluxKnowledge.Infrastructure.Usearch;
 
 /// <summary>Bounded verified native reuse. Idle entries retain durable owners, never a SQL session lock.</summary>
-public sealed class UsearchSegmentCache(UsearchIndexOptions options, IIndexSegmentReadLeaseFactory paths,
-    IIndexSegmentOwnerStore owners, TimeProvider clock, long maximumBytes = 256L * 1024 * 1024,
-    TimeSpan? idleLifetime = null) : IAsyncDisposable
+public sealed partial class UsearchSegmentCache(UsearchIndexOptions options, IIndexSegmentReadLeaseFactory paths,
+    IIndexSegmentOwnerStore owners, TimeProvider clock, long maximumBytes = 8L * 1024 * 1024 * 1024,
+    TimeSpan? idleLifetime = null, int searchExpansion = UsearchReadIndex.DefaultSearchExpansion) : IAsyncDisposable
 {
+    // Preserve the existing six-argument binary entry point for bundled callers.
+    public UsearchSegmentCache(UsearchIndexOptions options, IIndexSegmentReadLeaseFactory paths,
+        IIndexSegmentOwnerStore owners, TimeProvider clock, long maximumBytes, TimeSpan? idleLifetime)
+        : this(options, paths, owners, clock, maximumBytes, idleLifetime, UsearchReadIndex.DefaultSearchExpansion) { }
+
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly Dictionary<string, Entry> _entries = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, IndexSegmentDescriptor> _prepared = new(StringComparer.Ordinal);
     private readonly Guid _instance = Guid.NewGuid();
-    private readonly TimeSpan _idleLifetime = idleLifetime ?? TimeSpan.FromSeconds(30);
-    private bool _stopping;
+    private readonly TimeSpan _idleLifetime = idleLifetime ?? Timeout.InfiniteTimeSpan;
+    private volatile bool _stopping;
     internal Action<string>? BeforeNativeDisposal { get; set; }
 
     public async ValueTask<BorrowedSegment> BorrowAsync(IndexSegmentDescriptor segment, CancellationToken cancellationToken)
+        => await BorrowAsync(segment, preparedOnly: false, cancellationToken);
+
+    public bool IsPrepared(IndexSegmentDescriptor segment) => !_stopping &&
+        _prepared.TryGetValue(segment.Id, out var descriptor) && descriptor == segment;
+
+    internal ValueTask<BorrowedSegment> BorrowPreparedAsync(IndexSegmentDescriptor segment, CancellationToken cancellationToken) =>
+        BorrowAsync(segment, preparedOnly: true, cancellationToken);
+
+    /// <summary>Pressure eviction is limited to idle entries outside this captured working set.</summary>
+    internal async ValueTask PrepareAsync(IReadOnlyList<IndexSegmentDescriptor> segments, CancellationToken cancellationToken)
     {
-        if (maximumBytes <= 0 || _idleLifetime < TimeSpan.Zero) throw new InvalidOperationException("segment-cache-budget-invalid");
+        if (segments.Sum(segment => segment.FileLength) > maximumBytes)
+            throw new PassageRetrievalRefusalException("scope-capacity-exceeded");
+        var required = segments.Select(segment => segment.Id).ToHashSet(StringComparer.Ordinal);
+        await _gate.WaitAsync(cancellationToken);
+        try
+        {
+            ObjectDisposedException.ThrowIf(_stopping, this);
+            var missingBytes = segments.Where(segment => !IsPrepared(segment)).Sum(segment => segment.FileLength);
+            foreach (var entry in _entries.Values.Where(value => value.Borrowers == 0 && !required.Contains(value.Descriptor.Id))
+                .OrderBy(value => value.LastUsed).ToArray())
+            {
+                if (missingBytes <= maximumBytes - _entries.Values.Where(value => value.Retained).Sum(value => value.Descriptor.FileLength)) break;
+                await DisposeEntryAsync(entry);
+            }
+        }
+        finally { _gate.Release(); }
+        foreach (var segment in segments)
+        {
+            await using var borrowed = await BorrowAsync(segment, cancellationToken);
+        }
+        if (!segments.All(IsPrepared)) throw new PassageRetrievalRefusalException("warming");
+    }
+
+    private async ValueTask<BorrowedSegment> BorrowAsync(IndexSegmentDescriptor segment, bool preparedOnly, CancellationToken cancellationToken)
+    {
+        if (maximumBytes <= 0 || _idleLifetime < TimeSpan.Zero && _idleLifetime != Timeout.InfiniteTimeSpan ||
+            searchExpansion is < 1 or > UsearchReadIndex.MaximumSearchExpansion)
+            throw new InvalidOperationException("segment-cache-budget-invalid");
+        if (preparedOnly && !IsPrepared(segment)) throw new PassageRetrievalRefusalException("warming");
+        var started = Stopwatch.GetTimestamp();
         await _gate.WaitAsync(cancellationToken);
         try
         {
@@ -32,13 +79,16 @@ public sealed class UsearchSegmentCache(UsearchIndexOptions options, IIndexSegme
                 if (cached.Descriptor != segment || cached.Disposing) throw new InvalidOperationException("segment-cache-proof-changed");
                 if ((await owners.ReadRetiringAsync([segment.Id], cancellationToken)).Contains(segment.Id))
                 {
+                    _prepared.TryRemove(segment.Id, out _);
                     cached.Disposing = true;
                     if (cached.Borrowers == 0) await DisposeEntryAsync(cached);
                     throw new InvalidOperationException("segment-retiring-or-proof-changed");
                 }
                 cached.Borrowers++;
+                ReportView(segment, true, started);
                 return new(this, cached);
             }
+            if (preparedOnly) throw new PassageRetrievalRefusalException("warming");
             var id = await owners.RegisterAsync(segment, _instance, cancellationToken);
             // Global queries scan every segment. Evicting residents for each miss would
             // reopen the entire working set on every query when it exceeds the budget.
@@ -48,17 +98,20 @@ public sealed class UsearchSegmentCache(UsearchIndexOptions options, IIndexSegme
             try
             {
                 var expected = Path.Combine(options.RootPath, "segments", segment.Id);
-                if (!string.Equals(expected, segment.DirectoryPath, StringComparison.OrdinalIgnoreCase) || segment.NativeFormat != UsearchSegmentBuilder.NativeFormat)
+                if (!string.Equals(expected, segment.DirectoryPath, StringComparison.OrdinalIgnoreCase) ||
+                    !UsearchSegmentBuilder.SupportsNativeFormat(segment.NativeFormat))
                     throw new IndexGenerationValidationException("segment-path-or-format-invalid");
                 entry.Path = paths.Acquire(segment.DirectoryPath);
                 var filePath = Path.Combine(segment.DirectoryPath, "index.usearch");
                 using (var file = File.OpenRead(filePath))
                     if (file.Length != segment.FileLength || Convert.ToHexStringLower(SHA256.HashData(file)) != segment.FileChecksum)
                         throw new IndexGenerationValidationException("segment-file-proof-mismatch");
-                entry.Index = new USearchIndex(filePath, false);
-                if (entry.Index.Size() != (ulong)segment.VectorCount || entry.Index.Dimensions() != (ulong)segment.Dimensions)
-                    throw new IndexGenerationValidationException("segment-native-profile-invalid");
+                // Attach ownership before view opening, so a failed native close cannot lose its guard/receipt.
+                entry.Index = new UsearchReadIndex(segment.Dimensions, searchExpansion);
+                entry.Index.OpenView(filePath, segment.VectorCount);
                 await owners.OpenedAsync(id, cancellationToken);
+                if (entry.Retained) _prepared[segment.Id] = segment;
+                ReportView(segment, false, started);
                 return new(this, entry);
             }
             catch
@@ -71,6 +124,14 @@ public sealed class UsearchSegmentCache(UsearchIndexOptions options, IIndexSegme
         finally { _gate.Release(); }
     }
 
+    private static void ReportView(IndexSegmentDescriptor segment, bool reused, long started)
+    {
+        if (!HybridSearchDiagnostics.Log.IsEnabled()) return;
+        var correlation = HybridSearchDiagnostics.CurrentCorrelation;
+        HybridSearchDiagnostics.Log.SegmentView(correlation.TraceId, correlation.SpanId, segment.Id,
+            segment.FileLength, reused, Stopwatch.GetElapsedTime(started).TotalMilliseconds);
+    }
+
     public async ValueTask SweepAsync(bool forceIdle, CancellationToken cancellationToken)
     {
         await _gate.WaitAsync(cancellationToken);
@@ -78,7 +139,8 @@ public sealed class UsearchSegmentCache(UsearchIndexOptions options, IIndexSegme
         {
             var retiring = await owners.ReadRetiringAsync(_entries.Keys.ToArray(), cancellationToken);
             foreach (var entry in _entries.Values.Where(value => value.Borrowers == 0 &&
-                (forceIdle || value.Disposing || retiring.Contains(value.Descriptor.Id) || clock.GetUtcNow() - value.LastUsed >= _idleLifetime))
+                (forceIdle || value.Disposing || retiring.Contains(value.Descriptor.Id) ||
+                 _idleLifetime != Timeout.InfiniteTimeSpan && clock.GetUtcNow() - value.LastUsed >= _idleLifetime))
                 .OrderBy(value => value.LastUsed).ToArray()) await DisposeEntryAsync(entry);
         }
         finally { _gate.Release(); }
@@ -101,6 +163,7 @@ public sealed class UsearchSegmentCache(UsearchIndexOptions options, IIndexSegme
     {
         if (entry.Borrowers != 0) throw new InvalidOperationException("segment-native-still-borrowed");
         entry.Disposing = true;
+        _prepared.TryRemove(entry.Descriptor.Id, out _);
         if (entry.Index is not null)
         {
             BeforeNativeDisposal?.Invoke(entry.Descriptor.Id);
@@ -133,7 +196,7 @@ public sealed class UsearchSegmentCache(UsearchIndexOptions options, IIndexSegme
         public Guid NativeInstanceId { get; } = Guid.NewGuid();
         public int Borrowers { get; set; }
         public DateTimeOffset LastUsed { get; set; } = now;
-        public USearchIndex? Index { get; set; }
+        public UsearchReadIndex? Index { get; set; }
         public IDisposable? Path { get; set; }
         public bool Disposing { get; set; }
         public bool Retained { get; init; }
@@ -147,22 +210,35 @@ public sealed class UsearchSegmentCache(UsearchIndexOptions options, IIndexSegme
         private int _disposed;
         internal BorrowedSegment(UsearchSegmentCache cache, Entry entry) { _cache = cache; _entry = entry; }
         public Guid NativeInstanceId => _entry.NativeInstanceId;
-        public async ValueTask<IReadOnlyList<AnnMatch>> SearchAsync(IReadOnlyList<float> query, int limit, CancellationToken cancellationToken)
+        public ValueTask<IReadOnlyList<AnnMatch>> SearchAsync(IReadOnlyList<float> query, int limit, CancellationToken cancellationToken) =>
+            SearchAsync(query, limit, null, cancellationToken);
+
+        public ValueTask<IReadOnlyList<AnnMatch>> SearchAsync(IReadOnlyList<float> query, int limit,
+            IReadOnlySet<long>? eligible, CancellationToken cancellationToken) =>
+            SearchCoreAsync(query, limit, eligible, false, cancellationToken);
+
+        internal ValueTask<IReadOnlyList<AnnMatch>> SearchCandidatePoolAsync(IReadOnlyList<float> query, int limit,
+            IReadOnlySet<long> eligible, CancellationToken cancellationToken) =>
+            SearchCoreAsync(query, limit, eligible, true, cancellationToken);
+
+        private async ValueTask<IReadOnlyList<AnnMatch>> SearchCoreAsync(IReadOnlyList<float> query, int limit,
+            IReadOnlySet<long>? eligible, bool candidatePool, CancellationToken cancellationToken)
         {
             if (query.Count != _entry.Descriptor.Dimensions || query.Any(value => !float.IsFinite(value)) || !query.Any(value => value != 0))
                 throw new ArgumentException("corpus-query-vector-invalid");
-            if (limit is < 1 or > 100) throw new ArgumentOutOfRangeException(nameof(limit));
-            await _entry.SearchGate.WaitAsync(cancellationToken);
+            if (limit < 1 || limit > (candidatePool ? IAnnCandidatePool.MaximumResults : 100)) throw new ArgumentOutOfRangeException(nameof(limit));
+            var waitStarted = Stopwatch.GetTimestamp();
+            try { await _entry.SearchGate.WaitAsync(cancellationToken); }
+            finally { ReportPreparedPhase("ann-native-gate", waitStarted); }
+            var searchStarted = Stopwatch.GetTimestamp();
             try
             {
                 ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
                 var index = _entry.Index ?? throw new ObjectDisposedException(nameof(BorrowedSegment));
-                var count = index.Search(query.ToArray(), limit, out var keys, out var distances);
-                cancellationToken.ThrowIfCancellationRequested();
-                if (distances.Take(count).Any(value => !float.IsFinite(value))) throw new IndexGenerationValidationException("segment-ann-output-invalid");
-                return Enumerable.Range(0, count).Select(index => new AnnMatch(checked((long)keys[index]), distances[index])).ToArray();
+                return candidatePool ? index.SearchCandidatePool(query, limit, eligible, cancellationToken)
+                    : index.Search(query, limit, eligible, cancellationToken);
             }
-            finally { _entry.SearchGate.Release(); }
+            finally { _entry.SearchGate.Release(); ReportPreparedPhase("ann-native-search", searchStarted); }
         }
         public async ValueTask DisposeAsync()
         {

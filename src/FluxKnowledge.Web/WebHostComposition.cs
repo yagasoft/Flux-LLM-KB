@@ -17,6 +17,7 @@ using FluxKnowledge.Application.IntegrationV1.Operations;
 using FluxKnowledge.Application.Operations;
 using FluxKnowledge.Infrastructure.Inference;
 using FluxKnowledge.Infrastructure.Inference.Models;
+using FluxKnowledge.Infrastructure.Inference.Search;
 using FluxKnowledge.Infrastructure.SqlServer;
 using FluxKnowledge.Infrastructure.SqlServer.Configuration;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
@@ -113,6 +114,7 @@ public static class WebHostComposition
         }
         services.AddDataProtection().SetApplicationName("FluxKnowledge.Staging." + settings.CatalogName)
             .PersistKeysToFileSystem(new DirectoryInfo(Path.Combine(settings.Layout.ConfigRoot, "browser-data-protection")));
+        services.AddSingleton(settings);
         // Dashboard projections need the SQL status reader, but no scheduler, executor,
         // owner probe or native worker is registered or started in functional staging.
         services.AddScoped<IGpuSchedulerStore>(provider => new SqlGpuSchedulerStore(
@@ -124,11 +126,39 @@ public static class WebHostComposition
                 new SourceRootPathPolicyOptions(settings.Layout.AppOwnedLocations.Append(@"I:\FluxKnowledge").Append(@"J:\Models").ToArray())), settings.SourcesRoot));
         if (settings.IndexPublicationMode == "Segmented")
         {
-            // Actual process identity is needed for durable index ownership; this registers no GPU executor or model loader.
-            services.AddSingleton(_ => new StagingPassageInference(new DeterministicTokenHashEmbeddingProvider()));
-            services.AddSingleton<IScheduledPassageInference>(provider => provider.GetRequiredService<StagingPassageInference>());
-            services.AddSingleton<IEmbeddingProvider>(provider => provider.GetRequiredService<StagingPassageInference>());
-            services.AddSingleton(StagingPassageInference.CreatePassageBuilder());
+            if (settings.CpuSemantic)
+            {
+                services.Replace(ServiceDescriptor.Singleton(provider => new UsearchSegmentCache(
+                    provider.GetRequiredService<UsearchIndexOptions>(), provider.GetRequiredService<IIndexSegmentReadLeaseFactory>(),
+                    provider.GetRequiredService<IIndexSegmentOwnerStore>(), provider.GetRequiredService<TimeProvider>(),
+                    searchExpansion: settings.AnnSearchExpansion)));
+                // Share immutable verified J: weights only. Ownership and all mutable state belong to this stage.
+                services.AddSingleton(_ => BgeSearchRuntimeComposition.CreateModelStores());
+                services.AddSingleton(provider => new ResidentCpuPassageInference(
+                    ct => BgeCpuResidentModelFactory.LoadAsync(provider.GetRequiredService<BgeGpuModelStores>(),
+                        async ownerToken => (IDisposable)await CpuSearchOwnerLease.AcquireAsync(settings.Layout.RuntimeRoot, ownerToken), ct,
+                        settings.CpuRerankerShards, settings.CpuRerankerThreads),
+                    new(BgeOfflineModels.EmbeddingFingerprint, 1024), BgeOfflineModels.RerankerFingerprint, maximumPendingRequests: 1));
+                services.AddSingleton<IScheduledPassageInference>(provider => provider.GetRequiredService<ResidentCpuPassageInference>());
+                services.AddSingleton<IHostedService, BgeCpuWarmupService>();
+                // Sweep idle read views and close them while SQL is alive at shutdown.
+                // No scope factory: this service must never start storage cleanup against copied work.
+                services.AddSingleton<IHostedService>(provider => new UsearchSegmentCacheMaintenance(
+                    provider.GetRequiredService<UsearchSegmentCache>(), provider.GetRequiredService<TimeProvider>(),
+                    provider.GetRequiredService<ILogger<UsearchSegmentCacheMaintenance>>()));
+                services.AddSingleton<IEmbeddingProvider, StagingCpuEmbeddingProvider>();
+                services.AddSingleton(new CorpusRetrievalOptions(true));
+                services.Replace(ServiceDescriptor.Scoped<ISearchService, PassageSearchService>());
+                services.AddSingleton<BgePassageTokenizer>();
+                services.AddSingleton(provider => new PassageBuilder(provider.GetRequiredService<BgePassageTokenizer>()));
+            }
+            else
+            {
+                services.AddSingleton(_ => new StagingPassageInference(new DeterministicTokenHashEmbeddingProvider()));
+                services.AddSingleton<IScheduledPassageInference>(provider => provider.GetRequiredService<StagingPassageInference>());
+                services.AddSingleton<IEmbeddingProvider>(provider => provider.GetRequiredService<StagingPassageInference>());
+                services.AddSingleton(StagingPassageInference.CreatePassageBuilder());
+            }
             services.AddScoped<IHybridPassageCandidateReader>(provider =>
                 (IHybridPassageCandidateReader)provider.GetRequiredService<ICorpusRetrievalReader>());
             services.AddScoped<IHybridPassageRetrieval>(provider => new HybridPassageRetrievalEngine(
@@ -136,7 +166,10 @@ public static class WebHostComposition
                 provider.GetRequiredService<ICorpusGenerationLeaseStore>(), provider.GetRequiredService<ICorpusAnnLeaseFactory>(),
                 provider.GetRequiredService<IScheduledPassageInference>(), provider.GetRequiredService<IGpuInteractiveOwnerProbe>(),
                 provider.GetRequiredService<ICorpusEvidenceCodec>(), provider.GetRequiredService<ILocalPrivateContentDisclosure>(),
-                provider.GetRequiredService<TimeProvider>(), TimeSpan.FromSeconds(25)));
+                provider.GetRequiredService<TimeProvider>(), TimeSpan.FromSeconds(25),
+                provider.GetService<ICorpusAnnPreparationSignal>()));
+            // Synthetic segmented staging also needs a prepared projection, without model allocation.
+            CorpusAnnPreparationService.Add(services);
         }
         return services;
     }
@@ -160,6 +193,7 @@ public static class WebHostComposition
         if (bool.TryParse(configuration["Search:HybridPassagesEnabled"], out var hybridEnabled) && hybridEnabled)
         {
             allowedHostedServiceTypes.Add(typeof(BgeCpuWarmupService));
+            allowedHostedServiceTypes.Add(typeof(CorpusAnnPreparationService));
         }
         if (runtime.WorkerEnabled)
         {

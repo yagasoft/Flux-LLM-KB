@@ -74,6 +74,7 @@ public sealed class CloudSourcePipelineTests(NativeSqlServerFixture fixture) : I
         await scans.CompleteAsync(claim, scanResult, null, default);
         await environment.PumpAsync();
 
+        await SqlTestData.WaitForFullTextAsync(environment.Factory);
         var retrieval = new CorpusRetrievalService(new SqlCorpusRetrievalReader(environment.Factory),
             new ScopedCorpusRetrievalTests.TestEvidenceCodec(), new LocalPrivateContentDisclosure());
         var hit = Assert.Single((await retrieval.SearchAsync(new CorpusSearchRequest(

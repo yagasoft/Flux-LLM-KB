@@ -16,6 +16,69 @@ namespace FluxKnowledge.Integration.Tests.Indexing;
 public sealed partial class SqlToUsearchRebuildTests
 {
     [NativeSqlServerFact]
+    public async Task Segmented_deletion_reports_committed_reclamation_and_resumes_between_segment_and_manifest()
+    {
+        await using var environment = await PipelineEnvironment.CreateAsync(_fixture, "The independent keeper remains published.", segmented: true);
+        var recordId = await environment.AddRetainedAndPumpAsync("The temporary rooted source must be removed through every native retirement phase.");
+        var operation = Guid.NewGuid(); Guid root;
+        await using (var db = await environment.Factory.CreateDbContextAsync())
+        {
+            root = await (from record in db.PipelineRecords join revision in db.SourceRevisions on record.SourceRevisionId equals revision.Id
+                where record.Id == recordId select revision.SourceRootId).SingleAsync();
+            (await db.SourceRootConfigurations.SingleAsync(r => r.Id == root)).State = (int)SourceRootState.Deleting;
+            var state = await db.IndexState.SingleAsync(); state.CorpusVersion++;
+            db.IndexProjectionChanges.Add(new() { CorpusEpoch = state.CorpusEpoch, CorpusVersion = state.CorpusVersion,
+                ScopeKind = 3, ScopeId = root, CreatedAtUtc = DateTimeOffset.UtcNow });
+            db.SourceDeletionOperations.Add(new() { Id = operation, SourceRootId = root, Phase = "accepted",
+                CreatedAtUtc = DateTimeOffset.UtcNow, UpdatedAtUtc = DateTimeOffset.UtcNow });
+            await db.SaveChangesAsync();
+        }
+        var recovery = Path.Combine(environment.IndexRoot, "test-recovery"); Directory.CreateDirectory(recovery);
+        await AuditRecoveryAsync(environment, recovery);
+        var store = new SqlSourceDeletionStore(environment.Factory, TimeProvider.System, queryOwnerProbe: new WindowsInteractiveGpuOwnerProbe());
+        using var scope = environment.Services.CreateScope();
+        var publisher = scope.ServiceProvider.GetRequiredService<IIndexGenerationPublisher>();
+        Assert.Equal("rebuild-index", (await store.PurgeAsync(await LeaseDeletionFixtureAsync(environment, operation), null, default)).Phase);
+        var candidate = await publisher.BuildAndPlaceAsync(Guid.Empty, default);
+        Assert.Equal("cleanup-memberships", (await store.PurgeAsync(await LeaseDeletionFixtureAsync(environment, operation), candidate, default)).Phase);
+        SourceDeletionCoordinator Coordinator() => new(store, publisher,
+            new WindowsSourceDeletionFileStore(environment.ArtifactRoot, environment.IndexRoot),
+            new SqlSourceArtifactPublicationGate(environment.Factory), new SqlDerivedIndexRecoveryStore(environment.Factory, TimeProvider.System),
+            indexMaintenance: new SqlSegmentRetirementOperations(environment.Factory, new WindowsIndexProjectionFileStore(environment.IndexRoot),
+                environment.IndexRoot, recovery, TimeProvider.System, new WindowsInteractiveGpuOwnerProbe()));
+        var first = Coordinator(); var checkpoint = false;
+        for (var attempt = 0; attempt < 24 && !checkpoint; attempt++)
+        {
+            var progressed = await first.RunOneAsync(default);
+            await using var db = await environment.Factory.CreateDbContextAsync();
+            var current = await db.SourceDeletionOperations.SingleAsync(d => d.Id == operation);
+            if (current.ReasonCode != "source-delete-segment-retirement-progressing") continue;
+            Assert.True(progressed);
+            Assert.Equal(0, current.State); Assert.Null(current.LeaseId);
+            Assert.True(await db.IndexSegments.AnyAsync(s => s.State == 3 && db.SourceDeletionCleanupItems.Any(i =>
+                i.SourceDeletionOperationId == operation && i.StorageKind == 4 && i.RelativePath == s.Id)));
+            var manifestPaths = await db.SourceDeletionCleanupItems.Where(i => i.SourceDeletionOperationId == operation && i.StorageKind == 3)
+                .Select(i => i.RelativePath).ToArrayAsync();
+            var manifestIds = manifestPaths.Select(p => Guid.ParseExact(p, "N")).ToArray();
+            Assert.True(await db.IndexGenerations.AnyAsync(g => manifestIds.Contains(g.Id) && g.RetiredAtUtc != null && g.ReclaimedAtUtc == null));
+            checkpoint = true;
+        }
+        Assert.True(checkpoint);
+        var resumed = Coordinator();
+        for (var attempt = 0; attempt < 24; attempt++)
+        {
+            await using var db = await environment.Factory.CreateDbContextAsync();
+            if (await db.SourceDeletionOperations.AnyAsync(d => d.Id == operation && d.State == 3)) break;
+            Assert.True(await resumed.RunOneAsync(default));
+        }
+        await using var verify = await environment.Factory.CreateDbContextAsync();
+        Assert.Equal(3, (await verify.SourceDeletionOperations.SingleAsync(d => d.Id == operation)).State);
+        Assert.False(await verify.SourceRootConfigurations.AnyAsync(r => r.Id == root));
+        Assert.False(await verify.PipelineRecords.AnyAsync(r => r.Id == recordId));
+        await AssertSegmentedOracleAsync(environment);
+    }
+
+    [NativeSqlServerFact]
     public async Task Segmented_overlapping_deletions_replay_shared_manifest_and_segment_targets_without_a_pin_cycle()
     {
         await using var environment = await PipelineEnvironment.CreateAsync(_fixture, "The independent control remains published.", segmented: true);

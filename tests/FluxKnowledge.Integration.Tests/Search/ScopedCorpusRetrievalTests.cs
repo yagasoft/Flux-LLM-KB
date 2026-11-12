@@ -21,7 +21,7 @@ using Xunit;
 namespace FluxKnowledge.Integration.Tests.Search;
 
 [Collection("sql-full-text")]
-public sealed class ScopedCorpusRetrievalTests(NativeSqlServerFixture fixture) : IClassFixture<NativeSqlServerFixture>
+public sealed partial class ScopedCorpusRetrievalTests(NativeSqlServerFixture fixture) : IClassFixture<NativeSqlServerFixture>
 {
     [NativeSqlServerFact]
     public async Task Context_header_discovers_the_body_but_never_becomes_cited_evidence_or_exact_match()
@@ -37,7 +37,7 @@ public sealed class ScopedCorpusRetrievalTests(NativeSqlServerFixture fixture) :
             chunk.ContextHeader = "Payment procedure";
             chunk.PassagePolicyFingerprint = Hash("synthetic-header-policy");
             chunk.SearchInputHash = Hash(chunk.ContextHeader + "\n" + body);
-            await context.SaveChangesAsync();
+            await SaveAndWaitForFullTextAsync(context);
             chunkId = chunk.Id;
         }
         var service = new CorpusRetrievalService(new SqlCorpusRetrievalReader(factory),
@@ -58,7 +58,7 @@ public sealed class ScopedCorpusRetrievalTests(NativeSqlServerFixture fixture) :
         await using (var context = await factory.CreateDbContextAsync())
         {
             (await context.TextChunks.FindAsync(chunkId))!.SearchInputHash = Hash("different-input");
-            await context.SaveChangesAsync();
+            await SaveAndWaitForFullTextAsync(context);
         }
         Assert.Empty((await service.SearchAsync(new CorpusSearchRequest("Thursday", 5, "root", rootId, null), CancellationToken.None)).Results);
         await using (var context = await factory.CreateDbContextAsync())
@@ -66,7 +66,7 @@ public sealed class ScopedCorpusRetrievalTests(NativeSqlServerFixture fixture) :
             var chunk = (await context.TextChunks.FindAsync(chunkId))!;
             chunk.ContextHeader = "secret-content-sentinel";
             chunk.SearchInputHash = Hash(chunk.ContextHeader + "\n" + body);
-            await context.SaveChangesAsync();
+            await SaveAndWaitForFullTextAsync(context);
         }
         Assert.Empty((await service.SearchAsync(new CorpusSearchRequest("Thursday", 5, "root", rootId, null), CancellationToken.None)).Results);
     }
@@ -90,13 +90,13 @@ public sealed class ScopedCorpusRetrievalTests(NativeSqlServerFixture fixture) :
                 Content = text[26..], ContentHash = Hash(text[26..]),
                 PassagePolicyFingerprint = original.PassagePolicyFingerprint, SearchInputHash = Hash(text[26..])
             });
-            await context.SaveChangesAsync();
+            await SaveAndWaitForFullTextAsync(context);
         }
 
         var service = new CorpusRetrievalService(new SqlCorpusRetrievalReader(factory),
             new TestEvidenceCodec(), new LocalPrivateContentDisclosure(), new CorpusRetrievalOptions(true));
         var hit = (await service.SearchAsync(new CorpusSearchRequest("INV-42", 5, "root", rootId, null),
-            CancellationToken.None)).Results.First();
+            CancellationToken.None)).Results.Single(hit => hit.StartOffset == 0);
 
         Assert.Equal(text, hit.Passage);
         Assert.Equal(0, hit.StartOffset);
@@ -115,7 +115,7 @@ public sealed class ScopedCorpusRetrievalTests(NativeSqlServerFixture fixture) :
         await using (var context = await factory.CreateDbContextAsync())
         {
             AddPublishedText(context, rootId, @"C:\epoch", "answer.txt", ["INV-43 confirms a value."]);
-            await context.SaveChangesAsync();
+            await SaveAndWaitForFullTextAsync(context);
         }
         var service = new CorpusRetrievalService(new SqlCorpusRetrievalReader(factory),
             new TestEvidenceCodec(), new LocalPrivateContentDisclosure());
@@ -124,7 +124,7 @@ public sealed class ScopedCorpusRetrievalTests(NativeSqlServerFixture fixture) :
         await using (var context = await factory.CreateDbContextAsync())
         {
             (await context.IndexState.SingleAsync()).CorpusEpoch = Guid.NewGuid();
-            await context.SaveChangesAsync();
+            await SaveAndWaitForFullTextAsync(context);
         }
         var error = await Assert.ThrowsAsync<FluxKnowledge.Application.IntegrationV1.NativeOperationException>(
             async () => await service.ReadAsync(new CorpusReadRequest(hit.EvidenceRef, 0), CancellationToken.None));
@@ -143,7 +143,7 @@ public sealed class ScopedCorpusRetrievalTests(NativeSqlServerFixture fixture) :
                 ["introductory text", "INV-2026/0042 marks the retained answer"]);
             AddPublishedText(context, rootB, @"C:\corpus-b", "other.txt",
                 ["INV-2026/0042 belongs to another source"]);
-            await context.SaveChangesAsync();
+            await SaveAndWaitForFullTextAsync(context);
         }
 
         var reader = new SqlCorpusRetrievalReader(factory);
@@ -170,7 +170,7 @@ public sealed class ScopedCorpusRetrievalTests(NativeSqlServerFixture fixture) :
             AddPublishedText(context, outerRoot, @"C:\work", "outer.txt", ["workspace marker outer"]);
             AddPublishedText(context, nestedRoot, @"C:\work\nested", "inner.txt", ["workspace marker inner"]);
             AddPublishedText(context, siblingRoot, @"C:\workshop", "outside.txt", ["workspace marker outside"]);
-            await context.SaveChangesAsync();
+            await SaveAndWaitForFullTextAsync(context);
         }
 
         var reader = new SqlCorpusRetrievalReader(factory);
@@ -205,7 +205,7 @@ public sealed class ScopedCorpusRetrievalTests(NativeSqlServerFixture fixture) :
         {
             AddPublishedText(context, root, workspace, "answer.txt", ["retention window records 30 days"]);
             AddPublishedText(context, Guid.NewGuid(), sibling, "other.txt", ["retention window records 90 days"]);
-            await context.SaveChangesAsync();
+            await SaveAndWaitForFullTextAsync(context);
         }
 
         var codec = new TestEvidenceCodec();
@@ -258,7 +258,7 @@ public sealed class ScopedCorpusRetrievalTests(NativeSqlServerFixture fixture) :
         await using (var context = await factory.CreateDbContextAsync())
         {
             AddPublishedText(context, Guid.NewGuid(), workspace, "answer.txt", ["retention window records 30 days"]);
-            await context.SaveChangesAsync();
+            await SaveAndWaitForFullTextAsync(context);
         }
         var corpus = new CorpusRetrievalService(new SqlCorpusRetrievalReader(factory),
             new TestEvidenceCodec(), new LocalPrivateContentDisclosure());
@@ -325,7 +325,7 @@ public sealed class ScopedCorpusRetrievalTests(NativeSqlServerFixture fixture) :
         {
             AddPublishedText(context, rootId, @"C:\invoices", "ledger.txt",
                 ["The ordinary text has an early section. ", "INV-2026/0042 confirms payment."]);
-            await context.SaveChangesAsync();
+            await SaveAndWaitForFullTextAsync(context);
         }
 
         var service = new CorpusRetrievalService(
@@ -353,7 +353,7 @@ public sealed class ScopedCorpusRetrievalTests(NativeSqlServerFixture fixture) :
         {
             AddPublishedText(context, rootId, @"C:\evidence", "sample.txt",
                 ["before ", "cited phrase", " after"]);
-            await context.SaveChangesAsync();
+            await SaveAndWaitForFullTextAsync(context);
         }
 
         var codec = new TestEvidenceCodec();
@@ -373,7 +373,7 @@ public sealed class ScopedCorpusRetrievalTests(NativeSqlServerFixture fixture) :
             var record = await context.PipelineRecords.FindAsync(hit.PipelineRecordId);
             Assert.NotNull(record);
             record.IsDeleted = true;
-            await context.SaveChangesAsync();
+            await SaveAndWaitForFullTextAsync(context);
         }
 
         var error = await Assert.ThrowsAsync<FluxKnowledge.Application.IntegrationV1.NativeOperationException>(
@@ -401,7 +401,7 @@ public sealed class ScopedCorpusRetrievalTests(NativeSqlServerFixture fixture) :
         {
             AddPublishedText(context, rootId, @"C:\terms", "payment.txt",
                 ["The payment settled yesterday."]);
-            await context.SaveChangesAsync();
+            await SaveAndWaitForFullTextAsync(context);
         }
 
         var service = new CorpusRetrievalService(new SqlCorpusRetrievalReader(factory),
@@ -436,13 +436,13 @@ public sealed class ScopedCorpusRetrievalTests(NativeSqlServerFixture fixture) :
         {
             AddPublishedText(context, rootId, @"C:\pages", "hybrid.pdf",
                 ["FirstPage\n\nSecondPage"], metadata);
-            await context.SaveChangesAsync();
+            await SaveAndWaitForFullTextAsync(context);
         }
 
         var service = new CorpusRetrievalService(new SqlCorpusRetrievalReader(factory),
             new TestEvidenceCodec(), new LocalPrivateContentDisclosure());
         var hit = Assert.Single((await service.SearchAsync(
-            new CorpusSearchRequest("Page\n\nSecond", 5, "root", rootId, null),
+            new CorpusSearchRequest("Page\n\nSecond", 5, "root", rootId, null, "literal"),
             CancellationToken.None)).Results);
         Assert.Contains(hit.Locations, location => location.Kind == "page" && location.PageNumber == 1);
         Assert.Contains(hit.Locations, location => location.Kind == "page" && location.PageNumber == 2);
@@ -456,16 +456,16 @@ public sealed class ScopedCorpusRetrievalTests(NativeSqlServerFixture fixture) :
         await using (var context = await factory.CreateDbContextAsync())
         {
             AddPublishedText(context, Guid.NewGuid(), @"C:\verbose", "first.txt",
-                ["needle first ", "needle second ", "needle third "]);
+                ["passagecapfixturekeyword first ", "passagecapfixturekeyword second ", "passagecapfixturekeyword third "]);
             AddPublishedText(context, Guid.NewGuid(), @"C:\other", "second.txt",
-                ["needle fourth"]);
-            await context.SaveChangesAsync();
+                ["passagecapfixturekeyword fourth"]);
+            await SaveAndWaitForFullTextAsync(context);
         }
 
         var service = new CorpusRetrievalService(new SqlCorpusRetrievalReader(factory),
             new TestEvidenceCodec(), new LocalPrivateContentDisclosure());
         var response = await service.SearchAsync(
-            new CorpusSearchRequest("needle", 3, "all", null, null), CancellationToken.None);
+            new CorpusSearchRequest("passagecapfixturekeyword", 3, "all", null, null), CancellationToken.None);
         Assert.Equal(3, response.Results.Count);
         Assert.Equal(2, response.Results.Count(hit => hit.Title == "first.txt"));
         Assert.Single(response.Results, hit => hit.Title == "second.txt");
@@ -480,7 +480,7 @@ public sealed class ScopedCorpusRetrievalTests(NativeSqlServerFixture fixture) :
         {
             AddPublishedText(context, rootId, @"C:\transport-parity", "safe.txt", ["parity marker safe content"]);
             AddPublishedText(context, rootId, @"C:\transport-parity", "withheld.txt", ["parity marker discusses a bearer token"]);
-            await context.SaveChangesAsync();
+            await SaveAndWaitForFullTextAsync(context);
         }
         var reader = new SqlCorpusRetrievalReader(factory);
         var codec = new TestEvidenceCodec();
@@ -508,7 +508,7 @@ public sealed class ScopedCorpusRetrievalTests(NativeSqlServerFixture fixture) :
         await using (var context = await factory.CreateDbContextAsync())
         {
             AddPublishedText(context, Guid.NewGuid(), @"C:\docs\bearer token", "safe.txt", ["unrelated text"]);
-            await context.SaveChangesAsync();
+            await SaveAndWaitForFullTextAsync(context);
         }
         var service = new CorpusRetrievalService(new SqlCorpusRetrievalReader(factory),
             new TestEvidenceCodec(), new LocalPrivateContentDisclosure());
@@ -527,7 +527,7 @@ public sealed class ScopedCorpusRetrievalTests(NativeSqlServerFixture fixture) :
         {
             AddPublishedText(context, rootId, @"C:\secrets", "hidden.txt",
                 [new string('x', 200) + " password=abc123 " + new string('y', 1200)]);
-            await context.SaveChangesAsync();
+            await SaveAndWaitForFullTextAsync(context);
         }
 
         var service = new CorpusRetrievalService(new SqlCorpusRetrievalReader(factory),
@@ -546,7 +546,7 @@ public sealed class ScopedCorpusRetrievalTests(NativeSqlServerFixture fixture) :
         {
             AddPublishedText(context, rootId, @"C:\split-secret", "hidden.txt",
                 [new string('x', 2000) + " password=", "abc123 visible"]);
-            await context.SaveChangesAsync();
+            await SaveAndWaitForFullTextAsync(context);
         }
 
         var reader = new SqlCorpusRetrievalReader(factory);
@@ -584,7 +584,7 @@ public sealed class ScopedCorpusRetrievalTests(NativeSqlServerFixture fixture) :
             {
                 AddPublishedText(context, rootId, @"C:\long-secret\" + rootId.ToString("N"),
                     "hidden.txt", chunks);
-                await context.SaveChangesAsync();
+                await SaveAndWaitForFullTextAsync(context);
             }
 
             var response = await service.SearchAsync(
@@ -606,7 +606,7 @@ public sealed class ScopedCorpusRetrievalTests(NativeSqlServerFixture fixture) :
         await using (var context = await factory.CreateDbContextAsync())
         {
             AddPublishedText(context, rootId, @"C:\long-safe", "book.txt", chunks);
-            await context.SaveChangesAsync();
+            await SaveAndWaitForFullTextAsync(context);
         }
 
         var service = new CorpusRetrievalService(new SqlCorpusRetrievalReader(factory),
@@ -629,7 +629,7 @@ public sealed class ScopedCorpusRetrievalTests(NativeSqlServerFixture fixture) :
         {
             AddPublishedText(context, rootId, @"C:\late-term", "article.txt",
                 [new string('x', 1850) + " payment settled."]);
-            await context.SaveChangesAsync();
+            await SaveAndWaitForFullTextAsync(context);
         }
 
         var service = new CorpusRetrievalService(new SqlCorpusRetrievalReader(factory),
@@ -657,7 +657,7 @@ public sealed class ScopedCorpusRetrievalTests(NativeSqlServerFixture fixture) :
         {
             AddPublishedText(context, rootId, @"C:\lexical-anchor", "terms.txt",
                 ["othermice " + new string('x', 1750) + " mice and ai tools"]);
-            await context.SaveChangesAsync();
+            await SaveAndWaitForFullTextAsync(context);
         }
 
         var service = new CorpusRetrievalService(new SqlCorpusRetrievalReader(factory),
@@ -688,7 +688,7 @@ public sealed class ScopedCorpusRetrievalTests(NativeSqlServerFixture fixture) :
         {
             AddPublishedText(context, rootId, @"C:\accents", "menu.txt",
                 [new string('x', 1750) + " café menu"]);
-            await context.SaveChangesAsync();
+            await SaveAndWaitForFullTextAsync(context);
         }
 
         var service = new CorpusRetrievalService(new SqlCorpusRetrievalReader(factory),
@@ -715,13 +715,13 @@ public sealed class ScopedCorpusRetrievalTests(NativeSqlServerFixture fixture) :
         await using (var context = await factory.CreateDbContextAsync())
         {
             AddPublishedText(context, rootId, @"C:\long-query", "article.txt", ["head " + query + " tail"]);
-            await context.SaveChangesAsync();
+            await SaveAndWaitForFullTextAsync(context);
         }
 
         var service = new CorpusRetrievalService(new SqlCorpusRetrievalReader(factory),
             new TestEvidenceCodec(), new LocalPrivateContentDisclosure());
         var response = await service.SearchAsync(
-            new CorpusSearchRequest(query, 5, "root", rootId, null), CancellationToken.None);
+            new CorpusSearchRequest(query, 5, "root", rootId, null, "literal"), CancellationToken.None);
         var hit = Assert.Single(response.Results);
         Assert.Equal(1024, hit.Length);
         Assert.Equal(new string('q', 1024), hit.Passage);
@@ -763,7 +763,7 @@ public sealed class ScopedCorpusRetrievalTests(NativeSqlServerFixture fixture) :
                 SourceProcessorBranchId = selected.BranchId, PipelineRecordId = selected.RecordId,
                 PipelineRecordRevision = 1, ProcessorFingerprint = "first", PublishedAtUtc = now
             });
-            await context.SaveChangesAsync();
+            await SaveAndWaitForFullTextAsync(context);
         }
 
         var codec = new TestEvidenceCodec();
@@ -787,7 +787,7 @@ public sealed class ScopedCorpusRetrievalTests(NativeSqlServerFixture fixture) :
             publication.SourceProcessorBranchId = successor.BranchId;
             publication.PipelineRecordId = successor.RecordId;
             publication.ProcessorFingerprint = "second";
-            await context.SaveChangesAsync();
+            await SaveAndWaitForFullTextAsync(context);
         }
 
         var stale = await Assert.ThrowsAsync<FluxKnowledge.Application.IntegrationV1.NativeOperationException>(
@@ -819,7 +819,7 @@ public sealed class ScopedCorpusRetrievalTests(NativeSqlServerFixture fixture) :
             });
             foreach (var member in context.SourceRevisions.Local.Where(x => x.SourceRootId == rootId && x.OriginKind == 1))
                 member.ParentSourceRevisionId = physicalArchiveId;
-            await context.SaveChangesAsync();
+            await SaveAndWaitForFullTextAsync(context);
         }
         var codec = new TestEvidenceCodec();
         var service = new CorpusRetrievalService(new SqlCorpusRetrievalReader(factory), codec,
@@ -836,7 +836,7 @@ public sealed class ScopedCorpusRetrievalTests(NativeSqlServerFixture fixture) :
             var revision = await context.SourceRevisions.FindAsync(first.OwnerSourceRevisionId);
             Assert.NotNull(revision);
             revision.SuppressedAtUtc = DateTimeOffset.UtcNow;
-            await context.SaveChangesAsync();
+            await SaveAndWaitForFullTextAsync(context);
         }
         var stale = await Assert.ThrowsAsync<FluxKnowledge.Application.IntegrationV1.NativeOperationException>(
             async () => await service.ReadAsync(new CorpusReadRequest(first.EvidenceRef, 0), CancellationToken.None));
@@ -860,14 +860,14 @@ public sealed class ScopedCorpusRetrievalTests(NativeSqlServerFixture fixture) :
                 Id = identityId, SourceKind = "import", StableKey = "unrooted-source",
                 CreatedAtUtc = now
             });
-            AddUnrootedRecord(context, identityId, oldId, 1, "unrooted marker old", now);
-            await context.SaveChangesAsync();
+            AddUnrootedRecord(context, identityId, oldId, 1, "unrootedrevisionfixturekeyword old", now);
+            await SaveAndWaitForFullTextAsync(context);
         }
         var codec = new TestEvidenceCodec();
         var service = new CorpusRetrievalService(new SqlCorpusRetrievalReader(factory), codec,
             new LocalPrivateContentDisclosure());
         var original = Assert.Single((await service.SearchAsync(
-            new CorpusSearchRequest("unrooted marker", 5, "all", null, null),
+            new CorpusSearchRequest("unrootedrevisionfixturekeyword", 5, "all", null, null),
             CancellationToken.None)).Results);
         Assert.Null(original.RootId);
         Assert.Null(original.OwnerSourceRevisionId);
@@ -875,16 +875,22 @@ public sealed class ScopedCorpusRetrievalTests(NativeSqlServerFixture fixture) :
         await using (var context = await factory.CreateDbContextAsync())
         {
             AddUnrootedRecord(context, identityId, Guid.NewGuid(), 2,
-                "unrooted marker current", now);
-            await context.SaveChangesAsync();
+                "unrootedrevisionfixturekeyword current", now);
+            await SaveAndWaitForFullTextAsync(context);
         }
         var stale = await Assert.ThrowsAsync<FluxKnowledge.Application.IntegrationV1.NativeOperationException>(
             async () => await service.ReadAsync(new CorpusReadRequest(original.EvidenceRef, 0), CancellationToken.None));
         Assert.Equal("evidence-stale", stale.ReasonCode);
         var current = Assert.Single((await service.SearchAsync(
-            new CorpusSearchRequest("unrooted marker", 5, "all", null, null),
+            new CorpusSearchRequest("unrootedrevisionfixturekeyword", 5, "all", null, null),
             CancellationToken.None)).Results);
         Assert.Equal(2, current.PipelineRecordRevision);
+    }
+
+    private static async Task SaveAndWaitForFullTextAsync(FluxKnowledgeDbContext context)
+    {
+        await context.SaveChangesAsync();
+        await SqlTestData.WaitForFullTextAsync(context);
     }
 
     private static void AddUnrootedRecord(

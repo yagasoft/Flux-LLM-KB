@@ -101,9 +101,12 @@ public sealed partial class SqlSegmentedIndexStore : IIndexProjectionRebuildStor
             await ValidateBaseAsync(context, capture, token);
             while (true)
             {
-                var page = await QueryAllEligible(context, last).ToArrayAsync(token);
-                if (page.Length == 0) break;
-                AppendHash(hash, page); count += page.Length; last = page[^1].VectorId;
+                var window = await ReadCanonicalWindowAsync(context, last, token);
+                if (window.End) break;
+                last = window.LastRawId;
+                var page = window.Eligible;
+                if (page.Length == 0) continue;
+                AppendHash(hash, page); count += page.Length;
                 await AppendPageAsync(plan.OperationId, 1, ++ordinal, page, token, explicitRebuild: true);
             }
             return true;
@@ -178,9 +181,10 @@ public sealed partial class SqlSegmentedIndexStore : IIndexProjectionRebuildStor
             long count = 0, last = 0;
             while (true)
             {
-                var page = await QueryAllEligible(context, last).ToArrayAsync(token);
-                if (page.Length == 0) break;
-                AppendHash(hash, page); count += page.Length; last = page[^1].VectorId;
+                var window = await ReadCanonicalWindowAsync(context, last, token);
+                if (window.End) break;
+                last = window.LastRawId;
+                AppendHash(hash, window.Eligible); count += window.Eligible.Length;
             }
             if (count != candidate.AfterCount || Convert.ToHexStringLower(hash.GetHashAndReset()) != candidate.AfterChecksum ||
                 await HashWorklistAsync(context, candidate.Id, 1, token) != (candidate.AfterCount, candidate.AfterChecksum) ||
@@ -232,20 +236,33 @@ public sealed partial class SqlSegmentedIndexStore : IIndexProjectionRebuildStor
         }, token);
     }
 
-    private static IQueryable<MemberRow> QueryAllEligible(FluxKnowledgeDbContext context, long last) =>
+    private sealed record CanonicalWindow(long LastRawId, MemberRow[] Eligible, bool End);
+
+    private static async Task<CanonicalWindow> ReadCanonicalWindowAsync(FluxKnowledgeDbContext context, long last, CancellationToken token)
+    {
+        // Bound the keys examined, not the eligible output. Historical/deleted rows
+        // must not make every page repeat a whole-corpus publication join and sort.
+        var raw = await context.Vectors.AsNoTracking().Where(value => value.VectorId > last)
+            .OrderBy(value => value.VectorId).Select(value => value.VectorId).Take(PageSize).ToArrayAsync(token);
+        if (raw.Length == 0) return new(last, [], true);
+        return new(raw[^1], await QueryAllEligible(context, last, raw[^1]).ToArrayAsync(token), false);
+    }
+
+    private static IQueryable<MemberRow> QueryAllEligible(FluxKnowledgeDbContext context, long last, long through) =>
         context.Database.SqlQuery<MemberRow>(SqlPublishedPassageSelection.Bind($"""
             SELECT TOP (256) [vector].[VectorId], [vector].[PayloadChecksum], [record].[SourceIdentityId],
                 COALESCE([owner].[Id], CASE WHEN [retained].[OriginKind] <> 0 THEN [retained].[ParentSourceRevisionId] END, [retained].[Id]) AS [OwnerSourceRevisionId],
                 COALESCE([owner].[SourceRootId], [retained].[SourceRootId]) AS [SourceRootId]
-            FROM [Vectors] AS [vector] INNER JOIN [TextChunks] AS [chunk] ON [chunk].[Id] = [vector].[TextChunkId]
+            FROM [Vectors] AS [vector] WITH (FORCESEEK) INNER JOIN [TextChunks] AS [chunk] ON [chunk].[Id] = [vector].[TextChunkId]
             INNER JOIN [Artifacts] AS [artifact] ON [artifact].[Id] = [chunk].[ArtifactId]
             INNER JOIN [PipelineRecords] AS [record] ON [record].[Id] = [artifact].[PipelineRecordId]
             /*publication-bindings*/
-            WHERE /*publication-eligibility*/ AND [vector].[VectorId] > {last} AND [vector].[IsDeleted] = 0
+            WHERE /*publication-eligibility*/ AND [vector].[VectorId] > {last} AND [vector].[VectorId] <= {through} AND [vector].[IsDeleted] = 0
               AND [vector].[SourceRevision] = [chunk].[SourceRevision]
               AND [vector].[TextChunkContentHash] COLLATE Latin1_General_100_BIN2 = [chunk].[ContentHash] COLLATE Latin1_General_100_BIN2
               AND ([vector].[SearchInputHash] IS NULL OR [vector].[SearchInputHash] COLLATE Latin1_General_100_BIN2 = [chunk].[SearchInputHash] COLLATE Latin1_General_100_BIN2)
             ORDER BY [vector].[VectorId]
+            OPTION (LOOP JOIN, FORCE ORDER, MAXDOP 1)
             """));
 
     private async ValueTask<T> RebuildTransactionAsync<T>(Func<FluxKnowledgeDbContext, Task<T>> action, CancellationToken token)

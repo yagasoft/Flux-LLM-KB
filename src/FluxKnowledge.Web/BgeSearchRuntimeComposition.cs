@@ -26,7 +26,8 @@ internal static class BgeSearchRuntimeComposition
     {
         var policy = new GpuWorkloadPolicy([
             new(PaddleOcrVlmRuntimeContract.ModelRuntimeKey, PaddleOcrVlmRuntimeContract.SettingsFingerprint, GpuWorkloadKind.Ocr),
-            new(BgeOfflineModels.GpuRuntimeKey, BgeOfflineModels.GpuSettingsFingerprint, GpuWorkloadKind.Retrieval)]);
+            new(BgeOfflineModels.GpuRuntimeKey, BgeOfflineModels.GpuSettingsFingerprint, GpuWorkloadKind.Retrieval),
+            new(BgeExpandedGpuRankBackend.Profile.RuntimeKey, BgeExpandedGpuRankBackend.Profile.SettingsFingerprint, GpuWorkloadKind.Retrieval)]);
         var runtime = new EmbeddingGpuRuntime(BgeOfflineModels.GpuRuntimeKey, BgeOfflineModels.GpuSettingsFingerprint,
             new(BgeOfflineModels.EmbeddingFingerprint, 1024), EstimatedGpuBytes);
         services.AddSingleton(runtime);
@@ -34,7 +35,7 @@ internal static class BgeSearchRuntimeComposition
             TimeSpan.FromMinutes(5), TimeSpan.FromMinutes(1), TimeSpan.FromMinutes(10), policy)));
         services.Replace(ServiceDescriptor.Singleton<IGpuAdmissionGate>(new SharedGpuAdmissionGate(policy,
             EmbeddingGpuExecutor.Name, EstimatedGpuBytes)));
-        services.AddSingleton(_ => CreateModelStores());
+        services.TryAddSingleton(_ => CreateModelStores());
         services.AddSingleton<IBgeGpuModelFactory, BgeGpuModelFactory>();
         services.AddSingleton<BgeGpuInferenceSession>();
         services.AddSingleton<ScopedGpuExecutorLifecycleSink>();
@@ -47,6 +48,7 @@ internal static class BgeSearchRuntimeComposition
                 provider.GetRequiredService<IGpuInteractiveOwnerProbe>(), wake, clock);
             return new GpuInteractiveExecutor(store, provider.GetRequiredService<ScopedGpuExecutorLifecycleSink>(), store, wake,
                 clock, runtime.RuntimeKey, runtime.SettingsFingerprint, runtime.EstimatedBytes,
+                new[] { BgeExpandedGpuRankBackend.Profile },
                 provider.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping, recovery,
                 executionTimeout: SearchExecutionTimeout);
         });
@@ -65,11 +67,11 @@ internal static class BgeSearchRuntimeComposition
         services.AddSingleton<IGpuExecutorAdapter>(provider => provider.GetRequiredService<EmbeddingGpuExecutor>());
         services.AddSingleton<BgeScheduledPassageInference>();
         services.AddSingleton<IConditionalGpuPassageInference>(provider => provider.GetRequiredService<BgeScheduledPassageInference>());
-        services.AddSingleton(provider => new ResidentCpuPassageInference(
+        services.TryAddSingleton(provider => new ResidentCpuPassageInference(
             ct => BgeCpuResidentModelFactory.LoadAsync(provider.GetRequiredService<BgeGpuModelStores>(),
                 async ownerToken => (IDisposable)await CpuSearchOwnerLease.AcquireProductionAsync(ownerToken).ConfigureAwait(false), ct),
             new EmbeddingProfile(BgeOfflineModels.EmbeddingFingerprint, 1024), BgeOfflineModels.RerankerFingerprint));
-        services.AddSingleton<IHostedService, BgeCpuWarmupService>();
+        services.TryAddEnumerable(ServiceDescriptor.Singleton<IHostedService, BgeCpuWarmupService>());
         services.AddSingleton<IScheduledPassageInference>(provider => new GpuFirstPassageInference(
             provider.GetRequiredService<IConditionalGpuPassageInference>(),
             provider.GetRequiredService<ResidentCpuPassageInference>()));
@@ -81,7 +83,16 @@ internal static class BgeSearchRuntimeComposition
         services.AddSingleton(new CorpusRetrievalOptions(true));
         services.AddScoped<IHybridPassageCandidateReader>(provider =>
             (IHybridPassageCandidateReader)provider.GetRequiredService<ICorpusRetrievalReader>());
-        services.AddScoped<IHybridPassageRetrieval>(provider => new HybridPassageRetrievalEngine(
+        services.AddKeyedSingleton("expanded-ranking", (_, _) => CreateFp16ModelStores());
+        services.AddKeyedSingleton<IBgeGpuModelFactory>("expanded-ranking", (provider, _) =>
+            new BgeGpuModelFactory(provider.GetRequiredKeyedService<BgeGpuModelStores>("expanded-ranking"), BgeRerankerPrecision.Fp16Internal));
+        services.AddSingleton(provider => new BgeExpandedGpuRankBackend(provider.GetRequiredService<GpuInteractiveExecutor>(),
+            provider.GetRequiredKeyedService<IBgeGpuModelFactory>("expanded-ranking"),
+            provider.GetRequiredService<TimeProvider>()));
+        services.AddSingleton<IExpandedGpuRankBackend>(provider => provider.GetRequiredService<BgeExpandedGpuRankBackend>());
+        services.AddSingleton<IExpandedPassageRanker>(provider => new ExpandedGpuRankCoordinator(provider.GetRequiredService<IExpandedGpuRankBackend>(),
+            clock: provider.GetRequiredService<TimeProvider>()));
+        services.AddScoped<HybridPassageRetrievalEngine>(provider => new HybridPassageRetrievalEngine(
             provider.GetRequiredService<ICorpusRetrievalReader>(),
             provider.GetRequiredService<IHybridPassageCandidateReader>(),
             provider.GetRequiredService<ICorpusGenerationLeaseStore>(),
@@ -90,18 +101,33 @@ internal static class BgeSearchRuntimeComposition
             provider.GetRequiredService<IGpuInteractiveOwnerProbe>(),
             provider.GetRequiredService<ICorpusEvidenceCodec>(),
             provider.GetRequiredService<ILocalPrivateContentDisclosure>(),
-            provider.GetRequiredService<TimeProvider>(), TimeSpan.FromSeconds(25)));
+            provider.GetRequiredService<TimeProvider>(), TimeSpan.FromSeconds(25),
+            provider.GetRequiredService<ICorpusAnnPreparationSignal>()));
+        services.Replace(ServiceDescriptor.Scoped<IHybridPassageRetrieval>(provider => new ExpandedPassageRetrieval(
+            provider.GetRequiredService<HybridPassageRetrievalEngine>(), provider.GetRequiredService<IExpandedPassageRanker>(),
+            provider.GetRequiredService<ResidentCpuPassageInference>(), () => RequestArrival(provider),
+            provider.GetRequiredService<IHostApplicationLifetime>().StopApplication)));
         services.Replace(ServiceDescriptor.Scoped<ISearchService, PassageSearchService>());
+        CorpusAnnPreparationService.Add(services);
     }
+
+    private static DateTimeOffset RequestArrival(IServiceProvider provider) =>
+        provider.GetRequiredService<IHttpContextAccessor>().HttpContext?.Items[NativeV1.NativeRequestResourceGuard.RetrievalArrivalKey] is DateTimeOffset arrival
+            ? arrival : provider.GetRequiredService<TimeProvider>().GetUtcNow();
 
     private static SqlGpuSchedulerStore NewSchedulerStore(IServiceProvider provider) =>
         new(provider.GetRequiredService<IDbContextFactory<FluxKnowledgeDbContext>>(), timeProvider: provider.GetRequiredService<TimeProvider>(),
             deploymentValidationHold: provider.GetService<IDeploymentValidationHold>(),
-            interactiveExecutionTimeout: SearchExecutionTimeout, sourceAdmission: provider.GetRequiredService<ISourceWorkAdmission>());
+            interactiveExecutionTimeout: SearchExecutionTimeout, sourceAdmission: provider.GetRequiredService<ISourceWorkAdmission>(),interactiveQueueTimeout:TimeSpan.FromSeconds(4));
 
-    private static BgeGpuModelStores CreateModelStores() => new(
+    internal static BgeGpuModelStores CreateModelStores() => new(
         Store(["bundles", "bge-m3-onnx", BgeOfflineModels.EmbeddingRevision, "onnx"]),
         Store(["bundles", "bge-reranker-v2-m3-onnx", BgeOfflineModels.RerankerRevision, BgeOfflineModels.RerankerExport]),
+        Store(["bundles", "bge-reranker-v2-m3", BgeOfflineModels.RerankerRevision]),
+        Store(["runtimes", "bge-onnx-net-tokenizer-1.4.0-win-x64"]));
+    internal static BgeGpuModelStores CreateFp16ModelStores() => new(
+        Store(["bundles", "bge-m3-onnx", BgeOfflineModels.EmbeddingRevision, "onnx"]),
+        Store(["bundles", "bge-reranker-v2-m3-onnx-fp16", BgeOfflineModels.RerankerRevision, BgeOfflineModels.Fp16RerankerRecipe]),
         Store(["bundles", "bge-reranker-v2-m3", BgeOfflineModels.RerankerRevision]),
         Store(["runtimes", "bge-onnx-net-tokenizer-1.4.0-win-x64"]));
     private static PinnedLocalModelStore Store(string[] components) =>

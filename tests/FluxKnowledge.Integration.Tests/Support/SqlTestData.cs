@@ -14,6 +14,35 @@ internal static class SqlTestData
         NativeSqlServerFixture fixture) =>
         new TestDbContextFactory(fixture.ConnectionString);
 
+    public static async Task WaitForFullTextAsync(IDbContextFactory<FluxKnowledgeDbContext> factory)
+    {
+        await using var context = await factory.CreateDbContextAsync();
+        await WaitForFullTextAsync(context);
+    }
+
+    public static async Task WaitForFullTextAsync(FluxKnowledgeDbContext context)
+    {
+        // Keyword assertions require this fixture's AUTO population to settle.
+        // Observe it without refreshing/reconfiguring the index or consuming a
+        // measured retrieval request's deadline.
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        const string sql = """
+            SELECT CASE WHEN COUNT(*) = 1 AND SUM(CASE WHEN is_enabled = 1
+                AND change_tracking_state_desc = N'AUTO' AND has_crawl_completed = 1
+                AND CONVERT(int, OBJECTPROPERTYEX(object_id, 'TableFulltextPopulateStatus')) = 0
+                AND CONVERT(int, OBJECTPROPERTYEX(object_id, 'TableFulltextPendingChanges')) = 0
+                THEN 1 ELSE 0 END) = 1 THEN 1 ELSE 0 END AS [Value]
+            FROM sys.fulltext_indexes WHERE object_id = OBJECT_ID(N'TextChunks')
+            """;
+        try
+        {
+            while (await context.Database.SqlQueryRaw<int>(sql).SingleAsync(deadline.Token) != 1)
+                await Task.Delay(100, deadline.Token);
+        }
+        catch (OperationCanceledException error) when (deadline.IsCancellationRequested)
+        { throw new TimeoutException("Owned keyword fixture did not reach enabled/AUTO/complete/idle/zero-pending Full-Text state.", error); }
+    }
+
     internal static Guid AddPhysicalRevisionHistory(
         FluxKnowledgeDbContext db, SourceRevisionEntity current,
         bool suppressPrevious = true, bool differentIdentity = false)

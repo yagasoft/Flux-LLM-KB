@@ -168,6 +168,7 @@ public sealed partial class SqlToUsearchRebuildTests
         await AssertSegmentedOracleAsync(environment);
         await BindSegmentedFixtureInputsAsync(environment);
         var reader = new SqlCorpusRetrievalReader(environment.Factory);
+        await ann.PrepareAsync(reader, CancellationToken.None);
         var dense = await reader.ReadDenseCandidatesAsync(ann, new("all", [], null), query, CancellationToken.None);
         Assert.Equal("ready", dense.Status);
         var passage = Assert.Single(dense.Candidates, value => value.ChunkId == vector.TextChunkId);

@@ -10,6 +10,7 @@ public sealed partial class SqlSegmentRetirementOperations
     public async ValueTask<string?> AdvanceAsync(SourceDeletionWorkItem work, CancellationToken cancellationToken)
     {
         await using var context = await contexts.CreateDbContextAsync(cancellationToken);
+        legacyProof?.ValidateConnection(context);
         if (await context.IndexState.Where(value => value.Id == 1).Select(value => value.RequiredIndexFormat).SingleAsync(cancellationToken) != 2) return null;
         var target = await context.SourceDeletionCleanupItems.AsNoTracking().Where(value => value.SourceDeletionOperationId == work.OperationId &&
             (value.StorageKind == 3 || value.StorageKind == 4) && value.State == 0)
@@ -49,6 +50,7 @@ public sealed partial class SqlSegmentRetirementOperations
     private async ValueTask<string?> AdvanceSegmentBeforeManifestAsync(SourceDeletionWorkItem work, Guid operation, CancellationToken cancellationToken)
     {
         await using var context = await contexts.CreateDbContextAsync(cancellationToken);
+        legacyProof?.ValidateConnection(context);
         var id = await context.IndexSegments.AsNoTracking().Where(value => value.RetirementOperationId == operation && value.State != 3 &&
             context.SourceDeletionCleanupItems.Any(target => target.SourceDeletionOperationId == work.OperationId && target.StorageKind == 4 && target.RelativePath == value.Id))
             .OrderBy(value => value.Id).Select(value => value.Id).FirstOrDefaultAsync(cancellationToken);
@@ -61,10 +63,13 @@ public sealed partial class SqlSegmentRetirementOperations
         SourceDeletionWorkItem? sourceDeletion = null)
     {
         if (operationId == Guid.Empty) throw new ArgumentException("segment-retirement-operation-invalid");
+        using var legacyUse=legacyProof?.BorrowRetirement(sourceDeletion,4,segmentId);
         await using var strategy = await contexts.CreateDbContextAsync(cancellationToken);
+        legacyProof?.ValidateConnection(strategy);
         await strategy.Database.CreateExecutionStrategy().ExecuteAsync(async () =>
         {
             await using var context = await contexts.CreateDbContextAsync(cancellationToken);
+            legacyProof?.ValidateConnection(context);
             await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
             if (!await EnterAsync(context, cancellationToken)) throw new InvalidOperationException("segment-retirement-query-owned");
             await ValidateSourceDeletionAsync(context, sourceDeletion, 4, segmentId, cancellationToken);

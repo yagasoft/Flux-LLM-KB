@@ -100,6 +100,7 @@ public sealed class RepositoryCoverageIntegrationTests(NativeSqlServerFixture fi
         var codeQuery = new NativeCodeQueryService(new SqlNativeV1ProjectionReader(environment.Factory, new LocalPrivateContentDisclosure(), new UnusedDetailReader(), cursors), cursors);
         var matches = JsonSerializer.SerializeToElement(await codeQuery.ExecuteAsync(new("matches", "global::Coverage.CoverageFact", codeBranchId, 10, null), default));
         Assert.Contains(matches.GetProperty("items").EnumerateArray(), item => item.GetProperty("qualifiedName").GetProperty("value").GetString() == "global::Coverage.CoverageFact");
+        await SqlTestData.WaitForFullTextAsync(environment.Factory);
         var retrieval = new CorpusRetrievalService(new SqlCorpusRetrievalReader(environment.Factory), new EvidenceCodec(), new LocalPrivateContentDisclosure());
         var lateHit = Assert.Single((await retrieval.SearchAsync(new CorpusSearchRequest("LateAnswer", 5, "root", rootId, null), default)).Results);
         Assert.True(lateHit.StartOffset > 16_384);
@@ -142,12 +143,14 @@ public sealed class RepositoryCoverageIntegrationTests(NativeSqlServerFixture fi
         clock.Advance(TimeSpan.FromMinutes(2)); Assert.Equal(1, await watcher.ReleaseDueAsync(clock.Now, TimeSpan.FromMinutes(1), default));
         await ScanAndPublish(environment, scanStore, clock);
         await Assert.ThrowsAsync<NativeOperationException>(() => retrieval.ReadAsync(new CorpusReadRequest(original.EvidenceRef, 0), default).AsTask());
+        await SqlTestData.WaitForFullTextAsync(environment.Factory);
         Assert.Equal(2, (await retrieval.SearchAsync(new CorpusSearchRequest("amber", 10, "root", rootId, null), default)).Results.Count);
 
         // Periodic-only scan: rename, working-file deletion, and untracking with bytes left on disk.
         repository.Git("mv", "Guide.md", "Renamed.md"); repository.Git("add", "Code.cs"); repository.Git("rm", "--cached", "Code.cs");
         File.Delete(System.IO.Path.Combine(repository.Path, "Added.py")); clock.Advance(TimeSpan.FromDays(7) + TimeSpan.FromSeconds(1));
         await ScanAndPublish(environment, scanStore, clock);
+        await SqlTestData.WaitForFullTextAsync(environment.Factory);
         var final = Assert.Single((await retrieval.SearchAsync(new CorpusSearchRequest("amber", 10, "root", rootId, null), default)).Results);
         Assert.Equal("Renamed.md", final.Title);
         Assert.Empty((await retrieval.SearchAsync(new CorpusSearchRequest("quartz", 10, "root", rootId, null), default)).Results);

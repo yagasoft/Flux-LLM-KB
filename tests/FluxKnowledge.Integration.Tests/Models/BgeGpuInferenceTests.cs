@@ -8,6 +8,50 @@ namespace FluxKnowledge.Integration.Tests.Models;
 
 public sealed partial class BgeGpuInferenceTests
 {
+    [Fact]
+    public async Task A_parallel_rerank_on_the_same_request_cannot_load_a_second_model()
+    {
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var factory = new RecordingModels { PauseRanking = release.Task };
+        var result = await new BgeGpuInferenceSession(factory).ExecuteSearchAsync(Owner(), async (_, reranker, ct) =>
+        {
+            var first = reranker.RerankAsync("query", [new(8, "passage")], ct).AsTask();
+            try
+            {
+                await factory.RankingStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+                var refusal = await Assert.ThrowsAsync<BgeInferenceException>(() =>
+                    reranker.RerankAsync("query", [new(9, "another passage")], ct).AsTask());
+                Assert.Equal("bge-request-phase-invalid", refusal.ReasonCode);
+                Assert.Single(factory.Events, entry => entry == "ranking.open");
+            }
+            finally { release.TrySetResult(); }
+            return await first;
+        });
+        Assert.Null(result.RefusalReason);
+        Assert.True(result.NativeCapacityReleased);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_fresh_gpu_request_can_rerank_without_loading_embeddings_and_preserves_release_proof(bool cleanupFails)
+    {
+        var factory = new RecordingModels { Failure = cleanupFails ? "ranking-dispose" : null };
+        IPassageReranker? escaped = null;
+        Exception? callbackFailure = null;
+        var result = await new BgeGpuInferenceSession(factory).ExecuteSearchAsync(Owner(), async (_, reranker, ct) =>
+        {
+            escaped = reranker;
+            try { return await reranker.RerankAsync("query", [new(8, "passage")], ct); }
+            catch (Exception exception) { callbackFailure = exception; throw; }
+        });
+        Assert.Equal(!cleanupFails, result.NativeCapacityReleased);
+        if (cleanupFails) { Assert.Null(result.Value); Assert.NotNull(result.RefusalReason); Assert.IsType<PassageInferenceOwnershipException>(callbackFailure); }
+        else { Assert.Null(result.RefusalReason); Assert.Equal(8, Assert.Single(result.Value!.Scores).PassageId); }
+        Assert.Equal(["ranking.open", "ranking.run", "ranking.dispose"], factory.Events);
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => escaped!.RerankAsync("late", [new(8, "passage")], default).AsTask());
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -110,16 +154,18 @@ public sealed partial class BgeGpuInferenceTests
     }
 
     [Fact]
-    public async Task Phase_order_and_repeated_query_embedding_fail_before_another_model_load()
+    public async Task Embedding_after_reranking_and_repeated_query_embedding_fail_before_another_model_load()
     {
         var factory = new RecordingModels();
-        var result = await new BgeGpuInferenceSession(factory).ExecuteSearchAsync<int>(Owner(), async (_, reranker, ct) =>
+        var result = await new BgeGpuInferenceSession(factory).ExecuteSearchAsync<int>(Owner(), async (embedding, reranker, ct) =>
         {
             await reranker.RerankAsync("query", [new(1, "passage")], ct);
+            await embedding.CreateEmbeddingAsync("late embedding", ct);
             return 1;
         });
         Assert.Equal("bge-request-phase-invalid", result.RefusalReason);
-        Assert.Empty(factory.Events);
+        Assert.Equal(["ranking.open", "ranking.run", "ranking.dispose"], factory.Events);
+        factory.Events.Clear();
         result = await new BgeGpuInferenceSession(factory).ExecuteSearchAsync<int>(Owner(), async (embedding, _, ct) =>
         {
             await embedding.CreateEmbeddingAsync("first", ct);
@@ -168,6 +214,8 @@ public sealed partial class BgeGpuInferenceTests
         public List<string[]> Batches { get; } = [];
         public string? Failure { get; init; }
         public Action? BeforeRun { get; init; }
+        public Task? PauseRanking { get; init; }
+        public TaskCompletionSource RankingStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public Func<int, IReadOnlyList<string>, IReadOnlyList<EmbeddingResult>>? EmbeddingResults { get; init; }
 
         public ValueTask<BgeGpuModelLease<IBatchedEmbeddingProvider>> OpenEmbeddingAsync(GpuOwnedWorkContext owner)
@@ -218,11 +266,13 @@ public sealed partial class BgeGpuInferenceTests
 
         private sealed class Ranker(RecordingModels owner) : IPassageReranker
         {
-            public ValueTask<RerankResult> RerankAsync(string query, IReadOnlyList<RerankPassage> passages, CancellationToken ct)
+            public async ValueTask<RerankResult> RerankAsync(string query, IReadOnlyList<RerankPassage> passages, CancellationToken ct)
             {
                 owner.Events.Add("ranking.run"); ct.ThrowIfCancellationRequested();
+                owner.RankingStarted.TrySetResult();
+                if (owner.PauseRanking is not null) await owner.PauseRanking.WaitAsync(ct);
                 if (owner.Failure == "ranking-run") throw new InvalidOperationException("synthetic-ranking-run-failure");
-                return ValueTask.FromResult(new RerankResult(passages.Select(p => new RerankScore(p.PassageId, p.PassageId)).ToArray(), BgeOfflineModels.RerankerFingerprint));
+                return new RerankResult(passages.Select(p => new RerankScore(p.PassageId, p.PassageId)).ToArray(), BgeOfflineModels.RerankerFingerprint);
             }
         }
     }

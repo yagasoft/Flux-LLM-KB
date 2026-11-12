@@ -152,6 +152,23 @@ rechecking current publication and deletion state. Both operations have a
 `hybrid` or `lexical`, together with semantic status and warnings. The installed
 app uses the learned hybrid passage runtime described below.
 
+The scoped-ANN staging candidate adds optional `match_mode` to the native
+MCP, REST and CLI JSON request. Its default, `keyword`, uses indexed SQL
+Full-Text candidates for hybrid retrieval and lexical fallback. It does not scan
+every body for arbitrary substring matches. Scope and current publication are
+applied before the 100-candidate budget; Full-Text rank and chunk ID determine
+keyword candidate order.
+
+Use `"match_mode":"literal"` for exhaustive, case-sensitive ordinal substring
+matching within retained bodies. Literal mode preserves the query's UTF-16
+code units, including meaningful edge spaces and decomposed Unicode; it runs
+without embeddings, reranking or ANN generation acquisition. It returns
+`retrievalMode: "lexical"`, `semanticStatus: "not-requested"` and a null
+`indexGeneration`, with the same disclosure and current-citation checks. A
+completed zero-match literal search is healthy; exhausting the 25-second budget
+is a retryable timeout refusal. Literal matching can be slower on a large scope.
+Unknown modes are invalid requests. This candidate has not been deployed.
+
 The `Search:HybridPassagesEnabled` runtime shares coherent passage
 retrieval across corpus, existing search and knowledge-source search. Successful
 wire shapes and public limits remain unchanged. Corpus responses identify hybrid

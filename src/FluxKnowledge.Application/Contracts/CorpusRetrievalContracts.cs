@@ -18,7 +18,8 @@ public sealed record CorpusSearchRequest(
     int Limit,
     string Scope,
     Guid? RootId,
-    string? Cwd);
+    string? Cwd,
+    string MatchMode = "keyword");
 
 public sealed record CorpusReadRequest(string EvidenceRef, int ContextCharacters);
 

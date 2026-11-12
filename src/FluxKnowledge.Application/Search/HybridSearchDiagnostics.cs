@@ -55,6 +55,27 @@ public sealed class HybridSearchDiagnostics : EventSource
     public void CheckpointRead(string probeId, int draftCount, long rows, double elapsedMs, string outcome) =>
         Emit(8, probeId, draftCount, rows, elapsedMs, outcome);
 
+    [Event(9, Level = EventLevel.Informational)]
+    public void ScopedAnnSegment(string traceId, string spanId, string segmentId, int eligibleKeys, int matches,
+        double selectionMs, double searchMs) => Emit(9, traceId, spanId, segmentId, eligibleKeys, matches, selectionMs, searchMs);
+
+    [Event(10, Level = EventLevel.Informational)]
+    public void SegmentView(string traceId, string spanId, string segmentId, long fileBytes, bool reused, double elapsedMs) =>
+        Emit(10, traceId, spanId, segmentId, fileBytes, reused, elapsedMs);
+
+    [Event(11, Level = EventLevel.Informational)]
+    public void InputGroups(string traceId, string spanId, string searchId, int rawCandidates, int distinctInputs,
+        int shortlistedInputs, int rerankerPairs) => Emit(11, traceId, spanId, searchId, rawCandidates, distinctInputs, shortlistedInputs, rerankerPairs);
+
+    [Event(12, Level = EventLevel.Informational)]
+    public void SourceDirected(string traceId, string spanId, string searchId, string status, string candidateIds) =>
+        Emit(12, traceId, spanId, searchId, status, candidateIds);
+
+    /// <summary>Shared prepared-view validation/wait, measured once per batch; per-view reuse reports only bookkeeping.</summary>
+    [Event(13, Level = EventLevel.Informational)]
+    public void PreparedBorrowBatch(string traceId, string spanId, int segments, double elapsedMs) =>
+        Emit(13, traceId, spanId, segments, elapsedMs);
+
     [NonEvent]
     private void Emit(int eventId, params object[] values)
     {

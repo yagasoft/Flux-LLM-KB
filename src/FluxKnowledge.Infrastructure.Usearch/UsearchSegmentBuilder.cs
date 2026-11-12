@@ -6,14 +6,27 @@ using FluxKnowledge.Application.Ports;
 
 namespace FluxKnowledge.Infrastructure.Usearch;
 
+public enum UsearchSegmentConstructionPolicy { Legacy, M32Construction512 }
+
 /// <summary>Streams new/replacement vectors into bounded immutable native files.</summary>
 public sealed class UsearchSegmentBuilder(
     UsearchIndexOptions options, IIndexSegmentReadLeaseFactory paths,
-    IndexSegmentBuildOptions? buildOptions = null)
+    IndexSegmentBuildOptions? buildOptions, UsearchSegmentConstructionPolicy constructionPolicy)
 {
+    public UsearchSegmentBuilder(UsearchIndexOptions options, IIndexSegmentReadLeaseFactory paths,
+        IndexSegmentBuildOptions? buildOptions = null) : this(options, paths, buildOptions, UsearchSegmentConstructionPolicy.Legacy) { }
     private readonly IndexSegmentBuildOptions _budgets = buildOptions ?? new();
     internal Func<long>? AvailableBytesOverride { get; init; }
     public static string NativeFormat => $"usearch/{typeof(USearchIndex).Assembly.GetName().Version}/f32/cos/1";
+    public string OutputNativeFormat => FormatFor(constructionPolicy);
+    private static string FormatFor(UsearchSegmentConstructionPolicy policy) => policy switch
+    {
+        UsearchSegmentConstructionPolicy.Legacy => NativeFormat,
+        UsearchSegmentConstructionPolicy.M32Construction512 => NativeFormat + "/m32-efc512",
+        _ => throw new ArgumentOutOfRangeException(nameof(policy))
+    };
+    internal static bool SupportsNativeFormat(string format) => format == NativeFormat ||
+        format == FormatFor(UsearchSegmentConstructionPolicy.M32Construction512);
 
     public async ValueTask<IReadOnlyList<IndexSegmentDescriptor>> BuildAsync(string modelFingerprint, int dimensions,
         IAsyncEnumerable<CanonicalVector> vectors, CancellationToken cancellationToken,
@@ -21,6 +34,7 @@ public sealed class UsearchSegmentBuilder(
         Guid incarnation = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        _ = OutputNativeFormat; // Reject unknown policies before enumerating or placing anything.
         ArgumentNullException.ThrowIfNull(vectors);
         _budgets.Validate();
         if (dimensions <= 0 || dimensions > int.MaxValue / sizeof(float) || string.IsNullOrWhiteSpace(modelFingerprint) ||
@@ -60,7 +74,7 @@ public sealed class UsearchSegmentBuilder(
     {
         cancellationToken.ThrowIfCancellationRequested();
         var membership = UsearchGenerationValidator.ComputeChecksum(fingerprint, dimensions, vectors);
-        var id = IndexSegmentDescriptor.ComputeId(NativeFormat, membership, incarnation);
+        var id = IndexSegmentDescriptor.ComputeId(OutputNativeFormat, membership, incarnation);
         var destination = Path.Combine(options.RootPath, "segments", id);
         using var destinationParent = paths.AcquireDirectory(Path.GetDirectoryName(destination)!, create: true);
         if (Directory.Exists(destination)) return Validate(destination, id, fingerprint, dimensions, membership, vectors, incarnation);
@@ -71,7 +85,9 @@ public sealed class UsearchSegmentBuilder(
             using (paths.AcquireDirectory(staging, create: true))
             {
                 var nativePath = Path.Combine(staging, "index.usearch");
-                using (var index = new USearchIndex(MetricKind.Cos, ScalarKind.Float32, (ulong)dimensions, 0, 0, 0, false))
+                var stronger = constructionPolicy == UsearchSegmentConstructionPolicy.M32Construction512;
+                using (var index = new USearchIndex(MetricKind.Cos, ScalarKind.Float32, (ulong)dimensions,
+                    stronger ? 32UL : 0, stronger ? 512UL : 0, 0, false))
                 {
                     foreach (var vector in vectors)
                     {
@@ -83,7 +99,7 @@ public sealed class UsearchSegmentBuilder(
                     index.Save(nativePath);
                 }
                 var metadata = new SegmentMetadata(new Guid(Convert.FromHexString(id)[..16]), fingerprint, "cos", dimensions,
-                    vectors.Count, membership, 2, id, NativeFormat, HashFile(nativePath), new FileInfo(nativePath).Length);
+                    vectors.Count, membership, 2, id, OutputNativeFormat, HashFile(nativePath), new FileInfo(nativePath).Length);
                 using var metadataFile = new FileStream(Path.Combine(staging, "metadata.json"), FileMode.CreateNew, FileAccess.Write, FileShare.None);
                 JsonSerializer.Serialize(metadataFile, metadata);
                 metadataFile.Flush(true);
@@ -135,14 +151,14 @@ public sealed class UsearchSegmentBuilder(
         var metadata = JsonSerializer.Deserialize<SegmentMetadata>(File.ReadAllText(metadataPath))
             ?? throw new IndexGenerationValidationException("segment-metadata-invalid");
         var nativePath = Path.Combine(directory, "index.usearch");
-        if (metadata.FormatVersion != 2 || metadata.SegmentId != id || metadata.NativeFormat != NativeFormat ||
+        if (metadata.FormatVersion != 2 || metadata.SegmentId != id || metadata.NativeFormat != OutputNativeFormat ||
             metadata.FileLength != new FileInfo(nativePath).Length || metadata.FileChecksum != HashFile(nativePath))
             throw new IndexGenerationValidationException("segment-file-proof-mismatch");
         var descriptor = new IndexGenerationDescriptor(new Guid(Convert.FromHexString(id)[..16]), fingerprint, dimensions,
             directory, membership, vectors.Count);
         new UsearchGenerationValidator().Validate(directory, descriptor, vectors);
         return new(id, fingerprint, dimensions, directory, membership, metadata.FileChecksum,
-            metadata.FileLength, vectors.Count, NativeFormat, PhysicalIncarnation: incarnation);
+            metadata.FileLength, vectors.Count, OutputNativeFormat, PhysicalIncarnation: incarnation);
     }
 
     private static string HashFile(string path)

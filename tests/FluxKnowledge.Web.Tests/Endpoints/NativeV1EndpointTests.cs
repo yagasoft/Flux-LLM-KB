@@ -20,6 +20,43 @@ namespace FluxKnowledge.Web.Tests.Endpoints;
 
 public sealed class NativeV1EndpointTests
 {
+    [Fact]
+    public async Task Corpus_literal_mode_preserves_raw_query_through_the_HTTP_mapper()
+    {
+        const string query = " e\u0301 ";
+        await using var host = await StartAsync();
+        using var response = await host.Client.PostAsJsonAsync("/api/v1/corpus/search", new { query, scope = "all", match_mode = "literal" });
+        var envelope = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.True(envelope.GetProperty("ok").GetBoolean());
+        var request = Assert.IsType<FluxKnowledge.Application.Contracts.CorpusSearchRequest>(host.Facade.LastQueryRequest);
+        Assert.Equal("literal", request.MatchMode);
+        Assert.Equal(query, request.Query);
+    }
+
+    [Fact]
+    public async Task Corpus_unknown_match_mode_is_refused_before_dispatch()
+    {
+        await using var host = await StartAsync();
+        using var response = await host.Client.PostAsJsonAsync("/api/v1/corpus/search", new { query = "needle", scope = "all", match_mode = "unknown" });
+        var envelope = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.False(envelope.GetProperty("ok").GetBoolean());
+        Assert.Equal("invalid-request", envelope.GetProperty("reasonCode").GetString());
+        Assert.Equal(0, host.Facade.QueryCalls);
+    }
+
+    [Fact]
+    public async Task Corpus_deadline_returns_retryable_search_timeout_in_the_native_HTTP_envelope()
+    {
+        await using var host = await StartAsync(queryFailure: new FluxKnowledge.Application.Ports.PassageRetrievalRefusalException("timeout"));
+        using var response = await host.Client.PostAsJsonAsync("/api/v1/corpus/search", new { query = "query", scope = "all", limit = 10 });
+        var envelope = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.False(envelope.GetProperty("ok").GetBoolean());
+        Assert.Equal("search-timeout", envelope.GetProperty("reasonCode").GetString());
+        Assert.True(envelope.GetProperty("retryable").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, envelope.GetProperty("result").ValueKind);
+        Assert.Equal(1, host.Facade.QueryCalls);
+    }
+
     [Theory]
     [InlineData("preview", "index_retention")]
     [InlineData("commit", "index_retention")]
@@ -417,11 +454,11 @@ public sealed class NativeV1EndpointTests
         };
     }
 
-    private static async Task<TestHost> StartAsync(object? queryResult = null)
+    private static async Task<TestHost> StartAsync(object? queryResult = null, Exception? queryFailure = null)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
-        var facade = new RecordingFacade(queryResult);
+        var facade = new RecordingFacade(queryResult, queryFailure);
         builder.Services.AddSingleton<INativeV1Facade>(facade);
         builder.Services.AddSingleton<NativeV1RequestMapper>();
         var app = builder.Build();
@@ -438,7 +475,7 @@ public sealed class NativeV1EndpointTests
         return new TestHost(app, app.GetTestClient(), app.GetTestServer(), facade);
     }
 
-    private sealed class RecordingFacade(object? queryResult = null) : INativeV1Facade
+    private sealed class RecordingFacade(object? queryResult = null, Exception? queryFailure = null) : INativeV1Facade
     {
         public object? LastCommand { get; private set; }
         public List<string> Queries { get; } = [];
@@ -453,6 +490,7 @@ public sealed class NativeV1EndpointTests
         {
             if (request is NativeCodeQuery { Cursor: not null }) throw new NativeOperationException("cursor-invalid");
             Queries.Add(family);
+            if (queryFailure is not null) throw queryFailure;
             LastQueryRequest = request;
             return ValueTask.FromResult(queryResult ?? (object)new { family, safe = true });
         }

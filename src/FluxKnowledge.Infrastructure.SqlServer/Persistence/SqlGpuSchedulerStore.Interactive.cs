@@ -144,7 +144,7 @@ public sealed partial class SqlGpuSchedulerStore
                 (t.InteractiveOwnerProcessId != owner.ProcessId || t.InteractiveOwnerStartedAtUtc != owner.StartedAtUtc ||
                  t.InteractiveOwnerMachineFingerprint != owner.MachineFingerprint), cancellationToken).ConfigureAwait(false))
                 throw new InvalidOperationException("interactive-executor-process-conflict");
-            if (request.QueueDeadlineUtc <= now || request.QueueDeadlineUtc > now.AddSeconds(2) ||
+            if (request.QueueDeadlineUtc <= now || request.QueueDeadlineUtc > now.Add(_interactiveQueueTimeout) ||
                 request.ExecutionDeadlineUtc <= request.QueueDeadlineUtc || request.ExecutionDeadlineUtc > now.Add(_interactiveExecutionTimeout))
                 throw new ArgumentException("interactive-request-deadline-invalid", nameof(request));
             await CancelExpiredInteractiveAsync(context, now, cancellationToken).ConfigureAwait(false);

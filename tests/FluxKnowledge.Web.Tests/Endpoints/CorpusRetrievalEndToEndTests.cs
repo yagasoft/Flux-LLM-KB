@@ -26,6 +26,8 @@ using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
+using System.Data.Common;
 using Microsoft.Extensions.DependencyInjection;
 using Xunit;
 
@@ -34,20 +36,26 @@ namespace FluxKnowledge.Web.Tests.Endpoints;
 public sealed class CorpusRetrievalEndToEndTests(NativeSqlServerFixture fixture) : IClassFixture<NativeSqlServerFixture>
 {
     [NativeSqlServerFact]
-    public async Task Scoped_HTTP_hybrid_search_above_ten_thousand_vectors_returns_exact_citations_without_ANN_and_deletion_invalidates_them()
+    public async Task Scoped_HTTP_hybrid_search_above_ten_thousand_vectors_uses_filtered_ANN_and_deletion_invalidates_citations()
     {
         const string winning = "RepositoryWinner EvidenceMarker.";
         var text = string.Join('\n', Enumerable.Range(0, 10_001).Select(index => index == 10_000 ? winning : $"Segment {index:D5}."));
         await using var pipeline = await SqlToUsearchRebuildTests.PipelineEnvironment.CreateAsync(fixture, "Baseline.",
-            new PassageBuilder(new WordTokenizer(), new PassagePolicy(2, 2, 128, 0, 0)));
+            new PassageBuilder(new WordTokenizer(), new PassagePolicy(2, 2, 128, 0, 0)),
+            segmented: true, segmentMaximumVectors: 20_000);
         var record = await pipeline.AddRetainedAndPumpAsync(text);
         await using var db = await pipeline.Factory.CreateDbContextAsync();
         await db.Database.ExecuteSqlRawAsync("UPDATE v SET SearchInputHash = c.SearchInputHash FROM Vectors v INNER JOIN TextChunks c ON c.Id = v.TextChunkId");
         var root = await (from value in db.PipelineRecords join source in db.SourceRevisions on value.SourceRevisionId equals source.Id
             where value.Id == record select source.SourceRootId).SingleAsync();
-        var reader = new SqlCorpusRetrievalReader(pipeline.Factory);
+        var serving = new ForbidServingVectorValues();
+        var reader = new SqlCorpusRetrievalReader(new LocalFactory(new DbContextOptionsBuilder<FluxKnowledgeDbContext>()
+            .UseSqlServer(fixture.ConnectionString, sql => sql.EnableRetryOnFailure()).AddInterceptors(serving).Options));
         var codec = new CorpusEvidenceCodec(new EphemeralDataProtectionProvider());
-        var ann = new NoAnnFactory();
+        using var services = pipeline.Services.CreateScope();
+        var ann = new ObservedAnnFactory(services.ServiceProvider.GetRequiredService<ICorpusAnnLeaseFactory>());
+        await PrepareAnnAsync(pipeline.Factory, ann, reader);
+        await WaitForFullTextAsync(pipeline.Factory);
         var engine = new HybridPassageRetrievalEngine(reader, reader,
             new SqlCorpusGenerationLeaseStore(pipeline.Factory, TimeProvider.System), ann, new Models(pipeline.Embeddings),
             new WindowsInteractiveGpuOwnerProbe(), codec, new LocalPrivateContentDisclosure(), searchTimeout: TimeSpan.FromSeconds(25));
@@ -74,7 +82,9 @@ public sealed class CorpusRetrievalEndToEndTests(NativeSqlServerFixture fixture)
         Assert.Equal(HttpStatusCode.OK, read.StatusCode);
         using var readJson = JsonDocument.Parse(await read.Content.ReadAsStringAsync());
         Assert.Equal(hit.GetProperty("passage").GetString(), readJson.RootElement.GetProperty("result").GetProperty("text").GetString());
-        Assert.Equal(0, ann.OpenCalls);
+        Assert.Equal(2, ann.FormatVersion);
+        Assert.True(ann.SearchCalls > 0, "Scoped semantic retrieval must execute the native filtered index.");
+        Assert.Equal(0, serving.VectorPayloadReads);
         Assert.Empty(await db.CorpusQueryLeases.ToArrayAsync());
         await db.PipelineRecords.Where(value => value.Id == record).ExecuteUpdateAsync(set => set.SetProperty(value => value.IsDeleted, true));
         using var stale = await client.PostAsJsonAsync("/api/v1/corpus/read", request);
@@ -95,6 +105,7 @@ public sealed class CorpusRetrievalEndToEndTests(NativeSqlServerFixture fixture)
         await using var pipeline = await SqlToUsearchRebuildTests.PipelineEnvironment.CreateAsync(
             fixture, "Baseline.", new PassageBuilder(new WordTokenizer()));
         await pipeline.AddAndPumpAtPathAsync(code, "late.cs");
+        await WaitForFullTextAsync(pipeline.Factory);
         var service = new CorpusRetrievalService(new SqlCorpusRetrievalReader(pipeline.Factory),
             new CorpusEvidenceCodec(new EphemeralDataProtectionProvider()), new LocalPrivateContentDisclosure(), new(true));
         var builder = WebApplication.CreateBuilder();
@@ -137,6 +148,7 @@ public sealed class CorpusRetrievalEndToEndTests(NativeSqlServerFixture fixture)
             "INV-42 confirms the final approved payment.";
         var passages = new PassageBuilder(new WordTokenizer(), new PassagePolicy(12, 16, 160, 8, 80));
         await using var pipeline = await SqlToUsearchRebuildTests.PipelineEnvironment.CreateAsync(fixture, text, passages, segmented: segmented);
+        await WaitForFullTextAsync(pipeline.Factory);
         using var pipelineScope = pipeline.Services.CreateScope();
         var ann = new ObservedAnnFactory(pipelineScope.ServiceProvider.GetRequiredService<ICorpusAnnLeaseFactory>());
         var reader = new SqlCorpusRetrievalReader(pipeline.Factory);
@@ -146,6 +158,7 @@ public sealed class CorpusRetrievalEndToEndTests(NativeSqlServerFixture fixture)
         {
             await using var context = await pipeline.Factory.CreateDbContextAsync();
             await context.Database.ExecuteSqlRawAsync("UPDATE v SET SearchInputHash = c.SearchInputHash FROM Vectors v INNER JOIN TextChunks c ON c.Id = v.TextChunkId");
+            await PrepareAnnAsync(pipeline.Factory, ann, reader);
             engine = new(reader, reader, new SqlCorpusGenerationLeaseStore(pipeline.Factory, TimeProvider.System),
                 ann, new Models(pipeline.Embeddings),
                 new WindowsInteractiveGpuOwnerProbe(), codec, new LocalPrivateContentDisclosure());
@@ -255,7 +268,7 @@ public sealed class CorpusRetrievalEndToEndTests(NativeSqlServerFixture fixture)
             });
             await context.SaveChangesAsync();
         }
-
+        await WaitForFullTextAsync(factory);
         var service = new CorpusRetrievalService(new SqlCorpusRetrievalReader(factory),
             new CorpusEvidenceCodec(new EphemeralDataProtectionProvider()),
             new LocalPrivateContentDisclosure(), new CorpusRetrievalOptions(CoherentPassagesEnabled: true));
@@ -338,11 +351,44 @@ public sealed class CorpusRetrievalEndToEndTests(NativeSqlServerFixture fixture)
             ValueTask.FromResult(new RerankResult(passages.Select((p, i) => new RerankScore(p.PassageId, -i)).ToArray(), RerankerFingerprint));
     }
 
-    private sealed class NoAnnFactory : ICorpusAnnLeaseFactory
+    private static async Task WaitForFullTextAsync(IDbContextFactory<FluxKnowledgeDbContext> factory)
     {
-        public int OpenCalls { get; private set; }
-        public ValueTask<ICorpusAnnLease> OpenAsync(ICorpusGenerationLease lease, CancellationToken cancellationToken)
-        { OpenCalls++; throw new InvalidOperationException("Scoped requests must not load ANN vectors."); }
+        await using var db = await factory.CreateDbContextAsync();
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        const string sql = """
+            SELECT CASE WHEN COUNT(*) = 1 AND SUM(CASE WHEN is_enabled = 1
+                AND change_tracking_state_desc = N'AUTO' AND has_crawl_completed = 1
+                AND CONVERT(int, OBJECTPROPERTYEX(object_id, 'TableFulltextPopulateStatus')) = 0
+                AND CONVERT(int, OBJECTPROPERTYEX(object_id, 'TableFulltextPendingChanges')) = 0
+                THEN 1 ELSE 0 END) = 1 THEN 1 ELSE 0 END AS [Value]
+            FROM sys.fulltext_indexes WHERE object_id = OBJECT_ID(N'TextChunks')
+            """;
+        while (await db.Database.SqlQueryRaw<int>(sql).SingleAsync(deadline.Token) != 1)
+            await Task.Delay(100, deadline.Token);
+    }
+
+    private static async Task PrepareAnnAsync(IDbContextFactory<FluxKnowledgeDbContext> factory,
+        ICorpusAnnLeaseFactory ann, SqlCorpusRetrievalReader reader)
+    {
+        var store = new SqlCorpusGenerationLeaseStore(factory, TimeProvider.System);
+        var sqlLease = await store.TryAcquireReadableAsync(Guid.NewGuid(), new WindowsInteractiveGpuOwnerProbe().Current,
+            DeterministicTokenHashEmbeddingProvider.Fingerprint, 256, CancellationToken.None)
+            ?? throw new InvalidOperationException("The owned HTTP fixture has no readable published generation.");
+        await using var warm = await ann.OpenAsync(sqlLease, CancellationToken.None);
+        await warm.PrepareAsync(reader, CancellationToken.None);
+        Assert.True(warm.IsPrepared(reader));
+    }
+
+    private sealed class ForbidServingVectorValues : DbCommandInterceptor
+    {
+        public int VectorPayloadReads { get; private set; }
+        public override ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(DbCommand command, CommandEventData data,
+            InterceptionResult<DbDataReader> result, CancellationToken cancellationToken = default)
+        {
+            if (command.CommandText.Contains("[Values]", StringComparison.Ordinal))
+            { VectorPayloadReads++; throw new InvalidOperationException("Serving must not read SQL vector payloads."); }
+            return ValueTask.FromResult(result);
+        }
     }
 
     private sealed class ObservedAnnFactory(ICorpusAnnLeaseFactory inner) : ICorpusAnnLeaseFactory
@@ -359,8 +405,14 @@ public sealed class CorpusRetrievalEndToEndTests(NativeSqlServerFixture fixture)
             public Guid LeaseId => innerLease.LeaseId;
             public IndexGenerationDescriptor Generation => innerLease.Generation;
             public ValueTask<bool> IsCurrentAsync(CancellationToken token) => innerLease.IsCurrentAsync(token);
+            public ValueTask<bool> IsReadableAsync(CancellationToken token) => innerLease.IsReadableAsync(token);
+            public bool IsPrepared(ICorpusAnnBindingPreparation metadata) => innerLease.IsPrepared(metadata);
+            public ValueTask PrepareAsync(ICorpusAnnBindingPreparation metadata, CancellationToken token) => innerLease.PrepareAsync(metadata, token);
             public ValueTask<IReadOnlyList<AnnMatch>> SearchAsync(IReadOnlyList<float> query, int limit, CancellationToken token)
             { owner.SearchCalls++; return innerLease.SearchAsync(query, limit, token); }
+            public ValueTask<IReadOnlyList<AnnMatch>> SearchAsync(IReadOnlyList<float> query, int limit,
+                ResolvedCorpusScope scope, ICorpusAnnScopeSelection selection, CancellationToken token)
+            { owner.SearchCalls++; return innerLease.SearchAsync(query, limit, scope, selection, token); }
             public ValueTask DisposeAsync() => innerLease.DisposeAsync();
         }
     }

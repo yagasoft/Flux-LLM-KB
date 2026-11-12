@@ -7,6 +7,55 @@ namespace FluxKnowledge.Domain.Tests.Sources;
 
 public sealed class SourceDeletionCoordinatorTests
 {
+    [Theory]
+    [InlineData("source-delete-segment-retirement-progressing", true)]
+    [InlineData("source-delete-segment-owner-active", false)]
+    [InlineData("source-delete-segment-retirement-recovery-reference-audit-required", false)]
+    public async Task Committed_retirement_progress_is_reported_only_after_the_deferral_settles(string reason, bool progressed)
+    {
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var store = new FailingStore(new InvalidOperationException("purge-must-not-run")) { Deferred = release.Task };
+        var coordinator = new SourceDeletionCoordinator(store, indexMaintenance: new Maintenance(reason));
+        var work = coordinator.RunOneAsync(default).AsTask();
+        try
+        {
+            Assert.Equal(reason, store.DeferredReason);
+            Assert.False(work.IsCompleted);
+        }
+        finally { release.TrySetResult(); }
+        Assert.Equal(progressed, await work);
+        Assert.Null(store.RecordedReason);
+    }
+
+    [Fact]
+    public async Task A_failed_retirement_deferral_is_not_reported_as_progress()
+    {
+        var store = new FailingStore(new InvalidOperationException("purge-must-not-run"))
+        { Deferred = Task.FromException(new IOException("synthetic-deferral-failure")) };
+        var coordinator = new SourceDeletionCoordinator(store,
+            indexMaintenance: new Maintenance("source-delete-segment-retirement-progressing"));
+        Assert.False(await coordinator.RunOneAsync(default));
+        Assert.Equal("source-delete-io-failed", store.RecordedReason);
+    }
+
+    [Fact]
+    public async Task A_cancelled_retirement_deferral_preserves_cancellation()
+    {
+        using var cancellation = new CancellationTokenSource(); cancellation.Cancel();
+        var store = new FailingStore(new InvalidOperationException("purge-must-not-run"))
+        { Deferred = Task.FromCanceled(cancellation.Token) };
+        var coordinator = new SourceDeletionCoordinator(store,
+            indexMaintenance: new Maintenance("source-delete-segment-retirement-progressing"));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => coordinator.RunOneAsync(cancellation.Token).AsTask());
+        Assert.Null(store.RecordedReason);
+    }
+
+    private sealed class Maintenance(string reason) : IIndexSourceDeletionMaintenance
+    {
+        public ValueTask<string?> AdvanceAsync(SourceDeletionWorkItem work, CancellationToken cancellationToken) =>
+            ValueTask.FromResult<string?>(reason);
+    }
+
     [Fact]
     public async Task A_claim_failure_leaves_durable_work_recoverable_without_terminating_the_pump()
     {
@@ -82,6 +131,8 @@ public sealed class SourceDeletionCoordinatorTests
         public Exception? ClaimError { get; init; }
         public Exception? FailureRecordingError { get; init; }
         public string? RecordedReason { get; private set; }
+        public string? DeferredReason { get; private set; }
+        public Task Deferred { get; init; } = Task.CompletedTask;
 
         public ValueTask<SourceDeletionWorkItem?> ClaimNextAsync(CancellationToken cancellationToken)
         {
@@ -108,7 +159,8 @@ public sealed class SourceDeletionCoordinatorTests
             return FailureRecordingError is null ? ValueTask.CompletedTask : ValueTask.FromException(FailureRecordingError);
         }
         public ValueTask DeferAsync(SourceDeletionWorkItem workItem, string reasonCode, CancellationToken cancellationToken) =>
-            throw new NotSupportedException();
+            new(RecordDeferral(reasonCode));
+        private Task RecordDeferral(string reason) { DeferredReason = reason; return Deferred; }
     }
 
     private sealed class CapturingLogger : ILogger<SourceDeletionCoordinator>

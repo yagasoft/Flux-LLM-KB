@@ -5,10 +5,12 @@ namespace FluxKnowledge.Web.NativeV1;
 
 public static class NativeRequestResourceGuard
 {
+    internal const string RetrievalArrivalKey = "FluxKnowledge.RetrievalArrivalUtc";
     public static IApplicationBuilder UseNativeRequestResources(this IApplicationBuilder app) => app.Use(async (context, next) =>
     {
         if (!context.Request.Path.StartsWithSegments("/mcp") && !context.Request.Path.StartsWithSegments("/api/v1") &&
             !context.Request.Path.StartsWithSegments("/native/v1/codex")) { await next(context); return; }
+        context.Items.TryAdd(RetrievalArrivalKey, DateTimeOffset.UtcNow);
         using var reservation = new NativeRequestInput.Reservation();
         var original = context.Request.Body;
         await using var guarded = new NativeRequestInput.ResourceReadStream(original, reservation);

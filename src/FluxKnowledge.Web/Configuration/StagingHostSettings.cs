@@ -12,7 +12,7 @@ using Microsoft.Data.SqlClient;
 
 namespace FluxKnowledge.Web.Configuration;
 
-/// <summary>Explicit settings for the separate, model-free functional staging executable.</summary>
+/// <summary>Explicit settings for the isolated staging executable; real offline CPU models are opt-in.</summary>
 internal sealed class StagingHostSettings
 {
     internal const string BaseRoot = @"E:\Codex Workspaces\Staging\FluxKnowledge";
@@ -36,6 +36,10 @@ internal sealed class StagingHostSettings
     internal string RuntimeConnectionString => Sql.Options.ConnectionString;
     internal string IndexPublicationMode { get; }
     internal bool DashboardReadBenchmark { get; }
+    internal bool CpuSemantic { get; private init; }
+    internal int CpuRerankerShards { get; private init; } = 4;
+    internal int CpuRerankerThreads { get; private init; } = 4;
+    internal int AnnSearchExpansion { get; private init; } = UsearchReadIndex.DefaultSearchExpansion;
     internal string DashboardReadConsistency { get; }
     internal bool SourceJournalEnabled { get; private init; }
     internal IReadOnlyList<string> SourceJournalVolumes { get; private init; } = [];
@@ -91,9 +95,22 @@ internal sealed class StagingHostSettings
         { throw new ArgumentException("Staging journal targets must be explicit canonical volume identities.", error); }
         if (document.SourceJournalEnabled && volumes.Length == 0)
             throw new ArgumentException("Incremental staging requires explicit journal volumes.");
+        if (document.CpuSemantic && (loaded.IndexPublicationMode != "Segmented" || !loaded.DashboardReadBenchmark || document.SourceJournalEnabled))
+            throw new ArgumentException("Real semantic staging requires segmented indexes and explicit workloads with autonomous writers and journals disabled.");
+        if (document.CpuRerankerShards is not (1 or 4) || !document.CpuSemantic && document.CpuRerankerShards != 4)
+            throw new ArgumentException("Staging CPU reranking requires one or four shards and explicit semantic mode.");
+        if (document.CpuRerankerThreads is not (1 or 4) || !document.CpuSemantic && document.CpuRerankerThreads != 4)
+            throw new ArgumentException("Staging CPU reranking requires one or four threads and explicit semantic mode.");
+        if (document.AnnSearchExpansion is < 1 or > UsearchReadIndex.MaximumSearchExpansion ||
+            !document.CpuSemantic && document.AnnSearchExpansion != UsearchReadIndex.DefaultSearchExpansion)
+            throw new ArgumentException("Staging ANN expansion must be bounded; a nondefault value requires explicit semantic mode.");
         return new(loaded.Layout, loaded.Sql, loaded.Origin, loaded.IndexPublicationMode, loaded.DashboardReadBenchmark,
             document.DashboardReadConsistency)
         {
+            CpuSemantic = document.CpuSemantic,
+            CpuRerankerShards = document.CpuRerankerShards,
+            CpuRerankerThreads = document.CpuRerankerThreads,
+            AnnSearchExpansion = document.AnnSearchExpansion,
             SourceJournalEnabled = document.SourceJournalEnabled, SourceJournalVolumes = volumes,
             SourceJournalSealingEnabled = document.SourceJournalSealingEnabled,
             SourceJournalSealQualifications = document.SourceJournalSealQualifications ?? [],
@@ -152,6 +169,8 @@ internal sealed class StagingHostSettings
         ["Logging:LogLevel:Default"] = "Warning",
         ["Logging:LogLevel:FluxKnowledge.Web.Components.Status.OverviewSnapshotCoordinator"] = DashboardReadBenchmark ? "Information" : "Warning",
         ["Logging:LogLevel:Microsoft.Hosting.Lifetime"] = "Information",
+        ["Logging:LogLevel:FluxKnowledge.Web.BgeCpuWarmupService"] = CpuSemantic ? "Information" : "Warning",
+        ["Logging:LogLevel:FluxKnowledge.Web.CorpusAnnPreparationService"] = "Information",
         ["Logging:LogLevel:FluxKnowledge.Infrastructure.SqlServer.Persistence.SqlDatabaseStartupReadiness"] = "Information",
         ["Logging:LogLevel:Microsoft.EntityFrameworkCore"] = "Warning"
     }.Concat(SourceJournalVolumes.Select((volume, index) =>
@@ -170,7 +189,8 @@ internal sealed class StagingHostSettings
         bool DashboardReadBenchmark = false, string DashboardReadConsistency = "LegacyFenced",
         bool SourceJournalEnabled = false, string[]? SourceJournalVolumes = null,
         bool SourceJournalSealingEnabled = false, SourceJournalSealQualification[]? SourceJournalSealQualifications = null,
-        int SourceJournalMetadataEntriesPerSecond = 64);
+        int SourceJournalMetadataEntriesPerSecond = 64, bool CpuSemantic = false, int CpuRerankerShards = 4, int CpuRerankerThreads = 4,
+        int AnnSearchExpansion = UsearchReadIndex.DefaultSearchExpansion);
 }
 
 internal sealed class StagingSourceRootPathPolicy(ISourceRootPathPolicy inner, string sourcesRoot) : ISourceRootPathPolicy

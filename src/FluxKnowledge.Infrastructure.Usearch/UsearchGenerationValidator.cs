@@ -23,8 +23,8 @@ public class UsearchGenerationValidator : IIndexGenerationVerifier
 
     public static string ComputeChecksum(string modelFingerprint, int dimensions, IReadOnlyList<CanonicalVector> vectors)
     {
-        var data = $"{modelFingerprint}|cos|{dimensions}|{string.Join(',', vectors.Select(vector => $"{vector.VectorId}:{vector.PayloadChecksum}"))}";
-        return Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(data)));
+        return FluxKnowledge.Application.Indexing.IndexSegmentDescriptor.ComputeMembershipChecksum(modelFingerprint, dimensions,
+            vectors.Select(vector => (vector.VectorId, vector.PayloadChecksum)));
     }
 
     public static Guid DeterministicGenerationId(string checksum, CorpusPublicationStamp? corpusStamp = null)

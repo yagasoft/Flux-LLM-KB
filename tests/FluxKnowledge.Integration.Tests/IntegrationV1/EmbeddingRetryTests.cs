@@ -89,6 +89,7 @@ public sealed class EmbeddingRetryTests(NativeSqlServerFixture fixture) : IClass
         var root = await verification.SourceRevisions.Where(value => value.Id ==
             verification.PipelineRecords.Where(record => record.Id == work.Job.PipelineRecordId.Value).Select(record => record.SourceRevisionId).Single())
             .Select(value => value.SourceRootId).SingleAsync();
+        await SqlTestData.WaitForFullTextAsync(environment.Factory);
         var retrieval = new CorpusRetrievalService(new SqlCorpusRetrievalReader(environment.Factory),
             new ScopedCorpusRetrievalTests.TestEvidenceCodec(), new LocalPrivateContentDisclosure());
         var hit = Assert.Single((await retrieval.SearchAsync(new("Section 0", 1, "root", root, null), CancellationToken.None)).Results);

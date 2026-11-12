@@ -121,11 +121,21 @@ public sealed class NativeV1RequestMapper
     {
         foreach (var property in input.EnumerateObject())
         {
-            if (property.Name is not ("query" or "limit" or "scope" or "root_id" or "cwd"))
+            if (property.Name is not ("query" or "limit" or "scope" or "root_id" or "cwd" or "match_mode"))
                 throw new NativeOperationException("invalid-request");
         }
 
-        var query = NativeV1ContractLimits.CanonicalizeKnowledgeQuery(QueryString(input, "query"));
+        var matchMode = "keyword";
+        if (input.TryGetProperty("match_mode", out var match))
+        {
+            if (match.ValueKind != JsonValueKind.String || match.GetString() is not ("keyword" or "literal"))
+                throw new NativeOperationException("invalid-request");
+            matchMode = match.GetString()!;
+        }
+        var query = QueryString(input, "query");
+        if (matchMode == "keyword") query = NativeV1ContractLimits.CanonicalizeKnowledgeQuery(query);
+        else if (string.IsNullOrWhiteSpace(query) || query.Length > NativeV1ContractLimits.MaximumKnowledgeQueryCharacters)
+            throw new NativeOperationException("invalid-query");
         var limit = input.TryGetProperty("limit", out _) ? RequiredInt(input, "limit", 1, 20) : 10;
         var scope = RequiredString(input, "scope");
         var rootId = OptionalGuid(input, "root_id");
@@ -136,7 +146,7 @@ public sealed class NativeV1RequestMapper
             scope == "workspace" && (rootId.HasValue || string.IsNullOrWhiteSpace(cwd)))
             throw new NativeOperationException("invalid-request");
 
-        return new CorpusSearchRequest(query, limit, scope, rootId, cwd);
+        return new CorpusSearchRequest(query!, limit, scope, rootId, cwd, matchMode);
     }
 
     private static CorpusReadRequest CorpusRead(JsonElement input)

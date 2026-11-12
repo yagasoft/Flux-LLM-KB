@@ -150,18 +150,28 @@ copy per passage.
    TOP; use SQL Full-Text and the existing parameterised ordinal-body branch.
    English LCID 1033 remains. Full-Text population status is explicit.
 3. Retrieve up to 100 dense candidates with the same profile and passage IDs.
-   All-corpus search uses the captured USearch handle. For a root/workspace with
-   eligible vectors, calculate exact cosine over that generation's SQL membership
-   in 256-row keyset pages and retain the best 100 candidates. There is no total
-   membership cutoff; scoped requests hold the SQL lease without opening global
-   ANN. Recheck scope/publication bindings and lease currency on every page and
-   final hydration. The [repository retrieval correction](repository-retrieval-reliability.md)
-   supersedes the former 10,000-vector refusal. Do not post-filter a small global
-   top-k and claim it implements scoped retrieval.
-4. Union by passage ID, retaining both ranks; maximum 200 candidates. Apply
-   reciprocal-rank fusion with constant 60 and equal initial channel weights.
-   Never substitute another window from the same document or chunk.
-5. Rerank the first 50 candidates ordered by `(ordinal body exact tier, fused
+   For format-2 generations, every scope uses native filtered USearch over captured
+   immutable segments. SQL supplies currently eligible identifiers for one segment
+   at a time; it does not transfer vector payloads. Apply root/path/publication
+   filters before native top-k, continuously merge at most 100 neighbours, then
+   hydrate only selected passages. A pinned generation may remain readable after
+   unrelated publication advances, while epoch/rebuild/ownership changes refuse it.
+   Final cited bindings are revalidated under the publication fence. Earlier scoped
+   generations explicitly fall back; the former exact SQL scan remains available
+   to existing diagnostic callers. See the [scoped ANN correction](scoped-ann-retrieval-plan.md).
+4. Preflight at most 200 raw passage bindings before assigning the 50-input
+   budget. Read current canonical disclosure windows and proof spans in bounded
+   SQL batches, then apply the same identity, text, scope, complete-line and
+   disclosure checks used by final assembly. Omit citation metadata at this stage.
+   Remove rejected bindings independently, preserving each channel's order and
+   the original raw candidate count. Final fresh reads and the publication fence
+   remain mandatory. Group exact copies only when their verified
+   search-input hash, complete body and context header all agree. Deduplicate
+   each channel before assigning contiguous ranks, with one vote per group per
+   channel. Apply reciprocal-rank fusion with constant 60 and equal weights.
+   Retain equivalent bindings for current citation selection; other windows
+   remain distinct candidates.
+5. Rerank the first 50 distinct input groups ordered by `(ordinal body exact tier, fused
    rank, passage ID)`. Pass the entire query and each complete header/body pair
    to the cross-encoder. No model-side silent truncation. If the complete batch
    cannot fit, finish or validate, discard its partial scores and retain the
@@ -172,8 +182,10 @@ copy per passage.
    intersection covers at least 80% of the shorter body, retaining the higher
    ranked passage. Record candidate/shortlist/diversity effects in evaluation.
 7. Recheck current publication, source state, hashes, scope and disclosure before
-   returning each complete body and evidence reference. Top up only from the
-   already scored shortlist. A depleted shortlist is reported; no unbounded loop.
+   returning each complete body and evidence reference. If a representative is
+   withdrawn or cannot satisfy the document limit, try only its bounded exact
+   equivalents, using the selected copy's own identity and citation. Top up only
+   from the scored shortlist. A depleted shortlist is reported; no unbounded loop.
 
 The numerical budgets are initial engineering choices, not universal constants.
 They can change through ranking configuration without schema changes. Tokeniser,
@@ -190,13 +202,74 @@ notes/claims; their source content uses the complete selected passage. No new
 claim is made about semantic note/claim search.
 
 `corpus.search` retains its fields. `retrieval_mode` is `lexical` or `hybrid`;
-`semantic_status` identifies ready/not-enabled/busy/unavailable/timeout/
+`semantic_status` identifies ready/not-enabled/busy/unavailable/timeout/warming/
 scope-capacity-exceeded/query-too-long/index-updating/rebuilding. Reranking state is carried by stable
 explanation/warning codes. Report candidate budget, shortlist depletion and
 Full-Text population warnings. A timeout/refusal must never be labelled a
 semantic no-match. Other response adapters retain their shapes and use the same
 selected passage order; operational status records degraded reasons without
 logging query text or private passages.
+
+The outer search deadline remains 25 seconds. Semantic work has an earlier
+20-second cutoff; lexical work retains the outer budget and its results are
+revalidated before fallback. Exhausting the outer deadline without validated
+results raises the retryable `search-timeout` refusal through native transports,
+rather than returning a successful empty lexical response. A lexical response's
+`index_generation: null` means no semantic generation contributed accepted results;
+it does not establish that an index is missing, empty or unhealthy. These changes
+are undergoing full-library staging acceptance and are not deployed.
+
+Optional trained reranking requests cancellation after its own three-second
+budget. The callback awaits all native shards before releasing its lane or lease;
+native acknowledgement can extend the phase beyond that budget. A rerank-only
+timeout retains the validated dense/lexical RRF ordering with `rerank:timeout` and
+no trained-score labels. Parent cancellation still takes precedence, and scores
+returned after the rerank deadline are discarded. Relevance gates apply to the
+actual returned ordering, including this degraded reranking path.
+
+Model admission covers embedding and reranking separately. SQL, ANN, lexical
+selection and citation work do not hold a model lane. One observed semantic task
+retains corpus ownership until every entered callback settles, including a
+callback outliving its scheduler's public cancellation. An admission that has
+already ended rejects a later callback before model access. Fresh GPU requests
+may perform reranking alone, with the same one-use and native-release checks.
+Unconfirmed cleanup cannot become successful fusion: its typed failure survives
+late settlement and routes the search to semantic fallback or refusal.
+
+Segment binding metadata and verified native views are prepared independently
+after database startup readiness. Serving uses their actual residency as the
+readiness authority and never starts a full cold load inside the search budget.
+Preparation verifies the full segment membership before excluding vectors whose
+complete context-zero disclosure window cannot be constructed. Bounded canonical
+windows are materialised once within the SQL command; only metadata and flags
+leave SQL, and only eligible identifiers remain cached. A true flag grants no
+disclosure authority. Current binding, credential, proof and final citation checks
+still apply. Diagnostic selection shares this policy. Exact recall for the new
+population uses the full scoped distance population intersected with window
+availability, with original coarse-population results retained separately.
+A miss signals one coalesced preparation owned by a separate scope and lease.
+Serving allows at most 250 ms for a small incremental preparation, polling actual
+residency with the monotonic request clock and retaining the original generation.
+An absent preparation service or terminal failure returns immediately. A cold
+miss after that grace preserves lexical retrieval with `semantic:warming`;
+successful preparation must still pass the captured lease's readable check.
+Retained entries have
+no time-only expiry; bounded pressure, retirement and shutdown still release
+them. New segments can briefly require warming after publication; older readable
+requests continue with their captured manifest and current citation checks.
+
+Normal keyword retrieval uses request-local scoped key materialisation and
+Full-Text discovery, ordered by Full-Text rank then chunk ID. Scope and current
+publication precede the 100-candidate budget; only selected bodies are hydrated.
+It does not perform exhaustive substring discovery. Lexical fallback uses the
+same indexed keyword selector.
+
+Explicit literal mode retains exhaustive case-sensitive ordinal body substring
+matching in chunk-ID order, under the outer search budget. It preserves raw query
+code units and bypasses Full-Text readiness, models and ANN generation access.
+It retains disclosure and current-citation fences and reports semantic status
+`not-requested`, without a semantic-failure warning. This mode can read all
+current scoped bodies; historical and out-of-scope bodies remain excluded.
 
 ## Models and runtime
 

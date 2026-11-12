@@ -16,6 +16,38 @@ namespace FluxKnowledge.Integration.Tests.Indexing;
 public sealed class SegmentOwnerLifetimeTests(NativeSqlServerFixture fixture) : IClassFixture<NativeSqlServerFixture>
 {
     [NativeSqlServerFact]
+    public async Task Prepared_views_survive_idle_time_and_pressure_evicts_only_unborrowed_obsolete_views()
+    {
+        await using var environment = await SqlToUsearchRebuildTests.PipelineEnvironment.CreateAsync(fixture,
+            "A prepared view remains reusable after a long idle period.", segmented: true);
+        await environment.AddAndPumpAsync("A second immutable view tests bounded pressure eviction.");
+        using var scope = environment.Services.CreateScope();
+        var active = await environment.Store.GetActiveGenerationIdAsync(CancellationToken.None);
+        var manifest = await scope.ServiceProvider.GetRequiredService<ISegmentedIndexStore>().ReadManifestAsync(active!.Value, CancellationToken.None);
+        var first = manifest.Segments[0]; var second = manifest.Segments[1];
+        var time = new MaintenanceClock();
+        await using var cache = new UsearchSegmentCache(new(environment.IndexRoot), new WindowsIndexSegmentReadLeaseFactory(environment.IndexRoot),
+            new SqlIndexSegmentOwnerStore(environment.Factory, TimeProvider.System, new WindowsInteractiveGpuOwnerProbe()), time,
+            maximumBytes: Math.Max(first.FileLength, second.FileLength));
+        await cache.PrepareAsync([first], CancellationToken.None);
+        Assert.True(cache.IsPrepared(first));
+        for (var i = 0; i < 121; i++) time.Advance();
+        await cache.SweepAsync(false, CancellationToken.None);
+        var held = await cache.BorrowPreparedAsync(first, CancellationToken.None);
+        var instance = held.NativeInstanceId;
+        await Assert.ThrowsAsync<PassageRetrievalRefusalException>(() => cache.PrepareAsync([second], CancellationToken.None).AsTask());
+        Assert.True(cache.IsPrepared(first)); Assert.False(cache.IsPrepared(second));
+        await held.DisposeAsync();
+        await cache.PrepareAsync([second], CancellationToken.None);
+        Assert.False(cache.IsPrepared(first)); Assert.True(cache.IsPrepared(second));
+        var error = await Assert.ThrowsAsync<PassageRetrievalRefusalException>(() => cache.BorrowPreparedAsync(first, CancellationToken.None).AsTask());
+        Assert.Equal("warming", error.Status);
+        await cache.PrepareAsync([first], CancellationToken.None);
+        await using var reopened = await cache.BorrowPreparedAsync(first, CancellationToken.None);
+        Assert.NotEqual(instance, reopened.NativeInstanceId);
+    }
+
+    [NativeSqlServerFact]
     public async Task Existing_cache_sweep_runs_cooperative_storage_maintenance_without_repeating_resolved_or_unchanged_warnings()
     {
         await using var environment = await SqlToUsearchRebuildTests.PipelineEnvironment.CreateAsync(fixture,

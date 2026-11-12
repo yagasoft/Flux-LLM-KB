@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Security.Cryptography;
 using System.Text;
+using System.Runtime.CompilerServices;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Domain.Pipeline;
 using FluxKnowledge.Domain.Sources;
@@ -10,10 +11,12 @@ using Microsoft.EntityFrameworkCore;
 namespace FluxKnowledge.Infrastructure.SqlServer.Search;
 
 /// <summary>Reads bounded canonical chunks from completed, currently eligible publications.</summary>
-public sealed partial class SqlCorpusRetrievalReader(IDbContextFactory<FluxKnowledgeDbContext> contextFactory)
-    : ICorpusRetrievalReader, IHybridPassageCandidateReader
+public sealed partial class SqlCorpusRetrievalReader(IDbContextFactory<FluxKnowledgeDbContext> contextFactory,
+    CorpusAnnBindingCache? bindingCache = null)
+    : ICorpusRetrievalReader, IHybridPassageCandidateReader, ICorpusAnnScopeSelection, ICorpusAnnBindingPreparation
 {
-    private const int CandidateBudget = 200;
+    private const int CandidateBudget = 100;
+    private readonly CorpusAnnBindingCache _bindingCache = bindingCache ?? new();
 
     public async ValueTask<CorpusLexicalReadiness> GetLexicalReadinessAsync(CancellationToken cancellationToken)
     {
@@ -28,6 +31,7 @@ public sealed partial class SqlCorpusRetrievalReader(IDbContextFactory<FluxKnowl
                  THEN 1 ELSE 0 END AS int) AS [IndexPresent],
                  CAST(CASE WHEN FULLTEXTCATALOGPROPERTY(N'FluxKnowledge', N'PopulateStatus') = 0
                      AND TRY_CONVERT(int, OBJECTPROPERTYEX(OBJECT_ID(N'[dbo].[TextChunks]'), N'TableFulltextPopulateStatus')) = 0
+                     AND TRY_CONVERT(int, OBJECTPROPERTYEX(OBJECT_ID(N'[dbo].[TextChunks]'), N'TableFulltextPendingChanges')) = 0
                      THEN 1 ELSE 0 END AS int) AS [PopulationComplete]
              """)
             .SingleAsync(cancellationToken).ConfigureAwait(false);
@@ -100,11 +104,16 @@ public sealed partial class SqlCorpusRetrievalReader(IDbContextFactory<FluxKnowl
         string query, ResolvedCorpusScope scope, CancellationToken cancellationToken) =>
         SearchCoreAsync(query, scope, 100, cancellationToken);
 
+    public ValueTask<IReadOnlyList<EligiblePassageCandidate>> ReadLiteralCandidatesAsync(
+        string query, ResolvedCorpusScope scope, CancellationToken cancellationToken) =>
+        SearchCoreAsync(query, scope, 100, cancellationToken, literal: true);
+
     private async ValueTask<IReadOnlyList<EligiblePassageCandidate>> SearchCoreAsync(
-        string query, ResolvedCorpusScope scope, int budget, CancellationToken cancellationToken)
+        string query, ResolvedCorpusScope scope, int budget, CancellationToken cancellationToken, bool literal = false)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(query);
         ArgumentNullException.ThrowIfNull(scope);
+        if (query.Length > 2048) throw new ArgumentOutOfRangeException(nameof(query));
         if (scope.Kind is not ("all" or "root" or "workspace")) throw new ArgumentException("Unknown scope.", nameof(scope));
 
         var rootIdsJson = JsonSerializer.Serialize(scope.RootIds);
@@ -113,11 +122,36 @@ public sealed partial class SqlCorpusRetrievalReader(IDbContextFactory<FluxKnowl
         var cwdPrefix = cwd.EndsWith('\\') ? cwd : cwd + '\\';
         await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         await EnsureServingAsync(context, cancellationToken).ConfigureAwait(false);
-        var rows = await context.Database.SqlQuery<CandidateRow>(SqlPublishedPassageSelection.Bind(
-                $"""
+        FormattableString selection = $"""
+                 SET NOCOUNT ON;
+                 DECLARE @query nvarchar(2048) = {query};
+                 DECLARE @budget int = {budget};
+                 -- One read-only batch: retry starts by discarding any session-local partial work.
+                 DROP TABLE IF EXISTS #corpusScope;
+                 DROP TABLE IF EXISTS #corpusFullText;
+                 DROP TABLE IF EXISTS #corpusChosen;
+                 DROP TABLE IF EXISTS #corpusChunks;
+                 SELECT DISTINCT [artifact].[Id] AS [ArtifactId], [artifact].[SourceRevision]
+                 INTO #corpusScope
+                 FROM [Artifacts] AS [artifact]
+                 INNER JOIN [PipelineRecords] AS [record] ON [record].[Id] = [artifact].[PipelineRecordId]
+                 CROSS APPLY (SELECT TOP (1) [canonicalChunk].[SourceRevision]
+                     FROM [TextChunks] AS [canonicalChunk]
+                     WHERE [canonicalChunk].[ArtifactId] = [artifact].[Id]
+                       AND [canonicalChunk].[SourceRevision] = [artifact].[SourceRevision]) AS [chunk]
+                 /*publication-bindings*/
+                 WHERE /*publication-eligibility*/
+                   AND ({scopeKind} = N'all' OR COALESCE([owner].[SourceRootId], [retained].[SourceRootId]) IN (
+                       SELECT [Id] FROM OPENJSON({rootIdsJson}) WITH ([Id] uniqueidentifier '$')))
+                   AND ({scopeKind} <> N'workspace' OR
+                       (CASE WHEN [publication].[OwnerSourceRevisionId] IS NOT NULL THEN [owner].[CanonicalPath] ELSE [retained].[CanonicalPath] END COLLATE Latin1_General_100_CI_AS = {cwd} OR
+                        LEFT(CASE WHEN [publication].[OwnerSourceRevisionId] IS NOT NULL THEN [owner].[CanonicalPath] ELSE [retained].[CanonicalPath] END, LEN({cwdPrefix})) COLLATE Latin1_General_100_CI_AS = {cwdPrefix}));
+                 CREATE UNIQUE CLUSTERED INDEX [IX_scope] ON #corpusScope ([ArtifactId], [SourceRevision]);
+                 CREATE TABLE #corpusChosen ([ChunkId] bigint NOT NULL PRIMARY KEY, [FullTextRank] int NULL);
+                 /*candidate-key-selection*/
                  SELECT TOP ({budget})
                      [chunk].[Id] AS [ChunkId], [chunk].[Ordinal] AS [Ordinal], [chunk].[Content] AS [Content],
-                     COALESCE([fulltext].[RANK], 0) AS [FullTextRank],
+                     [requested].[FullTextRank] AS [FullTextRank],
                      [chunk].[ContentHash] AS [ChunkHash], [state].[CorpusEpoch] AS [CorpusEpoch],
                      [chunk].[ContextHeader] AS [ContextHeader],
                      [chunk].[PassagePolicyFingerprint] AS [PassagePolicyFingerprint],
@@ -133,7 +167,8 @@ public sealed partial class SqlCorpusRetrievalReader(IDbContextFactory<FluxKnowl
                      CASE WHEN [publication].[OwnerSourceRevisionId] IS NOT NULL THEN [owner].[CanonicalPath]
                           WHEN [retained].[Id] IS NOT NULL THEN [retained].[CanonicalPath]
                           ELSE [source].[StableKey] COLLATE Latin1_General_100_BIN2 END AS [SourceIdentity]
-                 FROM [TextChunks] AS [chunk]
+                 FROM #corpusChosen AS [requested]
+                 INNER JOIN [TextChunks] AS [chunk] WITH (FORCESEEK) ON [chunk].[Id] = [requested].[ChunkId]
                  INNER JOIN [IndexState] AS [state] ON [state].[Id] = 1
                  INNER JOIN [Artifacts] AS [artifact]
                    ON [chunk].[ArtifactId] = [artifact].[Id]
@@ -143,8 +178,6 @@ public sealed partial class SqlCorpusRetrievalReader(IDbContextFactory<FluxKnowl
                   AND [artifact].[SourceRevision] = [record].[Revision]
                  INNER JOIN [SourceIdentities] AS [source]
                    ON [record].[SourceIdentityId] = [source].[Id]
-                 LEFT JOIN FREETEXTTABLE([TextChunks], [SearchText], {query}) AS [fulltext]
-                   ON [fulltext].[KEY] = [chunk].[Id]
                  /*publication-bindings*/
                  WHERE [record].[IsDeleted] = 0
                    AND /*publication-eligibility*/
@@ -157,12 +190,20 @@ public sealed partial class SqlCorpusRetrievalReader(IDbContextFactory<FluxKnowl
                               ELSE [retained].[CanonicalPath] END COLLATE Latin1_General_100_CI_AS = {cwd} OR
                          LEFT(CASE WHEN [publication].[OwnerSourceRevisionId] IS NOT NULL THEN [owner].[CanonicalPath]
                                    ELSE [retained].[CanonicalPath] END, LEN({cwdPrefix})) COLLATE Latin1_General_100_CI_AS = {cwdPrefix}))
-                   AND (CHARINDEX({query}, [chunk].[Content] COLLATE Latin1_General_100_BIN2) > 0
-                        OR [fulltext].[KEY] IS NOT NULL)
-                 ORDER BY CASE WHEN CHARINDEX({query}, [chunk].[Content] COLLATE Latin1_General_100_BIN2) > 0
-                               THEN 0 ELSE 1 END,
-                          [fulltext].[RANK] DESC, [chunk].[Id]
-                 """))
+                 ORDER BY /*candidate-order*/
+                 OPTION (LOOP JOIN, FORCE ORDER, MAXDOP 1);
+                 DROP TABLE #corpusChosen;
+                 DROP TABLE IF EXISTS #corpusFullText;
+                 DROP TABLE #corpusScope;
+                 DROP TABLE IF EXISTS #corpusChunks;
+                 """;
+        // Only application-owned SQL fragments are composed. Every request value
+        // remains a parameter, including the unnormalised literal query.
+        var command = FormattableStringFactory.Create(selection.Format
+            .Replace("/*candidate-key-selection*/", literal ? LiteralKeySelection : KeywordKeySelection, StringComparison.Ordinal)
+            .Replace("/*candidate-order*/", literal ? "[requested].[ChunkId]" : "[requested].[FullTextRank] DESC, [requested].[ChunkId]", StringComparison.Ordinal),
+            selection.GetArguments());
+        var rows = await context.Database.SqlQuery<CandidateRow>(SqlPublishedPassageSelection.Bind(command))
             .ToListAsync(cancellationToken)
             .ConfigureAwait(false);
 
@@ -207,7 +248,7 @@ public sealed partial class SqlCorpusRetrievalReader(IDbContextFactory<FluxKnowl
                  INNER JOIN [Artifacts] AS [artifact]
                    ON [chunk].[ArtifactId] = [artifact].[Id]
                   AND [chunk].[SourceRevision] = [artifact].[SourceRevision]
-                 INNER JOIN [PipelineRecords] AS [record]
+                 INNER JOIN [PipelineRecords] AS [record] WITH (FORCESEEK)
                    ON [artifact].[PipelineRecordId] = [record].[Id]
                   AND [artifact].[SourceRevision] = [record].[Revision]
                  INNER JOIN [SourceIdentities] AS [source]

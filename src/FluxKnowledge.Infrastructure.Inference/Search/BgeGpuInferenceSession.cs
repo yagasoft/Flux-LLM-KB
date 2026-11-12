@@ -9,12 +9,21 @@ namespace FluxKnowledge.Infrastructure.Inference.Search;
 /// <summary>One owned request/batch; embedding unloads before ranking, with no retained GPU model.</summary>
 public sealed class BgeGpuInferenceSession(IBgeGpuModelFactory models) : IEmbeddingGpuInference
 {
+    private readonly BgeRerankerPrecision _precision = ValidatePrecision(models);
+    public string RerankerFingerprint => BgeOfflineModels.GetRerankerFingerprint(_precision);
+    private static BgeRerankerPrecision ValidatePrecision(IBgeGpuModelFactory factory)
+    {
+        ArgumentNullException.ThrowIfNull(factory);
+        var precision = factory.Precision;
+        _ = BgeOfflineModels.GetRerankerFingerprint(precision);
+        return precision;
+    }
     public async ValueTask<GpuInteractiveNativeResult<T>> ExecuteSearchAsync<T>(GpuOwnedWorkContext ownership,
         Func<IEmbeddingProvider, IPassageReranker, CancellationToken, ValueTask<T>> work)
     {
         ArgumentNullException.ThrowIfNull(ownership);
         ArgumentNullException.ThrowIfNull(work);
-        var access = new RequestAccess(models, ownership);
+        var access = new RequestAccess(models, ownership, _precision);
         try
         {
             access.RequireActive();
@@ -36,22 +45,22 @@ public sealed class BgeGpuInferenceSession(IBgeGpuModelFactory models) : IEmbedd
         ArgumentNullException.ThrowIfNull(ownership);
         try
         {
-            ownership.RequireActive(BgeOfflineModels.GpuRuntimeKey, BgeOfflineModels.GpuSettingsFingerprint);
+            ownership.RequireActive(BgeOfflineModels.GetGpuRuntimeKey(_precision), BgeOfflineModels.GpuSettingsFingerprint);
             if (texts.Count is < 1 or > EmbeddingGpuRuntime.MaximumRequestChunks) throw new BgeInferenceException("bge-batch-invalid");
             foreach (var text in texts) ValidateText(text);
             using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, ownership.CancellationToken);
             var results = new List<EmbeddingResult>(texts.Count);
             using (var lease = await OpenMeasuredAsync(() => models.OpenEmbeddingAsync(ownership), ownership, "embedding").ConfigureAwait(false))
             {
-                ownership.RequireActive(BgeOfflineModels.GpuRuntimeKey, BgeOfflineModels.GpuSettingsFingerprint);
+                ownership.RequireActive(BgeOfflineModels.GetGpuRuntimeKey(_precision), BgeOfflineModels.GpuSettingsFingerprint);
                 ValidateProfile(lease.Model);
                 for (var offset = 0; offset < texts.Count; offset += BgeInputBatch.MaximumBatch)
                 {
-                    ownership.RequireActive(BgeOfflineModels.GpuRuntimeKey, BgeOfflineModels.GpuSettingsFingerprint);
+                    ownership.RequireActive(BgeOfflineModels.GetGpuRuntimeKey(_precision), BgeOfflineModels.GpuSettingsFingerprint);
                     linked.Token.ThrowIfCancellationRequested();
                     var inputs = texts.Skip(offset).Take(BgeInputBatch.MaximumBatch).ToArray();
                     var output = await MeasureAsync(() => lease.Model.CreateEmbeddingsAsync(inputs, linked.Token), ownership, "embedding", "inference").ConfigureAwait(false);
-                    ownership.RequireActive(BgeOfflineModels.GpuRuntimeKey, BgeOfflineModels.GpuSettingsFingerprint);
+                    ownership.RequireActive(BgeOfflineModels.GetGpuRuntimeKey(_precision), BgeOfflineModels.GpuSettingsFingerprint);
                     linked.Token.ThrowIfCancellationRequested();
                     if (output.Count != inputs.Length) throw new BgeInferenceException("bge-embedding-output-invalid");
                     foreach (var result in output) ValidateEmbedding(result);
@@ -117,11 +126,12 @@ public sealed class BgeGpuInferenceSession(IBgeGpuModelFactory models) : IEmbedd
     {
         private readonly IBgeGpuModelFactory _models;
         private readonly GpuOwnedWorkContext _ownership;
+        private readonly BgeRerankerPrecision _precision;
         private int _ended;
         private int _phase;
-        internal RequestAccess(IBgeGpuModelFactory models, GpuOwnedWorkContext ownership)
+        internal RequestAccess(IBgeGpuModelFactory models, GpuOwnedWorkContext ownership, BgeRerankerPrecision precision)
         {
-            _models = models; _ownership = ownership; Embedding = new EmbeddingAccess(this); Reranker = new RerankerAccess(this);
+            _models = models; _ownership = ownership; _precision = precision; Embedding = new EmbeddingAccess(this); Reranker = new RerankerAccess(this);
         }
         internal IEmbeddingProvider Embedding { get; }
         internal IPassageReranker Reranker { get; }
@@ -130,7 +140,7 @@ public sealed class BgeGpuInferenceSession(IBgeGpuModelFactory models) : IEmbedd
         internal void RequireActive()
         {
             ObjectDisposedException.ThrowIf(Volatile.Read(ref _ended) != 0, this);
-            _ownership.RequireActive(BgeOfflineModels.GpuRuntimeKey, BgeOfflineModels.GpuSettingsFingerprint);
+            _ownership.RequireActive(BgeOfflineModels.GetGpuRuntimeKey(_precision), BgeOfflineModels.GpuSettingsFingerprint);
         }
 
         private sealed class EmbeddingAccess(RequestAccess request) : IEmbeddingProvider
@@ -161,7 +171,9 @@ public sealed class BgeGpuInferenceSession(IBgeGpuModelFactory models) : IEmbedd
                 if (passages.Count is < 1 or > 50 || passages.Any(p => p is null || p.PassageId <= 0 || string.IsNullOrWhiteSpace(p.SearchText) || p.SearchText.Length > 16384) ||
                     passages.Select(p => p.PassageId).Distinct().Count() != passages.Count)
                     throw new BgeInferenceException("bge-reranker-input-invalid");
-                if (Interlocked.CompareExchange(ref request._phase, 3, 2) != 2) throw new BgeInferenceException("bge-request-phase-invalid");
+                var phase = Volatile.Read(ref request._phase);
+                if (phase is not (0 or 2) || Interlocked.CompareExchange(ref request._phase, 3, phase) != phase)
+                    throw new BgeInferenceException("bge-request-phase-invalid");
                 using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, request._ownership.CancellationToken);
                 RerankResult result;
                 try
@@ -169,10 +181,15 @@ public sealed class BgeGpuInferenceSession(IBgeGpuModelFactory models) : IEmbedd
                     using var lease = await OpenMeasuredAsync(() => request._models.OpenRerankerAsync(request._ownership), request._ownership, "reranker").ConfigureAwait(false);
                     request.RequireActive();
                     result = await MeasureAsync(() => lease.Model.RerankAsync(query, passages, linked.Token), request._ownership, "reranker", "inference").ConfigureAwait(false);
-                    if (result.ModelFingerprint != BgeOfflineModels.RerankerFingerprint || result.Scores.Count != passages.Count ||
+                    if (result.ModelFingerprint != BgeOfflineModels.GetRerankerFingerprint(request._precision) || result.Scores.Count != passages.Count ||
                         !result.Scores.Select(score => score.PassageId).SequenceEqual(passages.Select(p => p.PassageId)) ||
                         result.Scores.Any(score => !float.IsFinite(score.Logit)))
                         throw new BgeInferenceException("bge-reranker-output-invalid");
+                }
+                catch (Exception exception) when (exception is not OutOfMemoryException and not StackOverflowException)
+                {
+                    if (!request._ownership.NativeCapacityReleased) throw new PassageInferenceOwnershipException(exception);
+                    throw;
                 }
                 finally
                 {
@@ -180,6 +197,7 @@ public sealed class BgeGpuInferenceSession(IBgeGpuModelFactory models) : IEmbedd
                     // when disposal proved that every native allocation is released.
                     if (request._ownership.NativeCapacityReleased) Interlocked.Exchange(ref request._phase, 4);
                 }
+                if (!request._ownership.NativeCapacityReleased) throw new PassageInferenceOwnershipException();
                 linked.Token.ThrowIfCancellationRequested();
                 request.RequireActive();
                 return result;

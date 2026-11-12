@@ -43,9 +43,9 @@ public sealed class NativeV1McpTools
         QueryAsync("corpus.query", new { view, root_id, branch_id, job_id, limit, cursor }, cancellationToken);
 
     [McpServerTool(Name = "corpus.search")]
-    [Description("Search published retained text in all, root, or workspace scope with exact citations.")]
-    public Task<CallToolResult> CorpusSearch(string query, int limit = 10, string scope = "all", string? root_id = null, string? cwd = null, CancellationToken cancellationToken = default) =>
-        QueryAsync("corpus.search", new { query, limit, scope, root_id, cwd }, cancellationToken);
+    [Description("Search published retained text using indexed keywords and semantic meaning. Set match_mode to literal for exact, case-sensitive body substrings with no semantic search. All modes return current citations.")]
+    public Task<CallToolResult> CorpusSearch(string query, int limit = 10, string scope = "all", string? root_id = null, string? cwd = null, CancellationToken cancellationToken = default, string match_mode = "keyword") =>
+        QueryAsync("corpus.search", new { query, limit, scope, root_id, cwd, match_mode }, cancellationToken);
 
     [McpServerTool(Name = "corpus.read")]
     [Description("Read bounded retained context for a current corpus evidence reference.")]

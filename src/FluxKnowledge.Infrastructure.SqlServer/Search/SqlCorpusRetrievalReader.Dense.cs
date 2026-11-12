@@ -14,13 +14,13 @@ public sealed partial class SqlCorpusRetrievalReader
     public async ValueTask<DensePassageCandidates> ReadDenseCandidatesAsync(ICorpusGenerationLease lease,
         ResolvedCorpusScope scope, IReadOnlyList<float> query, CancellationToken cancellationToken)
     {
-        ArgumentNullException.ThrowIfNull(lease);
-        ArgumentNullException.ThrowIfNull(scope);
-        var generation = lease.Generation;
-        if (generation.CorpusStamp is null || query.Count != generation.Dimensions ||
-            query.Any(value => !float.IsFinite(value)) || Math.Abs(query.Sum(value => (double)value * value) - 1) > 0.001)
-            throw new InvalidOperationException("corpus-dense-profile-invalid");
-        if (scope.Kind is not ("all" or "root" or "workspace")) throw new ArgumentException("Unknown scope.", nameof(scope));
+        var generation = ValidateDenseRequest(lease, scope, query);
+        var stamp = generation.CorpusStamp!; // ValidateDenseRequest requires a publication stamp.
+        if (generation.FormatVersion == 2)
+        {
+            if (lease is not ICorpusAnnLease indexed) throw new PassageRetrievalRefusalException("unavailable");
+            return await ReadIndexedCandidatesAsync(indexed, scope, query, cancellationToken).ConfigureAwait(false);
+        }
         if (!await lease.IsCurrentAsync(cancellationToken).ConfigureAwait(false)) return new("index-updating", []);
         IReadOnlyList<AnnMatch> matches = [];
         if (scope.Kind == "all")
@@ -68,8 +68,8 @@ public sealed partial class SqlCorpusRetrievalReader
             WHERE /*publication-eligibility*/
               AND [member].[GenerationId] = {generation.Id} AND [state].[ActiveIndexGenerationId] = {generation.Id}
               AND [generation].[RetiredAtUtc] IS NULL
-              AND [generation].[CorpusEpoch] = {generation.CorpusStamp.CorpusEpoch}
-              AND [generation].[CorpusVersion] = {generation.CorpusStamp.CorpusVersion}
+              AND [generation].[CorpusEpoch] = {stamp.CorpusEpoch}
+              AND [generation].[CorpusVersion] = {stamp.CorpusVersion}
               AND [state].[CorpusEpoch] = [generation].[CorpusEpoch] AND [state].[CorpusVersion] = [generation].[CorpusVersion]
               AND [vector].[IsDeleted] = 0 AND [vector].[SourceRevision] = [chunk].[SourceRevision]
               AND [vector].[VectorId] > {lastVectorId}
@@ -159,8 +159,8 @@ public sealed partial class SqlCorpusRetrievalReader
             WHERE /*publication-eligibility*/
               AND [chunk].[Id] IN (SELECT [Value] FROM OPENJSON({ids}) WITH ([Value] bigint '$'))
               AND [state].[ActiveIndexGenerationId] = {generation.Id}
-              AND [state].[CorpusEpoch] = {generation.CorpusStamp.CorpusEpoch}
-              AND [state].[CorpusVersion] = {generation.CorpusStamp.CorpusVersion}
+              AND [state].[CorpusEpoch] = {stamp.CorpusEpoch}
+              AND [state].[CorpusVersion] = {stamp.CorpusVersion}
               AND [chunk].[Length] BETWEEN 1 AND 1024
               AND ({kind} = N'all' OR COALESCE([owner].[SourceRootId], [retained].[SourceRootId]) IN (
                   SELECT [Value] FROM OPENJSON({rootIds}) WITH ([Value] uniqueidentifier '$')))
@@ -179,6 +179,30 @@ public sealed partial class SqlCorpusRetrievalReader
         if (passages.Count != ordered.Select(value => value.TextChunkId).Distinct().Count())
             throw new InvalidOperationException("corpus-dense-passage-invalid");
         return new("ready", ordered.Select(row => passages[row.TextChunkId]).DistinctBy(value => value.ChunkId).ToArray());
+    }
+
+    public ValueTask<DensePassageCandidates> ReadDenseCandidatesAsync(ICorpusGenerationLease lease,
+        ResolvedCorpusScope scope, string queryText, IReadOnlyList<float> query, CancellationToken cancellationToken)
+    {
+        var generation = ValidateDenseRequest(lease, scope, query);
+        if (scope.Kind == "all" || generation.FormatVersion != 2 || string.IsNullOrWhiteSpace(queryText))
+            return ReadDenseCandidatesAsync(lease, scope, query, cancellationToken);
+        if (queryText.Length > 2048) throw new ArgumentOutOfRangeException(nameof(queryText));
+        if (lease is not ICorpusAnnLease indexed) throw new PassageRetrievalRefusalException("unavailable");
+        return ReadIndexedCandidatesCoreAsync(indexed, scope, query, queryText, cancellationToken);
+    }
+
+    private static IndexGenerationDescriptor ValidateDenseRequest(ICorpusGenerationLease lease,
+        ResolvedCorpusScope scope, IReadOnlyList<float> query)
+    {
+        ArgumentNullException.ThrowIfNull(lease);
+        ArgumentNullException.ThrowIfNull(scope);
+        var generation = lease.Generation;
+        if (generation.CorpusStamp is null || query.Count != generation.Dimensions ||
+            query.Any(value => !float.IsFinite(value)) || Math.Abs(query.Sum(value => (double)value * value) - 1) > 0.001)
+            throw new InvalidOperationException("corpus-dense-profile-invalid");
+        if (scope.Kind is not ("all" or "root" or "workspace")) throw new ArgumentException("Unknown scope.", nameof(scope));
+        return generation;
     }
 
     private static double Distance(DenseVectorRow row, IReadOnlyList<float> query, int dimensions,

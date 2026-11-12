@@ -15,6 +15,7 @@ public sealed partial class SqlSegmentRetirementOperations : IIndexProjectionMai
 
     public async ValueTask<IndexProjectionMaintenanceResult> RunOnceAsync(IndexProjectionMaintenanceBudget budget, CancellationToken cancellationToken)
     {
+        if(legacyProof is not null)throw new InvalidOperationException("segment-retirement-legacy-proof-scope-required");
         budget.Validate();
         if (!await _maintenanceRun.WaitAsync(0, cancellationToken)) return new(0, 0, 0, "segment-retirement-maintenance-active", WorkRemaining: true);
         try { return await RunMaintenanceCoreAsync(budget, cancellationToken); }
@@ -32,6 +33,7 @@ public sealed partial class SqlSegmentRetirementOperations : IIndexProjectionMai
         try
         {
             await using var context = await contexts.CreateDbContextAsync(token);
+            legacyProof?.ValidateConnection(context);
             var state = await context.IndexState.AsNoTracking().SingleAsync(token);
             if (state.RequiredIndexFormat != 2) return new(0, 0, 0);
             await MaintainCatalogueAsync(budget, token);

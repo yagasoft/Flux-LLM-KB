@@ -7,7 +7,7 @@ namespace FluxKnowledge.Infrastructure.Inference.Search;
 public sealed class BgeScheduledPassageInference(GpuInteractiveExecutor executor, BgeGpuInferenceSession models) : IConditionalGpuPassageInference
 {
     public EmbeddingProfile EmbeddingProfile { get; } = new(BgeOfflineModels.EmbeddingFingerprint, 1024);
-    public string RerankerFingerprint => BgeOfflineModels.RerankerFingerprint;
+    public string RerankerFingerprint => models.RerankerFingerprint;
     public ValueTask<T> ExecuteAsync<T>(Func<IEmbeddingProvider, IPassageReranker, CancellationToken, ValueTask<T>> work,
         CancellationToken cancellationToken) => ExecuteCoreAsync(work, cancellationToken, false);
 

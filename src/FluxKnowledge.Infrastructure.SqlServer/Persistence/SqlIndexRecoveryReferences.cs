@@ -51,10 +51,20 @@ public sealed class SqlIndexRecoveryReferences(IDbContextFactory<FluxKnowledgeDb
         catch { await connection.DisposeAsync(); throw; }
     }
 
-    public async ValueTask<RecoveryIndexAudit> AuditAsync(string recoveryRoot, string indexRoot, CancellationToken token)
+    public ValueTask<RecoveryIndexAudit> AuditAsync(string recoveryRoot,string indexRoot,CancellationToken token)=>
+        AuditCoreAsync(recoveryRoot,indexRoot,token,null);
+
+    public async ValueTask<RecoveryIndexAudit> AuditLegacyStagingAsync(LegacyStagingRecoveryProof proof,CancellationToken token)
+    {
+        ArgumentNullException.ThrowIfNull(proof);
+        using var use=proof.BorrowAudit();
+        return await AuditCoreAsync(proof.Scope.RecoveryRoot,proof.Scope.IndexRoot,token,proof);
+    }
+
+    private async ValueTask<RecoveryIndexAudit> AuditCoreAsync(string recoveryRoot,string indexRoot,CancellationToken token,LegacyStagingRecoveryProof? legacy)
     {
         var root = Canonical(recoveryRoot);
-        await using var connection = await OpenSessionAsync("Exclusive", token);
+        await using var connection = await OpenSessionAsync("Exclusive", token,legacy);
         await using (var invalidation = Context(connection))
             await invalidation.IndexRecoveryAudit.Where(value => value.Id == 1).ExecuteUpdateAsync(setters =>
                 setters.SetProperty(value => value.IsValid, false).SetProperty(value => value.FailurePath, (string?)null), token);
@@ -72,7 +82,8 @@ public sealed class SqlIndexRecoveryReferences(IDbContextFactory<FluxKnowledgeDb
                 if (!writer.OwnerExitSufficient)
                     throw new InvalidOperationException("index-recovery-writer-reconciliation-required");
             }
-            var captured = new RecoveryIndexReferenceAudit(indexRoot).Capture(root, token);
+            var capture=new RecoveryIndexReferenceAudit(indexRoot);
+            var captured=legacy is null?capture.Capture(root,token):capture.CaptureLegacyStaging(legacy,token);
             if (captured.Pins.Count > 8192) throw new RecoveryIndexAuditException("index-recovery-audit-budget", ".");
             if (AfterCapture is { } pause) await pause(token);
             await RequireSessionAsync(connection, "Exclusive", token);
@@ -81,8 +92,9 @@ public sealed class SqlIndexRecoveryReferences(IDbContextFactory<FluxKnowledgeDb
             await RequireSessionAsync(connection, "Exclusive", token, transaction);
             await db.Database.UseTransactionAsync(transaction, token);
             if (AfterProtocolTransaction is { } bound) await bound(connection, token);
+            if(legacy is not null)await legacy.RevalidateBeforeSealAsync(db,token);
             var audit = await db.IndexRecoveryAudit.SingleAsync(value => value.Id == 1, token);
-            audit.IsValid = true; audit.ClassifierVersion = RecoveryIndexReferenceAudit.ClassifierVersion;
+            audit.IsValid = true; audit.ClassifierVersion = legacy is null?RecoveryIndexReferenceAudit.ClassifierVersion:LegacyStagingRecoveryProof.ClassifierVersion;
             audit.DatabaseIncarnation = await DatabaseIdentityAsync(db, token);
             audit.RecoveryRoot = root; audit.IndexRoot = Canonical(indexRoot); audit.RootFingerprint = captured.RootFingerprint;
             audit.InventoryChecksum = captured.InventoryChecksum; audit.SealedAtUtc = clock.GetUtcNow(); audit.FailurePath = null;
@@ -105,6 +117,7 @@ public sealed class SqlIndexRecoveryReferences(IDbContextFactory<FluxKnowledgeDb
                 await release.ExecuteNonQueryAsync(CancellationToken.None);
             }
             if (AfterAuditCommit is { } committed) await committed(connection, token);
+            legacy?.BindSeal(audit);
             return captured;
         }
         catch (RecoveryIndexAuditException exception)
@@ -136,27 +149,40 @@ public sealed class SqlIndexRecoveryReferences(IDbContextFactory<FluxKnowledgeDb
             throw new InvalidOperationException("segment-retirement-recovery-reference-owned");
     }
 
-    internal static async Task RequireCurrentAsync(FluxKnowledgeDbContext context, string recoveryRoot, string indexRoot, CancellationToken token)
+    internal static async Task RequireCurrentAsync(FluxKnowledgeDbContext context, string recoveryRoot, string indexRoot, CancellationToken token,
+        LegacyStagingRecoveryProof? legacy=null)
     {
         await AcquireReadTransactionAsync(context, token);
         var audit = await context.IndexRecoveryAudit.AsNoTracking().SingleOrDefaultAsync(value => value.Id == 1, token);
-        if (audit is null || !audit.IsValid || audit.ClassifierVersion != RecoveryIndexReferenceAudit.ClassifierVersion ||
+        if (audit is null || !audit.IsValid ||
             audit.SealedAtUtc is null || audit.InventoryChecksum.Length != 64 || string.IsNullOrWhiteSpace(audit.RootFingerprint) ||
             !string.Equals(audit.RecoveryRoot, Canonical(recoveryRoot), StringComparison.OrdinalIgnoreCase) ||
             !string.Equals(audit.IndexRoot, Canonical(indexRoot), StringComparison.OrdinalIgnoreCase) ||
             audit.DatabaseIncarnation != await DatabaseIdentityAsync(context, token))
             throw new InvalidOperationException("segment-retirement-recovery-reference-audit-required");
+        if(audit.ClassifierVersion==RecoveryIndexReferenceAudit.ClassifierVersion)return;
+        if(audit.ClassifierVersion!=LegacyStagingRecoveryProof.ClassifierVersion || legacy is null)
+            throw new InvalidOperationException("segment-retirement-legacy-live-proof-required");
+        legacy.RequireLiveSeal(context,audit);
     }
 
-    private async Task<SqlConnection> OpenSessionAsync(string mode, CancellationToken token)
+    private async Task<SqlConnection> OpenSessionAsync(string mode, CancellationToken token,LegacyStagingRecoveryProof? legacy=null)
     {
         await using var configured = await factory.CreateDbContextAsync(token);
+        legacy?.ValidateConnection(configured);
         var builder = new SqlConnectionStringBuilder(configured.Database.GetConnectionString())
             { Pooling = false, Enlist = false, ConnectRetryCount = 0, ConnectTimeout = 5, ApplicationName = "FluxKnowledge.RecoveryReferences" };
         var connection = new SqlConnection(builder.ConnectionString);
         try
         {
             await connection.OpenAsync(token);
+            if(legacy is not null)
+            {
+                await using var actual=Context(connection);
+                legacy.ValidateConnection(actual);
+                if(await DatabaseIdentityAsync(actual,token)!=legacy.Scope.DatabaseIncarnation)
+                    throw new InvalidOperationException("index-recovery-legacy-incarnation-changed");
+            }
             await using var command = connection.CreateCommand(); command.CommandTimeout = 10;
             command.CommandText = """
                 DECLARE @result int;
@@ -195,7 +221,7 @@ public sealed class SqlIndexRecoveryReferences(IDbContextFactory<FluxKnowledgeDb
         if (!string.Equals(await command.ExecuteScalarAsync(token) as string, mode, StringComparison.Ordinal))
             throw new InvalidOperationException("index-recovery-reference-session-lost");
     }
-    private static async Task<Guid> DatabaseIdentityAsync(FluxKnowledgeDbContext db, CancellationToken token)
+    internal static async Task<Guid> DatabaseIdentityAsync(FluxKnowledgeDbContext db, CancellationToken token)
     {
         await using var command = new SqlCommand("SELECT database_guid FROM sys.database_recovery_status WHERE database_id=DB_ID();",
             (SqlConnection)db.Database.GetDbConnection(), (SqlTransaction?)db.Database.CurrentTransaction?.GetDbTransaction());

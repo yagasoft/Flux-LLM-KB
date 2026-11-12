@@ -14,6 +14,7 @@ public sealed partial class SqlSegmentRetirementOperations
     {
         await using (var selection = await contexts.CreateDbContextAsync(token))
         {
+            legacyProof?.ValidateConnection(selection);
             // Explicit rebuilds retain sealed progress for an ownership-checked resume.
             // They end only through activation or explicit abandonment, never owner age/exit alone.
             var query = selection.IndexPublicationCandidates.AsNoTracking().Where(value => value.State < 2 && value.BuildPurpose == 0);

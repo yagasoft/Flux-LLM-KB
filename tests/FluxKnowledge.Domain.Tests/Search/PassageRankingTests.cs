@@ -6,8 +6,51 @@ using Xunit;
 
 namespace FluxKnowledge.Domain.Tests.Search;
 
-public sealed class PassageRankingTests
+public sealed partial class PassageRankingTests
 {
+    [Fact]
+    public void Exact_copies_contribute_one_channel_vote_without_depressing_later_unique_ranks()
+    {
+        var ranked = PassageRanking.Fuse("query", [Passage(8, "Repeated"), Passage(9, "Repeated"), Passage(10, "Different")], []);
+        Assert.Equal(new long[] { 8, 10 }, ranked.Select(value => value.Passage.ChunkId));
+        Assert.Equal(2, ranked[1].LexicalRank);
+        Assert.Equal(1D / 62, ranked[1].FusionScore, 10);
+        Assert.Equal(9, Assert.Single(ranked[0].AlternativePassages).ChunkId);
+    }
+
+    [Fact]
+    public void Equivalent_copies_across_channels_combine_once_and_keep_their_own_bindings()
+    {
+        var lexical = Passage(8, "Repeated");
+        var dense = Passage(2, "Repeated");
+        var ranked = Assert.Single(PassageRanking.Fuse("query", [lexical], [dense]));
+        Assert.Equal(dense, ranked.Passage);
+        Assert.Equal(lexical, Assert.Single(ranked.AlternativePassages));
+        Assert.Equal(1, ranked.LexicalRank);
+        Assert.Equal(1, ranked.SemanticRank);
+        Assert.Equal(2D / 61, ranked.FusionScore, 10);
+    }
+
+    [Fact]
+    public void Hash_claims_and_equal_concatenation_with_different_body_boundaries_do_not_coalesce()
+    {
+        var unverified = Passage(1, "Repeated") with { SearchInputHash = new string('0', 64) };
+        var other = Passage(2, "Repeated");
+        Assert.Equal(2, PassageRanking.Fuse("query", [unverified, other], []).Count);
+        Assert.Equal(2, PassageRanking.Fuse("query", [Passage(3, "header\nbody"), Passage(4, "body", "header")], []).Count);
+    }
+
+    [Fact]
+    public void Copies_do_not_consume_the_shortlist_budget_before_unique_passages()
+    {
+        var copies = Enumerable.Range(1, 80).Select(id => Passage(id, "Repeated"));
+        var unique = Enumerable.Range(81, 20).Select(id => Passage(id, "Unique " + id));
+        var ranked = PassageRanking.Fuse("query", copies.Concat(unique).ToArray(), []);
+        Assert.Equal(21, ranked.Count);
+        Assert.Contains(ranked, value => value.Passage.ChunkId == 100 && value.LexicalRank == 21);
+        Assert.Equal(79, ranked[0].AlternativePassages.Count);
+    }
+
     [Fact]
     public void Fusion_preserves_one_passage_identity_and_both_channel_ranks()
     {
@@ -59,8 +102,8 @@ public sealed class PassageRankingTests
     [Fact]
     public void Shortlist_is_bounded_after_union_and_deterministic_ties()
     {
-        var ranked = PassageRanking.Fuse("query", Enumerable.Range(1, 100).Select(i => Passage(i, "body")).ToArray(),
-            Enumerable.Range(101, 100).Select(i => Passage(i, "body")).ToArray());
+        var ranked = PassageRanking.Fuse("query", Enumerable.Range(1, 100).Select(i => Passage(i, "body " + i)).ToArray(),
+            Enumerable.Range(101, 100).Select(i => Passage(i, "body " + i)).ToArray());
         Assert.Equal(50, ranked.Count);
         Assert.Equal(new long[] { 1, 101, 2, 102 }, ranked.Take(4).Select(value => value.Passage.ChunkId));
     }

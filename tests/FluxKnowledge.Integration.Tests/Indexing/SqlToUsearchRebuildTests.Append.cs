@@ -75,6 +75,7 @@ public sealed partial class SqlToUsearchRebuildTests
         Assert.True((await verify.PipelineRecords.SingleAsync(value => value.Id == recordId)).CompletionCriteriaMet);
         Assert.Equal(5, await verify.Jobs.CountAsync(value => value.PipelineRecordId == recordId && value.PublicState == (int)PublicJobState.Completed));
         Assert.All(await verify.Jobs.Where(value => value.PipelineRecordId == recordId).ToArrayAsync(), value => Assert.Null(value.LeaseOwner));
+        await SqlTestData.WaitForFullTextAsync(verify);
         var reader = new FluxKnowledge.Infrastructure.SqlServer.Search.SqlCorpusRetrievalReader(environment.Factory);
         var scope = await reader.ResolveScopeAsync("all", null, null, CancellationToken.None);
         Assert.NotNull(scope);

@@ -1,3 +1,4 @@
+@inject FluxKnowledge.Web.Configuration.StagingHostSettings Settings
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -9,7 +10,7 @@
 </head>
 <body>
     <aside role="status" style="padding: 0.75rem 1rem; background: #fff4cc; color: #382900; border-bottom: 1px solid #c19b39;">
-        Isolated staging · Functional checks · Semantic models, GPU, OCR and mail are off.
+        Isolated staging · @(Settings.CpuSemantic ? "Offline CPU semantic search · Explicit workloads only" : "Model-free functional checks") · GPU, OCR and mail are off.
     </aside>
     <Routes @rendermode="InteractiveServer" />
     <script src="_framework/blazor.web.js"></script>

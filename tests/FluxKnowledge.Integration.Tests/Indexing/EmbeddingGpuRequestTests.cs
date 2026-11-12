@@ -801,20 +801,25 @@ public sealed partial class EmbeddingGpuRequestTests(NativeSqlServerFixture fixt
             new UsearchCorpusAnnLeaseFactory(environment.Store, new UsearchGenerationValidator()),
             new BgeScheduledPassageInference(foreground, new BgeGpuInferenceSession(models)),
             new WindowsInteractiveGpuOwnerProbe(), codec, new LocalPrivateContentDisclosure());
+        await SqlTestData.WaitForFullTextAsync(environment.Factory);
         var search = engine.SearchAsync(new("Heading", 2, "all", null, null), CancellationToken.None).AsTask();
-        GpuExecutorBatchHandle? handle = null;
-        var dispatchDeadline = DateTimeOffset.UtcNow.AddSeconds(1.5);
-        while (handle is null && DateTimeOffset.UtcNow < dispatchDeadline)
+        var foregroundBatches = new List<Guid>();
+        using var foregroundBudget = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+        // Embedding and ranking now release ownership separately around SQL/ANN.
+        // Drive the real handoffs for both phases, rather than leaving ranking queued.
+        while (!search.IsCompleted)
         {
             await scheduler.RunAdmissionRoundAsync(Guid.NewGuid(), GpuSchedulerWakeReason.WorkReady, options,
-                gate.DecideAsync, CancellationToken.None);
-            handle = (await scheduler.ReadPendingDispatchesAsync(CancellationToken.None)).SingleOrDefault();
-            if (handle is null) await Task.Delay(10);
+                gate.DecideAsync, foregroundBudget.Token);
+            var handle = (await scheduler.ReadPendingDispatchesAsync(foregroundBudget.Token)).SingleOrDefault();
+            if (handle is null) { await Task.Delay(10, foregroundBudget.Token); continue; }
+            Assert.Equal(foreground.ExecutorKey, handle.ExecutorKey);
+            foregroundBatches.Add(handle.BatchId);
+            await foreground.DeliverAsync(handle, foregroundBudget.Token);
         }
-        Assert.NotNull(handle);
-        Assert.Equal(foreground.ExecutorKey, handle.ExecutorKey);
-        await foreground.DeliverAsync(handle, CancellationToken.None);
         var result = await search;
+        Assert.Equal(2, foregroundBatches.Count);
+        Assert.Equal(2, foregroundBatches.Distinct().Count());
         Assert.Equal("ready", result.SemanticStatus);
         Assert.Equal(2, result.Results.Count);
         Assert.All(result.Results, hit => Assert.Contains("rerank:trained", hit.Explanation));

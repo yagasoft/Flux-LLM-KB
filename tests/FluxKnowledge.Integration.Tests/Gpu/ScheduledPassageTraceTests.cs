@@ -174,7 +174,38 @@ public sealed class ScheduledPassageTraceTests(NativeSqlServerFixture fixture) :
             ? GpuMiniTaskExecutionState.OutcomeUncertain : GpuMiniTaskExecutionState.Completed);
     }
 
-    private static async Task<(SqlGpuSchedulerStore, GpuInteractiveExecutor, Lifecycle)> CreateExecutorAsync(IDbContextFactory<FluxKnowledgeDbContext> factory)
+    [NativeSqlServerTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Configured_executor_session_and_factory_precision_must_match(bool matches)
+    {
+        await SqlTestData.ClearPipelineAsync(fixture);
+        var factory = SqlTestData.CreateFactory(fixture);
+        var precision = BgeRerankerPrecision.Fp16Internal;
+        var (store, executor, _) = await CreateExecutorAsync(factory,
+            matches ? BgeOfflineModels.GetGpuRuntimeKey(precision) : BgeOfflineModels.GpuRuntimeKey);
+        var models = new BgeRerankerPrecisionTests.Models(precision, false);
+        var inference = new BgeScheduledPassageInference(executor, new BgeGpuInferenceSession(models));
+        Assert.Equal(BgeOfflineModels.GetRerankerFingerprint(precision), inference.RerankerFingerprint);
+        var result = inference.ExecuteAsync((_, reranker, ct) => reranker.RerankAsync("query", [new(8,"passage")], ct), default).AsTask();
+        await WaitForRequestsAsync(factory, 1);
+        await DeliverNextAsync(store, executor);
+        if (matches)
+        {
+            Assert.Equal(inference.RerankerFingerprint, (await result).ModelFingerprint);
+            Assert.Equal(1, models.Opens);
+            Assert.Equal(1, models.Disposals);
+        }
+        else
+        {
+            await Assert.ThrowsAsync<InvalidOperationException>(() => result);
+            Assert.Equal(0, models.Opens);
+        }
+        await AssertReleasedAsync(factory, 1, matches ? GpuMiniTaskExecutionState.Completed : GpuMiniTaskExecutionState.OutcomeUncertain);
+    }
+
+    private static async Task<(SqlGpuSchedulerStore, GpuInteractiveExecutor, Lifecycle)> CreateExecutorAsync(
+        IDbContextFactory<FluxKnowledgeDbContext> factory, string? runtimeKey = null)
     {
         var store = new SqlGpuSchedulerStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         await using var setup = await factory.CreateDbContextAsync();
@@ -182,7 +213,7 @@ public sealed class ScheduledPassageTraceTests(NativeSqlServerFixture fixture) :
         await setup.SaveChangesAsync();
         var lifecycle = new Lifecycle(store);
         return (store, new GpuInteractiveExecutor(store, lifecycle, store, new ChannelGpuSchedulerWakeSignal(),
-            TimeProvider.System, BgeOfflineModels.GpuRuntimeKey, BgeOfflineModels.GpuSettingsFingerprint, 10), lifecycle);
+            TimeProvider.System, runtimeKey ?? BgeOfflineModels.GpuRuntimeKey, BgeOfflineModels.GpuSettingsFingerprint, 10), lifecycle);
     }
 
     private static async Task WaitForRequestsAsync(IDbContextFactory<FluxKnowledgeDbContext> factory, int count)

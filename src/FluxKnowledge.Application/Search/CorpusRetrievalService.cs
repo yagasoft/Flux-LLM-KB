@@ -40,17 +40,45 @@ public sealed class CorpusRetrievalService(
     {
         var query = ValidateSearchRequest(request);
         if (hybrid is not null) return await hybrid.SearchAsync(request with { Query = query }, token).ConfigureAwait(false);
-        return await SearchLexicalCoreAsync(request, query, token).ConfigureAwait(false);
+        return await SearchModelFreeAsync(request, query, token).ConfigureAwait(false);
     }
 
     public ValueTask<CorpusSearchResponse> SearchLexicalAsync(
         CorpusSearchRequest request, CancellationToken token) =>
-        SearchLexicalCoreAsync(request, ValidateSearchRequest(request), token);
+        SearchModelFreeAsync(request, ValidateSearchRequest(request), token);
+
+    private ValueTask<CorpusSearchResponse> SearchModelFreeAsync(CorpusSearchRequest request, string query, CancellationToken token) =>
+        request.MatchMode == "literal" ? SearchLiteralBoundedAsync(request, query, token) : SearchLexicalCoreAsync(request, query, token);
+
+    private async ValueTask<CorpusSearchResponse> SearchLiteralBoundedAsync(CorpusSearchRequest request, string query, CancellationToken callerToken)
+    {
+        callerToken.ThrowIfCancellationRequested();
+        var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(25));
+        var budget = CancellationTokenSource.CreateLinkedTokenSource(callerToken, deadline.Token);
+        var work = SearchLexicalCoreAsync(request, query, budget.Token).AsTask();
+        try { return await work.WaitAsync(TimeSpan.FromSeconds(25), callerToken).ConfigureAwait(false); }
+        catch (Exception error) when (!callerToken.IsCancellationRequested &&
+            (error is TimeoutException || error is OperationCanceledException && deadline.IsCancellationRequested))
+        { throw new PassageRetrievalRefusalException("timeout"); }
+        finally
+        {
+            budget.Cancel();
+            _ = DisposeAfterLiteralSettlesAsync(work, budget, deadline);
+        }
+    }
+
+    private static async Task DisposeAfterLiteralSettlesAsync(Task work, params CancellationTokenSource[] sources)
+    {
+        try { await work.ConfigureAwait(false); }
+        catch (Exception error) when (error is not OutOfMemoryException and not StackOverflowException) { }
+        finally { foreach (var source in sources) source.Dispose(); }
+    }
 
     private static string ValidateSearchRequest(CorpusSearchRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
-        var query = request.Query?.Trim().Normalize(NormalizationForm.FormC);
+        if (request.MatchMode is not ("keyword" or "literal")) throw new NativeOperationException("invalid-request");
+        var query = request.MatchMode == "literal" ? request.Query : request.Query?.Trim().Normalize(NormalizationForm.FormC);
         if (string.IsNullOrWhiteSpace(query) || query.Length > 2048)
             throw new NativeOperationException("invalid-query");
         if (request.Limit is < 1 or > 20)
@@ -68,16 +96,25 @@ public sealed class CorpusRetrievalService(
     {
         var scope = await reader.ResolveScopeAsync(request.Scope, request.RootId, request.Cwd, token)
             .ConfigureAwait(false) ?? throw new NativeOperationException("scope-unavailable");
-        var readiness = await reader.GetLexicalReadinessAsync(token).ConfigureAwait(false);
-        if (!readiness.IndexPresent) throw new NativeOperationException("lexical-unavailable");
-        var candidates = await reader.SearchAsync(query, scope, request.Limit, token).ConfigureAwait(false);
-        var lexicalTerms = candidates.Any(static candidate => candidate.FullTextRank > 0)
+        token.ThrowIfCancellationRequested();
+        var literal = request.MatchMode == "literal";
+        var readiness = literal ? new CorpusLexicalReadiness(false, true) : await reader.GetLexicalReadinessAsync(token).ConfigureAwait(false);
+        if (!literal && !readiness.IndexPresent) throw new NativeOperationException("lexical-unavailable");
+        var candidates = literal
+            ? reader is IHybridPassageCandidateReader literalReader
+                ? await literalReader.ReadLiteralCandidatesAsync(query, scope, token).ConfigureAwait(false)
+                : throw new NativeOperationException("lexical-unavailable")
+            : await reader.SearchAsync(query, scope, request.Limit, token).ConfigureAwait(false);
+        token.ThrowIfCancellationRequested();
+        var lexicalTerms = !literal && candidates.Any(static candidate => candidate.FullTextRank > 0)
             ? await reader.GetLexicalTermsAsync(query, token).ConfigureAwait(false)
             : [];
         var hits = new List<CorpusSearchHit>(request.Limit);
+        var returnedBindings = new List<CorpusEvidenceBinding>(request.Limit);
         var passagesPerDocument = new Dictionary<(Guid? Owner, Guid UnrootedRecord), int>();
         foreach (var candidate in candidates)
         {
+            token.ThrowIfCancellationRequested();
             if (hits.Count == request.Limit) break;
             var documentKey = candidate.OwnerSourceRevisionId.HasValue
                 ? (candidate.OwnerSourceRevisionId, Guid.Empty)
@@ -98,6 +135,7 @@ public sealed class CorpusRetrievalService(
                 candidate.DisclosureProof, candidate.ContextHeader.Length == 0 ? 0 : candidate.ContextHeader.Length + 1).Withheld ||
                 !NativeV1EnvelopeProtector.CanDiscloseResult(JsonSerializer.SerializeToElement(searchInput)))) continue;
             var match = candidate.Content.IndexOf(query, StringComparison.Ordinal);
+            if (literal && match < 0) continue;
             var lexicalAnchor = match >= 0 ? match : FindLexicalAnchor(candidate.Content, lexicalTerms);
             var headerMatch = coherent && candidate.FullTextRank > 0 &&
                 FindLexicalAnchor(candidate.ContextHeader, lexicalTerms) >= 0;
@@ -125,6 +163,7 @@ public sealed class CorpusRetrievalService(
                 candidate.ArtifactHash, candidate.ChunkId, candidate.ChunkHash,
                 candidate.StartOffset + localStart, localLength, candidate.CorpusEpoch);
             var current = await reader.ReadAsync(binding, 0, token).ConfigureAwait(false);
+            token.ThrowIfCancellationRequested();
             if (current is null) continue;
             if (current.DisclosureText is null ||
                 disclosure.EvaluateCodeGuard(current.DisclosureText, LocalDisclosureKind.RetainedDetail,
@@ -144,16 +183,24 @@ public sealed class CorpusRetrievalService(
                  ..citation.Warnings]);
             if (!NativeV1EnvelopeProtector.CanDiscloseResult(JsonSerializer.SerializeToElement(hit))) continue;
             hits.Add(hit);
+            if (literal) returnedBindings.Add(binding);
             passagesPerDocument[documentKey] = passagesPerDocument.GetValueOrDefault(documentKey) + 1;
         }
 
         var warnings = new List<string>();
+        if (literal && returnedBindings.Count > 0)
+        {
+            var valid = await reader.ValidateCurrentBindingsAsync(returnedBindings, token).ConfigureAwait(false);
+            token.ThrowIfCancellationRequested();
+            if (hits.RemoveAll(hit => !valid.Contains(hit.ChunkId)) > 0) warnings.Add("publication-changed");
+            if (hits.Count == 0) throw new PassageRetrievalRefusalException("index-updating");
+        }
         if (!readiness.PopulationComplete) warnings.Add("full-text-populating");
-        if (candidates.Count >= 200) warnings.Add("candidate-budget-reached");
+        if (candidates.Count >= 100) warnings.Add("candidate-budget-reached");
         if (lexicalTerms.Count >= 512) warnings.Add("lexical-term-budget-reached");
         var response = new CorpusSearchResponse(hits,
             new CorpusResolvedScope(scope.Kind, scope.RootIds, scope.CanonicalCwd),
-            "lexical", "not-enabled", null, warnings);
+            "lexical", literal ? "not-requested" : "not-enabled", null, warnings);
         if (!NativeV1EnvelopeProtector.CanDiscloseResult(JsonSerializer.SerializeToElement(response)))
             throw new NativeOperationException("content-withheld");
         return response;

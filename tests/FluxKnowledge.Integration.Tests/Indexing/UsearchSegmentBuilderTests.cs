@@ -15,6 +15,68 @@ public sealed class UsearchSegmentBuilderTests : IDisposable
     private readonly string _root = Path.Combine(Path.GetTempPath(), "FluxKnowledgeSegments_" + Guid.NewGuid().ToString("N"));
 
     [Fact]
+    public async Task Construction_policy_has_distinct_resumable_identity_without_replacing_legacy_graphs()
+    {
+        var vectors = new[] { Vector(1), Vector(2) };
+        var legacy = Assert.Single(await Builder(2).BuildAsync("synthetic-segment-profile", 4, Stream(vectors), default));
+        var builder = new UsearchSegmentBuilder(UsearchIndexOptions.FromConfiguredRoot(_root),
+            new WindowsIndexSegmentReadLeaseFactory(_root), new(2), UsearchSegmentConstructionPolicy.M32Construction512);
+        var stronger = Assert.Single(await builder.BuildAsync("synthetic-segment-profile", 4, Stream(vectors), default));
+        Assert.NotEqual(legacy.Id, stronger.Id);
+        Assert.NotEqual(legacy.NativeFormat, stronger.NativeFormat);
+        Assert.NotEqual(legacy.FileChecksum, stronger.FileChecksum);
+        Assert.Equal(legacy.MembershipChecksum, stronger.MembershipChecksum);
+        Assert.Equal(UsearchSegmentBuilder.NativeFormat, legacy.NativeFormat);
+        var timestamp = File.GetLastWriteTimeUtc(Path.Combine(stronger.DirectoryPath, "index.usearch"));
+        Assert.Equal(stronger, Assert.Single(await builder.BuildAsync("synthetic-segment-profile", 4, Stream(vectors), default)));
+        Assert.Equal(timestamp, File.GetLastWriteTimeUtc(Path.Combine(stronger.DirectoryPath, "index.usearch")));
+        foreach (var segment in new[] { legacy, stronger })
+        {
+            using var view = new UsearchReadIndex(Path.Combine(segment.DirectoryPath, "index.usearch"), 4, 2);
+            Assert.Equal(new long[] { 1, 2 }, view.Search([1, 2, 3, 4], 2, new HashSet<long> { 1, 2 }, default).Select(match => match.VectorId).Order());
+        }
+        var owners = new ConstructionOwners();
+        await using (var cache = new UsearchSegmentCache(UsearchIndexOptions.FromConfiguredRoot(_root),
+            new WindowsIndexSegmentReadLeaseFactory(_root), owners, TimeProvider.System))
+        {
+            foreach (var segment in new[] { legacy, stronger })
+            {
+                await using var borrowed = await cache.BorrowAsync(segment, default);
+                Assert.Equal(2, (await borrowed.SearchAsync([1, 2, 3, 4], 2, new HashSet<long> { 1, 2 }, default)).Count);
+            }
+        }
+        await using (var cache = new UsearchSegmentCache(UsearchIndexOptions.FromConfiguredRoot(_root),
+            new WindowsIndexSegmentReadLeaseFactory(_root), owners, TimeProvider.System))
+            await Assert.ThrowsAsync<IndexGenerationValidationException>(() =>
+                cache.BorrowAsync(legacy with { NativeFormat = legacy.NativeFormat + "/unknown" }, default).AsTask());
+        Assert.Equal(2, owners.Opened);
+        Assert.Equal(3, owners.Released);
+        Assert.Equal(2, Directory.EnumerateDirectories(Path.Combine(_root, "segments")).Count());
+    }
+
+    [Fact]
+    public async Task Unknown_construction_policy_fails_before_native_placement()
+    {
+        var builder = new UsearchSegmentBuilder(UsearchIndexOptions.FromConfiguredRoot(_root),
+            new WindowsIndexSegmentReadLeaseFactory(_root), new(2), (UsearchSegmentConstructionPolicy)99);
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() =>
+            builder.BuildAsync("synthetic-segment-profile", 4, Stream([Vector(1)]), default).AsTask());
+        Assert.False(Directory.Exists(_root));
+    }
+
+    private sealed class ConstructionOwners : IIndexSegmentOwnerStore
+    {
+        public int Opened { get; private set; }
+        public int Released { get; private set; }
+        public ValueTask<Guid> RegisterAsync(IndexSegmentDescriptor segment, Guid instanceId, CancellationToken cancellationToken) =>
+            ValueTask.FromResult(Guid.NewGuid());
+        public ValueTask OpenedAsync(Guid ownerId, CancellationToken cancellationToken) { Opened++; return ValueTask.CompletedTask; }
+        public ValueTask ReleasedAfterDisposalAsync(Guid ownerId, CancellationToken cancellationToken) { Released++; return ValueTask.CompletedTask; }
+        public ValueTask<IReadOnlySet<string>> ReadRetiringAsync(IReadOnlyList<string> ids, CancellationToken cancellationToken) =>
+            ValueTask.FromResult<IReadOnlySet<string>>(new HashSet<string>());
+    }
+
+    [Fact]
     public async Task Low_capacity_defers_before_native_placement_and_reuses_existing_segments()
     {
         var builder = Builder(2);

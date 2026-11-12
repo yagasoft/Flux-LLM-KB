@@ -6,14 +6,27 @@ namespace FluxKnowledge.Infrastructure.Inference.Search;
 public static class BgeCpuResidentModelFactory
 {
     private const int LaneCount = 2;
-    private const int RerankerShards = 4;
+    private const int DefaultRerankerShards = 4;
     private const int EmbeddingThreads = 4;
     private const int RerankerThreads = 4;
     private const long Gib = 1024L * 1024 * 1024;
 
+    public static Task<CpuResidentPassageLoad> LoadAsync(BgeGpuModelStores stores,
+        Func<CancellationToken, Task<IDisposable>> acquireOwner, CancellationToken cancellationToken) =>
+        LoadAsync(stores, acquireOwner, cancellationToken, DefaultRerankerShards);
+
+    public static Task<CpuResidentPassageLoad> LoadAsync(BgeGpuModelStores stores,
+        Func<CancellationToken, Task<IDisposable>> acquireOwner, CancellationToken cancellationToken, int rerankerShards)
+        => LoadAsync(stores, acquireOwner, cancellationToken, rerankerShards, RerankerThreads);
+
     public static async Task<CpuResidentPassageLoad> LoadAsync(BgeGpuModelStores stores,
-        Func<CancellationToken, Task<IDisposable>> acquireOwner, CancellationToken cancellationToken)
+        Func<CancellationToken, Task<IDisposable>> acquireOwner, CancellationToken cancellationToken, int rerankerShards, int rerankerThreads)
     {
+        if (rerankerShards is not (1 or DefaultRerankerShards)) throw new ArgumentOutOfRangeException(nameof(rerankerShards));
+        if (rerankerThreads is not (1 or RerankerThreads)) throw new ArgumentOutOfRangeException(nameof(rerankerThreads));
+        // Provisional per-lane loading headroom: fewer sessions, same final reserve.
+        // The default four-shard path retains its established 32/24/16 GiB checks.
+        var laneHeadroom = rerankerShards == DefaultRerankerShards ? 8 : 5;
         // No model allocation starts until this process exclusively owns the machine-wide pool.
         var owner = await acquireOwner(cancellationToken).ConfigureAwait(false);
         var lanes = new List<CpuPassageInferenceLane>(LaneCount);
@@ -21,9 +34,9 @@ public static class BgeCpuResidentModelFactory
         {
             for (var index = 0; index < LaneCount; index++)
             {
-                if (FreePhysicalBytes() is not long free || free < (index == 0 ? 32 : 24) * Gib)
+                if (FreePhysicalBytes() is not long free || free < (16 + (LaneCount - index) * laneHeadroom) * Gib)
                     throw new BgeInferenceException("cpu-search-memory-unavailable");
-                lanes.Add(await OpenLaneAsync(stores, cancellationToken).ConfigureAwait(false));
+                lanes.Add(await OpenLaneAsync(stores, rerankerShards, rerankerThreads, cancellationToken).ConfigureAwait(false));
             }
             if (FreePhysicalBytes() is not long remaining || remaining < 16 * Gib)
                 throw new BgeInferenceException("cpu-search-memory-unavailable");
@@ -52,11 +65,11 @@ public static class BgeCpuResidentModelFactory
         catch (Exception cleanup) { throw new CpuNativeReleaseUnconfirmedException(failure, cleanup); }
     }
 
-    private static async Task<CpuPassageInferenceLane> OpenLaneAsync(BgeGpuModelStores stores, CancellationToken ct)
+    private static async Task<CpuPassageInferenceLane> OpenLaneAsync(BgeGpuModelStores stores, int rerankerShards, int rerankerThreads, CancellationToken ct)
     {
         IBgeTokenizer? embeddingTokenizer = null, rerankerTokenizer = null;
         BgeEmbeddingProvider? embedding = null;
-        var rerankers = new List<BgeReranker>(RerankerShards);
+        var rerankers = new List<BgeReranker>(rerankerShards);
         try
         {
             embeddingTokenizer = await BgeOfflineModels.CreateTokenizerAsync(stores.Embedding, stores.TokenizerRuntime,
@@ -65,9 +78,9 @@ public static class BgeCpuResidentModelFactory
                 reranker: true, ct).ConfigureAwait(false);
             embedding = await BgeOfflineModels.OpenCpuEmbeddingAsync(stores.Embedding, embeddingTokenizer, ct,
                 EmbeddingThreads).ConfigureAwait(false);
-            for (var shard = 0; shard < RerankerShards; shard++)
+            for (var shard = 0; shard < rerankerShards; shard++)
                 rerankers.Add(await BgeOfflineModels.OpenCpuRerankerAsync(stores.Reranker, rerankerTokenizer, ct,
-                    RerankerThreads).ConfigureAwait(false));
+                    rerankerThreads).ConfigureAwait(false));
             var lane = new CpuPassageInferenceLane(embedding,
                 new ParallelCpuPassageReranker(rerankers, BgeOfflineModels.RerankerFingerprint),
                 () => DisposeModels(embedding, rerankers, embeddingTokenizer, rerankerTokenizer));

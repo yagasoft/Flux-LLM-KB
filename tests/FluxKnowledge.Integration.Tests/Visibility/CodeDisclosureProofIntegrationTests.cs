@@ -54,6 +54,7 @@ public sealed class CodeDisclosureProofIntegrationTests(NativeSqlServerFixture f
         Assert.Equal(text, candidate.Text);
         Assert.Equal(CodeDisclosureProofState.Ready, built.State);
         Assert.True(await store.CommitAsync(candidate, built, CancellationToken.None));
+        await SqlTestData.WaitForFullTextAsync(factory);
         var rawReader = new SqlCorpusRetrievalReader(factory);
         var rawCandidate = Assert.Single(await rawReader.SearchAsync(signature,
             new("root", [root], null), 20, CancellationToken.None), value => value.Content.Contains(signature, StringComparison.Ordinal));
@@ -319,6 +320,7 @@ public sealed class CodeDisclosureProofIntegrationTests(NativeSqlServerFixture f
         ScopedCorpusRetrievalTests.AddPublishedText(db, root, $@"C:\proof\{root:N}", "late.cs", chunks);
         var artifact = db.Artifacts.Local.Single().Id;
         await db.SaveChangesAsync();
+        await SqlTestData.WaitForFullTextAsync(db);
         return (factory, root, artifact, method);
     }
 

@@ -10,6 +10,18 @@ namespace FluxKnowledge.Integration.Tests.Cli;
 public sealed class NativeV1CommandTests
 {
     [Fact]
+    public async Task Corpus_literal_mode_and_raw_query_are_preserved_by_the_CLI_JSON_transport()
+    {
+        const string query = " e\u0301 ";
+        var handler = new RecordingHandler("{\"ok\":true,\"result\":{},\"reasonCode\":null,\"message\":null,\"retryable\":false}");
+        var result = await ExecuteAsync(["corpus", "search"], JsonSerializer.Serialize(new { query, scope = "all", match_mode = "literal" }), handler);
+        Assert.Equal(0, result.ExitCode);
+        using var body = JsonDocument.Parse(handler.Body!);
+        Assert.Equal("literal", body.RootElement.GetProperty("match_mode").GetString());
+        Assert.Equal(query, body.RootElement.GetProperty("query").GetString());
+    }
+
+    [Fact]
     public async Task Staging_client_is_pinned_separately_and_production_client_keeps_its_fixed_port()
     {
         var handler = new RecordingHandler("{\"ok\":true,\"result\":{\"safe\":true},\"reasonCode\":null,\"message\":null,\"retryable\":false}");

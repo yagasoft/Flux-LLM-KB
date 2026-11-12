@@ -7,6 +7,11 @@ public sealed record IndexSegmentDescriptor(
     string NativeFormat, int FormatVersion = 2,
     [property: System.Text.Json.Serialization.JsonIgnore] Guid PhysicalIncarnation = default)
 {
+    public static string ComputeMembershipChecksum(string modelFingerprint, int dimensions,
+        IEnumerable<(long VectorId, string PayloadChecksum)> members) =>
+        Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(
+            $"{modelFingerprint}|cos|{dimensions}|{string.Join(',', members.Select(member => $"{member.VectorId}:{member.PayloadChecksum}"))}")));
+
     // The physical incarnation is already encoded in Id. SQL retains its producing
     // candidate, so manifests need not gain a second mutable producer reference.
     public static string ComputeId(string nativeFormat, string membershipChecksum, Guid incarnation = default) =>

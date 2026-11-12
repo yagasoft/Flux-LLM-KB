@@ -1,5 +1,7 @@
 using FluxKnowledge.Application.Models;
 using FluxKnowledge.Application.Gpu;
+using FluxKnowledge.Application.Search;
+using System.Diagnostics;
 using Microsoft.ML.OnnxRuntime;
 using Microsoft.ML.OnnxRuntime.Tensors;
 
@@ -15,23 +17,29 @@ internal sealed class BgeOnnxTensorRunner : IBgeTensorRunner
     private readonly string _output;
     private readonly GpuOwnedWorkContext? _ownership;
     private readonly GpuOwnedWorkContext.NativeAllocation? _allocation;
+    private readonly string _runtimeKey;
     private bool _disposed;
 
     private BgeOnnxTensorRunner(VerifiedLocalModelLease lease, InferenceSession session, string output, GpuOwnedWorkContext? ownership,
-        GpuOwnedWorkContext.NativeAllocation? allocation)
+        GpuOwnedWorkContext.NativeAllocation? allocation, string runtimeKey)
     {
-        _lease = lease; _session = session; _output = output; _ownership = ownership; _allocation = allocation;
+        _lease = lease; _session = session; _output = output; _ownership = ownership; _allocation = allocation; _runtimeKey = runtimeKey;
     }
 
     internal static BgeOnnxTensorRunner Open(VerifiedLocalModelLease lease, bool embedding, CancellationToken cancellationToken,
-        GpuOwnedWorkContext? ownership = null, int cpuIntraOpThreads = 4)
+        GpuOwnedWorkContext? ownership = null, int cpuIntraOpThreads = 4) =>
+        Open(lease, embedding, cancellationToken, ownership, cpuIntraOpThreads, BgeRerankerPrecision.Fp32);
+
+    internal static BgeOnnxTensorRunner Open(VerifiedLocalModelLease lease, bool embedding, CancellationToken cancellationToken,
+        GpuOwnedWorkContext? ownership, int cpuIntraOpThreads, BgeRerankerPrecision precision)
     {
         InferenceSession? session = null;
         GpuOwnedWorkContext.NativeAllocation? allocation = null;
         try
         {
+            var runtimeKey = BgeOfflineModels.GetGpuRuntimeKey(precision);
             cancellationToken.ThrowIfCancellationRequested();
-            ownership?.RequireActive(BgeOfflineModels.GpuRuntimeKey, BgeOfflineModels.GpuSettingsFingerprint);
+            ownership?.RequireActive(runtimeKey, BgeOfflineModels.GpuSettingsFingerprint);
             var graph = lease.GetVerifiedLocalPath("model.onnx");
             var data = lease.GetVerifiedLocalPath("model.onnx_data");
             if (!string.Equals(Path.GetDirectoryName(graph), Path.GetDirectoryName(data), StringComparison.OrdinalIgnoreCase))
@@ -51,13 +59,13 @@ internal sealed class BgeOnnxTensorRunner : IBgeTensorRunner
             }
             session = new InferenceSession(graph, options);
             cancellationToken.ThrowIfCancellationRequested();
-            ownership?.RequireActive(BgeOfflineModels.GpuRuntimeKey, BgeOfflineModels.GpuSettingsFingerprint);
+            ownership?.RequireActive(runtimeKey, BgeOfflineModels.GpuSettingsFingerprint);
             var output = embedding ? "sentence_embedding" : "logits";
             if (!session.InputMetadata.Keys.Order().SequenceEqual(new[] { "attention_mask", "input_ids" }) ||
                 session.InputMetadata.Values.Any(static m => m.ElementType != typeof(long) || m.Dimensions.Length != 2) ||
                 !session.OutputMetadata.TryGetValue(output, out var meta) || meta.ElementType != typeof(float) || meta.Dimensions.Length != 2)
                 throw new BgeInferenceException("bge-model-tensor-contract-mismatch");
-            return new(lease, session, output, ownership, allocation);
+            return new(lease, session, output, ownership, allocation, runtimeKey);
         }
         catch (Exception failure)
         {
@@ -88,7 +96,7 @@ internal sealed class BgeOnnxTensorRunner : IBgeTensorRunner
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
             cancellationToken.ThrowIfCancellationRequested();
-            _ownership?.RequireActive(BgeOfflineModels.GpuRuntimeKey, BgeOfflineModels.GpuSettingsFingerprint);
+            _ownership?.RequireActive(_runtimeKey, BgeOfflineModels.GpuSettingsFingerprint);
             using var run = new RunOptions();
             using var registration = cancellationToken.Register(() => run.Terminate = true);
             var inputs = new[]
@@ -98,7 +106,15 @@ internal sealed class BgeOnnxTensorRunner : IBgeTensorRunner
             };
             try
             {
-                using var outputs = _session.Run(inputs, [_output], run);
+                var correlation = HybridSearchDiagnostics.CurrentCorrelation;
+                var nativeId = correlation.TraceId + "/" + correlation.SpanId;
+                var model = (_ownership is null ? "cpu-" : "gpu-") + (_output == "sentence_embedding" ? "embedding" : "reranker");
+                var started = Stopwatch.GetTimestamp();
+                HybridSearchDiagnostics.Log.ModelPhase(nativeId, model, "native-run", 0, "begin");
+                IDisposableReadOnlyCollection<DisposableNamedOnnxValue> outputs;
+                try { outputs = _session.Run(inputs, [_output], run); }
+                finally { HybridSearchDiagnostics.Log.ModelPhase(nativeId, model, "native-run", Stopwatch.GetElapsedTime(started).TotalMilliseconds, "settled"); }
+                using var ownedOutputs = outputs;
                 cancellationToken.ThrowIfCancellationRequested();
                 var tensor = outputs.Single().AsTensor<float>();
                 return new(tensor.ToArray(), tensor.Dimensions.ToArray());

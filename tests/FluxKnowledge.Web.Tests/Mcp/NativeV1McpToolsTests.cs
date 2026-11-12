@@ -17,6 +17,30 @@ namespace FluxKnowledge.Web.Tests.Mcp;
 
 public sealed class NativeV1McpToolsTests
 {
+    [Fact]
+    public async Task Corpus_literal_mode_preserves_raw_query_through_the_MCP_mapper()
+    {
+        const string query = " e\u0301 ";
+        var facade = new RecordingFacade();
+        var result = Read(await CreateTools(facade).CorpusSearch(query, scope: "all", match_mode: "literal"));
+        Assert.True(result.GetProperty("ok").GetBoolean());
+        var request = Assert.IsType<FluxKnowledge.Application.Contracts.CorpusSearchRequest>(facade.LastQueryRequest);
+        Assert.Equal("literal", request.MatchMode);
+        Assert.Equal(query, request.Query);
+    }
+
+    [Fact]
+    public async Task Corpus_deadline_is_a_retryable_refusal_without_automatic_repeat_or_empty_success()
+    {
+        var facade = new RecordingFacade(queryFailure: new FluxKnowledge.Application.Ports.PassageRetrievalRefusalException("timeout"));
+        var response = Read(await CreateTools(facade).CorpusSearch("query", 10, "all", cancellationToken: CancellationToken.None));
+        Assert.False(response.GetProperty("ok").GetBoolean());
+        Assert.Equal("search-timeout", response.GetProperty("reasonCode").GetString());
+        Assert.True(response.GetProperty("retryable").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, response.GetProperty("result").ValueKind);
+        Assert.Equal(1, facade.QueryCalls);
+    }
+
     [Theory]
     [InlineData("preview", "index_retention")]
     [InlineData("commit", "index_retention")]
@@ -262,8 +286,9 @@ public sealed class NativeV1McpToolsTests
         new NativeV1RequestMapper(),
         new FluxKnowledge.Application.Mcp.ReadonlyMcpRetryExecutor(TimeSpan.Zero, TimeSpan.Zero));
 
-    private sealed class RecordingFacade(object? queryResult = null) : INativeV1Facade
+    private sealed class RecordingFacade(object? queryResult = null, Exception? queryFailure = null) : INativeV1Facade
     {
+        public object? LastQueryRequest { get; private set; }
         public object? LastCommand { get; private set; }
         public int QueryCalls { get; private set; }
         public int PreviewCalls { get; private set; }
@@ -271,7 +296,9 @@ public sealed class NativeV1McpToolsTests
 
         public ValueTask<object> ExecuteQueryAsync(string family, object request, CancellationToken cancellationToken)
         {
+            LastQueryRequest = request;
             QueryCalls++;
+            if (queryFailure is not null) throw queryFailure;
             if (request is NativeCodeQuery { Cursor: not null }) throw new NativeOperationException("cursor-invalid");
             return ValueTask.FromResult(queryResult ?? (object)new { family, value = "safe" });
         }

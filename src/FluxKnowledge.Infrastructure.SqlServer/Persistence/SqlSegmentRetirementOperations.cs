@@ -13,17 +13,24 @@ public sealed record SegmentRetirementPlan(Guid OperationId, IndexGenerationDesc
 
 /// <summary>Exact retirement in two committed phases; no waiting for native disposal under either SQL fence.</summary>
 public sealed partial class SqlSegmentRetirementOperations(IDbContextFactory<FluxKnowledgeDbContext> contexts,
-    IIndexProjectionFileStore files, string indexRoot, string recoveryRoot, TimeProvider clock, IGpuInteractiveOwnerProbe probe) : IIndexSourceDeletionMaintenance
+    IIndexProjectionFileStore files, string indexRoot, string recoveryRoot, TimeProvider clock, IGpuInteractiveOwnerProbe probe,
+    LegacyStagingRecoveryProof? legacyProof) : IIndexSourceDeletionMaintenance
 {
+    public SqlSegmentRetirementOperations(IDbContextFactory<FluxKnowledgeDbContext> contexts,IIndexProjectionFileStore files,
+        string indexRoot,string recoveryRoot,TimeProvider clock,IGpuInteractiveOwnerProbe probe)
+        :this(contexts,files,indexRoot,recoveryRoot,clock,probe,null){}
     internal Func<string, FluxKnowledgeDbContext, CancellationToken, ValueTask>? FileOperationCheckpoint { get; init; }
     public async ValueTask<SegmentRetirementPlan> MarkManifestAsync(Guid generationId, Guid operationId, CancellationToken cancellationToken,
         SourceDeletionWorkItem? sourceDeletion = null)
     {
         if (operationId == Guid.Empty) throw new ArgumentException("segment-retirement-operation-invalid");
+        using var legacyUse=legacyProof?.BorrowRetirement(sourceDeletion,3,generationId.ToString("N"));
         await using var strategy = await contexts.CreateDbContextAsync(cancellationToken);
+        legacyProof?.ValidateConnection(strategy);
         return await strategy.Database.CreateExecutionStrategy().ExecuteAsync(async () =>
         {
             await using var context = await contexts.CreateDbContextAsync(cancellationToken);
+            legacyProof?.ValidateConnection(context);
             await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
             if (!await EnterAsync(context, cancellationToken)) throw new InvalidOperationException("segment-retirement-query-owned");
             await ValidateSourceDeletionAsync(context, sourceDeletion, 3, generationId.ToString("N"), cancellationToken);
@@ -37,6 +44,7 @@ public sealed partial class SqlSegmentRetirementOperations(IDbContextFactory<Flu
             await context.IndexGenerationSegments.Where(value => value.GenerationId == generationId).ExecuteDeleteAsync(cancellationToken);
             foreach (var id in ids)
             {
+                if(legacyProof is not null && id!=legacyProof.Scope.SegmentId)continue;
                 if (await context.IndexGenerationSegments.AnyAsync(value => value.SegmentId == id, cancellationToken)) continue;
                 if (sourceDeletion is not null && !await context.SourceDeletionCleanupItems.AnyAsync(value =>
                     value.SourceDeletionOperationId == sourceDeletion.OperationId && value.StorageKind == 4 && value.RelativePath == id, cancellationToken))
@@ -59,6 +67,7 @@ public sealed partial class SqlSegmentRetirementOperations(IDbContextFactory<Flu
     public async ValueTask<bool> TryReclaimSegmentAsync(string segmentId, Guid operationId, CancellationToken cancellationToken,
         SourceDeletionWorkItem? sourceDeletion = null)
     {
+        using var legacyUse=legacyProof?.BorrowRetirement(sourceDeletion,4,segmentId);
         // Filesystem work must not be replayed by an EF retry strategy. A repeated call rechecks the durable exact intent.
         await using var context = await NewFileOperationContextAsync(cancellationToken);
         await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
@@ -93,6 +102,7 @@ public sealed partial class SqlSegmentRetirementOperations(IDbContextFactory<Flu
     public async ValueTask<bool> TryReclaimManifestAsync(Guid generationId, Guid operationId, CancellationToken cancellationToken,
         SourceDeletionWorkItem? sourceDeletion = null)
     {
+        using var legacyUse=legacyProof?.BorrowRetirement(sourceDeletion,3,generationId.ToString("N"));
         await using var context = await NewFileOperationContextAsync(cancellationToken);
         await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
         var originalTransaction = (SqlTransaction)transaction.GetDbTransaction();
@@ -121,7 +131,7 @@ public sealed partial class SqlSegmentRetirementOperations(IDbContextFactory<Flu
         await SqlIndexRecoveryReferences.AcquireReadTransactionAsync(context, cancellationToken);
         if (!await SqlCorpusGenerationLeaseStore.TryAcquireCleanupTransactionAsync(context, probe, cancellationToken)) return false;
         await SqlPublishedPassageSelection.AcquireFenceAsync(context, cancellationToken);
-        await SqlIndexRecoveryReferences.RequireCurrentAsync(context, recoveryRoot, indexRoot, cancellationToken);
+        await SqlIndexRecoveryReferences.RequireCurrentAsync(context, recoveryRoot, indexRoot, cancellationToken,legacyProof);
         return true;
     }
 
@@ -169,6 +179,7 @@ public sealed partial class SqlSegmentRetirementOperations(IDbContextFactory<Flu
     private async Task<FluxKnowledgeDbContext> NewFileOperationContextAsync(CancellationToken cancellationToken)
     {
         await using var factoryContext = await contexts.CreateDbContextAsync(cancellationToken);
+        legacyProof?.ValidateConnection(factoryContext);
         var binding = new SqlConnectionStringBuilder(factoryContext.Database.GetConnectionString()) { ConnectRetryCount = 0, Enlist = false };
         return new(new DbContextOptionsBuilder<FluxKnowledgeDbContext>().UseSqlServer(binding.ConnectionString).Options);
     }

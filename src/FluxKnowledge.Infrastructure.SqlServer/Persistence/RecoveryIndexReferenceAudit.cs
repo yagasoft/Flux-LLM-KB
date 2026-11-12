@@ -36,7 +36,12 @@ public sealed class RecoveryIndexReferenceAudit(string indexRoot)
         "source-deletion-migration-prepared.json", "source-deletion-migration-verified.json", "stopped-pool-recovery-baseline.json"
     };
 
-    public RecoveryIndexAudit Capture(string recoveryRoot, CancellationToken token = default)
+    public RecoveryIndexAudit Capture(string recoveryRoot, CancellationToken token = default)=>CaptureCore(recoveryRoot,token,null);
+
+    internal RecoveryIndexAudit CaptureLegacyStaging(LegacyStagingRecoveryProof proof,CancellationToken token)=>
+        CaptureCore(proof.Scope.RecoveryRoot,token,proof);
+
+    private RecoveryIndexAudit CaptureCore(string recoveryRoot,CancellationToken token,LegacyStagingRecoveryProof? legacy)
     {
         var root = Path.GetFullPath(recoveryRoot);
         var index = Path.TrimEndingDirectorySeparator(Path.GetFullPath(indexRoot));
@@ -271,6 +276,7 @@ public sealed class RecoveryIndexReferenceAudit(string indexRoot)
             DirectoryProof(root);
             foreach (var category in Children(root))
             {
+                if(legacy is not null && legacy.TryCaptureCategory(category,inventory,pins)){packets++;continue;}
                 var name = Path.GetFileName(category); DirectoryProof(category);
                 if (name == "IncrementalUpdates") { foreach (var packet in Children(category)) ApplicationPacket(packet); continue; }
                 if (name == "IndexRetention") { foreach (var packet in Children(category)) RetentionPacket(packet); continue; }

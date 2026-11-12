@@ -765,6 +765,7 @@ public sealed partial class SqlToUsearchRebuildTests(NativeSqlServerFixture fixt
                 CurrentStage = (int)PipelineStage.Embed, RegisteredAtUtc = DateTimeOffset.UtcNow
             });
             await context.SaveChangesAsync();
+            await SqlTestData.WaitForFullTextAsync(context);
         }
 
         Assert.Equal(expected.Select(vector => vector.VectorId),
@@ -785,6 +786,7 @@ public sealed partial class SqlToUsearchRebuildTests(NativeSqlServerFixture fixt
             var record = await context.PipelineRecords.SingleAsync(candidate => candidate.Id == recordId);
             record.CompletionCriteriaMet = false;
             await context.SaveChangesAsync();
+            await SqlTestData.WaitForFullTextAsync(context);
         }
         await using var verification = await environment.Factory.CreateDbContextAsync();
         var forbidden = await (from vector in verification.Vectors
@@ -830,6 +832,7 @@ public sealed partial class SqlToUsearchRebuildTests(NativeSqlServerFixture fixt
             Assert.Equal(Convert.ToHexStringLower(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(chunk.SearchText))),
                 chunk.SearchInputHash);
         });
+        await SqlTestData.WaitForFullTextAsync(context);
         var service = new CorpusRetrievalService(new SqlCorpusRetrievalReader(environment.Factory),
             new CorpusEvidenceCodec(new Microsoft.AspNetCore.DataProtection.EphemeralDataProtectionProvider()),
             new FluxKnowledge.Infrastructure.SqlServer.Visibility.LocalPrivateContentDisclosure(), new CorpusRetrievalOptions(true));
@@ -2261,7 +2264,11 @@ public sealed partial class SqlToUsearchRebuildTests(NativeSqlServerFixture fixt
             public ValueTask WaitUntilReleasedAsync(CancellationToken cancellationToken) => ValueTask.CompletedTask;
         }
 
-        public async Task<Guid> AddRetainedAndPumpAsync(string text)
+        public Task<Guid> AddRetainedAndPumpAsync(string text) => AddRetainedAndPumpAsync(text, null);
+
+        public Task<Guid> AddRetainedAndPumpAsync(string text,string? sourceTag)=>AddRetainedAndPumpAsync(text,sourceTag,null);
+
+        public async Task<Guid> AddRetainedAndPumpAsync(string text,string? sourceTag,string? canonicalRoot)
         {
             var bytes = System.Text.Encoding.UTF8.GetBytes(text);
             var hash = Convert.ToHexStringLower(SHA256.HashData(bytes));
@@ -2277,7 +2284,7 @@ public sealed partial class SqlToUsearchRebuildTests(NativeSqlServerFixture fixt
             {
                 context.SourceRootConfigurations.Add(new SourceRootConfigurationEntity
                 {
-                    Id = rootId, CanonicalPath = $"C:\\retained-rebuild\\{rootId:N}", DisplayName = "Retained", State = 0,
+                    Id = rootId, CanonicalPath = canonicalRoot ?? (sourceTag is null ? $"C:\\retained-rebuild\\{rootId:N}" : $"C:\\routing-fixture\\{rootId:N}"), DisplayName = "Retained", State = 0,
                     Recursive = true, IncludePatternsJson = "[]", ExcludePatternsJson = "[]", FollowLinks = false,
                     MaximumFileBytes = 16 * 1024 * 1024, AllowedClassificationsJson = "[]", CrawlMode = 0,
                     ReconciliationCadenceSeconds = 900, ConfigurationRevision = 1, CreatedAtUtc = now, UpdatedAtUtc = now
@@ -2285,7 +2292,8 @@ public sealed partial class SqlToUsearchRebuildTests(NativeSqlServerFixture fixt
                 context.SourceRevisions.Add(new SourceRevisionEntity
                 {
                     Id = revisionId, SourceRootId = rootId, StableSourceIdentity = $"retained:{revisionId:N}", Revision = 1,
-                    ContentSha256 = hash, CanonicalPath = $"C:\\retained-rebuild\\{revisionId:N}.txt", Classification = "AcceptedUtf8Text",
+                    ContentSha256 = hash, CanonicalPath = canonicalRoot is not null ? Path.Combine(canonicalRoot,(sourceTag ?? "publication")+".txt") :
+                        sourceTag is null ? $"C:\\retained-rebuild\\{revisionId:N}.txt" : $"C:\\routing-fixture\\{rootId:N}\\{sourceTag}.txt", Classification = "AcceptedUtf8Text",
                     Extension = ".txt", ByteLength = bytes.Length, DiscoveredAtUtc = now, DiscoveryEvidenceJson = "{}"
                 });
                 context.SourceArtifacts.Add(new SourceArtifactEntity
