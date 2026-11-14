@@ -30,7 +30,7 @@ public sealed class SegmentedPublicationPerformanceTests(NativeSqlServerFixture 
         var metrics = new Counters();
         var cacheBytes = oversized ? 16 * 1024 : 32 * 1024 * 1024;
         var text = string.Join(' ', Enumerable.Range(0, 3500 * scale).Select(index => $"word_{index:00000}"));
-        await using var environment = await SqlToUsearchRebuildTests.PipelineEnvironment.CreateAsync(fixture, text,
+        var environment = await SqlToUsearchRebuildTests.PipelineEnvironment.CreateAsync(fixture, text,
             new PassageBuilder(new Words()), segmented: segmented, segmentMaximumVectors: 8,
             configureServices: services =>
             {
@@ -48,6 +48,7 @@ public sealed class SegmentedPublicationPerformanceTests(NativeSqlServerFixture 
                     provider.GetRequiredService<IIndexSegmentReadLeaseFactory>(), provider.GetRequiredService<IIndexSegmentOwnerStore>(),
                     TimeProvider.System, maximumBytes: cacheBytes));
             });
+        await using var cleanup = new ObservedEnvironment(environment, metrics, output);
         await using var db = await environment.Factory.CreateDbContextAsync();
         var before = await environment.ActiveGenerationAsync();
         var files = Directory.GetFiles(environment.IndexRoot, "*", SearchOption.AllDirectories)
@@ -129,15 +130,43 @@ public sealed class SegmentedPublicationPerformanceTests(NativeSqlServerFixture 
     {
         public long PublicationVectors, PublicationPayloadBytes, QueryPayloadBytes;
         public int NativeOpens;
+        // Lifetime ownership is independent of the per-iteration performance reset.
+        private readonly Dictionary<Guid, string> _owners = [];
+        public void Registered(Guid id, string directory) { lock (_owners) _owners.Add(id, directory); }
+        public void Released(Guid id) { lock (_owners) Assert.True(_owners.Remove(id), "Unregistered native owner released."); }
+        public string[] Unreleased { get { lock (_owners) return _owners.Select(p => $"{p.Key:N}:{p.Value}").ToArray(); } }
         public void Reset() { PublicationVectors = PublicationPayloadBytes = QueryPayloadBytes = 0; NativeOpens = 0; }
         public void Publication(IReadOnlyList<CanonicalVector> vectors) { PublicationVectors += vectors.Count; PublicationPayloadBytes += vectors.Sum(value => (long)value.Values.Length); }
     }
     private sealed class CountingOwners(IIndexSegmentOwnerStore inner, Counters counters) : IIndexSegmentOwnerStore
     {
-        public ValueTask<Guid> RegisterAsync(IndexSegmentDescriptor segment, Guid instance, CancellationToken token) => inner.RegisterAsync(segment, instance, token);
+        public async ValueTask<Guid> RegisterAsync(IndexSegmentDescriptor segment, Guid instance, CancellationToken token)
+        {
+            var id = await inner.RegisterAsync(segment, instance, token);
+            counters.Registered(id, segment.DirectoryPath);
+            return id;
+        }
         public async ValueTask OpenedAsync(Guid id, CancellationToken token) { await inner.OpenedAsync(id, token); counters.NativeOpens++; }
-        public ValueTask ReleasedAfterDisposalAsync(Guid id, CancellationToken token) => inner.ReleasedAfterDisposalAsync(id, token);
+        public async ValueTask ReleasedAfterDisposalAsync(Guid id, CancellationToken token)
+        {
+            await inner.ReleasedAfterDisposalAsync(id, token);
+            counters.Released(id);
+        }
         public ValueTask<IReadOnlySet<string>> ReadRetiringAsync(IReadOnlyList<string> ids, CancellationToken token) => inner.ReadRetiringAsync(ids, token);
+    }
+    private sealed class ObservedEnvironment(SqlToUsearchRebuildTests.PipelineEnvironment environment,
+        Counters counters, ITestOutputHelper output) : IAsyncDisposable
+    {
+        public async ValueTask DisposeAsync()
+        {
+            try { await environment.DisposeAsync(); }
+            catch
+            {
+                output.WriteLine($"Native fixture cleanup failed: index_root={environment.IndexRoot}; unreleased_owners=[{string.Join(',', counters.Unreleased)}]");
+                throw;
+            }
+            Assert.Empty(counters.Unreleased);
+        }
     }
     private sealed class CountingGenerationStore(IIndexGenerationStore inner, Counters counters) : IIndexGenerationStore
     {

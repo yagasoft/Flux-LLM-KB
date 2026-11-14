@@ -30,6 +30,9 @@ public sealed partial class HybridPassageRetrievalEngine
         var ct = budget.Token;
         var semantic = semanticBudget.Token;
         var started = _clock.GetTimestamp();
+        var diagnosticSearchId = Guid.NewGuid().ToString("N");
+        var diagnosticCorrelation = HybridSearchDiagnostics.CurrentCorrelation;
+        CorpusSearchResponse? returnedResponse = null;
         double scopeMs=0,embeddingMs=0,denseMs=0,lexicalMs=0,disclosureMs=0,rankingMs=0,assemblyMs=0;
         double? payloadReadyMs=null;
         Guid? clientId=null,cohortId=null,capturedGeneration=null;
@@ -50,6 +53,7 @@ public sealed partial class HybridPassageRetrievalEngine
             {
                 var result = await SemanticAsync().ConfigureAwait(false);
                 diagnosticOutcome=result.Result.SemanticStatus;
+                returnedResponse=result.Result;
                 return result with { FullPipelineMilliseconds = _clock.GetElapsedTime(started).TotalMilliseconds,
                     ApiArrivalUtc=apiArrivalUtc,PipelineCompletedUtc=_clock.GetUtcNow() };
             }
@@ -79,6 +83,7 @@ public sealed partial class HybridPassageRetrievalEngine
                 PassageRanking.Fuse(query, eligible.Where(p => approved.Contains(p.ChunkId)).ToArray(), []),
                 status, null, warnings, eligible.Length, ct),ms => assemblyMs+=ms).ConfigureAwait(false);
             diagnosticOutcome=status;
+            returnedResponse=response;
             return new(response, [], [], [], [], [], 0, 0, ranker.RerankerFingerprint,
                 new(scopeMs,embeddingMs,denseMs,lexicalMs,disclosureMs,rankingMs,assemblyMs,_clock.GetElapsedTime(started).TotalMilliseconds))
                 { EmbeddingFingerprint = embeddingInference.EmbeddingProfile.ModelFingerprint, FullPipelineMilliseconds = _clock.GetElapsedTime(started).TotalMilliseconds,
@@ -89,7 +94,7 @@ public sealed partial class HybridPassageRetrievalEngine
             async Task<IReadOnlyList<EligiblePassageCandidate>> ReadLexicalTrackedAsync()
             {
                 var begin=_clock.GetTimestamp();var outcome="failed";
-                try{var result=await candidates.ReadLexicalCandidatesAsync(query,scope,ct).ConfigureAwait(false);outcome="completed";return result;}
+                try{var result=await candidates.ReadLexicalCandidatesAsync(query,scope,ct).ConfigureAwait(false);outcome="completed";EmitCandidates("lexical",result.Select(p=>p.ChunkId));return result;}
                 catch(OperationCanceledException){outcome="cancelled";throw;}
                 finally{lexicalMs=_clock.GetElapsedTime(begin).TotalMilliseconds;EmitPhase("lexical-retrieval",outcome,lexicalMs);}
             }
@@ -129,13 +134,17 @@ public sealed partial class HybridPassageRetrievalEngine
                 currentPhase="lexical-wait";
                 var lexical = await MeasureAsync<IReadOnlyList<EligiblePassageCandidate>>("lexical-wait",async()=>await lexicalTask.WaitAsync(semantic).ConfigureAwait(false),_=>{}).ConfigureAwait(false);
                 ValidateExpandedPopulation(lexical,window.Baseline,window.Pool);
+                EmitCandidates("dense-baseline",window.Baseline.Select(p=>p.ChunkId));
+                EmitCandidates("dense-pool",window.Pool.Select(p=>p.ChunkId));
                 var terms = await MeasureAsync("lexical-terms",()=>LexicalTermsAsync(query,lexical,semantic),_=>{}).ConfigureAwait(false);
                 phase = _clock.GetTimestamp();
                 phaseStarted=phase;currentPhase="disclosure-preflight";
                 var safeLexical = lexical.Where(p => Safe(p,scope) && LexicalMatch(p,query,terms)).ToArray();
                 var baseline = window.Baseline.Where(p => Safe(p,scope)).ToArray();
                 var plan = PassageRanking.PlanExpansion(query,safeLexical,baseline,window.Pool.Where(p => Safe(p,scope)).ToArray());
+                EmitCandidates("disclosure-planned",plan.DisclosureCandidates.Select(p=>p.ChunkId));
                 var citable = await MeasureAsync("disclosure-preflight",()=>CitableExpandedAsync(plan.DisclosureCandidates,scope,semantic),_=>{}).ConfigureAwait(false);
+                EmitCandidates("disclosure-approved",plan.DisclosureCandidates.Where(p=>citable.Contains(p.ChunkId)).Select(p=>p.ChunkId));
                 var shortlist = plan.Complete(citable);
                 var original = PassageRanking.Fuse(query,safeLexical.Where(p => citable.Contains(p.ChunkId)).ToArray(),
                     baseline.Where(p => citable.Contains(p.ChunkId)).ToArray());
@@ -144,6 +153,7 @@ public sealed partial class HybridPassageRetrievalEngine
                 disclosureMs = _clock.GetElapsedTime(phase).TotalMilliseconds;
                 phase = _clock.GetTimestamp();
                 IReadOnlyList<RankedPassage> ranked = shortlist;
+                EmitCandidates("reranker-input",shortlist.Select(p=>p.Passage.ChunkId));
                 if (shortlist.Count > 0)
                 {
                     var inputs = shortlist.Select(p => new RerankPassage(p.Passage.ChunkId,SearchText(p.Passage))).ToArray();
@@ -158,6 +168,7 @@ public sealed partial class HybridPassageRetrievalEngine
                         .OrderByDescending(p => p.Passage.ExactBodyMatch).ThenByDescending(p => p.Passage.RerankerScore)
                         .ThenBy(p => p.Ordinal).Select(p => p.Passage).ToArray();
                 }
+                EmitCandidates("ranked",ranked.Select(p=>p.Passage.ChunkId));
                 var response = await MeasureAsync<CorpusSearchResponse>("cited-readback",async () =>
                 {
                     await RequireReadable().ConfigureAwait(false);
@@ -218,6 +229,11 @@ public sealed partial class HybridPassageRetrievalEngine
             await budget.CancelAsync().ConfigureAwait(false);
             // Every started lexical operation remains owned even when semantic admission or retrieval fails.
             if (lexicalTask is not null) await ObserveLateLexicalAsync(lexicalTask).ConfigureAwait(false);
+            if (HybridSearchDiagnostics.Log.IsEnabled())
+                HybridSearchDiagnostics.Log.Completed(diagnosticCorrelation.TraceId,diagnosticCorrelation.SpanId,diagnosticSearchId,
+                    returnedResponse?.SemanticStatus??diagnosticOutcome,
+                    returnedResponse is null?string.Empty:string.Join(',',returnedResponse.Results.Select(p=>p.ChunkId)),
+                    _clock.GetElapsedTime(started).TotalMilliseconds);
             if(observe is not null)
             {
                 try
@@ -247,6 +263,13 @@ public sealed partial class HybridPassageRetrievalEngine
             if(!HybridSearchDiagnostics.Log.IsEnabled())return;
             var correlation=HybridSearchDiagnostics.CurrentCorrelation;
             HybridSearchDiagnostics.Log.Phase(correlation.TraceId,correlation.SpanId,clientId?.ToString("N")??string.Empty,name,outcome,elapsed);
+        }
+        void EmitCandidates(string stage,IEnumerable<long> ids)
+        {
+            if(!HybridSearchDiagnostics.Log.IsEnabled())return;
+            // The pool is the largest channel. Keep diagnostic allocation bounded even on invalid input.
+            HybridSearchDiagnostics.Log.ExpandedCandidateStage(diagnosticCorrelation.TraceId,diagnosticCorrelation.SpanId,
+                diagnosticSearchId,stage,string.Join(',',ids.Take(IAnnCandidatePool.MaximumResults)));
         }
     }
 

@@ -80,7 +80,9 @@ public sealed partial class ScopedCorpusRetrievalTests
             artifact = db.Artifacts.Local.Single().Id;
             AddPublishedText(db, Guid.NewGuid(), @"C:\keyword-elsewhere", "crowding.txt",
                 Enumerable.Range(0, 340).Select(i => "NEEDLE NEEDLE NEEDLE high rank " + i).ToArray());
-            await db.SaveChangesAsync();
+            // Seeing every in-scope hit alone does not mean the out-of-scope
+            // population has settled; those rows also affect native FT ranks.
+            await SaveAndWaitForFullTextAsync(db);
         }
         await using var reference = await factory.CreateDbContextAsync();
         for (var attempt = 0; ; attempt++)

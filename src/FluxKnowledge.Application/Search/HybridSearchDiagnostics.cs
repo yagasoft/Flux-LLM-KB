@@ -76,6 +76,11 @@ public sealed class HybridSearchDiagnostics : EventSource
     public void PreparedBorrowBatch(string traceId, string spanId, int segments, double elapsedMs) =>
         Emit(13, traceId, spanId, segments, elapsedMs);
 
+    /// <summary>Ordered IDs at expanded retrieval boundaries; no queries, content, paths or vectors.</summary>
+    [Event(14, Level = EventLevel.Informational)]
+    public void ExpandedCandidateStage(string traceId, string spanId, string searchId, string stage, string passageIds) =>
+        Emit(14, traceId, spanId, searchId, stage, passageIds);
+
     [NonEvent]
     private void Emit(int eventId, params object[] values)
     {

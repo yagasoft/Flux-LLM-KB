@@ -23,8 +23,13 @@ Nearest-rank API p95 was 10,803.6675 ms and the maximum was 11,860.6847 ms.
 All requests remained inside the existing twenty-five-second outer deadline,
 but the ten-second API p95 target was not met. Different corpus and segment
 populations prevent attributing the difference to a code regression. Production
-dense-phase timing is unavailable: automatic approval review rejected the
-metadata-only trace capture before execution. No alternative capture bypass ran.
+dense-phase timing was initially unavailable after automatic approval review
+rejected the metadata-only capture before execution. Following renewed authority,
+the bounded 14 November capture completed normally with no event loss. Both
+requests spent about two seconds in dense selection and 6.7 seconds waiting for
+ranking. Shared native events do not establish per-request model-load or scoring
+times. See the [follow-up](../operations/2026-11-12-scoped-search-release.md#bounded-follow-up-14-november-2026)
+for the remaining candidate-admission observation and its metadata-only Event 14.
 
 Initial preparation returned useful lexical results in about two seconds with
 explicit `warming` status. The first subsequent MCP request also retained ten
