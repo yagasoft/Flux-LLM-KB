@@ -162,3 +162,37 @@ alone does not safely isolate a concurrent GPU trial: loss of its SQL session ca
 admit new production work while native staging work is still running, and held
 locks can delay foreground settlement. Production remains running; no such trial
 or additional service pause has occurred.
+
+## Refill validation and dispatch latency, 15 November 2026
+
+The refill correction completed canonical qualification with 5,456 passing tests,
+46 existing opt-in skips, nine native contract groups and zero build warnings.
+It was squash-merged as `2c6ce837` and incrementally deployed from the qualified
+feature source `1c2f01c7`. The service returned ready with the reviewed payloads,
+unchanged configuration, publication, root pauses and companion state.
+
+The fresh two-caller, two-round frozen workload returned 40 trained hybrid
+responses and 400 valid exact cited reads, without timeout or scope leakage.
+Independent adjudication found answering passages for 19 of 20 questions in each
+round. The CRM answer ranked seventh in both; the remaining miss concerns the
+prerequisite for full registration. API p95 was 11.921 seconds and the maximum
+was 12.741 seconds, so the ten-second latency requirement still failed.
+
+Durable timestamps for the 20 ranking cohorts show a mean 1.492 seconds between
+batch creation and dispatch acknowledgement, with p95 1.715 seconds. A single
+read-only invocation of the native embedding recovery reader took 996.742 ms
+and returned no candidates. Cached executions of its query averaged about one
+second and used 3.17 million logical reads per execution. This discovery runs
+before pending dispatch delivery in the serving loop. These observations identify
+avoidable foreground delay; they do not attribute all model or request time.
+
+The focused correction delivers already-admitted pending work before scanning
+continuations. It retains the recovery scan on every loop, including startup
+with no pending dispatches. Eligibility, claims, deadlines, model settings and
+native settlement remain unchanged. All 80 focused scheduler/lifecycle checks
+passed, including a real SQL owner remaining reserved while recovery observes a
+callback that outlives the local delivery timeout. Independent concurrency review
+approved canonical qualification. A prompt arriving during an existing recovery
+scan can still wait for that scan; the resulting API improvement remains to be
+measured after deployment. The full-current-corpus staging restriction above
+still applies.

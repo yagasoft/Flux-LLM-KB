@@ -32,8 +32,10 @@ public sealed class GpuExecutorDispatchRecoveryService(
             await (databaseStartupReadiness?.WaitAsync(stoppingToken) ?? ValueTask.CompletedTask).ConfigureAwait(false);
             while (!stoppingToken.IsCancellationRequested)
             {
-                await RecoverAdapterContinuationsAsync(stoppingToken).ConfigureAwait(false);
+                // Pending dispatches already passed durable admission. Do not put
+                // foreground delivery behind a scan of historical continuations.
                 await DeliverPendingDispatchesAsync(stoppingToken).ConfigureAwait(false);
+                await RecoverAdapterContinuationsAsync(stoppingToken).ConfigureAwait(false);
                 await WaitForPromptOrFallbackAsync(stoppingToken).ConfigureAwait(false);
             }
         }

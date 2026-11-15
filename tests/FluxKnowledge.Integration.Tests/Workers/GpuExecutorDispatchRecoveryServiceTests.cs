@@ -239,7 +239,7 @@ public sealed class GpuExecutorDispatchRecoveryServiceTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task Existing_dispatch_loop_recovers_durable_continuations_on_startup_and_prompt_without_blocking_other_delivery(bool recoveryThrows)
+    public async Task Existing_dispatch_loop_prioritises_pending_delivery_and_preserves_recovery_on_startup_and_prompt(bool recoveryThrows)
     {
         var handle = CreateHandle("executor-a");
         var store = new PendingDispatchStore(handle);
@@ -249,14 +249,75 @@ public sealed class GpuExecutorDispatchRecoveryServiceTests
         await service.StartAsync(CancellationToken.None);
         try
         {
-            Assert.Equal("recover", await adapter.Events.Reader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(2)));
             Assert.Equal("deliver", await adapter.Events.Reader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(2)));
+            Assert.Equal("recover", await adapter.Events.Reader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(2)));
             provider.GetRequiredService<ChannelGpuExecutorDispatchSignal>().Notify();
-            Assert.Equal("recover", await adapter.Events.Reader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(2)));
             Assert.Equal("deliver", await adapter.Events.Reader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(2)));
+            Assert.Equal("recover", await adapter.Events.Reader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(2)));
             Assert.Equal(0, store.MutationCount);
         }
         finally { await service.StopAsync(CancellationToken.None); }
+    }
+
+    [Fact]
+    public async Task Already_admitted_dispatch_does_not_wait_for_a_blocked_continuation_scan()
+    {
+        var handle = CreateHandle("executor-a");
+        var store = new PendingDispatchStore(handle);
+        var adapter = new BlockingRecoveryAdapter(handle.ExecutorKey);
+        await using var provider = CreateProvider(store, TimeProvider.System, adapter);
+        var service = provider.GetRequiredService<GpuExecutorDispatchRecoveryService>();
+        await service.StartAsync(CancellationToken.None);
+        try
+        {
+            await adapter.RecoveryStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            Assert.True(adapter.Delivered.Task.IsCompleted,
+                "An admitted dispatch must be delivered before awaiting continuation discovery.");
+            Assert.Equal(handle, await adapter.Delivered.Task);
+            Assert.Equal(0, store.MutationCount);
+        }
+        finally
+        {
+            adapter.ReleaseRecovery.TrySetResult();
+            await service.StopAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(2));
+        }
+    }
+
+    [Fact]
+    public async Task Continuation_recovery_runs_when_no_dispatch_is_pending()
+    {
+        var handle = CreateHandle("executor-a");
+        var store = new PendingDispatchStore(handle) { HasPending = false };
+        var adapter = new RecoveringAdapter(handle.ExecutorKey, false);
+        await using var provider = CreateProvider(store, TimeProvider.System, adapter);
+        var service = provider.GetRequiredService<GpuExecutorDispatchRecoveryService>();
+        await service.StartAsync(CancellationToken.None);
+        try
+        {
+            Assert.Equal("recover", await adapter.Events.Reader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(2)));
+            Assert.False(adapter.Events.Reader.TryRead(out _));
+            Assert.Equal(0, store.MutationCount);
+        }
+        finally { await service.StopAsync(CancellationToken.None); }
+    }
+
+    private sealed class BlockingRecoveryAdapter(string executorKey) : IGpuExecutorAdapter, IGpuExecutorRecoveryAdapter
+    {
+        public string ExecutorKey => executorKey;
+        public TaskCompletionSource RecoveryStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource ReleaseRecovery { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource<GpuExecutorBatchHandle> Delivered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public async ValueTask RecoverAsync(CancellationToken ct)
+        {
+            RecoveryStarted.TrySetResult();
+            await ReleaseRecovery.Task.WaitAsync(ct);
+        }
+        public ValueTask DeliverAsync(GpuExecutorBatchHandle handle, CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+            Delivered.TrySetResult(handle);
+            return ValueTask.CompletedTask;
+        }
     }
 
     private sealed class RecoveringAdapter(string executorKey, bool recoveryThrows) : IGpuExecutorAdapter, IGpuExecutorRecoveryAdapter
@@ -314,13 +375,14 @@ public sealed class GpuExecutorDispatchRecoveryServiceTests
         private readonly TaskCompletionSource _firstRead = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         public int MutationCount { get; private set; }
+        public bool HasPending { get; init; } = true;
 
         public ValueTask<IReadOnlyList<GpuExecutorBatchHandle>> ReadPendingDispatchesAsync(CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
             _firstRead.TrySetResult();
 
-            return ValueTask.FromResult<IReadOnlyList<GpuExecutorBatchHandle>>([handle]);
+            return ValueTask.FromResult<IReadOnlyList<GpuExecutorBatchHandle>>(HasPending ? [handle] : []);
         }
 
         public Task ReadsReached(int target)

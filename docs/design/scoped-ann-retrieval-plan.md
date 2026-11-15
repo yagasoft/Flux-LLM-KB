@@ -1223,3 +1223,18 @@ refill; the answer then entered the 81-input shortlist and scored seventh in the
 offline FP32 component. Final serving rank and the ten-second API p95 remain
 acceptance gates. See the dated follow-up in the release record for the measured
 scope and the constraint against another large corpus restore.
+
+The refill has since passed canonical qualification and normal-runtime deployment.
+Fresh frozen validation recovered the CRM answer at rank seven in both rounds,
+retained 19/20 answering questions and validated all 400 citations. Its 11.921-second
+API p95 still exceeds the ten-second target. A native read-only embedding recovery
+discovery took 996.742 ms before foreground dispatch; the 20 measured ranking
+cohorts waited a mean 1.492 seconds from batch creation to acknowledgement.
+
+Deliver already-admitted pending dispatches before continuation discovery in each
+loop. Keep discovery on startup and every loop; do not change eligibility or
+release acknowledged work merely because local delivery observation timed out.
+The native regression retains an active owner's reserved slot and acknowledged
+dispatch while recovery runs, then requires positive release and one result
+receipt. This is a scheduling correction, with fresh end-to-end latency still to
+be qualified; it does not alter semantic selection, scoring or lexical fallback.
