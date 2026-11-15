@@ -69,6 +69,26 @@ public sealed class OverviewProjectionTests
     }
 
     [Fact]
+    public void Normal_index_publication_updates_do_not_request_operator_recovery()
+    {
+        var summary = OverviewDiagnosticSummary.From("generation-a",
+            new IndexRecoverySummary("IndexUpdating", "generation-a", null, null, null, 0));
+
+        Assert.Equal("Updating", summary.State);
+        Assert.Equal("Index publication is catching up with source changes.", summary.Reason);
+    }
+
+    [Fact]
+    public void Actual_index_integrity_failures_still_require_operator_attention()
+    {
+        var summary = OverviewDiagnosticSummary.From("generation-a",
+            new IndexRecoverySummary("OperatorActionRequired", "generation-a", null, null, "SqlMembershipInvalid", 0));
+
+        Assert.Equal("Blocked", summary.State);
+        Assert.Equal("Index recovery is blocked by SqlMembershipInvalid.", summary.Reason);
+    }
+
+    [Fact]
     public void Overview_diagnostic_summary_keeps_opaque_generation_identifier_out_of_the_card_value()
     {
         var summary = OverviewDiagnosticSummary.From(

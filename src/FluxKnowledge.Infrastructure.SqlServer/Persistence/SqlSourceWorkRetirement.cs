@@ -17,10 +17,7 @@ public sealed class SqlSourceWorkRetirement(IDbContextFactory<FluxKnowledgeDbCon
     {
         await using (var lookup = await factory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false))
         {
-            var eligible = SqlSourceWorkEligibility.Records(lookup, includePending: false, includeAdmission: false).Select(x => x.Id);
-            var active = await lookup.GpuMiniTasks.AsNoTracking().Where(x => x.ParentJobId != null && x.ExecutionState == (int)GpuMiniTaskExecutionState.Active &&
-                    !eligible.Contains(x.ParentJob!.PipelineRecordId) && x.ParentJob.PipelineRecord.SourceRevisionId != null)
-                .OrderBy(x => x.CreatedSequence).Take(128).Select(x => x.Id).ToArrayAsync(cancellationToken).ConfigureAwait(false);
+            var active = await UnavailableActiveTaskIds(lookup).ToArrayAsync(cancellationToken).ConfigureAwait(false);
             foreach (var id in active) { embeddings?.RequestCancellation(id); ocr?.RequestCancellation(id); }
         }
         await using var execution = await factory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
@@ -103,5 +100,17 @@ public sealed class SqlSourceWorkRetirement(IDbContextFactory<FluxKnowledgeDbCon
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
             return jobs.Length + branches.Length;
         }).ConfigureAwait(false);
+    }
+
+    internal static IQueryable<Guid> UnavailableActiveTaskIds(FluxKnowledgeDbContext db)
+    {
+        var eligible = SqlSourceWorkEligibility.Records(db, includePending: false, includeAdmission: false).Select(record => record.Id);
+        // Correlate to the candidate record key. A whole-corpus anti-membership
+        // plan can scan eligible history even when there is no active GPU work.
+        return db.GpuMiniTasks.AsNoTracking().Where(task => task.ParentJobId != null &&
+                task.ExecutionState == (int)GpuMiniTaskExecutionState.Active &&
+                task.ParentJob!.PipelineRecord.SourceRevisionId != null &&
+                !eligible.Any(recordId => recordId == task.ParentJob.PipelineRecordId))
+            .OrderBy(task => task.CreatedSequence).Take(128).Select(task => task.Id);
     }
 }
