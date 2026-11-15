@@ -228,8 +228,9 @@ public sealed class RecoveryIndexReferenceAudit(string indexRoot)
                 if (name == "corpus-rebuild-manifest.json") rebuildHash = Rebuild(child, value);
                 if (name == "manifest.json")
                 {
-                    var expected = new[] { "commit", "staged_at_utc", "application_root", "migrations", "clean_slate", "reviewed_legacy_index_payloads" };
+                    var expected = new[] { "commit", "staged_at_utc", "application_root", "migrations", "clean_slate", "reviewed_legacy_index_payloads", "vector_publication_metadata" };
                     if (value.EnumerateObject().Any(property => !expected.Contains(property.Name, StringComparer.Ordinal)) ||
+                        value.TryGetProperty("vector_publication_metadata", out var vectorMetadata) && vectorMetadata.ValueKind != JsonValueKind.Null ||
                         !value.TryGetProperty("commit", out var commit) || commit.ValueKind != JsonValueKind.String ||
                         !Regex.IsMatch(commit.GetString()!, "^[0-9a-f]{40}$", RegexOptions.CultureInvariant) ||
                         !value.TryGetProperty("application_root", out var app) || app.ValueKind != JsonValueKind.String || !Path.IsPathFullyQualified(app.GetString()!) ||

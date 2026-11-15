@@ -172,6 +172,9 @@ public static class SqlPipelineActivityQuery
         var sql = $$"""
             SELECT t.Id, j.PipelineRecordId, s.SourceRootId, t.CreatedAtUtc,
               CASE
+                WHEN t.State = 3 AND (t.ParentJobId IS NOT NULL AND ({{HistoricalBinding}})
+                  OR EXISTS (SELECT 1 FROM OPENJSON(@releasedGpuOutcomesJson) WITH (Id uniqueidentifier '$') released
+                    WHERE released.Id = t.Id)) THEN N'Historical unresolved'
                 WHEN t.State = 3 THEN N'Outcome uncertain'
                 WHEN t.State = 1 AND {{OwnedTask("t", false)}} THEN N'Active'
                 WHEN t.State = 1 AND {{OwnedTask("t", true)}} THEN N'Awaiting dispatch'
@@ -261,7 +264,8 @@ public static class SqlPipelineActivityQuery
         new SqlParameter("@deploymentHeld", SqlDbType.Bit) { Value = admission.IsHeld },
         new SqlParameter("@permittedRebuildOperationId", SqlDbType.UniqueIdentifier)
             { Value = (object?)admission.PermittedCorpusRebuildOperationId ?? DBNull.Value },
-        new SqlParameter("@ownedGpuTasks", SqlDbType.NVarChar, -1) { Value = gpuEvidence.OwnedTasksJson }
+        new SqlParameter("@ownedGpuTasks", SqlDbType.NVarChar, -1) { Value = gpuEvidence.OwnedTasksJson },
+        new SqlParameter("@releasedGpuOutcomesJson", SqlDbType.NVarChar, -1) { Value = gpuEvidence.ReleasedOutcomesJson }
     ];
 }
 

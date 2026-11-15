@@ -23,6 +23,17 @@ public sealed class LegacyStagingRecoveryProofTests(NativeSqlServerFixture fixtu
     public void Original_retirement_constructor_remains_available_to_existing_binaries()=>
         Assert.Contains(typeof(SqlSegmentRetirementOperations).GetConstructors(),c=>c.GetParameters().Length==6);
 
+    [Fact]
+    public async Task A_sibling_stage_cannot_be_designated_as_the_owned_legacy_index()
+    {
+        var identity = Guid.NewGuid();
+        var sibling = Path.Combine(@"I:\Codex Workspaces\Staging\FluxKnowledge", $"LegacyNative-{identity:N}-other", "Data", "Index");
+        var failure = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            SqlToUsearchRebuildTests.PipelineEnvironment.CreateAsync(fixture, "Not ingested.",
+                indexRootOverride: sibling, legacyFixtureId: identity));
+        Assert.Equal("Legacy fixture index does not match its owned staging identity.", failure.Message);
+    }
+
     [NativeSqlServerFact]
     public async Task Unrelated_historical_catalogue_size_does_not_expand_the_target_projection_or_remove_prior_pins()
     {
@@ -182,7 +193,8 @@ public sealed class LegacyStagingRecoveryProofTests(NativeSqlServerFixture fixtu
                 File.WriteAllText(Path.Combine(recovery,"staging-before-ann512.json"),JsonSerializer.Serialize(new
                 {Origin="http://127.0.0.1:5147",DashboardReadBenchmark=true,SqlConnectionString=fixture.ConnectionString,CpuSemantic=true,SourceJournalEnabled=false,
                     IndexPublicationMode="Segmented",CpuRerankerShards=4,CpuRerankerThreads=4}));
-                environment=await SqlToUsearchRebuildTests.PipelineEnvironment.CreateAsync(fixture,"A keeper survives every legacy proof test.",segmented:true,indexRootOverride:index);
+                environment=await SqlToUsearchRebuildTests.PipelineEnvironment.CreateAsync(fixture,"A keeper survives every legacy proof test.",segmented:true,indexRootOverride:index,
+                    legacyFixtureId:Guid.ParseExact(token,"N"));
                 var bootstrap=await environment.ActiveGenerationAsync();var verified=DateTimeOffset.UtcNow.AddSeconds(-1);
                 var created=DateTimeOffset.UtcNow;var text="Unique synthetic publication "+operation.ToString("N")+" for a target-restricted proof.";
                 var directory=Path.Combine(stage,"Sources","controlled-index-"+operation.ToString("N"));

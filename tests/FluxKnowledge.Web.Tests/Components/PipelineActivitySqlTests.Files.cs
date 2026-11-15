@@ -192,7 +192,9 @@ public sealed partial class PipelineActivitySqlTests
         var published = await reader.ReadOverviewAsync(default);
         Assert.Equal(1, Assert.Single(published.Activity.Sources, s => s.Id == seed.Root).PublishedFiles);
         Assert.DoesNotContain(published.Activity.FileCauses, c => c.SourceRootId == seed.Root);
-        Assert.Equal(1, published.Activity.GpuTasks.Where(g => g.SourceRootId == seed.Root && g.State == "Outcome uncertain").Sum(g => g.Count));
+        Assert.Equal(2, published.Activity.GpuTasks.Where(g => g.SourceRootId == seed.Root && g.State == "Historical unresolved").Sum(g => g.Count));
+        await using var check = new TestDbContextFactory(_fixture.ConnectionString).CreateDbContext();
+        Assert.Equal(3, (await check.GpuMiniTasks.AsNoTracking().SingleAsync(t => t.Id == seed.Task)).ExecutionState);
     }
 
     private sealed class FileCommandTrace : DbCommandInterceptor

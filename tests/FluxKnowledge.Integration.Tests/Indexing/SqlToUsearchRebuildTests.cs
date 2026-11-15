@@ -2172,8 +2172,24 @@ public sealed partial class SqlToUsearchRebuildTests(NativeSqlServerFixture fixt
         public static async Task<PipelineEnvironment> CreateAsync(NativeSqlServerFixture fixture, string text,
             PassageBuilder? passageBuilder = null, bool publish = true, bool embed = true, TimeProvider? clock = null,
             bool appendReuse = false, bool segmented = false, int segmentMaximumVectors = 2, long segmentMaximumPayloadBytes = 64 * 1024 * 1024,
-            Action<IServiceCollection>? configureServices = null, int initialIndexFormat = 2, string? indexRootOverride = null)
+            Action<IServiceCollection>? configureServices = null, int initialIndexFormat = 2, string? indexRootOverride = null,
+            Guid? legacyFixtureId = null)
         {
+            var index = indexRootOverride ?? Path.Combine(Path.GetTempPath(), $"FluxKnowledgeIndexes_{Guid.NewGuid():N}");
+            if (legacyFixtureId is { } fixtureId)
+            {
+                var stage = Path.Combine(@"I:\Codex Workspaces\Staging\FluxKnowledge", $"LegacyNative-{fixtureId:N}");
+                var expected = Path.Combine(stage, "Data", "Index");
+                if (fixtureId == Guid.Empty || indexRootOverride is null ||
+                    !string.Equals(indexRootOverride, expected, StringComparison.OrdinalIgnoreCase) || !Directory.Exists(stage))
+                    throw new InvalidOperationException("Legacy fixture index does not match its owned staging identity.");
+                for (var path = stage; !string.IsNullOrEmpty(path); path = Path.GetDirectoryName(path))
+                    if ((File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
+                        throw new InvalidOperationException("A legacy fixture stage must be a physical directory.");
+            }
+            else if (indexRootOverride is not null && !Path.GetFullPath(indexRootOverride).StartsWith(
+                Path.TrimEndingDirectorySeparator(Path.GetFullPath(Path.GetTempPath())) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("An overridden fixture index must remain beneath its disposable temp root.");
             await SqlTestData.ClearPipelineAsync(fixture);
             if (segmented) passageBuilder ??= new PassageBuilder(new SegmentedFixtureWords());
             if (segmented)
@@ -2186,10 +2202,6 @@ public sealed partial class SqlToUsearchRebuildTests(NativeSqlServerFixture fixt
             }
             var ingress = Path.Combine(Path.GetTempPath(), $"FluxKnowledgeIngress_{Guid.NewGuid():N}");
             var artifact = Path.Combine(Path.GetTempPath(), $"FluxKnowledgeRetained_{Guid.NewGuid():N}");
-            var index = indexRootOverride ?? Path.Combine(Path.GetTempPath(), $"FluxKnowledgeIndexes_{Guid.NewGuid():N}");
-            if (indexRootOverride is not null && !Path.GetFullPath(indexRootOverride).StartsWith(
-                Path.TrimEndingDirectorySeparator(Path.GetFullPath(Path.GetTempPath())) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
-                throw new InvalidOperationException("An overridden fixture index must remain beneath its disposable temp root.");
             Directory.CreateDirectory(ingress);
             Directory.CreateDirectory(artifact);
             var services = new ServiceCollection();

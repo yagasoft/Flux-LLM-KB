@@ -19,6 +19,41 @@ public sealed class SelectedBranchSqlTests(NativeSqlServerFixture fixture) : ICl
 {
     private readonly NativeSqlServerFixture _fixture = fixture;
 
+    [NativeSqlServerTheory]
+    [InlineData("none")]
+    [InlineData("exact")]
+    [InlineData("other-task")]
+    public async Task A_released_uncertain_attempt_is_historical_only_with_its_own_exact_native_receipt(string receipt)
+    {
+        await using var db = new TestDbContextFactory(_fixture.ConnectionString).CreateDbContext();
+        var now = DateTimeOffset.UtcNow; var batch = Guid.NewGuid(); var dispatch = Guid.NewGuid();
+        var task = Guid.NewGuid(); var other = Guid.NewGuid(); var slot = "history-" + Guid.NewGuid().ToString("N");
+        db.GpuCapacitySlots.Add(new() { SlotKey = slot, UpdatedAtUtc = now });
+        db.GpuBatches.Add(new() { Id = batch, CapacitySlotKey = slot, OwnerKey = "owner", ModelRuntimeKey = "synthetic",
+            SettingsFingerprint = "synthetic", AdmissionGeneration = 1, ItemCount = 2, EstimatedBytes = 2,
+            State = 3, CreatedAtUtc = now, UpdatedAtUtc = now });
+        db.GpuExecutorDispatches.Add(new() { DispatchId = dispatch, BatchId = batch, CapacitySlotKey = slot,
+            OwnerKey = "owner", ExecutorKey = "executor", AdmissionGeneration = 1, State = 3, UpdatedAtUtc = now });
+        foreach (var id in new[] { task, other })
+            db.GpuMiniTasks.Add(new() { Id = id, BatchId = batch, AdmissionGeneration = 1, ExecutionState = id == task ? 3 : 2,
+                ModelRuntimeKey = "synthetic", SettingsFingerprint = "synthetic", RequiredExecutorKey = "executor",
+                InteractiveExecutorInstanceId = Guid.NewGuid(), InteractiveOwnerProcessId = 123,
+                InteractiveOwnerStartedAtUtc = now, InteractiveOwnerMachineFingerprint = new('a', 64),
+                QueueDeadlineUtc = now.AddMinutes(1), ExecutionDeadlineUtc = now.AddMinutes(2),
+                EstimatedBytes = 1, IdempotencyKey = id.ToString("N"), CreatedAtUtc = now });
+        if (receipt != "none") db.GpuExecutorResultReceipts.Add(new() { OperationId = Guid.NewGuid(), DispatchId = dispatch,
+            BatchId = batch, MiniTaskId = receipt == "exact" ? task : other, ExecutorKey = "executor", AdmissionGeneration = 1,
+            Disposition = 1, EvidenceClass = 2, RequestFingerprint = new('a', 64), CreatedAtUtc = now });
+        await db.SaveChangesAsync();
+        await using var branches = await SqlSelectedBranchReadScope.CreateAsync(db, [], default);
+        var proof = await SqlGpuActivityReadEvidence.ReadAsync(db, default);
+        var row = await SqlPipelineActivityQuery.GpuTasks(db, now, new(false, null), branches, proof)
+            .SingleAsync(value => value.Id == task);
+        Assert.Equal(receipt == "exact" ? "Historical unresolved" : "Outcome uncertain", row.State);
+        await branches.CompleteAsync(default);
+        Assert.Equal(3, (await db.GpuMiniTasks.AsNoTracking().SingleAsync(value => value.Id == task)).ExecutionState);
+    }
+
     public static IEnumerable<object[]> BranchSelectionCases()
     {
         foreach (var origin in new[] { 2, 3 })
@@ -105,7 +140,7 @@ public sealed class SelectedBranchSqlTests(NativeSqlServerFixture fixture) : ICl
             Assert.Equal(3, gpu.Length);
             Assert.Equal(historical ? "Historical unresolved" : "Ready", Assert.Single(gpu, row => row.Id == tasks[0].Id).State);
             Assert.Equal("Ownership unconfirmed", Assert.Single(gpu, row => row.Id == tasks[1].Id).State);
-            Assert.Equal("Outcome uncertain", Assert.Single(gpu, row => row.Id == tasks[2].Id).State);
+            Assert.Equal(historical ? "Historical unresolved" : "Outcome uncertain", Assert.Single(gpu, row => row.Id == tasks[2].Id).State);
             Assert.All(gpu, row => { Assert.Equal(root, row.SourceRootId); Assert.False(row.IsInteractive); });
             await branches.CompleteAsync(CancellationToken.None);
         }

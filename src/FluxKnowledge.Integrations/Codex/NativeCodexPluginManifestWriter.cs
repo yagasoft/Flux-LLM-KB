@@ -79,7 +79,7 @@ public sealed class NativeCodexPluginManifestWriter
         };
         await WriteJsonAsync(metadata, "plugin.json", manifest, cancellationToken).ConfigureAwait(false);
         await WriteJsonAsync(plugin, ".mcp.json", companion, cancellationToken).ConfigureAwait(false);
-        await WriteBytesAsync(hooksDirectory, "hooks.json", RenderHooksUtf8(), cancellationToken).ConfigureAwait(false);
+        await WriteBytesAsync(hooksDirectory, "hooks.json", RenderHooksUtf8(paths.PluginRoot), cancellationToken).ConfigureAwait(false);
         await WriteBytesAsync(hooksDirectory, "invoke-native-hook.ps1", RenderNativeHookAdapterUtf8(), cancellationToken).ConfigureAwait(false);
         await WriteJsonAsync(marketplaceDirectory, "marketplace.json", marketplaceDocument, cancellationToken).ConfigureAwait(false);
     }
@@ -121,7 +121,7 @@ public sealed class NativeCodexPluginManifestWriter
                 && StringProperty(root, "mcpServers") == "./.mcp.json"
                 && ValidInterface(root)
                 && ValidSingleServer(companion.RootElement)
-                && ValidHooks(hooks.RootElement)
+                && ValidHooks(hooks.RootElement, paths.PluginRoot)
                 && ValidNativeHookAdapter(adapterBytes.Content)
                 && ValidMarketplace(marketplaceJson.RootElement);
             return valid ? new(true, null) : new(false, "plugin-material-invalid");
@@ -228,29 +228,39 @@ public sealed class NativeCodexPluginManifestWriter
         && StringProperty(plugins[0], "name") == PluginName
         && plugins[0].TryGetProperty("source", out var source) && StringProperty(source, "source") == "local" && StringProperty(source, "path") == "./plugins/fluxknowledge";
 
-    private static object Hook(string eventName, string statusMessage) => new { hooks = new[] { Command(eventName, statusMessage) } };
+    private static object Hook(string eventName, string statusMessage, string? pluginRoot) => new { hooks = new[] { Command(eventName, statusMessage, pluginRoot) } };
 
     /// <summary>Renders the exact UTF-8 bytes accepted for the generated hook definition.</summary>
-    public static byte[] RenderHooksUtf8() => RenderJsonUtf8(new
+    public static byte[] RenderHooksUtf8(string? pluginRoot = null) => RenderJsonUtf8(new
     {
         hooks = new Dictionary<string, object>
         {
-            ["UserPromptSubmit"] = new[] { Hook("UserPromptSubmit", "Retrieving local FluxKnowledge context") },
-            ["PreCompact"] = new[] { new { matcher = "manual|auto", hooks = new[] { Command("PreCompact", "Preparing local turn capture") } } },
-            ["Stop"] = new[] { Hook("Stop", "Finalising local Codex turn") }
+            ["UserPromptSubmit"] = new[] { Hook("UserPromptSubmit", "Retrieving local FluxKnowledge context", pluginRoot) },
+            ["PreCompact"] = new[] { new { matcher = "manual|auto", hooks = new[] { Command("PreCompact", "Preparing local turn capture", pluginRoot) } } },
+            ["Stop"] = new[] { Hook("Stop", "Finalising local Codex turn", pluginRoot) }
         }
     });
 
     /// <summary>Renders the exact UTF-8 bytes accepted for the generated hook adapter.</summary>
     public static byte[] RenderNativeHookAdapterUtf8() => Encoding.UTF8.GetBytes(NativeHookAdapter);
 
-    private static object Command(string eventName, string statusMessage) => new
+    private static object Command(string eventName, string statusMessage, string? pluginRoot) => new
     {
         type = "command",
-        command = $"pwsh -NoProfile -File \"$env:PLUGIN_ROOT/hooks/invoke-native-hook.ps1\" {eventName}",
-        commandWindows = $"powershell -NoProfile -ExecutionPolicy Bypass -File \"$env:PLUGIN_ROOT\\hooks\\invoke-native-hook.ps1\" {eventName}",
+        command = $"pwsh -NoProfile -File {AdapterArgument(pluginRoot, '/')} {eventName}",
+        commandWindows = $"powershell -NoProfile -ExecutionPolicy Bypass -File {AdapterArgument(pluginRoot, '\\')} {eventName}",
         statusMessage
     };
+
+    private static string AdapterArgument(string? pluginRoot, char separator)
+    {
+        // Legacy rendering remains available for validating and repairing old
+        // installations. New registrations use the app-owned canonical copy.
+        if (pluginRoot is null) return $"\"$env:PLUGIN_ROOT{separator}hooks{separator}invoke-native-hook.ps1\"";
+        if (!Path.IsPathFullyQualified(pluginRoot) || pluginRoot.Any(c => c is '\r' or '\n' or '\0'))
+            throw new ArgumentException("A literal absolute canonical plugin root is required.", nameof(pluginRoot));
+        return "'" + Path.Combine(Path.GetFullPath(pluginRoot), "hooks", "invoke-native-hook.ps1").Replace("'", "''", StringComparison.Ordinal) + "'";
+    }
 
     private static byte[] RenderJsonUtf8(object value)
     {
@@ -261,9 +271,11 @@ public sealed class NativeCodexPluginManifestWriter
         return terminatedPayload;
     }
 
-    private static bool ValidHooks(JsonElement hooks) => hooks.ValueKind == JsonValueKind.Object
-        && hooks.TryGetProperty("hooks", out var events) && events.ValueKind == JsonValueKind.Object
-        && new[] { "UserPromptSubmit", "PreCompact", "Stop" }.All(eventName => events.TryGetProperty(eventName, out var entries) && entries.ValueKind == JsonValueKind.Array && entries.GetArrayLength() == 1);
+    private static bool ValidHooks(JsonElement hooks, string pluginRoot)
+    {
+        using var expected = JsonDocument.Parse(RenderHooksUtf8(pluginRoot));
+        return JsonElement.DeepEquals(hooks, expected.RootElement);
+    }
 
     private static bool ValidNativeHookAdapter(byte[] adapterBytes)
     {

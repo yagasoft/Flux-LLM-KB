@@ -12,7 +12,7 @@ using Microsoft.EntityFrameworkCore.Storage;
 namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
 
 /// <summary>SQL-only retirement admission backed by a privileged Recovery reference audit.</summary>
-public sealed class SqlIndexRecoveryReferences(IDbContextFactory<FluxKnowledgeDbContext> factory,
+public sealed partial class SqlIndexRecoveryReferences(IDbContextFactory<FluxKnowledgeDbContext> factory,
     TimeProvider clock, IGpuInteractiveOwnerProbe owners)
 {
     public const string LockResource = "FluxKnowledge.RecoveryReferences";
@@ -61,10 +61,52 @@ public sealed class SqlIndexRecoveryReferences(IDbContextFactory<FluxKnowledgeDb
         return await AuditCoreAsync(proof.Scope.RecoveryRoot,proof.Scope.IndexRoot,token,proof);
     }
 
-    private async ValueTask<RecoveryIndexAudit> AuditCoreAsync(string recoveryRoot,string indexRoot,CancellationToken token,LegacyStagingRecoveryProof? legacy)
+    public ValueTask<RecoveryIndexAudit> RetireSupersededArchivesAsync(RecoveryArchiveRetirementPlan plan, CancellationToken token) =>
+        AuditCoreAsync(plan.RecoveryRoot, plan.IndexRoot, token, null, plan);
+
+    private async ValueTask<RecoveryIndexAudit> AuditCoreAsync(string recoveryRoot,string indexRoot,CancellationToken token,
+        LegacyStagingRecoveryProof? legacy, RecoveryArchiveRetirementPlan? retirement = null)
     {
         var root = Canonical(recoveryRoot);
         await using var connection = await OpenSessionAsync("Exclusive", token,legacy);
+        var consumerObservation = System.Diagnostics.Stopwatch.StartNew();
+        async ValueTask RecheckRetirementSessionAsync()
+        {
+            await RequireSessionAsync(connection, "Exclusive", token);
+            if (retirement is not null && consumerObservation.Elapsed >= TimeSpan.FromSeconds(5))
+            {
+                await RecoveryArchiveConsumers.AssertAbsentAsync(retirement, token);
+                consumerObservation.Restart();
+            }
+        }
+        if (retirement is not null)
+        {
+            RecoveryArchiveRetirement.Validate(retirement);
+            await using var validation = Context(connection);
+            await ValidateRetirementBindingAsync(validation, retirement, token);
+            await RecoveryArchiveConsumers.AssertAbsentAsync(retirement, token); consumerObservation.Restart();
+            if (retirement.Moves.All(move => !Directory.Exists(Path.Combine(root, move.RelativePath)) &&
+                Directory.Exists(Path.Combine(retirement.QuarantineRoot, move.RelativePath))) &&
+                !await validation.IndexRecoveryWriters.AnyAsync(token))
+            {
+                await RecoveryArchiveRetirement.MoveAsync(retirement, RecheckRetirementSessionAsync, token);
+                var completed = new RecoveryIndexReferenceAudit(indexRoot).Capture(root, token);
+                var seal = await validation.IndexRecoveryAudit.AsNoTracking().SingleAsync(value => value.Id == 1, token);
+                var pins = await validation.IndexRecoveryPins.AsNoTracking().ToArrayAsync(token);
+                if (!seal.IsValid && retirement.Writers.Count == 0)
+                {
+                    // A zero-writer disposition can crash after its last rename
+                    // but before its first seal. Its exact journal resumes below.
+                }
+                else if (!seal.IsValid || seal.ClassifierVersion != RecoveryIndexReferenceAudit.ClassifierVersion ||
+                    seal.DatabaseIncarnation != retirement.DatabaseIncarnation || seal.RootFingerprint != completed.RootFingerprint ||
+                    seal.InventoryChecksum != completed.InventoryChecksum || seal.RecoveryRoot != root || seal.IndexRoot != Canonical(indexRoot) ||
+                    pins.Length != completed.Pins.Count || completed.Pins.Any(pin => !pins.Any(value =>
+                        value.Packet == pin.Packet && value.GenerationId == pin.GenerationId && value.IndexPath == pin.IndexPath)))
+                    throw new InvalidOperationException("index-recovery-retirement-completion-unconfirmed");
+                else return completed;
+            }
+        }
         await using (var invalidation = Context(connection))
             await invalidation.IndexRecoveryAudit.Where(value => value.Id == 1).ExecuteUpdateAsync(setters =>
                 setters.SetProperty(value => value.IsValid, false).SetProperty(value => value.FailurePath, (string?)null), token);
@@ -73,14 +115,21 @@ public sealed class SqlIndexRecoveryReferences(IDbContextFactory<FluxKnowledgeDb
             await using var db = Context(connection);
             var unfinished = await db.IndexRecoveryWriters.AsNoTracking().OrderBy(value => value.Id).Take(1025).ToArrayAsync(token);
             if (unfinished.Length > 1024) throw new InvalidOperationException("index-recovery-writer-audit-budget");
+            if (retirement is not null && !WritersMatch(unfinished, retirement.Writers))
+                throw new InvalidOperationException("index-recovery-retirement-writer-set-changed");
             foreach (var writer in unfinished)
             {
                 if (!string.Equals(writer.RecoveryRoot, root, StringComparison.OrdinalIgnoreCase))
                     throw new InvalidOperationException("index-recovery-writer-root-mismatch");
                 if (owners.Observe(new(writer.OwnerProcessId, writer.OwnerStartedAtUtc, writer.OwnerMachineFingerprint)) != GpuInteractiveOwnerObservation.Exited)
                     throw new InvalidOperationException("index-recovery-writer-exit-not-proven");
-                if (!writer.OwnerExitSufficient)
+                if (!writer.OwnerExitSufficient && retirement is null)
                     throw new InvalidOperationException("index-recovery-writer-reconciliation-required");
+            }
+            if (retirement is not null)
+            {
+                await RecoveryArchiveRetirement.MoveAsync(retirement, RecheckRetirementSessionAsync, token);
+                await RecoveryArchiveConsumers.AssertAbsentAsync(retirement, token);
             }
             var capture=new RecoveryIndexReferenceAudit(indexRoot);
             var captured=legacy is null?capture.Capture(root,token):capture.CaptureLegacyStaging(legacy,token);
@@ -93,6 +142,7 @@ public sealed class SqlIndexRecoveryReferences(IDbContextFactory<FluxKnowledgeDb
             await db.Database.UseTransactionAsync(transaction, token);
             if (AfterProtocolTransaction is { } bound) await bound(connection, token);
             if(legacy is not null)await legacy.RevalidateBeforeSealAsync(db,token);
+            if (retirement is not null) await ValidateRetirementBindingAsync(db, retirement, token);
             var audit = await db.IndexRecoveryAudit.SingleAsync(value => value.Id == 1, token);
             audit.IsValid = true; audit.ClassifierVersion = legacy is null?RecoveryIndexReferenceAudit.ClassifierVersion:LegacyStagingRecoveryProof.ClassifierVersion;
             audit.DatabaseIncarnation = await DatabaseIdentityAsync(db, token);

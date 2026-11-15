@@ -27,3 +27,59 @@ The user returned diagnosis, correction and semantic acceptance to the existing 
 The existing keeper searches at 5.386 and 20.179 seconds returned correct lexical citations but semantic timeouts. Their outcomes, lifecycle receipts, timings, release bindings and evidence locations were handed back to that owner without repeating the conversation. No additional search request or production trace attachment ran here. The approved provider-only trace preparation remains unexecuted.
 
 The [deletion design](../design/deleted-source-recovery-plan.md) records the implemented invariants and validation scope. Current unresolved semantic behaviour and protected historical purge remain separate issues; neither is reported as fixed by these deletion checks.
+
+## Native archive retirement, 15 November 2026
+
+The user subsequently authorised reconciliation of the remaining recovery holds,
+removal of the two synthetic sources, and deletion of optional rollback copies.
+The original preservation boundary above records the earlier acceptance; it does
+not declare those historical packets necessary for current serving.
+
+The privileged operator now supports:
+
+```text
+index-recovery retire-archives --plan <private.json> --plan-sha256 <sha256>
+```
+
+`scripts/deploy/prepare-native-recovery-retirement.ps1` captures a bounded
+metadata disposition using Windows SQL identity. It binds the current release,
+database incarnation, publication, exact unfinished writers, positive running
+service owners and complete Web, Outlook and helper payload file fingerprints.
+It reads no document, model or native index payload and creates no database backup.
+The ordinary updater's explicit `vector_publication_metadata: null` is accepted
+by the reference classifier; an unknown non-null binding is still refused.
+
+Execution holds the updater mutex and exclusive native recovery-reference
+session. It rechecks source and attached SQL file references, live processes,
+services and enabled scheduled actions including working directories. Reference
+observations are refreshed during a longer move sequence. Archive paths and
+identities are exact; unsupported categories such as retention snapshots require
+their own finalisation proof and are refused by this command. An incomplete
+rebuild is accepted only through its bound, completed successor at the current
+epoch. A deployment hold or a changed service, runtime file or publication stops
+the operation.
+
+Each same-volume rename into a separate cleanup directory has a flushed intent
+and completion journal. The optional current rollback packet moves last, after
+the complete live payload baseline is checked again. Serving continues from the
+installed payloads. The native audit stays invalid until the retained inventory
+passes classification; its seal and pins commit with removal of only the bound
+writer identities. Replay verifies the durable seal, or resumes a zero-writer
+pre-commit interruption from its exact journal. Conflicting locations or a
+mismatched valid seal are refused. Keep the plan, journal and quarantine until
+independent seal and publication checks pass.
+
+Only after the supported source deletions complete and the two synthetic source
+registrations disappear may their physical directories and the quarantined
+archives enter the user-run cleanup manifest. Deleting that quarantine gives up
+rollback from those saved releases. Preserve the canonical Recovery directory and
+ACL, installed app, canonical plugin, live database, index, retained source data
+and model store. This capability does not imply that a production retirement or
+fixture purge has already run; its execution receipt establishes that outcome.
+
+The dashboard distinguishes current GPU uncertainty from historical attempts
+whose parent is superseded or whose exact native release receipt is present.
+Historical outcomes remain uncertain; no task is rewritten as successful.
+Unproved outcomes remain visible. Receipt proof reads mutable GPU tables in
+separate statements, preserving the status reader's lock order, and bounds the
+materialised proof window.

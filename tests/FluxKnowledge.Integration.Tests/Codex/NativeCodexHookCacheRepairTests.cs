@@ -76,6 +76,56 @@ public sealed class NativeCodexHookCacheRepairTests
         finally { Directory.Delete(alias); }
     }
 
+    [Fact]
+    public async Task Canonical_location_upgrade_is_planned_hash_bound_and_repeatable_without_a_cached_adapter()
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        await fixture.UseLegacyHooksAsync();
+        var before = fixture.CacheHashes();
+        var planned = await fixture.RunAsync(false, upgrade: true);
+        Assert.Equal(0, planned.ExitCode); Assert.Equal(before, fixture.CacheHashes());
+        var applied = await fixture.RunAsync(true, upgrade: true);
+        Assert.True(applied.ExitCode == 0, applied.Error);
+        using var expected = JsonDocument.Parse(NativeCodexPluginManifestWriter.RenderHooksUtf8(fixture.Source));
+        foreach (var root in new[] { fixture.Source, fixture.Cache })
+        {
+            using var actual = JsonDocument.Parse(await File.ReadAllBytesAsync(Path.Combine(root, "hooks", "hooks.json")));
+            Assert.True(JsonElement.DeepEquals(expected.RootElement, actual.RootElement));
+        }
+        Assert.False(File.Exists(fixture.Target));
+        var after = fixture.CacheHashes();
+        var replay = await fixture.RunAsync(true, upgrade: true);
+        Assert.True(replay.ExitCode == 0, replay.Error); Assert.Equal(after, fixture.CacheHashes());
+        Assert.Equal(before[".mcp.json"], after[".mcp.json"]);
+        Assert.Equal(before[Path.Combine(".codex-plugin", "plugin.json")], after[Path.Combine(".codex-plugin", "plugin.json")]);
+    }
+
+    [Fact]
+    public async Task An_interrupted_two_file_location_upgrade_resumes_from_the_canonical_source_definition()
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        await fixture.UseLegacyHooksAsync();
+        await File.WriteAllBytesAsync(Path.Combine(fixture.Source, "hooks", "hooks.json"), NativeCodexPluginManifestWriter.RenderHooksUtf8(fixture.Source));
+        var result = await fixture.RunAsync(true, upgrade: true);
+        Assert.True(result.ExitCode == 0, result.Error);
+        using var expected = JsonDocument.Parse(NativeCodexPluginManifestWriter.RenderHooksUtf8(fixture.Source));
+        using var actual = JsonDocument.Parse(await File.ReadAllBytesAsync(Path.Combine(fixture.Cache, "hooks", "hooks.json")));
+        Assert.True(JsonElement.DeepEquals(expected.RootElement, actual.RootElement));
+    }
+
+    [Fact]
+    public async Task Unreviewed_definitions_stop_the_location_upgrade_before_either_file_changes()
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        await fixture.UseLegacyHooksAsync();
+        await File.AppendAllTextAsync(Path.Combine(fixture.Cache, "hooks", "hooks.json"), " ");
+        var cache = fixture.CacheHashes();
+        var source = await File.ReadAllBytesAsync(Path.Combine(fixture.Source, "hooks", "hooks.json"));
+        var result = await fixture.RunAsync(true, upgrade: true);
+        Assert.NotEqual(0, result.ExitCode); Assert.Equal(cache, fixture.CacheHashes());
+        Assert.Equal(source, await File.ReadAllBytesAsync(Path.Combine(fixture.Source, "hooks", "hooks.json")));
+    }
+
     private sealed class Fixture : IAsyncDisposable
     {
         public string Root { get; } = Path.Combine(Path.GetTempPath(), "FluxKnowledgeHookCacheRepairTests", Guid.NewGuid().ToString("N"));
@@ -84,6 +134,14 @@ public sealed class NativeCodexHookCacheRepairTests
         public string SourceAdapter => Path.Combine(Source, "hooks", "invoke-native-hook.ps1");
         public string Target => Path.Combine(Cache, "hooks", "invoke-native-hook.ps1");
         public string ExpectedHash { get; set; } = string.Empty;
+        public string OriginalHooksHash { get; private set; } = string.Empty;
+
+        public async Task UseLegacyHooksAsync()
+        {
+            var bytes = NativeCodexPluginManifestWriter.RenderHooksUtf8();
+            OriginalHooksHash = Convert.ToHexString(SHA256.HashData(bytes));
+            foreach (var root in new[] { Source, Cache }) await File.WriteAllBytesAsync(Path.Combine(root, "hooks", "hooks.json"), bytes);
+        }
 
         public static async Task<Fixture> CreateAsync()
         {
@@ -102,14 +160,15 @@ public sealed class NativeCodexHookCacheRepairTests
         public Dictionary<string, string> CacheHashes() => Directory.GetFiles(Cache, "*", SearchOption.AllDirectories)
             .ToDictionary(path => Path.GetRelativePath(Cache, path), path => Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path))));
 
-        public async Task<(int ExitCode, string Output, string Error)> RunAsync(bool apply, string? cacheOverride = null)
+        public async Task<(int ExitCode, string Output, string Error)> RunAsync(bool apply, string? cacheOverride = null, bool upgrade = false)
         {
             var directory = new DirectoryInfo(FluxKnowledge.Testing.RepositoryFiles.Root());
             while (directory is not null && !File.Exists(Path.Combine(directory.FullName, "FluxKnowledge.slnx"))) directory = directory.Parent;
             Assert.NotNull(directory);
-            var script = Path.Combine(directory.FullName, "scripts", "deploy", "repair-native-codex-hook-cache.ps1");
+            var script = Path.Combine(directory.FullName, "scripts", "deploy", upgrade ? "upgrade-native-codex-hook-paths.ps1" : "repair-native-codex-hook-cache.ps1");
             var start = new ProcessStartInfo("pwsh") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
             foreach (var argument in new[] { "-NoProfile", "-File", script, "-SourcePluginRoot", Source, "-CachedPluginRoot", cacheOverride ?? Cache, "-ExpectedAdapterSha256", ExpectedHash }) start.ArgumentList.Add(argument);
+            if (upgrade) { start.ArgumentList.Add("-ExpectedOriginalHooksSha256"); start.ArgumentList.Add(OriginalHooksHash); }
             if (apply) start.ArgumentList.Add("-Apply");
             using var process = Process.Start(start)!;
             var output = process.StandardOutput.ReadToEndAsync();

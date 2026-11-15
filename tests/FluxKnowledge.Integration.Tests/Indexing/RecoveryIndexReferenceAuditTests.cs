@@ -56,6 +56,28 @@ public sealed class RecoveryIndexReferenceAuditTests : IDisposable
     }
 
     [Theory]
+    [InlineData("null", true)]
+    [InlineData("{}", false)]
+    [InlineData("\"unknown-binding\"", false)]
+    public void Ordinary_release_metadata_accepts_an_explicitly_absent_vector_migration_and_refuses_unknown_bindings(
+        string metadata, bool accepted)
+    {
+        var packet = Packet();
+        using var value = JsonDocument.Parse(metadata);
+        File.WriteAllText(Path.Combine(packet, "manifest.json"), JsonSerializer.Serialize(new
+        {
+            commit = new string('a', 40), staged_at_utc = DateTimeOffset.UtcNow,
+            application_root = Path.Combine(_root, "App"), migrations = false, clean_slate = false,
+            vector_publication_metadata = value.RootElement
+        }));
+        if (accepted)
+            Assert.Empty(new RecoveryIndexReferenceAudit(Index).Capture(Recovery).Pins);
+        else
+            Assert.Equal("index-recovery-application-manifest-invalid",
+                Assert.Throws<RecoveryIndexAuditException>(() => new RecoveryIndexReferenceAudit(Index).Capture(Recovery)).Message);
+    }
+
+    [Theory]
     [InlineData("hybrid")]
     [InlineData("hybridpatch")]
     [InlineData("repositoryrecovery")]

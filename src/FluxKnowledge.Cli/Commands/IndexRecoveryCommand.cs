@@ -12,6 +12,8 @@ public static class IndexRecoveryCommand
     public static async Task<int> ExecuteFromEnvironmentAsync(string[] args, TextWriter output, TextWriter error,
         CancellationToken token = default)
     {
+        if (args.FirstOrDefault() == "retire-archives")
+            return await IndexRecoveryRetirementCommand.ExecuteAsync(args, output, error, token);
         if (args.Length != 5 || args[0] is not ("audit" or "report") || args[1] != "--recovery-root" || args[3] != "--index-root" ||
             !Path.IsPathFullyQualified(args[2]) || !Path.IsPathFullyQualified(args[4]))
         {
