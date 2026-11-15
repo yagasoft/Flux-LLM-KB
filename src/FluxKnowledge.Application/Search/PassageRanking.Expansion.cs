@@ -65,6 +65,13 @@ public static partial class PassageRanking
                 if (selected.Count == ExpandedDisclosureBudget) break;
                 if (ids.Add(p.ChunkId)) selected.Add(p);
             }
+            // Disclosure may withhold early inputs. Use spare binding capacity in
+            // dense order so later eligible inputs can fill the existing model budget.
+            foreach (var p in pool)
+            {
+                if (selected.Count == ExpandedDisclosureBudget) break;
+                if (ids.Add(p.ChunkId)) selected.Add(p);
+            }
             _planned = ids;
             DisclosureCandidates = Array.AsReadOnly(selected.ToArray());
         }

@@ -62,8 +62,9 @@ public interface ICorpusRetrievalReader
         ReadDisclosureBatchAsync(bindings, 200, cancellationToken);
 
     /// <summary>
-    /// Explicit expanded-candidate preflight: at most 200 baseline bindings and
-    /// 50 additional representatives. Independent disclosure and final reads still apply.
+    /// Explicit expanded-candidate preflight: at most 250 bindings, preserving
+    /// baseline capacity before extra representatives and spare-slot refill.
+    /// Independent disclosure and final reads still apply.
     /// </summary>
     ValueTask<IReadOnlyDictionary<long, EligibleContext>> ReadExpandedForDisclosureAsync(
         IReadOnlyList<CorpusEvidenceBinding> bindings, CancellationToken cancellationToken) =>

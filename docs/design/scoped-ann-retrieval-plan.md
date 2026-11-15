@@ -1208,3 +1208,18 @@ native/durable settlement and consistent FP16 profile binding. The current
 idle-only guard refuses queued or active GPU work; CPU-index overlap does not
 prove semantic availability during sustained GPU-index backlog. No production
 deployment, recovery or start was performed in this cleanup.
+
+The 15 November follow-up located a separate recall loss in the expanded
+disclosure planner. Stopping at 50 extra groups before disclosure left 27 of the
+250 binding slots unused on the captured CRM request. The answering passage was
+already present in the dense pool. Preserve the existing plan, then append safe
+pool bindings in dense order into unused slots. Complete still requires a fresh
+approval for each binding and retains the original baseline plus at most 50 new
+distinct model inputs. This uses the established disclosure and model capacities;
+it does not expand either cap or change lexical fallback.
+
+The authentic native replay matched the old plan and approvals before testing
+refill; the answer then entered the 81-input shortlist and scored seventh in the
+offline FP32 component. Final serving rank and the ten-second API p95 remain
+acceptance gates. See the dated follow-up in the release record for the measured
+scope and the constraint against another large corpus restore.

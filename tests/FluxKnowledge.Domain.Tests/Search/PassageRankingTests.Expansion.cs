@@ -7,15 +7,15 @@ namespace FluxKnowledge.Domain.Tests.Search;
 public sealed partial class PassageRankingTests
 {
     [Fact]
-    public void Expansion_preserves_every_baseline_binding_and_reserves_fifty_additions()
+    public void Expansion_preserves_every_baseline_binding_and_fills_spare_disclosure_capacity()
     {
         var lexical = Enumerable.Range(1, 80).Select(i => Passage(i, "Lexical " + i)).ToArray();
         var dense = Enumerable.Range(1001, 80).Select(i => Passage(i, "Dense " + i)).ToArray();
         var pool = Enumerable.Range(2001, 100).Select(i => Passage(i, "Pool " + i)).ToArray();
         var plan = PassageRanking.PlanExpansion("question", lexical, dense, pool);
-        Assert.Equal(210, plan.DisclosureCandidates.Count);
+        Assert.Equal(250, plan.DisclosureCandidates.Count);
         Assert.Equal(lexical.Concat(dense), plan.DisclosureCandidates.Take(160));
-        Assert.Equal(50, plan.DisclosureCandidates.Count(p => p.ChunkId >= 2001));
+        Assert.Equal(pool.Take(90), plan.DisclosureCandidates.Skip(160));
         var ranked = plan.Complete(plan.DisclosureCandidates.Select(p => p.ChunkId).ToHashSet());
         Assert.Equal(100, ranked.Count);
         Assert.Equal(PassageRanking.Fuse("question", lexical, dense), ranked.Take(50));
@@ -65,12 +65,18 @@ public sealed partial class PassageRankingTests
     [Fact]
     public void Fresh_approval_is_required_for_each_copy_and_cannot_be_invented_for_unplanned_bindings()
     {
-        var baseline = Passage(1, "Shared"); var copy = Passage(2, "Shared"); var extra = Passage(3, "New");
-        var plan = PassageRanking.PlanExpansion("question", [baseline], [], [copy, extra]);
-        Assert.DoesNotContain(plan.DisclosureCandidates, p => p.ChunkId == 2);
-        var ranked = plan.Complete(new HashSet<long> { 2, 3 });
-        Assert.Equal(3, Assert.Single(ranked).Passage.ChunkId);
-        Assert.DoesNotContain(ranked, p => p.Passage.ChunkId is 1 or 2);
+        var lexical = Enumerable.Range(1, 100).Select(i => Passage(i, "Lexical " + i)).ToArray();
+        var dense = Enumerable.Range(1001, 100).Select(i => Passage(i, "Dense " + i)).ToArray();
+        var pool = Enumerable.Range(2001, 51).Select(i => Passage(i, "Pool " + i)).ToArray();
+        var plan = PassageRanking.PlanExpansion("question", lexical, dense, pool);
+        Assert.Equal(250, plan.DisclosureCandidates.Count);
+        Assert.DoesNotContain(plan.DisclosureCandidates, p => p.ChunkId == pool[^1].ChunkId);
+
+        var ranked = plan.Complete(new HashSet<long> { pool[^2].ChunkId, pool[^1].ChunkId });
+
+        Assert.Equal(pool[^2].ChunkId, Assert.Single(ranked).Passage.ChunkId);
+        Assert.DoesNotContain(ranked.SelectMany(p => p.AlternativePassages.Prepend(p.Passage)),
+            p => p.ChunkId == pool[^1].ChunkId);
     }
 
     [Fact]

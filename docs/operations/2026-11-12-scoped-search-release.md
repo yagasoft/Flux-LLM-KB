@@ -116,3 +116,49 @@ approved the change. It has not yet been deployed. A complete normal-interface
 CRM trace must show both ranked and successful completion events before its
 shortlist can be treated as consumed model inputs. Absence from the hydrated
 dense pool would still leave raw ANN selection versus hydration unresolved.
+
+## Candidate selection follow-up, 15 November 2026
+
+The observer is now deployed and the service is ready. Its incremental update
+initially stopped safely because the reviewed Outlook publish fingerprint omitted
+the canonical launcher added by the updater. A separately reviewed and explicitly
+approved forward recovery included that launcher and restored the compatible
+payload set. Configuration, database, publication, paused roots, disabled Outlook
+task and running SourceAccess helper were preserved. No projection rebuild or
+corpus restore occurred.
+
+One lossless normal-route CRM trace returned ten trained hybrid hits in 8.505
+seconds. The missing answering passage was dense-pool item 148, but was absent
+from the 223 planned disclosure bindings. Only 125 bindings passed disclosure and
+65 distinct inputs reached scoring. This establishes the first loss at expansion
+planning, before model scoring. It does not establish a model-ranking failure.
+
+The correction preserves the entire existing disclosure plan and appends safe
+dense-pool bindings in their original order until the existing 250-binding cap.
+Fresh disclosure, the original baseline prefix, verified-input deduplication,
+the 50-addition limit, model caps and final citation checks remain in force.
+Neither deadlines nor lexical fallback change.
+
+A bounded read-only replay of the exact 486 captured candidate identities used
+the native publication, code proof, safety and disclosure checks. Its original
+223 planned bindings, 125 approvals and 65 ordered model inputs matched the trace
+exactly. Refill produced 250 bindings, 148 approvals and 81 model inputs, including
+the answer at input position 70. An offline FP32 replay scored that answer seventh.
+The regression fixture replaces all source identifiers and passage text with
+synthetic values while preserving the observed grouping and order.
+
+A separate offline component comparison grouped pairs by length within each
+existing call of at most 50. All 81 FP32 logits and the top ten were identical;
+CPU scoring took 23.595 seconds in original order and 20.267 seconds grouped.
+This single comparison is neither a GPU speed result nor an end-to-end latency
+qualification. Length grouping is not enabled by this correction.
+
+The full-current-corpus staged acceptance and production p95 remain open. The
+older successful staging indexing run remains historical evidence; its catalogue
+was removed during authorised cleanup, and the user declined a replacement
+snapshot or large restore. The new candidate correction has not yet been deployed
+or subjected to fresh final cited-rank validation. A production admission lock
+alone does not safely isolate a concurrent GPU trial: loss of its SQL session can
+admit new production work while native staging work is still running, and held
+locks can delay foreground settlement. Production remains running; no such trial
+or additional service pause has occurred.
