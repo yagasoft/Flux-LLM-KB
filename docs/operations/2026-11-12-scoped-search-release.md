@@ -196,3 +196,54 @@ approved canonical qualification. A prompt arriving during an existing recovery
 scan can still wait for that scan; the resulting API improvement remains to be
 measured after deployment. The full-current-corpus staging restriction above
 still applies.
+
+## Dispatch priority serving validation, 15 November 2026
+
+The correction passed 5,459 executed tests, 46 existing opt-in skips, nine native
+contract groups and a zero-warning build. Required closeout squash-merged and
+pushed main `3c06612d`; the qualified source `64e7e17c` was incrementally deployed
+as `20261115T121345Z-64e7e17c1dc0`. Independent checks matched the three installed
+role fingerprints and preserved configuration, publication version 18291, its
+1,257,687-vector/284-segment generation, both paused roots, disabled Outlook and
+the unchanged SourceAccess process. The updater reported success and released its
+hold despite the wrapper returning exit code 1; deployment was not repeated.
+
+The first fixed workload ran before ANN preparation completed. All 40 responses
+were lexical with `semanticStatus: warming`; 34 contained ten hits and six fewer.
+The denominator guard stopped before citation readback. This failed startup run
+is retained separately. HTTP readiness checks SQL and derived-index recovery,
+and does not assert that the semantic projection has finished preparation.
+
+A subsequent single control returned a trained hybrid result in 7.589 seconds
+on the unchanged generation, establishing the transition to semantic readiness.
+The separately reviewed warm two-caller workload then passed all 40 trained
+hybrid responses and all 400 exact cited reads, without timeout, invalid citation
+or scope leakage. API p95 was 9.637 seconds and the maximum was 9.870 seconds.
+Every ordered passage and its nine authority/boundary fields matched the prior
+independently adjudicated refill run. Answer presence therefore remains 19/20 in
+each round, including the CRM answer at rank seven; the full-registration
+prerequisite question remains a miss. This is warm serving performance, not a
+cold-start or concurrent-indexing qualification.
+
+For the 20 ranking cohorts created within this warm workload, durable
+batch-to-acknowledgement delay averaged 567.722 ms, with p95 957.916 ms. The prior
+workload averaged 1,491.953 ms. Acknowledgement-to-receipt time averaged 7.528
+seconds; it includes the owned work and does not isolate model scoring. The
+ordering regression proves admitted delivery no longer waits for the following
+discovery scan, while a prompt arriving during an existing scan can still wait.
+These same-host workload observations do not isolate every source of latency.
+
+No production indexing was injected. Historical full-size staging evidence
+includes actual GPU indexing, but the current staging catalogue is absent and
+the user declined another snapshot or large restore. The current-release
+full-corpus staging/indexing gate remains open; another unchanged live search
+run cannot resolve that dependency.
+
+The requested file cleanup includes obsolete staging backups. Canonical
+`I:\FluxKnowledge\Recovery` remains held pending reconciliation: its invalid
+audit retains 11 unfinished writers with `OwnerExitSufficient=false` and 105 pins
+from two older manifests. Those pins do not inventory all interrupted-release
+dependencies, so absence from the pin list does not prove an archive obsolete.
+This does not establish that every archive is needed for serving search. Narrowing
+the hold requires writer-specific completion/reconciliation evidence and an exact
+archive dependency check; no SQL or retention bypass was performed.

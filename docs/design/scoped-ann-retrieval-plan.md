@@ -1,6 +1,6 @@
 # Scoped semantic retrieval implementation plan
 
-Status: search release `ec928805` deployed on 12 November 2026. Staging qualification and production semantic/citation checks passed. Full production performance and previous-answer non-regression acceptance remain open. See the [production release record](../operations/2026-11-12-scoped-search-release.md).
+Status: the refill and dispatch-priority corrections are deployed on 15 November 2026. Fresh warm production validation passed 40/40 trained responses, 400 exact cited reads, 19/20 answering questions and API p95 9.637 seconds. Current-release full-corpus staging/concurrent-indexing acceptance remains open; the earlier staging evidence is historical. See the [production release record](../operations/2026-11-12-scoped-search-release.md).
 
 ## Production validation, 12 November 2026
 
@@ -1238,3 +1238,11 @@ The native regression retains an active owner's reserved slot and acknowledged
 dispatch while recovery runs, then requires positive release and one result
 receipt. This is a scheduling correction, with fresh end-to-end latency still to
 be qualified; it does not alter semantic selection, scoring or lexical fallback.
+
+Warm serving validation subsequently passed at API p95 9.637 seconds and maximum
+9.870 seconds, with all 40 trained responses and 400 exact cited reads. All
+ordered passages and authority bindings matched the prior adjudicated 19/20
+answer population. Mean durable batch-to-acknowledgement time fell from 1.492 to
+0.568 seconds across the two measured workloads. Keep the separate 40-response
+startup warming failure and the absent current full-corpus staging/indexing proof
+visible; neither the warm pass nor the read-only control closes those gates.
