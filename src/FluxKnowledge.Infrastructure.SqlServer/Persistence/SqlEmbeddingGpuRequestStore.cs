@@ -210,12 +210,11 @@ public sealed class SqlEmbeddingGpuRequestStore(IDbContextFactory<FluxKnowledgeD
         // exact ownership under their existing transaction/publication fences.
         await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         var allowLegacySettlement = deploymentValidationHold?.IsHeld != true;
-        var candidates = await (from request in context.EmbeddingGpuRequests.AsNoTracking()
+        var owned = from request in context.EmbeddingGpuRequests.AsNoTracking()
             join task in context.GpuMiniTasks.AsNoTracking() on request.MiniTaskId equals task.Id
             join batch in context.GpuBatches.AsNoTracking() on task.BatchId equals batch.Id
             join dispatch in context.GpuExecutorDispatches.AsNoTracking() on batch.Id equals dispatch.BatchId
-            where (request.State < 2 || allowLegacySettlement && RecoverableSettledRequestIds(context).Contains(request.MiniTaskId)) &&
-                batch.ItemCount == 1 && request.ParentJobId == task.ParentJobId &&
+            where batch.ItemCount == 1 && request.ParentJobId == task.ParentJobId &&
                 request.SourceRevision == task.SourceRevision && request.ModelFingerprint == runtime.Profile.ModelFingerprint &&
                 request.Dimensions == runtime.Profile.Dimensions &&
                 task.AdmissionGeneration == batch.AdmissionGeneration && dispatch.AdmissionGeneration == batch.AdmissionGeneration &&
@@ -227,8 +226,15 @@ public sealed class SqlEmbeddingGpuRequestStore(IDbContextFactory<FluxKnowledgeD
                 (dispatch.State == (int)GpuExecutorDispatchState.Acknowledged ||
                     dispatch.State == (int)GpuExecutorDispatchState.DeliveryUncertain ||
                     request.NativeCleanupConfirmed && dispatch.State == (int)GpuExecutorDispatchState.Terminal)
-            orderby request.UpdatedAtUtc, request.MiniTaskId
-            select new { Request = request, Dispatch = dispatch }).Take(128).ToArrayAsync(cancellationToken).ConfigureAwait(false);
+            select new { Request = request, Dispatch = dispatch };
+        // Keep unfinished work separate from the small eligible settled set.
+        // An OR over the historical request table defeats the recovery joins.
+        var eligible = owned.Where(value => value.Request.State < 2);
+        if (allowLegacySettlement)
+            eligible = eligible.Concat(owned.Where(value => value.Request.State == 2 &&
+                RecoverableSettledRequestIds(context).Contains(value.Request.MiniTaskId)));
+        var candidates = await eligible.OrderBy(value => value.Request.UpdatedAtUtc).ThenBy(value => value.Request.MiniTaskId)
+            .Take(128).ToArrayAsync(cancellationToken).ConfigureAwait(false);
         return candidates.Select(candidate => new EmbeddingGpuRecoveryWork(candidate.Request.MiniTaskId,
             new(candidate.Dispatch.BatchId, candidate.Dispatch.CapacitySlotKey, candidate.Dispatch.ExecutorKey,
                 candidate.Dispatch.AdmissionGeneration, candidate.Dispatch.DispatchId),

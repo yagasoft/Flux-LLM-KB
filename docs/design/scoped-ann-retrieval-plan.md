@@ -1271,3 +1271,19 @@ expire during that work. Do not treat the publication wake correction as a GPU
 latency fix or infer an exact interactive phase breakdown from these background
 measurements. Full current-corpus staging proof remains unavailable without a
 reusable corpus; a new large snapshot or restore is not authorised.
+
+The dispatch loop also awaits embedding recovery discovery between delivery
+passes. Its combined unfinished-or-settled predicate caused a scan of historical
+attempts. Preserve the common ownership query and concatenate disjoint unfinished
+and eligible settled branches, then apply one global ordering and 128-row limit.
+During a deployment hold, query only unfinished work. Claims, cleanup and
+settlement retain their existing authoritative checks.
+
+The native fixture with 6,000 inactive attempts and two actual recoverable
+handles measured 62,926 logical reads before the correction and 1,445 after it.
+It verifies both handles in global order, hold exclusion of the settled handle,
+and one generated SQL limit. Six focused recovery checks passed. A bounded
+read-only comparison of the actual EF selectors on one live snapshot returned
+the same single candidate while reducing logical reads from 3,836,206 to 2,868.
+These are database-work measurements; they do not yet qualify end-to-end search
+latency or full-corpus staging accuracy.
