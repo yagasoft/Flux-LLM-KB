@@ -121,3 +121,52 @@ foreach ($failureStatus in @(500, 503)) { foreach ($path in @('/health/live', '/
     }
 }}
 'PASS: required readiness waits only for startup HTTP 503 and retains its deadline and strict failure gates.'
+
+$budgetGuard=@($ast.FindAll({param($node)$node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+    $node.Name -eq 'Assert-StoppedRecoveryReadinessBudgetOptions'},$true))
+if($budgetGuard.Count -ne 1){throw 'Expected a recovery-only readiness budget guard.'}
+Invoke-Expression $budgetGuard[0].Extent.Text
+$options=@{StoppedRecoveryReadinessBudgetSeconds=900;RecoverStoppedPool=$true;
+    StoppedRecoveryBindingPath='I:\Codex Workspaces\Staging\FluxKnowledge\fixture-binding.json';ExpectedStoppedRecoveryBindingSha256=('a'*64)}
+Assert-StoppedRecoveryReadinessBudgetOptions $options
+Assert-StoppedRecoveryReadinessBudgetOptions $options @{Version=1;Purpose='incremental-stopped-release'}
+Assert-Rejected {Assert-StoppedRecoveryReadinessBudgetOptions $options @{Version=2;Purpose='vector-publication-metadata-resume'}}
+Assert-Rejected {Assert-StoppedRecoveryReadinessBudgetOptions $options @{Version=1;Purpose='other'}}
+foreach($fault in @('mode','path','hash','maximum','shorter','remediation')){
+    $bad=$options.Clone()
+    switch($fault){
+        'mode'{$bad.RecoverStoppedPool=$false}
+        'path'{$bad.StoppedRecoveryBindingPath=''}
+        'hash'{$bad.ExpectedStoppedRecoveryBindingSha256=''}
+        'maximum'{$bad.StoppedRecoveryReadinessBudgetSeconds=901}
+        'shorter'{$bad.StoppedRecoveryReadinessBudgetSeconds=119}
+        'remediation'{$bad.DeferReadinessForScopedRemediation=$true}
+    }
+    Assert-Rejected {Assert-StoppedRecoveryReadinessBudgetOptions $bad}
+}
+Assert-StoppedRecoveryReadinessBudgetOptions @{StoppedRecoveryReadinessBudgetSeconds=0}
+$script:ProbeCalls.Clear();$script:FailPath='';$script:ReadyMode='ready';$script:ReadyAttempts=0
+$script:RequestTimeouts=[Collections.Generic.List[int]]::new()
+function Invoke-FixedLoopbackProbe {
+    param([string]$Uri,[int]$TimeoutSeconds,[Threading.CancellationToken]$CancellationToken)
+    $script:RequestTimeouts.Add($TimeoutSeconds)
+    $script:ProbeCalls.Add(([uri]$Uri).AbsolutePath)
+    if($Uri.EndsWith('/health/ready',[StringComparison]::Ordinal)){
+        $script:ReadyAttempts++
+        Start-Sleep -Milliseconds 300
+        if($script:ReadyMode -eq 'absent' -or $script:ReadyAttempts -eq 1){
+            throw 'The fixed-loopback endpoint returned HTTP 503; exact HTTP 200 is required.'
+        }
+    }
+    $response=[pscustomobject]@{};$response|Add-Member ScriptMethod Dispose {};return $response
+}
+$timer=[Diagnostics.Stopwatch]::StartNew()
+Invoke-RequiredLoopbackProbes -Origin $origin -TimeoutSeconds 1 -ReadinessBudgetSeconds 3
+if($timer.Elapsed.TotalSeconds -lt 1 -or $timer.Elapsed.TotalSeconds -gt 3 -or
+    @($script:RequestTimeouts|Where-Object{$_ -ne 1}).Count -or $script:ReadyAttempts -ne 2){throw 'Recovery budget changed an individual probe limit or failed late readiness'}
+$script:ReadyMode='absent';$script:ReadyAttempts=0;$script:ProbeCalls.Clear();$timer.Restart()
+Assert-Rejected {Invoke-RequiredLoopbackProbes -Origin $origin -TimeoutSeconds 1 -ReadinessBudgetSeconds 2}
+if($timer.Elapsed.TotalSeconds -lt 1.9 -or $timer.Elapsed.TotalSeconds -gt 3.5 -or $script:ProbeCalls.Contains('/api/index-health')){
+    throw 'Recovery readiness restarted its deadline or accepted persistent HTTP 503'
+}
+'PASS: only bound stopped recovery extends readiness polling; per-request limits and absolute expiry are preserved.'

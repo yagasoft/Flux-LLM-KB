@@ -1246,3 +1246,28 @@ answer population. Mean durable batch-to-acknowledgement time fell from 1.492 to
 0.568 seconds across the two measured workloads. Keep the separate 40-response
 startup warming failure and the absent current full-corpus staging/indexing proof
 visible; neither the warm pass nor the read-only control closes those gates.
+
+The 16 November recovery completed with strict readiness and a bounded polling
+window. A fresh two-caller workload during actual background embedding and
+publication returned only 2/20 hybrid-ready responses: ten fell back while
+warming and eight timed out. API p95 was 11.144 seconds. All 193 cited reads were
+exact and stayed within scope, but only eight queries returned a previously
+adjudicated answering binding. Those results fail the concurrent indexing gate.
+
+Publication previously left ANN preparation idle until a search or startup
+woke it. Use one independent coalescing signal shared by publishers and the
+preparation worker. Signal after committed stage publication, survivor
+activation and refresh; signal before optional refresh worklist cleanup.
+Resolving the signal must not construct hosted services. Preparation still
+opens and validates the latest readable generation, finishes captured work,
+and handles a newer generation signalled while it runs. Native SQL tests cover
+commit, rollback, survivor activation and cleanup failure after activation.
+
+A passive bounded capture measured ten complete background embedding batches:
+model loading took 1.983–2.054 seconds, inference 0.635–0.802 seconds and unloading
+0.179–0.187 seconds. Admission to acknowledgement took 0.922–1.081 seconds and
+total ownership took 3.805–4.216 seconds. A four-second interactive queue can
+expire during that work. Do not treat the publication wake correction as a GPU
+latency fix or infer an exact interactive phase breakdown from these background
+measurements. Full current-corpus staging proof remains unavailable without a
+reusable corpus; a new large snapshot or restore is not authorised.

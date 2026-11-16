@@ -11,6 +11,39 @@ namespace FluxKnowledge.Web.Tests.Composition;
 public sealed class CorpusAnnPreparationServiceTests
 {
     [Fact]
+    public void Publication_signal_resolves_without_constructing_hosted_services()
+    {
+        var services = new ServiceCollection();
+        services.AddSingleton<Microsoft.Extensions.Hosting.IHostedService>(_ => throw new InvalidOperationException("Hosted services must not be resolved by publication."));
+        CorpusAnnPreparationService.Add(services);
+        using var provider = services.BuildServiceProvider();
+        var signal = provider.GetRequiredService<ICorpusAnnPreparationSignal>();
+        Assert.IsType<CorpusAnnPreparationSignal>(signal);
+        for (var i = 0; i < 100; i++) signal.RequestPreparation();
+        var queue = provider.GetRequiredService<CorpusAnnPreparationSignal>().Requests;
+        Assert.True(queue.TryRead(out _));
+        Assert.False(queue.TryRead(out _));
+    }
+
+    [Fact]
+    public async Task Idle_publication_prepares_the_next_generation_without_a_search()
+    {
+        var state = new State();
+        await using var provider = Services(state).BuildServiceProvider();
+        using var host = Host(provider);
+        await host.StartAsync(default);
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        while (host.State.Status != "prepared") await Task.Delay(10, deadline.Token);
+        var next = state.Generation with { Id = Guid.NewGuid(), CorpusStamp = state.Generation.CorpusStamp! with { CorpusVersion = 2 } };
+        state.Generation = next;
+        provider.GetRequiredService<CorpusAnnPreparationSignal>().RequestPreparation();
+        await state.SecondStarted.Task.WaitAsync(deadline.Token);
+        while (host.State.Status != "prepared" || host.State.Generation != next.Id) await Task.Delay(10, deadline.Token);
+        await host.StopAsync(default);
+        Assert.Equal(2, state.Prepares);
+        Assert.Equal(next.Id, host.State.Generation);
+    }
+    [Fact]
     public async Task A_readable_unchanged_generation_does_not_self_schedule_when_only_corpus_version_advanced()
     {
         var state = new State { Current = false, Load = async _ => await Task.Yield() };
@@ -52,6 +85,8 @@ public sealed class CorpusAnnPreparationServiceTests
         using var host = Host(provider);
         await host.StartAsync(default);
         await state.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var next = state.Generation with { Id = Guid.NewGuid(), CorpusStamp = state.Generation.CorpusStamp! with { CorpusVersion = 2 } };
+        state.Generation = next;
         for (var i = 0; i < 100; i++) host.RequestPreparation();
         Assert.Equal(1, state.Prepares);
         Assert.Equal("warming", host.State.Status);
@@ -60,9 +95,9 @@ public sealed class CorpusAnnPreparationServiceTests
         await state.SecondStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
         await host.StopAsync(default);
         Assert.Equal(2, state.Prepares);
-        Assert.Equal(2, state.Disposals);
+        Assert.Equal(3, state.Disposals); // Two preparations and the changed-active-identity observation.
         Assert.Equal("prepared", host.State.Status);
-        Assert.Equal(state.Generation.Id, host.State.Generation);
+        Assert.Equal(next.Id, host.State.Generation);
     }
 
     [Fact]
@@ -111,10 +146,12 @@ public sealed class CorpusAnnPreparationServiceTests
     }
 
     private static CorpusAnnPreparationService Host(ServiceProvider provider) =>
-        new(provider.GetRequiredService<IServiceScopeFactory>(), NullLogger<CorpusAnnPreparationService>.Instance);
+        new(provider.GetRequiredService<IServiceScopeFactory>(), NullLogger<CorpusAnnPreparationService>.Instance,
+            preparation: provider.GetRequiredService<CorpusAnnPreparationSignal>());
     private static ServiceCollection Services(State state)
     {
         var services = new ServiceCollection();
+        services.AddSingleton<CorpusAnnPreparationSignal>();
         services.AddSingleton(state);
         services.AddScoped<ICorpusGenerationLeaseStore, Store>();
         services.AddScoped<ICorpusAnnLeaseFactory, Factory>();

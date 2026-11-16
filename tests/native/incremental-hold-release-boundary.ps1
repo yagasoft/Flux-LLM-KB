@@ -96,6 +96,7 @@ try {
         $hostingChange = @{ RollbackVerified = $true; PreloadReceipt = $null }
         $swap = @{ PreviousPayload = 'disposable-previous' }; $applyAnyMigration = $false
         $loopbackOrigin = @{ Origin = 'http://127.0.0.1:1' }; $ReadinessTimeoutSeconds = 1
+        $StoppedRecoveryReadinessBudgetSeconds = 0
         $calls = @{ Removes = 0; Restores = 0; Enables = 0; CleanupChecks = 0; WriterCompletions = 0; WriterClosures = 0 }
         $mutex = [Threading.Mutex]::new($false)
         $leaseAcquired = $mutex.WaitOne(0)

@@ -491,7 +491,8 @@ public static class WebHostComposition
             provider.GetRequiredService<TimeProvider>(),
             provider.GetService<PaddleOcrVlmExecutionRegistry>(),
             provider.GetService<IGpuInteractiveOwnerProbe>(),
-            provider.GetService<EmbeddingGpuRuntime>(), provider.GetService<EmbeddingGpuExecutor>()));
+            provider.GetService<EmbeddingGpuRuntime>(), provider.GetService<EmbeddingGpuExecutor>(),
+            provider.GetService<ICorpusAnnPreparationSignal>()));
         services.AddScoped<ISourceDeletionStore>(provider => provider.GetRequiredService<SqlSourceDeletionStore>());
         services.AddScoped<SourceDeletionCoordinator>();
         services.AddScoped<SqlSourceActivityStore>();

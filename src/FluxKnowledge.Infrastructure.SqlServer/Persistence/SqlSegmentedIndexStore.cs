@@ -18,7 +18,7 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
 public sealed partial class SqlSegmentedIndexStore(
     IDbContextFactory<FluxKnowledgeDbContext> contexts, TimeProvider clock,
     IGpuInteractiveOwnerProbe ownerProbe, IDeploymentValidationHold? deploymentHold = null,
-    IndexSegmentBuildOptions? segmentOptions = null) : ISegmentedIndexStore
+    IndexSegmentBuildOptions? segmentOptions = null, ICorpusAnnPreparationSignal? annPreparation = null) : ISegmentedIndexStore
 {
     private const int PageSize = 256;
     private static readonly string EmptyDigest = Convert.ToHexStringLower(SHA256.HashData([]));

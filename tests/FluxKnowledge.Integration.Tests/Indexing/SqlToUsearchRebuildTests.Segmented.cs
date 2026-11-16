@@ -54,8 +54,9 @@ public sealed partial class SqlToUsearchRebuildTests
         context.SourceDeletionOperations.Add(new() { Id = Guid.NewGuid(), SourceRootId = rootId, Phase = "accepted",
             CreatedAtUtc = DateTimeOffset.UtcNow, UpdatedAtUtc = DateTimeOffset.UtcNow });
         await context.SaveChangesAsync();
+        var preparation = new PreparationNotifications();
         var store = new SqlSourceDeletionStore(environment.Factory, TimeProvider.System,
-            queryOwnerProbe: new FluxKnowledge.Integrations.Windows.WindowsInteractiveGpuOwnerProbe());
+            queryOwnerProbe: new FluxKnowledge.Integrations.Windows.WindowsInteractiveGpuOwnerProbe(), annPreparation: preparation);
         var first = Assert.IsType<SourceDeletionWorkItem>(await store.ClaimNextAsync(CancellationToken.None));
         Assert.Equal("rebuild-index", (await store.PurgeAsync(first, null, CancellationToken.None)).Phase);
         using var scope = environment.Services.CreateScope();
@@ -64,6 +65,7 @@ public sealed partial class SqlToUsearchRebuildTests
         var outcome = await store.PurgeAsync(rebuild, candidate, CancellationToken.None);
         Assert.Null(outcome.ReasonCode);
         Assert.Equal("cleanup-memberships", outcome.Phase);
+        Assert.Equal(1, preparation.Count);
         await AssertSegmentedOracleAsync(environment);
         Assert.True(await context.Vectors.AnyAsync(value => value.IsDeleted));
         Assert.False(await context.CurrentIndexMembers.AnyAsync(value => value.SourceRootId == rootId));

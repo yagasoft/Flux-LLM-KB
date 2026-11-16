@@ -84,6 +84,7 @@ public sealed partial class SqlSegmentedIndexStore
             await transaction.CommitAsync(cancellationToken);
             return (Activated: true, Cleanup: rootProof is not null);
         });
+        if (result.Activated) annPreparation?.RequestPreparation();
         if (result.Cleanup) await CleanupTerminalRootWorklistAsync(id, cancellationToken);
         return result.Activated;
     }

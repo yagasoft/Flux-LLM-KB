@@ -40,6 +40,8 @@ param(
     [switch]$RecoverStoppedPool,
     [string]$StoppedRecoveryBindingPath = '',
     [string]$ExpectedStoppedRecoveryBindingSha256 = '',
+    [ValidateRange(0, 900)]
+    [int]$StoppedRecoveryReadinessBudgetSeconds = 0,
     [string]$OfflineCodeMaintenanceReceipt = '',
     [string]$ExpectedOfflineCodeMaintenanceReceiptSha256 = '',
     [switch]$EnableDashboardSnapshots,
@@ -93,6 +95,22 @@ $SourceDeletionMigrationScriptSha256 = "355F7B8499D0CE333E6FA50142B76C9F7B6CA92B
 $vectorMetadataMigrationState = $null
 $vectorMetadataReleaseBinding = $null
 $vectorMetadataPreparationStarted = $false
+
+function Assert-StoppedRecoveryReadinessBudgetOptions {
+    param([Collections.IDictionary]$Parameters,[hashtable]$Binding=$null)
+    $budget=[int]$Parameters['StoppedRecoveryReadinessBudgetSeconds']
+    if($budget -eq 0){return}
+    $requestLimit=if($Parameters.Keys -contains 'ReadinessTimeoutSeconds'){[int]$Parameters['ReadinessTimeoutSeconds']}else{120}
+    if($budget -lt $requestLimit -or $budget -gt 900 -or !$Parameters['RecoverStoppedPool'] -or
+        !$Parameters['StoppedRecoveryBindingPath'] -or
+        $Parameters['ExpectedStoppedRecoveryBindingSha256'] -cnotmatch '^[A-Fa-f0-9]{64}$' -or
+        $Parameters['DeferReadinessForScopedRemediation']){
+        throw 'Extended readiness polling requires exact bound stopped-release recovery without readiness deferral.'
+    }
+    if($null -ne $Binding -and ($Binding.Version -ne 1 -or $Binding.Purpose -cne 'incremental-stopped-release')){
+        throw 'Extended readiness polling requires a version 1 incremental-stopped-release binding.'
+    }
+}
 
 function Assert-VectorPublicationMetadataUpdateOptions {
     param([Collections.IDictionary]$Parameters)
@@ -351,14 +369,16 @@ function Invoke-RequiredLoopbackProbes {
         [Parameter(Mandatory)]
         [string]$Origin,
         [Parameter(Mandatory)]
-        [int]$TimeoutSeconds
+        [int]$TimeoutSeconds,
+        [ValidateRange(0, 900)][int]$ReadinessBudgetSeconds = 0
     )
 
     foreach ($path in @("/health/live", "/health/ready", "/api/index-health")) {
         if ($path -eq '/health/ready') {
             # SQL/index startup validation runs asynchronously. Wait for readiness,
             # but never accept 503 or restart the original deadline per request.
-            $deadline = [Threading.CancellationTokenSource]::new([TimeSpan]::FromSeconds($TimeoutSeconds))
+            $total=if($ReadinessBudgetSeconds -gt 0){$ReadinessBudgetSeconds}else{$TimeoutSeconds}
+            $deadline = [Threading.CancellationTokenSource]::new([TimeSpan]::FromSeconds($total))
             try {
                 while ($true) {
                     $deadline.Token.ThrowIfCancellationRequested()
@@ -2333,6 +2353,7 @@ if($ResumeOfflineProjectionMaintenance -and !$Apply){throw 'index-update-offline
 $sourceAccessRequested = ![string]::IsNullOrEmpty($SourceAccessPipeName) -or $DisableSourceAccessRecovery
 $sourceJournalMode = $ApplyIncrementalSourceScanning -or $DisableIncrementalSourceScanning
 Assert-VectorPublicationMetadataUpdateOptions $PSBoundParameters
+Assert-StoppedRecoveryReadinessBudgetOptions $PSBoundParameters
 if ($sourceJournalMode) {
     $allowed=@('SourceRoot','SiteName','SiteUrl','DeployRoot','ReadinessTimeoutSeconds','RecoverStoppedPool','PlanOnly','Apply',
         'ApplyIncrementalSourceScanning','DisableIncrementalSourceScanning','SourceJournalOptionsPath','ExpectedSourceJournalOptionsSha256',
@@ -2352,7 +2373,7 @@ if ($sourceJournalMode) {
 } elseif ($SourceJournalOptionsPath -or $ExpectedSourceJournalOptionsSha256 -or $SourceJournalPolicyOperatorRoot -or $ExpectedSourceJournalPolicyOperatorSha256) {throw 'journal-release-explicit-mode-required'}
 if ($StoppedRecoveryBindingPath -or $ExpectedStoppedRecoveryBindingSha256) {
     $allowed=@('SourceRoot','SiteName','SiteUrl','DeployRoot','ReadinessTimeoutSeconds','RecoverStoppedPool',
-        'StoppedRecoveryBindingPath','ExpectedStoppedRecoveryBindingSha256','ReviewedSourceJournalPayloads',
+        'StoppedRecoveryBindingPath','ExpectedStoppedRecoveryBindingSha256','StoppedRecoveryReadinessBudgetSeconds','ReviewedSourceJournalPayloads',
         'ExpectedSourceJournalDatabaseIdentity','InspectIndexAdmissionPayloads','PlanOnly','Apply')
     if($ApplyVectorPublicationMetadataMigration){$allowed+=@('ApplyVectorPublicationMetadataMigration','ReviewedLegacyIndexPayloads')}
     if (!$RecoverStoppedPool -or !$StoppedRecoveryBindingPath -or $ExpectedStoppedRecoveryBindingSha256 -cnotmatch '^[A-Fa-f0-9]{64}$' -or
@@ -2625,6 +2646,7 @@ if ($EnterSourceDeletionAcceptanceMaintenance) {
 if ($StoppedRecoveryBindingPath) {
     Import-Module WebAdministration -ErrorAction Stop
     $stoppedRecoveryBinding=Read-IncrementalStoppedRecoveryBinding -Path $StoppedRecoveryBindingPath -ExpectedSha256 $ExpectedStoppedRecoveryBindingSha256
+    Assert-StoppedRecoveryReadinessBudgetOptions $PSBoundParameters $stoppedRecoveryBinding
     Assert-IncrementalStoppedRecoveryMode -Binding $stoppedRecoveryBinding -VectorMetadataMigration ([bool]$ApplyVectorPublicationMetadataMigration)
     Assert-IncrementalStoppedRecoveryBinding $stoppedRecoveryBinding
     if($ApplyVectorPublicationMetadataMigration){
@@ -2868,6 +2890,8 @@ if ($PlanOnly) {
         recover_stopped_pool = [bool]$RecoverStoppedPool
         stopped_release_recovery = if ($stoppedRecoveryBinding) {
             @{ binding=$StoppedRecoveryBindingPath; sha256=$ExpectedStoppedRecoveryBindingSha256;
+                readiness_polling_budget_seconds=$(if($StoppedRecoveryReadinessBudgetSeconds -gt 0){$StoppedRecoveryReadinessBudgetSeconds}else{$ReadinessTimeoutSeconds});
+                individual_probe_timeout_seconds=$ReadinessTimeoutSeconds;
                 prior_release=$stoppedRecoveryBinding.PriorReleaseId; hold='atomic transfer of exact owned deny-all hold after fresh stopped-owner proof';
                 companion_enabled_after_validation=$stoppedRecoveryBinding.EnableCompanionAfterValidation;
                 recovery='forward-only; retain compatible candidate set and owned hold on failure' }
@@ -3408,7 +3432,7 @@ try {
                 [void](Invoke-ScopedReadinessRemediationProbes -Origin $loopbackOrigin.Origin -TimeoutSeconds $ReadinessTimeoutSeconds)
             }
             else {
-                Invoke-RequiredLoopbackProbes -Origin $loopbackOrigin.Origin -TimeoutSeconds $ReadinessTimeoutSeconds
+                Invoke-RequiredLoopbackProbes -Origin $loopbackOrigin.Origin -TimeoutSeconds $ReadinessTimeoutSeconds -ReadinessBudgetSeconds $StoppedRecoveryReadinessBudgetSeconds
             }
             Assert-RetainedPipelineStateUnchanged `
                 -Baseline $deploymentValidation.Baseline `
@@ -3511,7 +3535,7 @@ try {
         $postHoldReadiness = Invoke-ScopedReadinessRemediationProbes -Origin $loopbackOrigin.Origin -TimeoutSeconds $ReadinessTimeoutSeconds -AfterHoldRelease
     }
     else {
-        Invoke-RequiredLoopbackProbes -Origin $loopbackOrigin.Origin -TimeoutSeconds $ReadinessTimeoutSeconds
+        Invoke-RequiredLoopbackProbes -Origin $loopbackOrigin.Origin -TimeoutSeconds $ReadinessTimeoutSeconds -ReadinessBudgetSeconds $StoppedRecoveryReadinessBudgetSeconds
     }
     if ($interactiveHostTaskWasEnabled) {
         Enable-IndexCompatibleOutlookTask -TaskName $InteractiveHostTaskName -ErrorAction Stop | Out-Null

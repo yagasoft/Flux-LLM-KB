@@ -50,17 +50,20 @@ public sealed partial class SqlStageTransitionStore : IStageTransitionStore
     private readonly TimeProvider _timeProvider;
     private readonly Application.Gpu.EmbeddingGpuRuntime? _embeddingRuntime;
     private readonly ISourceWorkAdmission? _sourceAdmission;
+    private readonly ICorpusAnnPreparationSignal? _annPreparation;
 
     public SqlStageTransitionStore(
         IDbContextFactory<FluxKnowledgeDbContext> contextFactory,
         IStageTransitionFailureInjector? failureInjector,
-        TimeProvider timeProvider, Application.Gpu.EmbeddingGpuRuntime? embeddingRuntime = null, ISourceWorkAdmission? sourceAdmission = null)
+        TimeProvider timeProvider, Application.Gpu.EmbeddingGpuRuntime? embeddingRuntime = null, ISourceWorkAdmission? sourceAdmission = null,
+        ICorpusAnnPreparationSignal? annPreparation = null)
     {
         _contextFactory = contextFactory;
         _failureInjector = failureInjector;
         _timeProvider = timeProvider;
         _embeddingRuntime = embeddingRuntime;
         _sourceAdmission = sourceAdmission;
+        _annPreparation = annPreparation;
     }
 
     public SqlStageTransitionStore(
@@ -427,6 +430,7 @@ public sealed partial class SqlStageTransitionStore : IStageTransitionStore
         await MarkDispatchCompleteAsync(context, request, cancellationToken)
             .ConfigureAwait(false);
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        if (segmentedCandidate is not null) _annPreparation?.RequestPreparation();
         return new StageTransitionResult(
             request.Artifact.Id,
             nextJobId,

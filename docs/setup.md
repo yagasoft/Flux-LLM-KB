@@ -215,6 +215,16 @@ transfer requires reconciliation; repeating the same transfer state is refused.
 This mode permits no migration, configuration change or readiness deferral and
 retains the compatible candidate set and hold on failure.
 
+If an observed root-wide projection refresh needs more time, a reviewed version-1
+stopped-release recovery can set `-StoppedRecoveryReadinessBudgetSeconds 900`.
+This extends only the total `/health/ready` polling window, up to 900 seconds.
+Individual HTTP requests and drain/shutdown waits still use
+`-ReadinessTimeoutSeconds` (at most 300 seconds). Only startup HTTP 503 is retried;
+exact HTTP 200 remains required. The option defaults to zero, preserving the
+ordinary readiness window, and is refused without the exact stopped-release
+binding. Expiry retains the compatible payload and owned hold. A larger window
+does not guarantee that a projection refresh will complete.
+
 For the additive publication-metadata index, use
 `-ApplyVectorPublicationMetadataMigration` in both `-PlanOnly` and the specifically
 authorised `-Apply`. Supply the reviewed source-journal payload hashes and exact

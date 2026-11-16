@@ -22,7 +22,8 @@ public sealed partial class SqlSourceDeletionStore(
     IDbContextFactory<FluxKnowledgeDbContext> contextFactory,
     TimeProvider timeProvider,
     PaddleOcrVlmExecutionRegistry? localOcrExecutions = null, IGpuInteractiveOwnerProbe? queryOwnerProbe = null,
-    EmbeddingGpuRuntime? embeddingRuntime = null, EmbeddingGpuExecutor? localEmbeddingExecutions = null) : ISourceDeletionStore
+    EmbeddingGpuRuntime? embeddingRuntime = null, EmbeddingGpuExecutor? localEmbeddingExecutions = null,
+    ICorpusAnnPreparationSignal? annPreparation = null) : ISourceDeletionStore
 {
     private static readonly TimeSpan LeaseDuration = TimeSpan.FromMinutes(15);
 
@@ -296,7 +297,9 @@ public sealed partial class SqlSourceDeletionStore(
                 }
                 await CaptureCleanupTargetsAsync(context, operation, revisionIds, recordIds, targetVectorIds, cancellationToken);
                 await SqlSegmentedIndexStore.ActivateAsync(context, candidate, indexState, timeProvider.GetUtcNow(), cancellationToken);
-                return await CommitUnitAsync(context, transaction, operation, "cleanup-memberships", cancellationToken);
+                var committed = await CommitUnitAsync(context, transaction, operation, "cleanup-memberships", cancellationToken);
+                annPreparation?.RequestPreparation();
+                return committed;
             }
             if (indexState.RequiredIndexFormat != 1) throw new InvalidOperationException("index-format-unsupported");
             var currentMembership = await SqlPublishedPassageSelection.ReadVectorsAsync(context, cancellationToken).ConfigureAwait(false);
