@@ -685,6 +685,26 @@ lease-generation increments and same-delivery requeue preserve saved vectors;
 normal workers resume missing batches and publication. Independent recovery review
 and separate human terminal-processing approval precede production use.
 
+Ordinary Git text edits select the current revision from its exact path inventory,
+retained artifact and completed authoritative scan proof, including the current
+configuration, repository identity and policy. A revision number alone grants no
+authority. Pending same-path captures and outstanding peer observations hold
+publication; an older terminal observation cannot indefinitely block a later
+completed capture. The last successful publication remains visible until its
+qualified successor atomically suppresses the predecessors and activates the new
+index membership. Segmented candidates cover every predecessor owner and recheck
+that scope at activation, including replacements that change physical identity.
+An empty successor retires the old text and vectors through the same path.
+
+Recovery may revisit only a qualified current Extract replacement hold, preserving
+delivery leases, unrelated blocked states and all GPU outcome/cleanup checks. A
+clean file captured alongside a transient sibling error retains a targeted proof
+retry. A revert to an already completed, unexpired revision can restore its verified
+publication without embedding again, after source admission and removal checks.
+This advances the corpus version and uses the normal derived-index refresh.
+Recovery pages advance across hosted service scopes, so ineligible retained
+history cannot starve later reverts. No schema migration is required.
+
 The locally implemented [automatic repository continuation](design/repository-retrieval-reliability.md#automatic-continuation-after-repository-withdrawal)
 preserves nonterminal jobs, deliveries, checkpoints and vectors during withdrawal.
 An immutable original processing/admission binding and mutable authoritative Git

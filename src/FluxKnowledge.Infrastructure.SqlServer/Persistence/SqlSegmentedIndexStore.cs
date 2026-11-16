@@ -290,6 +290,8 @@ public sealed partial class SqlSegmentedIndexStore(
             scopes.Add(new(2, revisionId));
             // Physical revisions link to history too; only retained children use their parent as publication owner.
             if (revision.OriginKind != 0 && revision.ParentSourceRevisionId is { } parent) scopes.Add(new(2, parent));
+            if (await SqlGitTextSelection.ReadAsync(context, revisionId, cancellationToken) is { } selection)
+                scopes.AddRange(selection.Predecessors.Select(predecessor => new IndexAffectedScope(2, predecessor.Id)));
         }
         return scopes.Distinct().OrderBy(value => value.Kind).ThenBy(value => value.Id).ToArray();
     }

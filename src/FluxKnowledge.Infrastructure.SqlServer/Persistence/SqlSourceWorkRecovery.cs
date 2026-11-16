@@ -7,10 +7,19 @@ using Microsoft.EntityFrameworkCore;
 
 namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
 
+/// <summary>Retains bounded publication-recovery progress across hosted service scopes.</summary>
+public sealed class SqlGitPublicationRecoveryProgress
+{
+    internal System.Collections.Concurrent.ConcurrentDictionary<Guid, Guid> After { get; } = new();
+}
+
 public sealed class SqlSourceWorkRecovery(IDbContextFactory<FluxKnowledgeDbContext> factory, SourceWorkAdmission admission,
     ISourceRemovalReconciler removals, ISourceObservationReader observations, TimeProvider clock,
-    ISourceWorkRetirement? retirement = null, Guid? targetRootId = null) : ISourceWorkRecovery
+    ISourceWorkRetirement? retirement = null, Guid? targetRootId = null,
+    SqlGitPublicationRecoveryProgress? gitPublicationProgress = null) : ISourceWorkRecovery
 {
+    private readonly SqlGitPublicationRecoveryProgress _gitPublicationProgress = gitPublicationProgress ?? new();
+
     public async ValueTask AdvanceAsync(CancellationToken cancellationToken)
     {
         await using var lookup = await factory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
@@ -45,6 +54,18 @@ public sealed class SqlSourceWorkRecovery(IDbContextFactory<FluxKnowledgeDbConte
                     (x.ReasonFlags & SourcePendingReasons.RemovalPending) != 0, cancellationToken).ConfigureAwait(false))
                 admission.Admit(root.Id, root.ConfigurationRevision);
         }
+        foreach (var root in roots.Where(x => x.CrawlMode == (int)SourceDiscoveryMode.GitTracked &&
+            admission.IsAdmitted(x.Id, x.ConfigurationRevision)))
+        {
+            Guid? after = _gitPublicationProgress.After.TryGetValue(root.Id, out var cursor) ? cursor : null;
+            var next = await SqlGitTextSelection.RestorePublishedAsync(factory, root.Id, root.ConfigurationRevision,
+                clock.GetUtcNow(), cancellationToken, after).ConfigureAwait(false);
+            if (next is { } value) _gitPublicationProgress.After[root.Id] = value;
+            else _gitPublicationProgress.After.TryRemove(root.Id, out _);
+        }
+        if (targetRootId is null)
+            foreach (var id in _gitPublicationProgress.After.Keys.Where(id => !roots.Any(root => root.Id == id)))
+                _gitPublicationProgress.After.TryRemove(id, out _);
         if (retirement is not null) await retirement.RetireAsync(cancellationToken).ConfigureAwait(false);
     }
 

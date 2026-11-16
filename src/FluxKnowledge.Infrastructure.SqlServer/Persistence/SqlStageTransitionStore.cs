@@ -727,6 +727,7 @@ public sealed partial class SqlStageTransitionStore : IStageTransitionStore
     {
         if (await SqlCorpusRebuildStore.PreserveCapturedPublicationAsync(context, record, cancellationToken).ConfigureAwait(false))
             return;
+        await SqlGitTextSelection.PublishAsync(context, record, now, cancellationToken).ConfigureAwait(false);
         var binding = await SqlRetainedPublicationBinding.ReadAsync(context, record, cancellationToken).ConfigureAwait(false);
         if (binding is null) return;
         var input = binding.Input;

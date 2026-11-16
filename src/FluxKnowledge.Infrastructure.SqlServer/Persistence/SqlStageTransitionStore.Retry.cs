@@ -87,7 +87,9 @@ public sealed partial class SqlStageTransitionStore
                 await SqlRepositoryWorkRecovery.MarkRecoveryRequiredAsync(context, job, cancellationToken);
                 var refusal = await SqlRepositoryWorkRecovery.ReadEligibilityAsync(context, job, deferralAt, cancellationToken);
                 refusal ??= await SqlRepositoryWorkRecovery.CheckCheckpointAsync(context, job, _embeddingRuntime, cancellationToken);
-                if (request.SourceDeferral!.Blocked) refusal ??= request.SourceDeferral;
+                var freshReplacement = request.SourceDeferral is { Blocked: true, Reason: "repository-source-replaced" } &&
+                    await SqlRepositoryWorkRecovery.CanRevisitReplacementAsync(context, job, cancellationToken);
+                if (request.SourceDeferral!.Blocked && !freshReplacement) refusal ??= request.SourceDeferral;
                 SqlRepositoryWorkRecovery.SetWaiting(context, job, dispatch, refusal ?? new("repository-source-ready-after-concurrent-rediscovery"), deferralAt);
                 if (refusal is null)
                 {

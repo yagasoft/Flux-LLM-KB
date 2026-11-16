@@ -123,7 +123,7 @@ internal static class SqlRepositoryWorkRecovery
     }
 
     internal static async Task<RepositorySourceDeferral?> ReadEligibilityAsync(FluxKnowledgeDbContext context,
-        JobEntity job, DateTimeOffset now, CancellationToken ct)
+        JobEntity job, DateTimeOffset now, CancellationToken ct, bool completedPublication = false)
     {
         var record = await context.PipelineRecords.SingleOrDefaultAsync(value => value.Id == job.PipelineRecordId, ct);
         if (record?.SourceRevisionId is null) return null;
@@ -131,7 +131,9 @@ internal static class SqlRepositoryWorkRecovery
         if (source is null) return new("repository-source-binding-missing", true);
         var root = await context.SourceRootConfigurations.SingleAsync(value => value.Id == source.SourceRootId, ct);
         if (root.CrawlMode != (int)SourceDiscoveryMode.GitTracked && record.RepositoryRecoveryBindingJson is null) return null;
-        if (record.IsDeleted || record.Revision != job.SourceRevision || record.CurrentStage != job.Stage || record.CompletionCriteriaMet ||
+        var reusableCompleted = completedPublication && record.CompletionCriteriaMet && record.CurrentStage == (int)PipelineStage.Publish &&
+            job.Stage == (int)PipelineStage.Publish && job.PublicState == (int)PublicJobState.Completed;
+        if (record.IsDeleted || record.Revision != job.SourceRevision || record.CurrentStage != job.Stage || record.CompletionCriteriaMet && !reusableCompleted ||
             root.State == (int)SourceRootState.Deleting || source.SuppressedAtUtc != null && source.RetainUntilUtc <= now ||
             await context.CorpusRebuildSupersededJobs.AnyAsync(value => value.JobId == job.Id, ct))
             return new("repository-work-deleted-expired-or-superseded", true);
@@ -181,8 +183,11 @@ internal static class SqlRepositoryWorkRecovery
             proof.ScanRequestId == Guid.Empty || proof.LeaseGeneration < 1 || proof.Inventory is not { Length: 64 } ||
             !proof.Inventory.All(Uri.IsHexDigit))
             return new("repository-current-discovery-binding-invalid", true);
+        if (source.OriginKind == 0 && await SqlGitTextSelection.HasOutstandingCaptureAsync(context, source, root, ct))
+            return new("repository-source-awaiting-current-authoritative-discovery");
         if (await context.SourceRevisions.AnyAsync(value => value.SourceRootId == root.Id && value.Id != source.Id &&
-                value.CanonicalPath == source.CanonicalPath && value.OriginKind == 0 && value.SuppressedAtUtc == null, ct))
+                value.CanonicalPath == source.CanonicalPath && value.OriginKind == 0 && value.SuppressedAtUtc == null, ct) &&
+            await SqlGitTextSelection.ReadAsync(context, source.Id, ct) is null)
             return new("repository-source-replaced", true);
         if (RequiresRecovery(source) && !MatchesCurrentProcessing(activity, source))
             return new("repository-current-processing-contract-incompatible", true);
@@ -311,19 +316,17 @@ internal static class SqlRepositoryWorkRecovery
         Guid last = Guid.Empty;
         while (true)
         {
-            var ids = await context.Jobs.FromSqlInterpolated($"""
-                SELECT TOP (64) j.* FROM Jobs j JOIN PipelineRecords p ON p.Id=j.PipelineRecordId
-                JOIN SourceRevisions s ON s.Id=p.SourceRevisionId
-                WHERE j.Id>{last} AND j.PublicState={(int)PublicJobState.WorkerQueued}
-                  AND j.Reason={Waiting} AND ({rootId} IS NULL OR s.SourceRootId={rootId})
-                  AND ({rootId} IS NOT NULL OR j.DueAtUtc<={now}) ORDER BY j.Id
-                """).AsNoTracking().Select(value => value.Id).ToArrayAsync(ct);
+            var ids = await RecoverableJobs(context, rootId, now)
+                .Where(value => value.Id.CompareTo(last) > 0).OrderBy(value => value.Id).Take(64)
+                .Select(value => value.Id).ToArrayAsync(ct);
             if (ids.Length == 0) break;
             foreach (var id in ids)
             {
                 var deliveries = await context.OutboxMessages.FromSqlInterpolated($"SELECT * FROM OutboxMessages WITH (UPDLOCK,HOLDLOCK) WHERE JobId={id}").ToArrayAsync(ct);
                 var job = await context.Jobs.FromSqlInterpolated($"SELECT * FROM Jobs WITH (UPDLOCK,HOLDLOCK) WHERE Id={id}").SingleAsync(ct);
-                if (job.Reason != Waiting || job.PublicState != (int)PublicJobState.WorkerQueued || job.LeaseOwner != null || job.LeaseExpiresAtUtc != null) continue;
+                var replacement = IsReplacementHold(job);
+                if (job.Reason != Waiting && !replacement || job.PublicState != (int)PublicJobState.WorkerQueued || job.LeaseOwner != null || job.LeaseExpiresAtUtc != null) continue;
+                if (replacement && !await CanRevisitReplacementAsync(context, job, ct)) continue;
                 var dispatch = deliveries.SingleOrDefault();
                 if (dispatch is null || dispatch.DispatchedAtUtc != null || dispatch.LeaseOwner != null || dispatch.LeaseExpiresAtUtc != null || dispatch.SourceRevision != job.SourceRevision ||
                     dispatch.PipelineRecordId != job.PipelineRecordId || dispatch.Stage != job.Stage || dispatch.Operation != job.Operation)
@@ -350,11 +353,40 @@ internal static class SqlRepositoryWorkRecovery
         }
     }
 
+    private static IQueryable<JobEntity> RecoverableJobs(FluxKnowledgeDbContext context, Guid? rootId, DateTimeOffset now) =>
+        context.Jobs.FromSqlInterpolated($"""
+                SELECT j.* FROM Jobs j JOIN PipelineRecords p ON p.Id=j.PipelineRecordId
+                JOIN SourceRevisions s ON s.Id=p.SourceRevisionId
+                WHERE j.PublicState={(int)PublicJobState.WorkerQueued}
+                  AND (j.Reason={Waiting} OR
+                    (j.Reason={Blocked} AND j.Stage={(int)PipelineStage.Extract} AND
+                     JSON_VALUE(CASE WHEN ISJSON(j.ErrorDetails)=1 THEN j.ErrorDetails ELSE {"{}"} END,'$.Reason')={"repository-source-replaced"} AND
+                     EXISTS(SELECT 1 FROM SourceInventoryEntries i WHERE i.SourceRootId=s.SourceRootId AND i.SourceRevisionId=s.Id AND i.IsDirectory=0)))
+                  AND ({rootId} IS NULL OR s.SourceRootId={rootId})
+                  AND ({rootId} IS NOT NULL OR j.DueAtUtc<={now})
+                """).AsNoTracking();
+
+    private static bool IsReplacementHold(JobEntity job)
+    {
+        if (job.Reason != Blocked || job.Stage != (int)PipelineStage.Extract) return false;
+        try { return JsonSerializer.Deserialize<WaitingDetails>(job.ErrorDetails ?? "{}")?.Reason == "repository-source-replaced"; }
+        catch (JsonException) { return false; }
+    }
+
+    internal static async Task<bool> CanRevisitReplacementAsync(FluxKnowledgeDbContext context, JobEntity job, CancellationToken ct)
+    {
+        if (job.Stage != (int)PipelineStage.Extract || job.Operation != PipelineOperations.ExtractUtf8) return false;
+        var sourceId = await context.PipelineRecords.Where(x => x.Id == job.PipelineRecordId && x.Revision == job.SourceRevision &&
+            x.CurrentStage == job.Stage && !x.IsDeleted && !x.CompletionCriteriaMet && x.RepositoryRecoveryBindingJson != null)
+            .Select(x => x.SourceRevisionId).SingleOrDefaultAsync(ct);
+        return sourceId is { } id && await SqlGitTextSelection.ReadAsync(context, id, ct) is not null;
+    }
+
     internal static async Task ReconcileDueAsync(IDbContextFactory<FluxKnowledgeDbContext> factory,
         DateTimeOffset now, EmbeddingGpuRuntime? runtime, CancellationToken ct)
     {
         await using var probe = await factory.CreateDbContextAsync(ct);
-        if (!await probe.Jobs.AnyAsync(value => value.PublicState == (int)PublicJobState.WorkerQueued && value.Reason == Waiting && value.DueAtUtc <= now, ct)) return;
+        if (!await RecoverableJobs(probe, null, now).AnyAsync(ct)) return;
         await probe.Database.CreateExecutionStrategy().ExecuteAsync(async () =>
         {
             await using var context = await factory.CreateDbContextAsync(ct);

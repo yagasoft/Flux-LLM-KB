@@ -515,6 +515,7 @@ public static class WebHostComposition
         services.AddSingleton<SourceWorkAdmission>();
         services.AddSingleton<ISourceWorkAdmission>(provider => provider.GetRequiredService<SourceWorkAdmission>());
         services.AddSingleton<ISourceRemovalReconciler, SqlSourceRemovalReconciler>();
+        services.AddSingleton<SqlGitPublicationRecoveryProgress>();
         services.AddScoped<ISourceWorkRecovery, SqlSourceWorkRecovery>();
         services.AddScoped<ISourceWorkRetirement, SqlSourceWorkRetirement>();
         services.AddScoped<SqlSourceIncrementalCoordinator>();

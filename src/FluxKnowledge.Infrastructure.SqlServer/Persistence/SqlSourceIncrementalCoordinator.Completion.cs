@@ -209,15 +209,57 @@ public sealed partial class SqlSourceIncrementalCoordinator
             state.Mode = plan.IsFallback ? "Fallback" : SqlSourceIncrementalState.RequiresBaseline(state) ? "BaselineRequired" :
                 deferred.Count == 0 && state.NamespaceComplete ? "Journal" : "JournalPartial";
             state.Reason = state.Mode switch { "Fallback" => "journal-unavailable", "JournalPartial" => "deferred-or-incomplete-namespace", "Journal" => null, _ => state.Reason };
-            if (inventory is not null && evidence.Count == 0)
+            if (inventory is not null)
             {
-                foreach (var revision in await db.SourceRevisions.Where(x => seenIds.Contains(x.Id)).ToArrayAsync(ct).ConfigureAwait(false))
+                foreach (var revision in await db.SourceRevisions.Where(x => seenIds.Contains(x.Id) &&
+                    x.SourceRootId == current.Id && x.OriginKind == 0).ToArrayAsync(ct).ConfigureAwait(false))
                 {
                     var proof = SqlRepositoryWorkRecovery.ReadObservation(revision.CurrentDiscoveryEvidenceJson);
                     if (proof is not null && proof.ScanRequestId == request.Id.Value && proof.Inventory == inventory.Generation && proof.Repository == inventory.RepositoryIdentity &&
                         proof.ConfigurationRevision == current.ConfigurationRevision && proof.Policy == SqlRepositoryWorkRecovery.Policy(current) &&
                         proof.LeaseGeneration == request.Lease!.Generation)
-                        revision.CurrentDiscoveryEvidenceJson = SqlRepositoryWorkRecovery.Authorize(proof, SqlRepositoryWorkRecovery.RequiresRecovery(revision));
+                    {
+                        if (evidence.Count == 0)
+                            revision.CurrentDiscoveryEvidenceJson = SqlRepositoryWorkRecovery.Authorize(proof, SqlRepositoryWorkRecovery.RequiresRecovery(revision));
+                        else if (!evidence.Any(NamespaceIssue) && proof.EligibleText)
+                        {
+                            // A sibling's transient read failure cannot consume this
+                            // capture's only route to a completed, authoritative proof.
+                            // Keep global/namespace failures and the failed path fenced.
+                            var relative = SqlSourceChangeJournalStore.NormaliseRelative(Path.GetRelativePath(current.CanonicalPath, revision.CanonicalPath));
+                            if (evidence.Any(issue => SourcePathScope.Contains(issue.RelativePath, NamespaceIssue(issue), relative))) continue;
+                            var key = SqlSourceChangeJournalStore.PathKey(relative);
+                            var tracked = db.ChangeTracker.Entries<SourcePendingChangeEntity>()
+                                .Where(x => x.Entity.SourceRootId == current.Id).ToArray();
+                            var retry = tracked.SingleOrDefault(x => x.Entity.PathFingerprint == key);
+                            if (retry is not null && retry.State != EntityState.Deleted && retry.Entity.Generation > plan.Generation) continue;
+                            var activeRows = tracked.Where(x => x.State != EntityState.Deleted).Select(x => x.Entity).ToList();
+                            if ((retry is null || retry.State == EntityState.Deleted) && activeRows.Count >= SqlSourcePendingWork.MaximumPaths)
+                            {
+                                state.RecoveryRequired = true;
+                                SqlSourcePendingWork.RequireMetadata(db, state, activeRows, time.GetUtcNow());
+                                break;
+                            }
+                            SourcePendingChangeEntity item;
+                            if (retry is null)
+                            {
+                                item = new() { Id = Guid.NewGuid(), SourceRootId = current.Id, RelativePath = relative, PathFingerprint = key };
+                                db.SourcePendingChanges.Add(item);
+                            }
+                            else
+                            {
+                                item = retry.Entity;
+                                if (retry.State == EntityState.Deleted) retry.State = EntityState.Modified;
+                            }
+                            item.ReasonFlags |= SourcePendingReasons.FileEvent;
+                            item.Generation = ++state.Generation;
+                            item.RetryGeneration = null;
+                            item.FirstObservedAtUtc ??= time.GetUtcNow();
+                            item.LastContentUsn ??= 0;
+                            item.LastUnjournaledGeneration = item.Generation;
+                            item.NotBeforeUtc = time.GetUtcNow().AddSeconds(30);
+                        }
+                    }
                 }
             }
             full &= state.NamespaceComplete && state.NamespaceGeneration == plan.NamespaceGeneration;

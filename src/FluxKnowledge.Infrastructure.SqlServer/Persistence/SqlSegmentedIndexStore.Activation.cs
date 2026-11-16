@@ -222,6 +222,12 @@ public sealed partial class SqlSegmentedIndexStore
             await SqlPipelineStore.ResolveDraftOriginAsync(context, draft, cancellationToken) != recordId ||
             !await context.PipelineRecords.AnyAsync(value => value.Id == recordId && value.Revision == revision, cancellationToken))
             throw new PublicationSnapshotConflictException("The sealed candidate does not match the current publication.");
+        var sealedScopes = System.Text.Json.JsonSerializer.Deserialize<IndexAffectedScope[]>(candidate.AffectedScopesJson)!;
+        var currentScopes = await ResolveDraftScopesAsync(context, draft, cancellationToken);
+        // Extra scopes may carry projection debt captured during preparation. Every
+        // owner retired by this commit must still be covered by that sealed snapshot.
+        if (currentScopes.Except(sealedScopes).Any())
+            throw new PublicationSnapshotConflictException("The publication predecessor scope changed.");
         var before = await HashCurrentAsync(context, candidate, cancellationToken);
         if (before != (candidate.BeforeCount, candidate.BeforeChecksum))
             throw new PublicationSnapshotConflictException("The affected base membership changed.");

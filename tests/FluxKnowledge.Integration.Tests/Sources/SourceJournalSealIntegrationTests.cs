@@ -270,6 +270,7 @@ public sealed partial class SourceJournalSealIntegrationTests(NativeSqlServerFix
     {
         private readonly string _area = System.IO.Path.Combine(@"I:\Codex Workspaces\Staging\FluxKnowledge", "JournalSeal-" + Guid.NewGuid().ToString("N"));
         internal string Path => System.IO.Path.Combine(_area, "Sources", "one.txt");
+        internal string RetainedRoot => System.IO.Path.Combine(_area, "Retained");
         internal SourceJournalStoreIntegrationTests.ContextFactory Factory { get; }
         internal Clock Clock { get; } = new();
         internal SourceJournalOptions Options { get; } = new() { Enabled = true };
