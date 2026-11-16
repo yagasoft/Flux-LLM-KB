@@ -87,7 +87,7 @@ public sealed class GpuInteractiveExecutor : IGpuExecutorAdapter, IGpuExecutorRe
         ArgumentNullException.ThrowIfNull(work);
         cancellationToken.ThrowIfCancellationRequested();
         var queuedFor=queueWait??TimeSpan.FromSeconds(2);
-        if(queuedFor<=TimeSpan.Zero || queuedFor>TimeSpan.FromSeconds(4) || queuedFor>=_executionTimeout)
+        if(queuedFor<=TimeSpan.Zero || queuedFor>TimeSpan.FromSeconds(6) || queuedFor>=_executionTimeout)
             throw new ArgumentOutOfRangeException(nameof(queueWait));
         profile ??= _defaultProfile;
         if (!_profiles.Contains(profile)) throw new ArgumentException("interactive-profile-not-admitted", nameof(profile));

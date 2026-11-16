@@ -18,6 +18,9 @@ public sealed class BgeExpandedGpuRankBackend : IExpandedGpuRankBackend
     private int _active;
     public static GpuInteractiveExecutionProfile Profile { get; } = new(
         BgeOfflineModels.GetGpuRuntimeKey(BgeRerankerPrecision.Fp16Internal), BgeOfflineModels.GpuSettingsFingerprint, 8L * 1024 * 1024 * 1024);
+    // An ordinary embedding batch can take over four seconds to confirm native release.
+    // Execution still expires twenty seconds after the original handoff.
+    public static TimeSpan QueueWaitTimeout { get; } = TimeSpan.FromSeconds(6);
     public BgeExpandedGpuRankBackend(GpuInteractiveExecutor executor, IBgeGpuModelFactory models, TimeProvider? clock = null)
     {
         if (models.Precision != BgeRerankerPrecision.Fp16Internal) throw new ArgumentException("expanded-rank-profile-mismatch", nameof(models));
@@ -67,7 +70,7 @@ public sealed class BgeExpandedGpuRankBackend : IExpandedGpuRankBackend
                     finally { unloadMs = _clock.GetElapsedTime(phase).TotalMilliseconds; callbackSettled = true; nativeCalls = calls.Snapshot(); }
                 }
                 return new(scored, owner.NativeCapacityReleased, callbackFailure is null ? null : "expanded-rank-failed");
-            }, cancellationToken, TimeSpan.FromSeconds(4), Profile, declineWhenGpuBusy: false);
+            }, cancellationToken, QueueWaitTimeout, Profile, declineWhenGpuBusy: false);
             results = await operation.Result.ConfigureAwait(false);
         }
         catch (GpuInteractiveBusyWithoutHandoffException) { failure = new PassageRetrievalRefusalException("busy"); }

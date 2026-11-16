@@ -194,11 +194,7 @@ public sealed partial class SqlSegmentedIndexStore(
             var draft = await context.IndexGenerations.AsNoTracking().SingleAsync(value => value.Id == profileId, cancellationToken);
             if (draft.VectorCount == 0 && row.BaseGenerationId is { } profileBase)
                 draft = await context.IndexGenerations.AsNoTracking().SingleAsync(value => value.Id == profileBase, cancellationToken);
-            var touched = TouchedSegments(context, row);
-            var reused = await (from member in context.IndexGenerationSegments.AsNoTracking()
-                join segment in context.IndexSegments.AsNoTracking() on member.SegmentId equals segment.Id
-                where member.GenerationId == row.BaseGenerationId && !touched.Contains(segment.Id)
-                orderby member.Ordinal select segment).ToArrayAsync(cancellationToken);
+            var reused = await ReadReusedSegmentsAsync(context, row, cancellationToken);
             return new(id, new(row.CorpusEpoch, row.ExpectedCorpusVersion), new(row.CorpusEpoch, row.PublicationCorpusVersion),
                 draft.ModelFingerprint, draft.Dimensions, reused.Select(Describe).ToArray());
         }
@@ -436,6 +432,20 @@ public sealed partial class SqlSegmentedIndexStore(
         join current in context.CurrentIndexMembers on new { candidate.CorpusEpoch, before.VectorId } equals new { current.CorpusEpoch, current.VectorId }
         select current.SegmentId;
         return removed.Union(context.IndexSegments.Where(value => repacked.Contains(value.Id)).Select(value => value.Id));
+    }
+
+    internal static async Task<IndexSegmentEntity[]> ReadReusedSegmentsAsync(FluxKnowledgeDbContext context,
+        IndexPublicationCandidateEntity candidate, CancellationToken cancellationToken)
+    {
+        // Keep the worklist comparison outside the publication fence and execute it
+        // once. Composing it into the anti-join can repeat a root-sized comparison
+        // for every base segment. This preview is not publication authority: seal
+        // and activation independently validate the base and required membership.
+        var touched = await TouchedSegments(context, candidate).Distinct().ToArrayAsync(cancellationToken);
+        return await (from member in context.IndexGenerationSegments.AsNoTracking()
+                join segment in context.IndexSegments.AsNoTracking() on member.SegmentId equals segment.Id
+                where member.GenerationId == candidate.BaseGenerationId && !EF.Constant(touched).Contains(segment.Id)
+                orderby member.Ordinal select segment).ToArrayAsync(cancellationToken);
     }
 
     private async Task<string[]> SelectSmallMergeAsync(FluxKnowledgeDbContext context, IndexGenerationEntity? active, CancellationToken token)

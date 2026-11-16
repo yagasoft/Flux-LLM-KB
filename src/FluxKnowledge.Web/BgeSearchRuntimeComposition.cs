@@ -118,7 +118,8 @@ internal static class BgeSearchRuntimeComposition
     private static SqlGpuSchedulerStore NewSchedulerStore(IServiceProvider provider) =>
         new(provider.GetRequiredService<IDbContextFactory<FluxKnowledgeDbContext>>(), timeProvider: provider.GetRequiredService<TimeProvider>(),
             deploymentValidationHold: provider.GetService<IDeploymentValidationHold>(),
-            interactiveExecutionTimeout: SearchExecutionTimeout, sourceAdmission: provider.GetRequiredService<ISourceWorkAdmission>(),interactiveQueueTimeout:TimeSpan.FromSeconds(4));
+            interactiveExecutionTimeout: SearchExecutionTimeout, sourceAdmission: provider.GetRequiredService<ISourceWorkAdmission>(),
+            interactiveQueueTimeout: BgeExpandedGpuRankBackend.QueueWaitTimeout);
 
     internal static BgeGpuModelStores CreateModelStores() => new(
         Store(["bundles", "bge-m3-onnx", BgeOfflineModels.EmbeddingRevision, "onnx"]),

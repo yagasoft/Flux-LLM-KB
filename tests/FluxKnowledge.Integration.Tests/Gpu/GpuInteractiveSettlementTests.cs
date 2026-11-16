@@ -40,7 +40,7 @@ public sealed partial class GpuInteractiveSettlementTests : IAsyncLifetime
             await Task.Delay(2200);Assert.False(operation.Result.IsCompleted);
             var handle=await Admit(store);await executor.DeliverAsync(handle,default);
             Assert.Equal(42,await operation.Result);Assert.Equal(GpuInteractiveSettlementKind.Released,(await operation.Settlement).Kind);
-            Assert.Throws<ArgumentOutOfRangeException>(()=>executor.StartOwned<int>(_=>ValueTask.FromResult(new GpuInteractiveNativeResult<int>(1,true)),default,TimeSpan.FromSeconds(5)));
+            Assert.Throws<ArgumentOutOfRangeException>(()=>executor.StartOwned<int>(_=>ValueTask.FromResult(new GpuInteractiveNativeResult<int>(1,true)),default,TimeSpan.FromSeconds(7)));
             var legacyStore=new SqlGpuSchedulerStore(factory,interactiveExecutionTimeout:TimeSpan.FromSeconds(20));
             var instance=Guid.NewGuid();var now=DateTimeOffset.UtcNow;
             await Assert.ThrowsAsync<ArgumentException>(()=>legacyStore.HandoffInteractiveAsync(new(Guid.NewGuid(),instance,$"retrieval-gpu:{instance:N}",

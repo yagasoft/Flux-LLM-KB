@@ -47,7 +47,7 @@ public sealed partial class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecu
     {
         _interactiveExecutionTimeout = interactiveExecutionTimeout ?? TimeSpan.FromSeconds(10);
         _interactiveQueueTimeout=interactiveQueueTimeout??TimeSpan.FromSeconds(2);
-        if(_interactiveQueueTimeout<TimeSpan.FromSeconds(2) || _interactiveQueueTimeout>TimeSpan.FromSeconds(4) || _interactiveQueueTimeout>=_interactiveExecutionTimeout)
+        if(_interactiveQueueTimeout<TimeSpan.FromSeconds(2) || _interactiveQueueTimeout>TimeSpan.FromSeconds(6) || _interactiveQueueTimeout>=_interactiveExecutionTimeout)
             throw new ArgumentOutOfRangeException(nameof(interactiveQueueTimeout));
         if (_interactiveExecutionTimeout < TimeSpan.FromSeconds(10) ||
             _interactiveExecutionTimeout > TimeSpan.FromSeconds(25))

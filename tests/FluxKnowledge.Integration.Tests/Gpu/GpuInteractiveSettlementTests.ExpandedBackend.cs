@@ -15,7 +15,8 @@ public sealed partial class GpuInteractiveSettlementTests
     public async Task Expanded_cohort_uses_the_normal_executor_and_unloads_after_four_bounded_calls()
     {
         var factory = SqlTestData.CreateFactory(_sql);
-        var store = new SqlGpuSchedulerStore(factory, interactiveExecutionTimeout: TimeSpan.FromSeconds(20),interactiveQueueTimeout:TimeSpan.FromSeconds(4)); await AddSlot(factory);
+        var store = new SqlGpuSchedulerStore(factory, interactiveExecutionTimeout: TimeSpan.FromSeconds(20),
+            interactiveQueueTimeout: BgeExpandedGpuRankBackend.QueueWaitTimeout); await AddSlot(factory);
         var executor = new GpuInteractiveExecutor(store, new Lifecycle(store), store, new ChannelGpuSchedulerWakeSignal(),
             TimeProvider.System, "joined-profile", "joined-settings", 10, new[] { BgeExpandedGpuRankBackend.Profile },
             executionTimeout: TimeSpan.FromSeconds(20));
