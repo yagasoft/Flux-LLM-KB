@@ -247,3 +247,55 @@ dependencies, so absence from the pin list does not prove an archive obsolete.
 This does not establish that every archive is needed for serving search. Narrowing
 the hold requires writer-specific completion/reconciliation evidence and an exact
 archive dependency check; no SQL or retention bypass was performed.
+
+## 16 November follow-up: verified deployment and remaining limits
+
+Release `88aeed61` passed canonical qualification with 5,510 passing tests,
+46 existing opt-in skips, nine native groups and zero build warnings. Its
+29 focused native checks cover the six-second foreground admission boundary,
+settlement and the bounded publication reuse preview. The reuse fixture reduced
+SQL logical page reads from 41,030 to 432 without changing ordered descriptors;
+an intervening publication still prevents stale candidate sealing.
+
+The fresh two-caller warm run returned 20/20 hybrid-ready responses, all 19
+adjudicated reference answers and 202 exact citations, with no invalid citations,
+scope leaks or errors. Its p95 was 13.490 seconds and maximum 13.814 seconds.
+The ten-second target therefore failed. Native background embedding overlap was
+proved for the initial two searches, whose maximum was 10.916 seconds. This
+overlap evidence is a lower bound, not proof that every query overlapped native
+inference. The current full-corpus staging deployment remains unavailable; the
+user declined another snapshot or large restore.
+
+The p95 pair started while an indexing batch already owned the GPU. Its positive
+native cleanup preceded foreground admission by 42.608 ms; admission consumed
+about 4.37 seconds. Foreground acknowledgement to batch `UpdatedAt` took another
+8.139 seconds. That timestamp includes load, score and disposal, and is not a
+transaction commit timestamp. The earlier traced pair spent 5.574 seconds in
+52 native ranking calls for two clients. A faster scheduler wake cannot remove
+legitimate background occupancy. Meeting the ten-second target requires a
+separate bounded yield/resume design with continued indexing progress, or more
+execution capacity. No new residency policy, candidate reduction or repeated
+unchanged GPU replay was introduced on this evidence.
+
+The cold run returned usable lexical fallback for all 20 queries. All searches
+still reported semantic warming around four minutes after startup; the later
+control around fifteen minutes returned 12 hybrid passages in 6.725 seconds.
+Those observations bound preparation completion but do not establish its exact
+duration. HTTP readiness alone does not mean the ANN projection is prepared.
+The earlier intermittent 25-second server deadline failure remains unexplained
+without a request-correlated wait-chain trace from a failing request.
+
+The recovery hold described above was subsequently reconciled through native
+archive retirement, including the final release packet. The final audit is
+sealed with zero packets, pins and unfinished writers. Both real sources are
+enabled and both test sources are removed. Journal-recovery warnings are absent;
+MoHESR still reports incomplete namespace obligations, so full source coverage
+is not claimed. The human cleanup package retains compact verification and
+unique unmerged source while removing obsolete trial and recovery copies.
+
+Both installed hook-definition files call the verified adapter in the canonical
+Flux KB installation. They no longer require the adapter leaf in Codex's plugin
+cache. The user reviewed and trusted all three definitions. The available bounded
+logs do not establish the actor that removed the old cached leaf; the reviewed
+cleanup manifest had no cache overlap and the routine updater did not write that
+cache. Cleanup guards explicitly protect the canonical adapter and plugin cache.
