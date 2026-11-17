@@ -211,6 +211,20 @@ through `policy_reprocess`, with a current root revision, unique unsuppressed
 physical binding and checksum proof. Immutable source classification, original
 terminal attempts and the last good publication stay intact. Current status
 follows the versioned successor while history remains available.
+An unexecuted earlier-format text activity against an older `Unknown` or `DeferredPolicy`
+classification is not a queued job. Current views show its retained-policy
+assessment requirement. Exact retained admission may use that idle activity only
+when no older policy owner, processor branch, recognised successor or pipeline
+record exists. Mixed histories use the older policy owner and supersede its idle
+text sibling. A cancelled primary activity proves only its exact recorded
+successor; cancellation alone never authorises recovery. Once execution starts,
+the original native receipt may be replayed, but a new reprocess does not replay
+completed work. The text-size limit and unsupported-format outcomes retain their
+specific reasons.
+Native policy finalization registers only its exact pending text successor
+through the established planner and wakes the outbox, independently of long
+source scans. Exact receipt replay recovers interruption before or after job
+registration without creating a second record or delivery.
 Configuration drift blocks unexecuted successors visibly; only never-executed,
 unlinked work can receive a newly verified admission proof. Changed processors
 use new capability identities and retain exact previous read compatibility. During

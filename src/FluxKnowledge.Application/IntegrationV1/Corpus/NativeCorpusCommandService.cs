@@ -23,7 +23,7 @@ public sealed class NativeCorpusCommandService
         ["source_sync"] = "Queue metadata synchronisation, or read all content when fullContent is explicitly true.",
         ["source_verify"] = "Retired: automatic and scheduled checksum verification is disabled.",
         ["source_verification_set"] = "Retired: checksum verification scheduling is disabled.",
-        ["policy_reprocess"] = "Re-evaluate one exact retained item under the current default policy, preserving its original attempts and publication.",
+        ["policy_reprocess"] = "Re-evaluate one exact retained item under the current policy and queue eligible text, preserving its original attempts and publication.",
         ["watcher_set"] = "Set persisted watcher state.",
         ["job_retry"] = "Queue a supported job retry.",
         ["publication_retry"] = "Requeue exactly the selected terminal Publish job and its completed delivery.",
@@ -80,7 +80,7 @@ public sealed class NativeCorpusCommandService
             new NativeActionCommitRequest(action, Payload(command), confirmationId, idempotencyKey, surface),
             cancellationToken).ConfigureAwait(false);
         receipt = await _actionStore.FinalizeCommitAsync(action, Payload(command), receipt, cancellationToken).ConfigureAwait(false);
-        if (action is "publication_retry" or "embedding_retry") _outboxWakeSignal?.Notify();
+        if (action is "publication_retry" or "embedding_retry" or "policy_reprocess") _outboxWakeSignal?.Notify();
         if (action is "root_create" or "root_resume" or "root_delete" or "source_sync" or "source_verify" or "source_verification_set")
         {
             // A durable replay can follow a process stop immediately after the

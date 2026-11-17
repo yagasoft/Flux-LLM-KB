@@ -12,6 +12,28 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
 /// <summary>Current status excludes a policy predecessor only when its exact retained binding has a recognised durable successor.</summary>
 public static class SqlCurrentSourceActivities
 {
+    /// <summary>Legacy pending text without an admitted successor or executable binding needs explicit retained-policy assessment.</summary>
+    public static IQueryable<Guid> UnadmittedLegacyTextIds(FluxKnowledgeDbContext context) =>
+        from activity in context.SourceActivities.AsNoTracking()
+        join revision in context.SourceRevisions.AsNoTracking() on activity.SourceRevisionId equals revision.Id
+        where revision.OriginKind == 0 && revision.SuppressedAtUtc == null &&
+            (revision.Classification == "Unknown" || revision.Classification == "DeferredPolicy") &&
+            activity.ActivityKind == (int)SourceActivityKind.TextExtraction && activity.ExecutionClass == (int)ExecutionClass.InProcess &&
+            activity.ProcessorVersion == "phase-3a-v1" && activity.DescriptorFingerprint == SourceActivityEntity.LegacyDescriptorFingerprint &&
+            activity.State == (int)SourceActivityState.Pending && activity.AttemptCount == 0 && activity.LastAttemptAtUtc == null &&
+            activity.RequiredCapability == null && activity.Reason == null && activity.ResultingPipelineRecordId == null &&
+            EF.Functions.Collate(activity.InputFingerprint, SchemaConfiguration.SchedulerFenceCollation) ==
+                EF.Functions.Collate(revision.ContentSha256, SchemaConfiguration.SchedulerFenceCollation) &&
+            !context.PipelineRecords.Any(record => record.SourceRevisionId == revision.Id) &&
+            !context.SourceProcessorBranches.Any(branch => branch.SourceRevisionId == revision.Id) &&
+            !context.SourceActivities.Any(owner => owner.Id != activity.Id && owner.SourceRevisionId == revision.Id &&
+                (owner.State == (int)SourceActivityState.DeferredPolicy || owner.State == (int)SourceActivityState.DeferredUnsupported)) &&
+            !context.SourceActivities.Any(successor => successor.SourceRevisionId == revision.Id &&
+                (successor.ProcessorVersion == RetainedDefaultPolicy.Version && successor.DescriptorFingerprint == RetainedDefaultPolicy.TextFingerprint ||
+                 successor.ProcessorVersion == RetainedDefaultPolicy.UnsupportedBinary.ProcessorVersion &&
+                 successor.DescriptorFingerprint == RetainedDefaultPolicy.UnsupportedBinary.ProcessorFingerprint))
+        select activity.Id;
+
     public static IQueryable<SourceActivityEntity> Query(FluxKnowledgeDbContext context)
     {
         var resolvedDocumentFailures = ResolvedDocumentRecoveryPredecessors(context);

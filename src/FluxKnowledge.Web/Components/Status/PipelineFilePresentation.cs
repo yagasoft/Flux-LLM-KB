@@ -1,4 +1,5 @@
 using FluxKnowledge.Application.Contracts;
+using FluxKnowledge.Application.Sources;
 using FluxKnowledge.Domain.Jobs;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
 
@@ -67,6 +68,9 @@ public static class PipelineFilePresentation
 
     public static string NextAction(string? reason) => reason switch
     {
+        RetainedDefaultPolicy.UnadmittedLegacyTextReason => "Reassess the retained input under the current source policy before queueing it.",
+        "File extension is unknown to local source ingestion." => "Reassess the retained input under the current source policy before queueing it.",
+        "File exceeds the effective UTF-8 text ingestion limit." => "Review the file size and the source's effective text limit.",
         "source-content-not-available-locally" => "Check that this file is available locally, then inspect source status.",
         "source-revision-binding-unconfirmed" => "Inspect source reconciliation; no winning revision is confirmed.",
         "repository-source-blocked" => "Review the source policy and recorded refusal.",

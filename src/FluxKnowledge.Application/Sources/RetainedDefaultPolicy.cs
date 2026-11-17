@@ -9,6 +9,7 @@ public static class RetainedDefaultPolicy
 {
     public const string Version = "default-source-policy-20261016-v1";
     public const string RelationshipKind = "superseded-by-default-policy";
+    public const string UnadmittedLegacyTextReason = "retained-text-policy-reassessment-required";
     public static readonly string TextFingerprint = Convert.ToHexStringLower(SHA256.HashData(
         Encoding.UTF8.GetBytes(Version + ":strict-utf8:32MiB:inert-source-text")));
     public static readonly SourceCapabilityDescriptor UnsupportedBinary = new(new Guid("c093898c-ab53-4c28-b4ea-06c3a2b32dd4"),

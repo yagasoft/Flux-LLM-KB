@@ -1,4 +1,5 @@
 using FluxKnowledge.Application.Contracts;
+using FluxKnowledge.Application.Sources;
 
 namespace FluxKnowledge.Web.Components.Sources;
 
@@ -16,6 +17,7 @@ internal static class SourceIssuePresentation
 
     internal static string Guidance(string? reason) => reason switch
     {
+        RetainedDefaultPolicy.UnadmittedLegacyTextReason => "This earlier text activity has no executable job. Check its retained content against the current source policy before queueing it; valid text can use exact retained-policy recovery.",
         "File extension is unknown to local source ingestion." => "An earlier extension allowlist refused this item. Complete, valid UTF-8 text can use exact retained-policy recovery; recognised binary formats still require a supported parser. No source edit or full scan is needed.",
         "index-storage-capacity-deferred" => "Publication is waiting for free index storage and will retry automatically. Free app-owned storage through reviewed retention; the source file remains eligible and its previous publication is preserved.",
         "SourceAccessDenied" => "Windows denied access to the indexing identity. Ask an administrator to approve scoped automatic source-access recovery or grant read access to this item. Source trust does not change Windows permissions.",

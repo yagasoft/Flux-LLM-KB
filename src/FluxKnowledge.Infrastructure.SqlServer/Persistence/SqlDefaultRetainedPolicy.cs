@@ -11,7 +11,7 @@ using Microsoft.EntityFrameworkCore;
 namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
 
 /// <summary>Exact retained-only policy admission. This is never a startup or source-wide replay selector.</summary>
-internal static class SqlDefaultRetainedPolicy
+internal static partial class SqlDefaultRetainedPolicy
 {
     internal sealed record Request(Guid RootId, Guid RevisionId, Guid ActivityId, string Hash, long ConfigurationRevision);
     internal static Request Parse(string payload)
@@ -54,7 +54,8 @@ internal static class SqlDefaultRetainedPolicy
         var activity = await db.SourceActivities.AsNoTracking().SingleAsync(value => value.Id == request.ActivityId, token);
         var branch = await db.SourceProcessorBranches.AsNoTracking().SingleOrDefaultAsync(value => value.SourceActivityId == activity.Id, token);
         var descriptor = await SelectProcessorAsync(db, revision, activity, branch, token);
-        var isText = descriptor is null && MatchesText(root, revision, activity, request);
+        var isText = descriptor is null && MatchesText(root, revision, activity, request) &&
+            await ValidateLegacyTextPredecessorAsync(db, revision, activity, token).ConfigureAwait(false);
         if (!MatchesScope(root, revision, request) || (!isText && descriptor is null) ||
             await HasUnconfirmedBindingAsync(db, revision, token)) throw new NativeOperationException("policy-item-not-eligible");
         // Verification happens before any SQL mutation transaction, and uses only app-retained bytes.
@@ -98,7 +99,8 @@ internal static class SqlDefaultRetainedPolicy
         Fence(targets, $"policy-activity:{predecessor.Id:D}", predecessor.RowVersion);
         if (branch is not null) Fence(targets, $"policy-branch:{branch.Id:D}", branch.RowVersion);
         var descriptor = await SelectProcessorAsync(db, revision, predecessor, branch, token);
-        var isText = descriptor is null && MatchesText(root, revision, predecessor, request);
+        var isText = descriptor is null && MatchesText(root, revision, predecessor, request) &&
+            await ValidateLegacyTextPredecessorAsync(db, revision, predecessor, token).ConfigureAwait(false);
         if (!MatchesScope(root, revision, request) || (!isText && descriptor is null) || admission.IsText != isText ||
             admission.ProcessorVersion != (descriptor?.ProcessorVersion ?? RetainedDefaultPolicy.Version) ||
             admission.DescriptorFingerprint != (descriptor?.ProcessorFingerprint ?? RetainedDefaultPolicy.TextFingerprint) ||
@@ -192,9 +194,10 @@ internal static class SqlDefaultRetainedPolicy
             revision.Classification is not ("Unknown" or "DeferredPolicy" or "AcceptedUtf8Text") ||
             revision.ByteLength < 0 || revision.ByteLength > Math.Min(root.MaximumFileBytes, SourcePolicyDefaults.MaximumTextBytes) ||
             activity.Id != request.ActivityId || activity.SourceRevisionId != revision.Id || activity.InputFingerprint != request.Hash ||
-            activity.State != (int)SourceActivityState.DeferredPolicy || activity.ExecutionClass != (int)ExecutionClass.DeferredCapability ||
-            activity.ResultingPipelineRecordId is not null || !RetainedDefaultPolicy.IsCorrectedTextReason(activity.Reason)) return false;
-        return true;
+            activity.ResultingPipelineRecordId is not null) return false;
+        return activity.State == (int)SourceActivityState.DeferredPolicy &&
+            activity.ExecutionClass == (int)ExecutionClass.DeferredCapability && RetainedDefaultPolicy.IsCorrectedTextReason(activity.Reason) ||
+            revision.Classification is "Unknown" or "DeferredPolicy" && MatchesLegacyTextPredecessor(activity);
     }
 
     private static bool MatchesScope(SourceRootConfigurationEntity root, SourceRevisionEntity revision, Request request)
@@ -216,21 +219,18 @@ internal static class SqlDefaultRetainedPolicy
         SourceRevisionEntity revision, SourceActivity activity, CancellationToken token)
     {
         if (activity.ProcessorVersion != RetainedDefaultPolicy.Version || activity.DescriptorFingerprint != RetainedDefaultPolicy.TextFingerprint) return false;
-        string[] reasons = ["File extension is unknown to local source ingestion.", "Source code ingestion is not enabled for this root.",
-            "File exceeds the effective UTF-8 text ingestion limit."];
         var predecessor = await (from relation in db.SourceActivityRelations.AsNoTracking()
             join prior in db.SourceActivities.AsNoTracking() on relation.PredecessorActivityId equals prior.Id
             where relation.SuccessorActivityId == activity.Id.Value && relation.RelationshipKind == RetainedDefaultPolicy.RelationshipKind &&
-                relation.ReasonCode == RetainedDefaultPolicy.Version && prior.State == (int)SourceActivityState.DeferredPolicy && reasons.Contains(prior.Reason!)
+                relation.ReasonCode == RetainedDefaultPolicy.Version
             select prior).SingleOrDefaultAsync(token);
         var durable = await db.SourceActivities.AsNoTracking().SingleOrDefaultAsync(value => value.Id == activity.Id.Value, token);
-        if (predecessor is null || durable?.AttemptEvidenceJson is null) return false;
-        using var proof = JsonDocument.Parse(durable.AttemptEvidenceJson);
-        if (!proof.RootElement.TryGetProperty("policy", out var policy) || policy.GetString() != RetainedDefaultPolicy.Version ||
-            !proof.RootElement.TryGetProperty("configurationRevision", out var version) || !version.TryGetInt64(out var configurationRevision) ||
-            !proof.RootElement.TryGetProperty("inputSha256", out var hash) || hash.GetString() != revision.ContentSha256 ||
-            !proof.RootElement.TryGetProperty("verifiedByteLength", out var length) || length.GetInt64() != revision.ByteLength) return false;
+        if (predecessor is null || durable is null || durable.SourceRevisionId != revision.Id ||
+            durable.InputFingerprint != revision.ContentSha256 || durable.ProcessorVersion != RetainedDefaultPolicy.Version ||
+            durable.DescriptorFingerprint != RetainedDefaultPolicy.TextFingerprint ||
+            !TryReadTextAdmission(durable, revision, out var configurationRevision)) return false;
         return MatchesText(root, revision, predecessor, new Request(root.Id, revision.Id, predecessor.Id, revision.ContentSha256, configurationRevision)) &&
+            await ValidateLegacyTextPredecessorAsync(db, revision, predecessor, token).ConfigureAwait(false) &&
             !await HasUnconfirmedBindingAsync(db, revision, token);
     }
 

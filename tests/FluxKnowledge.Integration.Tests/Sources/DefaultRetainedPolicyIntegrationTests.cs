@@ -18,7 +18,7 @@ using Xunit;
 
 namespace FluxKnowledge.Integration.Tests.Sources;
 
-public sealed class DefaultRetainedPolicyIntegrationTests(NativeSqlServerFixture fixture) : IClassFixture<NativeSqlServerFixture>
+public sealed partial class DefaultRetainedPolicyIntegrationTests(NativeSqlServerFixture fixture) : IClassFixture<NativeSqlServerFixture>
 {
     [NativeSqlServerTheory]
     [InlineData(".rdl")]
@@ -65,9 +65,10 @@ public sealed class DefaultRetainedPolicyIntegrationTests(NativeSqlServerFixture
         Assert.Equal("policy-item-not-eligible", refusal.ReasonCode);
     }
 
-    private NativeCorpusCommandService Service(SqlRetainedSourceReader reader) => new(
+    private NativeCorpusCommandService Service(IRetainedSourceReader reader, RetainedTextActivityPlanner? planner = null) => new(
         new NativeOperationService(new SqlNativeOperationStore(SqlTestData.CreateFactory(fixture), TimeProvider.System), []),
-        new SqlNativeCorpusActionStore(SqlTestData.CreateFactory(fixture), new NoOriginalIoPolicy(), new LocalPrivateContentDisclosure(), retainedSourceReader: reader));
+        new SqlNativeCorpusActionStore(SqlTestData.CreateFactory(fixture), new NoOriginalIoPolicy(), new LocalPrivateContentDisclosure(), retainedSourceReader: reader,
+            textActivityPlanner: planner));
 
     [NativeSqlServerTheory]
     [InlineData(true, false)]
@@ -632,9 +633,10 @@ public sealed class DefaultRetainedPolicyIntegrationTests(NativeSqlServerFixture
     }
 
     private async Task<Seed> SeedAsync(long revision = 1, string extension = ".rdl", byte[]? payload = null, string classification = "Unknown",
-        bool withPhysicalHistory = false, bool suppressPrevious = true, bool differentHistoryIdentity = false, int originKind = 0)
+        bool withPhysicalHistory = false, bool suppressPrevious = true, bool differentHistoryIdentity = false, int originKind = 0,
+        string? artifactRoot = null)
     {
-        var root = Path.Combine(Environment.GetEnvironmentVariable(NativeSqlServerFixture.FileRootEnvironmentVariable)!, "policy-artifacts", Guid.NewGuid().ToString("N"));
+        var root = artifactRoot ?? Path.Combine(Environment.GetEnvironmentVariable(NativeSqlServerFixture.FileRootEnvironmentVariable)!, "policy-artifacts", Guid.NewGuid().ToString("N"));
         var original = Path.Combine(root, "original-must-not-read");
         var bytes = payload ?? Encoding.UTF8.GetBytes("<Report>safe retained policy sample</Report>");
         var hash = Convert.ToHexStringLower(SHA256.HashData(bytes));

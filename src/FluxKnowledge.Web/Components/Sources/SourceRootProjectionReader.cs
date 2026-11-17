@@ -118,12 +118,17 @@ public sealed class SourceRootProjectionReader(
             .ToDictionaryAsync(publication => publication.OwnerSourceRevisionId, cancellationToken)
             .ConfigureAwait(false);
         var logicalStates = await ReadLogicalOwnerStatesAsync(context, [rootId], cancellationToken).ConfigureAwait(false);
+        var unadmittedLegacyText = SqlCurrentSourceActivities.UnadmittedLegacyTextIds(context);
+        var effectiveTextLimit = Math.Min(root.MaximumFileBytes, SourcePolicyDefaults.MaximumTextBytes);
         var activities = await (
                 from activity in SqlCurrentSourceActivities.Query(context)
                 join revision in context.SourceRevisions.AsNoTracking() on activity.SourceRevisionId equals revision.Id
                 join artifactValue in context.SourceArtifacts.AsNoTracking() on revision.Id equals artifactValue.SourceRevisionId into artifactValues
                 from artifact in artifactValues.DefaultIfEmpty()
                 where revision.SourceRootId == rootId && revision.SuppressedAtUtc == null
+                let needsAssessment = unadmittedLegacyText.Contains(activity.Id)
+                let oversizedLegacyRefusal = revision.OriginKind == 0 && revision.ByteLength > effectiveTextLimit &&
+                    activity.State == (int)SourceActivityState.DeferredPolicy && activity.Reason == "File extension is unknown to local source ingestion."
                 select new SourceActivityRow(
                     activity.Id,
                     activity.SourceRevisionId,
@@ -131,8 +136,10 @@ public sealed class SourceRootProjectionReader(
                     activity.ExecutionClass,
                     activity.ProcessorVersion,
                     activity.InputFingerprint,
-                    activity.State,
-                    activity.Reason,
+                    needsAssessment ? (int)SourceActivityState.DeferredPolicy : activity.State,
+                    oversizedLegacyRefusal || needsAssessment && revision.ByteLength > effectiveTextLimit
+                        ? "File exceeds the effective UTF-8 text ingestion limit."
+                        : needsAssessment ? RetainedDefaultPolicy.UnadmittedLegacyTextReason : activity.Reason,
                     activity.RequiredCapability,
                     activity.ResultingPipelineRecordId,
                     revision.SuppressedAtUtc,
@@ -388,9 +395,11 @@ public sealed class SourceRootProjectionReader(
         // Every summary/derived branch below joins this same current-owner set.
         // Empty roots need no branch plans; the overview still checks its fences.
         if (knownFiles.Length == 0) return new Dictionary<Guid, SourceStateSummary>();
+        var unadmittedLegacyText = SqlCurrentSourceActivities.UnadmittedLegacyTextIds(context);
         var rows = await (
             from activity in SqlCurrentSourceActivities.Query(context)
             join revision in currentFiles on activity.SourceRevisionId equals revision.Id
+            join policy in context.SourceRootConfigurations.AsNoTracking() on revision.SourceRootId equals policy.Id
             join branch in context.SourceProcessorBranches.AsNoTracking() on activity.Id equals branch.SourceActivityId into branches
             from branch in branches.DefaultIfEmpty()
             join publicationValue in context.DocumentPublications.AsNoTracking() on revision.Id equals publicationValue.OwnerSourceRevisionId into publicationValues
@@ -403,10 +412,15 @@ public sealed class SourceRootProjectionReader(
                 on new { Id = (Guid?)record.Id, Revision = (long?)record.Revision }
                 equals new { Id = (Guid?)artifactValue.PipelineRecordId, Revision = (long?)artifactValue.SourceRevision } into artifactValues
             from artifact in artifactValues.DefaultIfEmpty()
+            let needsAssessment = unadmittedLegacyText.Contains(activity.Id)
+            let effectiveTextLimit = policy.MaximumFileBytes < SourcePolicyDefaults.MaximumTextBytes
+                ? policy.MaximumFileBytes : SourcePolicyDefaults.MaximumTextBytes
+            let oversizedLegacyRefusal = revision.OriginKind == 0 && revision.ByteLength > effectiveTextLimit &&
+                activity.State == (int)SourceActivityState.DeferredPolicy && activity.Reason == "File extension is unknown to local source ingestion."
             select new SourceStateRow(
                 revision.SourceRootId,
                 activity.SourceRevisionId,
-                activity.State,
+                needsAssessment ? (int)SourceActivityState.DeferredPolicy : activity.State,
                 record != null && record.CompletionCriteriaMet && !record.IsDeleted &&
                     record.SourceRevisionId == revision.Id &&
                     (activity.ResultingPipelineRecordRevision == null || record.Revision == activity.ResultingPipelineRecordRevision)
@@ -428,7 +442,9 @@ public sealed class SourceRootProjectionReader(
                     : record != null && record.CompletionCriteriaMet && !record.IsDeleted && record.SourceRevisionId == revision.Id &&
                         (activity.ResultingPipelineRecordRevision == null || record.Revision == activity.ResultingPipelineRecordRevision)
                         ? (DateTimeOffset?)artifact.CreatedAtUtc : null,
-                activity.Reason))
+                oversizedLegacyRefusal || needsAssessment && revision.ByteLength > effectiveTextLimit
+                    ? "File exceeds the effective UTF-8 text ingestion limit."
+                    : needsAssessment ? RetainedDefaultPolicy.UnadmittedLegacyTextReason : activity.Reason))
             .ToListAsync(cancellationToken).ConfigureAwait(false);
         var logicalStates = await ReadLogicalOwnerStatesAsync(context, rootIds, cancellationToken).ConfigureAwait(false);
         foreach (var state in logicalStates.Values)

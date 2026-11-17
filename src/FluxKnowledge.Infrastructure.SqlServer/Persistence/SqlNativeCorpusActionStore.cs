@@ -6,6 +6,7 @@ using FluxKnowledge.Application.Gpu;
 using FluxKnowledge.Application.IntegrationV1;
 using FluxKnowledge.Application.IntegrationV1.Corpus;
 using FluxKnowledge.Application.Ports;
+using FluxKnowledge.Application.Sources;
 using FluxKnowledge.Application.Visibility;
 using FluxKnowledge.Domain.Sources;
 using Microsoft.EntityFrameworkCore;
@@ -17,7 +18,8 @@ public sealed class SqlNativeCorpusActionStore(
     ISourceRootPathPolicy sourceRootPathPolicy,
     ILocalPrivateContentDisclosure disclosure, EmbeddingGpuRuntime? embeddingRuntime = null,
     SqlIndexRetentionOperations? indexRetention = null,
-    IRetainedSourceReader? retainedSourceReader = null) : INativeCorpusActionStore
+    IRetainedSourceReader? retainedSourceReader = null,
+    RetainedTextActivityPlanner? textActivityPlanner = null) : INativeCorpusActionStore
 {
     public async ValueTask<IReadOnlyList<NativeTargetVersion>> ResolveTargetsAsync(string action, string canonicalPayload, CancellationToken cancellationToken)
     {
@@ -88,10 +90,35 @@ public sealed class SqlNativeCorpusActionStore(
         return new NativeCorpusMutationCommitOperation(action, canonicalPayload, action == "root_create" ? RootAdmission(canonicalPayload) : null);
     }
 
-    public ValueTask<NativeActionReceipt> FinalizeCommitAsync(string action, string canonicalPayload, NativeActionReceipt receipt, CancellationToken cancellationToken) =>
-        action is "index_retention" or "index_retention_restore"
-            ? (indexRetention ?? throw new NativeOperationException("index-retention-unavailable")).FinalizeAsync(action, canonicalPayload, receipt, cancellationToken)
-            : ValueTask.FromResult(receipt);
+    public async ValueTask<NativeActionReceipt> FinalizeCommitAsync(string action, string canonicalPayload, NativeActionReceipt receipt, CancellationToken cancellationToken)
+    {
+        if (action is "index_retention" or "index_retention_restore")
+            return await (indexRetention ?? throw new NativeOperationException("index-retention-unavailable"))
+                .FinalizeAsync(action, canonicalPayload, receipt, cancellationToken).ConfigureAwait(false);
+        if (action == "policy_reprocess" && textActivityPlanner is not null)
+        {
+            var request = SqlDefaultRetainedPolicy.Parse(canonicalPayload);
+            await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+            var successor = await (from relation in context.SourceActivityRelations.AsNoTracking()
+                join activity in context.SourceActivities.AsNoTracking() on relation.SuccessorActivityId equals activity.Id
+                join revision in context.SourceRevisions.AsNoTracking() on activity.SourceRevisionId equals revision.Id
+                where relation.PredecessorActivityId == request.ActivityId &&
+                    relation.RelationshipKind == RetainedDefaultPolicy.RelationshipKind && relation.ReasonCode == RetainedDefaultPolicy.Version &&
+                    revision.Id == request.RevisionId && revision.SourceRootId == request.RootId && revision.ContentSha256 == request.Hash &&
+                    activity.InputFingerprint == request.Hash && activity.ProcessorVersion == RetainedDefaultPolicy.Version &&
+                    activity.DescriptorFingerprint == RetainedDefaultPolicy.TextFingerprint &&
+                    activity.ActivityKind == (int)SourceActivityKind.TextExtraction && activity.ExecutionClass == (int)ExecutionClass.InProcess &&
+                    activity.State == (int)SourceActivityState.Pending && activity.ResultingPipelineRecordId == null &&
+                    activity.ResultingPipelineRecordRevision == null
+                select activity).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+            // The policy receipt is already durable. Exact receipt replay repeats
+            // this bounded hand-off; registration owns its own eligibility fence
+            // and idempotent record/job/outbox transaction, without waiting for a scan.
+            if (successor is not null)
+                _ = await textActivityPlanner.PlanAsync(SqlSourceActivityWriter.Restore(successor), cancellationToken).ConfigureAwait(false);
+        }
+        return receipt;
+    }
 
     private SourceRootPathValidation RootAdmission(string payload)
     {

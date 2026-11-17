@@ -17,7 +17,7 @@ using Xunit;
 
 namespace FluxKnowledge.Web.Tests.Components;
 
-public sealed class SourceRootProjectionReaderIntegrationTests(NativeSqlServerFixture fixture)
+public sealed partial class SourceRootProjectionReaderIntegrationTests(NativeSqlServerFixture fixture)
     : IClassFixture<NativeSqlServerFixture>
 {
     private readonly NativeSqlServerFixture _fixture = fixture;
