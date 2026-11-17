@@ -4,10 +4,13 @@ using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using FluxKnowledge.Application.Gpu;
+using FluxKnowledge.Application.Pipeline;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Sources;
+using FluxKnowledge.Application.Workers;
 using FluxKnowledge.Domain.Gpu;
 using FluxKnowledge.Domain.Jobs;
+using FluxKnowledge.Domain.Pipeline;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Storage;
@@ -1096,12 +1099,13 @@ public sealed partial class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecu
         }
 
         await SqlPublishedPassageSelection.AcquireFenceAsync(context, cancellationToken).ConfigureAwait(false);
-        await AcquireMutationLockAsync(context, transaction.GetDbTransaction(), cancellationToken).ConfigureAwait(false);
+        await AcquireMutationLockAsync(context, transaction.GetDbTransaction(), cancellationToken,
+            deferEmbeddingHandoff: request.ParentJob.Stage == PipelineStage.Embed && request.ParentJob.Operation == PipelineOperations.Embed).ConfigureAwait(false);
 
         // Recovery can inspect the parent before reaching a child. Exclude that shared
         // read before inserting/locking a child, avoiding a later S-to-X conversion cycle.
         // Lock by identity only: an identical handoff may replay after its parent advances.
-        _ = await context.Jobs.FromSqlInterpolated($"SELECT * FROM [Jobs] WITH (XLOCK, HOLDLOCK) WHERE [Id] = {request.ParentJob.JobId.Value}")
+        var durableParent = await context.Jobs.FromSqlInterpolated($"SELECT * FROM [Jobs] WITH (XLOCK, HOLDLOCK) WHERE [Id] = {request.ParentJob.JobId.Value}")
             .AsNoTracking().SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false)
             ?? throw new InvalidOperationException("The GPU hand-off parent Job no longer exists.");
 
@@ -1138,6 +1142,7 @@ public sealed partial class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecu
             throw new InvalidOperationException("The claimed parent Job lease does not match durable worker processing work.");
         }
         await SqlSourceWorkEligibility.RequireAsync(context, parent.PipelineRecordId.Value, cancellationToken, _sourceAdmission).ConfigureAwait(false);
+        await SqlRepositoryWorkRecovery.ValidateAsync(context, durableParent, _timeProvider.GetUtcNow(), cancellationToken).ConfigureAwait(false);
 
         var miniTask = new GpuMiniTaskEntity
         {
@@ -1613,9 +1618,9 @@ public sealed partial class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecu
     internal static Task AcquireMutationLockAsync(
         FluxKnowledgeDbContext context,
         DbTransaction transaction,
-        CancellationToken cancellationToken) =>
+        CancellationToken cancellationToken, bool deferEmbeddingHandoff = false) =>
         AcquireTransactionApplicationLockAsync(context, transaction,
-            "FluxKnowledge.GpuScheduler.Mutation", cancellationToken, "mutation");
+            "FluxKnowledge.GpuScheduler.Mutation", cancellationToken, "mutation", deferEmbeddingHandoff);
 
     private static async Task AcquireLifecycleOperationFencesAsync(
         FluxKnowledgeDbContext context,
@@ -1643,7 +1648,7 @@ public sealed partial class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecu
         DbTransaction transaction,
         string resource,
         CancellationToken cancellationToken,
-        string fenceKind = "lifecycle")
+        string fenceKind = "lifecycle", bool deferEmbeddingHandoff = false)
     {
         await context.Database.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var command = context.Database.GetDbConnection().CreateCommand();
@@ -1658,6 +1663,7 @@ public sealed partial class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecu
         var result = Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false));
         if (result is not 0 and not 1)
         {
+            if (result == -1 && deferEmbeddingHandoff) throw new SqlEmbeddingHandoffDeferredException();
             throw new InvalidOperationException($"Could not acquire the GPU scheduler {fenceKind} fence. Check SQL Server locking and permissions.");
         }
     }

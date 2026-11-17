@@ -63,6 +63,12 @@ request automatic full content recapture.
 
 `corpus.write` uses the existing preview/confirmed-commit contract:
 
+The MCP surface accepts either a native payload object or one JSON-encoded object
+string from a connector. It decodes once with resource/depth admission and the
+same duplicate-property and closed-action validation. Both forms use the same
+confirmation, canonical fingerprint and idempotency receipt. REST and
+`code.write` retain their existing payload contracts.
+
 - `source_sync`, payload `{ "rootId": "<guid>" }`, processes pending changes;
   metadata reconciliation follows its weekly deadline.
 - `source_sync`, payload `{ "rootId": "<guid>", "fullContent": true }`, explicitly
@@ -137,6 +143,15 @@ generations while preserving job/delivery keys, attempts, draft and vectors;
 normal workers process only missing chunks and then publish. Confirmation binds
 current versions and hash commitments, and idempotent replay returns its receipt.
 Hold and terminal-processing approval requirements are the same as Publish recovery.
+
+The retry may reuse one durable request which never reached GPU handoff. Its
+original ID and ordered inputs remain; all owner, claim, dispatch, result and
+cleanup fields must be absent, no task may match its ID or idempotency key, and
+its group must have no saved vectors. Every earlier request still requires
+verified successful settlement. Git sources require exact current capture proof,
+which an immutable recovery audit receipt fences through claim, task creation and
+native execution. Confirmation also binds the compatible runtime and pending
+request. This permits neither unknown GPU outcomes nor an extra attempt budget.
 
 `operations.status` accepts the bounded views `overview`, `sources`, `jobs`,
 `workers`, `processors`, and `recovery`. Code, corpus and audit queries use

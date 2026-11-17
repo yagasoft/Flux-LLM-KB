@@ -17,6 +17,43 @@ namespace FluxKnowledge.Web.Tests.Mcp;
 
 public sealed class NativeV1McpToolsTests
 {
+    [Theory]
+    [InlineData("preview")]
+    [InlineData("commit")]
+    public async Task Corpus_connector_JSON_string_matches_the_native_object_and_preserves_confirmation(string mode)
+    {
+        var facade = new RecordingFacade();
+        var tools = CreateTools(facade);
+        var payload = JsonSerializer.SerializeToElement(new { jobId = Guid.NewGuid() });
+        Assert.True(Read(await tools.CorpusWrite(mode, "embedding_retry", payload, "same-confirmation", "same-key")).GetProperty("ok").GetBoolean());
+        var direct = Assert.IsType<NativeCorpusMutation>(facade.LastCommand);
+        Assert.True(Read(await tools.CorpusWrite(mode, "embedding_retry", JsonSerializer.SerializeToElement(payload.GetRawText()),
+            "same-confirmation", "same-key")).GetProperty("ok").GetBoolean());
+        var decoded = Assert.IsType<NativeCorpusMutation>(facade.LastCommand);
+        Assert.Equal(direct.Action, decoded.Action);
+        Assert.Equal(direct.Payload.GetRawText(), decoded.Payload.GetRawText());
+        if (mode == "commit")
+        {
+            Assert.Equal("same-confirmation", facade.LastConfirmationId);
+            Assert.Equal("same-key", facade.LastIdempotencyKey);
+        }
+    }
+
+    [Theory]
+    [InlineData("not JSON")]
+    [InlineData("null")]
+    [InlineData("5")]
+    [InlineData("[]")]
+    [InlineData("\"{}\"")]
+    [InlineData("{\"jobId\":1,\"jobId\":2}")]
+    public async Task Corpus_connector_invalid_or_multiply_encoded_payloads_never_reach_the_facade(string value)
+    {
+        var facade = new RecordingFacade();
+        var result = Read(await CreateTools(facade).CorpusWrite("preview", "embedding_retry", JsonSerializer.SerializeToElement(value)));
+        Assert.False(result.GetProperty("ok").GetBoolean());
+        Assert.Equal(0, facade.PreviewCalls);
+    }
+
     [Fact]
     public async Task Corpus_literal_mode_preserves_raw_query_through_the_MCP_mapper()
     {
@@ -293,6 +330,8 @@ public sealed class NativeV1McpToolsTests
         public int QueryCalls { get; private set; }
         public int PreviewCalls { get; private set; }
         public int CommitCalls { get; private set; }
+        public string? LastConfirmationId { get; private set; }
+        public string? LastIdempotencyKey { get; private set; }
 
         public ValueTask<object> ExecuteQueryAsync(string family, object request, CancellationToken cancellationToken)
         {
@@ -322,6 +361,8 @@ public sealed class NativeV1McpToolsTests
         public ValueTask<NativeActionReceipt> CommitAsync(string family, object command, string confirmationId, string idempotencyKey, string surface, CancellationToken cancellationToken)
         {
             LastCommand = command;
+            LastConfirmationId = confirmationId;
+            LastIdempotencyKey = idempotencyKey;
             CommitCalls++;
             return ValueTask.FromResult(new NativeActionReceipt(Guid.Empty, false, "committed", null));
         }

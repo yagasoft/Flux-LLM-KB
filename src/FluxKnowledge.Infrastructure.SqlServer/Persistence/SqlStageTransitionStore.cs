@@ -41,6 +41,7 @@ public sealed partial class SqlStageTransitionStore : IStageTransitionStore
                 value.LeaseExpiresAtUtc > now, cancellationToken).ConfigureAwait(false))
             throw new InvalidOperationException("Repository preflight lost its worker lease.");
         await SqlRepositoryWorkRecovery.ValidateAsync(context, job, _timeProvider.GetUtcNow(), cancellationToken).ConfigureAwait(false);
+        await SqlRepositoryWorkRecovery.ValidateRecoveredGpuPublicationAsync(context, job, _embeddingRuntime, cancellationToken).ConfigureAwait(false);
         await SqlSourceWorkEligibility.RequireAsync(context, job.PipelineRecordId, cancellationToken, _sourceAdmission).ConfigureAwait(false);
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
         }).ConfigureAwait(false);
@@ -637,6 +638,7 @@ public sealed partial class SqlStageTransitionStore : IStageTransitionStore
             }
             var currentJob = await context.Jobs.SingleAsync(value => value.Id == request.CurrentJob.JobId.Value, cancellationToken).ConfigureAwait(false);
             await SqlRepositoryWorkRecovery.ValidateAsync(context, currentJob, _timeProvider.GetUtcNow(), cancellationToken).ConfigureAwait(false);
+            await SqlRepositoryWorkRecovery.ValidateRecoveredGpuPublicationAsync(context, currentJob, _embeddingRuntime, cancellationToken).ConfigureAwait(false);
         }
 
         return new ValidatedClaim(record, dispatch);

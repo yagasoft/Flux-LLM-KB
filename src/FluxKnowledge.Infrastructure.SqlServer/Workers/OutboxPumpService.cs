@@ -3,6 +3,7 @@ using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Sources;
 using FluxKnowledge.Application.Workers;
 using FluxKnowledge.Domain.Pipeline;
+using FluxKnowledge.Infrastructure.SqlServer.Persistence;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -102,6 +103,12 @@ public sealed class OutboxPumpService(
             {
                 await transitions.RetryAsync(new(dispatch, job, timeProvider.GetUtcNow().AddSeconds(5),
                     "source-work-deferred", nameof(OutboxPumpService)), cancellationToken).ConfigureAwait(false);
+            }
+            catch (SqlEmbeddingHandoffDeferredException) when (job.Stage == PipelineStage.Embed && job.Operation == PipelineOperations.Embed)
+            {
+                // The original request survives. Expiry reclaims the delivery;
+                // durable task state still decides whether a handoff already committed.
+                throw;
             }
             catch (Exception exception) when (job.Stage == dispatch.Stage && job.Operation == dispatch.Operation &&
                 (job.Stage == PipelineStage.Normalise && job.Operation == PipelineOperations.NormaliseText ||

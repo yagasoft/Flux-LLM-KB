@@ -19,7 +19,7 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
 /// <summary>Explicit terminal Embed recovery preserves checkpoint and delivery identities.</summary>
 internal sealed record SqlEmbeddingRetry(JobEntity Job, OutboxMessageEntity Dispatch, PipelineRecordEntity Record,
     SourceRevisionEntity Source, SourceRootConfigurationEntity Root, SourceActivityEntity Activity,
-    IReadOnlyList<NativeTargetVersion> Targets)
+    IReadOnlyList<NativeTargetVersion> Targets, bool HasUnstartedHandoff = false)
 {
     internal static async Task<SqlEmbeddingRetry> ReadEligibleAsync(FluxKnowledgeDbContext context, Guid jobId,
         EmbeddingGpuRuntime? runtime, bool forCommit, CancellationToken ct)
@@ -49,9 +49,14 @@ internal sealed record SqlEmbeddingRetry(JobEntity Job, OutboxMessageEntity Disp
             source.OriginKind != 0 || source.ContentSha256 != record.ContentHash) Refuse();
         var root = await context.SourceRootConfigurations.SingleOrDefaultAsync(value => value.Id == source.SourceRootId, ct);
         if (root is null || root.State != (int)SourceRootState.Enabled) Refuse();
+        var hasUnstartedHandoff = await SqlEmbeddingGpuRequestStore.UnstartedRequests(context).AnyAsync(value => value.ParentJobId == job.Id, ct);
+        var qualifiedCurrentGit = hasUnstartedHandoff && root.CrawlMode == (int)SourceDiscoveryMode.GitTracked &&
+            await SqlGitTextSelection.ReadAsync(context, source.Id, ct) is not null;
+        if (hasUnstartedHandoff && root.CrawlMode == (int)SourceDiscoveryMode.GitTracked &&
+            (!qualifiedCurrentGit || record.RepositoryRecoveryBindingJson is null)) Refuse();
         var state = await context.IndexState.AsNoTracking().SingleAsync(value => value.Id == 1, ct);
         if (state.CorpusRebuildOperationId is not null || await context.CorpusRebuildSupersededJobs.AnyAsync(value => value.JobId == jobId, ct) ||
-            await context.SourceRevisions.AnyAsync(value => value.Id != source.Id && value.SourceRootId == source.SourceRootId &&
+            !qualifiedCurrentGit && await context.SourceRevisions.AnyAsync(value => value.Id != source.Id && value.SourceRootId == source.SourceRootId &&
                 value.StableSourceIdentity == source.StableSourceIdentity && value.SuppressedAtUtc == null, ct) ||
             await context.Jobs.AnyAsync(value => value.PipelineRecordId == record.Id && value.SourceRevision == record.Revision && value.Id != jobId &&
                 value.PublicState != (int)PublicJobState.Completed && value.PublicState != (int)PublicJobState.Failed, ct) ||
@@ -79,7 +84,7 @@ internal sealed record SqlEmbeddingRetry(JobEntity Job, OutboxMessageEntity Disp
         }
         catch (InvalidOperationException) { Refuse(); throw; }
         var inputs = await ReadInputBindingAsync(context, record, canonical, draft, ct);
-        var gpu = await ReadSettledGpuBindingAsync(context, job, draft, runtime, ct);
+        var gpu = await ReadSettledGpuBindingAsync(context, job, draft, runtime, ct, allowUnstartedHandoff: true);
         return new(job, dispatch, record, source, root, activity,
         [
             Version("embedding-job", job.Id, job.RowVersion), Version("embedding-dispatch", dispatch.Id, dispatch.RowVersion),
@@ -88,7 +93,7 @@ internal sealed record SqlEmbeddingRetry(JobEntity Job, OutboxMessageEntity Disp
             Version("generation", draft.Id, draft.RowVersion), new($"canonical-artifact:{canonical.Id:D}", Hash(canonical)),
             new($"embedding-inputs:{jobId:D}", Hash(new { inputs, vectors })), new($"embedding-gpu:{jobId:D}", gpu),
             new("embedding-epoch-profile", Hash(new { state.CorpusEpoch, runtime }))
-        ]);
+        ], hasUnstartedHandoff);
     }
 
     internal static async Task<string> ReadInputBindingAsync(FluxKnowledgeDbContext context, PipelineRecordEntity record,
@@ -128,55 +133,145 @@ internal sealed record SqlEmbeddingRetry(JobEntity Job, OutboxMessageEntity Disp
 
     private sealed record GpuInput(long Id, string Hash);
     internal static async Task<string> ReadSettledGpuBindingAsync(FluxKnowledgeDbContext context, JobEntity job,
-        IndexGenerationEntity draft, EmbeddingGpuRuntime runtime, CancellationToken ct)
+        IndexGenerationEntity draft, EmbeddingGpuRuntime runtime, CancellationToken ct,
+        bool repositoryRecovery = false, bool allowUnresolvedGroup = false, bool allowUnstartedHandoff = false)
     {
         var requests = await context.EmbeddingGpuRequests.AsNoTracking().Where(value => value.ParentJobId == job.Id)
             .OrderBy(value => value.MiniTaskId).ToArrayAsync(ct);
         var tasks = await context.GpuMiniTasks.AsNoTracking().Where(value => value.ParentJobId == job.Id)
             .OrderBy(value => value.Id).ToArrayAsync(ct);
-        if (requests.Length != tasks.Length || requests.Any(value => !tasks.Any(task => task.Id == value.MiniTaskId))) Refuse();
+        EmbeddingGpuRequestEntity? unresolved = null;
         using var binding = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        var unstarted = requests.Where(value => !tasks.Any(task => task.Id == value.MiniTaskId)).ToArray();
+        if (unstarted.Length > 1 || requests.Length != tasks.Length + unstarted.Length ||
+            tasks.Any(task => !requests.Any(request => request.MiniTaskId == task.Id))) Refuse();
+        if (unstarted.Length == 1)
+        {
+            if (!allowUnstartedHandoff) Refuse();
+            await ValidateUnstartedHandoffAsync(context, job, draft, runtime, unstarted[0], ct);
+            binding.AppendData(JsonSerializer.SerializeToUtf8Bytes(new { UnstartedRequest = unstarted[0], runtime.RuntimeKey, runtime.SettingsFingerprint }));
+            requests = requests.Where(value => value.MiniTaskId != unstarted[0].MiniTaskId).ToArray();
+        }
+        var batchIds = tasks.Where(task => task.BatchId != null).Select(task => task.BatchId!.Value).Distinct().ToArray();
+        var batches = await context.GpuBatches.AsNoTracking().Where(value => batchIds.Contains(value.Id)).ToArrayAsync(ct);
+        var dispatches = await context.GpuExecutorDispatches.AsNoTracking().Where(value => batchIds.Contains(value.BatchId)).ToArrayAsync(ct);
+        var reserved = await context.GpuCapacitySlots.Where(value => value.ActiveBatchId != null && batchIds.Contains(value.ActiveBatchId.Value))
+            .Select(value => value.ActiveBatchId!.Value).ToArrayAsync(ct);
         foreach (var request in requests)
         {
             var task = tasks.Single(value => value.Id == request.MiniTaskId);
             if (request.PipelineRecordId != job.PipelineRecordId || request.SourceRevision != job.SourceRevision ||
                 request.GenerationId != draft.Id || request.CorpusEpoch != draft.CorpusEpoch || request.ModelFingerprint != runtime.Profile.ModelFingerprint ||
                 request.Dimensions != runtime.Profile.Dimensions || request.State != 2 || !request.NativeCleanupConfirmed ||
-                request.CleanupConfirmedAtUtc is null || request.ResultDigest is not { Length: 32 } ||
+                request.CleanupConfirmedAtUtc is null ||
                 request.ExecutorInstanceId is null || request.ClaimOperationId is null || request.OwnerProcessId is null ||
                 request.OwnerStartedAtUtc is null || string.IsNullOrEmpty(request.OwnerMachineFingerprint) ||
-                task.SourceRevision != job.SourceRevision || task.ExecutionState != (int)GpuMiniTaskExecutionState.Completed || task.BatchId is null ||
+                task.SourceRevision != job.SourceRevision || task.BatchId is null ||
                 task.PriorityLane != (int)GpuPriorityLane.DocumentIndexing || task.ModelRuntimeKey != runtime.RuntimeKey ||
                 task.SettingsFingerprint != runtime.SettingsFingerprint || CodeDisclosureIntegrity.Hash(request.InputsJson) != request.InputDigest) Refuse();
             GpuInput[] inputs;
             try { inputs = JsonSerializer.Deserialize<GpuInput[]>(request.InputsJson) ?? []; }
             catch (JsonException) { Refuse(); throw; }
             if (inputs.Length is < 1 or > EmbeddingGpuRuntime.MaximumRequestChunks || inputs.Select(value => value.Id).Distinct().Count() != inputs.Length) Refuse();
-            using var resultHash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-            foreach (var input in inputs)
-            {
-                var payload = await (from chunk in SqlEmbeddingCheckpointStore.Chunks(context, job.PipelineRecordId, job.SourceRevision)
-                    join vector in context.Vectors on chunk.Id equals vector.TextChunkId
-                    where chunk.Id == input.Id && chunk.SearchInputHash == input.Hash && vector.IndexGenerationId == draft.Id
-                    select vector.Values).SingleOrDefaultAsync(ct);
-                if (payload is null) Refuse();
-                resultHash.AppendData(payload);
-            }
-            if (!resultHash.GetHashAndReset().AsSpan().SequenceEqual(request.ResultDigest)) Refuse();
-            var batch = await context.GpuBatches.AsNoTracking().SingleOrDefaultAsync(value => value.Id == task.BatchId, ct);
-            var dispatches = await context.GpuExecutorDispatches.AsNoTracking().Where(value => value.BatchId == task.BatchId).ToArrayAsync(ct);
-            if (batch is null || batch.State != (int)GpuBatchState.Completed || batch.ItemCount != 1 ||
+            // A missing result is never evidence of success. Validate its original
+            // canonical group even when a later attempt owns the saved vectors.
+            var batch = batches.SingleOrDefault(value => value.Id == task.BatchId);
+            var deliveries = dispatches.Where(value => value.BatchId == task.BatchId).ToArray();
+            if (batch is null || batch.ItemCount != 1 ||
                 batch.ModelRuntimeKey != task.ModelRuntimeKey || batch.SettingsFingerprint != task.SettingsFingerprint ||
-                batch.AdmissionGeneration != task.AdmissionGeneration || dispatches.Length != 1 ||
-                await context.GpuCapacitySlots.AnyAsync(value => value.ActiveBatchId == batch.Id, ct)) Refuse();
-            var dispatch = dispatches[0];
-            if (request.DispatchId != dispatch.DispatchId || dispatch.State != (int)GpuExecutorDispatchState.Terminal ||
+                batch.AdmissionGeneration != task.AdmissionGeneration || deliveries.Length != 1 || reserved.Contains(batch.Id)) Refuse();
+            var dispatch = deliveries[0];
+            if (request.DispatchId != dispatch.DispatchId ||
                 dispatch.ExecutorKey != EmbeddingGpuExecutor.Name || dispatch.AdmissionGeneration != batch.AdmissionGeneration ||
                 dispatch.CapacitySlotKey != batch.CapacitySlotKey || dispatch.OwnerKey != batch.OwnerKey) Refuse();
+
+            if (request.ResultDigest is { Length: 32 })
+            {
+                if (task.ExecutionState != (int)GpuMiniTaskExecutionState.Completed || batch.State != (int)GpuBatchState.Completed ||
+                    dispatch.State != (int)GpuExecutorDispatchState.Terminal) Refuse();
+                using var resultHash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+                var ids = inputs.Select(value => value.Id).ToArray();
+                var payloads = await (from chunk in SqlEmbeddingCheckpointStore.Chunks(context, job.PipelineRecordId, job.SourceRevision)
+                    join vector in context.Vectors on chunk.Id equals vector.TextChunkId
+                    where ids.Contains(chunk.Id) && vector.IndexGenerationId == draft.Id
+                    select new { chunk.Id, chunk.SearchInputHash, vector.Values }).ToArrayAsync(ct);
+                foreach (var input in inputs)
+                {
+                    var payload = payloads.SingleOrDefault(value => value.Id == input.Id && value.SearchInputHash == input.Hash)?.Values;
+                    if (payload is null) Refuse();
+                    resultHash.AppendData(payload);
+                }
+                if (!resultHash.GetHashAndReset().AsSpan().SequenceEqual(request.ResultDigest)) Refuse();
+            }
+            else
+            {
+                if (!repositoryRecovery || request.ResultDigest is not null || task.ExecutionState != (int)GpuMiniTaskExecutionState.OutcomeUncertain ||
+                    dispatch.State != (int)GpuExecutorDispatchState.Terminal && dispatch.State != (int)GpuExecutorDispatchState.DeliveryUncertain ||
+                    batch.State != (int)GpuBatchState.Released && !(batch.State == (int)GpuBatchState.CapacityUncertain &&
+                        await context.GpuSchedulerOperationReceipts.AnyAsync(receipt => receipt.OperationKind == "capacity-reconciliation" &&
+                            receipt.Accepted && receipt.Committed && receipt.BatchId == batch.Id &&
+                            receipt.AdmissionGeneration == batch.AdmissionGeneration && receipt.CapacitySlotKey == batch.CapacitySlotKey &&
+                            receipt.OwnerKey == batch.OwnerKey, ct))) Refuse();
+                foreach (var input in inputs)
+                {
+                    if (!await SqlEmbeddingCheckpointStore.Chunks(context, job.PipelineRecordId, job.SourceRevision)
+                        .AnyAsync(chunk => chunk.Id == input.Id && chunk.SearchInputHash == input.Hash, ct)) Refuse();
+                }
+                var replacements = requests.Where(success => success.ResultDigest is { Length: 32 } &&
+                    SameGroup(success, request) && tasks.Single(value => value.Id == success.MiniTaskId).CreatedSequence > task.CreatedSequence).ToArray();
+                if (replacements.Length == 0)
+                {
+                    if (!allowUnresolvedGroup || unresolved is not null && !SameGroup(unresolved, request) ||
+                        requests.Count(value => SameGroup(value, request) && value.ResultDigest is null) >= 3 ||
+                        await context.Vectors.AnyAsync(value => value.IndexGenerationId == draft.Id &&
+                            inputs.Select(input => input.Id).Contains(value.TextChunkId), ct)) Refuse();
+                    unresolved = request;
+                }
+                else if (replacements.Length != 1) Refuse();
+            }
             binding.AppendData(JsonSerializer.SerializeToUtf8Bytes(new { request, task, batch, dispatch }));
         }
+        // Older failed attempts may precede this same group. The newest unresolved
+        // attempt must still be the latest parent task, with no competing work.
+        if (unresolved is not null && tasks.Max(value => value.CreatedSequence) !=
+            tasks.Where(task => requests.Any(request => request.MiniTaskId == task.Id && SameGroup(request, unresolved)))
+                .Max(value => value.CreatedSequence)) Refuse();
+        if (unresolved is not null && unstarted.Length == 1 && !SameGroup(unstarted[0], unresolved)) Refuse();
         return Convert.ToHexStringLower(binding.GetHashAndReset());
     }
+
+    internal static async Task ValidateUnstartedHandoffAsync(FluxKnowledgeDbContext context, JobEntity job, IndexGenerationEntity draft,
+        EmbeddingGpuRuntime runtime, EmbeddingGpuRequestEntity request, CancellationToken ct)
+    {
+        if (request.ParentJobId != job.Id || request.PipelineRecordId != job.PipelineRecordId || request.SourceRevision != job.SourceRevision ||
+            request.GenerationId != draft.Id || request.CorpusEpoch != draft.CorpusEpoch || request.ModelFingerprint != runtime.Profile.ModelFingerprint ||
+            request.Dimensions != runtime.Profile.Dimensions || request.State != 0 || request.ResultDigest != null || request.NativeCleanupConfirmed ||
+            request.CleanupConfirmedAtUtc != null || request.ExecutorInstanceId != null || request.ClaimOperationId != null || request.DispatchId != null ||
+            request.OwnerProcessId != null || request.OwnerStartedAtUtc != null || request.OwnerMachineFingerprint != null ||
+            CodeDisclosureIntegrity.Hash(request.InputsJson) != request.InputDigest ||
+            await context.GpuMiniTasks.AnyAsync(value => value.Id == request.MiniTaskId || value.IdempotencyKey == $"embedding-gpu:{request.MiniTaskId:N}", ct) ||
+            await context.GpuExecutorResultReceipts.AnyAsync(value => value.MiniTaskId == request.MiniTaskId, ct) ||
+            await context.EmbeddingGpuRequests.AnyAsync(value => value.ParentJobId == job.Id && value.MiniTaskId != request.MiniTaskId && value.State < 2, ct)) Refuse();
+        GpuInput[] inputs;
+        try { inputs = JsonSerializer.Deserialize<GpuInput[]>(request.InputsJson) ?? []; }
+        catch (JsonException) { Refuse(); throw; }
+        if (inputs.Length is < 1 or > EmbeddingGpuRuntime.MaximumRequestChunks || inputs.Select(value => value.Id).Distinct().Count() != inputs.Length) Refuse();
+        var ids = inputs.Select(value => value.Id).ToArray();
+        if (await context.Vectors.AnyAsync(value => value.IndexGenerationId == draft.Id && ids.Contains(value.TextChunkId), ct)) Refuse();
+        var chunks = await SqlEmbeddingCheckpointStore.Chunks(context, job.PipelineRecordId, job.SourceRevision).Where(value => ids.Contains(value.Id)).ToArrayAsync(ct);
+        foreach (var input in inputs)
+        {
+            var chunk = chunks.SingleOrDefault(value => value.Id == input.Id);
+            if (chunk is null || chunk.SearchInputHash != input.Hash || CodeDisclosureIntegrity.Hash(chunk.Content) != chunk.ContentHash ||
+                new CanonicalTextChunk(chunk.Id, chunk.Ordinal, chunk.StartOffset, chunk.Length, chunk.Content,
+                    chunk.ContentHash, chunk.PassagePolicyFingerprint, chunk.ContextHeader).SearchInputHash != input.Hash) Refuse();
+        }
+    }
+
+    private static bool SameGroup(EmbeddingGpuRequestEntity left, EmbeddingGpuRequestEntity right) =>
+        left.ParentJobId == right.ParentJobId && left.PipelineRecordId == right.PipelineRecordId && left.SourceRevision == right.SourceRevision &&
+        left.GenerationId == right.GenerationId && left.CorpusEpoch == right.CorpusEpoch && left.ModelFingerprint == right.ModelFingerprint &&
+        left.Dimensions == right.Dimensions && left.InputDigest == right.InputDigest && left.InputsJson == right.InputsJson;
 
     internal void Requeue(FluxKnowledgeDbContext context, DateTimeOffset now, string actor, string idempotencyKey, string requestFingerprint)
     {
@@ -188,6 +283,7 @@ internal sealed record SqlEmbeddingRetry(JobEntity Job, OutboxMessageEntity Disp
             {
                 idempotencyKey, requestFingerprint, jobId = Job.Id, dispatchId = Dispatch.Id,
                 Job.SourceRevision, Job.Reason, Job.ErrorDetails, Job.AttemptCount,
+                requireCurrentGpuCapture = HasUnstartedHandoff && Root.CrawlMode == (int)SourceDiscoveryMode.GitTracked,
                 jobLeaseGeneration = Job.LeaseGeneration, Dispatch.DispatchedAtUtc, Dispatch.DispatchGeneration,
                 dispatchIdempotencyKey = Dispatch.IdempotencyKey, dispatchLeaseGeneration = Dispatch.LeaseGeneration,
                 activity = new { Activity.Id, Activity.State, Activity.Reason, Activity.AttemptCount, Activity.AttemptEvidenceJson },

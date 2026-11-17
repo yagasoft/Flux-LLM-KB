@@ -696,14 +696,36 @@ index membership. Segmented candidates cover every predecessor owner and recheck
 that scope at activation, including replacements that change physical identity.
 An empty successor retires the old text and vectors through the same path.
 
-Recovery may revisit only a qualified current Extract replacement hold, preserving
-delivery leases, unrelated blocked states and all GPU outcome/cleanup checks. A
+Recovery may revisit qualified current Extract replacement holds and settled Embed
+group holds, preserving delivery leases and unrelated blocked states. An Embed
+hold needs exact native cleanup, released capacity, draft/profile/input bindings,
+no saved vectors for the missing group and fewer than three failed attempts.
+It retries the original ordered group through the existing GPU handoff and keeps
+all attempt history and successful sibling vectors. Every failed attempt retains
+its own cleanup/release proof. Publication requires a strictly later, fully verified
+success for each failed group, rechecking result payloads at preflight and inside
+the activation transaction. Missing results never authorise publication, and the
+explicit terminal embedding retry API retains its stricter existing contract. A
 clean file captured alongside a transient sibling error retains a targeted proof
 retry. A revert to an already completed, unexpired revision can restore its verified
 publication without embedding again, after source admission and removal checks.
 This advances the corpus version and uses the normal derived-index refresh.
 Recovery pages advance across hosted service scopes, so ineligible retained
 history cannot starve later reverts. No schema migration is required.
+
+A scheduler mutation-lock timeout before Embed handoff leaves the original
+request and worker delivery recoverable by lease expiry. Only the typed lock
+timeout at that pre-mutation boundary receives this treatment. A confirmed
+terminal retry may also reuse exactly one demonstrably unstarted request:
+all execution/cleanup/result fields are absent, no task or idempotency-key
+collision exists, its exact canonical group has no vectors, and every saved
+sibling remains fully verified. Git recovery records an append-only audit fence
+requiring current capture authority after claim, at handoff and before native
+allocation. Claims and subsequent scan updates cannot erase it. Once such a
+requeue commits, recovery must use a binary enforcing this fence; hold workers
+and preserve receipts for reviewed forward recovery rather than admitting an
+older payload. Native history checks batch metadata and bounded group payloads
+without dropping ordered input or result-digest verification.
 
 The locally implemented [automatic repository continuation](design/repository-retrieval-reliability.md#automatic-continuation-after-repository-withdrawal)
 preserves nonterminal jobs, deliveries, checkpoints and vectors during withdrawal.

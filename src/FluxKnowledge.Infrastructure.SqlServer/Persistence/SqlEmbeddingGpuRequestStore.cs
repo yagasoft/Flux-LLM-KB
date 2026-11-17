@@ -26,6 +26,15 @@ public sealed class SqlEmbeddingGpuRequestStore(IDbContextFactory<FluxKnowledgeD
     private sealed record Input(long Id, string Hash);
     public EmbeddingProfile Profile => runtime.Profile;
 
+    // This is a candidate probe, never proof that execution is safe. The fenced
+    // validator also checks the idempotency key, inputs, draft and sibling history.
+    internal static IQueryable<EmbeddingGpuRequestEntity> UnstartedRequests(FluxKnowledgeDbContext context) =>
+        context.EmbeddingGpuRequests.Where(request => request.State == 0 && request.ResultDigest == null &&
+            !request.NativeCleanupConfirmed && request.CleanupConfirmedAtUtc == null && request.ExecutorInstanceId == null &&
+            request.ClaimOperationId == null && request.DispatchId == null && request.OwnerProcessId == null &&
+            request.OwnerStartedAtUtc == null && request.OwnerMachineFingerprint == null &&
+            !context.GpuMiniTasks.Any(task => task.Id == request.MiniTaskId));
+
     internal static IQueryable<GpuMiniTaskEntity> OwnedLocalTasks(FluxKnowledgeDbContext context, EmbeddingGpuRuntime runtime)
         => context.GpuMiniTasks.Where(task => ArchivedTaskIds(context).Contains(task.Id) ||
             task.ModelRuntimeKey == runtime.RuntimeKey && task.SettingsFingerprint == runtime.SettingsFingerprint &&
@@ -100,6 +109,12 @@ public sealed class SqlEmbeddingGpuRequestStore(IDbContextFactory<FluxKnowledgeD
                 var original = await ReadBatchAsync(context, previous.PipelineRecordId, previous.SourceRevision,
                     previous.GenerationId, previous.CorpusEpoch, previous.InputsJson, cancellationToken).ConfigureAwait(false);
                 if (!original.Chunks.SequenceEqual(batch.Chunks)) throw new InvalidOperationException("embedding-gpu-request-conflict");
+                if (!await context.GpuMiniTasks.AnyAsync(task => task.Id == previous.MiniTaskId, cancellationToken).ConfigureAwait(false))
+                {
+                    await SqlEmbeddingCheckpointStore.ValidateClaimAsync(context, work, clock.GetUtcNow(), cancellationToken, sourceAdmission).ConfigureAwait(false);
+                    var parent = await context.Jobs.SingleAsync(job => job.Id == previous.ParentJobId, cancellationToken).ConfigureAwait(false);
+                    await SqlEmbeddingRetry.ValidateUnstartedHandoffAsync(context, parent, draft, runtime, previous, cancellationToken).ConfigureAwait(false);
+                }
                 // The scheduler validates the original parent lease identity and
                 // reuses its task without changing dispatch or native ownership.
                 return previous.MiniTaskId;
@@ -491,7 +506,10 @@ public sealed class SqlEmbeddingGpuRequestStore(IDbContextFactory<FluxKnowledgeD
     internal static IQueryable<Guid> RetainedSettledRequestIds(FluxKnowledgeDbContext context)
         => SettledCheckpointRequestIds(context, includeSuppressedSource: true);
 
-    private static IQueryable<Guid> SettledCheckpointRequestIds(FluxKnowledgeDbContext context, bool includeSuppressedSource)
+    internal static IQueryable<Guid> RepositoryHeldSettledRequestIds(FluxKnowledgeDbContext context)
+        => SettledCheckpointRequestIds(context, includeSuppressedSource: false, repositoryHeld: true);
+
+    private static IQueryable<Guid> SettledCheckpointRequestIds(FluxKnowledgeDbContext context, bool includeSuppressedSource, bool repositoryHeld = false)
         => from request in context.EmbeddingGpuRequests
             join task in context.GpuMiniTasks on request.MiniTaskId equals task.Id
             join parent in context.Jobs on request.ParentJobId equals parent.Id
@@ -502,7 +520,12 @@ public sealed class SqlEmbeddingGpuRequestStore(IDbContextFactory<FluxKnowledgeD
             join dispatch in context.GpuExecutorDispatches on batch.Id equals dispatch.BatchId
             where request.State == 2 && request.NativeCleanupConfirmed && request.CleanupConfirmedAtUtc != null &&
                 request.ExecutorInstanceId != null && request.ClaimOperationId != null && request.DispatchId == dispatch.DispatchId &&
-                parent.PublicState == (int)PublicJobState.GpuProcessing && parent.Stage == (int)PipelineStage.Embed && parent.Operation == PipelineOperations.Embed &&
+                (repositoryHeld ? parent.PublicState == (int)PublicJobState.WorkerQueued && parent.Reason == SqlRepositoryWorkRecovery.Blocked &&
+                    parent.LeaseOwner == null && parent.LeaseExpiresAtUtc == null && record.RepositoryRecoveryBindingJson != null &&
+                    request.ResultDigest == null && request.OwnerProcessId != null && request.OwnerStartedAtUtc != null && request.OwnerMachineFingerprint != null &&
+                    outbox.LeaseOwner == null && outbox.LeaseExpiresAtUtc == null &&
+                    !context.GpuCapacitySlots.Any(slot => slot.ActiveBatchId == batch.Id) : parent.PublicState == (int)PublicJobState.GpuProcessing) &&
+                parent.Stage == (int)PipelineStage.Embed && parent.Operation == PipelineOperations.Embed &&
                 parent.PipelineRecordId == record.Id && parent.SourceRevision == request.SourceRevision &&
                 !record.IsDeleted && record.Revision == request.SourceRevision && record.CurrentStage == (int)PipelineStage.Embed &&
                 (record.SourceRevisionId == null || (includeSuppressedSource || record.SourceRevision!.SuppressedAtUtc == null) &&

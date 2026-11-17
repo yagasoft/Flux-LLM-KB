@@ -109,6 +109,20 @@ public sealed class NativeV1McpTools
         try
         {
             var payload = JsonSerializer.SerializeToElement(arguments);
+            if (toolName == "corpus.write" && payload.GetProperty("payload") is { ValueKind: JsonValueKind.String } encoded)
+            {
+                var json = encoded.GetString()!;
+                using var reservation = new NativeRequestInput.Reservation();
+                reservation.AddInputBytes(System.Text.Encoding.UTF8.GetByteCount(json));
+                using var decoded = JsonDocument.Parse(json, new JsonDocumentOptions { MaxDepth = 64 });
+                if (decoded.RootElement.ValueKind != JsonValueKind.Object) throw new NativeOperationException("invalid-request");
+                NativeRequestInput.Validate(decoded.RootElement);
+                payload = JsonSerializer.SerializeToElement(new
+                {
+                    action = payload.GetProperty("action"), payload = decoded.RootElement,
+                    confirmation_id = payload.GetProperty("confirmation_id")
+                });
+            }
             var command = _mapper.MapAction(toolName, payload);
             var family = _mapper.ActionFamily(toolName, command);
             if (string.Equals(mode, "preview", StringComparison.OrdinalIgnoreCase))
