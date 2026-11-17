@@ -178,11 +178,24 @@ public sealed partial class EmbeddingRetryTests
     private sealed class RecoveryReadCounter : DbCommandInterceptor
     {
         public int Count { get; private set; }
+        public double ExecuteToReaderMilliseconds { get; private set; }
+        public long Rows { get; private set; }
         public override ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(DbCommand command,
             CommandEventData eventData, InterceptionResult<DbDataReader> result, CancellationToken cancellationToken = default)
         {
             Count++;
             return ValueTask.FromResult(result);
+        }
+        public override ValueTask<DbDataReader> ReaderExecutedAsync(DbCommand command, CommandExecutedEventData eventData,
+            DbDataReader result, CancellationToken cancellationToken = default)
+        {
+            ExecuteToReaderMilliseconds += eventData.Duration.TotalMilliseconds;
+            return ValueTask.FromResult(result);
+        }
+        public override InterceptionResult DataReaderDisposing(DbCommand command, DataReaderDisposingEventData eventData, InterceptionResult result)
+        {
+            Rows += eventData.ReadCount;
+            return result;
         }
     }
     private sealed class RecoveryContextFactory(string connection, RecoveryReadCounter counter) : IDbContextFactory<FluxKnowledgeDbContext>

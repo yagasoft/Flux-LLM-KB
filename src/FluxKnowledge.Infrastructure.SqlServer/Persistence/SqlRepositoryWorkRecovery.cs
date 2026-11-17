@@ -288,8 +288,7 @@ internal static class SqlRepositoryWorkRecovery
             if (needsGpuProof)
             {
                 var record = await context.PipelineRecords.SingleAsync(value => value.Id == job.PipelineRecordId, ct);
-                var canonical = await context.Artifacts.SingleOrDefaultAsync(value => value.PipelineRecordId == record.Id &&
-                    value.SourceRevision == record.Revision && value.Stage == (int)PipelineStage.CanonicalIndex, ct);
+                var canonical = await SqlCanonicalArtifactReader.ReadAsync(context, record.Id, record.Revision, ct);
                 if (canonical?.SearchText is null || CodeDisclosureIntegrity.Hash(canonical.SearchText) != canonical.ContentHash)
                     return new("repository-canonical-input-integrity-failed", true);
                 try { _ = await SqlEmbeddingRetry.ReadInputBindingAsync(context, record, canonical, draft, ct); }

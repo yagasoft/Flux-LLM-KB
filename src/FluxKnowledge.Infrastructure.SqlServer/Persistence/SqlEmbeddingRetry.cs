@@ -74,8 +74,7 @@ internal sealed record SqlEmbeddingRetry(JobEntity Job, OutboxMessageEntity Disp
             value.ResultingPipelineRecordRevision == record.Revision).ToArrayAsync(ct);
         if (activities.Length != 1 || activities[0].State != (int)SourceActivityState.FailedTerminal) Refuse();
         var activity = activities[0];
-        var canonical = await context.Artifacts.AsNoTracking().SingleOrDefaultAsync(value => value.PipelineRecordId == record.Id &&
-            value.SourceRevision == record.Revision && value.Stage == (int)PipelineStage.CanonicalIndex, ct);
+        var canonical = await SqlCanonicalArtifactReader.ReadAsync(context, record.Id, record.Revision, ct);
         if (canonical is null || canonical.SearchText is null ||
             CodeDisclosureIntegrity.Hash(canonical.SearchText) != canonical.ContentHash) Refuse();
         if (draft is null)
@@ -181,11 +180,13 @@ internal sealed record SqlEmbeddingRetry(JobEntity Job, OutboxMessageEntity Disp
             .OrderBy(value => value.MiniTaskId).ToArrayAsync(ct);
         var tasks = await context.GpuMiniTasks.AsNoTracking().Where(value => value.ParentJobId == job.Id)
             .OrderBy(value => value.Id).ToArrayAsync(ct);
+        var tasksById = tasks.ToDictionary(value => value.Id);
+        var requestsById = requests.ToDictionary(value => value.MiniTaskId);
         EmbeddingGpuRequestEntity? unresolved = null;
         using var binding = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-        var unstarted = requests.Where(value => !tasks.Any(task => task.Id == value.MiniTaskId)).ToArray();
+        var unstarted = requests.Where(value => !tasksById.ContainsKey(value.MiniTaskId)).ToArray();
         if (unstarted.Length > 1 || requests.Length != tasks.Length + unstarted.Length ||
-            tasks.Any(task => !requests.Any(request => request.MiniTaskId == task.Id))) Refuse();
+            tasks.Any(task => !requestsById.ContainsKey(task.Id))) Refuse();
         if (unstarted.Length == 1)
         {
             if (!allowUnstartedHandoff) Refuse();
@@ -193,14 +194,16 @@ internal sealed record SqlEmbeddingRetry(JobEntity Job, OutboxMessageEntity Disp
             binding.AppendData(JsonSerializer.SerializeToUtf8Bytes(new { UnstartedRequest = unstarted[0], runtime.RuntimeKey, runtime.SettingsFingerprint }));
             requests = requests.Where(value => value.MiniTaskId != unstarted[0].MiniTaskId).ToArray();
         }
-        var batchIds = tasks.Where(task => task.BatchId != null).Select(task => task.BatchId!.Value).Distinct().ToArray();
-        var batches = await context.GpuBatches.AsNoTracking().Where(value => batchIds.Contains(value.Id)).ToArrayAsync(ct);
-        var dispatches = await context.GpuExecutorDispatches.AsNoTracking().Where(value => batchIds.Contains(value.BatchId)).ToArrayAsync(ct);
+        var batchIds = context.GpuMiniTasks.Where(value => value.ParentJobId == job.Id && value.BatchId != null).Select(value => value.BatchId!.Value);
+        var batches = (await context.GpuBatches.AsNoTracking().Where(value => batchIds.Contains(value.Id)).ToArrayAsync(ct)).ToDictionary(value => value.Id);
+        var dispatches = (await context.GpuExecutorDispatches.AsNoTracking().Where(value => batchIds.Contains(value.BatchId)).ToArrayAsync(ct)).ToLookup(value => value.BatchId);
         var reserved = await context.GpuCapacitySlots.Where(value => value.ActiveBatchId != null && batchIds.Contains(value.ActiveBatchId.Value))
             .Select(value => value.ActiveBatchId!.Value).ToArrayAsync(ct);
+        var reservedIds = reserved.ToHashSet();
+        var successfulDigests = await ReadSuccessfulResultDigestsAsync(context, job, draft, requests, ct);
         foreach (var request in requests)
         {
-            var task = tasks.Single(value => value.Id == request.MiniTaskId);
+            var task = tasksById[request.MiniTaskId];
             if (request.PipelineRecordId != job.PipelineRecordId || request.SourceRevision != job.SourceRevision ||
                 request.GenerationId != draft.Id || request.CorpusEpoch != draft.CorpusEpoch || request.ModelFingerprint != runtime.Profile.ModelFingerprint ||
                 request.Dimensions != runtime.Profile.Dimensions || request.State != 2 || !request.NativeCleanupConfirmed ||
@@ -210,17 +213,14 @@ internal sealed record SqlEmbeddingRetry(JobEntity Job, OutboxMessageEntity Disp
                 task.SourceRevision != job.SourceRevision || task.BatchId is null ||
                 task.PriorityLane != (int)GpuPriorityLane.DocumentIndexing || task.ModelRuntimeKey != runtime.RuntimeKey ||
                 task.SettingsFingerprint != runtime.SettingsFingerprint || CodeDisclosureIntegrity.Hash(request.InputsJson) != request.InputDigest) Refuse();
-            GpuInput[] inputs;
-            try { inputs = JsonSerializer.Deserialize<GpuInput[]>(request.InputsJson) ?? []; }
-            catch (JsonException) { Refuse(); throw; }
-            if (inputs.Length is < 1 or > EmbeddingGpuRuntime.MaximumRequestChunks || inputs.Select(value => value.Id).Distinct().Count() != inputs.Length) Refuse();
+            var inputs = ReadGroupInputs(request);
             // A missing result is never evidence of success. Validate its original
             // canonical group even when a later attempt owns the saved vectors.
-            var batch = batches.SingleOrDefault(value => value.Id == task.BatchId);
-            var deliveries = dispatches.Where(value => value.BatchId == task.BatchId).ToArray();
+            var batch = task.BatchId is { } batchId ? batches.GetValueOrDefault(batchId) : null;
+            var deliveries = task.BatchId is { } deliveryBatch ? dispatches[deliveryBatch].ToArray() : [];
             if (batch is null || batch.ItemCount != 1 ||
                 batch.ModelRuntimeKey != task.ModelRuntimeKey || batch.SettingsFingerprint != task.SettingsFingerprint ||
-                batch.AdmissionGeneration != task.AdmissionGeneration || deliveries.Length != 1 || reserved.Contains(batch.Id)) Refuse();
+                batch.AdmissionGeneration != task.AdmissionGeneration || deliveries.Length != 1 || reservedIds.Contains(batch.Id)) Refuse();
             var dispatch = deliveries[0];
             if (request.DispatchId != dispatch.DispatchId ||
                 dispatch.ExecutorKey != EmbeddingGpuExecutor.Name || dispatch.AdmissionGeneration != batch.AdmissionGeneration ||
@@ -230,19 +230,7 @@ internal sealed record SqlEmbeddingRetry(JobEntity Job, OutboxMessageEntity Disp
             {
                 if (task.ExecutionState != (int)GpuMiniTaskExecutionState.Completed || batch.State != (int)GpuBatchState.Completed ||
                     dispatch.State != (int)GpuExecutorDispatchState.Terminal) Refuse();
-                using var resultHash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-                var ids = inputs.Select(value => value.Id).ToArray();
-                var payloads = await (from chunk in SqlEmbeddingCheckpointStore.Chunks(context, job.PipelineRecordId, job.SourceRevision)
-                    join vector in context.Vectors on chunk.Id equals vector.TextChunkId
-                    where ids.Contains(chunk.Id) && vector.IndexGenerationId == draft.Id
-                    select new { chunk.Id, chunk.SearchInputHash, vector.Values }).ToArrayAsync(ct);
-                foreach (var input in inputs)
-                {
-                    var payload = payloads.SingleOrDefault(value => value.Id == input.Id && value.SearchInputHash == input.Hash)?.Values;
-                    if (payload is null) Refuse();
-                    resultHash.AppendData(payload);
-                }
-                if (!resultHash.GetHashAndReset().AsSpan().SequenceEqual(request.ResultDigest)) Refuse();
+                if (!successfulDigests[request.MiniTaskId].AsSpan().SequenceEqual(request.ResultDigest)) Refuse();
             }
             else
             {
@@ -259,7 +247,7 @@ internal sealed record SqlEmbeddingRetry(JobEntity Job, OutboxMessageEntity Disp
                         .AnyAsync(chunk => chunk.Id == input.Id && chunk.SearchInputHash == input.Hash, ct)) Refuse();
                 }
                 var replacements = requests.Where(success => success.ResultDigest is { Length: 32 } &&
-                    SameGroup(success, request) && tasks.Single(value => value.Id == success.MiniTaskId).CreatedSequence > task.CreatedSequence).ToArray();
+                    SameGroup(success, request) && tasksById[success.MiniTaskId].CreatedSequence > task.CreatedSequence).ToArray();
                 if (replacements.Length == 0)
                 {
                     if (!allowUnresolvedGroup || unresolved is not null && !SameGroup(unresolved, request) ||
@@ -275,10 +263,51 @@ internal sealed record SqlEmbeddingRetry(JobEntity Job, OutboxMessageEntity Disp
         // Older failed attempts may precede this same group. The newest unresolved
         // attempt must still be the latest parent task, with no competing work.
         if (unresolved is not null && tasks.Max(value => value.CreatedSequence) !=
-            tasks.Where(task => requests.Any(request => request.MiniTaskId == task.Id && SameGroup(request, unresolved)))
+            tasks.Where(task => requestsById.TryGetValue(task.Id, out var request) && SameGroup(request, unresolved))
                 .Max(value => value.CreatedSequence)) Refuse();
         if (unresolved is not null && unstarted.Length == 1 && !SameGroup(unstarted[0], unresolved)) Refuse();
         return Convert.ToHexStringLower(binding.GetHashAndReset());
+    }
+
+    private static GpuInput[] ReadGroupInputs(EmbeddingGpuRequestEntity request)
+    {
+        GpuInput[] inputs;
+        try { inputs = JsonSerializer.Deserialize<GpuInput[]>(request.InputsJson) ?? []; }
+        catch (JsonException) { Refuse(); throw; }
+        if (inputs.Length is < 1 or > EmbeddingGpuRuntime.MaximumRequestChunks || inputs.Select(value => value.Id).Distinct().Count() != inputs.Length) Refuse();
+        return inputs;
+    }
+
+    private static async Task<Dictionary<Guid, byte[]>> ReadSuccessfulResultDigestsAsync(FluxKnowledgeDbContext context,
+        JobEntity job, IndexGenerationEntity draft, EmbeddingGpuRequestEntity[] requests, CancellationToken ct)
+    {
+        var successful = requests.Where(value => value.ResultDigest is { Length: 32 }).ToArray();
+        var result = new Dictionary<Guid, byte[]>();
+        // Bound vector payload memory to at most 128 chunks. Reuse a page for
+        // several groups, but hash each group's original ordered inputs. The
+        // caller still binds every request/task/batch/dispatch in SQL GUID order.
+        const int groupsPerPage = 128 / EmbeddingGpuRuntime.MaximumRequestChunks;
+        for (var start = 0; start < successful.Length; start += groupsPerPage)
+        {
+            var groups = successful.Skip(start).Take(groupsPerPage).Select(request => new { Request = request, Inputs = ReadGroupInputs(request) }).ToArray();
+            var ids = groups.SelectMany(group => group.Inputs.Select(input => input.Id)).Distinct().ToArray();
+            var payloads = await (from chunk in SqlEmbeddingCheckpointStore.Chunks(context, job.PipelineRecordId, job.SourceRevision)
+                join vector in context.Vectors on chunk.Id equals vector.TextChunkId
+                where ids.Contains(chunk.Id) && vector.IndexGenerationId == draft.Id
+                select new { chunk.Id, chunk.SearchInputHash, vector.Values }).ToArrayAsync(ct);
+            var byChunk = payloads.ToDictionary(value => value.Id);
+            foreach (var group in groups)
+            {
+                using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+                foreach (var input in group.Inputs)
+                {
+                    if (!byChunk.TryGetValue(input.Id, out var payload) || payload.SearchInputHash != input.Hash) Refuse();
+                    hash.AppendData(payload.Values);
+                }
+                result.Add(group.Request.MiniTaskId, hash.GetHashAndReset());
+            }
+        }
+        return result;
     }
 
     internal static async Task ValidateUnstartedHandoffAsync(FluxKnowledgeDbContext context, JobEntity job, IndexGenerationEntity draft,

@@ -743,6 +743,15 @@ matching success, including previously superseded groups. A lost result or chang
 input keeps the publication held; ordinary unrelated filesystem work is unchanged.
 Recovery after these marked actions requires a binary enforcing the audit fences.
 
+Repeated recovery proofs read canonical artifact text and optional metadata with
+SQL sequential access on the existing connection and transaction. The reader
+preserves every artifact field and the configured transient-read retry outside
+transaction-owned execution. Successful native group payloads are fetched in
+pages of at most 128 chunks, then hashed in each request's original input order.
+Confirmation binding retains SQL request ordering. These I/O changes retain the
+complete source, sibling-result, ownership, cleanup and publication proofs on
+every required gate; they introduce no cross-call cache or schema change.
+
 Text normalisation preserves well-formed Unicode noncharacters. Windows FormKC
 can reject these valid UTF-8 values; the shared normaliser retains them unchanged
 and normalises surrounding spans. Plain text, document provenance and the local

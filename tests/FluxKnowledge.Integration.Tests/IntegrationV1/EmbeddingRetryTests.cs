@@ -29,7 +29,7 @@ using Xunit;
 namespace FluxKnowledge.Integration.Tests.IntegrationV1;
 
 [Collection("sql-full-text")]
-public sealed partial class EmbeddingRetryTests(NativeSqlServerFixture fixture) : IClassFixture<NativeSqlServerFixture>
+public sealed partial class EmbeddingRetryTests(NativeSqlServerFixture fixture, Xunit.Abstractions.ITestOutputHelper output) : IClassFixture<NativeSqlServerFixture>
 {
     private static readonly EmbeddingProfile Profile = new(DeterministicTokenHashEmbeddingProvider.Fingerprint, 256);
     private static readonly EmbeddingGpuRuntime Runtime = new("synthetic-embed", new string('a', 64), Profile, 1024);
@@ -269,11 +269,11 @@ public sealed partial class EmbeddingRetryTests(NativeSqlServerFixture fixture) 
         Assert.Empty(await check.NativeOperationReceipts.Where(value => value.IdempotencyKey == "stale-" + change).ToArrayAsync());
     }
 
-    private async Task<SqlToUsearchRebuildTests.PipelineEnvironment> SeedAsync(int sections = 12)
+    private async Task<SqlToUsearchRebuildTests.PipelineEnvironment> SeedAsync(int sections = 12, string? canonicalRoot = null)
     {
         var environment = await SqlToUsearchRebuildTests.PipelineEnvironment.CreateAsync(fixture, "Unretained control", embed:false);
         _ = await ClaimAsync(environment);
-        await environment.AddRetainedAndPumpAsync(string.Join("\n\n", Enumerable.Range(0,sections).Select(index=>$"Section {index}. "+new string((char)('a'+index%26),900)+".")));
+        await environment.AddRetainedAndPumpAsync(string.Join("\n\n", Enumerable.Range(0,sections).Select(index=>$"Section {index}. "+new string((char)('a'+index%26),900)+".")), null, canonicalRoot);
         return environment;
     }
 
