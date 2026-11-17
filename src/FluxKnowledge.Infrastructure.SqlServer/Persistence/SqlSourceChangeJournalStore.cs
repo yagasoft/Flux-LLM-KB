@@ -146,23 +146,21 @@ public sealed class SqlSourceChangeJournalStore(IDbContextFactory<FluxKnowledgeD
                 if (targets.Count > 0)
                 {
                     state.Generation++;
-                    var pending = await db.SourcePendingChanges.Where(x => x.SourceRootId == root.Id).ToListAsync(ct).ConfigureAwait(false);
-                    var additions = targets.Keys.Count(path => pending.All(x => x.PathFingerprint != PathKey(path)));
-                    if (additions > 0 && pending.Count + additions > SqlSourcePendingWork.MaximumPaths)
-                        throw new SourcePendingCapacityException(additions > SqlSourcePendingWork.MaximumPaths);
+                    var pending = await db.SourcePendingChanges.Where(x => x.SourceRootId == root.Id)
+                        .ToDictionaryAsync(x => x.PathFingerprint, ct).ConfigureAwait(false);
                     foreach (var (path, item) in targets)
                     {
                         var key = PathKey(path);
-                        var row = pending.SingleOrDefault(x => x.PathFingerprint == key);
+                        pending.TryGetValue(key, out var row);
                         if (row is not null && !row.RelativePath.Equals(path, StringComparison.OrdinalIgnoreCase))
                             throw new InvalidDataException("SourceJournalPathCollision");
                         if (row is null)
                         {
                             row = new() { Id = Guid.NewGuid(), SourceRootId = root.Id, RelativePath = path, PathFingerprint = key,
                                 FirstUsn = item.First, LastContentUsn = 0, LastUnjournaledGeneration = 0 };
-                            pending.Add(row); db.SourcePendingChanges.Add(row);
+                            pending.Add(key, row); db.SourcePendingChanges.Add(row);
                         }
-                    row.ReasonFlags |= item.Reasons; row.IsSubtree |= item.Subtree;
+                        row.ReasonFlags |= item.Reasons; row.IsSubtree |= item.Subtree;
                         row.Generation = state.Generation; row.LastUsn = item.Last;
                         if (row.LastContentUsn is { } priorContent) row.LastContentUsn = Math.Max(priorContent, item.Content);
                         row.FirstObservedAtUtc ??= time.GetUtcNow();

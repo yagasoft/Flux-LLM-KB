@@ -247,12 +247,6 @@ public sealed partial class SqlSourceIncrementalCoordinator(
                 return await ResetCoverageAsync(claim, current, ct, error.Message).ConfigureAwait(false);
             }
         }
-        catch (SourcePendingCapacityException error)
-        {
-            await _journal.MarkUnavailableAsync(claim, time.GetUtcNow().AddSeconds(options.PollSeconds),
-                error.PageTooLarge ? "journal-pending-page-capacity" : "journal-pending-capacity", ct).ConfigureAwait(false);
-            return JournalPollResult.Unavailable;
-        }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException ||
             error is OperationCanceledException && !ct.IsCancellationRequested)
         {

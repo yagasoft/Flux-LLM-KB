@@ -100,8 +100,10 @@ public sealed partial class SourceJournalSealIntegrationTests
         Assert.Equal(64, scenario.SourceBytes);
     }
 
-    [NativeSqlServerFact]
-    public async Task Low_disk_policy_watcher_capacity_failure_retains_its_batch_and_a_newer_signal_until_retry()
+    [NativeSqlServerTheory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Watcher_admits_paths_above_ten_thousand_and_retains_a_newer_signal(bool journalEnabled)
     {
         await using var scenario = await Scenario.CreateAsync(fixture.ConnectionString, qualified: false);
         await scenario.ScanAsync("watch-capacity-initial"); await scenario.DrainAsync();
@@ -115,30 +117,17 @@ public sealed partial class SourceJournalSealIntegrationTests
                 LastContentUsn = 0, LastUnjournaledGeneration = 1, FirstObservedAtUtc = scenario.Clock.Now }));
             await db.SaveChangesAsync();
         }
+        scenario.Options.Enabled = journalEnabled;
         var watch = new SqlSourceRootWatchStore(scenario.Factory, scenario.Clock, scenario.Options);
         await watch.RecordSignalAsync(new(rootId, FluxKnowledge.Domain.Sources.SourceWatchSignalKind.Changed,
             scenario.Clock.Now, [new("first-event.txt")]), default);
         scenario.Clock.Now += TimeSpan.FromSeconds(3);
         var batch = Assert.IsType<ClaimedSourceWatchBatch>(await watch.ClaimDueBatchAsync(scenario.Clock.Now, "watch-capacity", TimeSpan.FromMinutes(1), default));
-        string before;
-        await using (var db = scenario.Factory.CreateDbContext())
-            before = System.Text.Json.JsonSerializer.Serialize(await db.SourceRootWatchStates.AsNoTracking().SingleAsync());
-        await Assert.ThrowsAsync<SourcePendingCapacityException>(() => watch.ReleaseScanAsync(batch, default).AsTask());
-        await using (var db = scenario.Factory.CreateDbContext())
-        {
-            Assert.Equal(before, System.Text.Json.JsonSerializer.Serialize(await db.SourceRootWatchStates.AsNoTracking().SingleAsync()));
-            Assert.Equal(10000, await db.SourcePendingChanges.CountAsync());
-        }
         await watch.RecordSignalAsync(new(rootId, FluxKnowledge.Domain.Sources.SourceWatchSignalKind.Changed,
             scenario.Clock.Now, [new("newer-event.txt")]), default);
-        await using (var db = scenario.Factory.CreateDbContext())
-        {
-            // Disposable fixture arrangement: two already-admitted paths drain.
-            db.SourcePendingChanges.RemoveRange(await db.SourcePendingChanges.OrderBy(x => x.Id).Take(2).ToArrayAsync());
-            await db.SaveChangesAsync();
-        }
         await watch.ReleaseScanAsync(batch, default);
         await using var after = scenario.Factory.CreateDbContext();
+        Assert.Equal(10001, await after.SourcePendingChanges.CountAsync());
         Assert.True(await after.SourcePendingChanges.AnyAsync(x => x.RelativePath == "first-event.txt"));
         var retained = await after.SourceRootWatchStates.SingleAsync();
         Assert.True(retained.DebounceGeneration > batch.DebounceGeneration);
@@ -283,7 +272,7 @@ public sealed partial class SourceJournalSealIntegrationTests
     }
 
     [NativeSqlServerFact]
-    public async Task Low_disk_policy_admitted_capture_finishes_when_intake_capacity_blocks_a_later_barrier()
+    public async Task Low_disk_policy_admitted_capture_finishes_when_a_later_journal_barrier_is_unavailable()
     {
         await using var scenario = await Scenario.CreateAsync(fixture.ConnectionString, qualified: false);
         await scenario.ScanAsync("capacity-progress-initial");
@@ -336,7 +325,7 @@ public sealed partial class SourceJournalSealIntegrationTests
         public ValueTask<JournalCapability> QueryAsync(string volumeIdentity, CancellationToken cancellationToken) =>
             _native.QueryAsync(volumeIdentity, cancellationToken);
         public ValueTask<JournalPage> ReadAsync(JournalCursor cursor, int maximumBytes, CancellationToken cancellationToken) =>
-            Blocked ? ValueTask.FromException<JournalPage>(new IOException("SourcePendingCapacityExceeded")) :
+            Blocked ? ValueTask.FromException<JournalPage>(new IOException("FixtureJournalUnavailable")) :
                 _native.ReadAsync(cursor, maximumBytes, cancellationToken);
     }
 

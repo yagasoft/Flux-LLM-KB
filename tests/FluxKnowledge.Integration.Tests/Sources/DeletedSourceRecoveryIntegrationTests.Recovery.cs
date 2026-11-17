@@ -14,6 +14,69 @@ namespace FluxKnowledge.Integration.Tests.Sources;
 public sealed partial class DeletedSourceRecoveryIntegrationTests
 {
     [NativeSqlServerFact]
+    public async Task Uncertain_removal_retries_are_durable_between_batches_above_ten_thousand_paths()
+    {
+        await using var scenario = await Scenario.CreateAsync(fixture.ConnectionString);
+        await using var db = scenario.Factory.CreateDbContext();
+        var rootId = scenario.Claim.SourceRoot.Id.Value;
+        db.SourcePendingChanges.AddRange(Enumerable.Range(0, 10000).Select(index => new SourcePendingChangeEntity
+        {
+            Id = Guid.NewGuid(), SourceRootId = rootId, RelativePath = $"unrelated-{index}.txt",
+            PathFingerprint = SqlSourceChangeJournalStore.PathKey($"unrelated-{index}.txt"), Generation = 1, ReasonFlags = 1
+        }));
+        var revisions = Enumerable.Range(0, 140).Select(index => Synthetic(scenario, $"uncertain-{index}.txt")).ToArray();
+        for (var index = 0; index < revisions.Length; index++)
+            revisions[index].Id = Guid.Parse($"00000000-0000-0000-0000-{index + 3:x12}");
+        var duplicate = Synthetic(scenario, "uncertain-0.txt");
+        duplicate.Id = Guid.Parse("00000000-0000-0000-0000-000000000001");
+        duplicate.ContentSha256 = new string('b', 64);
+        db.SourceRevisions.AddRange(revisions.Append(duplicate));
+        await db.SaveChangesAsync();
+        var pendingId = await scenario.PendingAsync(".", true);
+        using var cancellation = new CancellationTokenSource();
+        var calls = 0;
+        var observations = new ControlledObservations { RefuseUncertain = true,
+            BeforeAbsence = () => { if (++calls == 20) { cancellation.Cancel(); cancellation.Token.ThrowIfCancellationRequested(); } } };
+        var removals = new SqlSourceRemovalReconciler(scenario.Factory, TimeProvider.System, observations);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => removals.ReconcileAsync(cancellation.Token).AsTask());
+        Assert.InRange(await db.SourcePendingChanges.CountAsync(x => x.RelativePath.StartsWith("uncertain-")), 1, 16);
+        Assert.NotEqual(0, (await db.SourcePendingChanges.AsNoTracking().SingleAsync(x => x.Id == pendingId)).ReasonFlags & SourcePendingReasons.RemovalPending);
+
+        observations.BeforeAbsence = null;
+        removals = new SqlSourceRemovalReconciler(scenario.Factory, TimeProvider.System, observations);
+        await removals.ReconcileAsync(default);
+        await db.SourcePendingChanges.Where(x => x.Id == pendingId).ExecuteUpdateAsync(set => set.SetProperty(x => x.Generation, x => x.Generation + 1));
+        await removals.ReconcileAsync(default);
+        Assert.NotEqual(0, (await db.SourcePendingChanges.AsNoTracking().SingleAsync(x => x.Id == pendingId)).ReasonFlags & SourcePendingReasons.RemovalPending);
+        for (var turn = 0; turn < 5; turn++) await removals.ReconcileAsync(default);
+        Assert.Equal(1, (await db.SourcePendingChanges.AsNoTracking().SingleAsync(x => x.Id == pendingId)).ReasonFlags);
+        Assert.Equal(140, await db.SourcePendingChanges.CountAsync(x => x.RelativePath.StartsWith("uncertain-")));
+        Assert.Equal(10000, await db.SourcePendingChanges.CountAsync(x => x.RelativePath.StartsWith("unrelated-") && x.ReasonFlags == 1));
+        Assert.False(await db.SourceRevisions.AnyAsync(x => x.SuppressedAtUtc != null));
+    }
+
+    [NativeSqlServerFact]
+    public async Task An_uncertain_scope_itself_keeps_its_new_generation_with_multiple_revisions()
+    {
+        await using var scenario = await Scenario.CreateAsync(fixture.ConnectionString);
+        await using var db = scenario.Factory.CreateDbContext();
+        var first = Synthetic(scenario, "uncertain-one.txt");
+        var second = Synthetic(scenario, "uncertain-one.txt");
+        second.ContentSha256 = new string('b', 64);
+        db.SourceRevisions.AddRange(first, second);
+        await db.SaveChangesAsync();
+        var pendingId = await scenario.PendingAsync("uncertain-one.txt", false);
+        var removals = new SqlSourceRemovalReconciler(scenario.Factory, TimeProvider.System,
+            new ControlledObservations { RefuseUncertain = true });
+        Assert.Equal(0, await removals.ReconcileAsync(default));
+        var pending = await db.SourcePendingChanges.AsNoTracking().SingleAsync(x => x.Id == pendingId);
+        Assert.True(pending.Generation > 1);
+        Assert.NotEqual(0, pending.ReasonFlags & SourcePendingReasons.RemovalPending);
+        Assert.Equal(1, await db.SourcePendingChanges.CountAsync(x => x.RelativePath == "uncertain-one.txt"));
+        Assert.False(await db.SourceRevisions.AnyAsync(x => x.SuppressedAtUtc != null));
+    }
+
+    [NativeSqlServerFact]
     public async Task Intake_during_a_large_removal_pass_preserves_progress_without_acknowledging_newer_work()
     {
         await using var scenario = await Scenario.CreateAsync(fixture.ConnectionString);
@@ -162,6 +225,7 @@ public sealed partial class DeletedSourceRecoveryIntegrationTests
         internal string? Missing { get; set; }
         internal bool RefuseUncertain { get; init; }
         internal Exception? PresenceError { get; init; }
+        internal Action? BeforeAbsence { get; set; }
         public ISourceObservationLease Open(SourceRootConfiguration root, string path)
         {
             if (PresenceError is not null) throw PresenceError;
@@ -171,6 +235,7 @@ public sealed partial class DeletedSourceRecoveryIntegrationTests
         public ISourceRootObservationLease OpenRoot(SourceRootConfiguration root) => _inner.OpenRoot(root);
         public ISourceAbsenceLease? OpenAbsence(SourceRootConfiguration root, string path)
         {
+            BeforeAbsence?.Invoke();
             if (RefuseUncertain && path.StartsWith("uncertain-", StringComparison.Ordinal)) throw new IOException("fixture-uncertain");
             return path == Missing ? new Absence() : null;
         }

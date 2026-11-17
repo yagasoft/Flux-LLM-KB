@@ -233,13 +233,6 @@ public sealed partial class SqlSourceIncrementalCoordinator
                                 .Where(x => x.Entity.SourceRootId == current.Id).ToArray();
                             var retry = tracked.SingleOrDefault(x => x.Entity.PathFingerprint == key);
                             if (retry is not null && retry.State != EntityState.Deleted && retry.Entity.Generation > plan.Generation) continue;
-                            var activeRows = tracked.Where(x => x.State != EntityState.Deleted).Select(x => x.Entity).ToList();
-                            if ((retry is null || retry.State == EntityState.Deleted) && activeRows.Count >= SqlSourcePendingWork.MaximumPaths)
-                            {
-                                state.RecoveryRequired = true;
-                                SqlSourcePendingWork.RequireMetadata(db, state, activeRows, time.GetUtcNow());
-                                break;
-                            }
                             SourcePendingChangeEntity item;
                             if (retry is null)
                             {

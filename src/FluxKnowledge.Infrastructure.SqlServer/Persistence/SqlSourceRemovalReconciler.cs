@@ -22,7 +22,6 @@ public sealed class SqlSourceRemovalReconciler(IDbContextFactory<FluxKnowledgeDb
     {
         internal SourcePendingChangeEntity Scope { get; } = scope;
         internal Guid? After { get; set; }
-        internal HashSet<string> Uncertain { get; } = new(StringComparer.OrdinalIgnoreCase);
     }
 
     public async ValueTask<int> ReconcileAsync(CancellationToken cancellationToken)
@@ -118,6 +117,7 @@ public sealed class SqlSourceRemovalReconciler(IDbContextFactory<FluxKnowledgeDb
                 using var authority = observations.OpenRoot(root);
                 var leases = new List<ISourceAbsenceLease>();
                 var affected = new List<IndexAffectedScope>();
+                var uncertain = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 try
                 {
                     var state = await db.SourceRootScanStates.SingleOrDefaultAsync(x => x.SourceRootId == root.Id.Value, ct).ConfigureAwait(false);
@@ -131,7 +131,24 @@ public sealed class SqlSourceRemovalReconciler(IDbContextFactory<FluxKnowledgeDb
                         ISourceAbsenceLease? absence;
                         try { absence = observations.OpenAbsence(root, path); }
                         catch (Exception error) when (error is IOException or UnauthorizedAccessException)
-                        { progress.Uncertain.Add(path); continue; }
+                        {
+                            if (!uncertain.Add(path)) continue;
+                            // Persist retries in this existing sixteen-revision transaction.
+                            // The broad hold stays durable until every page has committed.
+                            var key = SqlSourceChangeJournalStore.PathKey(path);
+                            var retry = await db.SourcePendingChanges.SingleOrDefaultAsync(x =>
+                                x.SourceRootId == root.Id.Value && x.PathFingerprint == key, ct).ConfigureAwait(false);
+                            if (retry is null)
+                            {
+                                retry = new() { Id = Guid.NewGuid(), SourceRootId = root.Id.Value, RelativePath = path, PathFingerprint = key };
+                                db.SourcePendingChanges.Add(retry);
+                            }
+                            retry.ReasonFlags |= SourcePendingReasons.RemovalPending;
+                            retry.Generation = state is null ? Math.Max(retry.Generation, scope.Generation) + 1 :
+                                state.Generation = Math.Max(state.Generation, Math.Max(retry.Generation, scope.Generation)) + 1;
+                            retry.NotBeforeUtc = clock.GetUtcNow().AddSeconds(5);
+                            continue;
+                        }
                         if (absence is null) continue;
                         leases.Add(absence); absence.ValidateCurrent();
                         var now = clock.GetUtcNow();
@@ -181,32 +198,6 @@ public sealed class SqlSourceRemovalReconciler(IDbContextFactory<FluxKnowledgeDb
             var current = await db.SourcePendingChanges.SingleOrDefaultAsync(x => x.Id == progress.Scope.Id, ct).ConfigureAwait(false);
             if (current is null || current.Generation != progress.Scope.Generation) return;
             current.ReasonFlags &= ~SourcePendingReasons.RemovalPending;
-            var state = await db.SourceRootScanStates.SingleOrDefaultAsync(x => x.SourceRootId == root.Id, ct).ConfigureAwait(false);
-            if (progress.Uncertain.Count > 0 && await db.SourcePendingChanges.CountAsync(x => x.SourceRootId == root.Id, ct).ConfigureAwait(false)
-                    + progress.Uncertain.Count > SqlSourcePendingWork.MaximumPaths)
-            {
-                // Too many uncertain paths remain represented by the existing broader hold.
-                current.ReasonFlags |= SourcePendingReasons.RemovalPending;
-                current.NotBeforeUtc = clock.GetUtcNow().AddSeconds(5);
-                await db.SaveChangesAsync(ct).ConfigureAwait(false);
-                authority.ValidateCurrent();
-                await transaction.CommitAsync(ct).ConfigureAwait(false);
-                return;
-            }
-            foreach (var path in progress.Uncertain)
-            {
-                var key = SqlSourceChangeJournalStore.PathKey(path);
-                var item = await db.SourcePendingChanges.SingleOrDefaultAsync(x => x.SourceRootId == root.Id && x.PathFingerprint == key, ct).ConfigureAwait(false);
-                if (item is null)
-                {
-                    item = new() { Id = Guid.NewGuid(), SourceRootId = root.Id, RelativePath = path, PathFingerprint = key };
-                    db.SourcePendingChanges.Add(item);
-                }
-                item.ReasonFlags |= SourcePendingReasons.RemovalPending;
-                item.Generation = state is null ? Math.Max(item.Generation, current.Generation) + 1 :
-                    state.Generation = Math.Max(state.Generation, Math.Max(item.Generation, current.Generation)) + 1;
-                item.NotBeforeUtc = clock.GetUtcNow().AddSeconds(5);
-            }
             if (current.ReasonFlags == 0) db.SourcePendingChanges.Remove(current);
             await db.SaveChangesAsync(ct).ConfigureAwait(false);
             authority.ValidateCurrent();

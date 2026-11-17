@@ -153,12 +153,8 @@ public sealed class SqlSourceRootWatchStore(IDbContextFactory<FluxKnowledgeDbCon
                 SourceRootId: root.Id, CorrelationId: $"watch:{root.Id:N}:{batch.DebounceGeneration}", Details: new { kind = "journal-advisory" }));
             return true;
         }
-        var pending = await context.SourcePendingChanges.Where(x => x.SourceRootId == root.Id).ToListAsync(ct).ConfigureAwait(false);
-        var incoming = paths.Select(x => SqlSourceChangeJournalStore.PathKey(x.RelativePath)).ToHashSet(StringComparer.Ordinal);
-        if (membership || uncertain) incoming.Add(SqlSourceChangeJournalStore.PathKey("."));
-        var additions = incoming.Count(key => !pending.Any(x => x.PathFingerprint == key));
-        if (additions > 0 && pending.Count + additions > SqlSourcePendingWork.MaximumPaths)
-            throw new SourcePendingCapacityException();
+        var pending = await context.SourcePendingChanges.Where(x => x.SourceRootId == root.Id)
+            .ToDictionaryAsync(x => x.PathFingerprint, ct).ConfigureAwait(false);
         var generation = ++scan.Generation;
         foreach (var hint in paths) Merge(hint.RelativePath,
             (healthy && hint.IsSubtree ? SourcePendingReasons.ScopedNamespace : 1) | SourcePendingReasons.RemovalPending |
@@ -180,13 +176,13 @@ public sealed class SqlSourceRootWatchStore(IDbContextFactory<FluxKnowledgeDbCon
         {
             var path = SqlSourceChangeJournalStore.NormaliseRelative(relativePath);
             var key = SqlSourceChangeJournalStore.PathKey(path);
-            var item = pending.SingleOrDefault(x => x.PathFingerprint == key);
+            pending.TryGetValue(key, out var item);
             if (item is not null && !item.RelativePath.Equals(path, StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("SourceWatchPathCollision");
             if (item is null)
             {
                 item = new() { Id = Guid.NewGuid(), SourceRootId = root.Id, RelativePath = path, PathFingerprint = key,
                     LastContentUsn = 0, LastUnjournaledGeneration = 0 };
-                pending.Add(item); context.SourcePendingChanges.Add(item);
+                pending.Add(key, item); context.SourcePendingChanges.Add(item);
             }
             item.ReasonFlags |= reasons;
             item.IsSubtree |= subtree;
@@ -206,22 +202,21 @@ public sealed class SqlSourceRootWatchStore(IDbContextFactory<FluxKnowledgeDbCon
         var uncertain = signal is null || signal.PathsIncomplete || paths.Count == 0;
         var hints = paths.Concat(uncertain ? [new SourceWatchPathHint(".", true)] : Array.Empty<SourceWatchPathHint>())
             .DistinctBy(x => x.RelativePath, StringComparer.OrdinalIgnoreCase).ToArray();
-        var pending = await db.SourcePendingChanges.Where(x => x.SourceRootId == root.Id).ToListAsync(ct).ConfigureAwait(false);
+        var pending = await db.SourcePendingChanges.Where(x => x.SourceRootId == root.Id)
+            .ToDictionaryAsync(x => x.PathFingerprint, ct).ConfigureAwait(false);
         var state = await db.SourceRootScanStates.SingleOrDefaultAsync(x => x.SourceRootId == root.Id, ct).ConfigureAwait(false);
-        var generation = Math.Max(state?.Generation ?? 0, pending.Select(x => x.Generation).DefaultIfEmpty(0).Max()) + 1;
+        var generation = Math.Max(state?.Generation ?? 0, pending.Values.Select(x => x.Generation).DefaultIfEmpty(0).Max()) + 1;
         if (state is not null) state.Generation = generation;
         if (uncertain && state is not null) { state.NamespaceComplete = false; state.NamespaceGeneration++; }
-        if (pending.Count + hints.Count(x => pending.All(p => p.PathFingerprint != SqlSourceChangeJournalStore.PathKey(x.RelativePath))) > SqlSourcePendingWork.MaximumPaths)
-            throw new SourcePendingCapacityException();
         foreach (var hint in hints)
         {
             var path = SqlSourceChangeJournalStore.NormaliseRelative(hint.RelativePath);
             var key = SqlSourceChangeJournalStore.PathKey(path);
-            var item = pending.SingleOrDefault(x => x.PathFingerprint == key);
+            pending.TryGetValue(key, out var item);
             if (item is null)
             {
                 item = new() { Id = Guid.NewGuid(), SourceRootId = root.Id, RelativePath = path, PathFingerprint = key };
-                db.SourcePendingChanges.Add(item); pending.Add(item);
+                db.SourcePendingChanges.Add(item); pending.Add(key, item);
             }
             item.IsSubtree |= hint.IsSubtree;
             item.ReasonFlags |= SourcePendingReasons.RemovalPending | (path == "." ? SourcePendingReasons.NamespaceMetadata :

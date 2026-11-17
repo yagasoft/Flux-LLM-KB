@@ -3,17 +3,9 @@ using FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
 
 namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
 
-internal sealed class SourcePendingCapacityException(bool pageTooLarge = false)
-    : IOException(pageTooLarge ? "SourcePendingCapacityPageTooLarge" : "SourcePendingCapacityExceeded")
-{
-    internal bool PageTooLarge { get; } = pageTooLarge;
-}
-
-/// <summary>Bounds dirty-path debt without throwing away its content or removal obligations.</summary>
+/// <summary>Preserves metadata debt alongside every specific content or removal obligation.</summary>
 internal static class SqlSourcePendingWork
 {
-    internal const int MaximumPaths = 10000;
-
     internal static void RequireMetadata(FluxKnowledgeDbContext db, SourceRootScanStateEntity state,
         IList<SourcePendingChangeEntity> pending, DateTimeOffset now)
     {
@@ -21,9 +13,6 @@ internal static class SqlSourcePendingWork
         var root = pending.SingleOrDefault(x => x.PathFingerprint == key);
         if (root is null)
         {
-            // RecoveryRequired already records this metadata obligation. A full queue
-            // keeps every specific event, and the weekly scheduler supplies the sweep.
-            if (pending.Count >= MaximumPaths) return;
             root = new() { Id = Guid.NewGuid(), SourceRootId = state.SourceRootId, RelativePath = ".", PathFingerprint = key };
             db.SourcePendingChanges.Add(root);
             pending.Add(root);
