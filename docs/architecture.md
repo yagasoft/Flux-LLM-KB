@@ -704,8 +704,7 @@ It retries the original ordered group through the existing GPU handoff and keeps
 all attempt history and successful sibling vectors. Every failed attempt retains
 its own cleanup/release proof. Publication requires a strictly later, fully verified
 success for each failed group, rechecking result payloads at preflight and inside
-the activation transaction. Missing results never authorise publication, and the
-explicit terminal embedding retry API retains its stricter existing contract. A
+the activation transaction. Missing results never authorise publication. A
 clean file captured alongside a transient sibling error retains a targeted proof
 retry. A revert to an already completed, unexpired revision can restore its verified
 publication without embedding again, after source admission and removal checks.
@@ -726,6 +725,29 @@ requeue commits, recovery must use a binary enforcing this fence; hold workers
 and preserve receipts for reviewed forward recovery rather than admitting an
 older payload. Native history checks batch metadata and bounded group payloads
 without dropping ordered input or result-digest verification.
+
+Physical source revisions may link to their immediately preceding revision after
+an edit or rename. Terminal Embed and Publish recovery distinguish that history
+from derived inputs by origin kind, root, stable identity and revision sequence.
+A terminal Embed failure before its first draft can resume only with the exact
+completed Canonical job, delivery and verified chunks, and no draft, GPU task,
+request or vector evidence anywhere for that record revision. Confirmation binds
+those inputs and the absence; the ordinary worker creates the first draft. Git
+work retains its enrolled current-capture fence through claim and native handoff.
+
+Explicit recovery of cleanup-confirmed failed GPU groups records a separate
+append-only audit requirement on both filesystem and Git roots. Current inventory,
+retained input, attempt limits and native ownership remain mandatory. The shared
+checkpoint verifier and both publication fences require a strictly later verified
+matching success, including previously superseded groups. A lost result or changed
+input keeps the publication held; ordinary unrelated filesystem work is unchanged.
+Recovery after these marked actions requires a binary enforcing the audit fences.
+
+Text normalisation preserves well-formed Unicode noncharacters. Windows FormKC
+can reject these valid UTF-8 values; the shared normaliser retains them unchanged
+and normalises surrounding spans. Plain text, document provenance and the local
+model-free provider use the same rule. Unpaired UTF-16 surrogates still fail, and
+the retained Extract text and source bytes are preserved.
 
 The locally implemented [automatic repository continuation](design/repository-retrieval-reliability.md#automatic-continuation-after-repository-withdrawal)
 preserves nonterminal jobs, deliveries, checkpoints and vectors during withdrawal.

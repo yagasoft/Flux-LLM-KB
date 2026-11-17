@@ -2,6 +2,8 @@ using System.Text.Json;
 using System.Security.Cryptography;
 using FluxKnowledge.Application.Gpu;
 using FluxKnowledge.Application.Indexing;
+using FluxKnowledge.Application.IntegrationV1;
+using FluxKnowledge.Application.IntegrationV1.Corpus;
 using FluxKnowledge.Application.Pipeline;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Search;
@@ -76,10 +78,42 @@ public sealed partial class SourceJournalSealIntegrationTests
     public Task Repository_replay_rechecks_exact_current_capture_authority(bool segmented, string boundary) =>
         AssertRepositoryGpuReplayAsync(segmented, 1, boundary);
 
-    private async Task AssertRepositoryGpuReplayAsync(bool segmented, int failedAttempts, string? boundary = null)
+    [NativeSqlServerTheory]
+    [InlineData(false, null)]
+    [InlineData(true, null)]
+    [InlineData(false, "publication-result")]
+    [InlineData(true, "publication-result")]
+    [InlineData(false, "publication-race")]
+    [InlineData(true, "publication-race")]
+    [InlineData(false, "cleanup")]
+    [InlineData(false, "capacity")]
+    [InlineData(false, "older-success")]
+    public Task Confirmed_non_Git_settled_recovery_preserves_gpu_proof_through_publication(bool segmented, string? boundary) =>
+        AssertRepositoryGpuReplayAsync(segmented, 1, boundary, explicitNonGit: true);
+
+    [NativeSqlServerTheory]
+    [InlineData(false, "restore-checkpoint")]
+    [InlineData(true, "restore-checkpoint")]
+    [InlineData(false, "restore-after-replacement")]
+    [InlineData(true, "restore-after-replacement")]
+    [InlineData(false, "inventory-alias")]
+    public Task Marked_filesystem_recovery_requires_exact_path_and_revisits_restored_pending_or_superseded_proof(bool segmented, string boundary) =>
+        AssertRepositoryGpuReplayAsync(segmented, 1, boundary, explicitNonGit: true, nativePending: boundary == "restore-checkpoint");
+
+    [NativeSqlServerTheory]
+    [InlineData(false, "terminal-during-handoff")]
+    [InlineData(true, "terminal-during-handoff")]
+    [InlineData(false, "terminal-before-native")]
+    [InlineData(true, "terminal-before-native")]
+    public Task Confirmed_Git_settled_history_without_unstarted_request_keeps_capture_after_checkpoint(bool segmented, string boundary) =>
+        AssertRepositoryGpuReplayAsync(segmented, 1, boundary, explicitTerminalGit: true);
+
+    private async Task AssertRepositoryGpuReplayAsync(bool segmented, int failedAttempts, string? boundary = null, bool explicitNonGit = false,
+        bool nativePending = false, bool explicitTerminalGit = false)
     {
         var refusesBeforeResume = boundary is not null and not "publication-result" and not "publication-race" and
-            not "publication-authority" and not "after-requeue-authority" and not "after-checkpoint-authority";
+            not "publication-authority" and not "after-requeue-authority" and not "after-checkpoint-authority" and
+            not "restore-checkpoint" and not "restore-after-replacement" and not "terminal-during-handoff" and not "terminal-before-native";
         await using var scenario = await Scenario.CreateAsync(fixture.ConnectionString, qualified: true, gitTracked: true);
         await File.WriteAllTextAsync(scenario.Path, string.Join("\n\n", Enumerable.Range(0, 32)
             .Select(i => $"Repository replay section {i}. " + new string('x', 900))));
@@ -211,8 +245,62 @@ public sealed partial class SourceJournalSealIntegrationTests
             await fault.SaveChangesAsync();
         }
         scenario.Clock.Now += TimeSpan.FromMinutes(2);
-        await Task.WhenAll(SqlRepositoryWorkRecovery.ReconcileDueAsync(scenario.Factory, scenario.Clock.Now, ReplayRuntime, default),
-            SqlRepositoryWorkRecovery.ReconcileDueAsync(scenario.Factory, scenario.Clock.Now, ReplayRuntime, default));
+        if (explicitNonGit || explicitTerminalGit)
+        {
+            await using (var legacy = scenario.Factory.CreateDbContext())
+            {
+                if (explicitNonGit)
+                {
+                    await legacy.SourceRootConfigurations.Where(x => x.Id == root.Id.Value).ExecuteUpdateAsync(setters => setters.SetProperty(x => x.CrawlMode, 0));
+                    await legacy.PipelineRecords.Where(x => x.Id == stranded.Job.PipelineRecordId.Value).ExecuteUpdateAsync(setters => setters.SetProperty(x => x.RepositoryRecoveryBindingJson, (string?)null));
+                }
+                else
+                    await legacy.Database.ExecuteSqlInterpolatedAsync($"UPDATE SourceRevisions SET CurrentDiscoveryEvidenceJson=JSON_MODIFY(CurrentDiscoveryEvidenceJson,'$.RecoveryRequired',CAST(0 AS bit)) WHERE Id={(await legacy.PipelineRecords.SingleAsync(x => x.Id == stranded.Job.PipelineRecordId.Value)).SourceRevisionId}");
+                await legacy.Jobs.Where(x => x.Id == stranded.Job.JobId.Value).ExecuteUpdateAsync(setters => setters.SetProperty(x => x.PublicState, 5).SetProperty(x => x.Reason, "stage worker failed non-retryably"));
+                await legacy.OutboxMessages.Where(x => x.JobId == stranded.Job.JobId.Value).ExecuteUpdateAsync(setters => setters.SetProperty(x => x.DispatchedAtUtc, scenario.Clock.Now));
+                await legacy.SourceActivities.Where(x => x.ResultingPipelineRecordId == stranded.Job.PipelineRecordId.Value).ExecuteUpdateAsync(setters => setters.SetProperty(x => x.State, 6));
+                if (nativePending)
+                {
+                    var pending = (EmbeddingGpuRequestEntity)legacy.Entry(await legacy.EmbeddingGpuRequests.SingleAsync(x => x.MiniTaskId == execution.MiniTaskId)).CurrentValues.ToObject();
+                    pending.MiniTaskId = Guid.NewGuid(); pending.RowVersion = []; pending.State = 0;
+                    pending.ExecutorInstanceId = null; pending.ClaimOperationId = null; pending.DispatchId = null;
+                    pending.OwnerProcessId = null; pending.OwnerStartedAtUtc = null; pending.OwnerMachineFingerprint = null;
+                    pending.NativeCleanupConfirmed = false; pending.CleanupConfirmedAtUtc = null;
+                    pending.CreatedAtUtc = pending.UpdatedAtUtc = scenario.Clock.Now;
+                    legacy.EmbeddingGpuRequests.Add(pending); await legacy.SaveChangesAsync();
+                }
+                if (boundary == "inventory-alias")
+                {
+                    var canonicalEntry = await legacy.SourceInventoryEntries.SingleAsync(x => x.RelativePath == "one.txt");
+                    var alias = (SourceInventoryEntryEntity)legacy.Entry(canonicalEntry).CurrentValues.ToObject();
+                    alias.Id = Guid.NewGuid(); alias.RelativePath = "old-alias.txt"; alias.PathFingerprint = SqlSourceChangeJournalStore.PathKey(alias.RelativePath);
+                    legacy.SourceInventoryEntries.Add(alias);
+                    var oldSource = await legacy.SourceRevisions.SingleAsync(x => x.Id == canonicalEntry.SourceRevisionId);
+                    var successor = (SourceRevisionEntity)legacy.Entry(oldSource).CurrentValues.ToObject();
+                    successor.Id = Guid.NewGuid(); successor.RowVersion = []; successor.StableSourceIdentity += ":new-physical-file";
+                    successor.ContentSha256 = new string('b', 64); successor.ParentSourceRevisionId = null; successor.Revision = 1;
+                    legacy.SourceRevisions.Add(successor);
+                    var retained = (SourceArtifactEntity)legacy.Entry(await legacy.SourceArtifacts.SingleAsync(x => x.SourceRevisionId == oldSource.Id)).CurrentValues.ToObject();
+                    retained.Id = Guid.NewGuid(); retained.RowVersion = []; retained.SourceRevisionId = successor.Id; retained.ContentSha256 = successor.ContentSha256;
+                    legacy.SourceArtifacts.Add(retained); canonicalEntry.SourceRevisionId = successor.Id; canonicalEntry.SourceArtifactId = retained.Id;
+                    await legacy.SaveChangesAsync();
+                }
+            }
+            var service = new NativeCorpusCommandService(new SqlNativeOperationStore(scenario.Factory, scenario.Clock, embeddingRuntime: ReplayRuntime),
+                new SqlNativeCorpusActionStore(scenario.Factory, new SourceRootPathPolicy(new LocalIngressOptions([Path.GetDirectoryName(scenario.Path)!])),
+                    new LocalPrivateContentDisclosure(), ReplayRuntime));
+            var command = new NativeCorpusMutation("embedding_retry", JsonSerializer.SerializeToElement(new { jobId = stranded.Job.JobId.Value }));
+            if (refusesBeforeResume)
+            {
+                await Assert.ThrowsAsync<NativeOperationException>(() => service.PreviewAsync(command, "test", default).AsTask());
+                return;
+            }
+            var preview = await service.PreviewAsync(command, "test", default);
+            await service.CommitAsync(command, preview.ConfirmationId, "non-git-settled-" + stranded.Job.JobId.Value.ToString("N"), "test", default);
+        }
+        else
+            await Task.WhenAll(SqlRepositoryWorkRecovery.ReconcileDueAsync(scenario.Factory, scenario.Clock.Now, ReplayRuntime, default),
+                SqlRepositoryWorkRecovery.ReconcileDueAsync(scenario.Factory, scenario.Clock.Now, ReplayRuntime, default));
         await using (var resumed = scenario.Factory.CreateDbContext())
         {
             var job = await resumed.Jobs.SingleAsync(x => x.Id == stranded.Job.JobId.Value);
@@ -224,7 +312,7 @@ public sealed partial class SourceJournalSealIntegrationTests
                 Assert.Null((await resumed.IndexState.SingleAsync()).ActiveIndexGenerationId);
                 return;
             }
-            Assert.True(job.Reason == "repository-source-resumed", $"Released current group did not resume: {job.Reason}, {job.ErrorDetails}");
+            Assert.Equal(explicitNonGit || explicitTerminalGit ? "explicit-embedding-recovery" : "repository-source-resumed", job.Reason);
             // The operator's explicit terminal retry API retains its strict contract.
             await Assert.ThrowsAsync<FluxKnowledge.Application.IntegrationV1.NativeOperationException>(() =>
                 SqlEmbeddingRetry.ReadSettledGpuBindingAsync(resumed, job,
@@ -253,6 +341,40 @@ public sealed partial class SourceJournalSealIntegrationTests
             return await ClaimRepositoryEmbedAsync(scenario);
         }
         var replacement = await ClaimRepositoryEmbedAsync(scenario);
+        async Task<StageWorkItem> RestoreBlockedProofAsync(StageWorkItem owned, bool leaveUnstarted)
+        {
+            if (leaveUnstarted)
+            {
+                var next = await checkpoint.ReadNextAsync(owned, ReplayRuntime.Profile, default);
+                var interrupted = new SqlEmbeddingGpuRequestStore(scenario.Factory,
+                    new SqlGpuSchedulerStore(scenario.Factory, timeProvider: scenario.Clock, sourceAdmission: admission,
+                        beforeIdempotencyRead: _ => throw new InvalidOperationException("injected-unstarted-after-success")),
+                    wake, ReplayRuntime, scenario.Clock, sourceAdmission: admission);
+                await Assert.ThrowsAsync<InvalidOperationException>(() => interrupted.QueueAsync(owned, next, default).AsTask());
+            }
+            Guid siblingId; byte[] originalResult;
+            await using (var lost = scenario.Factory.CreateDbContext())
+            {
+                var sibling = await lost.EmbeddingGpuRequests.FirstAsync(x => x.ResultDigest != null);
+                siblingId = sibling.MiniTaskId; originalResult = sibling.ResultDigest!.ToArray(); sibling.ResultDigest = new byte[32]; await lost.SaveChangesAsync();
+            }
+            var refusal = await Assert.ThrowsAsync<RepositorySourceDeferredException>(() => checkpoint.ReadNextAsync(owned, ReplayRuntime.Profile, default).AsTask());
+            Assert.True(refusal.Deferral.Blocked);
+            await new SqlStageTransitionStore(scenario.Factory, null, scenario.Clock, ReplayRuntime, admission)
+                .RetryAsync(new(owned.DispatchMessage, owned.Job, scenario.Clock.Now.AddMinutes(1), SqlRepositoryWorkRecovery.Waiting, "test", refusal.Deferral), default);
+            await using (var restore = scenario.Factory.CreateDbContext())
+            {
+                Assert.Equal(SqlRepositoryWorkRecovery.Blocked, (await restore.Jobs.SingleAsync(x => x.Id == owned.Job.JobId.Value)).Reason);
+                Assert.Null((await restore.PipelineRecords.SingleAsync(x => x.Id == owned.Job.PipelineRecordId.Value)).RepositoryRecoveryBindingJson);
+                (await restore.EmbeddingGpuRequests.SingleAsync(x => x.MiniTaskId == siblingId)).ResultDigest = originalResult; await restore.SaveChangesAsync();
+            }
+            scenario.Clock.Now += TimeSpan.FromMinutes(2);
+            await SqlRepositoryWorkRecovery.ReconcileDueAsync(scenario.Factory, scenario.Clock.Now, ReplayRuntime, default);
+            await using (var reconciled = scenario.Factory.CreateDbContext())
+                Assert.Equal("repository-source-resumed", (await reconciled.Jobs.SingleAsync(x => x.Id == owned.Job.JobId.Value)).Reason);
+            return await ClaimRepositoryEmbedAsync(scenario);
+        }
+        if (boundary == "restore-checkpoint") replacement = await RestoreBlockedProofAsync(replacement, leaveUnstarted: false);
         if (boundary == "after-requeue-authority")
         {
             await InvalidateCaptureAsync();
@@ -261,6 +383,34 @@ public sealed partial class SourceJournalSealIntegrationTests
         }
         var replay = await checkpoint.ReadNextAsync(replacement, ReplayRuntime.Profile, default);
         Assert.Equal(missing.Chunks, replay.Chunks);
+        if (explicitTerminalGit)
+        {
+            await using (var check = scenario.Factory.CreateDbContext())
+            {
+                var source = await check.SourceRevisions.SingleAsync(x => x.Id == check.PipelineRecords.Where(p => p.Id == replacement.Job.PipelineRecordId.Value).Select(p => p.SourceRevisionId).Single());
+                Assert.False(SqlRepositoryWorkRecovery.RequiresRecovery(source));
+                Assert.Empty(await check.EmbeddingGpuRequests.Where(x => x.State < 2).ToArrayAsync());
+            }
+            if (boundary == "terminal-during-handoff")
+            {
+                var guardedScheduler = new SqlGpuSchedulerStore(scenario.Factory, timeProvider: scenario.Clock, sourceAdmission: admission,
+                    beforeIdempotencyRead: async _ => await InvalidateCaptureAsync());
+                var guarded = new SqlEmbeddingGpuRequestStore(scenario.Factory, guardedScheduler, wake, ReplayRuntime, scenario.Clock, sourceAdmission: admission);
+                await Assert.ThrowsAsync<RepositorySourceDeferredException>(() => guarded.QueueAsync(replacement, replay, default).AsTask());
+                await using var stopped = scenario.Factory.CreateDbContext();
+                Assert.Equal(failedAttempts + 2, await stopped.GpuMiniTasks.CountAsync());
+            }
+            else
+            {
+                await requests.QueueAsync(replacement, replay, default); var handle = await AdmitRepositoryGpuAsync(scheduler);
+                await InvalidateCaptureAsync(); var models = new BgeGpuInferenceTests.RecordingModels();
+                await new EmbeddingGpuExecutor(requests, new RepositoryReplayLifecycle(scheduler), scheduler,
+                    new BgeGpuInferenceSession(models), new WindowsInteractiveGpuOwnerProbe(), ReplayRuntime,
+                    new ChannelOutboxWakeSignal(), wake, scenario.Clock).DeliverAsync(handle, default);
+                Assert.Empty(models.Events);
+            }
+            return;
+        }
         if (boundary == "after-checkpoint-authority")
         {
             await InvalidateCaptureAsync();
@@ -276,9 +426,11 @@ public sealed partial class SourceJournalSealIntegrationTests
             Assert.Equal(failedAttempts + 1, await queued.EmbeddingGpuRequests.CountAsync(x => x.ParentJobId == stranded.Job.JobId.Value &&
                 x.InputDigest == queued.EmbeddingGpuRequests.Where(y => y.MiniTaskId == execution.MiniTaskId).Select(y => y.InputDigest).Single()));
         await DeliverRepositoryGpuAsync(requests, scheduler, wake, scenario.Clock, await AdmitRepositoryGpuAsync(scheduler));
+        StageWorkItem? restoredWork = boundary == "restore-after-replacement"
+            ? await RestoreBlockedProofAsync(await ClaimRepositoryEmbedAsync(scenario), leaveUnstarted: true) : null;
         for (var turn = 0; turn < 16; turn++)
         {
-            var work = await ClaimRepositoryEmbedAsync(scenario);
+            var work = restoredWork ?? await ClaimRepositoryEmbedAsync(scenario); restoredWork = null;
             var batch = await checkpoint.ReadNextAsync(work, ReplayRuntime.Profile, default);
             if (batch.Chunks.Count == 0)
             {

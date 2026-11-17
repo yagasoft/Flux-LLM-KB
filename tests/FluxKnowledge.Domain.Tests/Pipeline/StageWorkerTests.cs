@@ -202,6 +202,36 @@ public sealed class StageWorkerTests
         Assert.Equal(PipelineOperations.CanonicalIndex, transition.NextOperation);
     }
 
+    [Theory]
+    [InlineData(0xfffe)]
+    [InlineData(0xffff)]
+    [InlineData(0xfdd0)]
+    [InlineData(0x1fffe)]
+    [InlineData(0x10ffff)]
+    public async Task Normalise_preserves_valid_utf8_noncharacters_and_normalises_surrounding_text(int codePoint)
+    {
+        var noncharacter = char.ConvertFromUtf32(codePoint);
+        var input = "e\u0301" + noncharacter + "\u2460\r\ne\u0301";
+        Assert.Equal(input, new UTF8Encoding(false, true).GetString(Encoding.UTF8.GetBytes(input)));
+        var transitions = new RecordingTransitionStore();
+        var worker = new NormaliseTextStageWorker(new StubPipelineReader(new string('a', 64), input),
+            CreateTransitionService(transitions), new FixedTimeProvider());
+        await worker.ExecuteAsync(CreateWork(PipelineStage.Normalise, PipelineOperations.NormaliseText), default);
+        Assert.Equal("é" + noncharacter + "1\né", Assert.Single(transitions.Transitions).Artifact.SearchText);
+    }
+
+    [Theory]
+    [InlineData(0xd800)]
+    [InlineData(0xdfff)]
+    public async Task Normalise_still_refuses_unpaired_utf16_surrogates_even_beside_a_noncharacter(int codeUnit)
+    {
+        var transitions = new RecordingTransitionStore();
+        var worker = new NormaliseTextStageWorker(new StubPipelineReader(new string('a', 64), "before\ufffe" + (char)codeUnit),
+            CreateTransitionService(transitions), new FixedTimeProvider());
+        await Assert.ThrowsAsync<ArgumentException>(() => worker.ExecuteAsync(CreateWork(PipelineStage.Normalise, PipelineOperations.NormaliseText), default).AsTask());
+        Assert.Empty(transitions.Transitions);
+    }
+
     [Fact]
     public async Task Normalise_preserves_document_page_provenance_after_text_normalisation()
     {

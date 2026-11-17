@@ -28,7 +28,20 @@ public sealed partial class SourceJournalSealIntegrationTests
     [InlineData(true, "during-handoff")]
     [InlineData(false, "before-native")]
     [InlineData(true, "before-native")]
-    public async Task Confirmed_Git_unstarted_recovery_retains_current_capture_fence_after_claim_and_handoff(bool segmented, string boundary)
+    public Task Confirmed_Git_unstarted_recovery_retains_current_capture_fence_after_claim_and_handoff(bool segmented, string boundary) =>
+        AssertGitRecoveryCaptureAsync(segmented, boundary, beforeFirstDraft: false);
+
+    [NativeSqlServerTheory]
+    [InlineData(false, "after-claim")]
+    [InlineData(true, "after-claim")]
+    [InlineData(false, "during-handoff")]
+    [InlineData(true, "during-handoff")]
+    [InlineData(false, "before-native")]
+    [InlineData(true, "before-native")]
+    public Task Confirmed_Git_pre_draft_recovery_keeps_current_capture_authority_through_native_handoff(bool segmented, string boundary) =>
+        AssertGitRecoveryCaptureAsync(segmented, boundary, beforeFirstDraft: true);
+
+    private async Task AssertGitRecoveryCaptureAsync(bool segmented, string boundary, bool beforeFirstDraft)
     {
         await using var scenario = await Scenario.CreateAsync(fixture.ConnectionString, qualified: true, gitTracked: true);
         await using var pipeline = await SqlToUsearchRebuildTests.PipelineEnvironment.CreateAsync(fixture, "Disposable bootstrap.",
@@ -51,11 +64,14 @@ public sealed partial class SourceJournalSealIntegrationTests
         var admission = new FixtureSourceAdmission(scenario.Factory);
         var checkpoint = new SqlEmbeddingCheckpointStore(scenario.Factory, scenario.Clock, ReplayRuntime, admission);
         var original = await ClaimRepositoryEmbedAsync(scenario);
-        var batch = await checkpoint.ReadNextAsync(original, ReplayRuntime.Profile, default);
-        var interrupted = new SqlEmbeddingGpuRequestStore(scenario.Factory,
-            new SqlGpuSchedulerStore(scenario.Factory, beforeIdempotencyRead: _ => throw new InvalidOperationException("injected-before-handoff"),
-                timeProvider: scenario.Clock, sourceAdmission: admission), new ChannelGpuSchedulerWakeSignal(), ReplayRuntime, scenario.Clock, sourceAdmission: admission);
-        await Assert.ThrowsAsync<InvalidOperationException>(() => interrupted.QueueAsync(original, batch, default).AsTask());
+        if (!beforeFirstDraft)
+        {
+            var batch = await checkpoint.ReadNextAsync(original, ReplayRuntime.Profile, default);
+            var interrupted = new SqlEmbeddingGpuRequestStore(scenario.Factory,
+                new SqlGpuSchedulerStore(scenario.Factory, beforeIdempotencyRead: _ => throw new InvalidOperationException("injected-before-handoff"),
+                    timeProvider: scenario.Clock, sourceAdmission: admission), new ChannelGpuSchedulerWakeSignal(), ReplayRuntime, scenario.Clock, sourceAdmission: admission);
+            await Assert.ThrowsAsync<InvalidOperationException>(() => interrupted.QueueAsync(original, batch, default).AsTask());
+        }
         await new SqlStageTransitionStore(scenario.Factory, null, scenario.Clock, ReplayRuntime, admission).FailAsync(
             new(original.DispatchMessage, original.Job, "stage worker failed non-retryably", "injected-before-handoff", "test"), default);
         var service = new NativeCorpusCommandService(new SqlNativeOperationStore(scenario.Factory, scenario.Clock, embeddingRuntime: ReplayRuntime),

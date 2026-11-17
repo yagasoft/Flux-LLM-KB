@@ -42,7 +42,7 @@ internal sealed partial record SqlPublicationRetry(JobEntity Job, OutboxMessageE
         var source = await context.SourceRevisions.SingleOrDefaultAsync(value => value.Id == record!.SourceRevisionId, ct);
         if (source is null || source.SuppressedAtUtc is not null || source.ContentSha256 != record.ContentHash) Refuse();
         var derived = source.OriginKind is 2 or 3 && source.ParentSourceRevisionId is not null;
-        if (!derived && (source.ParentSourceRevisionId is not null || source.OriginKind != 0)) Refuse();
+        if (!derived && !await SqlPhysicalSourceHistory.IsValidAsync(context, source, ct)) Refuse();
         var root = await context.SourceRootConfigurations.SingleOrDefaultAsync(value => value.Id == source!.SourceRootId, ct);
         if (root is null || root.State != (int)SourceRootState.Enabled) Refuse();
         if (await context.SourceRevisions.AnyAsync(value => value.Id != source!.Id && value.SourceRootId == source.SourceRootId &&

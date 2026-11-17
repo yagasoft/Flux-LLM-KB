@@ -26,7 +26,7 @@ public sealed class DeterministicTokenHashEmbeddingProvider : IEmbeddingProvider
         cancellationToken.ThrowIfCancellationRequested();
 
         var values = new float[Dimensions];
-        var normalised = text.Normalize(NormalizationForm.FormKC).ToLowerInvariant();
+        var normalised = FluxKnowledge.Application.Text.UnicodeTextNormalisation.FormKC(text).ToLowerInvariant();
         var start = 0;
         while (start < normalised.Length)
         {

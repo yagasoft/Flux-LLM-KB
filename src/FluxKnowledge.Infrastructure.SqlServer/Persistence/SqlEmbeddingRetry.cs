@@ -19,7 +19,8 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
 /// <summary>Explicit terminal Embed recovery preserves checkpoint and delivery identities.</summary>
 internal sealed record SqlEmbeddingRetry(JobEntity Job, OutboxMessageEntity Dispatch, PipelineRecordEntity Record,
     SourceRevisionEntity Source, SourceRootConfigurationEntity Root, SourceActivityEntity Activity,
-    IReadOnlyList<NativeTargetVersion> Targets, bool HasUnstartedHandoff = false)
+    IReadOnlyList<NativeTargetVersion> Targets, bool HasUnstartedHandoff = false, bool BeforeFirstDraft = false,
+    bool RequiresSettledGpuPublicationProof = false)
 {
     internal static async Task<SqlEmbeddingRetry> ReadEligibleAsync(FluxKnowledgeDbContext context, Guid jobId,
         EmbeddingGpuRuntime? runtime, bool forCommit, CancellationToken ct)
@@ -45,14 +46,17 @@ internal sealed record SqlEmbeddingRetry(JobEntity Job, OutboxMessageEntity Disp
         if (record is null || record.Revision != job.SourceRevision || record.IsDeleted || record.CompletionCriteriaMet ||
             record.CurrentStage != (int)PipelineStage.Embed || record.SourceRevisionId is null) Refuse();
         var source = await context.SourceRevisions.SingleOrDefaultAsync(value => value.Id == record.SourceRevisionId, ct);
-        if (source is null || source.SuppressedAtUtc is not null || source.ParentSourceRevisionId is not null ||
-            source.OriginKind != 0 || source.ContentSha256 != record.ContentHash) Refuse();
+        if (source is null || source.SuppressedAtUtc is not null || source.ContentSha256 != record.ContentHash ||
+            !await SqlPhysicalSourceHistory.IsValidAsync(context, source, ct)) Refuse();
         var root = await context.SourceRootConfigurations.SingleOrDefaultAsync(value => value.Id == source.SourceRootId, ct);
         if (root is null || root.State != (int)SourceRootState.Enabled) Refuse();
         var hasUnstartedHandoff = await SqlEmbeddingGpuRequestStore.UnstartedRequests(context).AnyAsync(value => value.ParentJobId == job.Id, ct);
-        var qualifiedCurrentGit = hasUnstartedHandoff && root.CrawlMode == (int)SourceDiscoveryMode.GitTracked &&
+        var settledRecovery = await context.EmbeddingGpuRequests.AnyAsync(value => value.ParentJobId == job.Id && value.State == 2 && value.ResultDigest == null, ct);
+        var draft = await context.IndexGenerations.AsNoTracking().SingleOrDefaultAsync(value => value.EmbeddingJobId == jobId, ct);
+        var needsCurrentGitCapture = (hasUnstartedHandoff || settledRecovery || draft is null) && root.CrawlMode == (int)SourceDiscoveryMode.GitTracked;
+        var qualifiedCurrentGit = needsCurrentGitCapture &&
             await SqlGitTextSelection.ReadAsync(context, source.Id, ct) is not null;
-        if (hasUnstartedHandoff && root.CrawlMode == (int)SourceDiscoveryMode.GitTracked &&
+        if (needsCurrentGitCapture &&
             (!qualifiedCurrentGit || record.RepositoryRecoveryBindingJson is null)) Refuse();
         var state = await context.IndexState.AsNoTracking().SingleAsync(value => value.Id == 1, ct);
         if (state.CorpusRebuildOperationId is not null || await context.CorpusRebuildSupersededJobs.AnyAsync(value => value.JobId == jobId, ct) ||
@@ -72,9 +76,11 @@ internal sealed record SqlEmbeddingRetry(JobEntity Job, OutboxMessageEntity Disp
         var activity = activities[0];
         var canonical = await context.Artifacts.AsNoTracking().SingleOrDefaultAsync(value => value.PipelineRecordId == record.Id &&
             value.SourceRevision == record.Revision && value.Stage == (int)PipelineStage.CanonicalIndex, ct);
-        var draft = await context.IndexGenerations.AsNoTracking().SingleOrDefaultAsync(value => value.EmbeddingJobId == jobId, ct);
-        if (canonical is null || canonical.SearchText is null || draft is null || state.ActiveIndexGenerationId == draft.Id ||
+        if (canonical is null || canonical.SearchText is null ||
             CodeDisclosureIntegrity.Hash(canonical.SearchText) != canonical.ContentHash) Refuse();
+        if (draft is null)
+            return await ReadBeforeFirstDraftAsync(context, job, dispatch, record, source, root, activity, canonical, state, runtime, ct);
+        if (state.ActiveIndexGenerationId == draft.Id) Refuse();
         string vectors;
         try
         {
@@ -84,7 +90,9 @@ internal sealed record SqlEmbeddingRetry(JobEntity Job, OutboxMessageEntity Disp
         }
         catch (InvalidOperationException) { Refuse(); throw; }
         var inputs = await ReadInputBindingAsync(context, record, canonical, draft, ct);
-        var gpu = await ReadSettledGpuBindingAsync(context, job, draft, runtime, ct, allowUnstartedHandoff: true);
+        if (settledRecovery && !await SqlExplicitGpuRecovery.HasCurrentInputAsync(context, source.Id, ct)) Refuse();
+        var gpu = await ReadSettledGpuBindingAsync(context, job, draft, runtime, ct, repositoryRecovery: settledRecovery,
+            allowUnresolvedGroup: settledRecovery, allowUnstartedHandoff: true);
         return new(job, dispatch, record, source, root, activity,
         [
             Version("embedding-job", job.Id, job.RowVersion), Version("embedding-dispatch", dispatch.Id, dispatch.RowVersion),
@@ -93,11 +101,11 @@ internal sealed record SqlEmbeddingRetry(JobEntity Job, OutboxMessageEntity Disp
             Version("generation", draft.Id, draft.RowVersion), new($"canonical-artifact:{canonical.Id:D}", Hash(canonical)),
             new($"embedding-inputs:{jobId:D}", Hash(new { inputs, vectors })), new($"embedding-gpu:{jobId:D}", gpu),
             new("embedding-epoch-profile", Hash(new { state.CorpusEpoch, runtime }))
-        ], hasUnstartedHandoff);
+        ], hasUnstartedHandoff, RequiresSettledGpuPublicationProof: settledRecovery);
     }
 
     internal static async Task<string> ReadInputBindingAsync(FluxKnowledgeDbContext context, PipelineRecordEntity record,
-        ArtifactEntity canonical, IndexGenerationEntity draft, CancellationToken ct)
+        ArtifactEntity canonical, IndexGenerationEntity? draft, CancellationToken ct)
     {
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         long lastId = 0;
@@ -118,8 +126,9 @@ internal sealed record SqlEmbeddingRetry(JobEntity Job, OutboxMessageEntity Disp
             }
             lastId = page[^1].Id;
         }
+        if (draft is null && lastId == 0 && !string.IsNullOrWhiteSpace(canonical.SearchText)) Refuse();
         long lastVector = 0;
-        while (true)
+        while (draft is not null)
         {
             var page = await context.Vectors.AsNoTracking().Where(value => value.IndexGenerationId == draft.Id && value.VectorId > lastVector)
                 .OrderBy(value => value.VectorId).Take(128).Select(value => new { value.VectorId, value.TextChunkId, value.RowVersion,
@@ -129,6 +138,38 @@ internal sealed record SqlEmbeddingRetry(JobEntity Job, OutboxMessageEntity Disp
             lastVector = page[^1].VectorId;
         }
         return Convert.ToHexStringLower(hash.GetHashAndReset());
+    }
+
+    private static async Task<SqlEmbeddingRetry> ReadBeforeFirstDraftAsync(FluxKnowledgeDbContext context, JobEntity job,
+        OutboxMessageEntity dispatch, PipelineRecordEntity record, SourceRevisionEntity source, SourceRootConfigurationEntity root,
+        SourceActivityEntity activity, ArtifactEntity canonical, IndexStateEntity state, EmbeddingGpuRuntime runtime, CancellationToken ct)
+    {
+        var prior = await (from delivery in context.OutboxMessages.AsNoTracking()
+            join parent in context.Jobs.AsNoTracking() on delivery.JobId equals parent.Id
+            where parent.PipelineRecordId == record.Id && parent.SourceRevision == record.Revision && parent.Stage == (int)PipelineStage.CanonicalIndex &&
+                parent.Operation == PipelineOperations.CanonicalIndex && parent.PublicState == (int)PublicJobState.Completed &&
+                parent.LeaseOwner == null && parent.LeaseExpiresAtUtc == null && delivery.CompletedArtifactId == canonical.Id &&
+                delivery.PipelineRecordId == record.Id && delivery.SourceRevision == record.Revision && delivery.Stage == parent.Stage &&
+                EF.Functions.Collate(delivery.Operation, "Latin1_General_100_BIN2") == EF.Functions.Collate(parent.Operation, "Latin1_General_100_BIN2") &&
+                delivery.DispatchGeneration == dispatch.DispatchGeneration - 1 && delivery.DispatchedAtUtc != null &&
+                delivery.LeaseOwner == null && delivery.LeaseExpiresAtUtc == null
+            select new { Job = parent, Delivery = delivery }).ToArrayAsync(ct);
+        if (prior.Length != 1 ||
+            await context.Jobs.AnyAsync(value => value.PipelineRecordId == record.Id && value.SourceRevision == record.Revision && value.Id != job.Id && value.Stage >= job.Stage, ct) ||
+            await context.EmbeddingGpuRequests.AnyAsync(value => value.PipelineRecordId == record.Id && value.SourceRevision == record.Revision, ct) ||
+            await context.GpuMiniTasks.AnyAsync(value => context.Jobs.Any(parent => parent.Id == value.ParentJobId && parent.PipelineRecordId == record.Id && parent.SourceRevision == record.Revision), ct) ||
+            await context.IndexGenerations.AnyAsync(value => context.Jobs.Any(parent => parent.Id == value.EmbeddingJobId && parent.PipelineRecordId == record.Id && parent.SourceRevision == record.Revision), ct) ||
+            await context.Vectors.AnyAsync(value => context.TextChunks.Any(chunk => chunk.Id == value.TextChunkId && chunk.Artifact.PipelineRecordId == record.Id && chunk.Artifact.SourceRevision == record.Revision), ct)) Refuse();
+        var inputs = await ReadInputBindingAsync(context, record, canonical, null, ct);
+        return new(job, dispatch, record, source, root, activity,
+        [
+            Version("embedding-job", job.Id, job.RowVersion), Version("embedding-dispatch", dispatch.Id, dispatch.RowVersion),
+            Version("record", record.Id, record.RowVersion), Version("source", source.Id, source.RowVersion),
+            Version("root", root.Id, root.RowVersion), Version("activity", activity.Id, activity.RowVersion),
+            Version("canonical-job", prior[0].Job.Id, prior[0].Job.RowVersion), Version("canonical-delivery", prior[0].Delivery.Id, prior[0].Delivery.RowVersion),
+            new($"canonical-artifact:{canonical.Id:D}", Hash(canonical)),
+            new($"embedding-before-first-draft:{job.Id:D}", Hash(new { state.CorpusEpoch, runtime, inputs, prior[0].Delivery.CompletedArtifactId }))
+        ], BeforeFirstDraft: true);
     }
 
     private sealed record GpuInput(long Id, string Hash);
@@ -283,7 +324,8 @@ internal sealed record SqlEmbeddingRetry(JobEntity Job, OutboxMessageEntity Disp
             {
                 idempotencyKey, requestFingerprint, jobId = Job.Id, dispatchId = Dispatch.Id,
                 Job.SourceRevision, Job.Reason, Job.ErrorDetails, Job.AttemptCount,
-                requireCurrentGpuCapture = HasUnstartedHandoff && Root.CrawlMode == (int)SourceDiscoveryMode.GitTracked,
+                requireCurrentGpuCapture = (HasUnstartedHandoff || BeforeFirstDraft || RequiresSettledGpuPublicationProof) && Root.CrawlMode == (int)SourceDiscoveryMode.GitTracked,
+                requireSettledGpuPublicationProof = RequiresSettledGpuPublicationProof,
                 jobLeaseGeneration = Job.LeaseGeneration, Dispatch.DispatchedAtUtc, Dispatch.DispatchGeneration,
                 dispatchIdempotencyKey = Dispatch.IdempotencyKey, dispatchLeaseGeneration = Dispatch.LeaseGeneration,
                 activity = new { Activity.Id, Activity.State, Activity.Reason, Activity.AttemptCount, Activity.AttemptEvidenceJson },

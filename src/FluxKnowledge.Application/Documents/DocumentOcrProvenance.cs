@@ -381,8 +381,7 @@ public static class DocumentOcrProvenance
             ? "document-ocr-result-invalid"
             : reasonCode;
 
-    private static string Normalise(string value) => value
+    private static string Normalise(string value) => FluxKnowledge.Application.Text.UnicodeTextNormalisation.FormKC(value
         .Replace("\r\n", "\n", StringComparison.Ordinal)
-        .Replace('\r', '\n')
-        .Normalize(NormalizationForm.FormKC);
+        .Replace('\r', '\n'));
 }

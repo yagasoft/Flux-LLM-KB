@@ -79,8 +79,9 @@ public sealed partial class SqlStageTransitionStore
                 if (!await (from record in context.PipelineRecords join revision in context.SourceRevisions on record.SourceRevisionId equals revision.Id
                     join root in context.SourceRootConfigurations on revision.SourceRootId equals root.Id
                     where record.Id == job.PipelineRecordId && (root.CrawlMode == (int)SourceDiscoveryMode.GitTracked || record.RepositoryRecoveryBindingJson != null)
-                    select record.Id).AnyAsync(cancellationToken))
-                    throw new InvalidOperationException("Only repository source work may use this deferral.");
+                    select record.Id).AnyAsync(cancellationToken) &&
+                    !await SqlExplicitGpuRecovery.IsMarkedAsync(context, job.PipelineRecordId, null, cancellationToken))
+                    throw new InvalidOperationException("Only repository or explicitly confirmed GPU recovery work may use this deferral.");
                 var deferralAt = _timeProvider.GetUtcNow();
                 if (job.LeaseExpiresAtUtc <= deferralAt || dispatch.LeaseExpiresAtUtc <= deferralAt || job.LeaseExpiresAtUtc is null || dispatch.LeaseExpiresAtUtc is null)
                     throw new InvalidOperationException("The source deferral no longer owns live leases.");

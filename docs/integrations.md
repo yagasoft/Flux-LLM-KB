@@ -136,8 +136,12 @@ approval; installing this action does not authorise a replay.
 Explicit terminal Embed recovery uses `action: "embedding_retry"` with the same
 single `jobId` payload and native preview/confirmed commit routes. It requires a
 compatible retained checkpoint, current enabled source, completed unsuccessful
-delivery and fully settled, cleanup-confirmed GPU history whose input/result
-bindings match saved vectors. It rejects active slots/owners, contradictory
+delivery and verified GPU history whose input/result bindings match saved
+vectors. Failed groups additionally require confirmed cleanup and released
+capacity, bounded attempts and either a later verified matching success or one
+unresolved zero-vector group. An immutable audit requirement enforces successful
+replacement at Publish preflight and final activation on both filesystem and Git
+roots. It rejects active slots/owners, contradictory
 downstream success, rebuilds or changed inputs. Recovery advances both lease
 generations while preserving job/delivery keys, attempts, draft and vectors;
 normal workers process only missing chunks and then publish. Confirmation binds
@@ -147,11 +151,19 @@ Hold and terminal-processing approval requirements are the same as Publish recov
 The retry may reuse one durable request which never reached GPU handoff. Its
 original ID and ordered inputs remain; all owner, claim, dispatch, result and
 cleanup fields must be absent, no task may match its ID or idempotency key, and
-its group must have no saved vectors. Every earlier request still requires
-verified successful settlement. Git sources require exact current capture proof,
+its group must have no saved vectors. Every earlier request retains its own
+verified settlement or bounded failed-group proof. Git sources require exact current capture proof,
 which an immutable recovery audit receipt fences through claim, task creation and
 native execution. Confirmation also binds the compatible runtime and pending
 request. This permits neither unknown GPU outcomes nor an extra attempt budget.
+
+Both terminal recovery actions recognise ordinary physical revision history,
+including renames, through the exact physical predecessor in the same root and
+stable identity. This does not admit derived inputs to Embed recovery. An Embed
+job which failed before its first draft may also resume with a verified completed
+Canonical delivery and no draft, GPU or vector evidence for its revision.
+Confirmation binds that absence and the inputs; commit queues the original job
+and the ordinary worker creates its draft. Git capture authority remains required.
 
 `operations.status` accepts the bounded views `overview`, `sources`, `jobs`,
 `workers`, `processors`, and `recovery`. Code, corpus and audit queries use

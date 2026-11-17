@@ -136,7 +136,10 @@ internal static class SqlRepositoryWorkRecovery
         var source = await context.SourceRevisions.SingleOrDefaultAsync(value => value.Id == record.SourceRevisionId, ct);
         if (source is null) return new("repository-source-binding-missing", true);
         var root = await context.SourceRootConfigurations.SingleAsync(value => value.Id == source.SourceRootId, ct);
-        if (root.CrawlMode != (int)SourceDiscoveryMode.GitTracked && record.RepositoryRecoveryBindingJson is null) return null;
+        if (root.CrawlMode != (int)SourceDiscoveryMode.GitTracked && record.RepositoryRecoveryBindingJson is null)
+            return await SqlExplicitGpuRecovery.IsMarkedAsync(context, record.Id, null, ct) &&
+                !await SqlExplicitGpuRecovery.HasCurrentInputAsync(context, source.Id, ct)
+                ? new("embedding-recovery-source-awaiting-current-input") : null;
         var reusableCompleted = completedPublication && record.CompletionCriteriaMet && record.CurrentStage == (int)PipelineStage.Publish &&
             job.Stage == (int)PipelineStage.Publish && job.PublicState == (int)PublicJobState.Completed;
         if (record.IsDeleted || record.Revision != job.SourceRevision || record.CurrentStage != job.Stage || record.CompletionCriteriaMet && !reusableCompleted ||
@@ -227,8 +230,10 @@ internal static class SqlRepositoryWorkRecovery
     internal static async Task<RepositorySourceDeferral?> CheckCheckpointAsync(FluxKnowledgeDbContext context,
         JobEntity job, EmbeddingGpuRuntime? runtime, CancellationToken ct, EmbeddingProfile? expectedProfile = null)
     {
+        if (job.Stage < (int)PipelineStage.Embed) return null;
         var enrolled = await context.PipelineRecords.AnyAsync(value => value.Id == job.PipelineRecordId && value.RepositoryRecoveryBindingJson != null, ct);
-        if (!enrolled || job.Stage < (int)PipelineStage.Embed) return null;
+        var hasExplicitRecovery = await SqlExplicitGpuRecovery.IsMarkedAsync(context, job.PipelineRecordId, null, ct);
+        if (!enrolled && !hasExplicitRecovery) return null;
         var embedJob = job.Stage == (int)PipelineStage.Embed ? job : await (from publication in context.OutboxMessages
             join parent in context.OutboxMessages on new { publication.PipelineRecordId, publication.SourceRevision } equals new { parent.PipelineRecordId, parent.SourceRevision }
             join previous in context.Jobs on parent.JobId equals previous.Id
@@ -238,6 +243,8 @@ internal static class SqlRepositoryWorkRecovery
                 previous.SourceRevision == parent.SourceRevision
             select previous).SingleOrDefaultAsync(ct);
         if (embedJob is null) return new("repository-embedding-job-missing", true);
+        var explicitRecovery = hasExplicitRecovery && await SqlExplicitGpuRecovery.IsMarkedAsync(context, job.PipelineRecordId, embedJob.Id, ct);
+        if (!enrolled && !explicitRecovery) return null;
         ArtifactEntity? completedEmbedding = null;
         IndexGenerationEntity? draft;
         if (job.Stage == (int)PipelineStage.Publish)
@@ -272,10 +279,13 @@ internal static class SqlRepositoryWorkRecovery
                 return new("repository-completed-embedding-checksum-invalid", true);
             var source = await (from record in context.PipelineRecords join revision in context.SourceRevisions on record.SourceRevisionId equals revision.Id
                 where record.Id == job.PipelineRecordId select revision).SingleAsync(ct);
-            var hasMissingGpuResult = RequiresRecovery(source) && await context.EmbeddingGpuRequests
+            if (explicitRecovery && !await SqlExplicitGpuRecovery.HasCurrentInputAsync(context, source.Id, ct))
+                return new("embedding-recovery-source-awaiting-current-input");
+            var needsGpuProof = RequiresRecovery(source) || explicitRecovery;
+            var hasMissingGpuResult = needsGpuProof && await context.EmbeddingGpuRequests
                 .AnyAsync(value => value.ParentJobId == embedJob.Id && value.State == 2 && value.ResultDigest == null, ct);
-            var qualifiedGpuReplay = !hasMissingGpuResult || await SqlGitTextSelection.ReadAsync(context, source.Id, ct) is not null;
-            if (RequiresRecovery(source))
+            var qualifiedGpuReplay = !hasMissingGpuResult || explicitRecovery || await SqlGitTextSelection.ReadAsync(context, source.Id, ct) is not null;
+            if (needsGpuProof)
             {
                 var record = await context.PipelineRecords.SingleAsync(value => value.Id == job.PipelineRecordId, ct);
                 var canonical = await context.Artifacts.SingleOrDefaultAsync(value => value.PipelineRecordId == record.Id &&
@@ -285,7 +295,7 @@ internal static class SqlRepositoryWorkRecovery
                 try { _ = await SqlEmbeddingRetry.ReadInputBindingAsync(context, record, canonical, draft, ct); }
                 catch (NativeOperationException) { return new("repository-canonical-input-integrity-failed", true); }
             }
-            if (RequiresRecovery(source) && await context.EmbeddingGpuRequests.AnyAsync(value => value.ParentJobId == embedJob.Id, ct))
+            if (needsGpuProof && await context.EmbeddingGpuRequests.AnyAsync(value => value.ParentJobId == embedJob.Id, ct))
             {
                 if (runtime is null) return new("repository-gpu-runtime-verification-required", true);
                 _ = await SqlEmbeddingRetry.ReadSettledGpuBindingAsync(context, embedJob, draft, runtime, ct,
@@ -307,7 +317,7 @@ internal static class SqlRepositoryWorkRecovery
             await SqlEmbeddingGpuRequestStore.UnstartedRequests(context).AnyAsync(value => value.PipelineRecordId == job.PipelineRecordId && value.SourceRevision == job.SourceRevision, ct))) return;
         var source = await (from record in context.PipelineRecords join revision in context.SourceRevisions on record.SourceRevisionId equals revision.Id
             where record.Id == job.PipelineRecordId && record.RepositoryRecoveryBindingJson != null select revision).SingleOrDefaultAsync(ct);
-        if (source is null || !RequiresRecovery(source)) return;
+        if ((source is null || !RequiresRecovery(source)) && !await SqlExplicitGpuRecovery.IsMarkedAsync(context, job.PipelineRecordId, null, ct)) return;
         if (await CheckCheckpointAsync(context, job, runtime, ct) is { } refusal)
             throw new RepositorySourceDeferredException(refusal);
     }
@@ -360,8 +370,9 @@ internal static class SqlRepositoryWorkRecovery
                 if (replacement && !await CanRevisitReplacementAsync(context, job, ct)) continue;
                 // Avoid rehashing retained sibling vectors for an ineligible held
                 // job on every unrelated outbox claim under the publication fence.
-                if (gpuHold && (!await SqlEmbeddingGpuRequestStore.RepositoryHeldSettledRequestIds(context)
-                    .AnyAsync(id => context.EmbeddingGpuRequests.Any(request => request.MiniTaskId == id && request.ParentJobId == job.Id), ct) ||
+                var markedGpuHold = gpuHold && await SqlExplicitGpuRecovery.IsMarkedAsync(context, job.PipelineRecordId, job.Id, ct);
+                if (gpuHold && ((!markedGpuHold && !await SqlEmbeddingGpuRequestStore.RepositoryHeldSettledRequestIds(context)
+                    .AnyAsync(id => context.EmbeddingGpuRequests.Any(request => request.MiniTaskId == id && request.ParentJobId == job.Id), ct)) ||
                     !await CanRevisitCurrentEmbedAsync(context, job, ct))) continue;
                 var dispatch = deliveries.SingleOrDefault();
                 if (dispatch is null || dispatch.DispatchedAtUtc != null || dispatch.LeaseOwner != null || dispatch.LeaseExpiresAtUtc != null || dispatch.SourceRevision != job.SourceRevision ||
@@ -421,6 +432,12 @@ internal static class SqlRepositoryWorkRecovery
 
     private static async Task<bool> CanRevisitCurrentEmbedAsync(FluxKnowledgeDbContext context, JobEntity job, CancellationToken ct)
     {
+        if (await SqlExplicitGpuRecovery.IsMarkedAsync(context, job.PipelineRecordId, job.Id, ct))
+        {
+            var markedSource = await context.PipelineRecords.Where(x => x.Id == job.PipelineRecordId && x.Revision == job.SourceRevision &&
+                x.CurrentStage == job.Stage && !x.IsDeleted && !x.CompletionCriteriaMet).Select(x => x.SourceRevisionId).SingleOrDefaultAsync(ct);
+            return markedSource is { } marked && await SqlExplicitGpuRecovery.HasCurrentInputAsync(context, marked, ct);
+        }
         var sourceId = await context.PipelineRecords.Where(x => x.Id == job.PipelineRecordId && x.Revision == job.SourceRevision &&
             x.CurrentStage == (int)PipelineStage.Embed && !x.IsDeleted && !x.CompletionCriteriaMet && x.RepositoryRecoveryBindingJson != null)
             .Select(x => x.SourceRevisionId).SingleOrDefaultAsync(ct);

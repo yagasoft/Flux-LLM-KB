@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using FluxKnowledge.Application.Text;
 using FluxKnowledge.Application.Documents;
 using FluxKnowledge.Application.Pipeline;
 using FluxKnowledge.Domain.Pipeline;
@@ -42,10 +43,7 @@ public sealed class NormaliseTextStageWorker(
         string? normalisedMetadataJson;
         if (source.InputDocumentMetadataJson is null)
         {
-            normalised = source.InputText
-                .Replace("\r\n", "\n", StringComparison.Ordinal)
-                .Replace('\r', '\n')
-                .Normalize(NormalizationForm.FormKC);
+            normalised = NormalisePlainText(source.InputText);
             normalisedMetadataJson = null;
         }
         else
@@ -74,5 +72,11 @@ public sealed class NormaliseTextStageWorker(
                     nameof(NormaliseTextStageWorker)),
                 cancellationToken)
             .ConfigureAwait(false);
+    }
+
+    private static string NormalisePlainText(string text)
+    {
+        var lines = text.Replace("\r\n", "\n", StringComparison.Ordinal).Replace('\r', '\n');
+        return UnicodeTextNormalisation.FormKC(lines);
     }
 }
