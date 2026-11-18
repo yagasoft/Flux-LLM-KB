@@ -25,6 +25,19 @@ public sealed class SourceRootProjectionReader(
     ISourceFileEnumerator enumerator,
     ILocalSourceCapabilityHandlerRegistry handlers) : ISourceRootProjectionReader
 {
+    internal async Task<JournalSourceRoot[]> ReadJournalRootsAsync(CancellationToken cancellationToken)
+    {
+        await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        var roots = await (from root in context.SourceRootConfigurations.AsNoTracking()
+            join scan in context.SourceRootScanStates.AsNoTracking() on root.Id equals scan.SourceRootId into scans
+            from scan in scans.DefaultIfEmpty()
+            orderby root.DisplayName, root.CanonicalPath, root.Id
+            select new { root.Id, root.DisplayName, root.CanonicalPath, root.State, Volume = scan == null ? null : scan.VolumeIdentity })
+            .ToArrayAsync(cancellationToken).ConfigureAwait(false);
+        return roots.Select(root => new JournalSourceRoot(root.Id, root.DisplayName, root.CanonicalPath,
+            ((SourceRootState)root.State).ToString(), root.Volume)).ToArray();
+    }
+
     public async ValueTask<IReadOnlyList<SourceRootListProjection>> ReadRootsAsync(CancellationToken cancellationToken)
     {
         await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);

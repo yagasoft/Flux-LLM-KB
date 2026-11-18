@@ -8,18 +8,34 @@
     <h2 id="verification-heading">Source updates</h2>
     <p>Journal and watcher events update changed files. Weekly metadata reconciliation checks membership, identity, size and modification time. Quiet, unchanged files are not reread.</p>
     <p>Automatic checksum verification is disabled. Changes with unchanged metadata may be missed if no event is available. Use a full rescan when you want every file read again.</p>
+    @if (CanonicalPath is not null)
+    {
+        <SourceJournalVolumeStatus CanonicalPath="@CanonicalPath" Scanning="_state.Status?.Scanning" />
+    }
     @if (_state.ReadError is { } error) { <p role="alert">@error</p> }
     @if (_state.Status is { } status)
     {
         @if (status.Scanning is { } scanning)
         {
             <dl class="status-grid verification-grid">
-                <div><dt>Change detection</dt><dd>@scanning.Mode</dd></div>
+                <div><dt>Recorded source coverage</dt><dd>@Coverage(scanning.Mode)</dd></div>
                 <div><dt>Last metadata reconciliation attempt</dt><dd>@When(scanning.LastReconciliationAtUtc)</dd></div>
                 <div><dt>Pending changes</dt><dd>@Count(scanning.PendingObligations)</dd></div>
-                <div><dt>Journal lag (USN distance)</dt><dd>@Count(scanning.DurableJournalLagUsn)</dd></div>
+                <div><dt>Saved journal lag (USN distance)</dt><dd>@(HasMeasuredLag(scanning) ? Count(scanning.DurableJournalLagUsn) : "Not measured")</dd></div>
                 <div><dt>Namespace</dt><dd>@(scanning.NamespaceComplete ? "Complete" : "Metadata reconciliation pending")</dd></div>
             </dl>
+            @if (scanning.UnresolvedThroughUsn is { } horizon)
+            {
+                <p>Namespace history remains unresolved through USN @Count(horizon).</p>
+            }
+            @if (scanning.NamespaceObligations > 0)
+            {
+                <p>Pending namespace reconciliation items: @Count(scanning.NamespaceObligations).</p>
+            }
+            @if (!scanning.NamespaceComplete || scanning.Mode == "JournalPartial")
+            {
+                <p>Journal access and a caught-up cursor can coexist with incomplete source coverage. Follow up on any <a href="#source-scan-issues-heading">path or read issues</a> and reconcile source metadata.</p>
+            }
             @if (scanning.Reason is { } reason) { <p class="diagnostic-value">Change detection: @reason</p> }
         }
         @if (status.Run is { } run)
@@ -32,9 +48,18 @@
             </details>
         }
         <div class="verification-actions">
+            <button type="button" disabled="@(ControlsDisabled || RootState != "Enabled")" @onclick="ReconcileAsync">Reconcile source metadata</button>
             <button type="button" disabled="@(ControlsDisabled || RootState != "Enabled")" @onclick="FullRescanAsync">Full content rescan</button>
             <button type="button" disabled="@_refreshing" @onclick="RefreshAsync">Refresh source status</button>
         </div>
+        @if (RootState != "Enabled")
+        {
+            <p>Metadata reconciliation is available when the source is enabled.</p>
+        }
+        else
+        {
+            <p>Metadata reconciliation queues a paced scan of the source inventory. Normal change checks determine which files need a content read.</p>
+        }
         <p class="status-freshness">A full content rescan reads every included file and reindexes changed content. Status refreshes every 10 seconds.</p>
     }
     else if (_state.ReadError is null) { <p role="status">Loading source status…</p> }

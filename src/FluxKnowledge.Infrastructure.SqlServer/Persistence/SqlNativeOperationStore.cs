@@ -791,7 +791,11 @@ public sealed class SqlNativeOperationStore(
         }
         if (operation.Action == "source_sync")
         {
-            await EnqueueAsync(context, targets, rootIdValue, actor, now, requestKind: Bool(payload, "fullContent", false) ? 5 : 0,
+            var reconcileMetadata = Bool(payload, "reconcileMetadata", false);
+            if (reconcileMetadata && root!.State != (int)SourceRootState.Enabled)
+                throw new NativeOperationException("source-not-enabled");
+            var requestKind = reconcileMetadata ? 1 : Bool(payload, "fullContent", false) ? 5 : 0;
+            await EnqueueAsync(context, targets, rootIdValue, actor, now, requestKind,
                 SourceRootControlConfiguration.From(root!), cancellationToken);
             return;
         }

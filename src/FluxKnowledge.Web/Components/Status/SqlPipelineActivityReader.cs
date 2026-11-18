@@ -1,4 +1,5 @@
 using FluxKnowledge.Application.Contracts;
+using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Sources;
 using FluxKnowledge.Domain.Jobs;
 using FluxKnowledge.Domain.Pipeline;
@@ -10,7 +11,7 @@ using Microsoft.EntityFrameworkCore;
 
 namespace FluxKnowledge.Web.Components.Status;
 
-internal sealed class SqlPipelineActivityReader(IDeploymentValidationHold? hold, TimeProvider clock)
+internal sealed class SqlPipelineActivityReader(IDeploymentValidationHold? hold, TimeProvider clock, SourceJournalOptions? journalOptions = null)
 {
     public async ValueTask<PipelineActivitySummary> ReadAsync(FluxKnowledgeDbContext context,
         DateTimeOffset startedAt, CancellationToken cancellationToken, DeploymentHoldAdmission? capturedAdmission = null,
@@ -102,7 +103,7 @@ internal sealed class SqlPipelineActivityReader(IDeploymentValidationHold? hold,
         var journalStates = await (from state in context.SourceRootScanStates.AsNoTracking()
                 join checkpoint in context.SourceVolumeJournalCheckpoints.AsNoTracking() on state.VolumeIdentity equals checkpoint.VolumeIdentity into checkpoints
                 from checkpoint in checkpoints.DefaultIfEmpty()
-                select new { state.SourceRootId, state.Mode, state.RecoveryRequired, state.LastReconciliationAtUtc,
+                select new { state.SourceRootId, state.VolumeIdentity, state.Mode, state.RecoveryRequired, state.LastReconciliationAtUtc,
                     HasCheckpoint = checkpoint != null, UnavailableSinceUtc = checkpoint == null ? null : checkpoint.UnavailableSinceUtc,
                     Reason = checkpoint == null ? state.Reason : checkpoint.LastFailureCode,
                     NextRetryAtUtc = checkpoint == null ? null : checkpoint.DueAtUtc })
@@ -111,6 +112,8 @@ internal sealed class SqlPipelineActivityReader(IDeploymentValidationHold? hold,
         {
             var counts = sourceStates.GetValueOrDefault(root.Id) ?? SourceRootProjectionReader.SourceStateSummary.Empty;
             var journal = journalStates.GetValueOrDefault(root.Id);
+            var approved = journalOptions is null || journal is not null &&
+                (string.IsNullOrEmpty(journal.VolumeIdentity) || journalOptions.ApprovedVolumes.Contains(journal.VolumeIdentity, StringComparer.OrdinalIgnoreCase));
             return new SourcePipelineProgress(root.Id, root.Name, root.Path, ((SourceRootState)root.State).ToString(),
                 counts.Known, counts.Indexed, counts.Pending, counts.Deferred, counts.Blocked, counts.Error,
                 counts.MetadataOnly, counts.WithoutText, root.LastScanCompletedAtUtc,
@@ -124,10 +127,11 @@ internal sealed class SqlPipelineActivityReader(IDeploymentValidationHold? hold,
                 scans.Where(s => s.Key.SourceRootId == root.Id && s.Key.State == (int)SourceScanJobState.Running && !s.Key.Confirmed).Sum(s => s.Count) +
                     processors.Where(p => p.Key.SourceRootId == root.Id && !p.Key.Confirmed).Sum(p => p.Count))
             {
-                JournalHealth = journal is null ? null : new(journal.Mode,
-                    journal.UnavailableSinceUtc is not null || !journal.HasCheckpoint && journal.Mode == "Fallback",
-                    journal.RecoveryRequired || journal.Mode is "BaselineRequired" or "Baselining", journal.Reason,
-                    journal.UnavailableSinceUtc, journal.NextRetryAtUtc,
+                JournalHealth = journal is null || journalOptions is { Enabled: false } ? null : new(approved ? journal.Mode : "Fallback",
+                    !approved || journal.UnavailableSinceUtc is not null || !journal.HasCheckpoint && journal.Mode == "Fallback",
+                    approved && (journal.RecoveryRequired || journal.Mode is "BaselineRequired" or "Baselining"),
+                    approved ? journal.Reason : "journal-volume-not-approved",
+                    approved ? journal.UnavailableSinceUtc : null, approved ? journal.NextRetryAtUtc : null,
                     (journal.LastReconciliationAtUtc ?? root.LastScanCompletedAtUtc)?.AddSeconds(root.ReconciliationCadenceSeconds),
                     root.ReconciliationCadenceSeconds)
             };

@@ -41,6 +41,31 @@ public sealed class HealthEndpointTests
         public ValueTask WaitUntilReleasedAsync(CancellationToken cancellationToken) => throw new NotSupportedException();
     }
 
+    [Theory]
+    [InlineData("/sources/journal", false)]
+    [InlineData("/sources/journal", true)]
+    [InlineData("/sources/11111111-1111-1111-1111-111111111111", false)]
+    [InlineData("/sources/11111111-1111-1111-1111-111111111111", true)]
+    public async Task Journal_dashboard_surfaces_refuse_remote_or_forwarded_requests_before_rendering(string path, bool forwarded)
+    {
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseTestServer();
+        await using var app = builder.Build();
+        app.Use(async (context, next) =>
+        {
+            context.Connection.RemoteIpAddress = forwarded ? IPAddress.Loopback : IPAddress.Parse("192.0.2.20");
+            await next(context);
+        });
+        app.UseLocalOperatorLoopbackGate();
+        app.MapGet(path, () => "private operator data");
+        await app.StartAsync();
+        using var request = new HttpRequestMessage(HttpMethod.Get, path);
+        if (forwarded) request.Headers.TryAddWithoutValidation("Forwarded", "for=192.0.2.20");
+        using var response = await app.GetTestClient().SendAsync(request);
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        Assert.Empty(await response.Content.ReadAsStringAsync());
+    }
+
     [Fact]
     public async Task Live_health_refuses_forwarded_requests_even_from_a_loopback_peer()
     {

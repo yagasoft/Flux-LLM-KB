@@ -1,10 +1,13 @@
 using System.ComponentModel;
 using System.Text.Json;
+using FluxKnowledge.Application.IntegrationV1;
+using FluxKnowledge.Application.IntegrationV1.Corpus;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Sources;
 using FluxKnowledge.Domain.Sources;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
+using FluxKnowledge.Infrastructure.SqlServer.Visibility;
 using FluxKnowledge.Integrations.Files;
 using FluxKnowledge.Integration.Tests.Support;
 using Microsoft.EntityFrameworkCore;
@@ -14,6 +17,69 @@ namespace FluxKnowledge.Integration.Tests.Sources;
 
 public sealed partial class SourceJournalRecoveryIntegrationTests
 {
+    [NativeSqlServerTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Confirmed_metadata_reconciliation_can_settle_parked_namespace_debt_without_overriding_guarded_paths(bool pathRefused)
+    {
+        var area = NewArea();
+        var source = Path.Combine(area, "Sources");
+        Directory.CreateDirectory(source);
+        try
+        {
+            var factory = new SourceJournalStoreIntegrationTests.ContextFactory(fixture.ConnectionString);
+            var clock = new LoopClock(DateTimeOffset.UtcNow.AddSeconds(1));
+            var control = new SqlSourceScanStore(factory, clock);
+            var initial = await RegisterAndClaimAsync(factory, control, source);
+            await control.CompleteAsync(initial, new(initial.SourceRoot.Id, initial.ScanRequest.Id, 0, 0, 0, 0)
+                { CompletesReconciliation = true }, null, default);
+            var volume = WindowsSourceChangeJournalReader.CanonicalVolume(source);
+            var rootId = initial.SourceRoot.Id.Value;
+            await using (var db = factory.CreateDbContext())
+            {
+                var root = await db.SourceRootConfigurations.SingleAsync();
+                db.SourceRootScanStates.Add(new() { SourceRootId = rootId, VolumeIdentity = volume, BaselineEpoch = 1,
+                    CoveredUsn = 100, UnresolvedThroughUsn = 100, Mode = "JournalPartial", NamespaceGeneration = 1,
+                    LastReconciliationAtUtc = clock.Now, Generation = 2, PolicyFingerprint = SqlRepositoryWorkRecovery.Policy(root) });
+                db.SourceVolumeJournalCheckpoints.Add(new() { VolumeIdentity = volume, JournalId = "0000000000000001",
+                    NextUsn = 100, RegistrationGeneration = 1 });
+                db.SourcePendingChanges.AddRange(
+                    new() { Id = Guid.NewGuid(), SourceRootId = rootId, RelativePath = ".", PathFingerprint = SqlSourceChangeJournalStore.PathKey("."),
+                        IsSubtree = true, ReasonFlags = SourcePendingReasons.NamespaceMetadata, Generation = 1,
+                        LastContentUsn = 0, LastUnjournaledGeneration = 1, NotBeforeUtc = clock.Now.AddDays(5) },
+                    new() { Id = Guid.NewGuid(), SourceRootId = rootId, RelativePath = "parked.txt", PathFingerprint = SqlSourceChangeJournalStore.PathKey("parked.txt"),
+                        ReasonFlags = 1, Generation = 2, LastContentUsn = 0, LastUnjournaledGeneration = 2, NotBeforeUtc = clock.Now.AddDays(5) });
+                await db.SaveChangesAsync();
+            }
+            var commands = new NativeCorpusCommandService(new NativeOperationService(new SqlNativeOperationStore(factory, clock), []),
+                new SqlNativeCorpusActionStore(factory, new SourceRootPathPolicy(new LocalIngressOptions([source])), new LocalPrivateContentDisclosure()));
+            var mutation = new NativeCorpusMutation("source_sync", JsonSerializer.SerializeToElement(new { rootId, reconcileMetadata = true }));
+            var preview = await commands.PreviewAsync(mutation, "test", default);
+            await commands.CommitAsync(mutation, preview.ConfirmationId, "reconcile-" + Guid.NewGuid().ToString("N"), "test", default);
+            var claim = Assert.IsType<ClaimedSourceScan>(await control.ClaimNextReleasedAsync("metadata-operator", clock.Now, TimeSpan.FromMinutes(10), default));
+            using var artifacts = new ContentAddressedSourceArtifactStore(Path.Combine(area, "Retained"));
+            var coordinator = new SqlSourceIncrementalCoordinator(factory, clock, new GapReader(volume),
+                new WindowsSourceObservationReader(), artifacts, new() { Enabled = true, ApprovedVolumes = [volume] });
+            var plan = Assert.IsType<SourceIncrementalPlan>(await coordinator.PrepareAsync(claim.SourceRoot, claim.ScanRequest, default));
+            Assert.True(plan.IsReconciliation);
+            Assert.False(plan.ForceFullContent);
+            Assert.Contains(plan.Targets, target => target is { RelativePath: ".", Generation: 1 });
+            Assert.DoesNotContain(plan.Targets, target => target.RelativePath == "parked.txt");
+            var evidence = pathRefused
+                ? new[] { new SourceEnumerationEvidence("access", "blocked", "SourcePathSafetyRefused") { NamespaceIncomplete = true } }
+                : [];
+            await coordinator.CompleteAsync(claim.SourceRoot, claim.ScanRequest, plan, [], evidence, new HashSet<SourceRevisionId>(), null, default);
+            await using var verify = factory.CreateDbContext();
+            var scan = await verify.SourceRootScanStates.SingleAsync();
+            Assert.Equal(!pathRefused, scan.NamespaceComplete);
+            Assert.Equal(pathRefused ? "JournalPartial" : "Journal", scan.Mode);
+            Assert.Equal(pathRefused ? 100L : (long?)null, scan.UnresolvedThroughUsn);
+            Assert.Equal(pathRefused, await verify.SourcePendingChanges.AnyAsync(x => x.RelativePath == "."));
+            Assert.True(await verify.SourcePendingChanges.AnyAsync(x => x.RelativePath == "parked.txt" && x.Generation == 2));
+        }
+        finally { Directory.Delete(area, true); }
+    }
+
     [NativeSqlServerTheory]
     [InlineData(true, true, false)]
     [InlineData(true, true, true)]

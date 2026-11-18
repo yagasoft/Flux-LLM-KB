@@ -52,6 +52,9 @@ public sealed class SourceJournalPipeClient : ISourceChangeJournalReader
         if (response.Error == "cursor-rejected")
             throw new SourceJournalGapException("SourceJournalCursorRejected", new Win32Exception(87));
         if (response.Error == "gap") throw new SourceJournalGapException("SourceJournalContinuityLost");
+        if (response.Error == "not-approved") throw new IOException("SourceJournalHelperRefused");
+        if (response.Error is "journal-inactive" or "journal-deleting" or "volume-unavailable" or "volume-access-denied")
+            throw new IOException(response.Error);
         if (response.Error is not null) throw new IOException("SourceJournalHelperUnavailable");
         return response;
     }

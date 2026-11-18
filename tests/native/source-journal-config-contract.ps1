@@ -62,6 +62,30 @@ try {
     if ($active.SourceJournal.Enabled -or $active.SourceJournal.SealingEnabled -or !$active.SourceAccess.Enabled -or
         $active.SourceJournal.SealQualifications[0].QualificationId -cne 'staging-only') {throw 'Feature-off configuration failed or erased its qualification.'}
     Restore-SourceAccessConfigurationChange $disable
+    $firstVolume=$options.ApprovedVolumes[0]
+    $secondVolume='\\?\VOLUME{22222222-2222-2222-2222-222222222222}\'
+    $proposal=[ordered]@{ExpectedApprovedVolumes=@($firstVolume);ApprovedVolumes=@($firstVolume,$secondVolume)}
+    $sha=Write-Options $proposal
+    $allowlist=New-SourceJournalConfigurationChange -Path $path -OptionsPath $optionsPath -ExpectedOptionsSha256 $sha -AllowlistOnly
+    Set-SourceAccessConfigurationChange $allowlist
+    $active=Get-Content -LiteralPath $path -Raw|ConvertFrom-Json
+    if($active.SourceJournal.ApprovedVolumes.Count -ne 2 -or $active.SourceJournal.ApprovedVolumes[1] -cne $secondVolume -or
+        $active.SourceJournal.SealQualifications[0].QualificationId -cne 'staging-only' -or !$active.SourceJournal.SealingEnabled) {
+        throw 'Allowlist update did not preserve other journal settings.'
+    }
+    $refused=$false
+    try {New-SourceJournalConfigurationChange -Path $path -OptionsPath $optionsPath -ExpectedOptionsSha256 $sha -AllowlistOnly|Out-Null}
+    catch {if($_.Exception.Message -ne 'journal-allowlist-stale'){throw};$refused=$true}
+    if(!$refused){throw 'Stale allowlist proposal was accepted.'}
+    $proposal.ExpectedApprovedVolumes=@($secondVolume,$firstVolume)
+    $proposal.ApprovedVolumes=@($secondVolume)
+    $sha=Write-Options $proposal
+    $removal=New-SourceJournalConfigurationChange -Path $path -OptionsPath $optionsPath -ExpectedOptionsSha256 $sha -AllowlistOnly
+    Set-SourceAccessConfigurationChange $removal
+    $remaining=(Get-Content -LiteralPath $path -Raw|ConvertFrom-Json).SourceJournal.ApprovedVolumes
+    if($remaining.Count -ne 1 -or $remaining[0] -cne $secondVolume){throw 'Volume removal failed.'}
+    Restore-SourceAccessConfigurationChange $removal
+    Restore-SourceAccessConfigurationChange $allowlist
     Restore-SourceAccessConfigurationChange $change
     $validCloud=$options|ConvertTo-Json -Depth 15|ConvertFrom-Json -AsHashtable
     $validCloud.SealQualifications[0].Scope='onedrive-hydrated'

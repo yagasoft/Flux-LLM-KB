@@ -10,7 +10,7 @@ $descriptor=[byte[]]::new($security.BinaryLength);$security.GetBinaryForm($descr
 $passed=0
 $failures=[Collections.Generic.List[object]]::new()
 foreach($scenario in @('success','repair-off','repair-default-off','disabled','probe-failure','start-failure','exit-unproved','candidate-drift','source-policy-drift','task-drift',
- 'journal-policy-drift','duplicate-repair','untrusted-policy','disabled-running','post-start-policy-drift','rollback-probe-failure','rollback-start-failure','task-security-drift')){
+ 'journal-policy-drift','allowlist-predecessor-drift','duplicate-repair','untrusted-policy','disabled-running','post-start-policy-drift','rollback-probe-failure','rollback-start-failure','task-security-drift')){
  $id=[guid]::NewGuid().ToString('N');$root='I:\FluxKnowledgeSourceAccess-Staging-'+$id
  $taskName='FluxKnowledge.SourceAccess-Staging-'+$id;$state=$null
  $created=[FluxSourceAccessInstallFile]::CreatePrivateDirectory($root,$descriptor);$created.Dispose()
@@ -25,7 +25,7 @@ foreach($scenario in @('success','repair-off','repair-default-off','disabled','p
   [IO.File]::WriteAllText((Join-Path $root 'policy.json'),'{"Version":1,"IndexerSid":"S-1-5-21-1-2-3-1001","PipeName":"FluxKnowledge.SourceAccess.isolated"}')
   [IO.File]::WriteAllText((Join-Path $root 'root-read-plan.json'),'{"Version":1,"fixture":"preserve-root-grant"}')
   [IO.File]::WriteAllText((Join-Path $root 'journal\owned-intent.json'),'{"fixture":"preserve-repair-intent"}')
-  if($scenario -cin @('repair-off','repair-default-off','journal-policy-drift')){
+  if($scenario -cin @('repair-off','repair-default-off','journal-policy-drift','allowlist-predecessor-drift')){
    $policy=[ordered]@{Version=1;PipeName='FluxKnowledge.SourceJournal.previous';ApprovedVolumes=@('\\?\Volume{11111111-1111-1111-1111-111111111111}\')}
    if($scenario -cne 'repair-default-off'){$policy.RepairEnabled=$false}
    [IO.File]::WriteAllText((Join-Path $root 'journal-policy.json'),($policy|ConvertTo-Json -Depth 4))
@@ -46,7 +46,11 @@ foreach($scenario in @('success','repair-off','repair-default-off','disabled','p
   $arguments=@{InstallRoot=$root;TaskName=$taskName;ReleaseId='20261025T170000Z-6fbd224186ab';CandidatePath=$input;
    ExpectedCandidateSha256=(Get-SourceJournalHelperPayloadManifest $input).Sha256;TaskObservation=$task;
    PipeName='FluxKnowledge.SourceJournal.isolated';ApprovedVolumes=@('\\?\Volume{11111111-1111-1111-1111-111111111111}\')}
-  if($scenario -cin @('duplicate-repair','untrusted-policy','disabled-running')){
+  if($scenario -ceq 'allowlist-predecessor-drift'){
+   $arguments.ExpectedJournalPolicySha256=(Get-FileHash -LiteralPath (Join-Path $root 'journal-policy.json')).Hash
+   [IO.File]::AppendAllText((Join-Path $root 'journal-policy.json'),' ')
+  }
+  if($scenario -cin @('duplicate-repair','untrusted-policy','disabled-running','allowlist-predecessor-drift')){
    $box=@{State=$null}
    try{Expect-Refusal {$box.State=New-SourceJournalHelperUpdate @arguments}}finally{Close-SourceJournalHelperUpdate $box.State}
    Assert-True (!(Test-Path -LiteralPath (Join-Path $root 'updates'))) 'Unreviewed policy/task state reached protected preparation writes.'

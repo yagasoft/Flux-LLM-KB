@@ -1,6 +1,7 @@
 using System.Data;
 using FluxKnowledge.Application.Contracts;
 using FluxKnowledge.Application.Indexing;
+using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Sources;
 using FluxKnowledge.Domain.Gpu;
 using FluxKnowledge.Domain.Jobs;
@@ -41,11 +42,12 @@ public sealed partial class SqlProjectionReader(
     GpuSchedulerStore schedulerStore,
     IDeploymentValidationHold? validationHold = null,
     TimeProvider? timeProvider = null,
-    OverviewReadOptions? readOptions = null) : IProjectionReader
+    OverviewReadOptions? readOptions = null,
+    SourceJournalOptions? journalOptions = null) : IProjectionReader
 {
     private OverviewReadOptions ReadOptions { get; } = readOptions ?? new();
     private readonly TimeProvider _clock = timeProvider ?? TimeProvider.System;
-    private readonly SqlPipelineActivityReader _activityReader = new(validationHold, timeProvider ?? TimeProvider.System);
+    private readonly SqlPipelineActivityReader _activityReader = new(validationHold, timeProvider ?? TimeProvider.System, journalOptions);
 
     public async ValueTask<PipelineAttentionPage> ReadPipelineAttentionAsync(string unit, Guid? sourceRootId, int page,
         CancellationToken cancellationToken)

@@ -3,10 +3,17 @@
 @if (Source.JournalHealth is { } health)
 {
     <aside class="pipeline-warning source-journal-warning" role="alert" aria-label="Change detection needs attention">
-        <h2>@Source.Name: @(health.IsUnavailable ? "Change journal unavailable" : "Journal recovery needs reconciliation")</h2>
+        <h2>@Source.Name: @(health.IsUnavailable ? "Change journal unavailable" : health.Mode == "JournalPartial" ? "Partial journal coverage" : "Journal recovery needs reconciliation")</h2>
         @if (health.IsUnavailable)
         {
-            <p>Some file changes may not appear until reconciliation completes. Journal checks keep retrying automatically.</p>
+            @if (health.Reason == "journal-volume-not-approved")
+            {
+                <p>This volume is outside the app allowlist. The source is using watcher and metadata fallback.</p>
+            }
+            else
+            {
+                <p>Some file changes may not appear until reconciliation completes. Journal checks keep retrying automatically.</p>
+            }
             @if (health.Reason is "journal-pending-capacity" or "journal-pending-page-capacity")
             {
                 <p>The journal backlog has reached the processing limit. Saved changes and the cursor are retained. Weekly metadata reconciliation continues; journal updates are delayed.</p>
@@ -27,6 +34,10 @@
         @if (health.RecoveryRequired)
         {
             <p>Metadata reconciliation is pending. File events and pending changes are preserved; missing journal history does not trigger a full content rescan.</p>
+        }
+        else if (health.Mode == "JournalPartial" && !health.IsUnavailable)
+        {
+            <p>The source has unresolved namespace or path evidence. Open source status to see what needs reconciliation.</p>
         }
         <p>Metadata reconciliation runs weekly. Quiet, unchanged files are not reread.
             @if (Source.Lifecycle != "Enabled")

@@ -68,7 +68,8 @@ internal static class SourceJournalPipeServer
                     }
                     catch (SourceJournalGapException error)
                     { response = new(1, null, null, error.Message == "SourceJournalCursorRejected" ? "cursor-rejected" : "gap"); }
-                    catch (IOException) { response = new(1, null, null, "unavailable"); }
+                    catch (IOException error)
+                    { response = new(1, null, null, WindowsSourceChangeJournalReader.DiagnosticFailure(error) ?? "unavailable"); }
                 }
                 validateStorage();
                 await SourceJournalPipeProtocol.WriteAsync(pipe, response, deadline.Token).ConfigureAwait(false);

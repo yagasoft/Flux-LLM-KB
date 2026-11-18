@@ -1,4 +1,5 @@
 using FluxKnowledge.Application.Contracts;
+using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Domain.Sources;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
 using FluxKnowledge.Integration.Tests.Support;
@@ -41,5 +42,13 @@ public sealed partial class PipelineActivitySqlTests
         Assert.Equal(now.AddMinutes(15), health.NextReconciliationAtUtc);
         Assert.Equal(900, health.ReconciliationCadenceSeconds);
         Assert.False(await context.SourceScanRequests.AnyAsync(x => x.SourceRootId == root));
+
+        var options = new SourceJournalOptions { Enabled = true, ApprovedVolumes = ["another-volume"] };
+        var updated = await new SqlPipelineActivityReader(null, new FixedTimeProvider(now), options).ReadAsync(context, now, default);
+        var removed = Assert.IsType<SourceJournalHealth>(Assert.Single(updated.Sources, x => x.Id == root).JournalHealth);
+        Assert.Equal("Fallback", removed.Mode);
+        Assert.Equal("journal-volume-not-approved", removed.Reason);
+        Assert.Null(removed.UnavailableSinceUtc);
+        Assert.Null(removed.NextRetryAtUtc);
     }
 }

@@ -1,0 +1,165 @@
+@page "/sources/journal"
+@implements IDisposable
+@using FluxKnowledge.Web.Components.Sources
+@inject SourceJournalOperator Journal
+@inject SourceRootProjectionReader Sources
+
+<PageTitle>USN journal allowlist | Flux Knowledge</PageTitle>
+
+<h1>USN journal allowlist</h1>
+<p><a href="/sources">Back to Sources and indexing</a></p>
+<p>Volume approval lets the protected helper read the USN journal. Each source still has its own path checks and metadata coverage.</p>
+@if (!CanEdit)
+{
+    <p role="status">Allowlist editing requires journal scanning and a configured protected helper. Use the reviewed journal activation procedure to configure them.</p>
+}
+<div class="table-scroll">
+    <table>
+        <caption>Journal volumes</caption>
+        <thead><tr><th scope="col">Local drive</th><th scope="col">Volume identity</th><th scope="col">Running app</th><th scope="col">Proposed approval</th></tr></thead>
+        <tbody>
+            @foreach (var volume in VolumeIdentities)
+            {
+                var drives = string.Join(", ", _volumes.Where(x => VolumeComparer.Equals(x.Identity, volume)).Select(x => x.Drive));
+                var label = drives.Length == 0 ? "No fixed NTFS drive found" : drives;
+                <tr @key="volume">
+                    <td>@label</td>
+                    <td class="diagnostic-value"><code>@volume</code></td>
+                    <td>@(Journal.ApprovedVolumes.Contains(volume, VolumeComparer) ? "Approved" : "Outside allowlist")</td>
+                    <td><label><input type="checkbox" checked="@_selection.Contains(volume)" disabled="@(!CanEdit || _busy)"
+                               @onchange="args => SetVolume(volume, args.Value is true)" /> Approve @label
+                        @if (drives.Length == 0) { <span class="visually-hidden">@volume</span> }
+                    </label></td>
+                </tr>
+            }
+        </tbody>
+    </table>
+</div>
+@if (CanEdit)
+{
+    <div class="verification-actions">
+        <button type="button" @onclick="Refresh" disabled="@_busy">Refresh local volumes</button>
+        <button type="button" @onclick="PreviewAsync" disabled="@(_busy || _selection.SetEquals(Journal.ApprovedVolumes))">Review allowlist change</button>
+    </div>
+}
+@if (_error is { } error)
+{
+    <p role="alert">@error</p>
+}
+@if (_proposal is { } proposal)
+{
+    <section aria-labelledby="journal-preview-heading">
+        <h2 id="journal-preview-heading">Allowlist change preview</h2>
+        <ul>
+            @foreach (var volume in proposal.Added) { <li class="diagnostic-value">Add <code>@volume</code></li> }
+            @foreach (var volume in proposal.Removed) { <li class="diagnostic-value">Remove <code>@volume</code></li> }
+        </ul>
+        <h3>Sources on the selected volumes</h3>
+        @if (proposal.Impacts.Count == 0)
+        {
+            <p>No saved sources currently map to these volumes.</p>
+        }
+        else
+        {
+            <ul>
+                @foreach (var impact in proposal.Impacts)
+                {
+                    <li class="diagnostic-value"><a href="@($"/sources/{impact.Root.Id:D}")">@impact.Root.DisplayName</a> (@impact.Root.State)
+                        <code>@impact.Root.CanonicalPath</code>.
+                        @(impact.Added ? "Eligible for journal coverage after activation and metadata baselining." : "Will use watcher and metadata fallback after activation.")</li>
+                }
+            </ul>
+        }
+        @if (proposal.Unmapped.Count > 0)
+        {
+            <p>These sources have no current local volume mapping. Check their volume before approving this change.</p>
+            <ul>
+                @foreach (var root in proposal.Unmapped) { <li><a href="@($"/sources/{root.Id:D}")">@root.DisplayName</a></li> }
+            </ul>
+        }
+        <p>The reviewed incremental IIS updater applies the change to the app and helper together. It requires an operator review, a protected activation and an app and helper restart.</p>
+        @if (!_confirmed)
+        {
+            <button type="button" @onclick="ConfirmAsync" disabled="@_busy">Confirm proposal for download</button>
+        }
+        else
+        {
+            <p role="status">Proposal confirmed for download. The running allowlist is unchanged until activation.</p>
+            <p><a href="@($"data:application/json;base64,{proposal.Base64}")" download="source-journal-allowlist.json">Download allowlist proposal</a></p>
+            <p class="diagnostic-value">Proposal SHA-256 <code>@proposal.Sha256</code></p>
+            <p>Use the proposal and hash with <code>-SourceJournalAllowlistOnly</code> in the incremental IIS updater. Review its <code>-PlanOnly</code> output before the authorised activation.</p>
+        }
+    </section>
+}
+
+@code {
+    private static readonly StringComparer VolumeComparer = StringComparer.OrdinalIgnoreCase;
+    private readonly CancellationTokenSource _stopping = new();
+    private readonly HashSet<string> _selection = new(VolumeComparer);
+    private IReadOnlyList<JournalVolume> _volumes = [];
+    private JournalAllowlistProposal? _proposal;
+    private string? _error;
+    private bool _busy;
+    private bool _confirmed;
+    private bool CanEdit => Journal.Enabled && Journal.UsesProtectedHelper;
+    private IEnumerable<string> VolumeIdentities =>
+        Journal.ApprovedVolumes.Union(_volumes.Select(x => x.Identity), VolumeComparer).Order(VolumeComparer);
+
+    protected override void OnInitialized() => Refresh();
+
+    private void Refresh()
+    {
+        _volumes = Journal.ReadLocalVolumes();
+        _selection.Clear();
+        _selection.UnionWith(Journal.ApprovedVolumes);
+        ClearProposal();
+    }
+
+    private void SetVolume(string volume, bool selected)
+    {
+        if (_busy || !CanEdit) return;
+        if (selected) _selection.Add(volume);
+        else _selection.Remove(volume);
+        ClearProposal();
+    }
+
+    private void ClearProposal()
+    {
+        _proposal = null;
+        _confirmed = false;
+        _error = null;
+    }
+
+    private Task PreviewAsync() => ReviewAsync(null);
+    private Task ConfirmAsync() => _proposal is { } prior ? ReviewAsync(prior) : Task.CompletedTask;
+
+    private async Task ReviewAsync(JournalAllowlistProposal? prior)
+    {
+        if (_busy || !CanEdit) return;
+        _busy = true;
+        ClearProposal();
+        try
+        {
+            var roots = await Sources.ReadJournalRootsAsync(_stopping.Token);
+            _volumes = Journal.ReadLocalVolumes();
+            _proposal = Journal.Preview(_selection, _volumes, roots);
+            if (prior is null) return;
+            _confirmed = prior.Sha256 == _proposal.Sha256 &&
+                prior.Impacts.Select(x => (x.Root.Id, x.Root.DisplayName, x.Root.State, x.Root.CanonicalPath, x.Volume, x.Added))
+                    .SequenceEqual(_proposal.Impacts.Select(x => (x.Root.Id, x.Root.DisplayName, x.Root.State, x.Root.CanonicalPath, x.Volume, x.Added))) &&
+                prior.Unmapped.Select(x => (x.Id, x.DisplayName, x.CanonicalPath))
+                    .SequenceEqual(_proposal.Unmapped.Select(x => (x.Id, x.DisplayName, x.CanonicalPath)));
+            if (!_confirmed) _error = "The local volume or source impact changed. Review the updated proposal before confirming.";
+        }
+        catch (OperationCanceledException) when (_stopping.IsCancellationRequested) { }
+        catch (InvalidOperationException error) { _error = error.Message; }
+        catch { _error = "The active source list or local volumes could not be read. Try reviewing the proposal again."; }
+        finally { _busy = false; }
+    }
+
+    public void Dispose()
+    {
+        _stopping.Cancel();
+        _stopping.Dispose();
+    }
+}

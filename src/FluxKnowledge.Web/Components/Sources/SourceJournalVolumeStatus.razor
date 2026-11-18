@@ -1,0 +1,109 @@
+@implements IDisposable
+@using FluxKnowledge.Application.Ports
+@inject SourceJournalOperator Journal
+
+<details open="@(Scanning is { Mode: not "Journal" })">
+    <summary>USN journal diagnostics</summary>
+    <dl class="status-grid verification-grid">
+        <div><dt>Local volume</dt><dd class="diagnostic-value">@(_volume ?? "No fixed NTFS drive found for this source")</dd></div>
+        <div><dt>App allowlist</dt><dd>@(Approved ? "Approved" : _volume is null ? "Volume unknown" : "Outside allowlist")</dd></div>
+        <div><dt>Journal access</dt><dd role="status">@AccessStatus</dd></div>
+        @if (CurrentProbe is not null && _probeStartedAtUtc is { } checkedAt)
+        {
+            <div><dt>Manual journal check</dt><dd><time datetime="@checkedAt.ToString("O")">@checkedAt.ToLocalTime().ToString("g")</time></dd></div>
+        }
+    </dl>
+    @if (Scanning is { } scan)
+    {
+        @if (!scan.HasJournalCheckpoint)
+        {
+            <p>No journal checkpoint has been recorded for this source volume.</p>
+        }
+        else if (HasMatchingVolume && CurrentProbe?.JournalId is { } id && !string.Equals(id, scan.JournalId, StringComparison.Ordinal))
+        {
+            <p role="status">The live journal and saved checkpoint have different IDs. Journal recovery and metadata reconciliation are needed.</p>
+        }
+        @if (HasMatchingVolume && scan.JournalUnavailableSinceUtc is { } unavailable)
+        {
+            <p>Last recorded outage began <time datetime="@unavailable.ToString("O")">@unavailable.ToLocalTime().ToString("g")</time>.
+                @if (scan.JournalFailureCode == "journal-recovery-paused")
+                {
+                    <span>Recovery is waiting for a paused source on this volume. Review source lifecycle controls.</span>
+                }
+                else if (scan.JournalFailureCode is not null)
+                {
+                    <code>@scan.JournalFailureCode</code>
+                }
+            </p>
+        }
+        @if (_volume is not null && !string.IsNullOrEmpty(scan.VolumeIdentity) &&
+            !string.Equals(_volume, scan.VolumeIdentity, StringComparison.OrdinalIgnoreCase))
+        {
+            <p role="status">The local drive now maps to a different volume than the saved source state. Check the expected drive and source path before reconciling.</p>
+        }
+    }
+    <div class="verification-actions">
+        <button type="button" disabled="@_checking" @onclick="CheckAsync">Check journal now</button>
+        <a href="/sources/journal">Manage USN journal allowlist</a>
+    </div>
+</details>
+
+@code {
+    [Parameter, EditorRequired] public string CanonicalPath { get; set; } = default!;
+    [Parameter] public SourceIncrementalStatus? Scanning { get; set; }
+    private readonly CancellationTokenSource _stopping = new();
+    private string? _volume;
+    private string? _sourcePath;
+    private JournalProbe? _probe;
+    private DateTimeOffset? _probeStartedAtUtc;
+    private bool _checking;
+    private bool Approved => _volume is not null && Journal.ApprovedVolumes.Contains(_volume, StringComparer.OrdinalIgnoreCase);
+    private JournalProbe? CurrentProbe => HasMatchingVolume &&
+        Scanning?.JournalUnavailableSinceUtc is { } unavailable && unavailable >= _probeStartedAtUtc
+        ? null : _probe;
+    private string AccessStatus => _checking ? "Checking journal access…" : CurrentProbe?.Message ??
+        (!Journal.Enabled ? "Journal scanning is disabled in the running app." :
+            _volume is null ? "Restore the expected fixed NTFS volume, then check again." :
+            !Approved ? "Unverified. This volume is outside the app allowlist." :
+            HasMatchingVolume && Scanning?.JournalUnavailableSinceUtc is not null ? "Unavailable at the last recorded attempt." :
+            Scanning?.HasJournalCheckpoint == true && HasMatchingVolume ? "A saved checkpoint exists. Check journal now to verify current access." :
+            "Current access is unverified.");
+    private bool HasMatchingVolume => string.Equals(_volume, Scanning?.VolumeIdentity, StringComparison.OrdinalIgnoreCase);
+
+    protected override void OnParametersSet()
+    {
+        if (_sourcePath == CanonicalPath) return;
+        _sourcePath = CanonicalPath;
+        _probe = null;
+        ResolveVolume();
+    }
+
+    private void ResolveVolume() => _volume = SourceJournalOperator.FindLocalVolume(CanonicalPath, Journal.ReadLocalVolumes());
+
+    private async Task CheckAsync()
+    {
+        if (_checking) return;
+        _checking = true;
+        _probe = null;
+        try
+        {
+            ResolveVolume();
+            if (_volume is not { } volume) return;
+            var startedAt = DateTimeOffset.UtcNow;
+            var result = await Journal.ProbeAsync(volume, _stopping.Token);
+            if (string.Equals(volume, _volume, StringComparison.OrdinalIgnoreCase))
+            {
+                _probe = result;
+                _probeStartedAtUtc = startedAt;
+            }
+        }
+        catch (OperationCanceledException) when (_stopping.IsCancellationRequested) { }
+        finally { _checking = false; }
+    }
+
+    public void Dispose()
+    {
+        _stopping.Cancel();
+        _stopping.Dispose();
+    }
+}

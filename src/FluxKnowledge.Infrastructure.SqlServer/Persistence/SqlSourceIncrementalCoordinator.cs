@@ -75,7 +75,9 @@ public sealed partial class SqlSourceIncrementalCoordinator(
                 superseded is { IsBaseline: true, DetectionPolicy: SourcePolicyDefaults.DetectionPolicy };
             var pending = await db.SourcePendingChanges.Where(x => x.SourceRootId == root.Id.Value &&
                 (x.ReasonFlags & ~SourcePendingReasons.RemovalPending) != 0 &&
-                (x.NotBeforeUtc == null || x.NotBeforeUtc <= now)).ToArrayAsync(ct).ConfigureAwait(false);
+                (x.NotBeforeUtc == null || x.NotBeforeUtc <= now ||
+                    row.RequestKind == 1 && (x.ReasonFlags & ~SourcePendingReasons.RemovalPending) == SourcePendingReasons.NamespaceMetadata))
+                .ToArrayAsync(ct).ConfigureAwait(false);
             // Legacy rows carry unknown provenance. Turn them into explicit forced work
             // before freezing the claim, rather than interpreting missing evidence as zero.
             foreach (var item in pending.Where(x => x.LastContentUsn is null || x.LastUnjournaledGeneration is null))

@@ -71,6 +71,9 @@ confirmation, canonical fingerprint and idempotency receipt. REST and
 
 - `source_sync`, payload `{ "rootId": "<guid>" }`, processes pending changes;
   metadata reconciliation follows its weekly deadline.
+- `source_sync`, payload `{ "rootId": "<guid>", "reconcileMetadata": true }`,
+  requests a paced metadata reconciliation. This option and `fullContent` are
+  mutually exclusive.
 - `source_sync`, payload `{ "rootId": "<guid>", "fullContent": true }`, explicitly
   requests a full content rescan through normal ingestion and reindexes changes.
 - `root_resume` resumes event processing without requesting a full content scan.

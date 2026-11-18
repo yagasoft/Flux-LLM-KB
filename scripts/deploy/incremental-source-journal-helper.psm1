@@ -56,7 +56,8 @@ function New-SourceJournalHelperUpdate {
     param([Parameter(Mandatory)][string]$InstallRoot,[Parameter(Mandatory)][string]$TaskName,
         [Parameter(Mandatory)][string]$ReleaseId,[Parameter(Mandatory)][string]$CandidatePath,
         [Parameter(Mandatory)][string]$ExpectedCandidateSha256,[Parameter(Mandatory)][hashtable]$TaskObservation,
-        [Parameter(Mandatory)][string]$PipeName,[Parameter(Mandatory)][string[]]$ApprovedVolumes)
+        [Parameter(Mandatory)][string]$PipeName,[Parameter(Mandatory)][string[]]$ApprovedVolumes,
+        [ValidatePattern('^([A-Fa-f0-9]{64})?$')][string]$ExpectedJournalPolicySha256='')
     $root=[IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($InstallRoot));$drive=[IO.Path]::GetPathRoot($root)
     if(![IO.Path]::IsPathFullyQualified($InstallRoot) -or [IO.Path]::GetDirectoryName($root) -ine $drive -or
         [IO.DriveInfo]::new($drive).DriveType -ne [IO.DriveType]::Fixed -or [IO.DriveInfo]::new($drive).DriveFormat -ine 'NTFS' -or
@@ -96,6 +97,10 @@ function New-SourceJournalHelperUpdate {
                 @($existing.Keys|Where-Object {$_ -cnotin @('Version','PipeName','ApprovedVolumes','RepairEnabled')}).Count){throw 'journal-helper-existing-journal-policy-invalid'}
             $repairEnabled=$existing.Contains('RepairEnabled') -and $existing.RepairEnabled -ceq $true
             if($existing.Contains('RepairEnabled') -and $existing.RepairEnabled -isnot [bool]){throw 'journal-helper-existing-repair-setting-invalid'}
+        }
+        if($ExpectedJournalPolicySha256 -and ($null -eq $before -or
+            (Get-SourceJournalHelperHash $before) -ine $ExpectedJournalPolicySha256)){
+            throw 'journal-allowlist-helper-predecessor-changed'
         }
         $after=[Text.UTF8Encoding]::new($false).GetBytes(([ordered]@{Version=1;PipeName=$PipeName;
             ApprovedVolumes=@($ApprovedVolumes|ForEach-Object {$_.ToUpperInvariant()});RepairEnabled=[bool]$repairEnabled}|ConvertTo-Json -Depth 4))

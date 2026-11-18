@@ -49,6 +49,7 @@ function Assert-DeploymentSourceJournalCliWritersStopped {
 }
 
 function Get-DeploymentSourceJournalRepairMode {
+    param([switch]$AllowlistOnly)
     $settings=ConvertFrom-UniqueConfigurationJson $sourceJournalChange.After
     $appRepair=$false
     if($settings.Contains('SourceAccess')){
@@ -59,14 +60,30 @@ function Get-DeploymentSourceJournalRepairMode {
         }
     }
     $helperRepair=$true # Before journal policy exists the original helper serves repair.
+    $journalPolicySha256=''
     $path=Join-Path $SourceJournalHelperRoot 'journal-policy.json'
     if(Test-Path -LiteralPath $path){
-        $policy=ConvertFrom-UniqueConfigurationJson (Get-SourceAccessConfigurationBytes $path)
+        $policyBytes=Get-SourceAccessConfigurationBytes $path
+        $policy=ConvertFrom-UniqueConfigurationJson $policyBytes
         if($policy.Contains('RepairEnabled') -and $policy.RepairEnabled -isnot [bool]){throw 'journal-release-repair-policy-invalid'}
         $helperRepair=$policy.Contains('RepairEnabled') -and $policy.RepairEnabled
+        if ($AllowlistOnly) {
+            $before=(ConvertFrom-UniqueConfigurationJson $sourceJournalChange.Before).SourceJournal
+            $expected=[Collections.Generic.HashSet[string]]::new([string[]]$before.ApprovedVolumes,[StringComparer]::OrdinalIgnoreCase)
+            if (!$policy.Contains('Version') -or $policy.Version -cne 1 -or
+                !$policy.Contains('PipeName') -or $policy.PipeName -cne $before.PipeName -or
+                !$policy.Contains('ApprovedVolumes') -or $policy.ApprovedVolumes -isnot [array] -or
+                $policy.ApprovedVolumes.Count -ne $expected.Count -or !$expected.SetEquals([string[]]$policy.ApprovedVolumes)) {
+                throw 'journal-allowlist-helper-predecessor-mismatch'
+            }
+            $journalPolicySha256=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($policyBytes))
+        }
+    } elseif ($AllowlistOnly) {
+        throw 'journal-allowlist-helper-predecessor-mismatch'
     }
     if($appRepair -and !$helperRepair){throw 'journal-release-enabled-app-repair-has-disabled-helper'}
-    @{AppEnabled=$appRepair;HelperEnabled=$helperRepair;ExpectedTransport=$(if($appRepair){'NotApproved'}else{'Disabled'})}
+    @{AppEnabled=$appRepair;HelperEnabled=$helperRepair;ExpectedTransport=$(if($appRepair){'NotApproved'}else{'Disabled'});
+      ExpectedJournalPolicySha256=$journalPolicySha256}
 }
 
 function Test-DeploymentSourceJournalHelperNativeState([bool]$Candidate) {
@@ -104,7 +121,10 @@ function Confirm-DeploymentSourceJournalHelperTransport {
     $policy=ConvertFrom-UniqueConfigurationJson (Get-SourceAccessConfigurationBytes (Join-Path $SourceJournalHelperRoot 'policy.json'))
     $options=(ConvertFrom-UniqueConfigurationJson $sourceJournalChange.After).SourceJournal
     $response=Invoke-RestMethod -Uri ($loopbackOrigin.Origin+'/health/source-journal-helper') -Method Get -TimeoutSec 12
+    $expectedVolumes=[Collections.Generic.HashSet[string]]::new([string[]]$options.ApprovedVolumes,[StringComparer]::OrdinalIgnoreCase)
     if($response.Version -ne 1 -or $response.VolumesChecked -ne $options.ApprovedVolumes.Count -or
+        $response.ApprovedVolumes.Count -ne $expectedVolumes.Count -or !$expectedVolumes.SetEquals([string[]]$response.ApprovedVolumes) -or
+        $response.PipeName -cne $options.PipeName -or
         $response.RepairTransport -cne $sourceJournalRelease.RepairMode.ExpectedTransport -or $response.CallerSid -cne $policy.IndexerSid){
         throw 'journal-release-held-transport-unconfirmed'
     }
@@ -114,7 +134,7 @@ function Confirm-DeploymentSourceJournalHelperTransport {
     Test-DeploymentSourceJournalHelperNativeState $true
     $sourceJournalRelease.TransportConfirmed=$true
     Write-SegmentedUpdateJson (Join-Path $releaseRoot 'source-journal-transport.json') @{
-        Version=1;ReleaseId=$releaseId;CallerSid=$response.CallerSid;VolumesChecked=$response.VolumesChecked;
+        Version=1;ReleaseId=$releaseId;CallerSid=$response.CallerSid;VolumesChecked=$response.VolumesChecked;ApprovedVolumes=@($response.ApprovedVolumes);
         RepairTransport=$response.RepairTransport;ObservedAtUtc=[DateTimeOffset]::UtcNow;
         RepairPolicySha256=$sourceJournalHelperState.RepairPolicySha256;JournalPolicySha256=$sourceJournalHelperState.Policy.AfterHash
     }

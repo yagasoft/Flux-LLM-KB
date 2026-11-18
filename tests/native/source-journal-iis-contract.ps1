@@ -26,10 +26,12 @@ function Invoke-RestMethod {
  param($Uri,$Method,$TimeoutSec)
  $box.HttpCalls++
  Assert-True ($Uri -ceq ($loopbackOrigin.Origin+'/health/source-journal-helper') -and $Method -ceq 'Get' -and $TimeoutSec -eq 12) 'Unexpected transport target.'
- $result=@{Version=1;VolumesChecked=1;RepairTransport=$sourceJournalRelease.RepairMode.ExpectedTransport;CallerSid='S-1-5-21-123'}
+ $result=@{Version=1;VolumesChecked=1;ApprovedVolumes=@('synthetic-volume');PipeName='FluxKnowledge.SourceJournal.fixture';RepairTransport=$sourceJournalRelease.RepairMode.ExpectedTransport;CallerSid='S-1-5-21-123'}
  switch($box.Fault){
   'sid'{$result.CallerSid='wrong'}
   'volume-count'{$result.VolumesChecked=2}
+  'wrong-volume'{$result.ApprovedVolumes=@('other-volume')}
+  'wrong-pipe'{$result.PipeName='FluxKnowledge.SourceJournal.other'}
   'repair-outcome'{$result.RepairTransport='AlreadyReadable'}
   'late-hold'{[IO.File]::WriteAllText($ValidationHoldPath,'"another-release"')}
   'late-policy'{[IO.File]::AppendAllText($sourceJournalHelperState.Policy.Path,' ')}
@@ -50,13 +52,24 @@ try{
  Expect-Refusal {Assert-DeploymentSourceJournalReleasePayloadSet $true}
  $ReviewedSourceJournalPayloads=$saved
  $config=Join-Path $area 'configuration.json'
- $configuration='{"SourceAccess":{"Enabled":true},"SourceJournal":{"ApprovedVolumes":["synthetic-volume"]}}'
+ $configuration='{"SourceAccess":{"Enabled":true},"SourceJournal":{"ApprovedVolumes":["synthetic-volume"],"PipeName":"FluxKnowledge.SourceJournal.fixture"}}'
  [IO.File]::WriteAllText($config,$configuration)
- $sourceJournalChange=@{Path=$config;After=[Text.Encoding]::UTF8.GetBytes($configuration);BeforeHash=(Get-FileHash -LiteralPath $config).Hash;
+ $sourceJournalChange=@{Path=$config;Before=[Text.Encoding]::UTF8.GetBytes($configuration);After=[Text.Encoding]::UTF8.GetBytes($configuration);BeforeHash=(Get-FileHash -LiteralPath $config).Hash;
   AfterHash=(Get-FileHash -LiteralPath $config).Hash;Attempted=$true}
  $policyPath=Join-Path $SourceJournalHelperRoot 'policy.json';$planPath=Join-Path $SourceJournalHelperRoot 'root-read-plan.json'
  [IO.File]::WriteAllText($policyPath,'{"IndexerSid":"S-1-5-21-123"}');[IO.File]::WriteAllText($planPath,'{}')
  $journalPath=Join-Path $SourceJournalHelperRoot 'journal-policy.json'
+ Expect-Refusal {Get-DeploymentSourceJournalRepairMode -AllowlistOnly}
+ foreach($prior in @(
+   '{"Version":1,"PipeName":"FluxKnowledge.SourceJournal.fixture","ApprovedVolumes":["other-volume"],"RepairEnabled":true}',
+   '{"Version":1,"PipeName":"FluxKnowledge.SourceJournal.other","ApprovedVolumes":["synthetic-volume"],"RepairEnabled":true}'
+  )){
+  [IO.File]::WriteAllText($journalPath,$prior)
+  Expect-Refusal {Get-DeploymentSourceJournalRepairMode -AllowlistOnly}
+ }
+ [IO.File]::WriteAllText($journalPath,'{"Version":1,"PipeName":"FluxKnowledge.SourceJournal.fixture","ApprovedVolumes":["synthetic-volume"],"RepairEnabled":true}')
+ Assert-True ((Get-DeploymentSourceJournalRepairMode -AllowlistOnly).ExpectedJournalPolicySha256 -ceq
+  (Get-FileHash -LiteralPath $journalPath).Hash) 'Allowlist predecessor bytes were not bound.'
  [IO.File]::WriteAllText($journalPath,'{"RepairEnabled":true}')
  $exe=Join-Path $SourceJournalHelperRoot 'payload/FluxKnowledge.Cli.exe'
  $box.Task=@{Enabled=$true;Running=$true;TaskName='isolated';PrincipalSid='S-1-5-18';Executable=$exe;Arguments=('source-access serve --broker-root "'+$SourceJournalHelperRoot+'"');
@@ -88,7 +101,7 @@ try{
  $box.PoolStopped=$true;$box.CompanionEnabled=$false;$box.Processes=@($allowed);$box.Sid='S-1-5-18'
  Confirm-DeploymentSourceJournalHelperTransport
  Assert-True ($sourceJournalRelease.TransportConfirmed -and (Test-Path -LiteralPath (Join-Path $releaseRoot 'source-journal-transport.json'))) 'Valid held transport did not retain its proof.'
- foreach($fault in @('sid','volume-count','repair-outcome','late-hold','late-policy','late-repair-policy','late-task')){
+ foreach($fault in @('sid','volume-count','wrong-volume','wrong-pipe','repair-outcome','late-hold','late-policy','late-repair-policy','late-task')){
   $sourceJournalRelease.TransportConfirmed=$false;$box.Fault=$fault
   Expect-Refusal {Confirm-DeploymentSourceJournalHelperTransport}
   Assert-True (!$sourceJournalRelease.TransportConfirmed) 'Unconfirmed held transport acquired a release proof.'
@@ -107,7 +120,7 @@ try{
  Confirm-DeploymentSourceJournalHelperTransport
  Assert-True (!$sourceJournalRelease.RepairMode.AppEnabled -and !$sourceJournalRelease.RepairMode.HelperEnabled -and
   $sourceJournalRelease.RepairMode.ExpectedTransport -ceq 'Disabled') 'Disabled repair was silently enabled.'
- [pscustomobject]@{Result='Passed';StopRefusals=7;TransportRefusals=7;RepairModes=2;ActualFiles=$true;ProductionCalls=0;ActualNativeOrSqlCalls=0}|ConvertTo-Json
+ [pscustomobject]@{Result='Passed';StopRefusals=7;TransportRefusals=9;RepairModes=2;ActualFiles=$true;ProductionCalls=0;ActualNativeOrSqlCalls=0}|ConvertTo-Json
 }finally{
  $resolved=[IO.Path]::GetFullPath($area)
  if(!$resolved.StartsWith('I:\Codex Workspaces\Staging\FluxKnowledge\JournalIisContract-',[StringComparison]::OrdinalIgnoreCase)){throw 'Unsafe IIS contract cleanup.'}

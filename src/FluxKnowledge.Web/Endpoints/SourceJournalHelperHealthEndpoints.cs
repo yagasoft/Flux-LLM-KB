@@ -22,7 +22,7 @@ public static class SourceJournalHelperHealthEndpoints
         var reader = services.GetService<ISourceChangeJournalReader>();
         var repair = services.GetService<ISourceAccessRepairClient>();
         var repairEnabled = services.GetRequiredService<IConfiguration>().GetValue<bool>("SourceAccess:Enabled");
-        if (options is null || string.IsNullOrWhiteSpace(options.PipeName) || options.ApprovedVolumes.Length is < 1 or > 16 ||
+        if (options is null || !options.Enabled || string.IsNullOrWhiteSpace(options.PipeName) || options.ApprovedVolumes.Length is < 1 or > 16 ||
             reader is null || repairEnabled && repair is null)
             return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
 
@@ -62,13 +62,14 @@ public static class SourceJournalHelperHealthEndpoints
                 callerSid = identity.User?.Value;
             }
             return Results.Ok(new { Version = 1, VolumesChecked = options.ApprovedVolumes.Length,
-                RepairTransport = repairTransport, CallerSid = callerSid });
+                ApprovedVolumes = options.ApprovedVolumes, options.PipeName, RepairTransport = repairTransport, CallerSid = callerSid });
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
             return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
         }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or System.ComponentModel.Win32Exception)
+        catch (Exception exception) when (exception is IOException or InvalidDataException or UnauthorizedAccessException or
+            System.ComponentModel.Win32Exception or System.Text.Json.JsonException or ArgumentException)
         {
             return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
         }

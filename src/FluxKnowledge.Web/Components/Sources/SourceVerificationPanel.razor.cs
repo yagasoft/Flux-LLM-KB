@@ -1,4 +1,5 @@
 using System.Globalization;
+using FluxKnowledge.Application.Ports;
 using Microsoft.AspNetCore.Components;
 
 namespace FluxKnowledge.Web.Components.Sources;
@@ -7,6 +8,7 @@ public partial class SourceVerificationPanel
 {
     [Parameter] public Guid RootId { get; set; }
     [Parameter] public string RootState { get; set; } = "Enabled";
+    [Parameter] public string? CanonicalPath { get; set; }
     private SourceVerificationPanelState _state = null!;
     private readonly CancellationTokenSource _stopping = new();
     private Task? _poll;
@@ -44,7 +46,19 @@ public partial class SourceVerificationPanel
         finally { _refreshing = false; }
     }
     private Task FullRescanAsync() => _state.FullRescanAsync(RootId);
+    private Task ReconcileAsync() => _state.ReconcileAsync(RootId);
     private Task RetryAsync() => _state.RetryAsync();
+    private static bool HasMeasuredLag(SourceIncrementalStatus scan) => scan.HasJournalCheckpoint &&
+        scan.JournalUnavailableSinceUtc is null && scan.Mode is "Journal" or "JournalPartial";
+    private static string Coverage(string mode) => mode switch
+    {
+        "JournalPartial" => "Partial journal coverage",
+        "Journal" => "Journal",
+        "Fallback" => "Watcher and metadata fallback",
+        "BaselineRequired" => "Journal baseline required",
+        "Baselining" => "Establishing journal baseline",
+        _ => mode
+    };
     private static string Count(long value) => value.ToString("N0", CultureInfo.InvariantCulture);
     private static string When(DateTimeOffset? value) => value?.UtcDateTime.ToString("yyyy-MM-dd HH:mm:ss 'UTC'", CultureInfo.InvariantCulture) ?? "Not yet recorded";
     public async ValueTask DisposeAsync()

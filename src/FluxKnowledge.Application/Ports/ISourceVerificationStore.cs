@@ -47,7 +47,16 @@ public sealed record SourceVerificationStatus(SourceRootId SourceRootId, SourceV
 
 public sealed record SourceIncrementalStatus(string Mode, string? Reason, long BaselineEpoch, bool NamespaceComplete,
     bool RecoveryRequired, DateTimeOffset? LastReconciliationAtUtc, long DurableJournalLagUsn, int PendingObligations,
-    DateTimeOffset? LastBaselineAtUtc);
+    DateTimeOffset? LastBaselineAtUtc)
+{
+    public string? VolumeIdentity { get; init; }
+    public bool HasJournalCheckpoint { get; init; }
+    public string? JournalId { get; init; }
+    public DateTimeOffset? JournalUnavailableSinceUtc { get; init; }
+    public string? JournalFailureCode { get; init; }
+    public long? UnresolvedThroughUsn { get; init; }
+    public int NamespaceObligations { get; init; }
+}
 
 public interface ISourceVerificationStore
 {

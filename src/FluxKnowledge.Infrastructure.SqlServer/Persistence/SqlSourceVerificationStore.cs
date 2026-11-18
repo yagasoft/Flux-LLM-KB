@@ -112,18 +112,35 @@ public sealed partial class SqlSourceVerificationStore(IDbContextFactory<FluxKno
         }
         var policy = ReadPolicy(state);
         var window = SourceVerificationSchedule.CurrentOrNextWindow(policy, time.GetUtcNow(), TimeZoneInfo.FindSystemTimeZoneById(policy.TimeZoneId));
-        var nextUsn = state is null ? 0 : await db.SourceVolumeJournalCheckpoints.AsNoTracking()
-            .Where(x => x.VolumeIdentity == state.VolumeIdentity).Select(x => (long?)x.NextUsn).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false) ?? 0;
-        var pending = await db.SourcePendingChanges.CountAsync(x => x.SourceRootId == rootId.Value, cancellationToken).ConfigureAwait(false);
+        var checkpoint = state is null ? null : await db.SourceVolumeJournalCheckpoints.AsNoTracking()
+            .Where(x => x.VolumeIdentity == state.VolumeIdentity)
+            .Select(x => new { x.NextUsn, x.JournalId, x.UnavailableSinceUtc, x.LastFailureCode })
+            .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+        var pending = await db.SourcePendingChanges.Where(x => x.SourceRootId == rootId.Value)
+            .GroupBy(x => x.SourceRootId)
+            .Select(group => new { Total = group.Count(), Namespace = group.Count(x => (x.ReasonFlags & SourcePendingReasons.NamespaceMetadata) != 0) })
+            .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+        var approved = options.Enabled && (string.IsNullOrEmpty(state?.VolumeIdentity) ||
+            options.ApprovedVolumes.Contains(state.VolumeIdentity, StringComparer.OrdinalIgnoreCase));
         return new(rootId, policy, state?.VerificationPaused ?? false, state?.LastVerifiedAtUtc, status)
         {
             FeatureEnabled = options.Enabled && SourcePolicyDefaults.ChecksumVerificationEnabled,
             NextWindowAtUtc = SourcePolicyDefaults.ChecksumVerificationEnabled ? window.Start : null,
             WindowEndAtUtc = SourcePolicyDefaults.ChecksumVerificationEnabled ? window.End : null,
-            Scanning = new(state?.Mode ?? (options.Enabled ? "BaselineRequired" : "Fallback"),
-                options.Enabled ? state?.Reason : "journal-disabled-metadata-fallback", state?.BaselineEpoch ?? 0, state?.NamespaceComplete ?? false,
-                state is null || state.RecoveryRequired, state?.LastReconciliationAtUtc, Math.Max(0, nextUsn - (state?.CoveredUsn ?? 0)), pending,
-                state?.LastBaselineAtUtc)
+            Scanning = new(approved ? state?.Mode ?? "BaselineRequired" : "Fallback",
+                approved ? state?.Reason : options.Enabled ? "journal-volume-not-approved" : "journal-disabled-metadata-fallback",
+                state?.BaselineEpoch ?? 0, state?.NamespaceComplete ?? false,
+                state is null || state.RecoveryRequired, state?.LastReconciliationAtUtc,
+                Math.Max(0, (checkpoint?.NextUsn ?? 0) - (state?.CoveredUsn ?? 0)), pending?.Total ?? 0, state?.LastBaselineAtUtc)
+            {
+                VolumeIdentity = state?.VolumeIdentity,
+                HasJournalCheckpoint = checkpoint is not null,
+                JournalId = checkpoint?.JournalId,
+                JournalUnavailableSinceUtc = checkpoint?.UnavailableSinceUtc,
+                JournalFailureCode = checkpoint?.LastFailureCode,
+                UnresolvedThroughUsn = state?.UnresolvedThroughUsn,
+                NamespaceObligations = pending?.Namespace ?? 0
+            }
         };
     }
 

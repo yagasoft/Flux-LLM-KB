@@ -14,6 +14,24 @@ namespace FluxKnowledge.Web.Tests.Components;
 
 public sealed class SourceVerificationPanelTests
 {
+    [Fact]
+    public async Task Metadata_reconciliation_uses_the_existing_confirmed_sync_without_full_content()
+    {
+        var reads = new Reads();
+        var writes = new Writes();
+        var root = reads.Status.SourceRootId.Value;
+        var state = new SourceVerificationPanelState(reads, new(writes, writes));
+        await state.LoadAsync(root, default);
+        await state.ReconcileAsync(root);
+        var commit = Assert.Single(writes.Commits);
+        Assert.Equal("source_sync", commit.Action);
+        using var payload = System.Text.Json.JsonDocument.Parse(commit.CanonicalPayload);
+        Assert.True(payload.RootElement.GetProperty("reconcileMetadata").GetBoolean());
+        Assert.False(payload.RootElement.TryGetProperty("fullContent", out _));
+        Assert.Equal(root, payload.RootElement.GetProperty("rootId").GetGuid());
+        Assert.Contains("Metadata reconciliation was requested", state.Message);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -168,6 +186,7 @@ public sealed class SourceVerificationPanelTests
         Assert.DoesNotContain("Resume verification", html);
         Assert.Contains("Quiet, unchanged files are not reread", html);
         Assert.DoesNotContain("Verify now", html);
+        Assert.Contains("Not measured", html);
     }
 
     [Fact]

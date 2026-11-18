@@ -51,6 +51,8 @@ public static class LocalOperatorLoopbackGate
                 context.Request.Path.StartsWithSegments("/api/v1") ||
                 context.Request.Path.StartsWithSegments("/native/v1/codex/hooks") ||
                 context.Request.Path.StartsWithSegments("/sources/retained") ||
+                context.Request.Path.StartsWithSegments("/sources/journal") ||
+                IsSourceRootDetail(context.Request.Path) ||
                 context.Request.Path.StartsWithSegments("/search/csharp-code") ||
                 context.Request.Path.StartsWithSegments("/mcp") ||
                 context.Request.Path.StartsWithSegments("/_blazor"),
@@ -65,6 +67,9 @@ public static class LocalOperatorLoopbackGate
                 await next(context).ConfigureAwait(false);
             }));
     }
+
+    private static bool IsSourceRootDetail(PathString path) =>
+        path.StartsWithSegments("/sources", out var suffix) && Guid.TryParse(suffix.Value?.Trim('/'), out _);
 
     public static bool IsDirectLoopback(HttpContext context) =>
         context.Connection.RemoteIpAddress is { } remoteAddress &&

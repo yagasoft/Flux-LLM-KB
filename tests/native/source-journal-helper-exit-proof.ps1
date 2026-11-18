@@ -66,7 +66,7 @@ function Invoke-RestMethod {
  param($Uri,$Method,$TimeoutSec)
  Assert-True ($Uri -ceq 'http://127.0.0.1:59999/health/source-journal-helper' -and $Method -ceq 'Get' -and $TimeoutSec -eq 12) 'Unexpected fixture transport target.'
  $global:JournalExitProofFixture.Transports++
- [pscustomobject]@{Version=1;VolumesChecked=1;RepairTransport='NotApproved';CallerSid='S-1-5-21-123'}
+ [pscustomobject]@{Version=1;VolumesChecked=1;ApprovedVolumes=@('synthetic-volume');PipeName='FluxKnowledge.SourceJournal.fixture';RepairTransport='NotApproved';CallerSid='S-1-5-21-123'}
 }
 # Replace only the external Task Scheduler observation. All capture, native
 # handle/exit checks, update/rollback, IIS process guards and transport flow run
@@ -109,7 +109,7 @@ foreach($scenario in @('success','rollback')){
   $SourceJournalHelperRoot=$root;$sourceJournalHelperState=$state;$loopbackOrigin=@{Origin='http://127.0.0.1:59999'}
   $releaseId=$state.ReleaseId;$ValidationHoldPath=Join-Path $root 'hold.json'
   [IO.File]::WriteAllText($ValidationHoldPath,($releaseId|ConvertTo-Json -Compress))
-  $configuration='{"SourceAccess":{"Enabled":true},"SourceJournal":{"ApprovedVolumes":["synthetic-volume"]}}'
+  $configuration='{"SourceAccess":{"Enabled":true},"SourceJournal":{"ApprovedVolumes":["synthetic-volume"],"PipeName":"FluxKnowledge.SourceJournal.fixture"}}'
   $config=Join-Path $root 'configuration.json';[IO.File]::WriteAllText($config,$configuration)
   $sourceJournalChange=@{Path=$config;After=[Text.Encoding]::UTF8.GetBytes($configuration);AfterHash=(Get-FileHash -LiteralPath $config).Hash}
   $sourceJournalRelease=@{TransportConfirmed=$false;TransportDeferred=$false;RepairMode=@{ExpectedTransport='NotApproved'}}

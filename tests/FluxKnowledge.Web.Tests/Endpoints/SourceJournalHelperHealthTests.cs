@@ -20,6 +20,7 @@ public sealed class SourceJournalHelperHealthTests
     [InlineData("forwarded", HttpStatusCode.Forbidden)]
     [InlineData("unheld", HttpStatusCode.Conflict)]
     [InlineData("direct-reader", HttpStatusCode.ServiceUnavailable)]
+    [InlineData("disabled", HttpStatusCode.ServiceUnavailable)]
     [InlineData("missing-repair", HttpStatusCode.ServiceUnavailable)]
     public async Task Ineligible_requests_do_not_touch_either_pipe(string mode, HttpStatusCode expected)
     {
@@ -45,6 +46,8 @@ public sealed class SourceJournalHelperHealthTests
         Assert.NotNull(result);
         Assert.Equal(1, result.Version);
         Assert.Equal(1, result.VolumesChecked);
+        Assert.Equal([Volume], result.ApprovedVolumes);
+        Assert.Equal("FluxKnowledge.SourceJournal.test", result.PipeName);
         Assert.Equal(repairEnabled ? "NotApproved" : "Disabled", result.RepairTransport);
         Assert.Equal((1, 1, repairEnabled ? 1 : 0), (fake.Queries, fake.Reads, fake.Repairs));
         if (repairEnabled) Assert.Equal(new SourceAccessRepairRequest("", null, "probe", false), fake.LastRepair);
@@ -91,7 +94,7 @@ public sealed class SourceJournalHelperHealthTests
         builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?> { ["SourceAccess:Enabled"] = mode == "repair-disabled" ? "false" : "true" });
         builder.Services.AddSingleton(new SourceJournalOptions
         {
-            Enabled = true, PipeName = mode == "direct-reader" ? null : "FluxKnowledge.SourceJournal.test",
+            Enabled = mode != "disabled", PipeName = mode == "direct-reader" ? null : "FluxKnowledge.SourceJournal.test",
             ApprovedVolumes = [Volume]
         });
         builder.Services.AddSingleton<ISourceChangeJournalReader>(fake);
@@ -108,7 +111,7 @@ public sealed class SourceJournalHelperHealthTests
         return app;
     }
 
-    private sealed record ProbeResult(int Version, int VolumesChecked, string RepairTransport, string? CallerSid);
+    private sealed record ProbeResult(int Version, int VolumesChecked, string[] ApprovedVolumes, string PipeName, string RepairTransport, string? CallerSid);
     private sealed class ProbeHold : IDeploymentValidationHold
     {
         public bool Held { get; set; } = true;

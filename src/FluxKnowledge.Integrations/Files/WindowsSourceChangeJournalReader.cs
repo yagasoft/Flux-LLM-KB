@@ -129,6 +129,15 @@ public sealed class WindowsSourceChangeJournalReader : ISourceChangeJournalReade
         ? new SourceJournalGapException("SourceJournalEntryDeleted", new Win32Exception(error))
         : new IOException("SourceJournalNativeReadFailed", new Win32Exception(error));
 
+    public static string? DiagnosticFailure(IOException error) => (error.InnerException as Win32Exception)?.NativeErrorCode switch
+    {
+        5 => "volume-access-denied",
+        2 or 3 or 15 or 21 => "volume-unavailable",
+        1178 => "journal-deleting",
+        1179 => "journal-inactive",
+        _ => null
+    };
+
     private static string? ParentPath(SafeFileHandle volume, string identity)
     {
         // Metadata only; names outside admitted sources are transient routing inputs.

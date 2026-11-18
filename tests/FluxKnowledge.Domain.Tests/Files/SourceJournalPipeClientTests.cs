@@ -16,6 +16,23 @@ public sealed class SourceJournalPipeClientTests
     private const string Volume = @"\\?\Volume{11111111-1111-1111-1111-111111111111}\";
 
     [Theory]
+    [InlineData("not-approved", "SourceJournalHelperRefused")]
+    [InlineData("journal-inactive", "journal-inactive")]
+    [InlineData("journal-deleting", "journal-deleting")]
+    [InlineData("unexpected-code", "SourceJournalHelperUnavailable")]
+    public async Task Authenticated_helper_errors_are_bounded_and_preserve_operator_action(string wireError, string expected)
+    {
+        var options = Options();
+        var client = new SourceJournalPipeClient(options, WindowsIdentity.GetCurrent().User!);
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        using var pipe = CreateUserOwnedServer(options.PipeName!);
+        var server = ReplyAsync(pipe, deadline.Token, error: wireError);
+        var failure = await Assert.ThrowsAsync<IOException>(() => client.QueryAsync(Volume, deadline.Token).AsTask());
+        Assert.Equal(expected, failure.Message);
+        Assert.True(await server > 0);
+    }
+
+    [Theory]
     [InlineData(false)]
     [InlineData(true)]
     public async Task Public_client_rejects_a_non_SYSTEM_server_before_sending_any_request(bool read)
@@ -129,7 +146,7 @@ public sealed class SourceJournalPipeClientTests
     }
 
     private static async Task<int> ReplyAsync(NamedPipeServerStream pipe, CancellationToken ct,
-        Action<SourceJournalPipeProtocol.Request>? observe = null)
+        Action<SourceJournalPipeProtocol.Request>? observe = null, string? error = null)
     {
         await pipe.WaitForConnectionAsync(ct);
         var header = new byte[4];
@@ -142,8 +159,10 @@ public sealed class SourceJournalPipeClientTests
         await pipe.ReadExactlyAsync(body, ct);
         observe?.Invoke(JsonSerializer.Deserialize<SourceJournalPipeProtocol.Request>(body)!);
         var cursor = new JournalCursor(Volume, 7, 100);
-        await SourceJournalPipeProtocol.WriteAsync(pipe, new SourceJournalPipeProtocol.Response(1,
-            new(Volume, 7, 0, 999, 0, 33554432, 8388608), new(cursor, cursor with { NextUsn = 999 }, []), null), ct);
+        var response = error is null ? new SourceJournalPipeProtocol.Response(1,
+            new(Volume, 7, 0, 999, 0, 33554432, 8388608), new(cursor, cursor with { NextUsn = 999 }, []), null)
+            : new(1, null, null, error);
+        await SourceJournalPipeProtocol.WriteAsync(pipe, response, ct);
         await pipe.ReadExactlyAsync(new byte[1], ct);
         return length + 4;
     }

@@ -20,7 +20,7 @@ public sealed class NativeCorpusCommandService
         ["root_pause"] = "Pause the selected source root.",
         ["root_resume"] = "Resume event processing for the selected source root; metadata reconciliation follows its weekly schedule.",
         ["root_delete"] = "Delete the selected local source root and its owned data.",
-        ["source_sync"] = "Queue metadata synchronisation, or read all content when fullContent is explicitly true.",
+        ["source_sync"] = "Process pending changes, reconcile source metadata when reconcileMetadata is true, or read all content when fullContent is true.",
         ["source_verify"] = "Retired: automatic and scheduled checksum verification is disabled.",
         ["source_verification_set"] = "Retired: checksum verification scheduling is disabled.",
         ["policy_reprocess"] = "Re-evaluate one exact retained item under the current policy and queue eligible text, preserving its original attempts and publication.",

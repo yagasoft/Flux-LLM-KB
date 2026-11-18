@@ -511,6 +511,8 @@ public static class WebHostComposition
         services.AddSingleton<ISourceChangeJournalReader>(provider => sourceJournalOptions.PipeName is null
             ? new WindowsSourceChangeJournalReader() : OperatingSystem.IsWindows()
                 ? new SourceJournalPipeClient(sourceJournalOptions) : throw new PlatformNotSupportedException("Source journal helper requires Windows."));
+        services.AddSingleton<ISourceJournalVolumeInventory, WindowsSourceJournalVolumeInventory>();
+        services.AddSingleton<SourceJournalOperator>();
         services.AddSingleton<ISourceObservationReader, WindowsSourceObservationReader>();
         services.AddSingleton<SourceWorkAdmission>();
         services.AddSingleton<ISourceWorkAdmission>(provider => provider.GetRequiredService<SourceWorkAdmission>());
@@ -547,7 +549,8 @@ public static class WebHostComposition
             services.AddSingleton<IHostedService, LocalSourceRootWatchHostedService>();
             services.AddSingleton<IHostedService, CodeDisclosureProofRecoveryService>();
         }
-        services.AddScoped<ISourceRootProjectionReader, SourceRootProjectionReader>();
+        services.AddScoped<SourceRootProjectionReader>();
+        services.AddScoped<ISourceRootProjectionReader>(provider => provider.GetRequiredService<SourceRootProjectionReader>());
         services.AddScoped<SourceRootPageState>();
         services.AddScoped<SourceRootDetailPageState>(provider => new SourceRootDetailPageState(
             provider.GetRequiredService<ISourceRootProjectionReader>(),

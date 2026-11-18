@@ -88,11 +88,23 @@ function ConvertFrom-UniqueConfigurationJson([byte[]]$Bytes) {
     ConvertFrom-Json -InputObject $text -AsHashtable -DateKind String
 }
 
+function Get-ApprovedJournalVolumeSet {
+    param($Volumes)
+    if ($Volumes -isnot [array] -or $Volumes.Count -lt 1 -or $Volumes.Count -gt 16) {throw 'Approved journal volumes are required.'}
+    $set=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($volume in $Volumes) {
+        if ($volume -isnot [string] -or $volume -inotmatch '^\\\\\?\\Volume\{[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\}\\$' -or !$set.Add($volume)) {
+            throw 'Journal volume identity is invalid or duplicated.'
+        }
+    }
+    return ,$set
+}
+
 function New-SourceJournalConfigurationChange {
     param([Parameter(Mandatory)][string]$Path,[string]$OptionsPath='',
-        [string]$ExpectedOptionsSha256='', [switch]$Disable)
+        [string]$ExpectedOptionsSha256='', [switch]$Disable, [switch]$AllowlistOnly)
     if ($Disable) {
-        if ($OptionsPath -or $ExpectedOptionsSha256) {throw 'Journal disable cannot replace qualifications.'}
+        if ($OptionsPath -or $ExpectedOptionsSha256 -or $AllowlistOnly) {throw 'Journal disable cannot replace qualifications.'}
     } elseif (!$OptionsPath -or $ExpectedOptionsSha256 -cnotmatch '^[A-Fa-f0-9]{64}$') {throw 'Journal activation requires hash-bound options.'}
     $before=Get-SourceAccessConfigurationBytes $Path
     $configuration=ConvertFrom-UniqueConfigurationJson $before
@@ -105,6 +117,21 @@ function New-SourceJournalConfigurationChange {
         $bytes=Get-SourceAccessConfigurationBytes $OptionsPath
         if ((Get-SourceAccessConfigurationHash $bytes) -cne $ExpectedOptionsSha256.ToUpperInvariant()) {throw 'Journal options differ from the reviewed hash.'}
         $options=ConvertFrom-UniqueConfigurationJson $bytes
+        if ($AllowlistOnly) {
+            if ($options.Count -ne 2 -or @($options.Keys|Where-Object {$_ -cnotin @('ExpectedApprovedVolumes','ApprovedVolumes')}).Count) {
+                throw 'journal-allowlist-proposal-invalid'
+            }
+            $expected=Get-ApprovedJournalVolumeSet $options.ExpectedApprovedVolumes
+            $proposed=Get-ApprovedJournalVolumeSet $options.ApprovedVolumes
+            $current=$configuration.SourceJournal
+            if (!$current.Contains('Enabled') -or $current.Enabled -isnot [bool] -or !$current.Enabled -or
+                !$current.Contains('ApprovedVolumes') -or !$expected.SetEquals((Get-ApprovedJournalVolumeSet $current.ApprovedVolumes))) {
+                throw 'journal-allowlist-stale'
+            }
+            if ($expected.SetEquals($proposed)) {throw 'journal-allowlist-unchanged'}
+            $current.ApprovedVolumes=@($options.ApprovedVolumes)
+            $options=$current
+        }
         $keys=@('Enabled','PipeName','ApprovedVolumes','PollSeconds','MetadataEntriesPerSecond','SealingEnabled','SealQualifications')
         if ($options.Count -ne $keys.Count -or @($options.Keys|Where-Object {$_ -cnotin $keys}).Count -or
             $options.Enabled -isnot [bool] -or !$options.Enabled -or $options.SealingEnabled -isnot [bool] -or
@@ -112,11 +139,7 @@ function New-SourceJournalConfigurationChange {
             $options.PipeName -cnotmatch '^FluxKnowledge\.SourceJournal\.[A-Za-z0-9.-]*$' -or
             $options.PollSeconds -isnot [long] -or $options.PollSeconds -lt 1 -or $options.PollSeconds -gt 60 -or
             $options.MetadataEntriesPerSecond -isnot [long] -or $options.MetadataEntriesPerSecond -lt 1 -or $options.MetadataEntriesPerSecond -gt 4096) {throw 'Journal options are invalid.'}
-        if ($options.ApprovedVolumes -isnot [array] -or $options.ApprovedVolumes.Count -lt 1 -or $options.ApprovedVolumes.Count -gt 16) {throw 'Approved journal volumes are required.'}
-        $volumes=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-        foreach ($volume in $options.ApprovedVolumes) {
-            if ($volume -isnot [string] -or $volume -inotmatch '^\\\\\?\\Volume\{[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\}\\$' -or !$volumes.Add($volume)) {throw 'Journal volume identity is invalid or duplicated.'}
-        }
+        [void](Get-ApprovedJournalVolumeSet $options.ApprovedVolumes)
         if ($options.SealQualifications -isnot [array] -or $options.SealQualifications.Count -gt 1024) {throw 'Journal qualifications must be a bounded array.'}
         $roots=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
         foreach ($qualification in $options.SealQualifications) {

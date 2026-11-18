@@ -217,7 +217,7 @@ public sealed class SqlNativeCorpusActionStore(
                 "root_update" => new[] { "rootId", "displayName", "applyDefaultPolicy", "reconcile" },
                 "policy_reprocess" => new[] { "rootId", "sourceRevisionId", "predecessorActivityId", "inputSha256", "configurationRevision" },
                 "root_disable" or "root_pause" or "root_resume" or "root_delete" => new[] { "rootId" },
-                "source_sync" => new[] { "rootId", "fullContent" },
+                "source_sync" => new[] { "rootId", "fullContent", "reconcileMetadata" },
                 "source_verify" => new[] { "rootId" },
                 "source_verification_set" => new[] { "rootId", "policy", "paused" },
                 "watcher_set" => new[] { "rootId", "enabled" },
@@ -240,7 +240,12 @@ public sealed class SqlNativeCorpusActionStore(
                     _ = OptionalBool(root, "applyDefaultPolicy", false); _ = OptionalBool(root, "reconcile", true);
                     break;
                 case "root_disable": case "root_pause": case "root_resume": case "root_delete": _ = RequiredGuid(root, "rootId"); break;
-                case "source_sync": _ = RequiredGuid(root, "rootId"); _ = OptionalBool(root, "fullContent", false); break;
+                case "source_sync":
+                    _ = RequiredGuid(root, "rootId");
+                    var fullContent = OptionalBool(root, "fullContent", false);
+                    var reconcileMetadata = OptionalBool(root, "reconcileMetadata", false);
+                    if (fullContent && reconcileMetadata) throw new NativeOperationException("invalid-payload");
+                    break;
                 case "source_verify": _ = RequiredGuid(root, "rootId"); break;
                 case "source_verification_set":
                     _ = RequiredGuid(root, "rootId");
