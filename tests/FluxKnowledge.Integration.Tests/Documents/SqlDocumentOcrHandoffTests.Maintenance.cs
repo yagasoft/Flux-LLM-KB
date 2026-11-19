@@ -26,8 +26,19 @@ public sealed partial class SqlDocumentOcrHandoffTests
         await scheduler.MarkCapacityUncertainAsync(Guid.NewGuid(), reservation, CancellationToken.None);
         await using (var migration = await factory.CreateDbContextAsync())
         {
+            // Cross the residency downgrade gate while the disposable slot is
+            // quiescent, then arrange the exact uncertain legacy state on the old schema.
+            var slot = await migration.GpuCapacitySlots.SingleAsync();
+            var state = (slot.State, slot.ActiveBatchId, slot.OwnerKey);
+            (slot.State, slot.ActiveBatchId, slot.OwnerKey) = ((int)GpuCapacitySlotState.Available, null, null);
+            await migration.SaveChangesAsync();
             await migration.GetService<IMigrator>().MigrateAsync("20261021010911_AddIndexRecoveryReferenceAudit");
-            try { await OcrLifecycleDeploymentTests.RunScriptAsync("ocr-lifecycle-migration-rehearsal.ps1", migration.Database.GetConnectionString()); }
+            try
+            {
+                (slot.State, slot.ActiveBatchId, slot.OwnerKey) = state;
+                await migration.SaveChangesAsync();
+                await OcrLifecycleDeploymentTests.RunScriptAsync("ocr-lifecycle-migration-rehearsal.ps1", migration.Database.GetConnectionString());
+            }
             finally { await migration.Database.MigrateAsync(); }
         }
         await using var read = await factory.CreateDbContextAsync();

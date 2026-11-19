@@ -24,6 +24,7 @@ using System.Text.Json;
 
 var mode = StagingHostArguments.ParseMode(args);
 var normalRuntime = mode == StagingHostMode.NormalRuntime;
+var warmingTrial = mode == StagingHostMode.ModelWarmingTrial;
 var checkNormalRuntime=mode==StagingHostMode.CheckNormalRuntime;
 var candidateQuality = mode == StagingHostMode.CandidateQuality;
 var indexingTrial=mode==StagingHostMode.ExpandedGpuIndexing || normalRuntime;
@@ -31,7 +32,8 @@ var fixtureCleanup=mode==StagingHostMode.IndexFixtureCleanup;
 var expandedGpu = mode is StagingHostMode.ExpandedGpu or StagingHostMode.ExpandedGpuQualification or StagingHostMode.ExpandedGpuIndexing;
 var maximumGpuCohorts=mode is StagingHostMode.ExpandedGpuQualification or StagingHostMode.ExpandedGpuIndexing or StagingHostMode.NormalRuntime?21:1;
 var payloadReadiness = mode == StagingHostMode.PayloadReadiness;
-if ((expandedGpu || normalRuntime || payloadReadiness || fixtureCleanup) && Console.ReadLine() != "approved-bounded-staging-start")
+if ((expandedGpu || normalRuntime || payloadReadiness || fixtureCleanup || warmingTrial) &&
+    Console.ReadLine() != "approved-bounded-staging-start")
     throw new InvalidOperationException("Expanded GPU staging requires its owned-job startup handshake.");
 var controllerNonce=Guid.Empty;
 if((indexingTrial || fixtureCleanup) && (!Guid.TryParse(Console.ReadLine(),out controllerNonce) || controllerNonce==Guid.Empty))
@@ -121,6 +123,13 @@ if (normalBinding is not null)
 {
     StagingNormalGpuComposition.Add(builder.Services, settings);
     StagingNormalGpuGuards.Add(builder.Services, settings, normalBinding);
+}
+if (warmingTrial)
+{
+    StagingModelWarmingTrial.Add(builder.Services, settings);
+    await using var trial = builder.Build();
+    await StagingModelWarmingTrial.RunAsync(trial, settings.GpuModelWarming);
+    return;
 }
 if(indexingTrial || fixtureCleanup)
     builder.Services.AddSingleton(provider=>new StagingRootedIndexFixture(provider.GetRequiredService<IServiceScopeFactory>(),settings,

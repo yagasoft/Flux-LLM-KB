@@ -17,6 +17,7 @@ public sealed class GpuInteractiveExecutor : IGpuExecutorAdapter, IGpuExecutorRe
     private readonly TimeSpan _executionTimeout;
     private readonly CancellationToken _stopping;
     private readonly GpuInteractiveOwnerRecovery? _ownerRecovery;
+    private readonly IGpuProcessModelResidency? _residency;
     private readonly Guid _instance = Guid.NewGuid();
     private readonly object _sync = new();
     private readonly Dictionary<Guid, Entry> _entries = [];
@@ -26,7 +27,8 @@ public sealed class GpuInteractiveExecutor : IGpuExecutorAdapter, IGpuExecutorRe
     public GpuInteractiveExecutor(IGpuInteractiveRequestStore requests, IGpuExecutorLifecycleSink lifecycle,
         IGpuSchedulerStore scheduler, IGpuSchedulerWakeSignal wakeSignal, TimeProvider clock,
         string runtimeKey, string settingsFingerprint, long estimatedBytes, CancellationToken stoppingToken = default,
-        GpuInteractiveOwnerRecovery? ownerRecovery = null, TimeSpan? executionTimeout = null)
+        GpuInteractiveOwnerRecovery? ownerRecovery = null, TimeSpan? executionTimeout = null,
+        IGpuProcessModelResidency? residency = null)
     {
         GpuSchedulerOpaqueKeyValidator.RequireCanonical(runtimeKey, nameof(runtimeKey), 256);
         GpuSchedulerOpaqueKeyValidator.RequireCanonical(settingsFingerprint, nameof(settingsFingerprint), 256);
@@ -37,6 +39,7 @@ public sealed class GpuInteractiveExecutor : IGpuExecutorAdapter, IGpuExecutorRe
         _requests = requests; _lifecycle = lifecycle; _scheduler = scheduler; _wakeSignal = wakeSignal; _clock = clock;
         _stopping = stoppingToken;
         _ownerRecovery = ownerRecovery;
+        _residency = residency;
         _defaultProfile = new(runtimeKey, settingsFingerprint, estimatedBytes);
         _profiles.Add(_defaultProfile);
     }
@@ -44,9 +47,10 @@ public sealed class GpuInteractiveExecutor : IGpuExecutorAdapter, IGpuExecutorRe
         IGpuSchedulerStore scheduler, IGpuSchedulerWakeSignal wakeSignal, TimeProvider clock,
         string runtimeKey, string settingsFingerprint, long estimatedBytes,
         IReadOnlyList<GpuInteractiveExecutionProfile> additionalProfiles, CancellationToken stoppingToken = default,
-        GpuInteractiveOwnerRecovery? ownerRecovery = null, TimeSpan? executionTimeout = null)
+        GpuInteractiveOwnerRecovery? ownerRecovery = null, TimeSpan? executionTimeout = null,
+        IGpuProcessModelResidency? residency = null)
         : this(requests, lifecycle, scheduler, wakeSignal, clock, runtimeKey, settingsFingerprint, estimatedBytes,
-            stoppingToken, ownerRecovery, executionTimeout)
+            stoppingToken, ownerRecovery, executionTimeout, residency)
     {
         foreach (var profile in additionalProfiles)
         {
@@ -178,6 +182,9 @@ public sealed class GpuInteractiveExecutor : IGpuExecutorAdapter, IGpuExecutorRe
                 else if (identity && profile && snapshot.Handle == entry.Handle && snapshot.Handle is not null &&
                     snapshot.State == GpuInteractiveRequestState.Released && (!entry.CallbackEntered || entry.NativeReleased))
                     kind = GpuInteractiveSettlementKind.Released;
+                else if (identity && profile && snapshot.Handle == entry.Handle && snapshot.Handle is not null &&
+                    snapshot.State == GpuInteractiveRequestState.Detached && entry.CallbackEntered)
+                    kind = GpuInteractiveSettlementKind.Detached;
                 else if (identity && snapshot.State == GpuInteractiveRequestState.NotFound && !entry.HandoffCommitted &&
                     entry.QueuedCancellationCompleted && !entry.CallbackEntered && snapshot.Handle is null)
                     // Handoff has returned and exact cancellation passed the admission lock;
@@ -226,21 +233,24 @@ public sealed class GpuInteractiveExecutor : IGpuExecutorAdapter, IGpuExecutorRe
 
     private async Task ExecuteOwnedAsync(Entry entry, GpuExecutorBatchHandle handle)
     {
-        var nativeReleased = true; // This one delivery task has not entered the native callback.
+        var nativeReleased = _residency is null;
+        var context = new GpuOwnedWorkContext(handle, entry.Request.ModelRuntimeKey, entry.Request.SettingsFingerprint,
+            entry.Cancellation.Token);
         try
         {
             entry.Started.TrySetResult();
             var acknowledged = await RetryDurableAsync(() => _lifecycle.AcknowledgeAsync(new(entry.AcknowledgementId, handle), _stopping)).ConfigureAwait(false);
             if (!acknowledged.Accepted || !acknowledged.Committed) throw new InvalidOperationException("interactive-dispatch-not-owned");
             var owned = await RetryDurableAsync(() => _requests.ReadInteractiveExecutionAsync(handle, _instance, GpuExecutorDispatchState.Acknowledged, _stopping)).ConfigureAwait(false);
-            if (owned is null) throw new InvalidOperationException("interactive-dispatch-not-owned");
+            if (owned is null || owned.ModelRuntimeKey != context.RuntimeKey || owned.SettingsFingerprint != context.SettingsFingerprint)
+                throw new InvalidOperationException("interactive-dispatch-not-owned");
+            var supportsResidency = _residency?.Supports(context) == true;
             GpuInteractiveNativeResult<object?> result;
             if (owned.CancellationRequested || entry.Cancellation.IsCancellationRequested)
                 result = new(null, true, "interactive-request-expired");
             else
             {
                 nativeReleased = false;
-                var context = new GpuOwnedWorkContext(handle, owned.ModelRuntimeKey, owned.SettingsFingerprint, entry.Cancellation.Token);
                 bool registeredNativeReleased;
                 var callbackReturned = false;
                 entry.CallbackEntered = true;
@@ -259,19 +269,34 @@ public sealed class GpuInteractiveExecutor : IGpuExecutorAdapter, IGpuExecutorRe
                 }
                 result = result with { NativeCapacityReleased = result.NativeCapacityReleased && registeredNativeReleased };
             }
-            // Exceptions and deadlines do not prove native memory release.
-            if (!result.NativeCapacityReleased) throw new InvalidOperationException("interactive-native-release-unconfirmed");
-            nativeReleased = true;
             var success = result.RefusalReason is null && !entry.Cancellation.IsCancellationRequested && _clock.GetUtcNow() < entry.Request.ExecutionDeadlineUtc;
+            var keepResident = supportsResidency && success && context.ResidentModelUsed;
+            if (!keepResident)
+            {
+                nativeReleased = supportsResidency
+                    ? await RetryDurableAsync(() => _residency!.ReleaseAsync(context, _stopping)).ConfigureAwait(false)
+                    : result.NativeCapacityReleased;
+                entry.RegisteredNativeReleased = context.NativeCapacityReleased;
+                if (!nativeReleased) throw new InvalidOperationException("interactive-native-release-unconfirmed");
+            }
             var disposition = success ? GpuMiniTaskBoundaryDisposition.Completed : GpuMiniTaskBoundaryDisposition.OutcomeUncertain;
             var receipt = new GpuExecutorResultReceipt(entry.ReceiptId, handle, entry.Request.RequestId, disposition, null,
                 success ? GpuExecutorEvidenceClass.TaskOutcomeConfirmed : GpuExecutorEvidenceClass.TaskOutcomeUncertainConfirmed);
             var recorded = await RetryDurableAsync(() => _lifecycle.RecordReceiptAsync(receipt, _stopping)).ConfigureAwait(false);
             if (!recorded.Accepted || !recorded.Committed) throw new InvalidOperationException("interactive-receipt-not-owned");
-            var callback = new GpuBatchCallback(handle, success ? GpuBatchCallbackKind.Completed : GpuBatchCallbackKind.CapacityReleased,
-                [new(entry.Request.RequestId, disposition)], CapacityReleased: true);
-            var released = await RetryDurableAsync(() => _lifecycle.HandleCallbackAsync(entry.CallbackId, callback, _stopping)).ConfigureAwait(false);
-            if (!released.Accepted || !released.Committed) throw new InvalidOperationException("interactive-capacity-release-not-committed");
+            if (keepResident)
+            {
+                if (!await RetryDurableAsync(() => _residency!.CompleteAsync(context, entry.CallbackId,
+                        entry.Request.RequestId, _stopping)).ConfigureAwait(false))
+                    throw new InvalidOperationException("interactive-model-detachment-not-committed");
+            }
+            else
+            {
+                var callback = new GpuBatchCallback(handle, success ? GpuBatchCallbackKind.Completed : GpuBatchCallbackKind.CapacityReleased,
+                    [new(entry.Request.RequestId, disposition)], CapacityReleased: true);
+                var released = await RetryDurableAsync(() => _lifecycle.HandleCallbackAsync(entry.CallbackId, callback, _stopping)).ConfigureAwait(false);
+                if (!released.Accepted || !released.Committed) throw new InvalidOperationException("interactive-capacity-release-not-committed");
+            }
             if (success && !entry.Cancellation.IsCancellationRequested) entry.Result.TrySetResult(result.Value);
             else entry.Result.TrySetException(new InvalidOperationException(result.RefusalReason ?? "interactive-request-expired"));
             Remove(entry);
@@ -281,6 +306,11 @@ public sealed class GpuInteractiveExecutor : IGpuExecutorAdapter, IGpuExecutorRe
             entry.Result.TrySetException(new InvalidOperationException("interactive-execution-or-release-unconfirmed"));
             try
             {
+                if (_residency?.Supports(context) == true)
+                {
+                    nativeReleased = await RetryDurableAsync(() => _residency.ReleaseAsync(context, _stopping)).ConfigureAwait(false);
+                    entry.RegisteredNativeReleased = context.NativeCapacityReleased;
+                }
                 var reservation = (await RetryDurableAsync(() => _scheduler.ReadStaleCapacityReservationsAsync(_clock.GetUtcNow(), _stopping)).ConfigureAwait(false))
                     .SingleOrDefault(r => r.BatchId == handle.BatchId && r.CapacitySlotKey == handle.CapacitySlotKey && r.AdmissionGeneration == handle.AdmissionGeneration);
                 var uncertaintyOperation = Guid.NewGuid();

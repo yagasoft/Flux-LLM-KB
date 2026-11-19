@@ -115,6 +115,8 @@ public sealed record GpuSchedulerStatusProjection(
     GpuCapacityUncertaintySummary UncertainCapacity)
 {
     public GpuOcrOwnerStatus? OcrOwner { get; init; }
+    public int WarmModelSlotCount { get; init; }
+    public int ReleasingModelSlotCount { get; init; }
     public static GpuSchedulerStatusProjection Empty { get; } = new(
         0,
         0,

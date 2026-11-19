@@ -29,17 +29,18 @@ function Invoke-PassageWindowPreDdlAbort {
 }
 
 function Invoke-DeploymentPassageWindowPreDdlAbort {
-    param([string]$PriorReleaseId,[string]$ExpectedBindingSha256,[switch]$Apply,[switch]$Outlook,[switch]$CodexWorkspace,[switch]$MediaTranscription,[switch]$VerifyOnly)
+    param([string]$PriorReleaseId,[string]$ExpectedBindingSha256,[switch]$Apply,[switch]$Outlook,[switch]$CodexWorkspace,[switch]$GpuResidency,[switch]$MediaTranscription,[switch]$VerifyOnly)
     if($PriorReleaseId -cnotmatch '^\d{8}T\d{6}Z-[a-f0-9]{12}$' -or
         $ExpectedBindingSha256 -cnotmatch '^[A-Fa-f0-9]{64}$' -or !$ExpectedSourceJournalDatabaseIdentity){
         throw 'window-pre-ddl-abort-binding-required'
     }
     $ApplyOutlookWatchedSourceMigration = $Outlook
     $ApplyCodexWorkspaceNotesMigration = $CodexWorkspace
+    $ApplyGpuModelResidencyMigration = $GpuResidency
     $ApplyMediaTranscriptionGpuMigration = $MediaTranscription
-    $contract = Get-PassageWindowEligibilityMigrationContract -Outlook:$Outlook -CodexWorkspace:$CodexWorkspace -MediaTranscription:$MediaTranscription
+    $contract = Get-PassageWindowEligibilityMigrationContract -Outlook:$Outlook -CodexWorkspace:$CodexWorkspace -MediaTranscription:$MediaTranscription -GpuResidency:$GpuResidency
     $purpose = $contract.ArtifactPrefix + '-migration'
-    $receiptPrefix = if ($MediaTranscription) { 'media-transcription-pre-ddl-abort' } elseif ($CodexWorkspace) { 'codex-workspace-pre-ddl-abort' } elseif ($Outlook) { 'outlook-pre-ddl-abort' } else { 'pre-ddl-abort' }
+    $receiptPrefix = if ($GpuResidency) { 'gpu-residency-pre-ddl-abort' } elseif ($MediaTranscription) { 'media-transcription-pre-ddl-abort' } elseif ($CodexWorkspace) { 'codex-workspace-pre-ddl-abort' } elseif ($Outlook) { 'outlook-pre-ddl-abort' } else { 'pre-ddl-abort' }
     $prior=Join-Path $IncrementalRecoveryRoot $PriorReleaseId
     $bindingPath=Join-Path $prior ($purpose+'-release-binding.json')
     $binding=Read-SegmentedUpdateJson $bindingPath $ExpectedBindingSha256
@@ -47,7 +48,7 @@ function Invoke-DeploymentPassageWindowPreDdlAbort {
         $binding.ReleaseId -cne $PriorReleaseId -or !$PriorReleaseId.EndsWith('-'+$binding.Commit.Substring(0,12),[StringComparison]::Ordinal) -or
         $binding.Identity -cne $ExpectedSourceJournalDatabaseIdentity -or
         $binding.Target -cne $contract.Target -or $binding.SqlSha256 -cne $contract.UpSha256 -or
-        $binding.EnableCompanionAfterValidation -isnot [bool] -or (!($Outlook -or $CodexWorkspace -or $MediaTranscription) -and $binding.EnableCompanionAfterValidation) -or
+        $binding.EnableCompanionAfterValidation -isnot [bool] -or (!($Outlook -or $CodexWorkspace -or $MediaTranscription -or $GpuResidency) -and $binding.EnableCompanionAfterValidation) -or
         @($binding.OriginalPayloads).Count -ne 3 -or
         (@($binding.OriginalPayloads.Role|Sort-Object) -join '|') -cne 'Cli|OutlookHost|Web'){
         throw 'window-pre-ddl-abort-release-invalid'
@@ -81,7 +82,7 @@ function Invoke-DeploymentPassageWindowPreDdlAbort {
                 (Get-HybridPayloadFingerprint (Assert-SegmentedUpdatePath $payload.Root)) -cne $payload.Sha256){throw 'window-pre-ddl-abort-original-payload-changed'}
         }
         foreach($connection in @((Get-DeploymentSqlConnectionString),(Get-RepositoryRecoveryCompanionConnectionString))){
-            if((Get-PassageWindowEligibilityStateKind (Get-PassageWindowEligibilityDatabaseState $connection -Outlook:$Outlook -CodexWorkspace:$CodexWorkspace -MediaTranscription:$MediaTranscription) $binding.Identity -Outlook:$Outlook -CodexWorkspace:$CodexWorkspace -MediaTranscription:$MediaTranscription) -cne 'Old'){
+            if((Get-PassageWindowEligibilityStateKind (Get-PassageWindowEligibilityDatabaseState $connection -Outlook:$Outlook -CodexWorkspace:$CodexWorkspace -MediaTranscription:$MediaTranscription -GpuResidency:$GpuResidency) $binding.Identity -Outlook:$Outlook -CodexWorkspace:$CodexWorkspace -MediaTranscription:$MediaTranscription -GpuResidency:$GpuResidency) -cne 'Old'){
                 throw 'typed-pre-ddl-abort-requires-exact-baseline'
             }
         }
@@ -96,7 +97,7 @@ function Invoke-DeploymentPassageWindowPreDdlAbort {
         Assert-DeploymentSourceJournalCliWritersStopped
         $checkpointPath = Join-Path $SourceJournalHelperRoot ('updates/'+$PriorReleaseId+'/state.json')
         $checkpoint=Read-SegmentedUpdateJson $checkpointPath
-        $helperUnchanged = $checkpoint.Phase -ceq 'RolledBack' -or (($Outlook -or $CodexWorkspace -or $MediaTranscription) -and $checkpoint.Phase -ceq 'Prepared')
+        $helperUnchanged = $checkpoint.Phase -ceq 'RolledBack' -or (($Outlook -or $CodexWorkspace -or $MediaTranscription -or $GpuResidency) -and $checkpoint.Phase -ceq 'Prepared')
         if(!$helperUnchanged -or $checkpoint.ReleaseId -cne $PriorReleaseId -or
             (Get-SourceJournalHelperPayloadManifest (Join-Path $SourceJournalHelperRoot 'payload')).Sha256 -cne $checkpoint.OriginalPayloadSha256){
             throw 'window-pre-ddl-abort-helper-rollback-unproved'

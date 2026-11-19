@@ -58,7 +58,12 @@ internal static class SqlGpuSchedulerStatusReader
                 .Select(state => state.NextDeferredAtUtc)
                 .SingleAsync(cancellationToken)
                 .ConfigureAwait(false),
-            uncertainAge) { OcrOwner = await ReadOcrOwnerAsync(context, now, cancellationToken).ConfigureAwait(false) };
+            uncertainAge)
+        {
+            OcrOwner = await ReadOcrOwnerAsync(context, now, cancellationToken).ConfigureAwait(false),
+            WarmModelSlotCount = slotCounts.Where(group => group.State == (int)GpuCapacitySlotState.ResidentIdle).Sum(group => group.Count),
+            ReleasingModelSlotCount = slotCounts.Where(group => group.State == (int)GpuCapacitySlotState.ResidentEvicting).Sum(group => group.Count)
+        };
     }
 
     private static async Task<GpuOcrOwnerStatus?> ReadOcrOwnerAsync(FluxKnowledgeDbContext context,

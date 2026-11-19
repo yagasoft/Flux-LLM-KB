@@ -109,12 +109,13 @@ function Get-SourceJournalDatabaseState {
                 $windowSchemaSha256=Get-PassageWindowEligibilitySchemaSha256 -Connection $connection -Transaction $transaction
                 $queueIndexSha256=Get-SourceDeletionPendingQueueIndexSha256 -Connection $connection -Transaction $transaction
                 $outlookSchemaSha256=if($history.Count -ge 80){ Get-OutlookWatchedSourceSchemaSha256 -Connection $connection -Transaction $transaction }
+                $residencySchema=if($history.Count -ge 83){ Get-GpuModelResidencySchemaFingerprint $connection $transaction }
                 $mediaSchema=if($history.Count -ge 82){ Get-MediaTranscriptionSchemaFingerprint $connection $transaction }
                 $codexWorkspaceSchemaKind=if($history.Count -ge 81){ Get-CodexWorkspaceNotesSchemaKind -Connection $connection -Transaction $transaction }
                 $transaction.Commit()
                 [pscustomobject]@{Identity=$identity;History=$history.ToArray();CanAlter=$canAlter;SchemaSha256=(Get-SourceJournalValueHash $schema);
                     VectorPublicationIndexSha256=$vectorIndexSha256;WindowEligibilitySchemaSha256=$windowSchemaSha256;QueueIndexSha256=$queueIndexSha256;
-                    OutlookSchemaSha256=$outlookSchemaSha256;CodexWorkspaceSchemaKind=$codexWorkspaceSchemaKind;MediaSchemaFingerprint=$mediaSchema}
+                    OutlookSchemaSha256=$outlookSchemaSha256;CodexWorkspaceSchemaKind=$codexWorkspaceSchemaKind;MediaSchemaFingerprint=$mediaSchema;ResidencySchemaFingerprint=$residencySchema}
             }finally{$command.Dispose()}
         }finally{$transaction.Dispose()}
     }finally{$connection.Dispose()}
@@ -129,10 +130,23 @@ function Assert-SourceJournalSchema {
     $codex=Get-PassageWindowEligibilityMigrationContract -CodexWorkspace
     $codexObservation=$DatabaseState.PSObject.Properties['CodexWorkspaceSchemaKind']
     $mediaObservation=$DatabaseState.PSObject.Properties['MediaSchemaFingerprint']
+    $residencyObservation=$DatabaseState.PSObject.Properties['ResidencySchemaFingerprint']
+    $residency=Get-PassageWindowEligibilityMigrationContract -GpuResidency
+    $hasResidency=$history.Count -eq 84
+    if ($hasResidency) {
+        $prefix=@($history[0..82])
+        if (!$residencyObservation -or $residencyObservation.Value -cne $residency.ResidencySchemaSha256 -or
+            $history[-1] -cne $residency.Target -or (Get-SourceJournalValueHash ($prefix -join "`n")) -cne $residency.PriorHistorySha256) {
+            throw 'journal-schema-gpu-residency-successor-invalid'
+        }
+        $history=$prefix
+    } elseif ($history.Count -eq 83 -and $residencyObservation -and $residencyObservation.Value -cne $residency.ResidencyOldSchemaSha256) {
+        throw 'journal-schema-unrecorded-gpu-residency'
+    }
     if ($history.Count -eq 83) {
         $media=Get-PassageWindowEligibilityMigrationContract -MediaTranscription
         $prefix=@($history[0..81])
-        if (!$mediaObservation -or $mediaObservation.Value -cne $media.MediaSchemaSha256 -or $history[-1] -cne $media.Target -or
+        if ((!$hasResidency -and (!$mediaObservation -or $mediaObservation.Value -cne $media.MediaSchemaSha256)) -or $history[-1] -cne $media.Target -or
             (Get-SourceJournalValueHash ($prefix -join "`n")) -cne $media.PriorHistorySha256){ throw 'journal-schema-media-successor-invalid' }
         $history=$prefix
     } elseif ($history.Count -eq 82 -and $mediaObservation -and $mediaObservation.Value -cne 'Old') {
@@ -206,7 +220,7 @@ function New-SourceJournalMigrationState {
         if($index.Value -isnot [string] -or $index.Value -cnotmatch '^[A-F0-9]{64}$'){throw 'journal-schema-index-observation-invalid'}
         $state.OriginalVectorPublicationIndexSha256=$index.Value
     }
-    foreach($field in @('WindowEligibilitySchemaSha256','QueueIndexSha256','OutlookSchemaSha256','CodexWorkspaceSchemaKind','MediaSchemaFingerprint')){
+    foreach($field in @('WindowEligibilitySchemaSha256','QueueIndexSha256','OutlookSchemaSha256','CodexWorkspaceSchemaKind','MediaSchemaFingerprint','ResidencySchemaFingerprint')){
         $observed=$DatabaseState.PSObject.Properties[$field]
         if($observed -and $null -ne $observed.Value){$state['Original'+$field]=$observed.Value}
     }
@@ -232,7 +246,7 @@ function Invoke-SourceJournalMigrationAttempt {
     if($State.ContainsKey('OriginalVectorPublicationIndexSha256')){
         $receipt.OriginalVectorPublicationIndexSha256=$State.OriginalVectorPublicationIndexSha256
     }
-    foreach($field in @('OriginalWindowEligibilitySchemaSha256','OriginalQueueIndexSha256','OriginalOutlookSchemaSha256','OriginalCodexWorkspaceSchemaKind','OriginalMediaSchemaFingerprint')){
+    foreach($field in @('OriginalWindowEligibilitySchemaSha256','OriginalQueueIndexSha256','OriginalOutlookSchemaSha256','OriginalCodexWorkspaceSchemaKind','OriginalMediaSchemaFingerprint','OriginalResidencySchemaFingerprint')){
         if($State.ContainsKey($field)){$receipt[$field]=$State[$field]}
     }
     $bytes=[Text.UTF8Encoding]::new($false).GetBytes(($receipt|ConvertTo-Json -Depth 12))
@@ -370,11 +384,11 @@ function Get-SourceJournalHeldMigrationIntent {
         if($index -isnot [string] -or $index -cnotmatch '^[A-F0-9]{64}$'){throw 'journal-schema-held-intent-index-observation-invalid'}
         $original|Add-Member -NotePropertyName VectorPublicationIndexSha256 -NotePropertyValue $index
     }
-    foreach($field in @('WindowEligibilitySchemaSha256','QueueIndexSha256','OutlookSchemaSha256','CodexWorkspaceSchemaKind','MediaSchemaFingerprint')){
+    foreach($field in @('WindowEligibilitySchemaSha256','QueueIndexSha256','OutlookSchemaSha256','CodexWorkspaceSchemaKind','MediaSchemaFingerprint','ResidencySchemaFingerprint')){
         $key='Original'+$field
         if($intent.Contains($key)){
             $value=$intent[$key]
-            $pattern=if($field -ceq 'MediaSchemaFingerprint'){'^(Old|[A-F0-9]{64})$'}elseif($field -ceq 'CodexWorkspaceSchemaKind'){'^(Old|New)$'}else{'^[A-F0-9]{64}$'}
+            $pattern=if($field -cin @('MediaSchemaFingerprint','ResidencySchemaFingerprint')){'^(Old|[A-F0-9]{64})$'}elseif($field -ceq 'CodexWorkspaceSchemaKind'){'^(Old|New)$'}else{'^[A-F0-9]{64}$'}
             if($value -isnot [string] -or $value -cnotmatch $pattern){throw 'journal-schema-held-intent-successor-observation-invalid'}
             $original|Add-Member -NotePropertyName $field -NotePropertyValue $value
         }

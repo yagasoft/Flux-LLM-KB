@@ -36,7 +36,9 @@ internal static class SqlSourceDeletionOwnership
             jobIds.Contains(request.ParentJobId) || parentTaskIds.Contains(request.MiniTaskId));
         var ocrRequests = context.DocumentOcrRequests.Where(request => recordIds.Contains(request.PipelineRecordId) ||
             revisionIds.Contains(request.RetainedSourceRevisionId) || jobIds.Contains(request.ParentJobId) || parentTaskIds.Contains(request.MiniTaskId));
-        var settledOcrIds = ocrRequests.Where(request => request.ExecutionInstanceId != null && request.NativeCleanupConfirmedAtUtc != null &&
+        var detachedOcrIds = context.Database.SqlQueryRaw<Guid>(DetachedOcrTaskIdsSql);
+        var settledOcrIds = ocrRequests.Where(request => detachedOcrIds.Contains(request.MiniTaskId) ||
+            request.ExecutionInstanceId != null && request.NativeCleanupConfirmedAtUtc != null &&
             (request.ExecutionPhase == (int)DocumentOcrExecutionPhase.CleanupConfirmed || request.ExecutionPhase == (int)DocumentOcrExecutionPhase.Settled) &&
             ((request.CleanupProofKind == (int)DocumentOcrCleanupKind.VerifiedUnstarted && request.NativeProcessId == null) ||
              (request.CleanupProofKind == (int)DocumentOcrCleanupKind.OwnedJobEmpty && request.NativeProcessId != null && request.NativeProcessStartedAtUtc != null) ||
@@ -50,7 +52,8 @@ internal static class SqlSourceDeletionOwnership
               !embeddingRequests.Any(request => request.MiniTaskId == task.Id && request.NativeCleanupConfirmed))) &&
             (parentTaskIds.Contains(task.Id) || embeddingRequests.Any(request => request.MiniTaskId == task.Id) ||
              ocrRequests.Any(request => request.MiniTaskId == task.Id)), ct).ConfigureAwait(false)) return true;
-        if (await embeddingRequests.AnyAsync(request => request.ExecutorInstanceId != null && !request.NativeCleanupConfirmed, ct)
+        if (await embeddingRequests.AnyAsync(request => request.ExecutorInstanceId != null && !request.NativeCleanupConfirmed &&
+                request.ResidentDetachmentDispatchId == null, ct)
             .ConfigureAwait(false)) return true;
 
         if (await HasUnconfirmedMediaWorkAsync(context, rootId, ct).ConfigureAwait(false))
@@ -69,6 +72,14 @@ internal static class SqlSourceDeletionOwnership
             .AnyAsync(request => !settledOcrIds.Contains(request.MiniTaskId), ct)
             .ConfigureAwait(false);
     }
+
+    private static readonly string DetachedOcrTaskIdsSql = $$"""
+        SELECT request.MiniTaskId AS [Value]
+        FROM DocumentOcrRequests request
+        INNER JOIN GpuMiniTasks task ON task.Id = request.MiniTaskId
+        INNER JOIN Jobs job ON job.Id = request.ParentJobId
+        WHERE {{SqlRemovedSourceWork.OcrDetached("request", "task", "job")}}
+        """;
 
     private static IQueryable<MediaTranscriptionGpuRequestEntity> MediaRequests(FluxKnowledgeDbContext context, Guid rootId)
     {

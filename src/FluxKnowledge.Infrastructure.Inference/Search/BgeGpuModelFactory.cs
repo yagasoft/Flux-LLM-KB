@@ -33,12 +33,14 @@ public sealed record BgeGpuModelStores(ILocalModelStore Embedding, ILocalModelSt
 public sealed class BgeGpuModelFactory : IBgeGpuModelFactory
 {
     private readonly BgeGpuModelStores _stores;
+    private readonly IGpuProcessModelResidency? _residency;
     public BgeGpuModelFactory(BgeGpuModelStores stores) : this(stores, BgeRerankerPrecision.Fp32) { }
-    public BgeGpuModelFactory(BgeGpuModelStores stores, BgeRerankerPrecision precision)
+    public BgeGpuModelFactory(BgeGpuModelStores stores, BgeRerankerPrecision precision,
+        IGpuProcessModelResidency? residency = null)
     {
         ArgumentNullException.ThrowIfNull(stores);
         _ = BgeOfflineModels.GetRerankerFingerprint(precision);
-        _stores = stores; Precision = precision;
+        _stores = stores; Precision = precision; _residency = residency;
     }
     public BgeRerankerPrecision Precision { get; }
 
@@ -48,7 +50,17 @@ public sealed class BgeGpuModelFactory : IBgeGpuModelFactory
         var tokenizer = await BgeOfflineModels.CreateTokenizerAsync(_stores.Embedding, _stores.TokenizerRuntime, false, ownership.CancellationToken).ConfigureAwait(false);
         try
         {
-            var model = await BgeOfflineModels.OpenGpuEmbeddingAsync(_stores.Embedding, tokenizer, ownership, Precision).ConfigureAwait(false);
+            BgeEmbeddingProvider model;
+            if (_residency?.Supports(ownership) == true)
+            {
+                var phase = BgeGpuModelPhase.Embedding;
+                var key = BgeOfflineModels.GetGpuResidentModelKey(phase, Precision);
+                var resident = await _residency.GetModelAsync(ownership, key,
+                    () => BgeOfflineModels.OpenGpuResidentAsync(_stores.Embedding, phase, ownership, Precision)).ConfigureAwait(false);
+                model = new(tokenizer, resident.Borrow(ownership, key), BgeOfflineModels.EmbeddingFingerprint);
+            }
+            else
+                model = await BgeOfflineModels.OpenGpuEmbeddingAsync(_stores.Embedding, tokenizer, ownership, Precision).ConfigureAwait(false);
             return new(model, () => { try { model.Dispose(); } finally { tokenizer.Dispose(); } });
         }
         catch { tokenizer.Dispose(); throw; }
@@ -60,7 +72,17 @@ public sealed class BgeGpuModelFactory : IBgeGpuModelFactory
         var tokenizer = await BgeOfflineModels.CreateTokenizerAsync(_stores.RerankerTokenizer, _stores.TokenizerRuntime, true, ownership.CancellationToken).ConfigureAwait(false);
         try
         {
-            var model = await BgeOfflineModels.OpenGpuRerankerAsync(_stores.Reranker, tokenizer, ownership, Precision).ConfigureAwait(false);
+            BgeReranker model;
+            if (_residency?.Supports(ownership) == true)
+            {
+                var phase = BgeGpuModelPhase.Reranker;
+                var key = BgeOfflineModels.GetGpuResidentModelKey(phase, Precision);
+                var resident = await _residency.GetModelAsync(ownership, key,
+                    () => BgeOfflineModels.OpenGpuResidentAsync(_stores.Reranker, phase, ownership, Precision)).ConfigureAwait(false);
+                model = new(tokenizer, resident.Borrow(ownership, key), BgeOfflineModels.GetRerankerFingerprint(Precision));
+            }
+            else
+                model = await BgeOfflineModels.OpenGpuRerankerAsync(_stores.Reranker, tokenizer, ownership, Precision).ConfigureAwait(false);
             return new(model, () => { try { model.Dispose(); } finally { tokenizer.Dispose(); } });
         }
         catch { tokenizer.Dispose(); throw; }

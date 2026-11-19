@@ -37,6 +37,7 @@ internal sealed class StagingHostSettings
     internal string IndexPublicationMode { get; }
     internal bool DashboardReadBenchmark { get; }
     internal bool CpuSemantic { get; private init; }
+    internal bool GpuModelWarming { get; private init; }
     internal int CpuRerankerShards { get; private init; } = 4;
     internal int CpuRerankerThreads { get; private init; } = 4;
     internal int AnnSearchExpansion { get; private init; } = UsearchReadIndex.DefaultSearchExpansion;
@@ -97,6 +98,8 @@ internal sealed class StagingHostSettings
             throw new ArgumentException("Incremental staging requires explicit journal volumes.");
         if (document.CpuSemantic && (loaded.IndexPublicationMode != "Segmented" || !loaded.DashboardReadBenchmark || document.SourceJournalEnabled))
             throw new ArgumentException("Real semantic staging requires segmented indexes and explicit workloads with autonomous writers and journals disabled.");
+        if (document.GpuModelWarming && !document.CpuSemantic)
+            throw new ArgumentException("GPU model warming requires explicit semantic staging.");
         if (document.CpuRerankerShards is not (1 or 4) || !document.CpuSemantic && document.CpuRerankerShards != 4)
             throw new ArgumentException("Staging CPU reranking requires one or four shards and explicit semantic mode.");
         if (document.CpuRerankerThreads is not (1 or 4) || !document.CpuSemantic && document.CpuRerankerThreads != 4)
@@ -108,6 +111,7 @@ internal sealed class StagingHostSettings
             document.DashboardReadConsistency)
         {
             CpuSemantic = document.CpuSemantic,
+            GpuModelWarming = document.GpuModelWarming,
             CpuRerankerShards = document.CpuRerankerShards,
             CpuRerankerThreads = document.CpuRerankerThreads,
             AnnSearchExpansion = document.AnnSearchExpansion,
@@ -190,7 +194,7 @@ internal sealed class StagingHostSettings
         bool SourceJournalEnabled = false, string[]? SourceJournalVolumes = null,
         bool SourceJournalSealingEnabled = false, SourceJournalSealQualification[]? SourceJournalSealQualifications = null,
         int SourceJournalMetadataEntriesPerSecond = 64, bool CpuSemantic = false, int CpuRerankerShards = 4, int CpuRerankerThreads = 4,
-        int AnnSearchExpansion = UsearchReadIndex.DefaultSearchExpansion);
+        int AnnSearchExpansion = UsearchReadIndex.DefaultSearchExpansion, bool GpuModelWarming = false);
 }
 
 internal sealed class StagingSourceRootPathPolicy(ISourceRootPathPolicy inner, string sourcesRoot) : ISourceRootPathPolicy

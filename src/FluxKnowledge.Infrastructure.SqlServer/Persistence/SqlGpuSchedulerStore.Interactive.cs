@@ -148,13 +148,24 @@ public sealed partial class SqlGpuSchedulerStore
                 request.ExecutionDeadlineUtc <= request.QueueDeadlineUtc || request.ExecutionDeadlineUtc > now.Add(_interactiveExecutionTimeout))
                 throw new ArgumentException("interactive-request-deadline-invalid", nameof(request));
             await CancelExpiredInteractiveAsync(context, now, cancellationToken).ConfigureAwait(false);
+            var compatibleIdle = false;
+            if (request.DeclineWhenGpuBusy && _residentOptions?.GetResidentEntryModel(request.ModelRuntimeKey,
+                    request.SettingsFingerprint) is { } entryModel)
+                compatibleIdle = await context.GpuModelResidencies.AnyAsync(row =>
+                    row.State == (int)GpuModelResidencyState.Idle && row.IdleUntilUtc > now &&
+                    row.OwnerProcessId == owner.ProcessId && row.OwnerStartedAtUtc == owner.StartedAtUtc &&
+                    row.MachineFingerprint == owner.MachineFingerprint && row.RuntimeKey == entryModel.RuntimeKey &&
+                    row.SettingsFingerprint == entryModel.SettingsFingerprint && row.ModelKey == entryModel.ModelKey,
+                    cancellationToken).ConfigureAwait(false);
             if (request.DeclineWhenGpuBusy &&
                 (!await context.GpuCapacitySlots.AnyAsync(cancellationToken).ConfigureAwait(false) ||
                  await context.GpuCapacitySlots.AnyAsync(slot =>
-                     slot.State != (int)GpuCapacitySlotState.Available || slot.ActiveBatchId != null,
+                     (slot.State != (int)GpuCapacitySlotState.Available &&
+                      (!compatibleIdle || slot.State != (int)GpuCapacitySlotState.ResidentIdle)) || slot.ActiveBatchId != null,
                      cancellationToken).ConfigureAwait(false) ||
                  await context.GpuMiniTasks.AnyAsync(task =>
-                     task.ExecutionState == (int)GpuMiniTaskExecutionState.Ready ||
+                     task.ExecutionState == (int)GpuMiniTaskExecutionState.Ready &&
+                        (!compatibleIdle || task.PriorityLane == (int)GpuPriorityLane.InteractiveRetrieval) ||
                      task.ExecutionState == (int)GpuMiniTaskExecutionState.Active,
                      cancellationToken).ConfigureAwait(false)))
                 throw new GpuInteractiveBusyWithoutHandoffException();

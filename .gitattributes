@@ -5,3 +5,4 @@
 *.bat text eol=crlf
 # Preserve the exact reviewed EF-generated migration artifact, including its BOM.
 scripts/deploy/source-journal-up.sql -text
+scripts/deploy/gpu-model-residency-up.sql -text whitespace=-blank-at-eof

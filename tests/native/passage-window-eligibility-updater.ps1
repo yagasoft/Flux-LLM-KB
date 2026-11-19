@@ -1,5 +1,6 @@
 [CmdletBinding()]
-param([string]$SourceRoot=(Split-Path -Parent (Split-Path -Parent $PSScriptRoot)),[switch]$Outlook,[switch]$CodexWorkspace,[switch]$MediaTranscription)
+param([string]$SourceRoot=(Split-Path -Parent (Split-Path -Parent $PSScriptRoot)),[switch]$Outlook,[switch]$CodexWorkspace,[switch]$GpuResidency,[switch]$MediaTranscription)
+$ApplyGpuModelResidencyMigration=$GpuResidency
 $ApplyMediaTranscriptionGpuMigration=$MediaTranscription
 $mediaConfigurationChange=$null
 $ErrorActionPreference='Stop';Set-StrictMode -Version Latest
@@ -20,7 +21,7 @@ function Load([string]$Name){
  . ([scriptblock]::Create('function script:'+$Name+' '+$node[0].Body.Extent.Text))
 }
 Load 'Assert-PassageWindowEligibilityUpdateOptions'
-$mode = if ($MediaTranscription) { 'ApplyMediaTranscriptionGpuMigration' } elseif ($CodexWorkspace) { 'ApplyCodexWorkspaceNotesMigration' } elseif ($Outlook) { 'ApplyOutlookWatchedSourceMigration' } else { 'ApplyPassageWindowEligibilityMigration' }
+$mode = if ($GpuResidency) { 'ApplyGpuModelResidencyMigration' } elseif ($MediaTranscription) { 'ApplyMediaTranscriptionGpuMigration' } elseif ($CodexWorkspace) { 'ApplyCodexWorkspaceNotesMigration' } elseif ($Outlook) { 'ApplyOutlookWatchedSourceMigration' } else { 'ApplyPassageWindowEligibilityMigration' }
 $good=@{$mode=$true;ExpectedSourceJournalDatabaseIdentity='owned'}
 if ($MediaTranscription) {
     $unbound=$good.Clone()
@@ -53,7 +54,7 @@ if ($MediaTranscription) {
     Refuse { Assert-PassageWindowEligibilityUpdateOptions $bound }
 }
 Assert-PassageWindowEligibilityUpdateOptions $good
-foreach($otherMode in @('ApplyMediaTranscriptionGpuMigration','ApplyCodexWorkspaceNotesMigration','ApplyOutlookWatchedSourceMigration','ApplyPassageWindowEligibilityMigration') | Where-Object { $_ -ne $mode }){
+foreach($otherMode in @('ApplyGpuModelResidencyMigration','ApplyMediaTranscriptionGpuMigration','ApplyCodexWorkspaceNotesMigration','ApplyOutlookWatchedSourceMigration','ApplyPassageWindowEligibilityMigration') | Where-Object { $_ -ne $mode }){
  $bad=$good.Clone();$bad[$otherMode]=$true;Refuse {Assert-PassageWindowEligibilityUpdateOptions $bad}
 }
 foreach($flag in @('ApplyMigrations','ApplyVectorPublicationMetadataMigration','RecoverStoppedPool','EnableDashboardSnapshots','DisableSourceAccessRecovery','ApplyIncrementalSourceScanning')){
@@ -115,13 +116,13 @@ Load 'Assert-PassageWindowEligibilityActivation'
 function Get-DeploymentSqlConnectionString {'owned-web'}
 function Get-RepositoryRecoveryCompanionConnectionString {'owned-companion'}
 function Get-PassageWindowEligibilityDatabaseState {
- param($ConnectionString,[switch]$Outlook,[switch]$CodexWorkspace,[switch]$MediaTranscription)
- Check ($MediaTranscription -eq $ApplyMediaTranscriptionGpuMigration -and $Outlook -eq $ApplyOutlookWatchedSourceMigration -and $CodexWorkspace -eq $ApplyCodexWorkspaceNotesMigration) 'Database observation used the wrong migration mode.'
+ param($ConnectionString,[switch]$Outlook,[switch]$CodexWorkspace,[switch]$GpuResidency,[switch]$MediaTranscription)
+ Check ($GpuResidency -eq $ApplyGpuModelResidencyMigration -and $MediaTranscription -eq $ApplyMediaTranscriptionGpuMigration -and $Outlook -eq $ApplyOutlookWatchedSourceMigration -and $CodexWorkspace -eq $ApplyCodexWorkspaceNotesMigration) 'Database observation used the wrong migration mode.'
  $ConnectionString
 }
 function Get-PassageWindowEligibilityStateKind {
- param($DatabaseState,$ExpectedDatabaseIdentity,[switch]$Outlook,[switch]$CodexWorkspace,[switch]$MediaTranscription)
- Check ($MediaTranscription -eq $ApplyMediaTranscriptionGpuMigration -and $Outlook -eq $ApplyOutlookWatchedSourceMigration -and $CodexWorkspace -eq $ApplyCodexWorkspaceNotesMigration -and $DatabaseState -ceq 'owned-companion') 'Companion validation used the wrong observation or migration mode.'
+ param($DatabaseState,$ExpectedDatabaseIdentity,[switch]$Outlook,[switch]$CodexWorkspace,[switch]$GpuResidency,[switch]$MediaTranscription)
+ Check ($GpuResidency -eq $ApplyGpuModelResidencyMigration -and $MediaTranscription -eq $ApplyMediaTranscriptionGpuMigration -and $Outlook -eq $ApplyOutlookWatchedSourceMigration -and $CodexWorkspace -eq $ApplyCodexWorkspaceNotesMigration -and $DatabaseState -ceq 'owned-companion') 'Companion validation used the wrong observation or migration mode.'
  Record 'exact-successor';'New'
 }
 function Confirm-PassageWindowEligibilityMigrationOutcome {

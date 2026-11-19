@@ -10,12 +10,14 @@ namespace FluxKnowledge.Application.Gpu;
 public sealed class EmbeddingGpuExecutor(IEmbeddingGpuRequestStore requests, IGpuExecutorLifecycleSink lifecycle,
     IGpuSchedulerStore scheduler, IEmbeddingGpuInference inference, IGpuInteractiveOwnerProbe process,
     EmbeddingGpuRuntime runtime, IOutboxWakeSignal outboxWake, IGpuSchedulerWakeSignal gpuWake, TimeProvider clock,
-    CancellationToken stoppingToken = default) : IGpuExecutorAdapter, IGpuExecutorRecoveryAdapter
+    CancellationToken stoppingToken = default, IGpuProcessModelResidency? residency = null)
+    : IGpuExecutorAdapter, IGpuExecutorRecoveryAdapter
 {
     private readonly Guid _instance = Guid.NewGuid();
     private readonly ConcurrentDictionary<Guid, Lazy<Task>> _deliveries = new();
     private readonly ConcurrentDictionary<Guid, byte> _unconfirmedNative = new();
     private readonly ConcurrentDictionary<Guid, Guid> _awaitingCleanup = new();
+    private readonly ConcurrentDictionary<Guid, GpuOwnedWorkContext> _warmAttempts = new();
     private readonly ConcurrentDictionary<Guid, CancellationTokenSource> _executions = new();
     public const string Name = "embedding-gpu:bge-m3-v1";
     public string ExecutorKey => Name;
@@ -25,11 +27,22 @@ public sealed class EmbeddingGpuExecutor(IEmbeddingGpuRequestStore requests, IGp
         foreach (var work in await requests.ReadRecoveryAsync(cancellationToken).ConfigureAwait(false))
         {
             if (_deliveries.TryGetValue(work.Handle.DispatchId, out var delivery) && delivery.IsValueCreated && !delivery.Value.IsCompleted) continue;
-            if (!work.NativeCleanupConfirmed && work.ExecutorInstanceId != _instance)
+            if (!work.NativeCleanupConfirmed && !work.Detached && work.ExecutorInstanceId != _instance)
             {
                 if (work.Owner is null)
                 {
-                    if (!await requests.ConfirmUnstartedCleanupAsync(work, _instance, Operation(work.Handle, "claim"), process.Current, cancellationToken).ConfigureAwait(false)) continue;
+                    var state = await requests.ReadUnclaimedResidentDispatchAsync(work, process.Current, cancellationToken).ConfigureAwait(false);
+                    if (state == GpuExecutorDispatchState.DeliveryUncertain)
+                    {
+                        var ownership = new GpuOwnedWorkContext(work.Handle, runtime.RuntimeKey, runtime.SettingsFingerprint, cancellationToken);
+                        // The watchdog has ended native admission. Recover the
+                        // original allocation without invoking the inference callback.
+                        if (residency is null || !await residency.ReleaseAsync(ownership, cancellationToken).ConfigureAwait(false))
+                            continue;
+                    }
+                    if (state != GpuExecutorDispatchState.Acknowledged &&
+                        !await requests.ConfirmUnstartedCleanupAsync(work, _instance, Operation(work.Handle, "claim"), process.Current, cancellationToken).ConfigureAwait(false))
+                        continue;
                 }
                 else
                 {
@@ -67,6 +80,7 @@ public sealed class EmbeddingGpuExecutor(IEmbeddingGpuRequestStore requests, IGp
         if (pending is not null)
         {
             _awaitingCleanup.TryRemove(handle.DispatchId, out _);
+            _warmAttempts.TryRemove(handle.DispatchId, out _);
             await CompleteAsync(handle, pending).ConfigureAwait(false);
             return;
         }
@@ -75,16 +89,23 @@ public sealed class EmbeddingGpuExecutor(IEmbeddingGpuRequestStore requests, IGp
             await PersistCleanupAndCompleteAsync(handle, completedClaim).ConfigureAwait(false);
             return;
         }
+        var claimOperation = Operation(handle, "claim");
+        if (_warmAttempts.TryGetValue(handle.DispatchId, out var previousWarmAttempt))
+        {
+            await FinishWarmAsync(handle, previousWarmAttempt, claimOperation).ConfigureAwait(false);
+            return;
+        }
         var acknowledgement = await lifecycle.AcknowledgeAsync(new(Operation(handle, "ack"), handle), stoppingToken).ConfigureAwait(false);
         if (!acknowledgement.Accepted || !acknowledgement.Committed) return;
-        var claimOperation = Operation(handle, "claim");
         var work = await requests.ClaimExecutionAsync(handle, _instance, claimOperation, process.Current, stoppingToken).ConfigureAwait(false);
         var released = true; // No native callback has started.
+        using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+        var ownership = new GpuOwnedWorkContext(handle, runtime.RuntimeKey, runtime.SettingsFingerprint, cancellation.Token);
+        var supportsResidency = residency?.Supports(ownership) == true;
+        if (supportsResidency) _warmAttempts[handle.DispatchId] = ownership;
         if (work is not null)
         {
-            using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
             if (!_executions.TryAdd(work.MiniTaskId, cancellation)) throw new InvalidOperationException("embedding-gpu-execution-duplicate");
-            var ownership = new GpuOwnedWorkContext(handle, runtime.RuntimeKey, runtime.SettingsFingerprint, cancellation.Token);
             var nativeStarted = false;
             try
             {
@@ -96,8 +117,22 @@ public sealed class EmbeddingGpuExecutor(IEmbeddingGpuRequestStore requests, IGp
                     released = false;
                     var result = await inference.EmbedBatchAsync(ownership, work.Batch.Chunks.Select(chunk => chunk.SearchText).ToArray(), cancellation.Token).ConfigureAwait(false);
                     released = result.NativeCapacityReleased && ownership.InvalidateAndReadNativeRelease();
-                    if (released && result.RefusalReason is null && result.Value is not null && !cancellation.IsCancellationRequested)
+                    if ((released || supportsResidency && ownership.ResidentModelUsed) && result.RefusalReason is null &&
+                        result.Value is not null && !cancellation.IsCancellationRequested)
+                    {
                         await requests.CommitAsync(handle, _instance, work, result.Value, cancellation.Token).ConfigureAwait(false);
+                        if (supportsResidency && ownership.ResidentModelUsed &&
+                            await requests.ReadResidentResultDigestAsync(handle, _instance, claimOperation, cancellation.Token).ConfigureAwait(false)
+                                is { Length: 32 } digest)
+                        {
+                            var receipt = await lifecycle.RecordReceiptAsync(new(Operation(handle, "receipt"), handle, work.MiniTaskId,
+                                GpuMiniTaskBoundaryDisposition.Completed, digest, GpuExecutorEvidenceClass.TaskOutcomeConfirmed),
+                                cancellation.Token).ConfigureAwait(false);
+                            if (receipt.Accepted && receipt.Committed)
+                                await residency!.CompleteAsync(ownership, Operation(handle, "detached-callback"),
+                                    work.MiniTaskId, cancellation.Token).ConfigureAwait(false);
+                        }
+                    }
                 }
             }
             catch (Exception exception) when (exception is not OutOfMemoryException and not StackOverflowException)
@@ -110,9 +145,15 @@ public sealed class EmbeddingGpuExecutor(IEmbeddingGpuRequestStore requests, IGp
             {
                 var nativeReleased = ownership.InvalidateAndReadNativeRelease();
                 if (nativeStarted) released &= nativeReleased;
-                if (!released) _unconfirmedNative.TryAdd(handle.DispatchId, 0);
+                if (!supportsResidency && !released) _unconfirmedNative.TryAdd(handle.DispatchId, 0);
                 _executions.TryRemove(work.MiniTaskId, out _);
             }
+        }
+        if (supportsResidency)
+        {
+            ownership.Invalidate();
+            await FinishWarmAsync(handle, ownership, claimOperation).ConfigureAwait(false);
+            return;
         }
         if (!released)
         {
@@ -129,6 +170,26 @@ public sealed class EmbeddingGpuExecutor(IEmbeddingGpuRequestStore requests, IGp
         await PersistCleanupAndCompleteAsync(handle, claimOperation).ConfigureAwait(false);
     }
 
+    private async ValueTask FinishWarmAsync(GpuExecutorBatchHandle handle, GpuOwnedWorkContext ownership, Guid claimOperation)
+    {
+        // Retrying a lost response reads the original dispatch. It never re-enters inference.
+        var settled = await requests.ReadPendingCompletionAsync(handle, CancellationToken.None).ConfigureAwait(false);
+        if (settled?.Detached == true)
+        {
+            _warmAttempts.TryRemove(handle.DispatchId, out _);
+            await CompleteAsync(handle, settled).ConfigureAwait(false);
+            return;
+        }
+        if (!await residency!.ReleaseAsync(ownership, CancellationToken.None).ConfigureAwait(false))
+        {
+            await MarkUncertainAsync(handle).ConfigureAwait(false);
+            return;
+        }
+        _awaitingCleanup[handle.DispatchId] = claimOperation;
+        _warmAttempts.TryRemove(handle.DispatchId, out _);
+        await PersistCleanupAndCompleteAsync(handle, claimOperation).ConfigureAwait(false);
+    }
+
     private async ValueTask PersistCleanupAndCompleteAsync(GpuExecutorBatchHandle handle, Guid claimOperation)
     {
         await requests.RecordNativeCleanupAsync(handle, _instance, claimOperation, CancellationToken.None).ConfigureAwait(false);
@@ -140,6 +201,13 @@ public sealed class EmbeddingGpuExecutor(IEmbeddingGpuRequestStore requests, IGp
 
     private async ValueTask CompleteAsync(GpuExecutorBatchHandle handle, EmbeddingGpuCompletion completion)
     {
+        if (completion.Detached)
+        {
+            if (await requests.RequeueSettledAsync(handle, completion.MiniTaskId, CancellationToken.None).ConfigureAwait(false))
+                outboxWake.Notify();
+            gpuWake.Notify(GpuSchedulerWakeReason.Reconciliation);
+            return;
+        }
         var disposition = completion.ResultDigest is null ? GpuMiniTaskBoundaryDisposition.OutcomeUncertain : GpuMiniTaskBoundaryDisposition.Completed;
         var receipt = await lifecycle.RecordReceiptAsync(new(Operation(handle, "receipt"), handle, completion.MiniTaskId, disposition,
             completion.ResultDigest, completion.ResultDigest is null ? GpuExecutorEvidenceClass.TaskOutcomeUncertainConfirmed : GpuExecutorEvidenceClass.TaskOutcomeConfirmed),

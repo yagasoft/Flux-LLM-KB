@@ -491,6 +491,14 @@
             <div><dt>Scheduler outcome uncertain</dt><dd><StatusCount Value="scheduler.OutcomeUncertainCount" /></dd></div>
             <div><dt>Scheduler slots available</dt><dd>@scheduler.AvailableSlotCount</dd></div>
             <div><dt>Scheduler slots reserved</dt><dd>@scheduler.ReservedSlotCount</dd></div>
+            @if (scheduler.WarmModelSlotCount > 0)
+            {
+                <div><dt>GPU models ready to reuse</dt><dd>@scheduler.WarmModelSlotCount</dd></div>
+            }
+            @if (scheduler.ReleasingModelSlotCount > 0)
+            {
+                <div><dt>GPU models awaiting confirmed release</dt><dd>@scheduler.ReleasingModelSlotCount</dd></div>
+            }
             <div><dt>Scheduler slots uncertain</dt><dd>@scheduler.UncertainSlotCount</dd></div>
             <div><dt>Scheduler active batch</dt><dd>@(scheduler.HasActiveBatch ? "Present" : "None")</dd></div>
             <div><dt>Scheduler next retry</dt><dd>@(scheduler.NextDeferredAtUtc?.ToString("O") ?? "None")</dd></div>

@@ -206,13 +206,18 @@ internal sealed partial record SqlEmbeddingRetry(JobEntity Job, OutboxMessageEnt
             ? await ReadReusableSuccessfulResultDigestsAsync(context, job, draft, runtime, requests, tasksById, batches, dispatches, ct)
             : null;
         var successfulDigests = cachedProofs?.Digests ?? await ReadSuccessfulResultDigestsAsync(context, job, draft, requests, ct);
+        var detachIds = requests.Where(request => request.ResidentDetachmentDispatchId.HasValue)
+            .Select(request => request.ResidentDetachmentDispatchId!.Value).ToArray();
+        var detachments = detachIds.Length == 0 ? [] : await context.GpuModelDetachmentReceipts.AsNoTracking()
+            .Where(receipt => detachIds.Contains(receipt.DispatchId)).ToArrayAsync(ct);
+        var detachedByDispatch = detachments.ToDictionary(receipt => receipt.DispatchId);
         foreach (var request in requests)
         {
             var task = tasksById[request.MiniTaskId];
             if (request.PipelineRecordId != job.PipelineRecordId || request.SourceRevision != job.SourceRevision ||
                 request.GenerationId != draft.Id || request.CorpusEpoch != draft.CorpusEpoch || request.ModelFingerprint != runtime.Profile.ModelFingerprint ||
-                request.Dimensions != runtime.Profile.Dimensions || request.State != 2 || !request.NativeCleanupConfirmed ||
-                request.CleanupConfirmedAtUtc is null ||
+                request.Dimensions != runtime.Profile.Dimensions || request.State != 2 ||
+                (!request.NativeCleanupConfirmed || request.CleanupConfirmedAtUtc is null) && request.ResidentDetachmentDispatchId is null ||
                 request.ExecutorInstanceId is null || request.ClaimOperationId is null || request.OwnerProcessId is null ||
                 request.OwnerStartedAtUtc is null || string.IsNullOrEmpty(request.OwnerMachineFingerprint) ||
                 task.SourceRevision != job.SourceRevision || task.BatchId is null ||
@@ -230,6 +235,14 @@ internal sealed partial record SqlEmbeddingRetry(JobEntity Job, OutboxMessageEnt
             if (request.DispatchId != dispatch.DispatchId ||
                 dispatch.ExecutorKey != EmbeddingGpuExecutor.Name || dispatch.AdmissionGeneration != batch.AdmissionGeneration ||
                 dispatch.CapacitySlotKey != batch.CapacitySlotKey || dispatch.OwnerKey != batch.OwnerKey) Refuse();
+            if (request.ResidentDetachmentDispatchId is { } detachedId)
+            {
+                if (!detachedByDispatch.TryGetValue(detachedId, out var receipt) || detachedId != dispatch.DispatchId ||
+                    receipt.BatchId != batch.Id || receipt.AdmissionGeneration != batch.AdmissionGeneration ||
+                    receipt.ExecutorKey != dispatch.ExecutorKey || receipt.ExecutionInstanceId != dispatch.DispatchId ||
+                    request.ResultDigest is not { Length: 32 }) Refuse();
+                binding.AppendData(JsonSerializer.SerializeToUtf8Bytes(receipt));
+            }
 
             if (request.ResultDigest is { Length: 32 })
             {

@@ -22,6 +22,7 @@ public sealed class EmbeddingGpuRequestEntity
     public Guid? DispatchId { get; set; }
     public bool NativeCleanupConfirmed { get; set; }
     public DateTimeOffset? CleanupConfirmedAtUtc { get; set; }
+    public Guid? ResidentDetachmentDispatchId { get; set; }
     public byte[]? ResultDigest { get; set; }
     public DateTimeOffset CreatedAtUtc { get; set; }
     public DateTimeOffset UpdatedAtUtc { get; set; }

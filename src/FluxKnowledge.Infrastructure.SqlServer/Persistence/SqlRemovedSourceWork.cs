@@ -190,7 +190,11 @@ internal static class SqlRemovedSourceWork
          AND {{request}}.ParentJobId = {{job}}.Id
          AND {{request}}.PipelineRecordId = {{job}}.PipelineRecordId AND {{request}}.SourceRevision = {{task}}.SourceRevision
          AND {{request}}.ExecutorInstanceId IS NOT NULL AND {{request}}.DispatchId IS NOT NULL
-         AND {{request}}.NativeCleanupConfirmed = 1 AND {{request}}.CleanupConfirmedAtUtc IS NOT NULL
+         AND (({{request}}.NativeCleanupConfirmed = 1 AND {{request}}.CleanupConfirmedAtUtc IS NOT NULL)
+           OR EXISTS (SELECT 1 FROM GpuModelDetachmentReceipts detach WHERE detach.DispatchId = {{request}}.ResidentDetachmentDispatchId
+             AND detach.DispatchId = {{request}}.DispatchId AND detach.ExecutionInstanceId = {{request}}.DispatchId
+             AND detach.BatchId = {{task}}.BatchId AND detach.AdmissionGeneration = {{task}}.AdmissionGeneration
+             AND detach.ExecutorKey = N'{{EmbeddingGpuExecutor.Name}}'))
          AND {{ReleasedBatch(task, request + ".DispatchId", readEvidence, EmbeddingGpuExecutor.Name)}})
         """;
 
@@ -201,15 +205,59 @@ internal static class SqlRemovedSourceWork
          AND {{request}}.ExecutionInstanceId IS NOT NULL AND {{request}}.ExecutionDispatchId IS NOT NULL
          AND {{request}}.ExecutionBatchId = {{task}}.BatchId AND {{request}}.ExecutionAdmissionGeneration = {{task}}.AdmissionGeneration
          AND {{request}}.ModelRuntimeKey = {{task}}.ModelRuntimeKey AND {{request}}.SettingsFingerprint = {{task}}.SettingsFingerprint
-         AND {{request}}.NativeCleanupConfirmedAtUtc IS NOT NULL
-         AND {{request}}.ExecutionPhase IN ({{(int)DocumentOcrExecutionPhase.CleanupConfirmed}},{{(int)DocumentOcrExecutionPhase.Settled}})
-         AND (({{request}}.CleanupProofKind = {{(int)DocumentOcrCleanupKind.VerifiedUnstarted}} AND {{request}}.NativeProcessId IS NULL)
-             OR ({{request}}.CleanupProofKind = {{(int)DocumentOcrCleanupKind.OwnedJobEmpty}} AND {{request}}.NativeProcessId IS NOT NULL
-                 AND {{request}}.NativeProcessStartedAtUtc IS NOT NULL)
-             OR ({{request}}.CleanupProofKind = {{(int)DocumentOcrCleanupKind.StoppedMaintenance}}
-                 AND LEN({{request}}.PhysicalCleanupEvidenceSha256) = 64
-                 AND {{request}}.PhysicalCleanupEvidenceSha256 COLLATE {{SchemaConfiguration.SchedulerFenceCollation}} NOT LIKE '%[^0-9a-f]%'))
+         AND (({{request}}.NativeCleanupConfirmedAtUtc IS NOT NULL
+               AND {{request}}.ExecutionPhase IN ({{(int)DocumentOcrExecutionPhase.CleanupConfirmed}},{{(int)DocumentOcrExecutionPhase.Settled}})
+               AND (({{request}}.CleanupProofKind = {{(int)DocumentOcrCleanupKind.VerifiedUnstarted}} AND {{request}}.NativeProcessId IS NULL)
+                 OR ({{request}}.CleanupProofKind = {{(int)DocumentOcrCleanupKind.OwnedJobEmpty}} AND {{request}}.NativeProcessId IS NOT NULL
+                   AND {{request}}.NativeProcessStartedAtUtc IS NOT NULL)
+                 OR ({{request}}.CleanupProofKind = {{(int)DocumentOcrCleanupKind.StoppedMaintenance}}
+                   AND LEN({{request}}.PhysicalCleanupEvidenceSha256) = 64
+                   AND {{request}}.PhysicalCleanupEvidenceSha256 COLLATE {{SchemaConfiguration.SchedulerFenceCollation}} NOT LIKE '%[^0-9a-f]%')))
+             OR {{OcrDetached(request, task, job)}})
          AND {{ReleasedBatch(task, request + ".ExecutionDispatchId", readEvidence, PaddleOcrVlmRuntimeContract.ExecutorKey)}})
+        """;
+
+    // Detachment proves that this source owns no active OCR command. The
+    // resident allocation may retain its native GPU capacity independently.
+    internal static string OcrDetached(string request, string task, string job) => $$"""
+        ({{request}}.MiniTaskId = {{task}}.Id AND {{task}}.ParentJobId = {{job}}.Id
+         AND {{request}}.ParentJobId = {{job}}.Id AND {{request}}.PipelineRecordId = {{job}}.PipelineRecordId
+         AND {{request}}.SourceRevision = {{job}}.SourceRevision AND {{request}}.SourceRevision = {{task}}.SourceRevision
+         AND {{request}}.ExecutionPhase = {{(int)DocumentOcrExecutionPhase.Settled}}
+         AND {{request}}.NativeCleanupConfirmedAtUtc IS NULL AND {{request}}.CleanupProofKind IS NULL
+         AND {{request}}.NativeProcessId IS NOT NULL AND {{request}}.NativeProcessStartedAtUtc IS NOT NULL
+         AND {{request}}.ModelRuntimeKey = {{task}}.ModelRuntimeKey AND {{request}}.SettingsFingerprint = {{task}}.SettingsFingerprint
+         AND {{task}}.State = {{(int)GpuMiniTaskExecutionState.Completed}}
+         AND EXISTS (SELECT 1 FROM GpuModelDetachmentReceipts detached
+            INNER JOIN GpuModelResidencies resident ON resident.ResidencyId = detached.ResidencyId
+            INNER JOIN GpuBatches ocrBatch ON ocrBatch.Id = detached.BatchId
+                AND ocrBatch.AdmissionGeneration = detached.AdmissionGeneration
+            INNER JOIN GpuExecutorDispatches ocrDispatch ON ocrDispatch.DispatchId = detached.DispatchId
+                AND ocrDispatch.BatchId = ocrBatch.Id AND ocrDispatch.AdmissionGeneration = ocrBatch.AdmissionGeneration
+                AND ocrDispatch.CapacitySlotKey = ocrBatch.CapacitySlotKey AND ocrDispatch.OwnerKey = ocrBatch.OwnerKey
+                AND ocrDispatch.ExecutorKey = detached.ExecutorKey
+            INNER JOIN GpuExecutorResultReceipts ocrResult ON ocrResult.DispatchId = ocrDispatch.DispatchId
+                AND ocrResult.BatchId = ocrBatch.Id AND ocrResult.AdmissionGeneration = ocrBatch.AdmissionGeneration
+                AND ocrResult.ExecutorKey = ocrDispatch.ExecutorKey AND ocrResult.MiniTaskId = {{task}}.Id
+            WHERE detached.DispatchId = {{request}}.ExecutionDispatchId AND detached.ExecutionInstanceId = {{request}}.ExecutionInstanceId
+                AND detached.BatchId = {{request}}.ExecutionBatchId AND detached.BatchId = {{task}}.BatchId
+                AND detached.AdmissionGeneration = {{request}}.ExecutionAdmissionGeneration
+                AND detached.AdmissionGeneration = {{task}}.AdmissionGeneration
+                AND detached.ExecutorKey = N'{{PaddleOcrVlmRuntimeContract.ExecutorKey}}'
+                AND ocrDispatch.State = {{(int)GpuExecutorDispatchState.Terminal}}
+                AND resident.SlotKey = ocrBatch.CapacitySlotKey AND resident.ChildJobId = resident.ResidencyId
+                AND resident.RuntimeKey = {{request}}.ModelRuntimeKey AND resident.SettingsFingerprint = {{request}}.SettingsFingerprint
+                AND resident.OwnerProcessId = {{request}}.SupervisorProcessId
+                AND resident.OwnerStartedAtUtc = {{request}}.SupervisorProcessStartedAtUtc
+                AND resident.MachineFingerprint = {{request}}.ExecutionMachineFingerprint
+                AND resident.ChildProcessId = {{request}}.NativeProcessId AND resident.ChildStartedAtUtc = {{request}}.NativeProcessStartedAtUtc
+                AND ocrBatch.State = {{(int)GpuBatchState.Completed}} AND ocrBatch.ItemCount = 1
+                AND ocrBatch.ModelRuntimeKey = {{task}}.ModelRuntimeKey AND ocrBatch.SettingsFingerprint = {{task}}.SettingsFingerprint
+                AND ocrResult.Disposition = {{(int)GpuMiniTaskBoundaryDisposition.Completed}}
+                AND ocrResult.EvidenceClass = {{(int)GpuExecutorEvidenceClass.TaskOutcomeConfirmed}}
+                AND ocrResult.OpaqueResultDigest = {{request}}.ResultDigest
+                AND NOT EXISTS (SELECT 1 FROM GpuCapacitySlots slot WHERE slot.ActiveBatchId = ocrBatch.Id)
+                AND NOT EXISTS (SELECT 1 FROM GpuMiniTasks other WHERE other.BatchId = ocrBatch.Id AND other.Id <> {{task}}.Id)))
         """;
 
     internal static string MediaCleanup(string request, string task, string job) => $$"""
@@ -225,18 +273,11 @@ internal static class SqlRemovedSourceWork
          AND {{request}}.ExecutionPhase = {{(int)DocumentOcrExecutionPhase.Settled}}
          AND {{request}}.ExecutionInstanceId IS NOT NULL AND {{request}}.ExecutionDispatchId IS NOT NULL
          AND {{request}}.ExecutionBatchId = {{task}}.BatchId AND {{request}}.ExecutionAdmissionGeneration = {{task}}.AdmissionGeneration
-         AND {{request}}.CleanupConfirmedAtUtc IS NOT NULL
-         AND (({{request}}.CleanupKind = {{(int)DocumentOcrCleanupKind.VerifiedUnstarted}} AND {{request}}.NativeProcessId IS NULL)
-             OR ({{request}}.CleanupKind = {{(int)DocumentOcrCleanupKind.OwnedJobEmpty}} AND {{request}}.NativeProcessId IS NOT NULL
-                AND {{request}}.NativeProcessStartedAtUtc IS NOT NULL))
          AND {{task}}.State = {{(int)GpuMiniTaskExecutionState.Completed}}
          AND EXISTS (SELECT 1 FROM GpuBatches mediaBatch
             INNER JOIN GpuExecutorDispatches mediaDispatch ON mediaDispatch.BatchId = mediaBatch.Id
                 AND mediaDispatch.AdmissionGeneration = mediaBatch.AdmissionGeneration
                 AND mediaDispatch.CapacitySlotKey = mediaBatch.CapacitySlotKey AND mediaDispatch.OwnerKey = mediaBatch.OwnerKey
-            INNER JOIN GpuExecutorEvidence mediaProof ON mediaProof.DispatchId = mediaDispatch.DispatchId
-                AND mediaProof.BatchId = mediaDispatch.BatchId AND mediaProof.AdmissionGeneration = mediaDispatch.AdmissionGeneration
-                AND mediaProof.ExecutorKey = mediaDispatch.ExecutorKey AND mediaProof.CapacitySlotKey = mediaDispatch.CapacitySlotKey
             INNER JOIN GpuExecutorResultReceipts mediaResult ON mediaResult.DispatchId = mediaDispatch.DispatchId
                 AND mediaResult.BatchId = mediaDispatch.BatchId AND mediaResult.AdmissionGeneration = mediaDispatch.AdmissionGeneration
                 AND mediaResult.ExecutorKey = mediaDispatch.ExecutorKey AND mediaResult.MiniTaskId = {{task}}.Id
@@ -244,9 +285,31 @@ internal static class SqlRemovedSourceWork
                 AND mediaBatch.ModelRuntimeKey = {{task}}.ModelRuntimeKey AND mediaBatch.SettingsFingerprint = {{task}}.SettingsFingerprint
                 AND mediaBatch.ItemCount = 1 AND mediaBatch.State = {{(int)GpuBatchState.Completed}}
                 AND mediaDispatch.DispatchId = {{request}}.ExecutionDispatchId AND mediaDispatch.State = {{(int)GpuExecutorDispatchState.Terminal}}
-                AND mediaProof.VerifierKey COLLATE {{SchemaConfiguration.SchedulerFenceCollation}} = N'media-transcription-owned-job-v1'
-                AND mediaProof.EvidenceClass = {{(int)GpuExecutorEvidenceClass.CapacityReleaseConfirmed}}
-                AND mediaProof.ObservedAtUtc = {{request}}.CleanupConfirmedAtUtc
+                AND (({{request}}.CleanupConfirmedAtUtc IS NOT NULL
+                        AND (({{request}}.CleanupKind = {{(int)DocumentOcrCleanupKind.VerifiedUnstarted}} AND {{request}}.NativeProcessId IS NULL)
+                            OR ({{request}}.CleanupKind = {{(int)DocumentOcrCleanupKind.OwnedJobEmpty}} AND {{request}}.NativeProcessId IS NOT NULL
+                                AND {{request}}.NativeProcessStartedAtUtc IS NOT NULL))
+                        AND EXISTS (SELECT 1 FROM GpuExecutorEvidence mediaProof
+                            WHERE mediaProof.DispatchId = mediaDispatch.DispatchId AND mediaProof.BatchId = mediaDispatch.BatchId
+                                AND mediaProof.AdmissionGeneration = mediaDispatch.AdmissionGeneration
+                                AND mediaProof.ExecutorKey = mediaDispatch.ExecutorKey AND mediaProof.CapacitySlotKey = mediaDispatch.CapacitySlotKey
+                                AND mediaProof.VerifierKey COLLATE {{SchemaConfiguration.SchedulerFenceCollation}} IN (
+                                    N'media-transcription-owned-job-v1', N'media-transcription-resident-job-empty-v1')
+                                AND mediaProof.EvidenceClass = {{(int)GpuExecutorEvidenceClass.CapacityReleaseConfirmed}}
+                                AND mediaProof.ObservedAtUtc = {{request}}.CleanupConfirmedAtUtc))
+                     OR ({{request}}.CleanupConfirmedAtUtc IS NULL AND {{request}}.CleanupKind IS NULL
+                        AND {{request}}.NativeProcessId IS NOT NULL AND {{request}}.NativeProcessStartedAtUtc IS NOT NULL
+                        AND EXISTS (SELECT 1 FROM GpuModelDetachmentReceipts detached
+                            INNER JOIN GpuModelResidencies resident ON resident.ResidencyId = detached.ResidencyId
+                            WHERE detached.DispatchId = mediaDispatch.DispatchId AND detached.BatchId = mediaDispatch.BatchId
+                                AND detached.AdmissionGeneration = mediaDispatch.AdmissionGeneration
+                                AND detached.ExecutorKey = mediaDispatch.ExecutorKey
+                                AND detached.ExecutionInstanceId = {{request}}.ExecutionInstanceId
+                                AND resident.Version >= detached.Version AND resident.SlotKey = mediaDispatch.CapacitySlotKey
+                                AND resident.RuntimeKey = {{request}}.ModelRuntimeKey AND resident.SettingsFingerprint = {{request}}.SettingsFingerprint
+                                AND resident.ChildJobId = detached.ResidencyId AND resident.ChildProcessId = {{request}}.NativeProcessId
+                                AND resident.ChildStartedAtUtc = {{request}}.NativeProcessStartedAtUtc
+                                AND resident.MachineFingerprint = {{request}}.MachineFingerprint)))
                 AND mediaResult.EvidenceClass = {{(int)GpuExecutorEvidenceClass.TaskOutcomeConfirmed}}
                 AND mediaResult.Disposition = {{(int)GpuMiniTaskBoundaryDisposition.Completed}}
                 AND mediaResult.OpaqueResultDigest = {{request}}.ResultDigest

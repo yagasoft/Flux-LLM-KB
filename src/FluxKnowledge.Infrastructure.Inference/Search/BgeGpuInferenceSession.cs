@@ -6,7 +6,7 @@ using FluxKnowledge.Application.Pipeline;
 
 namespace FluxKnowledge.Infrastructure.Inference.Search;
 
-/// <summary>One owned request/batch; embedding unloads before ranking, with no retained GPU model.</summary>
+/// <summary>One owned request or batch. Only one phase can own a native model at a time.</summary>
 public sealed class BgeGpuInferenceSession(IBgeGpuModelFactory models) : IEmbeddingGpuInference
 {
     private readonly BgeRerankerPrecision _precision = ValidatePrecision(models);
@@ -176,6 +176,7 @@ public sealed class BgeGpuInferenceSession(IBgeGpuModelFactory models) : IEmbedd
                     throw new BgeInferenceException("bge-request-phase-invalid");
                 using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, request._ownership.CancellationToken);
                 RerankResult result;
+                var succeeded = false;
                 try
                 {
                     using var lease = await OpenMeasuredAsync(() => request._models.OpenRerankerAsync(request._ownership), request._ownership, "reranker").ConfigureAwait(false);
@@ -185,6 +186,7 @@ public sealed class BgeGpuInferenceSession(IBgeGpuModelFactory models) : IEmbedd
                         !result.Scores.Select(score => score.PassageId).SequenceEqual(passages.Select(p => p.PassageId)) ||
                         result.Scores.Any(score => !float.IsFinite(score.Logit)))
                         throw new BgeInferenceException("bge-reranker-output-invalid");
+                    succeeded = true;
                 }
                 catch (Exception exception) when (exception is not OutOfMemoryException and not StackOverflowException)
                 {
@@ -195,9 +197,11 @@ public sealed class BgeGpuInferenceSession(IBgeGpuModelFactory models) : IEmbedd
                 {
                     // A caller may retain fused results after scoring refuses, but only
                     // when disposal proved that every native allocation is released.
-                    if (request._ownership.NativeCapacityReleased) Interlocked.Exchange(ref request._phase, 4);
+                    if (request._ownership.NativeCapacityReleased || succeeded && request._ownership.ResidentModelUsed)
+                        Interlocked.Exchange(ref request._phase, 4);
                 }
-                if (!request._ownership.NativeCapacityReleased) throw new PassageInferenceOwnershipException();
+                if (!request._ownership.NativeCapacityReleased && !request._ownership.ResidentModelUsed)
+                    throw new PassageInferenceOwnershipException();
                 linked.Token.ThrowIfCancellationRequested();
                 request.RequireActive();
                 return result;

@@ -20,7 +20,7 @@ if($stops -ne 1 -or ($after|ConvertTo-Json -Depth 20 -Compress) -cne $before){th
 # A matching historical plan is insufficient for the current updater.
 $priorState=@{};foreach($key in $state.Keys){$priorState[$key]=$state[$key]}
 $priorPlan=@{};foreach($key in $plan.Keys){$priorPlan[$key]=$plan[$key]}
-foreach($successor in @('20261117210606_PersistPassageWindowEligibility','20261118224032_BindOutlookWatchedSources')){
+foreach($successor in @('20261117210606_PersistPassageWindowEligibility','20261118224032_BindOutlookWatchedSources','20261119125051_AddMediaTranscriptionGpuRequests')){
     $priorState.History=@($state.History | Where-Object { $_ -cle $successor })
     $priorPlan.OriginalHistory=$priorState.History
     Assert-Refused {Assert-OcrLifecycleSchema $priorState $priorPlan -RequireOriginal} 'schema-or-history-changed'

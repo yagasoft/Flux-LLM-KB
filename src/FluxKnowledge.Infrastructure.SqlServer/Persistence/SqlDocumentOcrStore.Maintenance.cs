@@ -102,6 +102,9 @@ public sealed partial class SqlDocumentOcrStore
                 rows.Dispatch.State != (int)GpuExecutorDispatchState.DeliveryUncertain)
                 return Refused(DocumentOcrLifecycleDisposition.LegacyOwnerUnproven);
 
+            if (await SqlGpuModelResidencyStore.HasLiveResidencyAsync(context, binding.Handle.CapacitySlotKey, ct).ConfigureAwait(false))
+                return Refused(DocumentOcrLifecycleDisposition.CleanupUnproven);
+
             // Keep the same admission/mutation lock across fresh physical observation and proof.
             // This path is never authorised by a caller-supplied evidence-class row or bare hash.
             var proof = await verifier.VerifyStoppedAndCleanAsync(ct).ConfigureAwait(false);

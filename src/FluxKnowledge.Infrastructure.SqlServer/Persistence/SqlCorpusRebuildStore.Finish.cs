@@ -21,7 +21,8 @@ public sealed partial class SqlCorpusRebuildStore
                 throw new CorpusRebuildRefusalException("corpus-rebuild-items-incomplete");
             if (await context.CorpusQueryLeases.AnyAsync(ct).ConfigureAwait(false))
                 throw new CorpusRebuildRefusalException("corpus-rebuild-query-drain-required");
-            if (await context.EmbeddingGpuRequests.AnyAsync(value => value.State != 2 || !value.NativeCleanupConfirmed, ct).ConfigureAwait(false))
+            if (await context.EmbeddingGpuRequests.AnyAsync(value => value.State != 2 ||
+                    !value.NativeCleanupConfirmed && value.ResidentDetachmentDispatchId == null, ct).ConfigureAwait(false))
                 throw new CorpusRebuildRefusalException("corpus-rebuild-embedding-request-unsettled");
             foreach (var input in plan.Inputs)
             {

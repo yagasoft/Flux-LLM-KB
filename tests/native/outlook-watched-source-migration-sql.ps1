@@ -1,4 +1,4 @@
-param([Parameter(Mandatory)][string]$SourceRoot,[Parameter(Mandatory)][string]$ReceiptDirectory,[switch]$CodexWorkspace,[switch]$MediaTranscription,[switch]$ForwardOnly)
+param([Parameter(Mandatory)][string]$SourceRoot,[Parameter(Mandatory)][string]$ReceiptDirectory,[switch]$CodexWorkspace,[switch]$GpuResidency,[switch]$MediaTranscription,[switch]$ForwardOnly)
 $ErrorActionPreference='Stop';Set-StrictMode -Version Latest
 foreach($name in @('incremental-vector-publication-metadata-migration','incremental-source-deletion-pending-queue-index','incremental-passage-window-eligibility-migration','incremental-source-journal-migration')){
  Import-Module (Join-Path $SourceRoot ('scripts/deploy/'+$name+'.psm1')) -Force
@@ -17,7 +17,7 @@ function Test-Sql([string]$Text){
   $null=$command.ExecuteNonQuery()
  }finally{$connection.Dispose()}
 }
-$mode = if ($MediaTranscription) { @{MediaTranscription=$true} } elseif ($CodexWorkspace) { @{CodexWorkspace = $true} } else { @{Outlook = $true} }
+$mode = if ($GpuResidency) { @{GpuResidency=$true} } elseif ($MediaTranscription) { @{MediaTranscription=$true} } elseif ($CodexWorkspace) { @{CodexWorkspace = $true} } else { @{Outlook = $true} }
 $contract=Get-PassageWindowEligibilityMigrationContract @mode
 $sqlPath=(Resolve-Path -LiteralPath (Join-Path $SourceRoot ('scripts/deploy/' + $contract.ArtifactPrefix + '-up.sql'))).Path
 $read={Get-PassageWindowEligibilityDatabaseState $connectionText @mode}
@@ -32,6 +32,13 @@ if ($ForwardOnly) {
  Check ($state.Applied -and $state.SettledState -ceq 'New') 'The exact successor was not applied.'
  Assert-SourceJournalSchema (Get-SourceJournalDatabaseState $connectionText)
  return
+}
+if ($GpuResidency) {
+ Test-Sql 'CREATE TABLE dbo.GpuModelDetachmentReceipts (Incomplete bit);'
+ try {
+    Refuse { Get-PassageWindowEligibilityStateKind @mode (&$read) $initial.Identity }
+    Refuse { Assert-SourceJournalSchema (Get-SourceJournalDatabaseState $connectionText) }
+ } finally { Test-Sql 'DROP TABLE dbo.GpuModelDetachmentReceipts;' }
 }
 if ($MediaTranscription) {
  Test-Sql 'CREATE TABLE dbo.MediaTranscriptionGpuRequests (Incomplete bit);'
@@ -74,12 +81,12 @@ Invoke-PassageWindowEligibilityMigrationAttempt $state $read {} {throw 'Complete
 Invoke-PassageWindowEligibilityMigrationSql @mode $connectionText $sqlPath $initial.Identity
 Check $state.Applied 'Already-new state was not validated.'
 Assert-SourceJournalSchema (Get-SourceJournalDatabaseState $connectionText)
-$alter = if ($MediaTranscription) {
+$alter = if ($GpuResidency) { 'ALTER TABLE dbo.GpuModelResidencies NOCHECK CONSTRAINT CK_GpuModelResidencies_Release;' } elseif ($MediaTranscription) {
     'ALTER TABLE dbo.MediaTranscriptionGpuRequests NOCHECK CONSTRAINT CK_MediaTranscriptionGpuRequests_Phase;'
 } elseif ($CodexWorkspace) {
     'ALTER INDEX IX_KnowledgeItems_CodexWorkspaceRootId_CreatedAtUtc_Id ON dbo.KnowledgeItems DISABLE;'
 } else { 'ALTER TABLE dbo.OutlookCaptureProfiles ALTER COLUMN WatchedRootIdentity varchar(127) NULL;' }
-$restore = if ($MediaTranscription) {
+$restore = if ($GpuResidency) { 'ALTER TABLE dbo.GpuModelResidencies WITH CHECK CHECK CONSTRAINT CK_GpuModelResidencies_Release;' } elseif ($MediaTranscription) {
     'ALTER TABLE dbo.MediaTranscriptionGpuRequests WITH CHECK CHECK CONSTRAINT CK_MediaTranscriptionGpuRequests_Phase;'
 } elseif ($CodexWorkspace) {
     'ALTER INDEX IX_KnowledgeItems_CodexWorkspaceRootId_CreatedAtUtc_Id ON dbo.KnowledgeItems REBUILD;'
@@ -109,5 +116,26 @@ if ($MediaTranscription) {
         if ($batch.Trim()) { Test-Sql $batch }
     }
     Check ((Get-PassageWindowEligibilityStateKind @mode (&$read) $initial.Identity) -ceq 'Old') 'Disposable Down did not restore exact 82.'
+    Invoke-PassageWindowEligibilityMigrationSql @mode $connectionText $sqlPath $initial.Identity
+}
+
+if ($GpuResidency) {
+    $down = Join-Path $SourceRoot 'scripts/deploy/gpu-model-residency-down.sql'
+    Check ((Get-FileHash -LiteralPath $down).Hash -ceq $contract.DownSha256) 'Unreviewed residency Down script.'
+    Test-Sql @'
+INSERT INTO dbo.GpuCapacitySlots (SlotKey,State,UpdatedAtUtc) VALUES(N'fixture:model-rollback',0,SYSUTCDATETIME());
+INSERT INTO dbo.GpuModelResidencies(ResidencyId,SlotKey,RuntimeKey,SettingsFingerprint,ModelKey,OwnerProcessId,OwnerStartedAtUtc,
+    MachineFingerprint,State,Version,IdleUntilUtc)
+VALUES(NEWID(),N'fixture:model-rollback',N'profile',N'settings',N'model',42,SYSUTCDATETIME(),REPLICATE('a',64),1,1,DATEADD(minute,2,SYSUTCDATETIME()));
+'@
+    $downSql=Get-Content -Raw -LiteralPath $down
+    Refuse { Test-Sql $downSql }
+    Check ((Get-PassageWindowEligibilityStateKind @mode (&$read) $initial.Identity) -ceq 'New') 'Live residency allowed downgrade.'
+    Test-Sql "UPDATE dbo.GpuModelResidencies SET State=4,Version=2,ReleasedAtUtc=SYSUTCDATETIME(),ReleaseKind=0,IdleUntilUtc=NULL WHERE SlotKey=N'fixture:model-rollback';"
+    Refuse { Test-Sql $downSql }
+    Check ((Get-PassageWindowEligibilityStateKind @mode (&$read) $initial.Identity) -ceq 'New') 'Released residency lost historical evidence.'
+    Test-Sql "DELETE FROM dbo.GpuModelResidencies WHERE SlotKey=N'fixture:model-rollback'; DELETE FROM dbo.GpuCapacitySlots WHERE SlotKey=N'fixture:model-rollback';"
+    Test-Sql $downSql
+    Check ((Get-PassageWindowEligibilityStateKind @mode (&$read) $initial.Identity) -ceq 'Old') 'Empty residency downgrade did not restore schema 83.'
     Invoke-PassageWindowEligibilityMigrationSql @mode $connectionText $sqlPath $initial.Identity
 }

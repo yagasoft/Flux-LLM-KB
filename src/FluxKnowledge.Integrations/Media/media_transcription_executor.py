@@ -1,9 +1,18 @@
 """Native FluxKnowledge speech recognition. The supervisor owns its start and exit."""
+import gc
+import json
 import math
+import os
+from pathlib import Path
+import re
+import sys
 
 PROFILE_GENERAL = "general"
 PROFILE_EGYPTIAN = "egyptian-ar-en"
 PROFILE_THRESHOLD = 0.80
+MAXIMUM_CONTROL_BYTES = 16 * 1024
+MAXIMUM_MANIFEST_BYTES = 64 * 1024
+MAXIMUM_RESULT_BYTES = 8 * 1024 * 1024
 
 
 def select_profile(probes):
@@ -53,8 +62,6 @@ class WorkRefused(Exception):
 
 
 def transcribe(audio, open_model):
-    import gc
-
     sample_rate = 16_000
     sample_length = 30 * sample_rate
     end = max(0, len(audio) - sample_length)
@@ -106,11 +113,7 @@ def transcribe(audio, open_model):
                 durationMillis=duration_millis, cues=cues)
 
 
-def open_cached_models(configuration):
-    import os
-    from pathlib import Path
-    import sys
-
+def resolve_cached_configuration(configuration):
     declared_cache = Path(r"J:\Models")
     cache = declared_cache.resolve(strict=True)
     if cache != declared_cache:
@@ -133,10 +136,14 @@ def open_cached_models(configuration):
             if not inside_cache(model / name).is_file():
                 raise WorkRefused("transcription-model-assets-unavailable")
 
+    dll_directories = [str(inside_cache(directory)) for directory in configuration["dllDirectories"]]
+    return cache, packages, models, dll_directories
+
+
+def create_cached_model_loader(cache, packages, models, dll_directories):
     os.environ["HF_HUB_OFFLINE"] = "1"
     os.environ["TRANSFORMERS_OFFLINE"] = "1"
     os.environ["HF_HOME"] = str(cache / "provider-cache" / "huggingface")
-    dll_directories = [str(inside_cache(directory)) for directory in configuration["dllDirectories"]]
     dll_handles = [os.add_dll_directory(directory) for directory in dll_directories]
     windows = Path(os.environ["SystemRoot"])
     os.environ["PATH"] = os.pathsep.join(dll_directories + [str(windows / "System32"), str(windows)])
@@ -156,12 +163,159 @@ def open_cached_models(configuration):
     return open_model
 
 
+def open_cached_models(configuration):
+    return create_cached_model_loader(*resolve_cached_configuration(configuration))
+
+
+class ResidentModel:
+    """Keep one decoder from the exact runtime pinned for this process."""
+
+    def __init__(self):
+        self.configuration = None
+        self.open_model = None
+        self.profile = None
+        self.model = None
+
+    def bind(self, configuration):
+        # Recheck the local assets before each run. Python native imports cannot be rebound.
+        resolved = resolve_cached_configuration(configuration)
+        if self.configuration is None:
+            self.configuration = resolved
+        elif resolved != self.configuration:
+            raise WorkRefused("transcription-runtime-unavailable")
+        if self.open_model is None:
+            self.open_model = create_cached_model_loader(*resolved)
+        return self
+
+    def __call__(self, profile):
+        if self.profile != profile:
+            self.release()
+            self.model = self.open_model(profile)
+            self.profile = profile
+        return self.model
+
+    def release(self):
+        if self.model is not None:
+            self.model = None
+            self.profile = None
+            gc.collect()
+
+
+def run_transcription(manifest, open_models, warm=False):
+    try:
+        if warm:
+            with manifest.open("rb") as stream:
+                data = stream.read(MAXIMUM_MANIFEST_BYTES + 1)
+            if len(data) > MAXIMUM_MANIFEST_BYTES:
+                raise WorkRefused("transcription-runtime-unavailable")
+            configuration = json.loads(data.decode("utf-8"))
+        else:
+            with manifest.open(encoding="utf-8") as stream:
+                configuration = json.load(stream)
+        source = manifest.parent / "input.media"
+        open_model = open_models(configuration)
+        audio = decode_bounded_audio(source)
+        result = transcribe(audio, open_model)
+        return dict(succeeded=True, result=result)
+    except WorkRefused as error:
+        return dict(succeeded=False, reasonCode=str(error))
+    except (ImportError, OSError, KeyError, TypeError):
+        return dict(succeeded=False, reasonCode="transcription-runtime-unavailable")
+    except Exception:
+        return dict(succeeded=False, reasonCode="transcription-recognition-failed")
+
+
+def unique_object(pairs):
+    result = dict(pairs)
+    if len(result) != len(pairs):
+        raise ValueError("Duplicate control field")
+    return result
+
+
+def control_path(value, name):
+    if not isinstance(value, str) or "\x00" in value:
+        raise ValueError("Invalid control path")
+    path = Path(value)
+    if (not path.is_absolute() or path.name != name or ".." in path.parts or
+            (os.name == "nt" and len(path.drive) != 2)):
+        raise ValueError("Invalid control path")
+    return path
+
+
+def parse_control_frame(line):
+    if not line.endswith(b"\n"):
+        raise ValueError("Incomplete control frame")
+    payload = line[:-2] if line.endswith(b"\r\n") else line[:-1]
+    if len(payload) > MAXIMUM_CONTROL_BYTES:
+        raise ValueError("Oversized control frame")
+    request = json.loads(payload.decode("utf-8"), object_pairs_hook=unique_object)
+    if request == {"operation": "shutdown"}:
+        return None
+    if (not isinstance(request, dict) or request.keys() != {"operation", "execution_id", "manifest", "output"}
+            or request["operation"] != "run"):
+        raise ValueError("Invalid control request")
+    execution_id = request["execution_id"]
+    if not isinstance(execution_id, str) or not re.fullmatch(r"[0-9a-f]{32}", execution_id):
+        raise ValueError("Invalid execution identity")
+    manifest = control_path(request["manifest"], "runtime.json")
+    output = control_path(request["output"], "output.json")
+    if manifest.parent != output.parent:
+        raise ValueError("Mismatched control paths")
+    return execution_id, manifest, output
+
+
+def encode_result(result):
+    return json.dumps(result, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
+
+
+def write_warm_result(manifest, output, resident):
+    with output.open("xb") as stream:
+        result = run_transcription(manifest, resident.bind, warm=True)
+        try:
+            payload = encode_result(result)
+        except (ValueError, TypeError):
+            result = dict(succeeded=False, reasonCode="transcription-output-invalid")
+        else:
+            if len(payload) > MAXIMUM_RESULT_BYTES:
+                result = dict(succeeded=False, reasonCode="transcription-output-too-large")
+        if not result["succeeded"]:
+            resident.release()
+            payload = encode_result(result)
+        stream.write(payload)
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
+def run_warm_worker(control, replies):
+    # The supervisor establishes native containment before sending the first request.
+    resident = ResidentModel()
+    try:
+        while line := control.readline(MAXIMUM_CONTROL_BYTES + len(b"\r\n")):
+            try:
+                request = parse_control_frame(line)
+            except (ValueError, RecursionError):
+                return 73
+            if request is None:
+                break
+            execution_id, manifest, output = request
+            write_warm_result(manifest, output, resident)
+            replies.write(encode_result(dict(execution_id=execution_id, status="idle", model=resident.profile)) + b"\n")
+            replies.flush()
+        return 0
+    except OSError:
+        return 74
+    finally:
+        resident.release()
+
+
 def main():
     import argparse
-    import json
-    import os
-    from pathlib import Path
-    import sys
+
+    if sys.argv[1:] == ["--warm-worker"]:
+        # Keep the control channel separate from Python and native provider diagnostics.
+        with os.fdopen(os.dup(sys.stdout.fileno()), "wb") as replies:
+            os.dup2(sys.stderr.fileno(), sys.stdout.fileno())
+            return run_warm_worker(sys.stdin.buffer, replies)
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--manifest", type=Path, required=True)
@@ -169,20 +323,7 @@ def main():
     args = parser.parse_args()
     if sys.stdin.readline(64) != "fluxknowledge-transcription-go-v1\n":
         return 73
-    try:
-        with args.manifest.open(encoding="utf-8") as stream:
-            configuration = json.load(stream)
-        source = args.manifest.parent / "input.media"
-        open_model = open_cached_models(configuration)
-        audio = decode_bounded_audio(source)
-        result = transcribe(audio, open_model)
-        output = dict(succeeded=True, result=result)
-    except WorkRefused as error:
-        output = dict(succeeded=False, reasonCode=str(error))
-    except (ImportError, OSError, KeyError, TypeError):
-        output = dict(succeeded=False, reasonCode="transcription-runtime-unavailable")
-    except Exception:
-        output = dict(succeeded=False, reasonCode="transcription-recognition-failed")
+    output = run_transcription(args.manifest, open_cached_models)
     with args.output.open("x", encoding="utf-8") as stream:
         json.dump(output, stream, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
         stream.flush()

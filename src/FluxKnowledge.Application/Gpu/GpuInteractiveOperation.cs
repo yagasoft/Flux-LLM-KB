@@ -3,7 +3,7 @@ namespace FluxKnowledge.Application.Gpu;
 /// <summary>An explicitly admitted model profile; the executor retains its existing default profile.</summary>
 public sealed record GpuInteractiveExecutionProfile(string RuntimeKey, string SettingsFingerprint, long EstimatedBytes);
 
-public enum GpuInteractiveSettlementKind { NoHandoff, CancelledBeforeExecution, Released, RetainedUncertain }
+public enum GpuInteractiveSettlementKind { NoHandoff, CancelledBeforeExecution, Released, RetainedUncertain, Detached }
 
 public sealed record GpuInteractiveSettlement(Guid RequestId, Guid ExecutorInstanceId, GpuExecutorBatchHandle? Handle,
     GpuInteractiveSettlementKind Kind, bool NativeCallbackEntered, bool NativeCapacityReleased, string? ObservationFailureType=null);
@@ -12,7 +12,7 @@ public sealed record GpuInteractiveSettlement(Guid RequestId, Guid ExecutorInsta
 public sealed record GpuInteractiveOperation<T>(Guid RequestId, Guid ExecutorInstanceId, string ExecutorKey,
     Task<T> Result, Task<GpuInteractiveSettlement> Settlement);
 
-public enum GpuInteractiveRequestState { NotFound, Queued, Owned, CancelledBeforeExecution, Released, Uncertain }
+public enum GpuInteractiveRequestState { NotFound, Queued, Owned, CancelledBeforeExecution, Released, Uncertain, Detached }
 
 public sealed record GpuInteractiveRequestSnapshot(Guid RequestId, Guid ExecutorInstanceId,
     string? RuntimeKey, string? SettingsFingerprint, GpuExecutorBatchHandle? Handle, GpuInteractiveRequestState State);

@@ -19,10 +19,11 @@ public interface IEmbeddingGpuHandoff
 public sealed record EmbeddingGpuExecutionWork(Guid MiniTaskId, Guid ClaimOperationId, Guid ParentJobId, Guid PipelineRecordId,
     long SourceRevision, EmbeddingWorkBatch Batch);
 
-public sealed record EmbeddingGpuCompletion(Guid MiniTaskId, byte[]? ResultDigest, DateTimeOffset CleanupConfirmedAtUtc);
+public sealed record EmbeddingGpuCompletion(Guid MiniTaskId, byte[]? ResultDigest, DateTimeOffset CleanupConfirmedAtUtc,
+    bool Detached = false);
 
 public sealed record EmbeddingGpuRecoveryWork(Guid MiniTaskId, GpuExecutorBatchHandle Handle, Guid? ExecutorInstanceId,
-    Guid? ClaimOperationId, GpuInteractiveOwnerIdentity? Owner, bool NativeCleanupConfirmed);
+    Guid? ClaimOperationId, GpuInteractiveOwnerIdentity? Owner, bool NativeCleanupConfirmed, bool Detached = false);
 
 public interface IEmbeddingGpuInference
 {
@@ -42,8 +43,12 @@ public interface IEmbeddingGpuRequestStore : IEmbeddingGpuHandoff
     ValueTask RecordNativeCleanupAsync(GpuExecutorBatchHandle handle, Guid executorInstance, Guid claimOperation,
         CancellationToken cancellationToken);
     ValueTask<EmbeddingGpuCompletion?> ReadPendingCompletionAsync(GpuExecutorBatchHandle handle, CancellationToken cancellationToken);
+    ValueTask<byte[]?> ReadResidentResultDigestAsync(GpuExecutorBatchHandle handle, Guid executorInstance,
+        Guid claimOperation, CancellationToken cancellationToken) => ValueTask.FromResult<byte[]?>(null);
     ValueTask<bool> RequeueSettledAsync(GpuExecutorBatchHandle handle, Guid miniTaskId, CancellationToken cancellationToken);
     ValueTask<IReadOnlyList<EmbeddingGpuRecoveryWork>> ReadRecoveryAsync(CancellationToken cancellationToken);
+    ValueTask<GpuExecutorDispatchState?> ReadUnclaimedResidentDispatchAsync(EmbeddingGpuRecoveryWork work,
+        GpuInteractiveOwnerIdentity owner, CancellationToken cancellationToken) => ValueTask.FromResult<GpuExecutorDispatchState?>(null);
     /// <summary>CAS proof that native work never started: only an exact still-unbound acknowledged/uncertain request can be closed.</summary>
     ValueTask<bool> ConfirmUnstartedCleanupAsync(EmbeddingGpuRecoveryWork work, Guid executorInstance,
         Guid claimOperation, GpuInteractiveOwnerIdentity owner, CancellationToken cancellationToken);

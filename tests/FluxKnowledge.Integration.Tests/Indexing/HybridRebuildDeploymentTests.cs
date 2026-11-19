@@ -17,14 +17,21 @@ public sealed class HybridRebuildDeploymentTests(NativeSqlServerFixture fixture)
 
     [NativeSqlServerFact]
     public Task Forward_patch_retains_operation_epoch_and_checkpoint_authority_through_failure_replay() => RunScriptAsync("patch");
-    [NativeSqlServerFact]
-    public async Task Actual_updater_drain_holds_admission_and_fails_closed_after_session_loss_or_uncertain_capacity()
+    [NativeSqlServerTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Actual_updater_drain_holds_admission_and_fails_closed_after_session_loss_or_uncertain_capacity(bool legacy)
     {
         await SqlTestData.ClearPhase3SourceDataAsync(fixture);
         await using var context = SqlTestData.CreateFactory(fixture).CreateDbContext();
-        context.GpuCapacitySlots.Add(new GpuCapacitySlotEntity { SlotKey=PaddleOcrVlmRuntimeContract.CapacitySlotKey, UpdatedAtUtc=DateTimeOffset.UtcNow });
-        await context.SaveChangesAsync();
-        await RunScriptAsync("drain");
+        if (legacy) await context.GetService<IMigrator>().MigrateAsync("20261119125051_AddMediaTranscriptionGpuRequests");
+        try
+        {
+            context.GpuCapacitySlots.Add(new GpuCapacitySlotEntity { SlotKey=PaddleOcrVlmRuntimeContract.CapacitySlotKey, UpdatedAtUtc=DateTimeOffset.UtcNow });
+            await context.SaveChangesAsync();
+            await RunScriptAsync("drain");
+        }
+        finally { if (legacy) await context.Database.MigrateAsync(); }
     }
 
     [NativeSqlServerFact]

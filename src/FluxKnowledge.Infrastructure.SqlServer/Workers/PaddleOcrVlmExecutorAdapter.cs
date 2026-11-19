@@ -2,7 +2,9 @@ using System.Collections.Concurrent;
 using FluxKnowledge.Application.Documents;
 using FluxKnowledge.Application.Gpu;
 using FluxKnowledge.Application.Ports;
+using FluxKnowledge.Domain.Gpu;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
+using FluxKnowledge.Integrations.Documents;
 using FluxKnowledge.Integrations.Windows;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -52,16 +54,28 @@ public sealed class PaddleOcrVlmExecutorAdapter(
             await completionCoordinator.CompleteAsync(handle, pending, CancellationToken.None).ConfigureAwait(false);
             return;
         }
-        var work = await store.ReadExecutionWorkAsync(handle, GpuExecutorDispatchState.PendingDelivery, CancellationToken.None).ConfigureAwait(false);
-        if (work is null) return;
-        // This invocation generates the identity once and has not launched anything yet. A
-        // lost commit response may be read back with that same identity; redelivery has a new one.
-        var executionId = Guid.NewGuid();
         using var claimBudget = new CancellationTokenSource(TimeSpan.FromMinutes(2));
+        var preassigned = await store.ReadResidentBorrowAsync(handle, claimBudget.Token).ConfigureAwait(false);
+        var residency = scope.ServiceProvider.GetService<GpuModelResidencyRuntime>();
+        var work = await store.ReadExecutionWorkAsync(handle, GpuExecutorDispatchState.PendingDelivery, claimBudget.Token).ConfigureAwait(false);
+        if (work is null)
+        {
+            if (preassigned is not null && residency is not null)
+                await completionCoordinator.RecoverUnclaimedResidentAsync(store, residency, handle, preassigned,
+                    _supervisor, ownerExited: false, claimBudget.Token).ConfigureAwait(false);
+            return;
+        }
+        var executionId = preassigned is null ? Guid.NewGuid() : handle.DispatchId;
         DocumentOcrLifecycleResult claimed;
         try { claimed = await store.TryClaimExecutionAsync(handle, work.MiniTaskId, executionId, _supervisor, claimBudget.Token).ConfigureAwait(false); }
         catch (Exception error) when (error is not OutOfMemoryException and not StackOverflowException && !claimBudget.IsCancellationRequested)
         { claimed = await store.TryClaimExecutionAsync(handle, work.MiniTaskId, executionId, _supervisor, claimBudget.Token).ConfigureAwait(false); }
+        if (claimed.Disposition == DocumentOcrLifecycleDisposition.SourceWithdrawn && preassigned is not null && residency is not null)
+        {
+            await completionCoordinator.RecoverUnclaimedResidentAsync(store, residency, handle, preassigned,
+                _supervisor, ownerExited: false, claimBudget.Token).ConfigureAwait(false);
+            return;
+        }
         if (!claimed.Accepted || claimed.Lease is not { } lease || lease.ExecutionInstanceId != executionId || lease.Supervisor != _supervisor) return;
         using var execution = executionRegistry.Begin(work.MiniTaskId);
         var remaining = lease.DeadlineAtUtc - _clock.GetUtcNow();
@@ -70,14 +84,38 @@ public sealed class PaddleOcrVlmExecutorAdapter(
         using var heartbeatStop = CancellationTokenSource.CreateLinkedTokenSource(run.Token);
         var heartbeat = HeartbeatAsync(store, lease, heartbeatStop.Token, run);
         DocumentOcrExecutionResult result;
+        GpuModelResidencyRuntime.NativeBorrow? nativeBorrow = null;
+        DocumentOcrResidentIdleProof? idle = null;
+        var warmAttempted = false;
         try
         {
             var retained = await scope.ServiceProvider.GetRequiredService<IRetainedSourceReader>()
                 .ReadBytesAsync(work.RetainedSourceRevisionId, run.Token).ConfigureAwait(false);
-            result = retained.ContentSha256 != work.ContentSha256
-                ? Refused("document-ocr-source-content-mismatch")
-                : await scope.ServiceProvider.GetRequiredService<IDocumentOcrExecutor>()
-                    .ExecuteAsync(retained, work.PageIndexes, new(lease, store), run.Token).ConfigureAwait(false);
+            var executor = scope.ServiceProvider.GetRequiredService<IDocumentOcrExecutor>();
+            var model = SqlDocumentOcrStore.ResidentModel;
+            if (retained.ContentSha256 != work.ContentSha256)
+                result = Refused("document-ocr-source-content-mismatch");
+            else if (executor is PaddleOcrVlmLocalExecutor native && residency is not null &&
+                (preassigned is not null || residency.EntryModel(model.RuntimeKey, model.SettingsFingerprint) == model))
+            {
+                warmAttempted = true;
+                nativeBorrow = await residency.OpenHelperAsync(handle, executionId, model, native.StartWarmProcessAsync, run.Token)
+                    .ConfigureAwait(false);
+                var fence = nativeBorrow.Fence;
+                var warm = await native.ExecuteWarmAsync(retained, work.PageIndexes, new(lease, store), nativeBorrow.Process,
+                    async (claim, command, token) => command.ResidentId == fence.ResidencyId &&
+                        command.ExecutionId == claim.ExecutionInstanceId &&
+                        (await store.PermitResidentNativeStartAsync(claim, fence, command.Process, token).ConfigureAwait(false)).Accepted,
+                    run.Token).ConfigureAwait(false);
+                result = deadline.IsCancellationRequested && warm.Result.ReasonCode == "document-ocr-owner-interrupted"
+                    ? Refused("document-ocr-runtime-timeout") : warm.Result;
+                if (warm.Idle is { Model: { } modelKey } acknowledgement)
+                    idle = new(acknowledgement.ResidentId, acknowledgement.ExecutionId, acknowledgement.Process, modelKey, _clock.GetUtcNow());
+            }
+            else if (preassigned is not null)
+                result = Refused("document-ocr-resident-helper-unavailable");
+            else
+                result = await executor.ExecuteAsync(retained, work.PageIndexes, new(lease, store), run.Token).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (run.IsCancellationRequested)
         {
@@ -96,13 +134,31 @@ public sealed class PaddleOcrVlmExecutorAdapter(
         }
         using var settlementBudget = new CancellationTokenSource(TimeSpan.FromMinutes(2));
         var ct = settlementBudget.Token;
-        // Purely managed refusals and synthetic executors never received native start permission.
-        // The SQL phase check rejects this proof for any native-permitted execution.
-        var unstartedProof = new DocumentOcrCleanupProof(lease.ExecutionInstanceId,
-            DocumentOcrCleanupKind.VerifiedUnstarted, null, _clock.GetUtcNow());
-        try { await store.ConfirmCleanupAsync(lease, unstartedProof, ct).ConfigureAwait(false); }
-        catch (Exception error) when (error is not OutOfMemoryException and not StackOverflowException && !ct.IsCancellationRequested)
-        { await store.ConfirmCleanupAsync(lease, unstartedProof, ct).ConfigureAwait(false); }
+        var borrow = nativeBorrow?.Fence ?? preassigned;
+        if (borrow is null && warmAttempted)
+            borrow = await store.ReadResidentBorrowAsync(handle, ct).ConfigureAwait(false);
+        if (borrow is not null)
+        {
+            if (idle is not null && residency is not null &&
+                await TryParkAsync(scope.ServiceProvider, store, residency, lease, borrow, result, idle, ct).ConfigureAwait(false))
+                return;
+            if (residency is null ||
+                !await completionCoordinator.ConfirmResidentCleanupAsync(store, residency, lease, borrow, ct).ConfigureAwait(false))
+            {
+                await store.RecordBlockedAsync(handle, lease.MiniTaskId, "document-ocr-resident-cleanup-unproven", ct)
+                    .ConfigureAwait(false);
+                return;
+            }
+        }
+        else
+        {
+            // The SQL phase and residency checks reject this proof after native start permission.
+            var proof = new DocumentOcrCleanupProof(lease.ExecutionInstanceId,
+                DocumentOcrCleanupKind.VerifiedUnstarted, null, _clock.GetUtcNow());
+            try { await store.ConfirmCleanupAsync(lease, proof, ct).ConfigureAwait(false); }
+            catch (Exception error) when (error is not OutOfMemoryException and not StackOverflowException && !ct.IsCancellationRequested)
+            { await store.ConfirmCleanupAsync(lease, proof, ct).ConfigureAwait(false); }
+        }
         try
         {
             var stored = await store.StoreResultAsync(lease, result, ct).ConfigureAwait(false);
@@ -132,6 +188,32 @@ public sealed class PaddleOcrVlmExecutorAdapter(
                 throw;
             }
         }
+    }
+
+    private async ValueTask<bool> TryParkAsync(IServiceProvider services, SqlDocumentOcrStore store,
+        GpuModelResidencyRuntime residency, DocumentOcrExecutionLease lease, GpuResidentModelFence borrow,
+        DocumentOcrExecutionResult result, DocumentOcrResidentIdleProof idle, CancellationToken ct)
+    {
+        DocumentOcrDetachedSettlement? parked;
+        try
+        {
+            parked = await residency.SettleHelperAsync(borrow,
+                () => store.SettleDetachedCompletionAsync(lease, result, borrow, idle, ct), ct).ConfigureAwait(false);
+        }
+        catch (Exception error) when (error is not OutOfMemoryException and not StackOverflowException && !ct.IsCancellationRequested)
+        {
+            // Keep the exact observation and execution identity after an ambiguous commit.
+            parked = await residency.SettleHelperAsync(borrow,
+                () => store.SettleDetachedCompletionAsync(lease, result, borrow, idle, ct), ct).ConfigureAwait(false);
+        }
+        if (parked?.Settlement.Accepted != true) return false;
+
+        residency.Notify();
+        services.GetService<IGpuSchedulerWakeSignal>()?.Notify(GpuSchedulerWakeReason.Reconciliation);
+        var pending = await store.ReadPendingCompletionAsync(lease.Handle, ct).ConfigureAwait(false);
+        if (pending is not null)
+            await completionCoordinator.CompleteAsync(lease.Handle, pending, ct).ConfigureAwait(false);
+        return true;
     }
 
     private async Task HeartbeatAsync(SqlDocumentOcrStore store, DocumentOcrExecutionLease lease, CancellationToken ct, CancellationTokenSource run)

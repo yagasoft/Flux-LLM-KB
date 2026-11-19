@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -15,6 +16,7 @@ using Syncfusion.Pdf;
 using Syncfusion.Pdf.Graphics;
 using SkiaSharp;
 using Xunit;
+using Xunit.Abstractions;
 
 namespace FluxKnowledge.Integration.Tests.Documents;
 
@@ -22,8 +24,11 @@ public sealed class PaddleOcrVlmLocalExecutorTests : IDisposable
 {
     private readonly string _root = Path.Combine(Path.GetTempPath(), $"FluxKnowledgeOcrExecutor_{Guid.NewGuid():N}");
 
-    public PaddleOcrVlmLocalExecutorTests()
+    private readonly ITestOutputHelper _output;
+
+    public PaddleOcrVlmLocalExecutorTests(ITestOutputHelper output)
     {
+        _output = output;
         Directory.CreateDirectory(_root);
     }
 
@@ -82,6 +87,181 @@ public sealed class PaddleOcrVlmLocalExecutorTests : IDisposable
         Assert.True(Directory.Exists(executionRoot));
         Assert.Empty(Directory.EnumerateDirectories(executionRoot));
     }
+
+    [Theory]
+    [InlineData("complete", "document-ocr-complete", true, false)]
+    [InlineData("wrong-page", "document-ocr-provider-result-invalid", true, false)]
+    [InlineData("provider-failure", "document-ocr-recognition-failed", false, true)]
+    [InlineData("wrong-model", "document-ocr-native-supervision-failed", false, true)]
+    [InlineData("refused", "document-ocr-native-start-refused", false, false)]
+    public async Task Warm_executor_binds_the_native_command_and_separates_result_from_idle_and_release(
+        string behaviour, string reason, bool expectIdle, bool expectRelease)
+    {
+        var rasterizer = new RecordingRasterizer();
+        var coldRunner = new RecordingProcessRunner();
+        using var modelGate = CreateGate();
+        var layout = LiveRootLayout.CreateForIsolatedTests(_root);
+        Directory.CreateDirectory(layout.TempRoot);
+        var executor = new PaddleOcrVlmLocalExecutor(rasterizer, modelGate, layout, coldRunner);
+        var execution = OcrTestExecutionContext.Create(TimeSpan.FromSeconds(20));
+        var residentId = Guid.NewGuid();
+        await using var worker = OwnedWarmModelProcess.Start(WarmOcrChild(behaviour), residentId,
+            execution.Lease.Supervisor.Process.MachineFingerprint);
+        using var observedJob = OwnedOcrJob.TryOpen(residentId);
+        Assert.NotNull(observedJob);
+        var root = Path.Combine(layout.TempRoot, "document-ocr");
+        DocumentOcrExecutionLease? authorizedLease = null;
+        OwnedWarmModelCommand? authorizedCommand = null;
+        string[]? filesBeforePermission = null;
+
+        var outcome = await executor.ExecuteWarmAsync(CreateRetained(), [2], execution, worker,
+            (lease, command, _) =>
+            {
+                authorizedLease = lease;
+                authorizedCommand = command;
+                filesBeforePermission = Directory.GetFiles(Directory.GetDirectories(root).Single())
+                    .Select(Path.GetFileName).Order().ToArray()!;
+                return ValueTask.FromResult(behaviour != "refused");
+            }, CancellationToken.None);
+
+        Assert.Equal(0, coldRunner.Calls);
+        Assert.Equal(execution.Lease, authorizedLease);
+        Assert.NotNull(authorizedCommand);
+        Assert.Equal(residentId, authorizedCommand.ResidentId);
+        Assert.Equal(execution.Lease.ExecutionInstanceId, authorizedCommand.ExecutionId);
+        Assert.Equal(new[] { "input.json", "page-00000002.png" }, filesBeforePermission);
+        Assert.Equal(reason, outcome.Result.ReasonCode);
+        Assert.Equal(behaviour == "complete", outcome.Result.Succeeded);
+        Assert.Equal(expectIdle, outcome.Idle is not null);
+        Assert.Equal(expectRelease, outcome.NativeReleaseConfirmed);
+        Assert.Equal(expectRelease, observedJob.ActiveProcesses == 0);
+        if (outcome.Idle is not null)
+        {
+            Assert.Equal("ocr", outcome.Idle.Model);
+            Assert.Equal(authorizedCommand.Process, outcome.Idle.Process);
+            Assert.Equal(authorizedCommand.ExecutionId, outcome.Idle.ExecutionId);
+        }
+        Assert.Empty(Directory.EnumerateFileSystemEntries(root));
+    }
+
+    [Fact]
+    public async Task Warm_executor_does_not_send_or_authorize_a_command_after_the_claim_deadline()
+    {
+        using var modelGate = CreateGate();
+        var layout = LiveRootLayout.CreateForIsolatedTests(_root);
+        Directory.CreateDirectory(layout.TempRoot);
+        var executor = new PaddleOcrVlmLocalExecutor(new RecordingRasterizer(), modelGate, layout, new RecordingProcessRunner());
+        var context = OcrTestExecutionContext.Create();
+        var execution = context with
+        {
+            Lease = context.Lease with
+            {
+                ClaimedAtUtc = context.Lease.ClaimedAtUtc.AddMinutes(-2),
+                DeadlineAtUtc = context.Lease.ClaimedAtUtc.AddMinutes(-1),
+            }
+        };
+        await using var worker = OwnedWarmModelProcess.Start(WarmOcrChild("complete"), Guid.NewGuid(),
+            execution.Lease.Supervisor.Process.MachineFingerprint);
+        var authorized = false;
+        var outcome = await executor.ExecuteWarmAsync(CreateRetained(), [2], execution, worker,
+            (_, _, _) =>
+            {
+                authorized = true;
+                return ValueTask.FromResult(true);
+            }, CancellationToken.None);
+        Assert.False(authorized);
+        Assert.Null(outcome.Idle);
+        Assert.False(outcome.NativeReleaseConfirmed);
+        Assert.Equal("document-ocr-runtime-timeout", outcome.Result.ReasonCode);
+    }
+
+    [Fact]
+    public async Task Warm_executor_confirms_release_when_the_native_child_misses_the_claim_deadline()
+    {
+        using var modelGate = CreateGate();
+        var layout = LiveRootLayout.CreateForIsolatedTests(_root);
+        Directory.CreateDirectory(layout.TempRoot);
+        var executor = new PaddleOcrVlmLocalExecutor(new RecordingRasterizer(), modelGate, layout, new RecordingProcessRunner());
+        var execution = OcrTestExecutionContext.Create(TimeSpan.FromSeconds(3));
+        var residentId = Guid.NewGuid();
+        await using var worker = OwnedWarmModelProcess.Start(WarmOcrChild("slow"), residentId,
+            execution.Lease.Supervisor.Process.MachineFingerprint);
+        using var observedJob = OwnedOcrJob.TryOpen(residentId);
+        Assert.NotNull(observedJob);
+        var authorized = false;
+
+        var run = executor.ExecuteWarmAsync(CreateRetained(), [2], execution, worker,
+            (_, _, _) =>
+            {
+                authorized = true;
+                return ValueTask.FromResult(true);
+            }, CancellationToken.None).AsTask();
+        try
+        {
+            var outcome = await run.WaitAsync(TimeSpan.FromSeconds(10));
+            Assert.True(authorized);
+            Assert.Null(outcome.Idle);
+            Assert.True(outcome.NativeReleaseConfirmed);
+            Assert.Equal("document-ocr-runtime-timeout", outcome.Result.ReasonCode);
+            Assert.Equal(0u, observedJob.ActiveProcesses);
+        }
+        finally
+        {
+            if (!run.IsCompleted)
+                await observedJob.TerminateAndConfirmAsync(TimeSpan.FromSeconds(5), CancellationToken.None);
+        }
+    }
+
+    [Fact]
+    public async Task Warm_launch_checks_the_fixed_model_gate_before_creating_runtime_storage()
+    {
+        using var modelGate = CreateGate(failStore: true);
+        var layout = LiveRootLayout.CreateForIsolatedTests(_root);
+        Directory.CreateDirectory(layout.TempRoot);
+        var executor = new PaddleOcrVlmLocalExecutor(new RecordingRasterizer(), modelGate, layout, new RecordingProcessRunner());
+
+        var refusal = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            executor.StartWarmProcessAsync(Guid.NewGuid(), new string('a', 64), CancellationToken.None).AsTask());
+
+        Assert.Equal("document-ocr-model-artifact-missing", refusal.Message);
+        Assert.Empty(Directory.EnumerateFileSystemEntries(layout.TempRoot));
+    }
+
+
+    private static ProcessStartInfo WarmOcrChild(string behaviour)
+    {
+        var script = """
+            while ($frame = [Console]::ReadLine()) {
+                $request = ConvertFrom-Json -InputObject $frame
+                if ($request.operation -eq 'shutdown') { exit 0 }
+                $manifest = Get-Content -LiteralPath $request.manifest -Raw | ConvertFrom-Json
+                $page = $manifest.pages[0]
+                $png = Join-Path (Split-Path -Parent $request.manifest) $page.image
+                if ($manifest.pages.Count -ne 1 -or $page.pageIndex -ne 2 -or -not (Test-Path -LiteralPath $png)) { exit 96 }
+                $model = 'ocr'
+                $result = @{succeeded=$true; reasonCode='document-ocr-complete'; pages=@(
+                    @{pageIndex=2; orientationDegrees=0; blocks=@()})}
+                __BEHAVIOUR__
+                [IO.File]::WriteAllText($request.output, ($result | ConvertTo-Json -Compress -Depth 5))
+                if (-not $result.succeeded) { exit 1 }
+                [Console]::WriteLine((@{execution_id=$request.execution_id;status='idle';model=$model} | ConvertTo-Json -Compress))
+            }
+            """.Replace("__BEHAVIOUR__", behaviour switch
+            {
+                "wrong-page" => "$result.pages[0].pageIndex = 3",
+                "provider-failure" => "$result = @{succeeded=$false;reasonCode='document-ocr-recognition-failed';pages=@()}",
+                "wrong-model" => "$model = 'general'",
+                "slow" => "Start-Sleep -Seconds 45",
+                _ => "",
+            });
+        var start = new ProcessStartInfo("powershell.exe");
+        start.ArgumentList.Add("-NoProfile");
+        start.ArgumentList.Add("-NonInteractive");
+        start.ArgumentList.Add("-EncodedCommand");
+        start.ArgumentList.Add(Convert.ToBase64String(Encoding.Unicode.GetBytes(script)));
+        return start;
+    }
+
 
     [Fact]
     public async Task Document_rasterizer_accepts_one_retained_png_as_page_zero()
@@ -245,6 +425,82 @@ public sealed class PaddleOcrVlmLocalExecutorTests : IDisposable
                 .RenderAsync(CreateRetained(bytes), CancellationToken.None, new HashSet<int> { 0 }).AsTask());
 
         Assert.Equal("image-ocr-raster-page-output-too-large", failure.OutcomeCode);
+    }
+
+    [Fact]
+    [Trait("Category", "local-ocr-warm")]
+    public async Task Fixed_pinned_GPU_OCR_runs_two_documents_in_the_same_warm_worker()
+    {
+        if (Environment.GetEnvironmentVariable("FLUX_KB_RUN_LOCAL_PADDLE_OCR_WARM") != "1") return;
+
+        var layout = LiveRootLayout.CreateForIsolatedTests(_root);
+        Directory.CreateDirectory(layout.TempRoot);
+        using var gate = new PaddleOcrVlmModelGate(new LocalModelStore(WindowsModelVerificationFiles.OpenProduction));
+        var executor = new PaddleOcrVlmLocalExecutor(new SyncfusionPdfPageRasterizer(new SyncfusionLicenceRegistration()), gate, layout);
+        var first = OcrTestExecutionContext.Create(TimeSpan.FromMinutes(2));
+        using var budget = new CancellationTokenSource(TimeSpan.FromMinutes(3));
+        var token = budget.Token;
+        var residentId = Guid.NewGuid();
+        _output.WriteLine($"GPU before launch (used/free MiB): {await ReadGpuMemoryAsync(token)}");
+        await using var worker = await executor.StartWarmProcessAsync(residentId, first.Lease.Supervisor.Process.MachineFingerprint, token);
+        using var observedJob = OwnedOcrJob.TryOpen(residentId);
+        Assert.NotNull(observedJob);
+
+        var cold = await RunAsync(first, "2026");
+        var second = OcrTestExecutionContext.Create(TimeSpan.FromMinutes(2));
+        var warmed = await RunAsync(second, "2027");
+        Assert.Equal(cold.Process, warmed.Process);
+        Assert.NotEqual(cold.ExecutionId, warmed.ExecutionId);
+        Assert.True(observedJob.ActiveProcesses > 0);
+        Assert.True(await worker.StopAndConfirmAsync(token));
+        Assert.Equal(0u, observedJob.ActiveProcesses);
+        _output.WriteLine($"GPU after release (used/free MiB): {await ReadGpuMemoryAsync(token)}");
+
+        async Task<OwnedWarmModelIdle> RunAsync(DocumentOcrExecutionContext execution, string year)
+        {
+            using var bitmap = new SKBitmap(1400, 360);
+            using (var canvas = new SKCanvas(bitmap))
+            using (var paint = new SKPaint { Color = SKColors.Black, IsAntialias = true })
+            using (var font = new SKFont(SKTypeface.Default, 96))
+            {
+                canvas.Clear(SKColors.White);
+                canvas.DrawText($"Flux OCR {year}", 80, 210, SKTextAlign.Left, font, paint);
+            }
+            using var image = SKImage.FromBitmap(bitmap);
+            using var png = image.Encode(SKEncodedImageFormat.Png, 100);
+            var retained = CreateRetained(png.ToArray());
+            var started = Stopwatch.GetTimestamp();
+            var result = await executor.ExecuteWarmAsync(retained, [0],
+                execution, worker, (lease, command, _) => ValueTask.FromResult(
+                    lease == execution.Lease && command.ExecutionId == lease.ExecutionInstanceId && command.ResidentId == residentId), token);
+            var elapsed = Stopwatch.GetElapsedTime(started);
+            Assert.True(result.Result.Succeeded, result.Result.ReasonCode);
+            Assert.False(result.NativeReleaseConfirmed);
+            var idle = Assert.IsType<OwnedWarmModelIdle>(result.Idle);
+            Assert.Equal("ocr", idle.Model);
+            var page = Assert.Single(result.Result.Pages);
+            var text = string.Join(' ', page.Blocks.Select(block => block.Text));
+            Assert.Contains("Flux", text, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains(year, text, StringComparison.Ordinal);
+            _output.WriteLine($"Request {year}: {elapsed.TotalSeconds:F3}s, PID {idle.Process.ProcessId}, GPU idle (used/free MiB): {await ReadGpuMemoryAsync(token)}");
+            return idle;
+        }
+    }
+
+    private static async Task<string> ReadGpuMemoryAsync(CancellationToken ct)
+    {
+        var query = new ProcessStartInfo("nvidia-smi")
+        {
+            UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true,
+        };
+        query.ArgumentList.Add("--query-gpu=memory.used,memory.free");
+        query.ArgumentList.Add("--format=csv,noheader,nounits");
+        query.ArgumentList.Add("--id=0");
+        using var process = Process.Start(query) ?? throw new InvalidOperationException("OCR test GPU query did not start.");
+        var output = await process.StandardOutput.ReadToEndAsync(ct);
+        await process.WaitForExitAsync(ct);
+        Assert.Equal(0, process.ExitCode);
+        return output.Trim();
     }
 
     [Fact]

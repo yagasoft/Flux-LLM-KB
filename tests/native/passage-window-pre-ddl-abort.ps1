@@ -1,4 +1,4 @@
-param([string]$SourceRoot=(Split-Path -Parent (Split-Path -Parent $PSScriptRoot)),[switch]$CodexWorkspace,[switch]$MediaTranscription)
+param([string]$SourceRoot=(Split-Path -Parent (Split-Path -Parent $PSScriptRoot)),[switch]$CodexWorkspace,[switch]$GpuResidency,[switch]$MediaTranscription)
 $ErrorActionPreference='Stop';Set-StrictMode -Version Latest
 . (Join-Path $SourceRoot 'scripts/deploy/incremental-passage-window-pre-ddl-abort.ps1')
 Import-Module (Join-Path $SourceRoot 'scripts/deploy/incremental-passage-window-eligibility-migration.psm1') -Force
@@ -41,10 +41,10 @@ $InteractiveHostTaskName = 'fixture'
 $SiteName = 'fixture'
 $ValidationHoldPath = Join-Path $caseRoot 'hold.json'
 $ReadinessTimeoutSeconds = 10
-$mode = if ($MediaTranscription) { @{MediaTranscription = $true} } elseif ($CodexWorkspace) { @{CodexWorkspace = $true} } else { @{Outlook = $true} }
+$mode = if ($GpuResidency) { @{GpuResidency=$true} } elseif ($MediaTranscription) { @{MediaTranscription = $true} } elseif ($CodexWorkspace) { @{CodexWorkspace = $true} } else { @{Outlook = $true} }
 $contract = Get-PassageWindowEligibilityMigrationContract @mode
 $purpose = $contract.ArtifactPrefix + '-migration'
-$receiptPrefix = if ($MediaTranscription) { 'media-transcription-pre-ddl-abort' } elseif ($CodexWorkspace) { 'codex-workspace-pre-ddl-abort' } else { 'outlook-pre-ddl-abort' }
+$receiptPrefix = if ($GpuResidency) { 'gpu-residency-pre-ddl-abort' } elseif ($MediaTranscription) { 'media-transcription-pre-ddl-abort' } elseif ($CodexWorkspace) { 'codex-workspace-pre-ddl-abort' } else { 'outlook-pre-ddl-abort' }
 $policy = [byte[]]@(1, 2, 3)
 $policyHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($policy))
 $fixtureHelperTask = @{
@@ -84,16 +84,16 @@ function Get-DeploymentSqlConnectionString { 'web' }
 function Get-RepositoryRecoveryCompanionConnectionString { 'outlook' }
 function Assert-FixtureMode($Selected) {
     if ($Selected.Outlook -ne $mode.ContainsKey('Outlook') -or $Selected.CodexWorkspace -ne $mode.ContainsKey('CodexWorkspace') -or
-        $Selected.MediaTranscription -ne $mode.ContainsKey('MediaTranscription')) { throw 'Wrong migration proof mode.' }
+        $Selected.MediaTranscription -ne $mode.ContainsKey('MediaTranscription') -or $Selected.GpuResidency -ne $mode.ContainsKey('GpuResidency')) { throw 'Wrong migration proof mode.' }
 }
 function Get-PassageWindowEligibilityDatabaseState {
-    param($ConnectionString,[switch]$Outlook,[switch]$CodexWorkspace,[switch]$MediaTranscription)
-    Assert-FixtureMode @{Outlook=$Outlook;CodexWorkspace=$CodexWorkspace;MediaTranscription=$MediaTranscription}
+    param($ConnectionString,[switch]$Outlook,[switch]$CodexWorkspace,[switch]$GpuResidency,[switch]$MediaTranscription)
+    Assert-FixtureMode @{Outlook=$Outlook;CodexWorkspace=$CodexWorkspace;MediaTranscription=$MediaTranscription;GpuResidency=$GpuResidency}
     $ConnectionString
 }
 function Get-PassageWindowEligibilityStateKind {
-    param($DatabaseState,$ExpectedDatabaseIdentity,[switch]$Outlook,[switch]$CodexWorkspace,[switch]$MediaTranscription)
-    Assert-FixtureMode @{Outlook=$Outlook;CodexWorkspace=$CodexWorkspace;MediaTranscription=$MediaTranscription}
+    param($DatabaseState,$ExpectedDatabaseIdentity,[switch]$Outlook,[switch]$CodexWorkspace,[switch]$GpuResidency,[switch]$MediaTranscription)
+    Assert-FixtureMode @{Outlook=$Outlook;CodexWorkspace=$CodexWorkspace;MediaTranscription=$MediaTranscription;GpuResidency=$GpuResidency}
     'Old'
 }
 function Get-FileHash { @{Hash='config'} }

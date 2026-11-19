@@ -1081,11 +1081,15 @@ public sealed partial class EmbeddingGpuRequestTests(NativeSqlServerFixture fixt
         var migrations = context.Database.GetMigrations().ToArray();
         var index = Array.FindIndex(migrations, value => value.EndsWith("_AddEmbeddingGpuRequests", StringComparison.Ordinal));
         Assert.True(index > 0);
-        var refusal = await Assert.ThrowsAsync<SqlException>(() => context.GetService<IMigrator>().MigrateAsync(migrations[index - 1]));
-        Assert.Contains("embedding-gpu-downgrade-requires-empty-reset", refusal.Message);
-        Assert.Single(await context.EmbeddingGpuRequests.ToListAsync());
-        // Newer migrations may already have been downgraded before this older no-loss guard refuses.
-        await context.Database.MigrateAsync();
+        try
+        {
+            var refusal = await Assert.ThrowsAsync<SqlException>(() => context.GetService<IMigrator>().MigrateAsync(migrations[index - 1]));
+            Assert.Contains("embedding-gpu-downgrade-requires-empty-reset", refusal.Message);
+            // Inspect a column present at the historical target after newer
+            // migrations have already been removed.
+            Assert.Single(await context.EmbeddingGpuRequests.Select(request => request.MiniTaskId).ToListAsync());
+        }
+        finally { await context.Database.MigrateAsync(); }
         await SqlTestData.ClearPipelineAsync(fixture);
         await context.GetService<IMigrator>().MigrateAsync(migrations[index - 1]);
         await context.Database.MigrateAsync();

@@ -15,13 +15,15 @@ using FluxKnowledge.Domain.Sources;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence.Configurations;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
 
 namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
 
 /// <summary>Background batches use the existing parent job and GPU lifecycle, never a worker lease fabricated from GPU ownership.</summary>
 public sealed class SqlEmbeddingGpuRequestStore(IDbContextFactory<FluxKnowledgeDbContext> contextFactory,
     IGpuSchedulerStore scheduler, IGpuSchedulerWakeSignal wake, EmbeddingGpuRuntime runtime, TimeProvider clock,
-    IDeploymentValidationHold? deploymentValidationHold = null, ISourceWorkAdmission? sourceAdmission = null) : IEmbeddingGpuRequestStore
+    IDeploymentValidationHold? deploymentValidationHold = null, ISourceWorkAdmission? sourceAdmission = null,
+    IGpuInteractiveOwnerProbe? residentOwnerProbe = null) : IEmbeddingGpuRequestStore
 {
     private sealed record Input(long Id, string Hash);
     public EmbeddingProfile Profile => runtime.Profile;
@@ -93,7 +95,8 @@ public sealed class SqlEmbeddingGpuRequestStore(IDbContextFactory<FluxKnowledgeD
             AND item.PipelineRecordId=request.PipelineRecordId AND item.SourceRevision=request.SourceRevision
         INNER JOIN CorpusRebuildOperations previous ON previous.Id=receipt.OperationId AND previous.TargetEpoch=request.CorpusEpoch
         INNER JOIN CorpusRebuildOperations successor ON successor.Id=receipt.ReplacementOperationId AND successor.SupersedesOperationId=previous.Id
-        WHERE request.State=2 AND request.NativeCleanupConfirmed=1 AND request.CleanupConfirmedAtUtc IS NOT NULL
+        WHERE request.State=2 AND ((request.NativeCleanupConfirmed=1 AND request.CleanupConfirmedAtUtc IS NOT NULL)
+          OR request.ResidentDetachmentDispatchId IS NOT NULL)
           AND task.State IN ({(int)GpuMiniTaskExecutionState.Completed},{(int)GpuMiniTaskExecutionState.OutcomeUncertain},{(int)GpuMiniTaskExecutionState.Cancelled})
           AND task.PriorityLane={(int)GpuPriorityLane.DocumentIndexing}
           AND task.ModelRuntimeKey COLLATE Latin1_General_100_BIN2 = JSON_VALUE(successor.ManifestJson,'$.Supersession.RuntimeKey') COLLATE Latin1_General_100_BIN2
@@ -183,6 +186,9 @@ public sealed class SqlEmbeddingGpuRequestStore(IDbContextFactory<FluxKnowledgeD
         {
             var request = await ReadOwnedRequestAsync(context, handle, cancellationToken).ConfigureAwait(false);
             if (request is null || request.State != 0 || request.NativeCleanupConfirmed) return null;
+            var resident = await ReadActiveResidencyAsync(context, handle, cancellationToken).ConfigureAwait(false);
+            if (resident is not null && (resident.ChildJobId is not null || SqlGpuModelResidencyStore.ReadFence(resident).Owner != owner))
+                return null;
             if (request.ExecutorInstanceId is not null && (request.ExecutorInstanceId != executorInstance || request.ClaimOperationId != claimOperation ||
                 request.DispatchId != handle.DispatchId || request.OwnerProcessId != owner.ProcessId || request.OwnerStartedAtUtc != owner.StartedAtUtc ||
                 request.OwnerMachineFingerprint != owner.MachineFingerprint)) return null;
@@ -226,7 +232,8 @@ public sealed class SqlEmbeddingGpuRequestStore(IDbContextFactory<FluxKnowledgeD
         {
             var request = await ReadBoundRequestAsync(context, handle, cancellationToken).ConfigureAwait(false);
             if (request is null || request.ExecutorInstanceId != executorInstance || request.ClaimOperationId != claimOperation ||
-                request.DispatchId != handle.DispatchId)
+                request.DispatchId != handle.DispatchId || request.ResidentDetachmentDispatchId is not null ||
+                await HasActiveResidencyAsync(context, handle, cancellationToken).ConfigureAwait(false))
                 throw new InvalidOperationException("embedding-gpu-cleanup-owner-mismatch");
             request.NativeCleanupConfirmed = true;
             request.CleanupConfirmedAtUtc ??= clock.GetUtcNow();
@@ -240,9 +247,25 @@ public sealed class SqlEmbeddingGpuRequestStore(IDbContextFactory<FluxKnowledgeD
         => TransactionAsync<EmbeddingGpuCompletion?>(async context =>
         {
             var request = await ReadBoundRequestAsync(context, handle, cancellationToken).ConfigureAwait(false);
+            if (request?.ResidentDetachmentDispatchId == handle.DispatchId)
+            {
+                var detached = await context.GpuModelDetachmentReceipts.SingleOrDefaultAsync(row =>
+                    row.DispatchId == handle.DispatchId && row.BatchId == handle.BatchId && row.ExecutorKey == handle.ExecutorKey &&
+                    row.AdmissionGeneration == handle.AdmissionGeneration && row.ExecutionInstanceId == handle.DispatchId,
+                    cancellationToken).ConfigureAwait(false);
+                return detached is null ? null : new(request.MiniTaskId, request.ResultDigest?.ToArray(), detached.DetachedAtUtc, Detached: true);
+            }
             return request is { NativeCleanupConfirmed: true, CleanupConfirmedAtUtc: not null }
                 ? new(request.MiniTaskId, request.ResultDigest?.ToArray(), request.CleanupConfirmedAtUtc.Value) : null;
         }, cancellationToken);
+
+    public ValueTask<byte[]?> ReadResidentResultDigestAsync(GpuExecutorBatchHandle handle, Guid executorInstance,
+        Guid claimOperation, CancellationToken ct) => TransactionAsync(async context =>
+    {
+        var request = await ReadBoundRequestAsync(context, handle, ct).ConfigureAwait(false);
+        return request is { State: 1, NativeCleanupConfirmed: false } && request.ExecutorInstanceId == executorInstance &&
+            request.ClaimOperationId == claimOperation ? request.ResultDigest?.ToArray() : null;
+    }, ct);
 
     public async ValueTask<IReadOnlyList<EmbeddingGpuRecoveryWork>> ReadRecoveryAsync(CancellationToken cancellationToken)
     {
@@ -263,9 +286,13 @@ public sealed class SqlEmbeddingGpuRequestStore(IDbContextFactory<FluxKnowledgeD
                 batch.CapacitySlotKey == dispatch.CapacitySlotKey && batch.OwnerKey == dispatch.OwnerKey &&
                 dispatch.ExecutorKey == EmbeddingGpuExecutor.Name &&
                 (request.DispatchId == null || request.DispatchId == dispatch.DispatchId) &&
-                (dispatch.State == (int)GpuExecutorDispatchState.Acknowledged ||
+                (dispatch.State == (int)GpuExecutorDispatchState.PendingDelivery && request.ExecutorInstanceId == null &&
+                    context.GpuModelResidencies.Any(row => row.SlotKey == dispatch.CapacitySlotKey &&
+                        row.BorrowedDispatchId == dispatch.DispatchId && row.ChildJobId == null && row.ReleasedAtUtc == null) ||
+                    dispatch.State == (int)GpuExecutorDispatchState.Acknowledged ||
                     dispatch.State == (int)GpuExecutorDispatchState.DeliveryUncertain ||
-                    request.NativeCleanupConfirmed && dispatch.State == (int)GpuExecutorDispatchState.Terminal)
+                    (request.NativeCleanupConfirmed || request.ResidentDetachmentDispatchId == dispatch.DispatchId) &&
+                        dispatch.State == (int)GpuExecutorDispatchState.Terminal)
             select new { Request = request, Dispatch = dispatch };
         // Keep unfinished work separate from the small eligible settled set.
         // An OR over the historical request table defeats the recovery joins.
@@ -281,7 +308,7 @@ public sealed class SqlEmbeddingGpuRequestStore(IDbContextFactory<FluxKnowledgeD
             candidate.Request.ExecutorInstanceId, candidate.Request.ClaimOperationId,
             candidate.Request.OwnerProcessId is null ? null : new(candidate.Request.OwnerProcessId.Value,
                 candidate.Request.OwnerStartedAtUtc!.Value, candidate.Request.OwnerMachineFingerprint!),
-            candidate.Request.NativeCleanupConfirmed)).ToArray();
+            candidate.Request.NativeCleanupConfirmed, candidate.Request.ResidentDetachmentDispatchId == candidate.Dispatch.DispatchId)).ToArray();
     }
 
     public ValueTask<bool> ConfirmUnstartedCleanupAsync(EmbeddingGpuRecoveryWork work, Guid executorInstance,
@@ -294,6 +321,8 @@ public sealed class SqlEmbeddingGpuRequestStore(IDbContextFactory<FluxKnowledgeD
         return TransactionAsync(async context =>
         {
             var handle = work.Handle;
+            await SqlGpuSchedulerStore.AcquireMutationLockAsync(context, context.Database.CurrentTransaction!.GetDbTransaction(),
+                cancellationToken).ConfigureAwait(false);
             var request = await (from value in context.EmbeddingGpuRequests
                 join task in context.GpuMiniTasks on value.MiniTaskId equals task.Id
                 join batch in context.GpuBatches on task.BatchId equals batch.Id
@@ -309,9 +338,29 @@ public sealed class SqlEmbeddingGpuRequestStore(IDbContextFactory<FluxKnowledgeD
                     dispatch.DispatchId == handle.DispatchId && dispatch.CapacitySlotKey == handle.CapacitySlotKey &&
                     dispatch.ExecutorKey == handle.ExecutorKey && handle.ExecutorKey == EmbeddingGpuExecutor.Name &&
                     dispatch.AdmissionGeneration == handle.AdmissionGeneration &&
-                    (dispatch.State == (int)GpuExecutorDispatchState.Acknowledged || dispatch.State == (int)GpuExecutorDispatchState.DeliveryUncertain)
+                    (dispatch.State == (int)GpuExecutorDispatchState.PendingDelivery || dispatch.State == (int)GpuExecutorDispatchState.Acknowledged ||
+                     dispatch.State == (int)GpuExecutorDispatchState.DeliveryUncertain)
                 select value).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
             if (request is null) return false;
+            var pendingDispatch = await context.GpuExecutorDispatches.SingleAsync(row => row.DispatchId == handle.DispatchId,
+                cancellationToken).ConfigureAwait(false);
+            var resident = await ReadActiveResidencyAsync(context, handle, cancellationToken).ConfigureAwait(false);
+            if (resident is not null)
+            {
+                var fence = SqlGpuModelResidencyStore.ReadFence(resident);
+                if (fence.Helper is not null || residentOwnerProbe?.Current != owner || fence.Owner == owner ||
+                    residentOwnerProbe.Observe(fence.Owner) != GpuInteractiveOwnerObservation.Exited ||
+                    !await SqlGpuModelResidencyStore.ReleaseBorrowedAsync(context, fence, handle, handle.DispatchId,
+                        GpuResidentReleaseKind.HostingProcessExited, clock.GetUtcNow(), cancellationToken).ConfigureAwait(false))
+                    return false;
+            }
+            if (pendingDispatch.State == (int)GpuExecutorDispatchState.PendingDelivery)
+            {
+                if (resident is null) return false;
+                pendingDispatch.State = (int)GpuExecutorDispatchState.Acknowledged;
+                pendingDispatch.AcknowledgedAtUtc = clock.GetUtcNow();
+                pendingDispatch.UpdatedAtUtc = pendingDispatch.AcknowledgedAtUtc.Value;
+            }
             request.ExecutorInstanceId = executorInstance;
             request.ClaimOperationId = claimOperation;
             request.OwnerProcessId = owner.ProcessId;
@@ -326,13 +375,51 @@ public sealed class SqlEmbeddingGpuRequestStore(IDbContextFactory<FluxKnowledgeD
         }, cancellationToken);
     }
 
+    public async ValueTask<GpuExecutorDispatchState?> ReadUnclaimedResidentDispatchAsync(EmbeddingGpuRecoveryWork work,
+        GpuInteractiveOwnerIdentity owner, CancellationToken ct)
+    {
+        if (work.Owner is not null || work.ExecutorInstanceId is not null || work.ClaimOperationId is not null ||
+            residentOwnerProbe?.Current != owner) return null;
+        var handle = work.Handle;
+        await using var context = await contextFactory.CreateDbContextAsync(ct).ConfigureAwait(false);
+        // This read only selects redelivery. The acknowledgement receipt, exact
+        // claim and native allocation gates still decide whether execution can start.
+        var state = await (from task in context.GpuMiniTasks
+                      join request in context.EmbeddingGpuRequests on task.Id equals request.MiniTaskId
+                      join dispatch in context.GpuExecutorDispatches on task.BatchId equals dispatch.BatchId
+                      join resident in context.GpuModelResidencies on dispatch.DispatchId equals resident.BorrowedDispatchId
+                      where task.Id == work.MiniTaskId && request.ExecutorInstanceId == null &&
+                          (dispatch.State == (int)GpuExecutorDispatchState.Acknowledged ||
+                           dispatch.State == (int)GpuExecutorDispatchState.DeliveryUncertain) &&
+                          dispatch.DispatchId == handle.DispatchId && dispatch.BatchId == handle.BatchId &&
+                          dispatch.AdmissionGeneration == handle.AdmissionGeneration && dispatch.ExecutorKey == handle.ExecutorKey &&
+                          dispatch.CapacitySlotKey == handle.CapacitySlotKey && resident.SlotKey == handle.CapacitySlotKey &&
+                          resident.ReleasedAtUtc == null && resident.ChildJobId == null &&
+                          resident.BorrowedExecutionInstanceId == handle.DispatchId && resident.OwnerProcessId == owner.ProcessId &&
+                          resident.OwnerStartedAtUtc == owner.StartedAtUtc && resident.MachineFingerprint == owner.MachineFingerprint
+                      select (int?)dispatch.State).SingleOrDefaultAsync(ct).ConfigureAwait(false);
+        return state is { } observed ? (GpuExecutorDispatchState)observed : null;
+    }
+
     public ValueTask<bool> ConfirmExitedCleanupAsync(EmbeddingGpuRecoveryWork work, CancellationToken cancellationToken)
         => TransactionAsync(async context =>
         {
+            await SqlGpuSchedulerStore.AcquireMutationLockAsync(context, context.Database.CurrentTransaction!.GetDbTransaction(),
+                cancellationToken).ConfigureAwait(false);
             var request = await ReadBoundRequestAsync(context, work.Handle, cancellationToken).ConfigureAwait(false);
             if (request is null || request.MiniTaskId != work.MiniTaskId || request.ExecutorInstanceId != work.ExecutorInstanceId ||
                 request.ClaimOperationId != work.ClaimOperationId || work.Owner is null || request.OwnerProcessId != work.Owner.ProcessId ||
-                request.OwnerStartedAtUtc != work.Owner.StartedAtUtc || request.OwnerMachineFingerprint != work.Owner.MachineFingerprint) return false;
+                request.OwnerStartedAtUtc != work.Owner.StartedAtUtc || request.OwnerMachineFingerprint != work.Owner.MachineFingerprint ||
+                request.ResidentDetachmentDispatchId is not null) return false;
+            var resident = await context.GpuModelResidencies.SingleOrDefaultAsync(row =>
+                row.BorrowedDispatchId == work.Handle.DispatchId && row.ReleasedAtUtc == null, cancellationToken).ConfigureAwait(false);
+            if (resident is not null)
+            {
+                var fence = SqlGpuModelResidencyStore.ReadFence(resident);
+                if (fence.Owner != work.Owner || fence.Helper is not null ||
+                    !await SqlGpuModelResidencyStore.ReleaseBorrowedAsync(context, fence, work.Handle, work.Handle.DispatchId,
+                        GpuResidentReleaseKind.HostingProcessExited, clock.GetUtcNow(), cancellationToken).ConfigureAwait(false)) return false;
+            }
             request.NativeCleanupConfirmed = true;
             request.CleanupConfirmedAtUtc ??= clock.GetUtcNow();
             request.UpdatedAtUtc = clock.GetUtcNow();
@@ -340,11 +427,20 @@ public sealed class SqlEmbeddingGpuRequestStore(IDbContextFactory<FluxKnowledgeD
             return true;
         }, cancellationToken);
 
+    private static Task<bool> HasActiveResidencyAsync(FluxKnowledgeDbContext context, GpuExecutorBatchHandle handle,
+        CancellationToken ct) => context.GpuModelResidencies.AnyAsync(row => row.SlotKey == handle.CapacitySlotKey &&
+            row.BorrowedDispatchId == handle.DispatchId && row.ReleasedAtUtc == null, ct);
+
+    private static Task<GpuModelResidencyEntity?> ReadActiveResidencyAsync(FluxKnowledgeDbContext context,
+        GpuExecutorBatchHandle handle, CancellationToken ct) => context.GpuModelResidencies.SingleOrDefaultAsync(row =>
+            row.SlotKey == handle.CapacitySlotKey && row.BorrowedDispatchId == handle.DispatchId && row.ReleasedAtUtc == null, ct);
+
     public ValueTask<bool> RequeueSettledAsync(GpuExecutorBatchHandle handle, Guid miniTaskId, CancellationToken cancellationToken)
         => TransactionAsync(async context =>
         {
             var request = await ReadBoundRequestAsync(context, handle, cancellationToken).ConfigureAwait(false);
-            if (request is null || request.MiniTaskId != miniTaskId || !request.NativeCleanupConfirmed) return false;
+            if (request is null || request.MiniTaskId != miniTaskId ||
+                !(request.NativeCleanupConfirmed || request.ResidentDetachmentDispatchId == handle.DispatchId)) return false;
             if (request.State == 2 && deploymentValidationHold?.IsHeld == true) return false;
             if (await context.CorpusRebuildSupersededJobs.AnyAsync(value => value.JobId == request.ParentJobId, cancellationToken).ConfigureAwait(false)) return false;
             var parent = await context.Jobs.SingleAsync(value => value.Id == request.ParentJobId, cancellationToken).ConfigureAwait(false);
@@ -543,7 +639,8 @@ public sealed class SqlEmbeddingGpuRequestStore(IDbContextFactory<FluxKnowledgeD
             join outbox in context.OutboxMessages on parent.Id equals outbox.JobId
             join batch in context.GpuBatches on task.BatchId equals batch.Id
             join dispatch in context.GpuExecutorDispatches on batch.Id equals dispatch.BatchId
-            where request.State == 2 && request.NativeCleanupConfirmed && request.CleanupConfirmedAtUtc != null &&
+            where request.State == 2 &&
+                (request.NativeCleanupConfirmed && request.CleanupConfirmedAtUtc != null || request.ResidentDetachmentDispatchId == dispatch.DispatchId) &&
                 request.ExecutorInstanceId != null && request.ClaimOperationId != null && request.DispatchId == dispatch.DispatchId &&
                 (repositoryHeld ? parent.PublicState == (int)PublicJobState.WorkerQueued && parent.Reason == SqlRepositoryWorkRecovery.Blocked &&
                     parent.LeaseOwner == null && parent.LeaseExpiresAtUtc == null && record.RepositoryRecoveryBindingJson != null &&
@@ -603,7 +700,8 @@ public sealed class SqlEmbeddingGpuRequestStore(IDbContextFactory<FluxKnowledgeD
                     success.ParentJobId == value.ParentJobId && success.GenerationId == value.GenerationId && success.CorpusEpoch == value.CorpusEpoch &&
                     success.PipelineRecordId == value.PipelineRecordId && success.SourceRevision == value.SourceRevision &&
                     success.ModelFingerprint == value.ModelFingerprint && success.Dimensions == value.Dimensions &&
-                    success.InputDigest == value.InputDigest && success.State == 2 && success.ResultDigest != null && success.NativeCleanupConfirmed)))
+                    success.InputDigest == value.InputDigest && success.State == 2 && success.ResultDigest != null &&
+                    (success.NativeCleanupConfirmed || success.ResidentDetachmentDispatchId != null))))
             .OrderBy(value => value.CreatedAtUtc).ThenBy(value => value.MiniTaskId).Take(5).ToArrayAsync(ct).ConfigureAwait(false);
         if (candidates.Length == 0) return null;
         var first = candidates[0];

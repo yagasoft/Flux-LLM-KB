@@ -30,6 +30,7 @@ public sealed class MediaTranscriptionGpuRequestConfiguration : IEntityTypeConfi
             table.HasCheckConstraint("CK_MediaTranscriptionGpuRequests_Cleanup",
                 """
                 ([ExecutionPhase]<3 AND [CleanupConfirmedAtUtc] IS NULL AND [CleanupKind] IS NULL) OR
+                ([ExecutionPhase]=4 AND [NativeProcessId] IS NOT NULL AND [CleanupConfirmedAtUtc] IS NULL AND [CleanupKind] IS NULL) OR
                 ([ExecutionPhase]>=3 AND [CleanupConfirmedAtUtc] IS NOT NULL AND [CleanupKind] IS NOT NULL AND
                  ([CleanupKind]=0 AND [NativeProcessId] IS NULL OR [CleanupKind]=1 AND [NativeProcessId] IS NOT NULL))
                 """);

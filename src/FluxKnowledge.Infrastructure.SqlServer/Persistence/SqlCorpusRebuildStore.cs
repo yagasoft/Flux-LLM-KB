@@ -65,7 +65,8 @@ public sealed partial class SqlCorpusRebuildStore(IDbContextFactory<FluxKnowledg
             throw new CorpusRebuildRefusalException("corpus-rebuild-projection-work-unsettled");
         if (await context.SourceRootConfigurations.AnyAsync(root => root.State == (int)SourceRootState.Deleting, ct).ConfigureAwait(false))
             throw new CorpusRebuildRefusalException("corpus-rebuild-source-deletion-in-progress");
-        if (await context.EmbeddingGpuRequests.AnyAsync(request => (request.State != 2 || !request.NativeCleanupConfirmed) &&
+        if (await context.EmbeddingGpuRequests.AnyAsync(request => (request.State != 2 ||
+                !request.NativeCleanupConfirmed && request.ResidentDetachmentDispatchId == null) &&
                 !unstartedRequestIds.Contains(request.MiniTaskId), ct).ConfigureAwait(false))
             throw new CorpusRebuildRefusalException("corpus-rebuild-embedding-request-unsettled");
 

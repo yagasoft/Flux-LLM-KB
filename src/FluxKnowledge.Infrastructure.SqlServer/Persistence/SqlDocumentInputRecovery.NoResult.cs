@@ -55,7 +55,7 @@ internal static partial class SqlDocumentInputRecovery
         var cleanup = await db.GpuExecutorEvidence.SingleOrDefaultAsync(value => value.OperationId == cleanupId, token).ConfigureAwait(false);
         if (cleanup is null || cleanup.DispatchId != dispatch.DispatchId || cleanup.BatchId != batchId || cleanup.CapacitySlotKey != batch.CapacitySlotKey ||
             cleanup.ExecutorKey != dispatch.ExecutorKey || cleanup.AdmissionGeneration != task.AdmissionGeneration ||
-            cleanup.EvidenceClass != (int)GpuExecutorEvidenceClass.CapacityReleaseConfirmed || cleanup.VerifierKey != "ocr-owned-job-v1" ||
+            cleanup.EvidenceClass != (int)GpuExecutorEvidenceClass.CapacityReleaseConfirmed || cleanup.VerifierKey is not ("ocr-owned-job-v1" or "ocr-resident-job-empty-v1") ||
             cleanup.ObservedAtUtc != request.NativeCleanupConfirmedAtUtc) return null;
         return new(task.Id, batchId, task.AdmissionGeneration, dispatch.DispatchId, execution, cleanup.OperationId, cleanup.RequestFingerprint,
             Convert.ToHexString(request.RowVersion), Convert.ToHexString(task.RowVersion), Convert.ToHexString(batch.RowVersion), Convert.ToHexString(dispatch.RowVersion),

@@ -292,7 +292,11 @@ public sealed partial class SqlProjectionReader(
             snapshot.NextDeferredAtUtc,
             new GpuCapacityUncertaintySummary(
                 snapshot.UncertainSlotCount == 0 ? "None" : "Uncertain",
-                ToBoundedAgeMinutes(snapshot.UncertainCapacityAge))) { OcrOwner = snapshot.OcrOwner };
+                ToBoundedAgeMinutes(snapshot.UncertainCapacityAge)))
+        {
+            OcrOwner = snapshot.OcrOwner, WarmModelSlotCount = snapshot.WarmModelSlotCount,
+            ReleasingModelSlotCount = snapshot.ReleasingModelSlotCount
+        };
 
     private static int? ToBoundedAgeMinutes(TimeSpan? uncertainCapacityAge) =>
         uncertainCapacityAge is not { } age

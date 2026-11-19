@@ -28,10 +28,145 @@ namespace FluxKnowledge.Integration.Tests.Documents;
 
 public sealed partial class SqlDocumentOcrHandoffTests
 {
+    private static async Task VerifyAbandonedResidentAsync(FluxKnowledgeDbContext db, SqlMediaTranscriptionGpuStore store,
+        MediaTranscriptionGpuRuntime runtime, GpuExecutorBatchHandle handle)
+    {
+        var old = SyntheticSupervisor();
+        var now = DateTimeOffset.UtcNow;
+        var id = Guid.NewGuid();
+        var child = new DocumentOcrProcessIdentity(old.Process.ProcessId + 1, now.AddMinutes(-1), old.Process.MachineFingerprint);
+        var resident = new GpuModelResidencyEntity
+        {
+            ResidencyId = id, SlotKey = handle.CapacitySlotKey, Version = 2,
+            RuntimeKey = runtime.ModelRuntimeKey, SettingsFingerprint = runtime.SettingsFingerprint, ModelKey = "general",
+            OwnerProcessId = old.Process.ProcessId, OwnerStartedAtUtc = old.Process.StartedAtUtc,
+            MachineFingerprint = old.Process.MachineFingerprint, ChildJobId = id,
+            ChildProcessId = child.ProcessId, ChildStartedAtUtc = child.StartedAtUtc,
+            State = (int)GpuModelResidencyState.Borrowed, BorrowedDispatchId = handle.DispatchId,
+            BorrowedExecutionInstanceId = handle.DispatchId
+        };
+        db.GpuModelResidencies.Add(resident);
+        await db.SaveChangesAsync();
+        var assigned = Assert.Single(await store.ReadUnclaimedResidentsAsync(default));
+        var fence = SqlGpuModelResidencyStore.ReadFence(resident);
+        Assert.Equal((handle, fence), assigned);
+        var replacement = new DocumentOcrSupervisorIdentity(Guid.NewGuid(),
+            new(old.Process.ProcessId + 2, now, old.Process.MachineFingerprint));
+        Assert.Equal(DocumentOcrLifecycleDisposition.StaleOwner,
+            (await store.TryClaimExecutionAsync(handle, handle.DispatchId, replacement, default)).Lifecycle.Disposition);
+        Assert.Equal(DocumentOcrLifecycleDisposition.StaleOwner,
+            (await store.TryClaimExecutionAsync(handle, Guid.NewGuid(), old, default)).Lifecycle.Disposition);
+        await db.GpuModelResidencies.Where(row => row.ResidencyId == id).ExecuteUpdateAsync(setters => setters
+            .SetProperty(row => row.ChildJobId, (Guid?)null).SetProperty(row => row.ChildProcessId, (int?)null)
+            .SetProperty(row => row.ChildStartedAtUtc, (DateTimeOffset?)null));
+        Assert.Equal(DocumentOcrLifecycleDisposition.StaleOwner,
+            (await store.TryClaimExecutionAsync(handle, handle.DispatchId, old, default)).Lifecycle.Disposition);
+        await db.GpuModelResidencies.Where(row => row.ResidencyId == id).ExecuteUpdateAsync(setters => setters
+            .SetProperty(row => row.ChildJobId, id).SetProperty(row => row.ChildProcessId, child.ProcessId)
+            .SetProperty(row => row.ChildStartedAtUtc, child.StartedAtUtc));
+
+        var untouched = await db.GpuExecutorDispatches.AsNoTracking().SingleAsync(row => row.DispatchId == handle.DispatchId);
+        Assert.Equal((int)GpuExecutorDispatchState.PendingDelivery, untouched.State);
+        Assert.Null(untouched.AcknowledgedAtUtc);
+        Assert.Null(await db.MediaTranscriptionGpuRequests.Select(row => row.ExecutionInstanceId).SingleAsync());
+        Assert.False((await store.ClaimAbandonedResidentAsync(handle, fence, replacement, false, default)).Accepted);
+        Assert.False((await store.ClaimAbandonedResidentAsync(handle, fence with { Version = 3 }, replacement, true, default)).Accepted);
+        var accepted = await store.ClaimAbandonedResidentAsync(handle, fence, replacement, true, default);
+        var lease = Assert.IsType<DocumentOcrExecutionLease>(accepted.Lease);
+        Assert.Equal(handle.DispatchId, lease.ExecutionInstanceId);
+        Assert.Equal(replacement, lease.Supervisor);
+        Assert.Empty(await store.ReadUnclaimedResidentsAsync(default));
+        Assert.False((await store.PermitResidentNativeStartAsync(lease, fence, child, default)).Accepted);
+        Assert.True((await store.ConfirmResidentCleanupAsync(lease, fence, new(id, lease.ExecutionInstanceId, child, DateTimeOffset.UtcNow),
+            default)).Accepted);
+        Assert.True((await store.StoreResultAsync(lease, new(false, "transcription-worker-interrupted", null, null), default)).Accepted);
+        var completion = Assert.IsType<MediaTranscriptionGpuCompletion>(await store.ReadPendingCompletionAsync(handle, default));
+        Assert.True((await store.SettleAsync(handle, completion.MiniTaskId, completion.ResultDigest, default)).Accepted);
+        Assert.Equal((int)GpuCapacitySlotState.Available, await db.GpuCapacitySlots.Select(row => row.State).SingleAsync());
+    }
+
+    private static async Task VerifyResidentMediaSettlementAsync(
+        IDbContextFactory<FluxKnowledgeDbContext> factory, SqlMediaTranscriptionGpuStore media, FluxKnowledgeDbContext db,
+        SqlGpuSchedulerStore scheduler, MediaTranscriptionLocalExecutor output, MediaTranscriptionGpuRuntime runtime,
+        DocumentOcrExecutionLease lease, Guid rootId, string mode)
+    {
+        var handle = lease.Handle;
+        var id = Guid.NewGuid();
+        var owner = lease.Supervisor.Process;
+        var process = new DocumentOcrProcessIdentity(owner.ProcessId + 1, lease.ClaimedAtUtc.AddMinutes(-1), owner.MachineFingerprint);
+        var residentStore = new SqlGpuModelResidencyStore(factory, TimeProvider.System);
+        var entry = new GpuResidentModelKey(runtime.ModelRuntimeKey, runtime.SettingsFingerprint, "general");
+        var fence = Assert.IsType<GpuResidentModelFence>(await residentStore.BeginBorrowAsync(handle, id,
+            lease.ExecutionInstanceId, entry, owner, new(id, process.ProcessId, process.StartedAtUtc), default));
+        Assert.False((await media.PermitResidentNativeStartAsync(lease, fence with { Version = fence.Version + 1 },
+            process, default)).Accepted);
+        Assert.True((await media.PermitResidentNativeStartAsync(lease, fence, process, default)).Accepted);
+        Assert.True(await SqlSourceDeletionOwnership.HasUnconfirmedMediaWorkAsync(db, rootId, default));
+
+        var result = MediaTranscriptionLocalExecutor.ParseResult(JsonSerializer.SerializeToUtf8Bytes(new
+        {
+            succeeded = true, result = new
+            {
+                profile = "egyptian-ar-en", selectionReason = "arabic-speech", language = "ar", languageConfidence = 0.98,
+                durationMillis = 1200, languageEvidence = Array.Empty<object>(),
+                cues = new[] { new { startMillis = 0, endMillis = 1200, text = "synthetic" } }
+            }
+        }));
+        Assert.True(result.Succeeded);
+        Assert.False((await media.StoreResultAsync(lease, result, default)).Accepted);
+        var observed = DateTimeOffset.UtcNow;
+        if (mode == "resident-park")
+        {
+            await output.PersistTranscriptAsync(lease.ExecutionInstanceId, result.Transcript!, default);
+            var idle = new DocumentOcrResidentIdleProof(id, lease.ExecutionInstanceId, process, "egyptian-ar-en", observed);
+            Assert.False((await media.SettleDetachedCompletionAsync(lease, result, fence, idle with { ModelKey = "general" },
+                false, default)).Settlement.Accepted);
+            Assert.False((await media.SettleDetachedCompletionAsync(lease, result, fence, idle with { ObservedAtUtc = lease.DeadlineAtUtc },
+                false, default)).Settlement.Accepted);
+            await db.SourceRootConfigurations.ExecuteUpdateAsync(changes => changes.SetProperty(root => root.State, (int)SourceRootState.Deleting));
+            Assert.Equal(DocumentOcrLifecycleDisposition.SourceWithdrawn,
+                (await media.SettleDetachedCompletionAsync(lease, result, fence, idle, false, default)).Settlement.Disposition);
+            Assert.Equal((int)GpuCapacitySlotState.Reserved, await db.GpuCapacitySlots.Select(row => row.State).SingleAsync());
+            await db.SourceRootConfigurations.ExecuteUpdateAsync(changes => changes.SetProperty(root => root.State, (int)SourceRootState.Enabled));
+            var parked = await media.SettleDetachedCompletionAsync(lease, result, fence, idle, false, default);
+            Assert.True(parked.Settlement.Accepted, parked.Settlement.ReasonCode);
+            Assert.Equal(fence.Version + 1, Assert.IsType<GpuResidentModelFence>(parked.Idle).Version);
+            var replay = await media.SettleDetachedCompletionAsync(lease, result, fence, idle, false, default);
+            Assert.Equal(DocumentOcrLifecycleDisposition.AlreadyApplied, replay.Settlement.Disposition);
+            var slot = await db.GpuCapacitySlots.AsNoTracking().SingleAsync();
+            Assert.Equal((int)GpuCapacitySlotState.ResidentIdle, slot.State);
+            Assert.Null(slot.ActiveBatchId);
+            Assert.Equal("egyptian-ar-en", await db.GpuModelResidencies.Select(row => row.ModelKey).SingleAsync());
+            Assert.False((await media.ReadPendingCompletionAsync(handle, default))!.NativeCleanupConfirmed);
+            Assert.True(await media.RequeueSettledAsync(handle, lease.MiniTaskId, default));
+            Assert.False(await SqlSourceDeletionOwnership.HasUnconfirmedMediaWorkAsync(db, rootId, default));
+        }
+        else
+        {
+            var proof = new DocumentOcrResidentReleaseProof(id, lease.ExecutionInstanceId, process, observed);
+            Assert.False((await media.ConfirmCleanupAsync(lease, new(lease.ExecutionInstanceId,
+                DocumentOcrCleanupKind.OwnedJobEmpty, process, observed), default)).Accepted);
+            Assert.False((await media.ConfirmResidentCleanupAsync(lease, fence, proof with { ResidencyId = Guid.NewGuid() }, default)).Accepted);
+            Assert.True((await media.ConfirmResidentCleanupAsync(lease, fence, proof, default)).Accepted);
+            Assert.Equal(DocumentOcrLifecycleDisposition.AlreadyApplied,
+                (await media.ConfirmResidentCleanupAsync(lease, fence, proof, default)).Disposition);
+            Assert.Equal((int)GpuCapacitySlotState.Reserved, await db.GpuCapacitySlots.Select(row => row.State).SingleAsync());
+            Assert.True((await media.StoreResultAsync(lease, new(false, "transcription-worker-interrupted", null, null), default)).Accepted);
+            var completion = Assert.IsType<MediaTranscriptionGpuCompletion>(await media.ReadPendingCompletionAsync(handle, default));
+            Assert.True((await media.SettleAsync(handle, completion.MiniTaskId, completion.ResultDigest, default)).Accepted);
+            Assert.Equal((int)GpuCapacitySlotState.Available, await db.GpuCapacitySlots.Select(row => row.State).SingleAsync());
+            Assert.False(await SqlSourceDeletionOwnership.HasUnconfirmedMediaWorkAsync(db, rootId, default));
+        }
+        Assert.Empty(await scheduler.ReadPendingDispatchesAsync(default));
+    }
+
     [NativeSqlServerTheory]
     [InlineData("private-spool")]
     [InlineData("legacy-published")]
     [InlineData("verified-native-file")]
+    [InlineData("resident-park")]
+    [InlineData("resident-release")]
+    [InlineData("resident-abandoned")]
     public async Task Media_transcription_recovers_new_and_published_results_without_copying_full_text_to_a_second_index(string storage)
     {
         var (factory, original, revision, _) = await CreateClaimedPdfAsync();
@@ -116,12 +251,23 @@ public sealed partial class SqlDocumentOcrHandoffTests
         Assert.Equal(GpuAdmissionDisposition.Admit, result.Disposition);
         var handle = Assert.Single(await scheduler.ReadPendingDispatchesAsync(default));
 
+        if (storage == "resident-abandoned")
+        {
+            await VerifyAbandonedResidentAsync(arrange, store, runtime, handle);
+            return;
+        }
+
         var owner = SyntheticSupervisor();
         var execution = Guid.NewGuid();
         var owned = await store.TryClaimExecutionAsync(handle, execution, owner, default);
         var lease = Assert.IsType<DocumentOcrExecutionLease>(owned.Lifecycle.Lease);
         Assert.Equal(revision, owned.SourceRevisionId);
         Assert.False((await store.TryClaimExecutionAsync(handle, Guid.NewGuid(), owner, default)).Lifecycle.Accepted);
+        if (storage is "resident-park" or "resident-release")
+        {
+            await VerifyResidentMediaSettlementAsync(factory, store, arrange, scheduler, output, runtime, lease, rootId, storage);
+            return;
+        }
         var process = new DocumentOcrProcessIdentity(owner.Process.ProcessId + 1, DateTimeOffset.UtcNow, owner.Process.MachineFingerprint);
         Assert.Equal(DocumentOcrLifecycleDisposition.SourceWithdrawn,
             (await optedOut.PermitNativeStartAsync(lease, process, default)).Disposition);

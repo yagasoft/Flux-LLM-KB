@@ -12,11 +12,13 @@ param(
     [switch]$ApplyOutlookWatchedSourceMigration,
     [switch]$ApplyCodexWorkspaceNotesMigration,
     [switch]$ApplyMediaTranscriptionGpuMigration,
+    [switch]$ApplyGpuModelResidencyMigration,
     [string]$MediaTranscriptionOptionsPath = '',
     [string]$ExpectedMediaTranscriptionOptionsSha256 = '',
     [string]$ExpectedMediaConfigurationBeforeSha256 = '',
     [string]$ExpectedMediaConfigurationAfterSha256 = '',
     [string]$RecoverUnattemptedMediaTranscriptionRelease = '',
+    [string]$RecoverUnattemptedGpuModelResidencyRelease = '',
     [string]$ContinueHeldMediaTranscriptionRelease = '',
     [string]$RecoverUnattemptedPassageWindowRelease='',
     [string]$RecoverUnattemptedOutlookRelease='',
@@ -203,7 +205,7 @@ function Invoke-SourceDeletionPendingQueuePreparation {
 
 function Assert-PassageWindowEligibilityUpdateOptions {
     param([Collections.IDictionary]$Parameters)
-    $modes = @('ApplyPassageWindowEligibilityMigration','ApplyOutlookWatchedSourceMigration','ApplyCodexWorkspaceNotesMigration','ApplyMediaTranscriptionGpuMigration' |
+    $modes = @('ApplyPassageWindowEligibilityMigration','ApplyOutlookWatchedSourceMigration','ApplyCodexWorkspaceNotesMigration','ApplyMediaTranscriptionGpuMigration','ApplyGpuModelResidencyMigration' |
         Where-Object { $Parameters[$_] })
     $mediaOptions=@('MediaTranscriptionOptionsPath','ExpectedMediaTranscriptionOptionsSha256','ExpectedMediaConfigurationBeforeSha256','ExpectedMediaConfigurationAfterSha256')
     if ($Parameters.ContainsKey('ContinueHeldMediaTranscriptionRelease')) {
@@ -235,7 +237,7 @@ function Assert-PassageWindowEligibilityUpdateOptions {
 
 function Get-PassageWindowEligibilityUpdateSql {
     param([string]$Root)
-    $contract=Get-PassageWindowEligibilityMigrationContract -Outlook:$ApplyOutlookWatchedSourceMigration -CodexWorkspace:$ApplyCodexWorkspaceNotesMigration -MediaTranscription:$ApplyMediaTranscriptionGpuMigration
+    $contract=Get-PassageWindowEligibilityMigrationContract -Outlook:$ApplyOutlookWatchedSourceMigration -CodexWorkspace:$ApplyCodexWorkspaceNotesMigration -MediaTranscription:$ApplyMediaTranscriptionGpuMigration -GpuResidency:$ApplyGpuModelResidencyMigration
     $path=Assert-SegmentedUpdatePath (Join-Path $Root ("scripts/deploy/{0}-up.sql" -f $contract.ArtifactPrefix))
     if((Get-FileHash -LiteralPath $path).Hash -cne $contract.UpSha256){throw 'window-eligibility-reviewed-sql-changed'}
     @{Path=$path;Sha256=$contract.UpSha256;From=$contract.Baseline;To=$contract.Target}
@@ -243,8 +245,8 @@ function Get-PassageWindowEligibilityUpdateSql {
 
 function Get-PassageWindowEligibilityUpdatePlan {
     param($DatabaseState,[string]$ExpectedDatabaseIdentity,$Sql)
-    $contract=Get-PassageWindowEligibilityMigrationContract -Outlook:$ApplyOutlookWatchedSourceMigration -CodexWorkspace:$ApplyCodexWorkspaceNotesMigration -MediaTranscription:$ApplyMediaTranscriptionGpuMigration
-    $kind=Get-PassageWindowEligibilityStateKind -Outlook:$ApplyOutlookWatchedSourceMigration -CodexWorkspace:$ApplyCodexWorkspaceNotesMigration -MediaTranscription:$ApplyMediaTranscriptionGpuMigration $DatabaseState $ExpectedDatabaseIdentity
+    $contract=Get-PassageWindowEligibilityMigrationContract -Outlook:$ApplyOutlookWatchedSourceMigration -CodexWorkspace:$ApplyCodexWorkspaceNotesMigration -MediaTranscription:$ApplyMediaTranscriptionGpuMigration -GpuResidency:$ApplyGpuModelResidencyMigration
+    $kind=Get-PassageWindowEligibilityStateKind -Outlook:$ApplyOutlookWatchedSourceMigration -CodexWorkspace:$ApplyCodexWorkspaceNotesMigration -MediaTranscription:$ApplyMediaTranscriptionGpuMigration -GpuResidency:$ApplyGpuModelResidencyMigration $DatabaseState $ExpectedDatabaseIdentity
     if($kind -ceq 'Old' -and !$DatabaseState.CanAlter){throw 'window-eligibility-alter-permission-required'}
     if($Sql.Sha256 -cne $contract.UpSha256){throw 'window-eligibility-reviewed-sql-changed'}
     @{state=$kind;database_identity=$DatabaseState.Identity;target=$contract.Target;sql_sha256=$Sql.Sha256;
@@ -272,7 +274,7 @@ function Assert-PassageWindowEligibilityStopped {
         if($hash -cnotin @($payload.Sha256,$original.Sha256)){throw 'window-eligibility-installed-payload-unrecognised'}
     }
     foreach($connection in @((Get-DeploymentSqlConnectionString),(Get-RepositoryRecoveryCompanionConnectionString))){
-        $null=Get-PassageWindowEligibilityStateKind -Outlook:$ApplyOutlookWatchedSourceMigration -CodexWorkspace:$ApplyCodexWorkspaceNotesMigration -MediaTranscription:$ApplyMediaTranscriptionGpuMigration (Get-PassageWindowEligibilityDatabaseState -Outlook:$ApplyOutlookWatchedSourceMigration -CodexWorkspace:$ApplyCodexWorkspaceNotesMigration -MediaTranscription:$ApplyMediaTranscriptionGpuMigration -ConnectionString $connection) $State.Identity
+        $null=Get-PassageWindowEligibilityStateKind -Outlook:$ApplyOutlookWatchedSourceMigration -CodexWorkspace:$ApplyCodexWorkspaceNotesMigration -MediaTranscription:$ApplyMediaTranscriptionGpuMigration -GpuResidency:$ApplyGpuModelResidencyMigration (Get-PassageWindowEligibilityDatabaseState -Outlook:$ApplyOutlookWatchedSourceMigration -CodexWorkspace:$ApplyCodexWorkspaceNotesMigration -MediaTranscription:$ApplyMediaTranscriptionGpuMigration -GpuResidency:$ApplyGpuModelResidencyMigration -ConnectionString $connection) $State.Identity
     }
 }
 
@@ -280,13 +282,13 @@ function Invoke-PassageWindowEligibilityStoppedAttempt {
     param([hashtable]$State,[hashtable]$Binding,[string]$SqlPath)
     if($State.Attempted){
         $null=Confirm-PassageWindowEligibilityMigrationOutcome -State $State `
-            -ReadState {Get-PassageWindowEligibilityDatabaseState -Outlook:$ApplyOutlookWatchedSourceMigration -CodexWorkspace:$ApplyCodexWorkspaceNotesMigration -MediaTranscription:$ApplyMediaTranscriptionGpuMigration -ConnectionString (Get-DeploymentSqlConnectionString)}
+            -ReadState {Get-PassageWindowEligibilityDatabaseState -Outlook:$ApplyOutlookWatchedSourceMigration -CodexWorkspace:$ApplyCodexWorkspaceNotesMigration -MediaTranscription:$ApplyMediaTranscriptionGpuMigration -GpuResidency:$ApplyGpuModelResidencyMigration -ConnectionString (Get-DeploymentSqlConnectionString)}
     } else {
         if(!$sourceJournalHelperState.Completed){throw 'window-eligibility-helper-must-complete-before-ddl'}
         Invoke-PassageWindowEligibilityMigrationAttempt -State $State `
             -AssertStopped {Assert-PassageWindowEligibilityStopped $State $Binding} `
-            -ReadState {Get-PassageWindowEligibilityDatabaseState -Outlook:$ApplyOutlookWatchedSourceMigration -CodexWorkspace:$ApplyCodexWorkspaceNotesMigration -MediaTranscription:$ApplyMediaTranscriptionGpuMigration -ConnectionString (Get-DeploymentSqlConnectionString)} `
-            -RunUp {Invoke-PassageWindowEligibilityMigrationSql -Outlook:$ApplyOutlookWatchedSourceMigration -CodexWorkspace:$ApplyCodexWorkspaceNotesMigration -MediaTranscription:$ApplyMediaTranscriptionGpuMigration -ConnectionString (Get-DeploymentSqlConnectionString) `
+            -ReadState {Get-PassageWindowEligibilityDatabaseState -Outlook:$ApplyOutlookWatchedSourceMigration -CodexWorkspace:$ApplyCodexWorkspaceNotesMigration -MediaTranscription:$ApplyMediaTranscriptionGpuMigration -GpuResidency:$ApplyGpuModelResidencyMigration -ConnectionString (Get-DeploymentSqlConnectionString)} `
+            -RunUp {Invoke-PassageWindowEligibilityMigrationSql -Outlook:$ApplyOutlookWatchedSourceMigration -CodexWorkspace:$ApplyCodexWorkspaceNotesMigration -MediaTranscription:$ApplyMediaTranscriptionGpuMigration -GpuResidency:$ApplyGpuModelResidencyMigration -ConnectionString (Get-DeploymentSqlConnectionString) `
                 -SqlPath $SqlPath -ExpectedDatabaseIdentity $State.Identity}
     }
 }
@@ -314,10 +316,10 @@ function Assert-PassageWindowEligibilityActivation {
     }
     if(!$windowEligibilityMigrationState.Applied -or !$sourceJournalHelperState.Completed -or
         (Confirm-PassageWindowEligibilityMigrationOutcome -State $windowEligibilityMigrationState `
-            -ReadState {Get-PassageWindowEligibilityDatabaseState -Outlook:$ApplyOutlookWatchedSourceMigration -CodexWorkspace:$ApplyCodexWorkspaceNotesMigration -MediaTranscription:$ApplyMediaTranscriptionGpuMigration -ConnectionString (Get-DeploymentSqlConnectionString)}) -cne 'New'){
+            -ReadState {Get-PassageWindowEligibilityDatabaseState -Outlook:$ApplyOutlookWatchedSourceMigration -CodexWorkspace:$ApplyCodexWorkspaceNotesMigration -MediaTranscription:$ApplyMediaTranscriptionGpuMigration -GpuResidency:$ApplyGpuModelResidencyMigration -ConnectionString (Get-DeploymentSqlConnectionString)}) -cne 'New'){
         throw 'typed-schema-start-requires-exact-successor-and-helper'
     }
-    if((Get-PassageWindowEligibilityStateKind -Outlook:$ApplyOutlookWatchedSourceMigration -CodexWorkspace:$ApplyCodexWorkspaceNotesMigration -MediaTranscription:$ApplyMediaTranscriptionGpuMigration (Get-PassageWindowEligibilityDatabaseState -Outlook:$ApplyOutlookWatchedSourceMigration -CodexWorkspace:$ApplyCodexWorkspaceNotesMigration -MediaTranscription:$ApplyMediaTranscriptionGpuMigration `
+    if((Get-PassageWindowEligibilityStateKind -Outlook:$ApplyOutlookWatchedSourceMigration -CodexWorkspace:$ApplyCodexWorkspaceNotesMigration -MediaTranscription:$ApplyMediaTranscriptionGpuMigration -GpuResidency:$ApplyGpuModelResidencyMigration (Get-PassageWindowEligibilityDatabaseState -Outlook:$ApplyOutlookWatchedSourceMigration -CodexWorkspace:$ApplyCodexWorkspaceNotesMigration -MediaTranscription:$ApplyMediaTranscriptionGpuMigration -GpuResidency:$ApplyGpuModelResidencyMigration `
         -ConnectionString (Get-RepositoryRecoveryCompanionConnectionString)) $windowEligibilityMigrationState.Identity) -cne 'New'){
         throw 'typed-schema-companion-successor-invalid'
     }
@@ -2629,7 +2631,7 @@ $sourceJournalMode = $ApplyIncrementalSourceScanning -or $DisableIncrementalSour
 Assert-VectorPublicationMetadataUpdateOptions $PSBoundParameters
 Assert-SourceDeletionPendingQueueUpdateOptions $PSBoundParameters
 Assert-PassageWindowEligibilityUpdateOptions $PSBoundParameters
-$ApplyTypedSchemaMigration = $ApplyPassageWindowEligibilityMigration -or $ApplyOutlookWatchedSourceMigration -or $ApplyCodexWorkspaceNotesMigration -or $ApplyMediaTranscriptionGpuMigration
+$ApplyTypedSchemaMigration = $ApplyPassageWindowEligibilityMigration -or $ApplyOutlookWatchedSourceMigration -or $ApplyCodexWorkspaceNotesMigration -or $ApplyMediaTranscriptionGpuMigration -or $ApplyGpuModelResidencyMigration
 Assert-StoppedRecoveryReadinessBudgetOptions $PSBoundParameters
 if ($sourceJournalMode) {
     $allowed=@('SourceRoot','SiteName','SiteUrl','DeployRoot','ReadinessTimeoutSeconds','RecoverStoppedPool','PlanOnly','Apply',
@@ -2826,7 +2828,7 @@ $offlineCodeState = $null
 Import-Module (Join-Path $PSScriptRoot 'incremental-hybrid-passage-rebuild.psm1') -Force -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'incremental-repository-recovery-migration.psm1') -Force -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'incremental-repository-recovery-release.psm1') -Force -ErrorAction Stop
-$typedRecoveryModes = @('RecoverUnattemptedPassageWindowRelease','RecoverUnattemptedOutlookRelease','RecoverUnattemptedCodexWorkspaceNotesRelease','RecoverUnattemptedMediaTranscriptionRelease' |
+$typedRecoveryModes = @('RecoverUnattemptedPassageWindowRelease','RecoverUnattemptedOutlookRelease','RecoverUnattemptedCodexWorkspaceNotesRelease','RecoverUnattemptedMediaTranscriptionRelease','RecoverUnattemptedGpuModelResidencyRelease' |
     Where-Object { $PSBoundParameters[$_] })
 if($typedRecoveryModes.Count){
     if ($typedRecoveryModes.Count -ne 1) { throw 'typed-pre-ddl-recovery-modes-are-mutually-exclusive' }
@@ -2839,7 +2841,7 @@ if($typedRecoveryModes.Count){
     . (Join-Path $PSScriptRoot 'incremental-passage-window-pre-ddl-abort.ps1')
     Import-Module WebAdministration -ErrorAction Stop
     Invoke-DeploymentPassageWindowPreDdlAbort -PriorReleaseId $PSBoundParameters[$recoveryMode] `
-        -ExpectedBindingSha256 $ExpectedUnattemptedPassageWindowBindingSha256 -Apply:$Apply -Outlook:([bool]$RecoverUnattemptedOutlookRelease) -CodexWorkspace:([bool]$RecoverUnattemptedCodexWorkspaceNotesRelease) -MediaTranscription:([bool]$RecoverUnattemptedMediaTranscriptionRelease)
+        -ExpectedBindingSha256 $ExpectedUnattemptedPassageWindowBindingSha256 -Apply:$Apply -Outlook:([bool]$RecoverUnattemptedOutlookRelease) -CodexWorkspace:([bool]$RecoverUnattemptedCodexWorkspaceNotesRelease) -MediaTranscription:([bool]$RecoverUnattemptedMediaTranscriptionRelease) -GpuResidency:([bool]$RecoverUnattemptedGpuModelResidencyRelease)
     return
 }
 $loopbackOrigin = Get-FixedLoopbackOrigin -SiteUrl $SiteUrl
@@ -2987,7 +2989,7 @@ if ($PlanOnly) {
         if(!$SourceRoot){$SourceRoot=Split-Path -Parent (Split-Path -Parent $PSScriptRoot)}
         $SourceRoot=(Resolve-Path -LiteralPath $SourceRoot).Path
         $migrationPlan=Get-PassageWindowEligibilityUpdatePlan `
-            -DatabaseState (Get-PassageWindowEligibilityDatabaseState -Outlook:$ApplyOutlookWatchedSourceMigration -CodexWorkspace:$ApplyCodexWorkspaceNotesMigration -MediaTranscription:$ApplyMediaTranscriptionGpuMigration -ConnectionString (Get-DeploymentSqlConnectionString)) `
+            -DatabaseState (Get-PassageWindowEligibilityDatabaseState -Outlook:$ApplyOutlookWatchedSourceMigration -CodexWorkspace:$ApplyCodexWorkspaceNotesMigration -MediaTranscription:$ApplyMediaTranscriptionGpuMigration -GpuResidency:$ApplyGpuModelResidencyMigration -ConnectionString (Get-DeploymentSqlConnectionString)) `
             -ExpectedDatabaseIdentity $ExpectedSourceJournalDatabaseIdentity -Sql (Get-PassageWindowEligibilityUpdateSql $SourceRoot)
         $migrationPlan.helper='update the existing readonly broker payload before DDL; preserve exact policy bytes, grants and original task state'
         if($mediaPredecessor){$migrationPlan.held_predecessor=$mediaPredecessor.ReleaseId}
@@ -3318,7 +3320,7 @@ $pendingQueueSql = $null
 if($ApplyTypedSchemaMigration){
     $migrationPlan=@{Up=(Get-PassageWindowEligibilityUpdateSql $SourceRoot)}
     $null=Get-PassageWindowEligibilityUpdatePlan `
-        -DatabaseState (Get-PassageWindowEligibilityDatabaseState -Outlook:$ApplyOutlookWatchedSourceMigration -CodexWorkspace:$ApplyCodexWorkspaceNotesMigration -MediaTranscription:$ApplyMediaTranscriptionGpuMigration -ConnectionString (Get-DeploymentSqlConnectionString)) `
+        -DatabaseState (Get-PassageWindowEligibilityDatabaseState -Outlook:$ApplyOutlookWatchedSourceMigration -CodexWorkspace:$ApplyCodexWorkspaceNotesMigration -MediaTranscription:$ApplyMediaTranscriptionGpuMigration -GpuResidency:$ApplyGpuModelResidencyMigration -ConnectionString (Get-DeploymentSqlConnectionString)) `
         -ExpectedDatabaseIdentity $ExpectedSourceJournalDatabaseIdentity -Sql $migrationPlan.Up
 }
 if($EnsureSourceDeletionPendingQueueIndex){
@@ -3394,7 +3396,7 @@ try {
     if(!$RecoverStoppedPool -and !$applyAnyMigration){
         Assert-HybridGpuDrainPreflight -ConnectionString (Get-DeploymentSqlConnectionString)
     }
-    if ($ApplyCodexWorkspaceNotesMigration -or $ApplyMediaTranscriptionGpuMigration) { Assert-DeploymentSourceJournalCliWritersStopped }
+    if ($ApplyCodexWorkspaceNotesMigration -or $ApplyMediaTranscriptionGpuMigration -or $ApplyGpuModelResidencyMigration) { Assert-DeploymentSourceJournalCliWritersStopped }
     # Register before every Recovery write, including continuation/failure packets.
     # This scope launches external children; parent exit is insufficient on failure.
     if ($ApplyMediaTranscriptionGpuMigration) {
@@ -3556,11 +3558,11 @@ try {
                 MaintenanceReceiptSha256=$ExpectedSourceDeletionAcceptanceMaintenanceReceiptSha256 }
     }
     if($ApplyTypedSchemaMigration){
-        $typedContract = Get-PassageWindowEligibilityMigrationContract -Outlook:$ApplyOutlookWatchedSourceMigration -CodexWorkspace:$ApplyCodexWorkspaceNotesMigration -MediaTranscription:$ApplyMediaTranscriptionGpuMigration
+        $typedContract = Get-PassageWindowEligibilityMigrationContract -Outlook:$ApplyOutlookWatchedSourceMigration -CodexWorkspace:$ApplyCodexWorkspaceNotesMigration -MediaTranscription:$ApplyMediaTranscriptionGpuMigration -GpuResidency:$ApplyGpuModelResidencyMigration
         $migrationPurpose = $typedContract.ArtifactPrefix + '-migration'
         $sqlTarget=Join-Path $releaseRoot ($typedContract.ArtifactPrefix + '-up.sql')
         Copy-Item -LiteralPath $migrationPlan.Up.Path -Destination $sqlTarget -ErrorAction Stop
-        if((Get-FileHash -LiteralPath $sqlTarget).Hash -cne (Get-PassageWindowEligibilityMigrationContract -Outlook:$ApplyOutlookWatchedSourceMigration -CodexWorkspace:$ApplyCodexWorkspaceNotesMigration -MediaTranscription:$ApplyMediaTranscriptionGpuMigration).UpSha256){throw 'window-eligibility-release-sql-changed'}
+        if((Get-FileHash -LiteralPath $sqlTarget).Hash -cne (Get-PassageWindowEligibilityMigrationContract -Outlook:$ApplyOutlookWatchedSourceMigration -CodexWorkspace:$ApplyCodexWorkspaceNotesMigration -MediaTranscription:$ApplyMediaTranscriptionGpuMigration -GpuResidency:$ApplyGpuModelResidencyMigration).UpSha256){throw 'window-eligibility-release-sql-changed'}
         $migrationPlan.Up.Path=$sqlTarget
         $sourceJournalHelperCandidateRoot=Join-Path $releaseRoot 'candidate-source-helper'
         $security=[Security.AccessControl.RawSecurityDescriptor]::new('O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)')
@@ -3586,10 +3588,10 @@ try {
             if($candidateHash -cne (Get-DeploymentSourceJournalReviewedHash $payload.Role)){throw 'window-eligibility-reviewed-payload-changed'}
             $candidatePayloads+=@{Role=$payload.Role;Root=$payload.Root;Sha256=$candidateHash}
         }
-        $freshDatabase=Get-PassageWindowEligibilityDatabaseState -Outlook:$ApplyOutlookWatchedSourceMigration -CodexWorkspace:$ApplyCodexWorkspaceNotesMigration -MediaTranscription:$ApplyMediaTranscriptionGpuMigration -ConnectionString (Get-DeploymentSqlConnectionString)
+        $freshDatabase=Get-PassageWindowEligibilityDatabaseState -Outlook:$ApplyOutlookWatchedSourceMigration -CodexWorkspace:$ApplyCodexWorkspaceNotesMigration -MediaTranscription:$ApplyMediaTranscriptionGpuMigration -GpuResidency:$ApplyGpuModelResidencyMigration -ConnectionString (Get-DeploymentSqlConnectionString)
         $null=Get-PassageWindowEligibilityUpdatePlan $freshDatabase $ExpectedSourceJournalDatabaseIdentity $migrationPlan.Up
         $windowEligibilityReleaseBinding=@{Version=1;Purpose=($migrationPurpose+'-release');ReleaseId=$releaseId;Commit=$commit;
-            Identity=$ExpectedSourceJournalDatabaseIdentity;Target=(Get-PassageWindowEligibilityMigrationContract -Outlook:$ApplyOutlookWatchedSourceMigration -CodexWorkspace:$ApplyCodexWorkspaceNotesMigration -MediaTranscription:$ApplyMediaTranscriptionGpuMigration).Target;SqlSha256=$migrationPlan.Up.Sha256;
+            Identity=$ExpectedSourceJournalDatabaseIdentity;Target=(Get-PassageWindowEligibilityMigrationContract -Outlook:$ApplyOutlookWatchedSourceMigration -CodexWorkspace:$ApplyCodexWorkspaceNotesMigration -MediaTranscription:$ApplyMediaTranscriptionGpuMigration -GpuResidency:$ApplyGpuModelResidencyMigration).Target;SqlSha256=$migrationPlan.Up.Sha256;
             OriginalPayloads=$originalPayloads;CandidatePayloads=$candidatePayloads;
             HelperCheckpointPath=$sourceJournalHelperState.CheckpointPath;
             HelperTask=$sourceJournalHelperState.OriginalTask;
@@ -3610,7 +3612,7 @@ try {
         if(Test-Path -LiteralPath $windowBindingPath){throw 'window-eligibility-release-binding-already-exists'}
         Write-SegmentedUpdateJson $windowBindingPath $windowEligibilityReleaseBinding
         $windowEligibilityMigrationState=New-PassageWindowEligibilityMigrationState -DatabaseState $freshDatabase `
-            -ReceiptDirectory $releaseRoot -ReleaseId $releaseId -Commit $commit -SqlSha256 $migrationPlan.Up.Sha256 -Outlook:$ApplyOutlookWatchedSourceMigration -CodexWorkspace:$ApplyCodexWorkspaceNotesMigration -MediaTranscription:$ApplyMediaTranscriptionGpuMigration
+            -ReceiptDirectory $releaseRoot -ReleaseId $releaseId -Commit $commit -SqlSha256 $migrationPlan.Up.Sha256 -Outlook:$ApplyOutlookWatchedSourceMigration -CodexWorkspace:$ApplyCodexWorkspaceNotesMigration -MediaTranscription:$ApplyMediaTranscriptionGpuMigration -GpuResidency:$ApplyGpuModelResidencyMigration
         Write-SegmentedUpdateJson (Join-Path $releaseRoot 'manifest.json') @{
             commit=$commit;application_root=$CanonicalDeployRoot;migrations=$true;clean_slate=$false;
             ($typedContract.ManifestField)=@{Target=$windowEligibilityMigrationState.Target;SqlSha256=$migrationPlan.Up.Sha256;
@@ -3619,7 +3621,7 @@ try {
             -AssertApplicationStopped {Assert-PassageWindowEligibilityStopped $windowEligibilityMigrationState $windowEligibilityReleaseBinding} `
             -Probe {param($candidate) Test-DeploymentSourceJournalHelperNativeState $candidate}
         $sourceJournalNativePorts['AssertRollbackAllowed']={
-            if((Get-PassageWindowEligibilityStateKind -Outlook:$ApplyOutlookWatchedSourceMigration -CodexWorkspace:$ApplyCodexWorkspaceNotesMigration -MediaTranscription:$ApplyMediaTranscriptionGpuMigration (Get-PassageWindowEligibilityDatabaseState -Outlook:$ApplyOutlookWatchedSourceMigration -CodexWorkspace:$ApplyCodexWorkspaceNotesMigration -MediaTranscription:$ApplyMediaTranscriptionGpuMigration -ConnectionString (Get-DeploymentSqlConnectionString)) $windowEligibilityMigrationState.Identity) -cne 'Old'){
+            if((Get-PassageWindowEligibilityStateKind -Outlook:$ApplyOutlookWatchedSourceMigration -CodexWorkspace:$ApplyCodexWorkspaceNotesMigration -MediaTranscription:$ApplyMediaTranscriptionGpuMigration -GpuResidency:$ApplyGpuModelResidencyMigration (Get-PassageWindowEligibilityDatabaseState -Outlook:$ApplyOutlookWatchedSourceMigration -CodexWorkspace:$ApplyCodexWorkspaceNotesMigration -MediaTranscription:$ApplyMediaTranscriptionGpuMigration -GpuResidency:$ApplyGpuModelResidencyMigration -ConnectionString (Get-DeploymentSqlConnectionString)) $windowEligibilityMigrationState.Identity) -cne 'Old'){
                 throw 'typed-schema-helper-predecessor-requires-exact-baseline'
             }
         }
@@ -4134,7 +4136,7 @@ catch {
         } catch {throw "Window eligibility migration recovery requires a proved stop; preserve payloads and hold. Recovery=$releaseRoot. Original: $($deploymentFailure.Exception.Message) Stop: $($_.Exception.Message)"}
         try {
             $null=Confirm-PassageWindowEligibilityMigrationOutcome -State $windowEligibilityMigrationState `
-                -ReadState {Get-PassageWindowEligibilityDatabaseState -Outlook:$ApplyOutlookWatchedSourceMigration -CodexWorkspace:$ApplyCodexWorkspaceNotesMigration -MediaTranscription:$ApplyMediaTranscriptionGpuMigration -ConnectionString (Get-DeploymentSqlConnectionString)}
+                -ReadState {Get-PassageWindowEligibilityDatabaseState -Outlook:$ApplyOutlookWatchedSourceMigration -CodexWorkspace:$ApplyCodexWorkspaceNotesMigration -MediaTranscription:$ApplyMediaTranscriptionGpuMigration -GpuResidency:$ApplyGpuModelResidencyMigration -ConnectionString (Get-DeploymentSqlConnectionString)}
         } catch {$windowEligibilityMigrationState.SettledState='Unknown'}
         Write-SegmentedUpdateJson (Join-Path $releaseRoot ($migrationPurpose+'-failure-reconciliation.json')) @{
             ReleaseId=$releaseId;Identity=$windowEligibilityMigrationState.Identity;Attempted=$windowEligibilityMigrationState.Attempted;

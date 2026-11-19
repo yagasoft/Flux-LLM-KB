@@ -15,7 +15,8 @@ public sealed record GpuSchedulerOptions
         TimeSpan capacityDeferralCap,
         TimeSpan fallbackInterval,
         TimeSpan unresponsiveDiagnosticAge,
-        GpuWorkloadPolicy? workloadPolicy = null)
+        GpuWorkloadPolicy? workloadPolicy = null,
+        IReadOnlyList<GpuResidentModelKey>? residentEntryModels = null)
     {
         MaxBatchItems = maxBatchItems;
         MaxBatchEstimatedBytes = maxBatchEstimatedBytes;
@@ -23,6 +24,7 @@ public sealed record GpuSchedulerOptions
         FallbackInterval = fallbackInterval;
         UnresponsiveDiagnosticAge = unresponsiveDiagnosticAge;
         WorkloadPolicy = workloadPolicy;
+        ResidentEntryModels = Array.AsReadOnly(residentEntryModels?.ToArray() ?? []);
         Validate();
     }
 
@@ -36,6 +38,10 @@ public sealed record GpuSchedulerOptions
 
     public TimeSpan UnresponsiveDiagnosticAge { get; }
     public GpuWorkloadPolicy? WorkloadPolicy { get; }
+    public IReadOnlyList<GpuResidentModelKey> ResidentEntryModels { get; }
+
+    public GpuResidentModelKey? GetResidentEntryModel(string runtimeKey, string settingsFingerprint) =>
+        ResidentEntryModels.SingleOrDefault(model => model.RuntimeKey == runtimeKey && model.SettingsFingerprint == settingsFingerprint);
 
     public void Validate()
     {
@@ -63,6 +69,18 @@ public sealed record GpuSchedulerOptions
         {
             throw new ArgumentOutOfRangeException(nameof(UnresponsiveDiagnosticAge));
         }
+
+        if (ResidentEntryModels.Count > 0 && (MaxBatchItems != 1 || WorkloadPolicy is null))
+            throw new ArgumentException("Resident GPU models require a configured workload policy and single-item admission.");
+        foreach (var model in ResidentEntryModels)
+        {
+            model.Validate();
+            if (WorkloadPolicy?.Profiles.Any(profile => profile.ModelRuntimeKey == model.RuntimeKey &&
+                profile.SettingsFingerprint == model.SettingsFingerprint) != true)
+                throw new ArgumentException("A resident GPU model must match an admitted runtime profile.");
+        }
+        if (ResidentEntryModels.Select(model => (model.RuntimeKey, model.SettingsFingerprint)).Distinct().Count() != ResidentEntryModels.Count)
+            throw new ArgumentException("A GPU runtime profile must have a single resident entry model.");
     }
 
     public TimeSpan CapRetryDelay(TimeSpan retryAfter)

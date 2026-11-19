@@ -14,7 +14,35 @@ namespace FluxKnowledge.Integration.Tests.Persistence;
 public sealed class WindowEligibilityMigrationTests(NativeSqlServerFixture fixture) : IClassFixture<NativeSqlServerFixture>
 {
     [NativeSqlServerFact]
-    public async Task Populated_schema_79_upgrades_through_83_preserving_canonical_data_and_blocked_receipts()
+    public async Task Reviewed_residency_fingerprints_match_EF_predecessor_and_successor()
+    {
+        await using var db=SqlTestData.CreateFactory(fixture).CreateDbContext();
+        var scripts=Path.Combine(FluxKnowledge.Testing.RepositoryFiles.Root(),"scripts","deploy");
+        var contract=await File.ReadAllTextAsync(Path.Combine(scripts,"incremental-passage-window-eligibility-migration.psm1"));
+        var query=await File.ReadAllTextAsync(Path.Combine(scripts,"gpu-model-residency-schema.sql"));
+        var migrator=db.GetService<IMigrator>();
+        async Task<string> FingerprintAsync()
+        {
+            await db.Database.OpenConnectionAsync();
+            try
+            {
+                await using var command=db.Database.GetDbConnection().CreateCommand();
+                command.CommandText=query;
+                return Assert.IsType<string>(await command.ExecuteScalarAsync());
+            }
+            finally { await db.Database.CloseConnectionAsync(); }
+        }
+        await migrator.MigrateAsync("20261119125051_AddMediaTranscriptionGpuRequests");
+        var oldFingerprint=await FingerprintAsync();
+        await migrator.MigrateAsync();
+        var newFingerprint=await FingerprintAsync();
+        Assert.True(contract.Contains($"ResidencyOldSchemaSha256 = '{oldFingerprint}'", StringComparison.Ordinal) &&
+            contract.Contains($"ResidencySchemaSha256 = '{newFingerprint}'", StringComparison.Ordinal),
+            $"Observed EF schema 83 fingerprint {oldFingerprint} and schema 84 fingerprint {newFingerprint}.");
+    }
+
+    [NativeSqlServerFact]
+    public async Task Populated_schema_79_upgrades_through_84_preserving_canonical_data_and_blocked_receipts()
     {
         await using var environment=await SqlToUsearchRebuildTests.PipelineEnvironment.CreateAsync(fixture,"A canonical migration control.",segmented:true);
         await environment.AddRetainedAndPumpAsync("An independently owned retained migration control.");

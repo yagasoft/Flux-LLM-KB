@@ -23,7 +23,7 @@ internal static class BgeSearchRuntimeComposition
     private const long EstimatedGpuBytes = 8L * 1024 * 1024 * 1024;
     private static readonly TimeSpan SearchExecutionTimeout = TimeSpan.FromSeconds(20);
     internal static void Add(IServiceCollection services, bool enableWindowBackfill,
-        MediaTranscriptionGpuRuntime? transcription = null)
+        MediaTranscriptionGpuRuntime? transcription = null, bool enableModelWarming = false)
     {
         var profiles = new List<GpuWorkloadProfile>
         {
@@ -36,12 +36,31 @@ internal static class BgeSearchRuntimeComposition
         var runtime = new EmbeddingGpuRuntime(BgeOfflineModels.GpuRuntimeKey, BgeOfflineModels.GpuSettingsFingerprint,
             new(BgeOfflineModels.EmbeddingFingerprint, 1024), EstimatedGpuBytes);
         services.AddSingleton(runtime);
+        var residentModels = new List<GpuResidentModelKey>();
+        if (enableModelWarming)
+        {
+            residentModels.Add(SqlDocumentOcrStore.ResidentModel);
+            residentModels.Add(BgeOfflineModels.GetGpuResidentModelKey(BgeGpuModelPhase.Embedding, BgeRerankerPrecision.Fp32));
+            residentModels.Add(BgeOfflineModels.GetGpuResidentModelKey(BgeGpuModelPhase.Reranker, BgeRerankerPrecision.Fp16Internal));
+            if (transcription is not null)
+                residentModels.Add(new(transcription.ModelRuntimeKey, transcription.SettingsFingerprint, "general"));
+        }
         services.Replace(ServiceDescriptor.Singleton(new GpuSchedulerOptions(1, EstimatedGpuBytes,
-            TimeSpan.FromMinutes(5), TimeSpan.FromMinutes(1), TimeSpan.FromMinutes(10), policy)));
+            TimeSpan.FromMinutes(5), TimeSpan.FromMinutes(1), TimeSpan.FromMinutes(10), policy, residentModels)));
         services.Replace(ServiceDescriptor.Singleton<IGpuAdmissionGate>(new SharedGpuAdmissionGate(policy,
             EmbeddingGpuExecutor.Name, EstimatedGpuBytes, transcription)));
         services.TryAddSingleton(_ => CreateModelStores());
-        services.AddSingleton<IBgeGpuModelFactory, BgeGpuModelFactory>();
+        services.AddSingleton(provider => new SqlGpuModelResidencyStore(
+            provider.GetRequiredService<IDbContextFactory<FluxKnowledgeDbContext>>(), provider.GetRequiredService<TimeProvider>()));
+        services.AddSingleton(provider => new GpuModelResidencyRuntime(provider.GetRequiredService<SqlGpuModelResidencyStore>(),
+            provider.GetRequiredService<GpuSchedulerOptions>(), provider.GetRequiredService<IGpuInteractiveOwnerProbe>(),
+            provider.GetRequiredService<IGpuSchedulerWakeSignal>(), provider.GetRequiredService<TimeProvider>(),
+            provider.GetRequiredService<IDatabaseStartupReadiness>(), provider.GetRequiredService<ILogger<GpuModelResidencyRuntime>>(),
+            NewSchedulerStore(provider)));
+        services.AddSingleton<IGpuProcessModelResidency>(provider => provider.GetRequiredService<GpuModelResidencyRuntime>());
+        services.AddHostedService(provider => provider.GetRequiredService<GpuModelResidencyRuntime>());
+        services.AddSingleton<IBgeGpuModelFactory>(provider => new BgeGpuModelFactory(provider.GetRequiredService<BgeGpuModelStores>(),
+            BgeRerankerPrecision.Fp32, provider.GetRequiredService<IGpuProcessModelResidency>()));
         services.AddSingleton<BgeGpuInferenceSession>();
         services.AddSingleton<ScopedGpuExecutorLifecycleSink>();
         services.AddSingleton(provider =>
@@ -49,26 +68,29 @@ internal static class BgeSearchRuntimeComposition
             var store = NewSchedulerStore(provider);
             var wake = provider.GetRequiredService<IGpuSchedulerWakeSignal>();
             var clock = provider.GetRequiredService<TimeProvider>();
+            var residency = provider.GetRequiredService<IGpuProcessModelResidency>();
             var recovery = new GpuInteractiveOwnerRecovery(store, store, store,
-                provider.GetRequiredService<IGpuInteractiveOwnerProbe>(), wake, clock);
+                provider.GetRequiredService<IGpuInteractiveOwnerProbe>(), wake, clock, residency);
             return new GpuInteractiveExecutor(store, provider.GetRequiredService<ScopedGpuExecutorLifecycleSink>(), store, wake,
                 clock, runtime.RuntimeKey, runtime.SettingsFingerprint, runtime.EstimatedBytes,
                 new[] { BgeExpandedGpuRankBackend.Profile },
                 provider.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping, recovery,
-                executionTimeout: SearchExecutionTimeout);
+                executionTimeout: SearchExecutionTimeout, residency: residency);
         });
         services.AddSingleton<IGpuExecutorAdapter>(provider => provider.GetRequiredService<GpuInteractiveExecutor>());
         services.AddSingleton(provider => new SqlEmbeddingGpuRequestStore(
             provider.GetRequiredService<IDbContextFactory<FluxKnowledgeDbContext>>(), NewSchedulerStore(provider),
             provider.GetRequiredService<IGpuSchedulerWakeSignal>(), runtime, provider.GetRequiredService<TimeProvider>(),
-            provider.GetService<IDeploymentValidationHold>(), provider.GetRequiredService<ISourceWorkAdmission>()));
+            provider.GetService<IDeploymentValidationHold>(), provider.GetRequiredService<ISourceWorkAdmission>(),
+            provider.GetRequiredService<IGpuInteractiveOwnerProbe>()));
         services.AddSingleton<IEmbeddingGpuRequestStore>(provider => provider.GetRequiredService<SqlEmbeddingGpuRequestStore>());
         services.AddScoped<IEmbeddingGpuHandoff>(provider => provider.GetRequiredService<SqlEmbeddingGpuRequestStore>());
         services.AddSingleton(provider => new EmbeddingGpuExecutor(provider.GetRequiredService<IEmbeddingGpuRequestStore>(),
             provider.GetRequiredService<ScopedGpuExecutorLifecycleSink>(), NewSchedulerStore(provider),
             provider.GetRequiredService<BgeGpuInferenceSession>(), provider.GetRequiredService<IGpuInteractiveOwnerProbe>(), runtime,
             provider.GetRequiredService<IOutboxWakeSignal>(), provider.GetRequiredService<IGpuSchedulerWakeSignal>(),
-            provider.GetRequiredService<TimeProvider>(), provider.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping));
+            provider.GetRequiredService<TimeProvider>(), provider.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping,
+            provider.GetRequiredService<IGpuProcessModelResidency>()));
         services.AddSingleton<IGpuExecutorAdapter>(provider => provider.GetRequiredService<EmbeddingGpuExecutor>());
         services.AddSingleton<BgeScheduledPassageInference>();
         services.AddSingleton<IConditionalGpuPassageInference>(provider => provider.GetRequiredService<BgeScheduledPassageInference>());
@@ -90,7 +112,8 @@ internal static class BgeSearchRuntimeComposition
             (IHybridPassageCandidateReader)provider.GetRequiredService<ICorpusRetrievalReader>());
         services.AddKeyedSingleton("expanded-ranking", (_, _) => CreateFp16ModelStores());
         services.AddKeyedSingleton<IBgeGpuModelFactory>("expanded-ranking", (provider, _) =>
-            new BgeGpuModelFactory(provider.GetRequiredKeyedService<BgeGpuModelStores>("expanded-ranking"), BgeRerankerPrecision.Fp16Internal));
+            new BgeGpuModelFactory(provider.GetRequiredKeyedService<BgeGpuModelStores>("expanded-ranking"),
+                BgeRerankerPrecision.Fp16Internal, provider.GetRequiredService<IGpuProcessModelResidency>()));
         services.AddSingleton(provider => new BgeExpandedGpuRankBackend(provider.GetRequiredService<GpuInteractiveExecutor>(),
             provider.GetRequiredKeyedService<IBgeGpuModelFactory>("expanded-ranking"),
             provider.GetRequiredService<TimeProvider>()));
@@ -125,7 +148,8 @@ internal static class BgeSearchRuntimeComposition
         new(provider.GetRequiredService<IDbContextFactory<FluxKnowledgeDbContext>>(), timeProvider: provider.GetRequiredService<TimeProvider>(),
             deploymentValidationHold: provider.GetService<IDeploymentValidationHold>(),
             interactiveExecutionTimeout: SearchExecutionTimeout, sourceAdmission: provider.GetRequiredService<ISourceWorkAdmission>(),
-            interactiveQueueTimeout: BgeExpandedGpuRankBackend.QueueWaitTimeout);
+            interactiveQueueTimeout: BgeExpandedGpuRankBackend.QueueWaitTimeout,
+            residentOptions: provider.GetRequiredService<GpuSchedulerOptions>());
 
     internal static BgeGpuModelStores CreateModelStores() => new(
         Store(["bundles", "bge-m3-onnx", BgeOfflineModels.EmbeddingRevision, "onnx"]),

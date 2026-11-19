@@ -4,5 +4,7 @@ public enum GpuCapacitySlotState
 {
     Available,
     Reserved,
-    Uncertain
+    Uncertain,
+    ResidentIdle,
+    ResidentEvicting
 }

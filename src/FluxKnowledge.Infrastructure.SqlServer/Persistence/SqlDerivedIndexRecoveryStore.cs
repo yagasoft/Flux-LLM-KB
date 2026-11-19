@@ -333,7 +333,7 @@ public sealed partial class SqlDerivedIndexRecoveryStore(
                 batch.ModelRuntimeKey == pending.Task.ModelRuntimeKey && batch.SettingsFingerprint == pending.Task.SettingsFingerprint &&
                 (pending.Request.DispatchId == null || pending.Request.DispatchId == dispatch.DispatchId) &&
                 (pending.Task.ExecutionState == (int)Domain.Gpu.GpuMiniTaskExecutionState.Active ||
-                    pending.Request.NativeCleanupConfirmed &&
+                    (pending.Request.NativeCleanupConfirmed || pending.Request.ResidentDetachmentDispatchId == dispatch.DispatchId) &&
                     (dispatch.State == (int)GpuExecutorDispatchState.Terminal || dispatch.State == (int)GpuExecutorDispatchState.DeliveryUncertain) &&
                     (pending.Task.ExecutionState == (int)Domain.Gpu.GpuMiniTaskExecutionState.Completed ||
                         pending.Task.ExecutionState == (int)Domain.Gpu.GpuMiniTaskExecutionState.OutcomeUncertain))

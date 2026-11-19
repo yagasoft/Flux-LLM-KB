@@ -21,7 +21,7 @@ public sealed class GpuSchedulerContractTests
             ["Active", "AtSafeBoundary", "Completed", "Released", "CapacityUncertain"],
             Enum.GetNames<GpuBatchState>());
         Assert.Equal(
-            ["Available", "Reserved", "Uncertain"],
+            ["Available", "Reserved", "Uncertain", "ResidentIdle", "ResidentEvicting"],
             Enum.GetNames<GpuCapacitySlotState>());
         Assert.Equal(
             ["WorkReady", "SafeBoundary", "CapacityReleased", "DeferredRetry", "StartupRecovery", "Reconciliation"],

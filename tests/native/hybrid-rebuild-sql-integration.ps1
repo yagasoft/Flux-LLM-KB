@@ -45,6 +45,31 @@ SELECT @result;
         if ($lockResult -ge 0) { throw 'Admission lock was not held during stop.' }
     }
     if (-not $evidence.Called) { throw 'Available capacity did not reach stop.' }
+    if ((Invoke-TestSql "SELECT OBJECT_ID(N'dbo.GpuModelResidencies',N'U')") -isnot [DBNull]) {
+        [void](Invoke-TestSql @'
+INSERT INTO dbo.GpuModelResidencies(ResidencyId,SlotKey,RuntimeKey,SettingsFingerprint,ModelKey,
+    OwnerProcessId,OwnerStartedAtUtc,MachineFingerprint,State,Version,IdleUntilUtc)
+VALUES(NEWID(),N'paddleocr-vl-local-gpu-0',N'fixture',N'fixture',N'fixture',101,SYSUTCDATETIME(),
+    REPLICATE('a',64),1,1,DATEADD(minute,2,SYSUTCDATETIME()));
+'@)
+        try {
+            $evidence.Called=$false
+            $refused=$false
+            try { Assert-HybridGpuDrainPreflight -ConnectionString $connectionString } catch { $refused=$true }
+            if (!$refused) { throw 'Contradictory available slot and live model passed preflight.' }
+            try { Invoke-WithHybridGpuDrain -ConnectionString $connectionString -TimeoutSeconds 2 -StopApplication { $evidence.Called=$true } }
+            catch { if ($_.Exception.Message -cne 'hybrid-gpu-drain-timeout-or-uncertain-capacity') { throw } }
+            if ($evidence.Called) { throw 'Host stop ran while a native residency remained.' }
+            [void](Invoke-TestSql "UPDATE dbo.GpuCapacitySlots SET State=3 WHERE SlotKey=N'paddleocr-vl-local-gpu-0';")
+            Assert-HybridGpuDrainPreflight -ConnectionString $connectionString
+            $timedOut=$false
+            try { Invoke-WithHybridGpuDrain -ConnectionString $connectionString -TimeoutSeconds 1 -StopApplication { $evidence.Called=$true } }
+            catch { if ($_.Exception.Message -cne 'hybrid-gpu-drain-timeout-or-uncertain-capacity') { throw }; $timedOut=$true }
+            if (!$timedOut -or $evidence.Called) { throw 'Idle residency was treated as physical release.' }
+        } finally {
+            [void](Invoke-TestSql "DELETE FROM dbo.GpuModelResidencies WHERE RuntimeKey=N'fixture'; UPDATE dbo.GpuCapacitySlots SET State=0 WHERE SlotKey=N'paddleocr-vl-local-gpu-0';")
+        }
+    }
     try {
         Invoke-WithHybridGpuDrain -ConnectionString $connectionString -TimeoutSeconds 2 -StopApplication {
             param($sessionId)

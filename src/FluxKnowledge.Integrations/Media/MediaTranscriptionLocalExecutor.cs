@@ -15,7 +15,7 @@ using FluxKnowledge.Integrations.Windows.NativeGoLive;
 namespace FluxKnowledge.Integrations.Media;
 
 /// <summary>Materialises one admitted retained input in the private runtime and runs it behind the native start gate.</summary>
-public sealed class MediaTranscriptionLocalExecutor(LiveRootLayout layout, IRetainedSourceReader retained)
+public sealed partial class MediaTranscriptionLocalExecutor(LiveRootLayout layout, IRetainedSourceReader retained)
 {
     private const string StartMessage = "fluxknowledge-transcription-go-v1";
     private const int MaximumResultBytes = 8 * 1024 * 1024;
@@ -73,13 +73,24 @@ public sealed class MediaTranscriptionLocalExecutor(LiveRootLayout layout, IReta
     public async ValueTask<MediaTranscriptionResult?> RunAsync(SourceRevisionId sourceRevisionId, string contentSha256,
         DocumentOcrExecutionContext execution, CancellationToken cancellationToken)
     {
+        var outcome = await RunCoreAsync(sourceRevisionId, contentSha256, execution, cancellationToken).ConfigureAwait(false);
+        return outcome.NativeReleaseConfirmed || outcome.CommandUnsent ? outcome.Result : null;
+    }
+
+    private async ValueTask<MediaTranscriptionWarmExecutionResult> RunCoreAsync(
+        SourceRevisionId sourceRevisionId, string contentSha256, DocumentOcrExecutionContext execution,
+        CancellationToken cancellationToken,
+        Func<string, CancellationToken, ValueTask<MediaTranscriptionWarmExecutionResult>>? runWarmProcess = null)
+    {
         string? directory = null;
         var mayHaveStarted = false;
         var cleanupConfirmed = false;
+        var requestIdle = false;
+        var keepResult = false;
         try
         {
-            if (!MediaTranscriptionLocalRuntime.IsAvailable())
-                return Refused("transcription-runtime-unavailable");
+            if (runWarmProcess is null && !MediaTranscriptionLocalRuntime.IsAvailable())
+                return new(Refused("transcription-runtime-unavailable"), null, false, true);
 
             var safety = new LiveRootStorageSafety(layout, FileSystemLiveRootPathInspector.Instance);
             safety.ValidateBeforeIo(layout.TempRoot);
@@ -88,7 +99,7 @@ public sealed class MediaTranscriptionLocalExecutor(LiveRootLayout layout, IReta
             safety.ValidateBeforeIo(parent);
             var workDirectory = Path.Combine(parent, execution.Lease.ExecutionInstanceId.ToString("N"));
             if (Directory.Exists(workDirectory) || File.Exists(workDirectory))
-                return Refused("transcription-work-directory-exists");
+                return new(Refused("transcription-work-directory-exists"), null, false, true);
             Directory.CreateDirectory(workDirectory);
             safety.ValidateBeforeIo(workDirectory);
             directory = workDirectory;
@@ -96,7 +107,7 @@ public sealed class MediaTranscriptionLocalExecutor(LiveRootLayout layout, IReta
             await using var input = await retained.OpenReadAsync(sourceRevisionId, MediaTranscriptionDiscoveryOptions.MaximumMediaBytes, cancellationToken)
                 .ConfigureAwait(false);
             if (input.SourceRevisionId != sourceRevisionId || input.ContentSha256 != contentSha256)
-                return Refused("transcription-input-binding-invalid");
+                return new(Refused("transcription-input-binding-invalid"), null, false, true);
             await using (var copy = new FileStream(Path.Combine(directory, "input.media"), FileMode.CreateNew,
                              FileAccess.Write, FileShare.None, 81920, FileOptions.Asynchronous))
                 await input.Stream.CopyToAsync(copy, cancellationToken).ConfigureAwait(false);
@@ -107,43 +118,62 @@ public sealed class MediaTranscriptionLocalExecutor(LiveRootLayout layout, IReta
                 await JsonSerializer.SerializeAsync(stream, MediaTranscriptionLocalRuntime.Manifest, cancellationToken: cancellationToken)
                     .ConfigureAwait(false);
 
-            var start = new ProcessStartInfo(MediaTranscriptionLocalRuntime.Python) { WorkingDirectory = directory };
-            foreach (var argument in new[] { "-I", "-S", "-B", MediaTranscriptionLocalRuntime.Script, "--manifest", manifest,
-                         "--output", Path.Combine(directory, "output.json") })
-                start.ArgumentList.Add(argument);
-            // The provider receives no application connection strings, tokens or user Python paths.
-            start.Environment.Clear();
-            var windows = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
-            start.Environment["SystemRoot"] = windows;
-            start.Environment["WINDIR"] = windows;
-            start.Environment["TEMP"] = directory;
-            start.Environment["TMP"] = directory;
-            start.Environment["HF_HUB_OFFLINE"] = "1";
-            start.Environment["TRANSFORMERS_OFFLINE"] = "1";
-            start.Environment["HF_HOME"] = @"J:\Models\provider-cache\huggingface";
-            start.Environment["PIP_NO_INDEX"] = "1";
+            if (runWarmProcess is not null)
+            {
+                mayHaveStarted = true;
+                var result = await runWarmProcess(directory, cancellationToken).ConfigureAwait(false);
+                mayHaveStarted = !result.CommandUnsent;
+                cleanupConfirmed = result.NativeReleaseConfirmed;
+                requestIdle = result.Idle is not null;
+                keepResult = requestIdle;
+                return result;
+            }
 
+            var start = CreateStartInfo(directory, "--manifest", manifest, "--output", Path.Combine(directory, "output.json"));
+            keepResult = true;
             mayHaveStarted = true;
             var outcome = await OwnedOcrProcessSupervisor.RunAsync(start, execution, cancellationToken, StartMessage)
                 .ConfigureAwait(false);
             cleanupConfirmed = outcome.CleanupConfirmed;
-            if (!cleanupConfirmed) return null;
+            if (!cleanupConfirmed) return new(Refused("transcription-worker-interrupted"), null, false, false);
             if (outcome.ExitCode != 0 || outcome.FailureReason is not null)
-                return Refused("transcription-worker-interrupted");
+                return new(Refused("transcription-worker-interrupted"), null, true, false);
             var file = await ContainedFileReader.ReadAsync(directory, "output.json", MaximumResultBytes, cancellationToken)
                 .ConfigureAwait(false);
-            return ParseResult(file.Bytes);
+            return new(ParseResult(file.Bytes), null, true, false);
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or InvalidDataException or JsonException or
                                           ArgumentException or OperationCanceledException)
         {
-            return !mayHaveStarted || cleanupConfirmed ? Refused("transcription-execution-unavailable") : null;
+            return new(Refused("transcription-execution-unavailable"), null, cleanupConfirmed, !mayHaveStarted);
         }
         finally
         {
-            if (directory is not null && (!mayHaveStarted || cleanupConfirmed))
-                RemoveFiles(directory, keepResult: mayHaveStarted);
+            if (directory is not null && (!mayHaveStarted || cleanupConfirmed || requestIdle))
+                RemoveFiles(directory, keepResult);
         }
+    }
+
+    private static ProcessStartInfo CreateStartInfo(string directory, params string[] arguments)
+    {
+        var start = new ProcessStartInfo(MediaTranscriptionLocalRuntime.Python) { WorkingDirectory = directory };
+        foreach (var argument in new[] { "-I", "-S", "-B", MediaTranscriptionLocalRuntime.Script })
+            start.ArgumentList.Add(argument);
+        foreach (var argument in arguments)
+            start.ArgumentList.Add(argument);
+
+        // The provider receives no application connection strings, tokens or user Python paths.
+        start.Environment.Clear();
+        var windows = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+        start.Environment["SystemRoot"] = windows;
+        start.Environment["WINDIR"] = windows;
+        start.Environment["TEMP"] = directory;
+        start.Environment["TMP"] = directory;
+        start.Environment["HF_HUB_OFFLINE"] = "1";
+        start.Environment["TRANSFORMERS_OFFLINE"] = "1";
+        start.Environment["HF_HOME"] = @"J:\Models\provider-cache\huggingface";
+        start.Environment["PIP_NO_INDEX"] = "1";
+        return start;
     }
 
     public void RemoveSettledFiles(Guid executionInstanceId) => RemoveFiles(
@@ -182,8 +212,11 @@ public sealed class MediaTranscriptionLocalExecutor(LiveRootLayout layout, IReta
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or InvalidDataException) { }
     }
 
-    internal static MediaTranscriptionResult ParseResult(ReadOnlyMemory<byte> bytes)
+    internal static MediaTranscriptionResult ParseResult(ReadOnlyMemory<byte> bytes) => ParseResult(bytes, out _);
+
+    private static MediaTranscriptionResult ParseResult(ReadOnlyMemory<byte> bytes, out string? validatedModel)
     {
+        validatedModel = null;
         try
         {
             using var response = JsonDocument.Parse(bytes);
@@ -245,8 +278,10 @@ public sealed class MediaTranscriptionLocalExecutor(LiveRootLayout layout, IReta
                 reviewStatus = "unreviewed", source = "machine-generated" });
             var completion = new MediaTranscriptionResult(true, "transcription-complete", string.Join('\n', lines), metadata);
             var jsonOptions = new JsonSerializerOptions { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
-            return JsonSerializer.Serialize(completion, jsonOptions).Length * sizeof(char) <= MediaTranscriptionGpuContracts.MaximumResultBytes
-                ? completion : Refused("transcription-output-too-large");
+            if (JsonSerializer.Serialize(completion, jsonOptions).Length * sizeof(char) > MediaTranscriptionGpuContracts.MaximumResultBytes)
+                return Refused("transcription-output-too-large");
+            validatedModel = profile;
+            return completion;
         }
         catch (Exception error) when (error is JsonException or KeyNotFoundException or InvalidOperationException or FormatException)
         {

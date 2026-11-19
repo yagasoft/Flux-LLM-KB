@@ -1,14 +1,16 @@
 """Fixed, offline PaddleOCR-VL worker for selected private PDF page images.
 
-The .NET parent verifies and holds every model file before this process starts.  This script has
-no model, runtime, or source-path arguments: it accepts only a private temporary-page manifest
-and writes a bounded result next to it.  It never prints document content.
+The .NET parent verifies and holds every model file. After containment and durable start
+permission, the worker reads a private temporary-page manifest and writes a bounded result
+next to it. In warm mode, the same fixed model stays resident across authorised requests.
+The worker never prints document content.
 """
 
 import argparse
 import json
 import math
 import os
+import re
 import socket
 import stat
 import sys
@@ -22,6 +24,9 @@ LAYOUT_MODEL_ROOT = Path(r"J:\Models\bundles\pp-doclayoutv3\7b48a7566925fa464281
 PAGE_ORIENTATION_MODEL_ROOT = Path(
     r"J:\Models\runtimes\ppstructurev3-3.7.0-ort-1.30.0-cp312\bundles\page_orientation"
 )
+MAXIMUM_MANIFEST_BYTES = 512 * 1024
+MAXIMUM_WARM_COMMAND_BYTES = 16 * 1024
+OCR_DEVICE = "gpu:0"
 MAXIMUM_RESULT_BYTES = 4 * 1024 * 1024
 MAXIMUM_PAGES = 2_000
 MAXIMUM_BLOCKS_PER_PAGE = 3_000
@@ -130,7 +135,7 @@ def _create_components():
         engine="onnxruntime",
         batch_size=1,
     )
-    return orientation_predictor, create_pipeline(config=config, device="gpu:0", use_hpip=False)
+    return orientation_predictor, create_pipeline(config=config, device=OCR_DEVICE, use_hpip=False)
 
 
 def _normalised_bbox(block):
@@ -247,7 +252,11 @@ def _read_input(input_path, output_path):
     work_directory = source.parent.resolve(strict=True)
     if destination.parent != work_directory or destination.name != "output.json":
         _refuse("io-path-invalid")
-    document = json.loads(source.read_text(encoding="utf-8"))
+    with source.open("rb") as stream:
+        encoded = stream.read(MAXIMUM_MANIFEST_BYTES + 1)
+    if len(encoded) > MAXIMUM_MANIFEST_BYTES:
+        _refuse("input-manifest-too-large")
+    document = json.loads(encoded.decode("utf-8"))
     pages = document.get("pages") if isinstance(document, dict) else None
     if not isinstance(pages, list) or not pages or len(pages) > MAXIMUM_PAGES:
         _refuse("input-pages-invalid")
@@ -268,39 +277,25 @@ def _read_input(input_path, output_path):
     return destination, inputs
 
 
-def _write_result(destination, result):
+def _write_result(destination, result, *, durable=False):
     encoded = json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     if len(encoded) > MAXIMUM_RESULT_BYTES:
         _refuse("provider-result-too-large")
     with destination.open("xb") as stream:
         stream.write(encoded)
+        if durable:
+            stream.flush()
+            os.fsync(stream.fileno())
 
 
-def main(argv=None):
-    parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument("--input", required=True)
-    parser.add_argument("--output", required=True)
-    parser.add_argument("--startup-gate", action="store_true", required=True)
-    args = parser.parse_args(argv)
-    # No provider import, model loading or retained image read before the parent has contained
-    # this process and committed exact start permission. A parent crash closes stdin.
-    import queue
-    import threading
-    gate = queue.Queue(maxsize=1)
-    threading.Thread(target=lambda: gate.put(sys.stdin.readline(64)), daemon=True).start()
-    try:
-        if gate.get(timeout=30) != "fluxknowledge-ocr-go-v1\n":
-            return 1
-    except queue.Empty:
-        return 1
-    # -I -S prevents executable .pth files and sitecustomize from running before containment.
-    # Restore this verified interpreter's package paths only after durable permission.
-    import site
-    site.main()
-    destination, inputs = _read_input(args.input, args.output)
+def _run_request(destination, inputs, components=None, *, keep_warm=False):
     phase = "document-ocr-model-initialization-failed"
     try:
-        orientation_predictor, pipeline = _create_components()
+        if components is None:
+            components = _create_components()
+        else:
+            _assert_fixed_model_paths_are_safe()
+        orientation_predictor, pipeline = components
         from paddlex.inference.pipelines.components.common.warp_image import rotate_image
         import cv2
 
@@ -324,15 +319,136 @@ def main(argv=None):
                     "blocks": _output_blocks(raw_result),
                 }
             )
-        _write_result(destination, {"succeeded": True, "reasonCode": "document-ocr-complete", "pages": pages})
-        return 0
+        if keep_warm:
+            phase = "document-ocr-recognition-failed"
+            from paddle.device import synchronize
+
+            synchronize(OCR_DEVICE)
+        phase = "document-ocr-provider-result-invalid"
+        _write_result(
+            destination, {"succeeded": True, "reasonCode": "document-ocr-complete", "pages": pages}, durable=keep_warm
+        )
+        return 0, components
     except Exception as error:
         # Fixed codes only: never persist exception messages, paths, document text or provider logs.
         reason = "document-ocr-dependency-unavailable" if isinstance(error, ImportError) else phase
         if isinstance(error, RuntimeError) and str(error) in {"unexpected-model-download", "unexpected-network-connect"}:
             reason = "document-ocr-offline-operation-refused"
-        _write_result(destination, {"succeeded": False, "reasonCode": reason, "pages": []})
+        _write_result(destination, {"succeeded": False, "reasonCode": reason, "pages": []}, durable=keep_warm)
+        return 1, None
+
+
+def _unique_command_keys(pairs):
+    command = dict(pairs)
+    if len(command) != len(pairs):
+        _refuse("warm-command-invalid")
+    return command
+
+
+def _warm_run_paths(command):
+    execution_id = command["execution_id"]
+    if not isinstance(execution_id, str) or re.fullmatch(r"[0-9a-f]{32}", execution_id) is None:
+        _refuse("warm-execution-id-invalid")
+    if not all(isinstance(command[key], str) for key in ("manifest", "output")):
+        _refuse("warm-path-invalid")
+    source = Path(command["manifest"])
+    destination = Path(command["output"])
+    if (
+        not source.is_absolute()
+        or (os.name == "nt" and re.fullmatch(r"[a-zA-Z]:", source.drive) is None)
+        or ".." in source.parts
+        or source.name != "input.json"
+        or destination != source.with_name("output.json")
+        or source.resolve(strict=True) != source
+        or os.path.lexists(destination)
+    ):
+        _refuse("warm-path-invalid")
+    return source, destination
+
+
+def _run_warm_worker(commands, responses):
+    # The parent sends a run command only after job containment and durable start permission.
+    # This executable supports one fixed model configuration for its entire process lifetime.
+    components = None
+    while True:
+        line = commands.readline(MAXIMUM_WARM_COMMAND_BYTES + len(b"\r\n"))
+        if not line:
+            return 0
+        if not line.endswith(b"\n"):
+            return 1
+        payload = line[:-1].removesuffix(b"\r")
+        if len(payload) > MAXIMUM_WARM_COMMAND_BYTES:
+            return 1
+        try:
+            command = json.loads(payload.decode("utf-8"), object_pairs_hook=_unique_command_keys)
+            if command == {"operation": "shutdown"}:
+                return 0
+            if (
+                not isinstance(command, dict)
+                or command.keys() != {"operation", "execution_id", "manifest", "output"}
+                or command["operation"] != "run"
+            ):
+                return 1
+            destination, inputs = _read_input(*_warm_run_paths(command))
+        except (OSError, ValueError, RuntimeError):
+            return 1
+
+        if components is None:
+            # -I -S suppresses startup hooks until the first authorised run.
+            import site
+
+            site.main()
+        status, components = _run_request(destination, inputs, components, keep_warm=True)
+        if status:
+            # A failed provider can leave native state behind. Exit so the parent can
+            # verify that the Windows job is empty before releasing GPU ownership.
+            return status
+        response = {"execution_id": command["execution_id"], "status": "idle", "model": "ocr"}
+        responses.write(json.dumps(response, separators=(",", ":")).encode("ascii") + b"\n")
+        responses.flush()
+
+
+def _warm_worker_entry_point():
+    # Reserve the original stdout pipe for protocol responses. Provider output
+    # through Python stdout or the process's standard descriptor goes to the sink.
+    stdout = sys.stdout.fileno()
+    with os.fdopen(os.dup(stdout), "wb") as responses, open(os.devnull, "wb") as sink:
+        os.dup2(sink.fileno(), stdout)
+        return _run_warm_worker(sys.stdin.buffer, responses)
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--input")
+    parser.add_argument("--output")
+    modes = parser.add_mutually_exclusive_group(required=True)
+    modes.add_argument("--startup-gate", action="store_true")
+    modes.add_argument("--warm-worker", action="store_true")
+    args = parser.parse_args(argv)
+    if args.warm_worker:
+        if args.input is not None or args.output is not None:
+            parser.error("--warm-worker reads input and output paths from stdin")
+        return _warm_worker_entry_point()
+    if args.input is None or args.output is None:
+        parser.error("--startup-gate requires --input and --output")
+    # No provider import, model loading or retained image read before the parent has contained
+    # this process and committed exact start permission. A parent crash closes stdin.
+    import queue
+    import threading
+    gate = queue.Queue(maxsize=1)
+    threading.Thread(target=lambda: gate.put(sys.stdin.readline(64)), daemon=True).start()
+    try:
+        if gate.get(timeout=30) != "fluxknowledge-ocr-go-v1\n":
+            return 1
+    except queue.Empty:
         return 1
+    # -I -S prevents executable .pth files and sitecustomize from running before containment.
+    # Restore this verified interpreter's package paths only after durable permission.
+    import site
+    site.main()
+    destination, inputs = _read_input(args.input, args.output)
+    status, _ = _run_request(destination, inputs)
+    return status
 
 
 if __name__ == "__main__":

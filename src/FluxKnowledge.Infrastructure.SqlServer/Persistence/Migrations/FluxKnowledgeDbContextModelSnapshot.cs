@@ -782,6 +782,9 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Migrations
                     b.Property<Guid>("PipelineRecordId")
                         .HasColumnType("uniqueidentifier");
 
+                    b.Property<Guid?>("ResidentDetachmentDispatchId")
+                        .HasColumnType("uniqueidentifier");
+
                     b.Property<byte[]>("ResultDigest")
                         .HasColumnType("varbinary(max)");
 
@@ -802,6 +805,8 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Migrations
 
                     b.HasKey("MiniTaskId");
 
+                    b.HasIndex("ResidentDetachmentDispatchId");
+
                     b.HasIndex("ParentJobId", "State");
 
                     b.HasIndex("ParentJobId", "GenerationId", "InputDigest")
@@ -814,7 +819,7 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Migrations
                         {
                             t.HasCheckConstraint("CK_EmbeddingGpuRequests_Cleanup", "([NativeCleanupConfirmed] = 0 AND [CleanupConfirmedAtUtc] IS NULL) OR ([NativeCleanupConfirmed] = 1 AND [CleanupConfirmedAtUtc] IS NOT NULL)");
 
-                            t.HasCheckConstraint("CK_EmbeddingGpuRequests_Completion", "[State] = 0 OR ([State] = 1 AND [ResultDigest] IS NOT NULL AND [ExecutorInstanceId] IS NOT NULL) OR ([State] = 2 AND [NativeCleanupConfirmed] = 1)");
+                            t.HasCheckConstraint("CK_EmbeddingGpuRequests_Completion", "[State] = 0 OR ([State] = 1 AND [ResultDigest] IS NOT NULL AND [ExecutorInstanceId] IS NOT NULL) OR ([State] = 2 AND ([NativeCleanupConfirmed] = 1 OR [ResidentDetachmentDispatchId] IS NOT NULL))");
 
                             t.HasCheckConstraint("CK_EmbeddingGpuRequests_InputDigest", "LEN([InputDigest]) = 64 AND [InputDigest] COLLATE Latin1_General_100_BIN2 NOT LIKE '%[^0-9a-f]%'");
 
@@ -823,6 +828,8 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Migrations
                             t.HasCheckConstraint("CK_EmbeddingGpuRequests_Owner", "([ExecutorInstanceId] IS NULL AND [ClaimOperationId] IS NULL AND [OwnerProcessId] IS NULL AND [OwnerStartedAtUtc] IS NULL AND [OwnerMachineFingerprint] IS NULL AND [DispatchId] IS NULL) OR ([ExecutorInstanceId] IS NOT NULL AND [ExecutorInstanceId] <> '00000000-0000-0000-0000-000000000000' AND [ClaimOperationId] IS NOT NULL AND [ClaimOperationId] <> '00000000-0000-0000-0000-000000000000' AND [OwnerProcessId] IS NOT NULL AND [OwnerProcessId] > 0 AND [OwnerStartedAtUtc] IS NOT NULL AND [DispatchId] IS NOT NULL AND [OwnerMachineFingerprint] IS NOT NULL AND LEN([OwnerMachineFingerprint]) = 64 AND [OwnerMachineFingerprint] COLLATE Latin1_General_100_BIN2 NOT LIKE '%[^0-9a-f]%')");
 
                             t.HasCheckConstraint("CK_EmbeddingGpuRequests_Profile", "[Dimensions] BETWEEN 1 AND 4096 AND DATALENGTH([ModelFingerprint]) > 0");
+
+                            t.HasCheckConstraint("CK_EmbeddingGpuRequests_ResidentDetachment", "[ResidentDetachmentDispatchId] IS NULL OR ([State] IN (1, 2) AND [DispatchId] IS NOT NULL AND [ResidentDetachmentDispatchId] = [DispatchId] AND [ResultDigest] IS NOT NULL AND [NativeCleanupConfirmed] = 0)");
 
                             t.HasCheckConstraint("CK_EmbeddingGpuRequests_Result", "[ResultDigest] IS NULL OR DATALENGTH([ResultDigest]) = 32");
 
@@ -1289,6 +1296,151 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Migrations
                             t.HasCheckConstraint("CK_GpuMiniTasks_RequiredExecutorKey_NoTrailingWhitespace", "[RequiredExecutorKey] IS NULL OR (DATALENGTH([RequiredExecutorKey]) > 0 AND UNICODE(RIGHT([RequiredExecutorKey], 1)) NOT IN (9, 10, 11, 12, 13, 32, 133, 160, 5760, 8192, 8193, 8194, 8195, 8196, 8197, 8198, 8199, 8200, 8201, 8202, 8232, 8233, 8239, 8287, 12288))");
 
                             t.HasCheckConstraint("CK_GpuMiniTasks_SettingsFingerprint_NoTrailingWhitespace", "DATALENGTH([SettingsFingerprint]) > 0 AND UNICODE(RIGHT([SettingsFingerprint], 1)) NOT IN (9, 10, 11, 12, 13, 32, 133, 160, 5760, 8192, 8193, 8194, 8195, 8196, 8197, 8198, 8199, 8200, 8201, 8202, 8232, 8233, 8239, 8287, 12288)");
+                        });
+                });
+
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.GpuModelDetachmentReceiptEntity", b =>
+                {
+                    b.Property<Guid>("DispatchId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<long>("AdmissionGeneration")
+                        .HasColumnType("bigint");
+
+                    b.Property<Guid>("BatchId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTimeOffset>("DetachedAtUtc")
+                        .HasColumnType("datetimeoffset");
+
+                    b.Property<Guid>("ExecutionInstanceId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("ExecutorKey")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)")
+                        .UseCollation("Latin1_General_100_BIN2");
+
+                    b.Property<Guid>("ResidencyId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<long>("Version")
+                        .HasColumnType("bigint");
+
+                    b.HasKey("DispatchId");
+
+                    b.HasIndex("ResidencyId", "Version")
+                        .IsUnique();
+
+                    b.ToTable("GpuModelDetachmentReceipts", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_GpuModelDetachmentReceipts_ExecutorKey", "DATALENGTH([ExecutorKey]) > 0 AND UNICODE(RIGHT([ExecutorKey], 1)) NOT IN (9, 10, 11, 12, 13, 32, 133, 160, 5760, 8192, 8193, 8194, 8195, 8196, 8197, 8198, 8199, 8200, 8201, 8202, 8232, 8233, 8239, 8287, 12288)");
+
+                            t.HasCheckConstraint("CK_GpuModelDetachmentReceipts_Identity", "[DispatchId]<>'00000000-0000-0000-0000-000000000000' AND [BatchId]<>'00000000-0000-0000-0000-000000000000' AND\n[ExecutionInstanceId]<>'00000000-0000-0000-0000-000000000000' AND [Version]>0 AND [AdmissionGeneration]>0 AND\nDATEPART(TZOFFSET,[DetachedAtUtc])=0 AND [DetachedAtUtc]>'0001-01-01T00:00:00+00:00'");
+                        });
+                });
+
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.GpuModelResidencyEntity", b =>
+                {
+                    b.Property<Guid>("ResidencyId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid?>("BorrowedDispatchId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid?>("BorrowedExecutionInstanceId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid?>("ChildJobId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<int?>("ChildProcessId")
+                        .HasColumnType("int");
+
+                    b.Property<DateTimeOffset?>("ChildStartedAtUtc")
+                        .HasColumnType("datetimeoffset");
+
+                    b.Property<DateTimeOffset?>("IdleUntilUtc")
+                        .HasColumnType("datetimeoffset");
+
+                    b.Property<string>("MachineFingerprint")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .IsUnicode(false)
+                        .HasColumnType("char(64)")
+                        .IsFixedLength();
+
+                    b.Property<string>("ModelKey")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)")
+                        .UseCollation("Latin1_General_100_BIN2");
+
+                    b.Property<int>("OwnerProcessId")
+                        .HasColumnType("int");
+
+                    b.Property<DateTimeOffset>("OwnerStartedAtUtc")
+                        .HasColumnType("datetimeoffset");
+
+                    b.Property<int?>("ReleaseKind")
+                        .HasColumnType("int");
+
+                    b.Property<DateTimeOffset?>("ReleasedAtUtc")
+                        .HasColumnType("datetimeoffset");
+
+                    b.Property<string>("RuntimeKey")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)")
+                        .UseCollation("Latin1_General_100_BIN2");
+
+                    b.Property<string>("SettingsFingerprint")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)")
+                        .UseCollation("Latin1_General_100_BIN2");
+
+                    b.Property<string>("SlotKey")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)")
+                        .UseCollation("Latin1_General_100_BIN2");
+
+                    b.Property<int>("State")
+                        .HasColumnType("int");
+
+                    b.Property<long>("Version")
+                        .IsConcurrencyToken()
+                        .HasColumnType("bigint");
+
+                    b.HasKey("ResidencyId");
+
+                    b.HasIndex("SlotKey")
+                        .IsUnique()
+                        .HasFilter("[State] < 4");
+
+                    b.ToTable("GpuModelResidencies", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_GpuModelResidencies_Child", "([ChildJobId] IS NULL AND [ChildProcessId] IS NULL AND [ChildStartedAtUtc] IS NULL) OR\n([ChildJobId] IS NOT NULL AND [ChildJobId]=[ResidencyId] AND [ChildProcessId] IS NOT NULL AND\n [ChildProcessId]>0 AND [ChildStartedAtUtc] IS NOT NULL AND DATEPART(TZOFFSET,[ChildStartedAtUtc])=0 AND\n [ChildStartedAtUtc]>=[OwnerStartedAtUtc])");
+
+                            t.HasCheckConstraint("CK_GpuModelResidencies_Deadline", "[IdleUntilUtc] IS NULL OR (DATEPART(TZOFFSET,[IdleUntilUtc])=0 AND [IdleUntilUtc]>=[OwnerStartedAtUtc])");
+
+                            t.HasCheckConstraint("CK_GpuModelResidencies_Identity", "[ResidencyId] <> '00000000-0000-0000-0000-000000000000' AND [Version] > 0 AND [OwnerProcessId] > 0 AND\nDATEPART(TZOFFSET,[OwnerStartedAtUtc])=0 AND [OwnerStartedAtUtc] > '0001-01-01T00:00:00+00:00'");
+
+                            t.HasCheckConstraint("CK_GpuModelResidencies_MachineFingerprint", "LEN([MachineFingerprint]) = 64 AND [MachineFingerprint] COLLATE Latin1_General_100_BIN2 NOT LIKE '%[^0-9a-f]%'");
+
+                            t.HasCheckConstraint("CK_GpuModelResidencies_ModelKey", "DATALENGTH([ModelKey]) > 0 AND UNICODE(RIGHT([ModelKey], 1)) NOT IN (9, 10, 11, 12, 13, 32, 133, 160, 5760, 8192, 8193, 8194, 8195, 8196, 8197, 8198, 8199, 8200, 8201, 8202, 8232, 8233, 8239, 8287, 12288)");
+
+                            t.HasCheckConstraint("CK_GpuModelResidencies_Phase", "([State]=0 AND [BorrowedDispatchId] IS NOT NULL AND [BorrowedDispatchId]<>'00000000-0000-0000-0000-000000000000'\n AND [BorrowedExecutionInstanceId] IS NOT NULL AND [BorrowedExecutionInstanceId]<>'00000000-0000-0000-0000-000000000000'\n AND [IdleUntilUtc] IS NULL) OR\n([BorrowedDispatchId] IS NULL AND [BorrowedExecutionInstanceId] IS NULL AND\n (([State]=1 AND [IdleUntilUtc] IS NOT NULL) OR [State]=2 OR ([State] IN (3,4) AND [IdleUntilUtc] IS NULL)))");
+
+                            t.HasCheckConstraint("CK_GpuModelResidencies_Release", "([State]<>4 AND [ReleasedAtUtc] IS NULL AND [ReleaseKind] IS NULL) OR\n([State]=4 AND [ReleasedAtUtc] IS NOT NULL AND DATEPART(TZOFFSET,[ReleasedAtUtc])=0 AND\n [ReleasedAtUtc]>=[OwnerStartedAtUtc] AND ([ChildStartedAtUtc] IS NULL OR [ReleasedAtUtc]>=[ChildStartedAtUtc]) AND\n [ReleaseKind] IS NOT NULL AND\n (([ChildJobId] IS NULL AND [ReleaseKind] IN (0,2)) OR ([ChildJobId] IS NOT NULL AND [ReleaseKind]=1)))");
+
+                            t.HasCheckConstraint("CK_GpuModelResidencies_RuntimeKey", "DATALENGTH([RuntimeKey]) > 0 AND UNICODE(RIGHT([RuntimeKey], 1)) NOT IN (9, 10, 11, 12, 13, 32, 133, 160, 5760, 8192, 8193, 8194, 8195, 8196, 8197, 8198, 8199, 8200, 8201, 8202, 8232, 8233, 8239, 8287, 12288)");
+
+                            t.HasCheckConstraint("CK_GpuModelResidencies_SettingsFingerprint", "DATALENGTH([SettingsFingerprint]) > 0 AND UNICODE(RIGHT([SettingsFingerprint], 1)) NOT IN (9, 10, 11, 12, 13, 32, 133, 160, 5760, 8192, 8193, 8194, 8195, 8196, 8197, 8198, 8199, 8200, 8201, 8202, 8232, 8233, 8239, 8287, 12288)");
+
+                            t.HasCheckConstraint("CK_GpuModelResidencies_SlotKey", "DATALENGTH([SlotKey]) > 0 AND UNICODE(RIGHT([SlotKey], 1)) NOT IN (9, 10, 11, 12, 13, 32, 133, 160, 5760, 8192, 8193, 8194, 8195, 8196, 8197, 8198, 8199, 8200, 8201, 8202, 8232, 8233, 8239, 8287, 12288)");
                         });
                 });
 
@@ -2551,7 +2703,7 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Migrations
 
                     b.ToTable("MediaTranscriptionGpuRequests", null, t =>
                         {
-                            t.HasCheckConstraint("CK_MediaTranscriptionGpuRequests_Cleanup", "([ExecutionPhase]<3 AND [CleanupConfirmedAtUtc] IS NULL AND [CleanupKind] IS NULL) OR\n([ExecutionPhase]>=3 AND [CleanupConfirmedAtUtc] IS NOT NULL AND [CleanupKind] IS NOT NULL AND\n ([CleanupKind]=0 AND [NativeProcessId] IS NULL OR [CleanupKind]=1 AND [NativeProcessId] IS NOT NULL))");
+                            t.HasCheckConstraint("CK_MediaTranscriptionGpuRequests_Cleanup", "([ExecutionPhase]<3 AND [CleanupConfirmedAtUtc] IS NULL AND [CleanupKind] IS NULL) OR\n([ExecutionPhase]=4 AND [NativeProcessId] IS NOT NULL AND [CleanupConfirmedAtUtc] IS NULL AND [CleanupKind] IS NULL) OR\n([ExecutionPhase]>=3 AND [CleanupConfirmedAtUtc] IS NOT NULL AND [CleanupKind] IS NOT NULL AND\n ([CleanupKind]=0 AND [NativeProcessId] IS NULL OR [CleanupKind]=1 AND [NativeProcessId] IS NOT NULL))");
 
                             t.HasCheckConstraint("CK_MediaTranscriptionGpuRequests_ContentSha256", "LEN([ContentSha256]) = 64 AND [ContentSha256] COLLATE Latin1_General_100_BIN2 NOT LIKE '%[^0-9a-f]%'");
 
@@ -6344,6 +6496,14 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Migrations
                         .IsRequired();
                 });
 
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.EmbeddingGpuRequestEntity", b =>
+                {
+                    b.HasOne("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.GpuModelDetachmentReceiptEntity", null)
+                        .WithMany()
+                        .HasForeignKey("ResidentDetachmentDispatchId")
+                        .OnDelete(DeleteBehavior.Restrict);
+                });
+
             modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.GpuBatchEntity", b =>
                 {
                     b.HasOne("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.GpuCapacitySlotEntity", "CapacitySlot")
@@ -6454,6 +6614,24 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Migrations
                     b.Navigation("Batch");
 
                     b.Navigation("ParentJob");
+                });
+
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.GpuModelDetachmentReceiptEntity", b =>
+                {
+                    b.HasOne("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.GpuModelResidencyEntity", null)
+                        .WithMany()
+                        .HasForeignKey("ResidencyId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.GpuModelResidencyEntity", b =>
+                {
+                    b.HasOne("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.GpuCapacitySlotEntity", null)
+                        .WithMany()
+                        .HasForeignKey("SlotKey")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
                 });
 
             modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.IndexCandidateMemberEntity", b =>

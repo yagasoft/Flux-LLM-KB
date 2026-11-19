@@ -614,8 +614,12 @@ public static class WebHostComposition
         {
             // Reuse the provisioned physical slot, OCR adapter and recovery graph.
             if (!localOcrEnabled) throw new InvalidOperationException("hybrid-search-requires-shared-ocr-runtime");
+            var warmingSetting = configuration["Gpu:ModelWarmingEnabled"];
+            var warming = true;
+            if (warmingSetting is not null && !bool.TryParse(warmingSetting, out warming))
+                throw new InvalidOperationException("gpu-model-warming-setting-invalid");
             BgeSearchRuntimeComposition.Add(services, enableWindowBackfill: strictProductionPaths,
-                transcriptionEnabled ? MediaTranscriptionLocalRuntime.Profile : null);
+                transcriptionEnabled ? MediaTranscriptionLocalRuntime.Profile : null, enableModelWarming: warming);
         }
         if (localOcrEnabled)
         {

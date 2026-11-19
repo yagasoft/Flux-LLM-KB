@@ -54,9 +54,11 @@ public sealed class GpuStatusEndpointTests : IClassFixture<GpuStatusEndpointTest
                 "ocrOwner",
                 "outcomeUncertainCount",
                 "readyCount",
+                "releasingModelSlotCount",
                 "reservedSlotCount",
                 "uncertainCapacity",
-                "uncertainSlotCount"
+                "uncertainSlotCount",
+                "warmModelSlotCount"
             },
             result.EnumerateObject().Select(property => property.Name).OrderBy(name => name, StringComparer.Ordinal));
         Assert.Equal(2, result.GetProperty("readyCount").GetInt32());
@@ -68,6 +70,8 @@ public sealed class GpuStatusEndpointTests : IClassFixture<GpuStatusEndpointTest
         Assert.Equal(3, result.GetProperty("availableSlotCount").GetInt32());
         Assert.Equal(1, result.GetProperty("reservedSlotCount").GetInt32());
         Assert.Equal(1, result.GetProperty("uncertainSlotCount").GetInt32());
+        Assert.Equal(1, result.GetProperty("warmModelSlotCount").GetInt32());
+        Assert.Equal(2, result.GetProperty("releasingModelSlotCount").GetInt32());
         Assert.Equal("2026-07-30T12:05:00+00:00", result.GetProperty("nextDeferredAtUtc").GetString());
 
         var laneCounts = result.GetProperty("laneCounts");
@@ -194,7 +198,10 @@ public sealed class GpuStatusEndpointTests : IClassFixture<GpuStatusEndpointTest
                 1,
                 1,
                 DateTimeOffset.Parse("2026-07-30T12:05:00+00:00"),
-                new GpuCapacityUncertaintySummary("Uncertain", 45)));
+                new GpuCapacityUncertaintySummary("Uncertain", 45))
+            {
+                WarmModelSlotCount = 1, ReleasingModelSlotCount = 2
+            });
 
         public ValueTask<IReadOnlyList<PipelineRecordProjection>> ReadPipelineRecordsAsync(
             CancellationToken cancellationToken) =>

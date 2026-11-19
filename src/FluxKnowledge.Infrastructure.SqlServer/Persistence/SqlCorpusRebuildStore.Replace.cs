@@ -113,7 +113,7 @@ public sealed partial class SqlCorpusRebuildStore
                 !await context.IndexGenerations.AnyAsync(value => value.Id == request.GenerationId && value.EmbeddingJobId == request.ParentJobId &&
                     value.CorpusEpoch == old.TargetEpoch && value.ModelFingerprint == old.Profile.ModelFingerprint && value.Dimensions == old.Profile.Dimensions, ct).ConfigureAwait(false))
                 throw new CorpusRebuildRefusalException("corpus-rebuild-replacement-request-provenance-invalid");
-            if (request.State == 2 && request.NativeCleanupConfirmed &&
+            if (request.State == 2 && (request.NativeCleanupConfirmed || request.ResidentDetachmentDispatchId is not null) &&
                 task.ExecutionState is (int)GpuMiniTaskExecutionState.Completed or (int)GpuMiniTaskExecutionState.OutcomeUncertain) continue;
             if (request.State != 0 || request.NativeCleanupConfirmed || request.ExecutorInstanceId is not null || request.ClaimOperationId is not null ||
                 request.OwnerProcessId is not null || request.OwnerStartedAtUtc is not null || request.OwnerMachineFingerprint is not null || request.DispatchId is not null ||

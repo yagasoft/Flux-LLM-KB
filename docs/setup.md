@@ -491,6 +491,30 @@ They assert the full two-second and fifteen-second boundaries, cancellation and
 cleanup without waiting through those intervals. Application defaults and actual
 timeouts are unchanged.
 
+### Dedicated GPU model warming trial
+
+Use a separate staged catalogue and port with `IndexPublicationMode` set to
+`Segmented`, `DashboardReadBenchmark` and `CpuSemantic` enabled, and the source
+journal disabled. Set `GpuModelWarming` to true in the staging settings. Confirm
+GPU headroom before running and run the native trials one at a time using the
+installed models under `J:\Models`.
+
+```powershell
+'approved-bounded-staging-start' | dotnet <staging-host-dll> --settings-file <owned-staging-json> --model-warming-trial
+```
+
+The trial uses the normal shared scheduler and real BGE inference. It checks
+same-allocation reuse, incompatible admission after native release, two-minute
+expiry and recovery from a callback failure. After a warm run, setting
+`GpuModelWarming` to false runs the cold compatibility check against the same
+staging catalogue and retained receipts. In the installed app,
+`Gpu:ModelWarmingEnabled=false` selects the cold path on schema 84.
+
+The contained OCR and media native checks have separate opt-ins
+`FLUX_KB_RUN_LOCAL_PADDLE_OCR_WARM=1` and
+`FLUX_KB_RUN_MEDIA_WARM_NATIVE_TRIAL=1`. Ordinary verification uses synthetic
+helpers and disposable SQL fixtures.
+
 Per-run JSON summaries, step logs, TRX files and SQL fixture phase timings remain
 under `.agents/run-logs/closeout-<run-id>/`, outside the disposable candidate.
 Inspect them with:

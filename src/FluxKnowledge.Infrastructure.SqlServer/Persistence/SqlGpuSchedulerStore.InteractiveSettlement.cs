@@ -57,6 +57,17 @@ public sealed partial class SqlGpuSchedulerStore : IGpuInteractiveSettlementStor
                     r.DispatchId == handle.DispatchId && r.BatchId == handle.BatchId && r.MiniTaskId == requestId && r.ExecutorKey == handle.ExecutorKey &&
                     r.AdmissionGeneration == handle.AdmissionGeneration && r.Disposition == (int)GpuMiniTaskBoundaryDisposition.Completed &&
                     r.EvidenceClass == (int)GpuExecutorEvidenceClass.TaskOutcomeConfirmed, cancellationToken).ConfigureAwait(false);
+            if (confirmed && await db.GpuModelDetachmentReceipts.AnyAsync(receipt =>
+                    receipt.DispatchId == handle.DispatchId && receipt.BatchId == handle.BatchId &&
+                    receipt.AdmissionGeneration == handle.AdmissionGeneration && receipt.ExecutorKey == handle.ExecutorKey &&
+                    receipt.ExecutionInstanceId == handle.DispatchId, cancellationToken).ConfigureAwait(false))
+                return Snapshot(GpuInteractiveRequestState.Detached, handle);
+            if (confirmed && !oldOwnerReleased &&
+                slot.State is (int)GpuCapacitySlotState.ResidentIdle or (int)GpuCapacitySlotState.ResidentEvicting)
+                oldOwnerReleased = await db.GpuSchedulerOperationReceipts.AnyAsync(receipt =>
+                    receipt.OperationKind == "callback" && receipt.BatchId == batch.Id && receipt.CapacitySlotKey == slot.SlotKey &&
+                    receipt.AdmissionGeneration == batch.AdmissionGeneration && receipt.Accepted && receipt.Committed &&
+                    (receipt.WakeReasons & (int)GpuSchedulerWakeReason.CapacityReleased) != 0, cancellationToken).ConfigureAwait(false);
             var releasedWithUncertainOutcome = task.ExecutionState == (int)GpuMiniTaskExecutionState.OutcomeUncertain &&
                 batch.State == (int)GpuBatchState.Released && dispatch.State == (int)GpuExecutorDispatchState.DeliveryUncertain &&
                 await db.GpuExecutorResultReceipts.AnyAsync(r => r.DispatchId == handle.DispatchId && r.BatchId == handle.BatchId &&

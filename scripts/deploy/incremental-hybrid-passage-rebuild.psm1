@@ -47,6 +47,36 @@ function Assert-HybridMigrationHistory {
     }
 }
 
+function Get-HybridGpuDrainStateSql {
+    # 0 means wait for the owner, 1 means physically drained, 2 means unverified.
+    @'
+DECLARE @residencyState int=1;
+IF EXISTS (SELECT 1 FROM dbo.__EFMigrationsHistory WHERE MigrationId=N'20261119201434_AddGpuModelResidencies')
+BEGIN
+    IF OBJECT_ID(N'dbo.GpuModelResidencies',N'U') IS NULL OR OBJECT_ID(N'dbo.GpuModelDetachmentReceipts',N'U') IS NULL
+        SET @residencyState=2;
+    ELSE
+        EXEC sys.sp_executesql N'
+            SELECT @s=CASE WHEN EXISTS(
+                SELECT 1 FROM dbo.GpuModelResidencies r LEFT JOIN dbo.GpuCapacitySlots slot ON slot.SlotKey=r.SlotKey
+                WHERE r.State<>4 AND (slot.SlotKey IS NULL OR r.State=3 OR
+                    (r.State=0 AND (slot.State<>1 OR slot.ActiveBatchId IS NULL)) OR
+                    (r.State IN (1,2) AND (slot.State<>r.State+2 OR slot.ActiveBatchId IS NOT NULL))))
+                OR EXISTS(SELECT 1 FROM dbo.GpuCapacitySlots slot WHERE slot.State IN (3,4) AND
+                    NOT EXISTS(SELECT 1 FROM dbo.GpuModelResidencies r WHERE r.SlotKey=slot.SlotKey AND r.State=slot.State-2))
+                THEN 2 WHEN EXISTS(SELECT 1 FROM dbo.GpuModelResidencies WHERE State<>4) THEN 0 ELSE 1 END;',
+            N'@s int OUTPUT', @s=@residencyState OUTPUT;
+END
+ELSE IF OBJECT_ID(N'dbo.GpuModelResidencies') IS NOT NULL OR OBJECT_ID(N'dbo.GpuModelDetachmentReceipts') IS NOT NULL
+    SET @residencyState=2;
+SELECT CASE WHEN @residencyState=2
+    OR NOT EXISTS (SELECT 1 FROM dbo.GpuCapacitySlots WHERE SlotKey COLLATE Latin1_General_100_BIN2=N'paddleocr-vl-local-gpu-0')
+    OR EXISTS (SELECT 1 FROM dbo.GpuCapacitySlots WHERE State=2) THEN 2
+    WHEN @residencyState=1 AND NOT EXISTS (SELECT 1 FROM dbo.GpuCapacitySlots WHERE State<>0 OR ActiveBatchId IS NOT NULL)
+    AND NOT EXISTS (SELECT 1 FROM dbo.GpuMiniTasks WHERE State=1) THEN 1 ELSE 0 END;
+'@
+}
+
 function Assert-HybridGpuDrainPreflight {
     param([Parameter(Mandatory)][string]$ConnectionString)
     $normalised=$ConnectionString -replace '(?i)Trust Server Certificate=','TrustServerCertificate=' -replace '(?i)Connect Retry Count=','ConnectRetryCount='
@@ -57,8 +87,8 @@ function Assert-HybridGpuDrainPreflight {
     try {
         $connection.Open();$command=$connection.CreateCommand();$command.CommandTimeout=5
         try {
-            $command.CommandText="SELECT CONVERT(bit,CASE WHEN NOT EXISTS(SELECT 1 FROM GpuCapacitySlots WHERE SlotKey COLLATE Latin1_General_100_BIN2=N'paddleocr-vl-local-gpu-0') OR EXISTS(SELECT 1 FROM GpuCapacitySlots WHERE State=2) THEN 1 ELSE 0 END);"
-            if([bool]$command.ExecuteScalar()){throw 'hybrid-gpu-drain-timeout-or-uncertain-capacity'}
+            $command.CommandText=Get-HybridGpuDrainStateSql
+            if([int]$command.ExecuteScalar() -eq 2){throw 'hybrid-gpu-drain-timeout-or-uncertain-capacity'}
         } finally {$command.Dispose()}
     } finally {$connection.Dispose()}
 }
@@ -86,15 +116,8 @@ SELECT @@SPID;
             $command.CommandText = @'
 IF ISNULL(APPLOCK_MODE(N'public', N'FluxKnowledge.GpuScheduler.Admission', N'Session'), N'NoLock') <> N'Exclusive'
     THROW 51000, 'gpu-maintenance-admission-fence-lost', 1;
-SELECT CASE WHEN
-    NOT EXISTS (SELECT 1 FROM GpuCapacitySlots WHERE SlotKey COLLATE Latin1_General_100_BIN2 = N'paddleocr-vl-local-gpu-0')
-    OR EXISTS (SELECT 1 FROM GpuCapacitySlots WHERE State = 2) THEN 2
-    WHEN
-    EXISTS (SELECT 1 FROM GpuCapacitySlots WHERE SlotKey COLLATE Latin1_General_100_BIN2 = N'paddleocr-vl-local-gpu-0')
-    AND NOT EXISTS (SELECT 1 FROM GpuCapacitySlots WHERE State <> 0 OR ActiveBatchId IS NOT NULL)
-    AND NOT EXISTS (SELECT 1 FROM GpuMiniTasks WHERE State = 1)
-    THEN 1 ELSE 0 END;
 '@
+            $command.CommandText += [Environment]::NewLine + (Get-HybridGpuDrainStateSql)
             $timer = [Diagnostics.Stopwatch]::StartNew()
             while ($true) {
                 $state=[int]$command.ExecuteScalar()

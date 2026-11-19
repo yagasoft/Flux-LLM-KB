@@ -124,8 +124,8 @@ public static class BgeOfflineModels
         ArgumentNullException.ThrowIfNull(ownership);
         ownership.RequireActive(GetGpuRuntimeKey(precision), GpuSettingsFingerprint);
         RequireTokenizer(tokenizer, reranker: false);
-        var lease = await ResolveLeaseAsync(store, EmbeddingModel, ownership.CancellationToken).ConfigureAwait(false);
-        return new(tokenizer, BgeOnnxTensorRunner.Open(lease, embedding: true, ownership.CancellationToken, ownership, 4, precision), EmbeddingFingerprint);
+        var resident = await OpenGpuResidentAsync(store, BgeGpuModelPhase.Embedding, ownership, precision).ConfigureAwait(false);
+        return new(tokenizer, resident.BorrowCold(ownership), EmbeddingFingerprint);
     }
 
     public static ValueTask<BgeReranker> OpenGpuRerankerAsync(
@@ -138,8 +138,30 @@ public static class BgeOfflineModels
         ArgumentNullException.ThrowIfNull(ownership);
         ownership.RequireActive(GetGpuRuntimeKey(precision), GpuSettingsFingerprint);
         RequireTokenizer(tokenizer, reranker: true);
-        var lease = await ResolveLeaseAsync(store, RerankerSpecification(precision), ownership.CancellationToken).ConfigureAwait(false);
-        return new(tokenizer, BgeOnnxTensorRunner.Open(lease, embedding: false, ownership.CancellationToken, ownership, 4, precision), GetRerankerFingerprint(precision));
+        var resident = await OpenGpuResidentAsync(store, BgeGpuModelPhase.Reranker, ownership, precision).ConfigureAwait(false);
+        return new(tokenizer, resident.BorrowCold(ownership), GetRerankerFingerprint(precision));
+    }
+
+    internal static async ValueTask<BgeGpuResidentRunner> OpenGpuResidentAsync(
+        ILocalModelStore store, BgeGpuModelPhase phase, GpuOwnedWorkContext ownership, BgeRerankerPrecision precision)
+    {
+        var key = GetGpuResidentModelKey(phase, precision);
+        ownership.RequireActive(key.RuntimeKey, key.SettingsFingerprint);
+        var specification = phase == BgeGpuModelPhase.Embedding ? EmbeddingModel : RerankerSpecification(precision);
+        var lease = await ResolveLeaseAsync(store, specification, ownership.CancellationToken).ConfigureAwait(false);
+        return BgeOnnxTensorRunner.OpenGpu(lease, phase, ownership, precision);
+    }
+
+    public static GpuResidentModelKey GetGpuResidentModelKey(BgeGpuModelPhase phase, BgeRerankerPrecision precision)
+    {
+        var runtimeKey = GetGpuRuntimeKey(precision);
+        var modelKey = phase switch
+        {
+            BgeGpuModelPhase.Embedding => "embedding:" + EmbeddingFingerprint,
+            BgeGpuModelPhase.Reranker => "reranker:" + GetRerankerFingerprint(precision),
+            _ => throw new ArgumentOutOfRangeException(nameof(phase))
+        };
+        return new(runtimeKey, GpuSettingsFingerprint, modelKey);
     }
 
     public static string GetRerankerFingerprint(BgeRerankerPrecision precision) => precision switch

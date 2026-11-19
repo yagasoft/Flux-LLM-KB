@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using FluxKnowledge.Application.Documents;
 using FluxKnowledge.Application.Gpu;
 using FluxKnowledge.Domain.Gpu;
@@ -16,16 +17,9 @@ public sealed partial class SqlMediaTranscriptionGpuStore
     public ValueTask<DocumentOcrLifecycleResult> StoreResultAsync(DocumentOcrExecutionLease lease,
         MediaTranscriptionResult result, CancellationToken ct, bool useNativeResult = false)
     {
-        if (!IsValidResult(result) || useNativeResult && !result.Succeeded)
+        if (EncodeResult(lease.ExecutionInstanceId, result, useNativeResult) is not { } encoded)
             return ValueTask.FromResult(Refused(DocumentOcrLifecycleDisposition.InvalidResult, "result-invalid"));
-        var json = result.Succeeded
-            ? JsonSerializer.Serialize(new TranscriptResultReceipt(1, lease.ExecutionInstanceId, result.ReasonCode,
-                Convert.ToHexStringLower(SHA256.HashData(StrictUtf8.GetBytes(result.Transcript!))),
-                StrictUtf8.GetByteCount(result.Transcript!), useNativeResult), JsonOptions)
-            : JsonSerializer.Serialize(result, JsonOptions);
-        if (Encoding.Unicode.GetByteCount(json) > MediaTranscriptionGpuContracts.MaximumResultBytes)
-            return ValueTask.FromResult(Refused(DocumentOcrLifecycleDisposition.InvalidResult, "result-too-large"));
-        var digest = SHA256.HashData(StrictUtf8.GetBytes(json));
+        var (json, digest) = encoded;
         return WithLeaseAsync(lease, async (db, rows) =>
         {
             var request = rows.Request;
@@ -85,39 +79,61 @@ public sealed partial class SqlMediaTranscriptionGpuStore
                 rows.Batch.State is not ((int)GpuBatchState.Active or (int)GpuBatchState.CapacityUncertain))
                 return Stale();
 
+            if (await SqlGpuModelResidencyStore.HasLiveResidencyAsync(db, handle.CapacitySlotKey, ct).ConfigureAwait(false))
+                return Refused(DocumentOcrLifecycleDisposition.CleanupUnproven, "resident-native-capacity-held");
+
             var now = clock.GetUtcNow();
-            var operation = OperationId(OperationFingerprint("result", handle.DispatchId, request.ExecutionInstanceId!.Value,
-                handle.AdmissionGeneration));
-            var receipt = new GpuExecutorResultReceipt(operation, handle, miniTaskId, GpuMiniTaskBoundaryDisposition.Completed,
-                resultDigest, GpuExecutorEvidenceClass.TaskOutcomeConfirmed);
-            var fingerprint = SqlGpuSchedulerStore.CreateExecutorResultReceiptFingerprint(receipt);
-            db.GpuExecutorResultReceipts.Add(new()
-            {
-                OperationId = operation, DispatchId = handle.DispatchId, BatchId = handle.BatchId, MiniTaskId = miniTaskId,
-                ExecutorKey = handle.ExecutorKey, AdmissionGeneration = handle.AdmissionGeneration,
-                Disposition = (int)receipt.Disposition, EvidenceClass = (int)receipt.EvidenceClass,
-                OpaqueResultDigest = resultDigest.ToArray(), RequestFingerprint = fingerprint, CreatedAtUtc = now
-            });
-            db.GpuSchedulerOperationReceipts.Add(new()
-            {
-                OperationId = operation, OperationKind = "executor-result-receipt", RequestFingerprint = fingerprint,
-                BatchId = handle.BatchId, CapacitySlotKey = handle.CapacitySlotKey, OwnerKey = rows.Dispatch.OwnerKey,
-                AdmissionGeneration = handle.AdmissionGeneration, Accepted = true, Committed = true, CreatedAtUtc = now
-            });
-            rows.Task.ExecutionState = (int)GpuMiniTaskExecutionState.Completed;
-            rows.Batch.State = (int)GpuBatchState.Completed;
-            rows.Batch.UpdatedAtUtc = now;
-            rows.Dispatch.State = (int)GpuExecutorDispatchState.Terminal;
-            rows.Dispatch.UpdatedAtUtc = now;
+            CompleteRequest(db, rows, handle, resultDigest, now);
             rows.Slot.State = (int)GpuCapacitySlotState.Available;
             rows.Slot.ActiveBatchId = null;
             rows.Slot.OwnerKey = null;
             rows.Slot.LastHeartbeatAtUtc = now;
             rows.Slot.UpdatedAtUtc = now;
-            request.ExecutionPhase = (int)DocumentOcrExecutionPhase.Settled;
             await SqlGpuSchedulerStore.RecordWakeAsync(db, GpuSchedulerWakeReason.CapacityReleased, now, ct).ConfigureAwait(false);
             return Accepted("settled");
         }, ct);
+    }
+
+    private static void CompleteRequest(FluxKnowledgeDbContext db, ExecutionRows rows, GpuExecutorBatchHandle handle,
+        byte[] resultDigest, DateTimeOffset now)
+    {
+    var operation = OperationId(OperationFingerprint("result", handle.DispatchId, rows.Request.ExecutionInstanceId!.Value,
+        handle.AdmissionGeneration));
+    var receipt = new GpuExecutorResultReceipt(operation, handle, rows.Request.MiniTaskId, GpuMiniTaskBoundaryDisposition.Completed,
+        resultDigest, GpuExecutorEvidenceClass.TaskOutcomeConfirmed);
+    var fingerprint = SqlGpuSchedulerStore.CreateExecutorResultReceiptFingerprint(receipt);
+    db.GpuExecutorResultReceipts.Add(new()
+    {
+        OperationId = operation, DispatchId = handle.DispatchId, BatchId = handle.BatchId, MiniTaskId = rows.Request.MiniTaskId,
+        ExecutorKey = handle.ExecutorKey, AdmissionGeneration = handle.AdmissionGeneration,
+        Disposition = (int)receipt.Disposition, EvidenceClass = (int)receipt.EvidenceClass,
+        OpaqueResultDigest = resultDigest.ToArray(), RequestFingerprint = fingerprint, CreatedAtUtc = now
+    });
+    db.GpuSchedulerOperationReceipts.Add(new()
+    {
+        OperationId = operation, OperationKind = "executor-result-receipt", RequestFingerprint = fingerprint,
+        BatchId = handle.BatchId, CapacitySlotKey = handle.CapacitySlotKey, OwnerKey = rows.Dispatch.OwnerKey,
+        AdmissionGeneration = handle.AdmissionGeneration, Accepted = true, Committed = true, CreatedAtUtc = now
+    });
+    rows.Task.ExecutionState = (int)GpuMiniTaskExecutionState.Completed;
+    rows.Batch.State = (int)GpuBatchState.Completed;
+    rows.Batch.UpdatedAtUtc = now;
+    rows.Dispatch.State = (int)GpuExecutorDispatchState.Terminal;
+    rows.Dispatch.UpdatedAtUtc = now;
+        rows.Request.ExecutionPhase = (int)DocumentOcrExecutionPhase.Settled;
+    }
+
+    private static (string Json, byte[] Digest)? EncodeResult(Guid executionId, MediaTranscriptionResult result,
+        bool useNativeResult, string? residentModel = null)
+    {
+        if (!IsValidResult(result) || useNativeResult && !result.Succeeded) return null;
+        var json = result.Succeeded
+            ? JsonSerializer.Serialize(new TranscriptResultReceipt(1, executionId, result.ReasonCode,
+                Convert.ToHexStringLower(SHA256.HashData(StrictUtf8.GetBytes(result.Transcript!))),
+                StrictUtf8.GetByteCount(result.Transcript!), useNativeResult, residentModel), JsonOptions)
+            : JsonSerializer.Serialize(result, JsonOptions);
+        return Encoding.Unicode.GetByteCount(json) <= MediaTranscriptionGpuContracts.MaximumResultBytes
+            ? (json, SHA256.HashData(StrictUtf8.GetBytes(json))) : null;
     }
 
     public ValueTask<bool> RequeueSettledAsync(GpuExecutorBatchHandle handle, Guid miniTaskId, CancellationToken ct)
@@ -129,7 +145,8 @@ public sealed partial class SqlMediaTranscriptionGpuStore
             if (rows is null || rows.Request.MiniTaskId != miniTaskId || !MatchesHandle(rows.Request, handle) ||
                 rows.Request.ExecutionPhase != (int)DocumentOcrExecutionPhase.Settled || rows.Request.RequeuedAtUtc is not null ||
                 rows.Task.ExecutionState != (int)GpuMiniTaskExecutionState.Completed ||
-                rows.Dispatch.State != (int)GpuExecutorDispatchState.Terminal || !HasCleanup(rows.Request) ||
+                rows.Dispatch.State != (int)GpuExecutorDispatchState.Terminal ||
+                !HasCleanup(rows.Request) && await ReadDetachmentAsync(db, rows, handle, ct).ConfigureAwait(false) is null ||
                 !await SourceIsEnabledAsync(db, rows.Request, ct).ConfigureAwait(false))
                 return false;
 
@@ -194,7 +211,8 @@ public sealed partial class SqlMediaTranscriptionGpuStore
          r.CleanupKind == (int)DocumentOcrCleanupKind.OwnedJobEmpty && r.NativeProcessId is not null && r.NativeProcessStartedAtUtc is not null);
 
     private sealed record TranscriptResultReceipt(int Version, Guid ExecutionId, string ReasonCode,
-        string TranscriptSha256, int TranscriptByteLength, bool UseNativeResult);
+        string TranscriptSha256, int TranscriptByteLength, bool UseNativeResult,
+        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? ResidentModel = null);
 
     private static MediaTranscriptionCompletedResult? ReadResult(MediaTranscriptionGpuRequestEntity request)
     {

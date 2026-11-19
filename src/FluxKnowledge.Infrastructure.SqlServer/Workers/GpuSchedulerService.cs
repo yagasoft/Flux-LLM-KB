@@ -231,6 +231,8 @@ public sealed class GpuSchedulerService(
         await using var scope = scopeFactory.CreateAsyncScope();
         var coordinator = scope.ServiceProvider.GetRequiredService<GpuSchedulerCoordinator>();
         await coordinator.AdmitAsync(operationId, reason, cancellationToken).ConfigureAwait(false);
+        if (options.ResidentEntryModels.Count > 0)
+            scope.ServiceProvider.GetService<GpuModelResidencyRuntime>()?.Notify();
     }
 
     private async ValueTask AcknowledgeWakeAsync(Guid consumptionOperationId, CancellationToken cancellationToken)

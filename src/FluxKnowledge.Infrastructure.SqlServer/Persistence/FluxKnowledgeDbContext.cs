@@ -47,6 +47,8 @@ public sealed class FluxKnowledgeDbContext(DbContextOptions<FluxKnowledgeDbConte
     public DbSet<GpuMiniTaskEntity> GpuMiniTasks => Set<GpuMiniTaskEntity>();
     public DbSet<GpuBatchEntity> GpuBatches => Set<GpuBatchEntity>();
     public DbSet<GpuCapacitySlotEntity> GpuCapacitySlots => Set<GpuCapacitySlotEntity>();
+    public DbSet<GpuModelResidencyEntity> GpuModelResidencies => Set<GpuModelResidencyEntity>();
+    public DbSet<GpuModelDetachmentReceiptEntity> GpuModelDetachmentReceipts => Set<GpuModelDetachmentReceiptEntity>();
     public DbSet<GpuSchedulerStateEntity> GpuSchedulerStates => Set<GpuSchedulerStateEntity>();
     public DbSet<GpuSchedulerOperationReceiptEntity> GpuSchedulerOperationReceipts => Set<GpuSchedulerOperationReceiptEntity>();
     public DbSet<GpuExecutorDispatchEntity> GpuExecutorDispatches => Set<GpuExecutorDispatchEntity>();

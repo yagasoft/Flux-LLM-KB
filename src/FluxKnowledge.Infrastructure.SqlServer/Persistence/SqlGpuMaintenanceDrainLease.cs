@@ -61,6 +61,7 @@ public sealed class SqlGpuMaintenanceDrainLease : IAsyncDisposable
                     EXISTS (SELECT 1 FROM GpuCapacitySlots WHERE SlotKey COLLATE Latin1_General_100_BIN2 = @slot)
                     AND NOT EXISTS (SELECT 1 FROM GpuCapacitySlots WHERE State <> @available OR ActiveBatchId IS NOT NULL)
                     AND NOT EXISTS (SELECT 1 FROM GpuMiniTasks WHERE State = @active)
+                    AND NOT EXISTS (SELECT 1 FROM GpuModelResidencies WHERE ReleasedAtUtc IS NULL)
                     THEN 1 ELSE 0 END);
                 """;
             command.Parameters.Add("@resource", SqlDbType.NVarChar, 255).Value = AdmissionResource;

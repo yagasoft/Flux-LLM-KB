@@ -24,7 +24,7 @@ public sealed partial class SqlDocumentOcrStore
             if (rows is null) return Refused(DocumentOcrLifecycleDisposition.StaleOwner);
             var (request, task, batch, dispatch, slot) = rows;
             if (request.ExecutionInstanceId is not null)
-                return request.ExecutionInstanceId == executionInstanceId && MatchesSupervisor(request, supervisor) &&
+                return !IsAbandonedResidentClaim(request) && request.ExecutionInstanceId == executionInstanceId && MatchesSupervisor(request, supervisor) &&
                     request.ExecutionDispatchId == handle.DispatchId && request.ExecutionBatchId == handle.BatchId &&
                     request.ExecutionAdmissionGeneration == handle.AdmissionGeneration
                     ? new(DocumentOcrLifecycleDisposition.AlreadyApplied, "document-ocr-claim-replayed", ToLease(request, handle))
@@ -33,25 +33,48 @@ public sealed partial class SqlDocumentOcrStore
                 slot.State != (int)GpuCapacitySlotState.Reserved || task.ExecutionState != (int)GpuMiniTaskExecutionState.Active ||
                 batch.State != (int)GpuBatchState.Active)
                 return Refused(DocumentOcrLifecycleDisposition.LegacyOwnerUnproven);
+            var resident = await context.GpuModelResidencies.SingleOrDefaultAsync(row => row.SlotKey == handle.CapacitySlotKey &&
+                row.BorrowedDispatchId == handle.DispatchId && row.State == (int)GpuModelResidencyState.Borrowed, ct).ConfigureAwait(false);
+            if (resident is not null && (resident.BorrowedExecutionInstanceId != executionInstanceId ||
+                SqlGpuModelResidencyStore.ReadFence(resident).Owner != supervisor.Process))
+                return Refused(DocumentOcrLifecycleDisposition.StaleOwner);
             if (!await SourceIsEnabledAsync(context, request, ct).ConfigureAwait(false))
                 return Refused(DocumentOcrLifecycleDisposition.SourceWithdrawn);
-            var now = _timeProvider.GetUtcNow();
-            request.ExecutionInstanceId = executionInstanceId;
-            request.ExecutionDispatchId = handle.DispatchId; request.ExecutionBatchId = handle.BatchId;
-            request.ExecutionAdmissionGeneration = handle.AdmissionGeneration;
-            request.ExecutionMachineFingerprint = supervisor.Process.MachineFingerprint;
-            request.SupervisorInstanceId = supervisor.InstanceId; request.SupervisorProcessId = supervisor.Process.ProcessId;
-            request.SupervisorProcessStartedAtUtc = supervisor.Process.StartedAtUtc;
-            request.ExecutionClaimedAtUtc = now; request.ExecutionDeadlineAtUtc = now.AddMinutes(20);
-            request.ExecutionPhase = (int)DocumentOcrExecutionPhase.Claimed;
-            dispatch.State = (int)GpuExecutorDispatchState.Acknowledged;
-            dispatch.AcknowledgedAtUtc = now; dispatch.UpdatedAtUtc = now;
+            RecordExecutionClaim(rows, handle, executionInstanceId, supervisor, _timeProvider.GetUtcNow());
             return new(DocumentOcrLifecycleDisposition.Applied, "document-ocr-claimed", ToLease(request, handle));
         }, ct);
     }
 
+    private static void RecordExecutionClaim(OcrLifecycleRows rows, GpuExecutorBatchHandle handle, Guid executionInstanceId,
+        DocumentOcrSupervisorIdentity supervisor, DateTimeOffset now)
+    {
+        var request = rows.Request;
+        var dispatch = rows.Dispatch;
+        request.ExecutionInstanceId = executionInstanceId;
+        request.ExecutionDispatchId = handle.DispatchId; request.ExecutionBatchId = handle.BatchId;
+        request.ExecutionAdmissionGeneration = handle.AdmissionGeneration;
+        request.ExecutionMachineFingerprint = supervisor.Process.MachineFingerprint;
+        request.SupervisorInstanceId = supervisor.InstanceId; request.SupervisorProcessId = supervisor.Process.ProcessId;
+        request.SupervisorProcessStartedAtUtc = supervisor.Process.StartedAtUtc;
+        request.ExecutionClaimedAtUtc = now; request.ExecutionDeadlineAtUtc = now.AddMinutes(20);
+        request.ExecutionPhase = (int)DocumentOcrExecutionPhase.Claimed;
+        dispatch.State = (int)GpuExecutorDispatchState.Acknowledged;
+        dispatch.AcknowledgedAtUtc = now; dispatch.UpdatedAtUtc = now;
+    }
+
     public ValueTask<DocumentOcrLifecycleResult> PermitNativeStartAsync(DocumentOcrExecutionLease lease,
-        DocumentOcrProcessIdentity process, CancellationToken cancellationToken)
+        DocumentOcrProcessIdentity process, CancellationToken cancellationToken) =>
+        PermitNativeStartCoreAsync(lease, process, null, cancellationToken);
+
+    internal ValueTask<DocumentOcrLifecycleResult> PermitResidentNativeStartAsync(DocumentOcrExecutionLease lease,
+        GpuResidentModelFence borrow, DocumentOcrProcessIdentity process, CancellationToken ct)
+    {
+        borrow.Validate();
+        return PermitNativeStartCoreAsync(lease, process, borrow, ct);
+    }
+
+    private ValueTask<DocumentOcrLifecycleResult> PermitNativeStartCoreAsync(DocumentOcrExecutionLease lease,
+        DocumentOcrProcessIdentity process, GpuResidentModelFence? borrow, CancellationToken cancellationToken)
     {
         lease.Validate(); process.Validate();
         return MutateLifecycleAsync(async context =>
@@ -60,14 +83,22 @@ public sealed partial class SqlDocumentOcrStore
             if (rows is null || !MatchesLease(rows.Request, lease) || !OwnsSlot(rows) ||
                 process.MachineFingerprint != lease.Supervisor.Process.MachineFingerprint)
                 return Refused(DocumentOcrLifecycleDisposition.StaleOwner);
+            if (borrow is null
+                ? await SqlGpuModelResidencyStore.HasLiveResidencyAsync(context, lease.Handle.CapacitySlotKey, cancellationToken).ConfigureAwait(false)
+                : !ActiveResidentReservation(rows) || !MatchesResidentHelper(lease, borrow, process) ||
+                  !await MatchesActiveBorrowAsync(context, borrow, lease, cancellationToken).ConfigureAwait(false))
+                return Refused(DocumentOcrLifecycleDisposition.StaleOwner);
             var request = rows.Request;
-            if (request.ExecutionPhase == (int)DocumentOcrExecutionPhase.NativeStartPermitted && MatchesChild(request, process))
+            var replay = request.ExecutionPhase == (int)DocumentOcrExecutionPhase.NativeStartPermitted && MatchesChild(request, process);
+            if (replay && borrow is null)
                 return new(DocumentOcrLifecycleDisposition.AlreadyApplied, "document-ocr-native-start-permitted", lease);
-            if (request.ExecutionPhase != (int)DocumentOcrExecutionPhase.Claimed ||
+            if ((!replay && request.ExecutionPhase != (int)DocumentOcrExecutionPhase.Claimed) ||
                 _timeProvider.GetUtcNow() >= lease.DeadlineAtUtc || rows.Slot.State != (int)GpuCapacitySlotState.Reserved)
                 return Refused(DocumentOcrLifecycleDisposition.StaleOwner);
             if (!await SourceIsEnabledAsync(context, request, cancellationToken).ConfigureAwait(false))
                 return Refused(DocumentOcrLifecycleDisposition.SourceWithdrawn);
+            if (replay)
+                return new(DocumentOcrLifecycleDisposition.AlreadyApplied, "document-ocr-native-start-permitted", lease);
             request.NativeProcessId = process.ProcessId; request.NativeProcessStartedAtUtc = process.StartedAtUtc;
             request.ExecutionPhase = (int)DocumentOcrExecutionPhase.NativeStartPermitted;
             return new(DocumentOcrLifecycleDisposition.Applied, "document-ocr-native-start-permitted", lease);
@@ -117,22 +148,16 @@ public sealed partial class SqlDocumentOcrStore
                 return request.CleanupProofKind == (int)proof.Kind
                     ? new(DocumentOcrLifecycleDisposition.AlreadyApplied, "document-ocr-cleanup-confirmed", lease)
                     : Refused(DocumentOcrLifecycleDisposition.CleanupUnproven);
+            if (await SqlGpuModelResidencyStore.HasLiveResidencyAsync(context, lease.Handle.CapacitySlotKey, cancellationToken).ConfigureAwait(false))
+                return Refused(DocumentOcrLifecycleDisposition.CleanupUnproven);
             if (!OwnsSlot(rows) || request.ExecutionPhase != (int)DocumentOcrExecutionPhase.Blocked &&
                 request.ExecutionPhase != (int)(proof.Kind == DocumentOcrCleanupKind.VerifiedUnstarted
                     ? DocumentOcrExecutionPhase.Claimed : DocumentOcrExecutionPhase.NativeStartPermitted))
                 return Refused(DocumentOcrLifecycleDisposition.StaleOwner);
             request.NativeCleanupConfirmedAtUtc = proof.ObservedAtUtc; request.CleanupProofKind = (int)proof.Kind;
             request.ExecutionPhase = (int)DocumentOcrExecutionPhase.CleanupConfirmed;
-            var operation = PhaseOperation(lease.Handle, lease.ExecutionInstanceId, "cleanup");
-            context.GpuExecutorEvidence.Add(new GpuExecutorEvidenceEntity
-            {
-                OperationId = operation, DispatchId = lease.Handle.DispatchId, BatchId = lease.Handle.BatchId,
-                CapacitySlotKey = lease.Handle.CapacitySlotKey, ExecutorKey = lease.Handle.ExecutorKey,
-                AdmissionGeneration = lease.Handle.AdmissionGeneration, EvidenceClass = (int)GpuExecutorEvidenceClass.CapacityReleaseConfirmed,
-                VerifierKey = "ocr-owned-job-v1", ObservedAtUtc = proof.ObservedAtUtc,
-                RequestFingerprint = Fingerprint($"{lease.ExecutionInstanceId:N}|{proof.Kind}|{proof.ObservedAtUtc:O}"),
-                CreatedAtUtc = _timeProvider.GetUtcNow()
-            });
+            RecordCleanupEvidence(context, lease, "ocr-owned-job-v1",
+                Fingerprint($"{lease.ExecutionInstanceId:N}|{proof.Kind}|{proof.ObservedAtUtc:O}"), proof.ObservedAtUtc);
             return new(DocumentOcrLifecycleDisposition.Applied, "document-ocr-cleanup-confirmed", lease);
         }, cancellationToken);
     }
@@ -152,55 +177,32 @@ public sealed partial class SqlDocumentOcrStore
             var fingerprint = Fingerprint($"{miniTaskId:N}|{Convert.ToHexString(expectedDigest)}");
             var receipt = await context.GpuSchedulerOperationReceipts.SingleOrDefaultAsync(r => r.OperationId == operation, ct).ConfigureAwait(false);
             if (receipt is not null)
+            {
+                if (receipt.OperationKind == DetachedSettlementKind)
+                {
+                    var detached = await ReadDetachmentReceiptAsync(context, rows, handle, ct).ConfigureAwait(false);
+                    if (detached is null || !receipt.Committed) return Refused(DocumentOcrLifecycleDisposition.CleanupUnproven);
+                }
                 return receipt.Accepted && receipt.RequestFingerprint == fingerprint
                     ? new(DocumentOcrLifecycleDisposition.AlreadyApplied, "document-ocr-settled")
                     : Refused(DocumentOcrLifecycleDisposition.InvalidResult);
-            if (!HasCleanupProof(request, handle, miniTaskId)) return Refused(DocumentOcrLifecycleDisposition.CleanupUnproven);
+            }
+            if (!HasCleanupProof(request, handle, miniTaskId) ||
+                await SqlGpuModelResidencyStore.HasLiveResidencyAsync(context, handle.CapacitySlotKey, ct).ConfigureAwait(false))
+                return Refused(DocumentOcrLifecycleDisposition.CleanupUnproven);
             if (!OwnsSlot(rows) || rows.Slot.State is not ((int)GpuCapacitySlotState.Reserved or (int)GpuCapacitySlotState.Uncertain) ||
                 rows.Task.ExecutionState != (int)GpuMiniTaskExecutionState.Active || rows.Dispatch.State == (int)GpuExecutorDispatchState.Terminal)
                 return Refused(DocumentOcrLifecycleDisposition.StaleOwner);
             if (!ValidStoredResult(request, expectedDigest)) return Refused(DocumentOcrLifecycleDisposition.InvalidResult);
-            var resultReceipt = await context.GpuExecutorResultReceipts.SingleOrDefaultAsync(r => r.DispatchId == handle.DispatchId && r.MiniTaskId == miniTaskId, ct).ConfigureAwait(false);
-            if (resultReceipt is not null && (resultReceipt.OpaqueResultDigest is null ||
-                !CryptographicOperations.FixedTimeEquals(resultReceipt.OpaqueResultDigest, expectedDigest)))
-                return Refused(DocumentOcrLifecycleDisposition.InvalidResult);
             var now = _timeProvider.GetUtcNow();
-            if (resultReceipt is null)
-            {
-                var resultOperation = PhaseOperation(handle, executionId, "result");
-                var resultFingerprint = SqlGpuSchedulerStore.CreateExecutorResultReceiptFingerprint(new(resultOperation, handle,
-                    miniTaskId, GpuMiniTaskBoundaryDisposition.Completed, expectedDigest, GpuExecutorEvidenceClass.TaskOutcomeConfirmed));
-                context.GpuExecutorResultReceipts.Add(new GpuExecutorResultReceiptEntity
-                {
-                    OperationId = resultOperation, DispatchId = handle.DispatchId,
-                    BatchId = handle.BatchId, MiniTaskId = miniTaskId, ExecutorKey = handle.ExecutorKey,
-                    AdmissionGeneration = handle.AdmissionGeneration, Disposition = (int)GpuMiniTaskBoundaryDisposition.Completed,
-                    EvidenceClass = (int)GpuExecutorEvidenceClass.TaskOutcomeConfirmed, OpaqueResultDigest = expectedDigest.ToArray(),
-                    RequestFingerprint = resultFingerprint, CreatedAtUtc = now
-                });
-                // Preserve the existing result-receipt proof consumed by supported document recovery.
-                context.GpuSchedulerOperationReceipts.Add(new GpuSchedulerOperationReceiptEntity
-                {
-                    OperationId = resultOperation, OperationKind = "executor-result-receipt", RequestFingerprint = resultFingerprint,
-                    BatchId = handle.BatchId, CapacitySlotKey = handle.CapacitySlotKey, OwnerKey = rows.Dispatch.OwnerKey,
-                    AdmissionGeneration = handle.AdmissionGeneration, Accepted = true, Committed = true, CreatedAtUtc = now
-                });
-            }
-            rows.Task.ExecutionState = (int)GpuMiniTaskExecutionState.Completed;
-            rows.Batch.State = (int)GpuBatchState.Completed; rows.Batch.UpdatedAtUtc = now;
-            rows.Dispatch.State = (int)GpuExecutorDispatchState.Terminal; rows.Dispatch.UpdatedAtUtc = now;
+            if (!await EnsureResultReceiptAsync(context, rows, handle, executionId, expectedDigest, now, ct).ConfigureAwait(false))
+                return Refused(DocumentOcrLifecycleDisposition.InvalidResult);
+            CompleteOcrRows(rows, now);
             rows.Slot.State = (int)GpuCapacitySlotState.Available; rows.Slot.ActiveBatchId = null;
             rows.Slot.OwnerKey = null; rows.Slot.LastHeartbeatAtUtc = now; rows.Slot.UpdatedAtUtc = now;
-            request.ExecutionPhase = (int)DocumentOcrExecutionPhase.Settled;
-            request.RecoveryReason = null; request.RecoveryUpdatedAtUtc = now;
-            await SqlGpuSchedulerStore.RecordWakeAsync(context, GpuSchedulerWakeReason.CapacityReleased | GpuSchedulerWakeReason.Reconciliation, now, ct).ConfigureAwait(false);
-            context.GpuSchedulerOperationReceipts.Add(new GpuSchedulerOperationReceiptEntity
-            {
-                OperationId = operation, OperationKind = "ocr-settlement", RequestFingerprint = fingerprint,
-                BatchId = handle.BatchId, CapacitySlotKey = handle.CapacitySlotKey, OwnerKey = rows.Dispatch.OwnerKey,
-                AdmissionGeneration = handle.AdmissionGeneration, Accepted = true, Committed = true,
-                WakeReasons = (int)(GpuSchedulerWakeReason.CapacityReleased | GpuSchedulerWakeReason.Reconciliation), CreatedAtUtc = now
-            });
+            const GpuSchedulerWakeReason reasons = GpuSchedulerWakeReason.CapacityReleased | GpuSchedulerWakeReason.Reconciliation;
+            await SqlGpuSchedulerStore.RecordWakeAsync(context, reasons, now, ct).ConfigureAwait(false);
+            RecordSettlementReceipt(context, rows, handle, operation, "ocr-settlement", fingerprint, reasons, now);
             return new(DocumentOcrLifecycleDisposition.Applied, "document-ocr-settled");
         }, ct);
     }
@@ -262,15 +264,28 @@ public sealed partial class SqlDocumentOcrStore
                     enabled.Contains(request.MiniTaskId))
             orderby slot.ActiveBatchId == dispatch.BatchId ? 0 : 1, request.UpdatedAtUtc, request.MiniTaskId
             select new { Request = request, Dispatch = dispatch }).Take(32).ToArrayAsync(ct).ConfigureAwait(false);
+        if (rows.Length == 0) return [];
+        var dispatchIds = rows.Select(row => row.Dispatch.DispatchId).ToArray();
+        var detached = await context.GpuModelDetachmentReceipts.AsNoTracking()
+            .Where(receipt => dispatchIds.Contains(receipt.DispatchId))
+            .ToDictionaryAsync(receipt => receipt.DispatchId, ct).ConfigureAwait(false);
+        var borrowed = await context.GpuModelResidencies.AsNoTracking()
+            .Where(resident => resident.State == (int)GpuModelResidencyState.Borrowed &&
+                resident.BorrowedDispatchId.HasValue && dispatchIds.Contains(resident.BorrowedDispatchId.Value))
+            .ToDictionaryAsync(resident => resident.BorrowedDispatchId!.Value, ct).ConfigureAwait(false);
         return rows.Select(row =>
         {
             var r = row.Request; var d = row.Dispatch;
             var handle = new GpuExecutorBatchHandle(d.BatchId, d.CapacitySlotKey, d.ExecutorKey, d.AdmissionGeneration, d.DispatchId);
+            var residentBorrow = borrowed.TryGetValue(d.DispatchId, out var resident) &&
+                resident.BorrowedExecutionInstanceId == (r.ExecutionInstanceId ?? d.DispatchId) && resident.SlotKey == d.CapacitySlotKey
+                ? SqlGpuModelResidencyStore.ReadFence(resident) : null;
+            var detachedResult = detached.TryGetValue(d.DispatchId, out var receipt) && MatchesDetachmentReceipt(receipt, r, handle);
             return new DocumentOcrRecoveryCandidate(handle, r.MiniTaskId,
                 r.ExecutionInstanceId is null ? null : ToLease(r, handle),
                 r.NativeProcessId is null ? null : new(r.NativeProcessId.Value, r.NativeProcessStartedAtUtc!.Value, r.ExecutionMachineFingerprint!),
                 (DocumentOcrExecutionPhase)r.ExecutionPhase, r.NativeCleanupConfirmedAtUtc,
-                r.State >= (int)DocumentOcrRequestState.ResultStored, r.RecoveryStartedAtUtc, r.RecoveryReason);
+                r.State >= (int)DocumentOcrRequestState.ResultStored, r.RecoveryStartedAtUtc, r.RecoveryReason, detachedResult, residentBorrow);
         }).ToArray();
     }
 
@@ -322,6 +337,8 @@ public sealed partial class SqlDocumentOcrStore
     private async Task<DocumentOcrLifecycleResult> ReleaseProvedCapacityAsync(FluxKnowledgeDbContext context,
         OcrLifecycleRows rows, string reason, CancellationToken ct)
     {
+            if (await SqlGpuModelResidencyStore.HasLiveResidencyAsync(context, rows.Slot.SlotKey, ct).ConfigureAwait(false))
+                return Refused(DocumentOcrLifecycleDisposition.CleanupUnproven);
             var now = _timeProvider.GetUtcNow();
             rows.Task.ExecutionState = (int)GpuMiniTaskExecutionState.OutcomeUncertain;
             rows.Batch.State = (int)GpuBatchState.Released; rows.Batch.UpdatedAtUtc = now;
@@ -333,7 +350,12 @@ public sealed partial class SqlDocumentOcrStore
             return new(DocumentOcrLifecycleDisposition.Applied, reason);
     }
 
-    private async ValueTask<DocumentOcrLifecycleResult> MutateLifecycleAsync(Func<FluxKnowledgeDbContext, Task<DocumentOcrLifecycleResult>> action, CancellationToken ct)
+    private ValueTask<DocumentOcrLifecycleResult> MutateLifecycleAsync(
+        Func<FluxKnowledgeDbContext, Task<DocumentOcrLifecycleResult>> action, CancellationToken ct) =>
+        MutateLifecycleAsync(action, static result => result, ct);
+
+    private async ValueTask<TResult> MutateLifecycleAsync<TResult>(
+        Func<FluxKnowledgeDbContext, Task<TResult>> action, Func<TResult, DocumentOcrLifecycleResult> lifecycle, CancellationToken ct)
     {
         await using var execution = await contextFactory.CreateDbContextAsync(ct).ConfigureAwait(false);
         return await execution.Database.CreateExecutionStrategy().ExecuteAsync(async () =>
@@ -345,7 +367,7 @@ public sealed partial class SqlDocumentOcrStore
             var result = await action(context).ConfigureAwait(false);
             await context.SaveChangesAsync(ct).ConfigureAwait(false);
             await transaction.CommitAsync(ct).ConfigureAwait(false);
-            if (afterLifecycleCommitted is not null) await afterLifecycleCommitted(result, ct).ConfigureAwait(false);
+            if (afterLifecycleCommitted is not null) await afterLifecycleCommitted(lifecycle(result), ct).ConfigureAwait(false);
             return result;
         }).ConfigureAwait(false);
     }
@@ -407,4 +429,5 @@ public sealed partial class SqlDocumentOcrStore
 
 public sealed record DocumentOcrRecoveryCandidate(GpuExecutorBatchHandle Handle, Guid MiniTaskId,
     DocumentOcrExecutionLease? Lease, DocumentOcrProcessIdentity? Process, DocumentOcrExecutionPhase Phase,
-    DateTimeOffset? CleanupConfirmedAtUtc, bool HasStoredResult, DateTimeOffset? RecoveryStartedAtUtc, string? Reason);
+    DateTimeOffset? CleanupConfirmedAtUtc, bool HasStoredResult, DateTimeOffset? RecoveryStartedAtUtc, string? Reason,
+    bool Detached = false, GpuResidentModelFence? ResidentBorrow = null);

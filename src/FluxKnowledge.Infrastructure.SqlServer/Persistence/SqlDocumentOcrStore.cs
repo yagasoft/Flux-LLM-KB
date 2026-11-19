@@ -160,14 +160,7 @@ public sealed partial class SqlDocumentOcrStore(
             throw new ArgumentException("An OCR result requires a mini-task ID.", nameof(miniTaskId));
         }
 
-        ValidateResultShape(result);
-        var resultJson = JsonSerializer.Serialize(result, JsonOptions);
-        if (StrictUtf8.GetByteCount(resultJson) > DocumentOcrProvenance.MaximumMetadataUtf8Bytes)
-        {
-            throw new InvalidOperationException("document-ocr-result-too-large");
-        }
-
-        var digest = SHA256.HashData(StrictUtf8.GetBytes(resultJson));
+        var (resultJson, digest) = EncodeResult(result);
         await using var executionContext = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         var strategy = executionContext.Database.CreateExecutionStrategy();
         return await strategy.ExecuteAsync(async () =>

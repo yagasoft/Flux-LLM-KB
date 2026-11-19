@@ -60,6 +60,8 @@ public sealed partial class SqlDocumentOcrStore
                 await context.GpuExecutorEvidence.AnyAsync(value => value.DispatchId == lease.Handle.DispatchId &&
                     value.EvidenceClass == (int)GpuExecutorEvidenceClass.CapacityReleaseConfirmed, ct).ConfigureAwait(false))
                 return Refused(DocumentOcrLifecycleDisposition.StaleOwner);
+            if (await SqlGpuModelResidencyStore.HasLiveResidencyAsync(context, lease.Handle.CapacitySlotKey, ct).ConfigureAwait(false))
+                return Refused(DocumentOcrLifecycleDisposition.CleanupUnproven);
             var job = await context.Jobs.SingleOrDefaultAsync(value => value.Id == binding.ParentJobId, ct).ConfigureAwait(false);
             if (job is null || job.PipelineRecordId != binding.PipelineRecordId || job.SourceRevision != request.SourceRevision ||
                 !job.RowVersion.SequenceEqual(binding.JobRowVersion) ||

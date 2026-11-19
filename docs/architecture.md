@@ -465,6 +465,20 @@ result acceptance and settlement are fenced by durable identities. A result
 cannot publish against a superseded revision, paused/deleting source or stale
 ownership generation.
 
+The shared runtime can retain one GPU model for two minutes after its last
+completed job. The scheduler chooses the highest eligible lane first, then
+prefers the oldest exact match for the loaded model within that lane. A different
+model can run after the resident allocation has been released. Active jobs keep
+their existing deadlines and continue to own the device until they settle.
+
+Each reused model has a durable owner distinct from the job, and each successful
+job records its detachment from that owner. OCR and transcription use one
+contained helper with an independently authorised command per job. BGE revokes
+each request's access to the ONNX session before returning it to the scheduler.
+The next incompatible BGE phase disposes the current session before loading its
+replacement. Capacity becomes available after confirmed release of the precise
+allocation. An unverifiable owner or helper keeps the slot fenced.
+
 Native process supervision records lifecycle evidence. A process outcome that
 cannot be proved does not create permission to repeat inference or release an
 unsettled reservation. Shutdown cancels owned children; restart reconciliation
@@ -1152,7 +1166,7 @@ item prepares coherent passages outside its commit transaction, then queues one
 exactly bound Embed job. Claims admit only that worklist's Embed and subsequent
 Publish while ordinary intake waits. A paused source remains paused and retains its
 published document winner, branch and timestamp. The existing scheduler can admit
-its bound embedding work without changing OCR ownership or turn limits.
+its bound embedding work under the same native ownership rules.
 
 Search and evidence reads report rebuilding until worklist completion, matching
 model and corpus stamp, exact vector membership, native USearch validation and

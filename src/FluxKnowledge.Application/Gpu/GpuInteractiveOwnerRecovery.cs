@@ -4,7 +4,8 @@ namespace FluxKnowledge.Application.Gpu;
 
 /// <summary>Recovers opaque ownership after proven process exit; private work is never replayed.</summary>
 public sealed class GpuInteractiveOwnerRecovery(IGpuInteractiveRequestStore requests, IGpuSchedulerStore scheduler,
-    IGpuExecutorDispatchStore dispatches, IGpuInteractiveOwnerProbe probe, IGpuSchedulerWakeSignal wakeSignal, TimeProvider clock)
+    IGpuExecutorDispatchStore dispatches, IGpuInteractiveOwnerProbe probe, IGpuSchedulerWakeSignal wakeSignal, TimeProvider clock,
+    IGpuProcessModelResidency? residency = null)
 {
     public async ValueTask<int> RecoverAsync(CancellationToken cancellationToken)
     {
@@ -20,6 +21,9 @@ public sealed class GpuInteractiveOwnerRecovery(IGpuInteractiveRequestStore requ
             // A stale rowversion may mean the native owner finished concurrently; reread next round.
             if (work.Reservation is not null && !(await scheduler.MarkCapacityUncertainAsync(
                 Guid.NewGuid(), work.Reservation, cancellationToken).ConfigureAwait(false)).Committed) continue;
+            if (residency is not null &&
+                !await residency.RecoverExitedAsync(work.Handle, work.Owner, cancellationToken).ConfigureAwait(false))
+                continue;
             var outcomeEvidence = new GpuExecutorTrustedEvidence(Guid.NewGuid(), work.Handle, "retrieval-owner-process-exit",
                 clock.GetUtcNow(), GpuExecutorEvidenceClass.TaskOutcomeUncertainConfirmed);
             var capacityEvidence = outcomeEvidence with { OperationId = Guid.NewGuid(), EvidenceClass = GpuExecutorEvidenceClass.CapacityReleaseConfirmed };

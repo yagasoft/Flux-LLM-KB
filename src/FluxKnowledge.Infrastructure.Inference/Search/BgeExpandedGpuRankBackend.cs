@@ -87,7 +87,7 @@ public sealed class BgeExpandedGpuRankBackend : IExpandedGpuRankBackend
                 _uncertain |= uncertain;
                 if (_receipts.Count == 128) _receipts.Dequeue();
                 _receipts.Enqueue(new(cohortId, operation?.RequestId, _executor.ExecutorKey, settled?.Handle,
-                    callbackSettled, nativeDisposed, settled?.Kind == GpuInteractiveSettlementKind.Released,
+                    callbackSettled, nativeDisposed, settled?.Kind is GpuInteractiveSettlementKind.Released or GpuInteractiveSettlementKind.Detached,
                     operation is null || settled?.Kind is GpuInteractiveSettlementKind.NoHandoff or GpuInteractiveSettlementKind.CancelledBeforeExecution,
                     uncertain ? nameof(ExpandedGpuRankSettlement.RetainedUncertain) : nameof(ExpandedGpuRankSettlement.Settled),
                     failure?.GetType().Name, _clock.GetElapsedTime(started).TotalMilliseconds, ownerMs, loadMs, scoreMs, unloadMs, nativeCalls,

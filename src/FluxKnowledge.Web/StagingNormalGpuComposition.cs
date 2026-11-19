@@ -18,7 +18,7 @@ internal static class StagingNormalGpuComposition
         if (!settings.CpuSemantic || !settings.DashboardReadBenchmark || settings.SourceJournalEnabled || settings.IndexPublicationMode != "Segmented")
             throw new ArgumentException("Normal GPU staging requires isolated segmented staging with autonomous source writers disabled.");
         services.AddFluxKnowledgeGpuScheduler();
-        BgeSearchRuntimeComposition.Add(services, enableWindowBackfill: false);
+        BgeSearchRuntimeComposition.Add(services, enableWindowBackfill: false, enableModelWarming: settings.GpuModelWarming);
         foreach (var service in services.Where(s => s.ServiceType == typeof(IHostedService) && s.ImplementationType == typeof(DerivedIndexRecoveryService)).ToArray())
             services.Remove(service);
     }

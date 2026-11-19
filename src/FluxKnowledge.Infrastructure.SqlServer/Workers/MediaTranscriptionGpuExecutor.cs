@@ -4,6 +4,7 @@ using FluxKnowledge.Application.Gpu;
 using FluxKnowledge.Application.Workers;
 using FluxKnowledge.Domain.Gpu;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
+using FluxKnowledge.Integrations.Documents;
 using FluxKnowledge.Integrations.Media;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -46,7 +47,10 @@ public sealed class MediaTranscriptionGpuExecutor(IServiceScopeFactory scopes, M
             return;
         }
 
-        var executionId = Guid.NewGuid();
+        var residency = scope.ServiceProvider.GetService<GpuModelResidencyRuntime>();
+        var entryModel = residency?.EntryModel(runtime.ModelRuntimeKey, runtime.SettingsFingerprint);
+        var executionId = entryModel is { ModelKey: "general" }
+            ? await residency!.GetExecutionIdentityAsync(handle, token).ConfigureAwait(false) : Guid.NewGuid();
         var claim = await store.TryClaimExecutionAsync(handle, executionId, _supervisor, token).ConfigureAwait(false);
         if (!claim.Lifecycle.Accepted || claim.Lifecycle.Lease is not { } lease ||
             lease.ExecutionInstanceId != executionId || lease.Supervisor != _supervisor) return;
@@ -55,6 +59,12 @@ public sealed class MediaTranscriptionGpuExecutor(IServiceScopeFactory scopes, M
         var remaining = lease.DeadlineAtUtc - time.GetUtcNow();
         run.CancelAfter(remaining > TimeSpan.Zero ? remaining : TimeSpan.Zero);
         var heartbeat = HeartbeatAsync(store, lease, run);
+        if (entryModel is { ModelKey: "general" } && residency is not null)
+        {
+            await RunResidentAsync(store, worker, claim, lease, residency, entryModel, run, heartbeat).ConfigureAwait(false);
+            return;
+        }
+
         MediaTranscriptionResult? result;
         try
         {
@@ -80,17 +90,134 @@ public sealed class MediaTranscriptionGpuExecutor(IServiceScopeFactory scopes, M
             await SettleAsync(store, handle, pending, settleToken).ConfigureAwait(false);
     }
 
+    private async Task RunResidentAsync(SqlMediaTranscriptionGpuStore store, MediaTranscriptionLocalExecutor worker,
+        MediaTranscriptionGpuClaim claim, DocumentOcrExecutionLease lease, GpuModelResidencyRuntime residency,
+        GpuResidentModelKey entryModel, CancellationTokenSource run, Task heartbeat)
+    {
+        GpuModelResidencyRuntime.NativeBorrow? borrowed = null;
+        MediaTranscriptionWarmExecutionResult? outcome = null;
+        var observed = default(DateTimeOffset);
+        var failure = "transcription-source-unavailable";
+        try
+        {
+            if (claim.SourceAvailable && claim.SourceRevisionId is { } source && claim.ContentSha256 is { } hash)
+            {
+                failure = "transcription-runtime-unavailable";
+                borrowed = await residency.OpenHelperAsync(lease.Handle, lease.ExecutionInstanceId, entryModel,
+                    worker.StartWarmProcessAsync, run.Token).ConfigureAwait(false);
+                failure = "transcription-worker-interrupted";
+                var fence = borrowed.Fence;
+                outcome = await worker.RunWarmAsync(source, hash, new(lease, store), borrowed.Process,
+                    (claimLease, command, ct) => PermitResidentStartAsync(store, claimLease, fence, command, ct), run.Token)
+                    .ConfigureAwait(false);
+                observed = time.GetUtcNow();
+            }
+        }
+        catch (Exception error) when (error is not OutOfMemoryException and not StackOverflowException)
+        {
+            // A launch may have committed its durable borrow before reporting an error.
+            // Read that owner again before accepting an unstarted result.
+        }
+        finally
+        {
+            run.Cancel();
+            await heartbeat.ConfigureAwait(false);
+        }
+
+        using var settlementBudget = new CancellationTokenSource(TimeSpan.FromMinutes(1), time);
+        var token = settlementBudget.Token;
+        var prepared = await PrepareResultAsync(worker, lease, outcome?.Result ?? Failure(failure), token).ConfigureAwait(false);
+        if (borrowed is not null && outcome?.Idle is { Model: { } model } idle && prepared.Result.Succeeded)
+        {
+            var settled = await residency.SettleHelperAsync(borrowed.Fence, () =>
+                store.SettleDetachedCompletionAsync(lease, prepared.Result, borrowed.Fence,
+                    new(idle.ResidentId, idle.ExecutionId, idle.Process, model, observed), prepared.UseNativeResult, token), token).ConfigureAwait(false);
+            if (settled?.Settlement.Accepted == true)
+            {
+                RemoveStoredInput(worker, lease, prepared);
+                residency.Notify();
+                gpuWake.Notify(GpuSchedulerWakeReason.Reconciliation);
+                if (await store.RequeueSettledAsync(lease.Handle, lease.MiniTaskId, token).ConfigureAwait(false))
+                    outboxWake.Notify();
+                return;
+            }
+            // Withdrawal is final for the transcript. Other rejected idle
+            // settlements can follow the original physically released route.
+            if (settled?.Settlement.Disposition == DocumentOcrLifecycleDisposition.SourceWithdrawn)
+            {
+                worker.RemovePendingTranscript(lease.ExecutionInstanceId);
+                prepared = new(Failure("transcription-source-withdrawn"), false, false);
+            }
+        }
+
+        var current = await store.ReadResidentBorrowAsync(lease, token).ConfigureAwait(false);
+        if (current is not null)
+        {
+            if (!await ReleaseResidentAsync(store, residency, lease, current, token).ConfigureAwait(false)) return;
+        }
+        else if (!(await store.ConfirmCleanupAsync(lease, new(lease.ExecutionInstanceId, DocumentOcrCleanupKind.VerifiedUnstarted,
+                     null, time.GetUtcNow()), token).ConfigureAwait(false)).Accepted)
+            return;
+
+        await StorePreparedResultAsync(store, worker, lease, prepared, token).ConfigureAwait(false);
+        var pending = await store.ReadPendingCompletionAsync(lease.Handle, token).ConfigureAwait(false);
+        if (pending is not null) await SettleAsync(store, lease.Handle, pending, token).ConfigureAwait(false);
+    }
+
+    private static async ValueTask<bool> PermitResidentStartAsync(SqlMediaTranscriptionGpuStore store, DocumentOcrExecutionLease lease,
+        GpuResidentModelFence fence, OwnedWarmModelCommand command, CancellationToken ct) =>
+        command.ResidentId == fence.ResidencyId && command.ExecutionId == lease.ExecutionInstanceId &&
+        (await store.PermitResidentNativeStartAsync(lease, fence, command.Process, ct).ConfigureAwait(false)).Accepted;
+
+    private async ValueTask<bool> ReleaseResidentAsync(SqlMediaTranscriptionGpuStore store, GpuModelResidencyRuntime residency,
+        DocumentOcrExecutionLease lease, GpuResidentModelFence fence, CancellationToken ct)
+    {
+        if (fence.Helper is not { } helper || fence.Owner.MachineFingerprint != lease.Supervisor.Process.MachineFingerprint ||
+            await store.ReadResidentBorrowAsync(lease, ct).ConfigureAwait(false) != fence ||
+            !await residency.ConfirmHelperEmptyAsync(fence, ct).ConfigureAwait(false))
+            return false;
+        var process = new DocumentOcrProcessIdentity(helper.ProcessId, helper.StartedAtUtc, fence.Owner.MachineFingerprint);
+        var released = await store.ConfirmResidentCleanupAsync(lease, fence,
+            new(fence.ResidencyId, lease.ExecutionInstanceId, process, time.GetUtcNow()), ct).ConfigureAwait(false);
+        if (released.Accepted) residency.Forget(fence.ResidencyId);
+        return released.Accepted;
+    }
+
     public async ValueTask RecoverAsync(CancellationToken cancellationToken)
     {
         await using var scope = scopes.CreateAsyncScope();
         var store = scope.ServiceProvider.GetRequiredService<SqlMediaTranscriptionGpuStore>();
+        var residency = scope.ServiceProvider.GetService<GpuModelResidencyRuntime>();
+        if (residency is not null)
+        {
+            foreach (var (handle, fence) in await store.ReadUnclaimedResidentsAsync(cancellationToken).ConfigureAwait(false))
+            {
+                if (IsRunning(handle)) continue;
+                var ownerExited = ownerProbe.Observe(fence.Owner) == GpuInteractiveOwnerObservation.Exited;
+                await store.ClaimAbandonedResidentAsync(handle, fence, _supervisor, ownerExited, cancellationToken).ConfigureAwait(false);
+            }
+        }
         foreach (var candidate in await store.ReadRecoveryAsync(cancellationToken).ConfigureAwait(false))
         {
             var lease = candidate.Lease;
-            if (_deliveries.TryGetValue(lease.Handle.DispatchId, out var running) &&
-                running.IsValueCreated && !running.Value.IsCompleted)
+            if (IsRunning(lease.Handle)) continue;
+            var pending = await store.ReadPendingCompletionAsync(lease.Handle, cancellationToken).ConfigureAwait(false);
+            if (pending is { NativeCleanupConfirmed: false })
+            {
+                // Only the exact detached settlement receipt authorises requeue.
+                await SettleAsync(store, lease.Handle, pending, cancellationToken).ConfigureAwait(false);
                 continue;
-            if (!candidate.NativeCleanupConfirmed || !candidate.HasStoredResult)
+            }
+
+            var borrow = await store.ReadResidentBorrowAsync(lease, cancellationToken).ConfigureAwait(false);
+            if (borrow is not null)
+            {
+                if (residency is null || time.GetUtcNow() < lease.DeadlineAtUtc &&
+                    ownerProbe.Observe(borrow.Owner) != GpuInteractiveOwnerObservation.Exited ||
+                    !await ReleaseResidentAsync(store, residency, lease, borrow, cancellationToken).ConfigureAwait(false))
+                    continue;
+            }
+            else if (!candidate.NativeCleanupConfirmed || !candidate.HasStoredResult)
             {
                 var observation = await recovery.InspectAsync(lease, candidate.Process, candidate.HasStoredResult,
                     candidate.NativeCleanupConfirmed, cancellationToken).ConfigureAwait(false);
@@ -102,12 +229,12 @@ public sealed class MediaTranscriptionGpuExecutor(IServiceScopeFactory scopes, M
                     continue;
             }
 
-            var pending = await store.ReadPendingCompletionAsync(lease.Handle, cancellationToken).ConfigureAwait(false);
             if (pending is null && !candidate.HasStoredResult)
             {
                 // Read a result only after physical cleanup and only from this exact execution directory.
                 var worker = scope.ServiceProvider.GetRequiredService<MediaTranscriptionLocalExecutor>();
-                var result = await worker.ReadRecoveredResultAsync(lease.ExecutionInstanceId, cancellationToken).ConfigureAwait(false)
+                var result = (borrow is not null && candidate.Process is null ? null :
+                    await worker.ReadRecoveredResultAsync(lease.ExecutionInstanceId, cancellationToken).ConfigureAwait(false))
                     ?? Failure("transcription-worker-interrupted");
                 await StoreResultAsync(store, worker, lease, result, cancellationToken).ConfigureAwait(false);
                 pending = await store.ReadPendingCompletionAsync(lease.Handle, cancellationToken).ConfigureAwait(false);
@@ -117,15 +244,21 @@ public sealed class MediaTranscriptionGpuExecutor(IServiceScopeFactory scopes, M
         }
     }
 
+    private bool IsRunning(GpuExecutorBatchHandle handle) => _deliveries.TryGetValue(handle.DispatchId, out var delivery) &&
+        delivery.IsValueCreated && !delivery.Value.IsCompleted;
+
     private async ValueTask SettleAsync(SqlMediaTranscriptionGpuStore store, GpuExecutorBatchHandle handle,
         MediaTranscriptionGpuCompletion completion, CancellationToken token)
     {
-        if (!completion.NativeCleanupConfirmed ||
+        if (completion.NativeCleanupConfirmed &&
             !(await store.SettleAsync(handle, completion.MiniTaskId, completion.ResultDigest, token).ConfigureAwait(false)).Accepted)
             return;
-        if (await store.RequeueSettledAsync(handle, completion.MiniTaskId, token).ConfigureAwait(false))
-            outboxWake.Notify();
-        gpuWake.Notify(GpuSchedulerWakeReason.CapacityReleased | GpuSchedulerWakeReason.Reconciliation);
+        var requeued = await store.RequeueSettledAsync(handle, completion.MiniTaskId, token).ConfigureAwait(false);
+        if (requeued) outboxWake.Notify();
+        if (completion.NativeCleanupConfirmed)
+            gpuWake.Notify(GpuSchedulerWakeReason.CapacityReleased | GpuSchedulerWakeReason.Reconciliation);
+        else if (requeued)
+            gpuWake.Notify(GpuSchedulerWakeReason.Reconciliation);
     }
 
     private async Task HeartbeatAsync(SqlMediaTranscriptionGpuStore store, DocumentOcrExecutionLease lease, CancellationTokenSource run)
@@ -153,7 +286,14 @@ public sealed class MediaTranscriptionGpuExecutor(IServiceScopeFactory scopes, M
     }
 
     private static async ValueTask StoreResultAsync(SqlMediaTranscriptionGpuStore store,
-        MediaTranscriptionLocalExecutor worker, DocumentOcrExecutionLease lease, MediaTranscriptionResult result, CancellationToken token)
+        MediaTranscriptionLocalExecutor worker, DocumentOcrExecutionLease lease, MediaTranscriptionResult result, CancellationToken token) =>
+        await StorePreparedResultAsync(store, worker, lease,
+            await PrepareResultAsync(worker, lease, result, token).ConfigureAwait(false), token).ConfigureAwait(false);
+
+    private sealed record PreparedTranscript(MediaTranscriptionResult Result, bool UseNativeResult, bool PreserveEvidence);
+
+    private static async ValueTask<PreparedTranscript> PrepareResultAsync(MediaTranscriptionLocalExecutor worker,
+        DocumentOcrExecutionLease lease, MediaTranscriptionResult result, CancellationToken token)
     {
         var executionId = lease.ExecutionInstanceId;
         var useNativeResult = false;
@@ -174,16 +314,26 @@ public sealed class MediaTranscriptionGpuExecutor(IServiceScopeFactory scopes, M
             }
         }
 
-        var stored = await store.StoreResultAsync(lease, result, token, useNativeResult).ConfigureAwait(false);
-        if (stored.Disposition == DocumentOcrLifecycleDisposition.SourceWithdrawn && result.Succeeded)
-        {
-            stored = await store.StoreResultAsync(lease, Failure("transcription-source-withdrawn"), token).ConfigureAwait(false);
-            if (stored.Accepted) worker.RemovePendingTranscript(executionId);
-            useNativeResult = false;
-        }
+        return new(result, useNativeResult, preserveEvidence);
+    }
 
-        if (stored.Accepted && !useNativeResult && !preserveEvidence)
-            worker.RemoveSettledFiles(executionId);
+    private static async ValueTask StorePreparedResultAsync(SqlMediaTranscriptionGpuStore store,
+        MediaTranscriptionLocalExecutor worker, DocumentOcrExecutionLease lease, PreparedTranscript prepared, CancellationToken token)
+    {
+        var stored = await store.StoreResultAsync(lease, prepared.Result, token, prepared.UseNativeResult).ConfigureAwait(false);
+        if (stored.Disposition == DocumentOcrLifecycleDisposition.SourceWithdrawn && prepared.Result.Succeeded)
+        {
+            prepared = new(Failure("transcription-source-withdrawn"), false, false);
+            stored = await store.StoreResultAsync(lease, prepared.Result, token).ConfigureAwait(false);
+            if (stored.Accepted) worker.RemovePendingTranscript(lease.ExecutionInstanceId);
+        }
+        if (stored.Accepted) RemoveStoredInput(worker, lease, prepared);
+    }
+
+    private static void RemoveStoredInput(MediaTranscriptionLocalExecutor worker, DocumentOcrExecutionLease lease, PreparedTranscript prepared)
+    {
+        if (!prepared.UseNativeResult && !prepared.PreserveEvidence)
+            worker.RemoveSettledFiles(lease.ExecutionInstanceId);
     }
 
     private static MediaTranscriptionResult Failure(string reason) => new(false, reason, null, null);

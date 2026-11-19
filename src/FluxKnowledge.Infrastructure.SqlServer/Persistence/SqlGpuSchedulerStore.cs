@@ -33,6 +33,7 @@ public sealed partial class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecu
     private readonly TimeSpan _interactiveExecutionTimeout;
     private readonly TimeSpan _interactiveQueueTimeout;
     private readonly ISourceWorkAdmission? _sourceAdmission;
+    private readonly GpuSchedulerOptions? _residentOptions;
 
     public SqlGpuSchedulerStore(
         IDbContextFactory<FluxKnowledgeDbContext> contextFactory,
@@ -46,7 +47,8 @@ public sealed partial class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecu
         Func<CancellationToken, ValueTask>? afterWakeConsumptionCommitted = null,
         GpuInteractiveOwnerIdentity? interactiveOwner = null,
         IDeploymentValidationHold? deploymentValidationHold = null,
-        TimeSpan? interactiveExecutionTimeout = null, ISourceWorkAdmission? sourceAdmission = null,TimeSpan? interactiveQueueTimeout = null)
+        TimeSpan? interactiveExecutionTimeout = null, ISourceWorkAdmission? sourceAdmission = null, TimeSpan? interactiveQueueTimeout = null,
+        GpuSchedulerOptions? residentOptions = null)
     {
         _interactiveExecutionTimeout = interactiveExecutionTimeout ?? TimeSpan.FromSeconds(10);
         _interactiveQueueTimeout=interactiveQueueTimeout??TimeSpan.FromSeconds(2);
@@ -66,6 +68,7 @@ public sealed partial class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecu
         _afterWakeConsumptionCommitted = afterWakeConsumptionCommitted;
         _deploymentValidationHold = deploymentValidationHold;
         _sourceAdmission = sourceAdmission;
+        _residentOptions = residentOptions;
         interactiveOwner?.Validate();
         _interactiveOwner = new(() => interactiveOwner ?? new FluxKnowledge.Integrations.Windows.WindowsInteractiveGpuOwnerProbe().Current);
     }
@@ -384,11 +387,14 @@ public sealed partial class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecu
         var fingerprint = CreateExecutorEvidenceFingerprint(evidence);
         return await ApplyExecutorMutationAsync(
             evidence.OperationId, evidence.Handle, "executor-trusted-evidence", fingerprint,
-            (context, dispatch, now, token) =>
+            async (context, dispatch, now, token) =>
             {
-                if (dispatch.State == (int)GpuExecutorDispatchState.Terminal)
+                if (dispatch.State == (int)GpuExecutorDispatchState.Terminal ||
+                    evidence.EvidenceClass == GpuExecutorEvidenceClass.CapacityReleaseConfirmed &&
+                    await context.GpuModelResidencies.AnyAsync(row => row.SlotKey == dispatch.CapacitySlotKey &&
+                        row.BorrowedDispatchId == dispatch.DispatchId && row.ReleasedAtUtc == null, token).ConfigureAwait(false))
                 {
-                    return ValueTask.FromResult(false);
+                    return false;
                 }
 
                 context.GpuExecutorEvidence.Add(new GpuExecutorEvidenceEntity
@@ -405,7 +411,7 @@ public sealed partial class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecu
                     RequestFingerprint = fingerprint,
                     CreatedAtUtc = now
                 });
-                return ValueTask.FromResult(true);
+                return true;
             },
             cancellationToken).ConfigureAwait(false);
     }
@@ -431,7 +437,9 @@ public sealed partial class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecu
         GpuBatchCallback callback,
         Guid operationId,
         string requestFingerprint,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        GpuResidentModelFence? resident = null,
+        GpuResidentModelKey? residentModel = null)
     {
         await using var context = await _contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken).ConfigureAwait(false);
@@ -478,7 +486,9 @@ public sealed partial class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecu
                 task.AdmissionGeneration == callback.AdmissionGeneration &&
                 task.ExecutionState == (int)GpuMiniTaskExecutionState.Active)
             .ToListAsync(cancellationToken).ConfigureAwait(false);
-        if (callback.CapacityReleased && !await HasOcrReleaseProofAsync(context, dispatch, cancellationToken).ConfigureAwait(false))
+        if (callback.CapacityReleased &&
+            (await SqlGpuModelResidencyStore.HasLiveResidencyAsync(context, callback.CapacitySlotKey, cancellationToken).ConfigureAwait(false) ||
+             !await HasOcrReleaseProofAsync(context, dispatch, cancellationToken).ConfigureAwait(false)))
         {
             RecordReceipt(context, operationId, "callback", callback.BatchId, callback.CapacitySlotKey, ownerKey, callback.AdmissionGeneration, false, false, 0, requestFingerprint);
             await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
@@ -550,6 +560,27 @@ public sealed partial class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecu
             dispatch.UpdatedAtUtc = now;
         }
 
+        if (resident is not null)
+        {
+            if (callback.Handle.ExecutorKey == EmbeddingGpuExecutor.Name)
+            {
+                var task = activeTasks.Single();
+                var embedding = await context.EmbeddingGpuRequests.SingleOrDefaultAsync(row => row.MiniTaskId == task.Id &&
+                    row.DispatchId == dispatch.DispatchId && row.State == 1 && row.ResultDigest != null &&
+                    !row.NativeCleanupConfirmed && row.ResidentDetachmentDispatchId == null &&
+                    row.OwnerProcessId == resident.Owner.ProcessId && row.OwnerStartedAtUtc == resident.Owner.StartedAtUtc &&
+                    row.OwnerMachineFingerprint == resident.Owner.MachineFingerprint &&
+                    context.GpuExecutorResultReceipts.Any(result => result.DispatchId == dispatch.DispatchId &&
+                        result.MiniTaskId == row.MiniTaskId && result.OpaqueResultDigest == row.ResultDigest),
+                    cancellationToken).ConfigureAwait(false);
+                if (embedding is null) return new GpuBatchCallbackResult(false, false);
+                embedding.ResidentDetachmentDispatchId = dispatch.DispatchId;
+            }
+            if (await SqlGpuModelResidencyStore.ParkAfterTerminalAsync(context, resident, callback.Handle, callback.Handle.DispatchId,
+                    residentModel!, now, cancellationToken).ConfigureAwait(false) is null)
+                return new GpuBatchCallbackResult(false, false);
+        }
+
         var reasons = callback.Kind == GpuBatchCallbackKind.SafeBoundary
             ? GpuSchedulerWakeReason.SafeBoundary
             : (GpuSchedulerWakeReason)0;
@@ -567,6 +598,24 @@ public sealed partial class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecu
             await _afterLifecycleCommitted(cancellationToken).ConfigureAwait(false);
         }
         return new GpuBatchCallbackResult(Accepted: true, Committed: true);
+    }
+
+    internal async ValueTask<GpuBatchCallbackResult> CompleteResidentBatchAsync(Guid operationId, GpuExecutorBatchHandle handle,
+        Guid taskId, GpuResidentModelFence resident, GpuResidentModelKey model, CancellationToken ct)
+    {
+        RequireLifecycleOperationId(operationId);
+        handle.Validate();
+        resident.Validate();
+        model.Validate();
+        if (taskId == Guid.Empty || resident.Helper is not null || resident.Owner != _interactiveOwner.Value)
+            throw new ArgumentException("gpu-in-process-resident-settlement-binding-invalid");
+        var callback = new GpuBatchCallback(handle, GpuBatchCallbackKind.Completed,
+            [new(taskId, GpuMiniTaskBoundaryDisposition.Completed)], CapacityReleased: false);
+        var fingerprint = CreateRequestFingerprint(CreateCallbackRequestFingerprint(callback), "resident-detachment-v1",
+            resident.ResidencyId.ToString("N"), resident.Version.ToString(CultureInfo.InvariantCulture), model.ModelKey);
+        await using var context = await _contextFactory.CreateDbContextAsync(ct).ConfigureAwait(false);
+        return await context.Database.CreateExecutionStrategy().ExecuteAsync(() =>
+            ApplyBatchCallbackWithinTransactionAsync(callback, operationId, fingerprint, ct, resident, model)).ConfigureAwait(false);
     }
 
     public async ValueTask<GpuDiagnosticTransitionResult> MarkCapacityUncertainAsync(
@@ -727,6 +776,7 @@ public sealed partial class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecu
             evidence.EvidenceClass == (int)GpuExecutorEvidenceClass.CapacityReleaseConfirmed,
             cancellationToken).ConfigureAwait(false);
         if (dispatch is null || slot is null || !trustedEvidence ||
+            await SqlGpuModelResidencyStore.HasLiveResidencyAsync(context, request.CapacitySlotKey, cancellationToken).ConfigureAwait(false) ||
             !await HasOcrReleaseProofAsync(context, dispatch, cancellationToken).ConfigureAwait(false))
         {
             RecordReceipt(context, operationId, "capacity-reconciliation", request.BatchId, request.CapacitySlotKey, dispatch?.OwnerKey, request.AdmissionGeneration, false, false, 0, requestFingerprint);
@@ -1290,8 +1340,38 @@ public sealed partial class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecu
         {
             return [];
         }
+        var warmHeadSelected = false;
+        var slotHoldsResident = false;
+        if (options.ResidentEntryModels.Count > 0)
+        {
+            var owner = _interactiveOwner.Value;
+            var candidates = await context.GpuModelResidencies.AsNoTracking().Where(row =>
+                row.State == (int)GpuModelResidencyState.Idle || row.State == (int)GpuModelResidencyState.Evicting)
+                .OrderBy(row => row.SlotKey).Take(2)
+                .ToListAsync(cancellationToken).ConfigureAwait(false);
+            slotHoldsResident = candidates.Count > 0;
+            if (candidates.Count == 1 && candidates[0] is { State: (int)GpuModelResidencyState.Idle } idle &&
+                idle.IdleUntilUtc > now && SqlGpuModelResidencyStore.ReadFence(idle).Owner == owner)
+            {
+                var model = SqlGpuModelResidencyStore.ReadModel(idle);
+                if (options.GetResidentEntryModel(model.RuntimeKey, model.SettingsFingerprint) == model)
+                {
+                    var compatible = await eligibility.Where(task => task.PriorityLane == head.PriorityLane &&
+                        task.ModelRuntimeKey == model.RuntimeKey && task.SettingsFingerprint == model.SettingsFingerprint &&
+                        (task.ParentJobId != null || task.InteractiveOwnerProcessId == owner.ProcessId &&
+                         task.InteractiveOwnerStartedAtUtc == owner.StartedAtUtc && task.InteractiveOwnerMachineFingerprint == owner.MachineFingerprint))
+                        .OrderBy(task => task.CreatedSequence).ThenBy(task => task.Id)
+                        .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+                    if (compatible is not null)
+                    {
+                        head = compatible;
+                        warmHeadSelected = true;
+                    }
+                }
+            }
+        }
         GpuMiniTaskEntity? oldestOcr = null;
-        if (head.PriorityLane != (int)GpuPriorityLane.InteractiveRetrieval &&
+        if (!slotHoldsResident && head.PriorityLane != (int)GpuPriorityLane.InteractiveRetrieval &&
             options.WorkloadPolicy is { } policy &&
             policy.Classify(head.ModelRuntimeKey, head.SettingsFingerprint) == GpuWorkloadKind.Ocr)
         {
@@ -1319,6 +1399,7 @@ public sealed partial class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecu
         var maximumSelected = singleItem ? 1 : options.MaxBatchItems;
         var orderedPrefix = await eligibility
             .Where(task => task.PriorityLane == head.PriorityLane)
+            .Where(task => !warmHeadSelected || task.Id == head.Id)
             .Where(task => oldestOcr == null || head.Id != oldestOcr.Id || task.Id == head.Id)
             .Include(task => task.ParentJob)
             .OrderBy(task => task.CreatedSequence)
@@ -1467,7 +1548,28 @@ public sealed partial class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecu
             return await CommitBusyAsync(context, transaction, selected, now, wakeReason, options,
                 operationId, batchId, cancellationToken).ConfigureAwait(false);
         }
-        if (slot is null || slot.State != (int)GpuCapacitySlotState.Available || slot.ActiveBatchId is not null)
+        GpuResidentModelFence? warmFence = null;
+        var nextModel = options.GetResidentEntryModel(selected[0].ModelRuntimeKey, selected[0].SettingsFingerprint);
+        if (slot is { State: (int)GpuCapacitySlotState.ResidentIdle or (int)GpuCapacitySlotState.ResidentEvicting, ActiveBatchId: null })
+        {
+            var resident = await context.GpuModelResidencies.SingleOrDefaultAsync(row =>
+                row.SlotKey == slot.SlotKey && row.ReleasedAtUtc == null, cancellationToken).ConfigureAwait(false)
+                ?? throw new InvalidOperationException("The resident GPU capacity slot lacks a durable model owner.");
+            var fence = SqlGpuModelResidencyStore.ReadFence(resident);
+            if (slot.State == (int)GpuCapacitySlotState.ResidentIdle && resident.IdleUntilUtc > now &&
+                nextModel is not null && nextModel == SqlGpuModelResidencyStore.ReadModel(resident) &&
+                fence.Owner == _interactiveOwner.Value && slot.OwnerKey == decision.OwnerKey &&
+                (selected[0].ParentJobId is not null || OwnerOf(selected[0]) == fence.Owner))
+                warmFence = fence;
+            else
+            {
+                if (SqlGpuModelResidencyStore.RequestEviction(resident, slot, now))
+                    await RecordWakeAsync(context, GpuSchedulerWakeReason.Reconciliation, now, cancellationToken).ConfigureAwait(false);
+                return await CommitBusyAsync(context, transaction, selected, now, wakeReason, options,
+                    operationId, batchId, cancellationToken).ConfigureAwait(false);
+            }
+        }
+        if (slot is null || (warmFence is null && slot.State != (int)GpuCapacitySlotState.Available) || slot.ActiveBatchId is not null)
         {
             throw new InvalidOperationException("The admission decision named a capacity slot that is not available.");
         }
@@ -1505,7 +1607,7 @@ public sealed partial class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecu
         context.GpuBatches.Add(batch);
         await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
 
-        context.GpuExecutorDispatches.Add(new GpuExecutorDispatchEntity
+        var dispatch = new GpuExecutorDispatchEntity
         {
             DispatchId = dispatchId,
             BatchId = batch.Id,
@@ -1515,9 +1617,13 @@ public sealed partial class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecu
             AdmissionGeneration = batch.AdmissionGeneration,
             State = (int)GpuExecutorDispatchState.PendingDelivery,
             UpdatedAtUtc = now
-        });
+        };
+        context.GpuExecutorDispatches.Add(dispatch);
 
-        var reserved = await context.Database.ExecuteSqlInterpolatedAsync(
+        var reserved = warmFence is not null
+            ? await SqlGpuModelResidencyStore.ReserveWarmForAdmissionAsync(context, warmFence, nextModel!, batch, dispatch,
+                dispatchId, now, cancellationToken).ConfigureAwait(false) is not null ? 1 : 0
+            : await context.Database.ExecuteSqlInterpolatedAsync(
                 $"""
                  UPDATE [GpuCapacitySlots]
                  SET [State] = {(int)GpuCapacitySlotState.Reserved},
@@ -1716,8 +1822,13 @@ public sealed partial class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecu
             options.FallbackInterval.Ticks.ToString(CultureInfo.InvariantCulture),
             options.UnresponsiveDiagnosticAge.Ticks.ToString(CultureInfo.InvariantCulture));
         // Preserve the stored receipt identity so an admission committed before the policy change can still replay.
-        return options.WorkloadPolicy is null ? original : CreateRequestFingerprint(original,
+        var policy = options.WorkloadPolicy is null ? original : CreateRequestFingerprint(original,
             "ocr-turn-v1", options.WorkloadPolicy.Fingerprint, "3");
+        if (options.ResidentEntryModels.Count == 0) return policy;
+        return CreateRequestFingerprint(new[] { policy, "resident-model-v1" }.Concat(options.ResidentEntryModels
+            .OrderBy(model => model.RuntimeKey, StringComparer.Ordinal)
+            .ThenBy(model => model.SettingsFingerprint, StringComparer.Ordinal)
+            .SelectMany(model => new[] { model.RuntimeKey, model.SettingsFingerprint, model.ModelKey })));
     }
 
     private static string CreateExecutorAcknowledgementFingerprint(GpuExecutorAcknowledgement acknowledgement) =>
@@ -2086,6 +2197,15 @@ public sealed partial class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecu
             await AcquireLifecycleOperationFencesAsync(
                 context, transaction.GetDbTransaction(), operationId, handle.BatchId, cancellationToken)
                 .ConfigureAwait(false);
+            if (operationKind == "executor-acknowledgement")
+            {
+                var resident = await context.GpuModelResidencies.AsNoTracking().SingleOrDefaultAsync(row =>
+                    row.SlotKey == handle.CapacitySlotKey && row.BorrowedDispatchId == handle.DispatchId &&
+                    row.ReleasedAtUtc == null, cancellationToken).ConfigureAwait(false);
+                if (resident is not null && SqlGpuModelResidencyStore.ReadFence(resident).Owner != _interactiveOwner.Value)
+                    // A competing process cannot consume the real owner's operation ID.
+                    return new GpuExecutorDispatchMutationResult(false, false);
+            }
             var operation = await context.GpuSchedulerOperationReceipts.SingleOrDefaultAsync(candidate => candidate.OperationId == operationId, cancellationToken).ConfigureAwait(false);
             if (operation is not null)
             {

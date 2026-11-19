@@ -1,6 +1,6 @@
 namespace FluxKnowledge.Web.Configuration;
 
-internal enum StagingHostMode { Run, Migrate, Cli, CandidateQuality, ExpandedGpu, PayloadReadiness, ExpandedGpuQualification, ExpandedGpuIndexing, IndexFixtureCleanup, NormalRuntime, CheckNormalRuntime }
+internal enum StagingHostMode { Run, Migrate, Cli, CandidateQuality, ExpandedGpu, PayloadReadiness, ExpandedGpuQualification, ExpandedGpuIndexing, IndexFixtureCleanup, NormalRuntime, CheckNormalRuntime, ModelWarmingTrial }
 
 internal static class StagingHostArguments
 {
@@ -19,6 +19,7 @@ internal static class StagingHostArguments
             if (args.Length == 3)
             {
                 if (args[2] == "--migrate") return StagingHostMode.Migrate;
+                if (args[2] == "--model-warming-trial") return StagingHostMode.ModelWarmingTrial;
                 if (args[2] == "--candidate-quality") return StagingHostMode.CandidateQuality;
                 if (args[2] == "--expanded-gpu") return StagingHostMode.ExpandedGpu;
                 if (args[2] == "--expanded-gpu-qualification") return StagingHostMode.ExpandedGpuQualification;
@@ -26,6 +27,6 @@ internal static class StagingHostArguments
                 if (args[2] == "--payload-readiness") return StagingHostMode.PayloadReadiness;
             }
         }
-        throw new ArgumentException("Use --settings-file <owned Config\\staging.json> [--migrate | --candidate-quality | --expanded-gpu | --expanded-gpu-qualification | --payload-readiness | --cli <native command>].");
+        throw new ArgumentException("Use --settings-file <owned Config\\staging.json> [--migrate | --model-warming-trial | --candidate-quality | --expanded-gpu | --expanded-gpu-qualification | --payload-readiness | --cli <native command>].");
     }
 }

@@ -119,6 +119,8 @@ internal static class SqlTestData
             {Delete(context.DocumentOcrRequests)}
             {Delete(context.MediaTranscriptionGpuRequests)}
             {Delete(context.EmbeddingGpuRequests)}
+            IF OBJECT_ID(N'dbo.GpuModelDetachmentReceipts',N'U') IS NOT NULL DELETE FROM dbo.GpuModelDetachmentReceipts;
+            IF OBJECT_ID(N'dbo.GpuModelResidencies',N'U') IS NOT NULL DELETE FROM dbo.GpuModelResidencies;
             {Delete(context.GpuMiniTasks)}
             UPDATE {Table(context.GpuCapacitySlots)} SET [ActiveBatchId]=NULL WHERE [ActiveBatchId] IS NOT NULL;
             {Delete(context.GpuBatches)}

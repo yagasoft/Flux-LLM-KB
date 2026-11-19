@@ -14,6 +14,9 @@ internal static class RecoveryUpdateMetadata
     private const string Media = "media-transcription-gpu-migration";
     private const string MediaTarget = "20261119125051_AddMediaTranscriptionGpuRequests";
     private const string MediaSql = "D37933C7B951F81A6A39E92F4D0814725AB1AA0DE166F5BE795BE7141FE0B46B";
+    private const string GpuResidency = "gpu-model-residency-migration";
+    private const string GpuResidencyTarget = "20261119201434_AddGpuModelResidencies";
+    private const string GpuResidencySql = "7A9540981ED00AA671284E011673B194E637043066906B2288E51356B52AF986";
     private const string MediaHoldForwardIntent = "media-transcription-hold-forward-intent.json";
     private const string Queue = "source-deletion-pending-queue-index";
     private const string WindowTarget = "20261117210606_PersistPassageWindowEligibility";
@@ -32,20 +35,24 @@ internal static class RecoveryUpdateMetadata
             [Outlook + "-intent.json"] = (Intent, ""),
             [CodexWorkspace + "-intent.json"] = (Intent, ""),
             [Media + "-intent.json"] = (Intent, ""),
+            [GpuResidency + "-intent.json"] = (Intent, ""),
             [Window + "-outcome.json"] = (Outcome, "Error"), [Queue + "-outcome.json"] = (Outcome, "Error"),
             [Outlook + "-outcome.json"] = (Outcome, "Error"),
             [CodexWorkspace + "-outcome.json"] = (Outcome, "Error"),
             [Media + "-outcome.json"] = (Outcome, "Error"),
+            [GpuResidency + "-outcome.json"] = (Outcome, "Error"),
             [Queue + "-release-binding.json"] = (Binding, ""),
             [Window + "-release-binding.json"] = (Binding + " HelperTask HelperCheckpointPath HelperRootReadPlanSha256 HelperJournalPolicySha256 HelperRepairPolicySha256", ""),
             [Outlook + "-release-binding.json"] = (Binding + " HelperTask HelperCheckpointPath HelperRootReadPlanSha256 HelperJournalPolicySha256 HelperRepairPolicySha256", ""),
             [CodexWorkspace + "-release-binding.json"] = (Binding + " HelperTask HelperCheckpointPath HelperRootReadPlanSha256 HelperJournalPolicySha256 HelperRepairPolicySha256", ""),
             [Media + "-release-binding.json"] = (Binding + " HelperTask HelperCheckpointPath HelperRootReadPlanSha256 HelperJournalPolicySha256 HelperRepairPolicySha256" +
                 " MediaOptionsSha256 MediaConfigurationAfterSha256 MediaConfigurationBackup", ""),
+            [GpuResidency + "-release-binding.json"] = (Binding + " HelperTask HelperCheckpointPath HelperRootReadPlanSha256 HelperJournalPolicySha256 HelperRepairPolicySha256", ""),
             [Window + "-failure-reconciliation.json"] = ("ReleaseId Identity SettledState Error Attempted PredecessorStarted HoldRetained", "ScriptStackTrace ErrorTarget"),
             [Outlook + "-failure-reconciliation.json"] = ("ReleaseId Identity SettledState Error Attempted PredecessorStarted HoldRetained", "ScriptStackTrace ErrorTarget"),
             [CodexWorkspace + "-failure-reconciliation.json"] = ("ReleaseId Identity SettledState Error Attempted PredecessorStarted HoldRetained", "ScriptStackTrace ErrorTarget"),
             [Media + "-failure-reconciliation.json"] = ("ReleaseId Identity SettledState Error Attempted PredecessorStarted HoldRetained", "ScriptStackTrace ErrorTarget"),
+            [GpuResidency + "-failure-reconciliation.json"] = ("ReleaseId Identity SettledState Error Attempted PredecessorStarted HoldRetained", "ScriptStackTrace ErrorTarget"),
             [Queue + "-failure-reconciliation.json"] = ("ReleaseId Identity SettledState Error Attempted PredecessorStarted HoldRetained", ""),
             ["pre-ddl-abort-intent.json"] = ("ReleaseId BindingSha256 RecordedUtc", ""),
             ["pre-ddl-abort-completed.json"] = ("ReleaseId OriginalSchema CompletedUtc", ""),
@@ -55,20 +62,25 @@ internal static class RecoveryUpdateMetadata
             ["codex-workspace-pre-ddl-abort-completed.json"] = ("ReleaseId OriginalSchema CompletedUtc", ""),
             ["media-transcription-pre-ddl-abort-intent.json"] = ("ReleaseId BindingSha256 RecordedUtc", ""),
             ["media-transcription-pre-ddl-abort-completed.json"] = ("ReleaseId OriginalSchema CompletedUtc", ""),
+            ["gpu-residency-pre-ddl-abort-intent.json"] = ("ReleaseId BindingSha256 RecordedUtc", ""),
+            ["gpu-residency-pre-ddl-abort-completed.json"] = ("ReleaseId OriginalSchema CompletedUtc", ""),
             [MediaHoldForwardIntent] = ("PriorReleaseId PriorBindingSha256 ReleaseId ReleaseBindingSha256 RecordedUtc", ""),
             ["stopped-release-hold-transfer.json"] = ("Version Purpose ReleaseId PriorReleaseId BindingSha256 HoldTransferred HoldTransferIntentUtc", "")
         };
 
     internal static bool Supports(string name) => Shapes.ContainsKey(name) ||
-        name is "passage-window-eligibility-up.sql" or "source-deletion-pending-queue-index.sql" or "outlook-watched-source-up.sql" or "codex-workspace-notes-up.sql" or "media-transcription-gpu-up.sql";
+        name is "passage-window-eligibility-up.sql" or "source-deletion-pending-queue-index.sql" or "outlook-watched-source-up.sql" or
+            "codex-workspace-notes-up.sql" or "media-transcription-gpu-up.sql" or "gpu-model-residency-up.sql";
 
     internal static bool IsTypedManifest(JsonElement value) => value.TryGetProperty("passage_window_eligibility", out _) ||
         value.TryGetProperty("source_deletion_pending_queue", out _) || value.TryGetProperty("outlook_watched_source", out _) ||
-        value.TryGetProperty("codex_workspace_notes", out _) || value.TryGetProperty("media_transcription_gpu", out _);
+        value.TryGetProperty("codex_workspace_notes", out _) || value.TryGetProperty("media_transcription_gpu", out _) ||
+        value.TryGetProperty("gpu_model_residency", out _);
 
     internal static bool ValidateManifest(JsonElement value, string packet)
     {
-        var (field, family) = value.TryGetProperty("media_transcription_gpu", out _) ? ("media_transcription_gpu", Media) :
+        var (field, family) = value.TryGetProperty("gpu_model_residency", out _) ? ("gpu_model_residency", GpuResidency) :
+            value.TryGetProperty("media_transcription_gpu", out _) ? ("media_transcription_gpu", Media) :
             value.TryGetProperty("codex_workspace_notes", out _) ? ("codex_workspace_notes", CodexWorkspace) :
             value.TryGetProperty("outlook_watched_source", out _) ? ("outlook_watched_source", Outlook) :
             value.TryGetProperty("passage_window_eligibility", out _) ? ("passage_window_eligibility", Window) :
@@ -102,6 +114,7 @@ internal static class RecoveryUpdateMetadata
                 "OriginalSchema" => item.ValueKind == JsonValueKind.Number && item.TryGetInt32(out var schema) &&
                     schema == (name switch
                     {
+                        "gpu-residency-pre-ddl-abort-completed.json" => 83,
                         "media-transcription-pre-ddl-abort-completed.json" => 82,
                         "codex-workspace-pre-ddl-abort-completed.json" => 81,
                         "outlook-pre-ddl-abort-completed.json" => 80,
@@ -130,7 +143,7 @@ internal static class RecoveryUpdateMetadata
             };
             if (!valid) return false;
         }
-        foreach (var family in new[] { Window, Outlook, CodexWorkspace, Media, Queue })
+        foreach (var family in new[] { Window, Outlook, CodexWorkspace, Media, GpuResidency, Queue })
         {
             if (!name.StartsWith(family + "-", StringComparison.Ordinal)) continue;
             if (value.TryGetProperty("Target", out _) && !TargetAndSql(value, family, optionalSql: true)) return false;
@@ -149,6 +162,7 @@ internal static class RecoveryUpdateMetadata
             Outlook => (OutlookTarget, OutlookSql),
             CodexWorkspace => (CodexWorkspaceTarget, CodexWorkspaceSql),
             Media => (MediaTarget, MediaSql),
+            GpuResidency => (GpuResidencyTarget, GpuResidencySql),
             Queue => (QueueTarget, QueueSql),
             _ => throw new ArgumentOutOfRangeException(nameof(family))
         };

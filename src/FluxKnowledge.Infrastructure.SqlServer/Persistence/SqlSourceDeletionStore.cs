@@ -213,7 +213,8 @@ public sealed partial class SqlSourceDeletionStore(
                     .ToArrayAsync(cancellationToken)
                     .ConfigureAwait(false);
             var unconfirmedEmbeddingCleanup = await context.EmbeddingGpuRequests.AnyAsync(value => recordIds.Contains(value.PipelineRecordId) &&
-                value.ExecutorInstanceId != null && !value.NativeCleanupConfirmed, cancellationToken).ConfigureAwait(false);
+                value.ExecutorInstanceId != null && !value.NativeCleanupConfirmed && value.ResidentDetachmentDispatchId == null,
+                cancellationToken).ConfigureAwait(false);
             var unconfirmedMediaCleanup = await SqlSourceDeletionOwnership.HasUnconfirmedMediaWorkAsync(context, root.Id,
                 cancellationToken).ConfigureAwait(false);
             if (activeLocalTaskIds.Length > 0 || unconfirmedEmbeddingCleanup || unconfirmedMediaCleanup)
@@ -787,7 +788,8 @@ public sealed partial class SqlSourceDeletionStore(
             .ToArrayAsync(cancellationToken)
             .ConfigureAwait(false);
         if (await context.EmbeddingGpuRequests.AnyAsync(request => recordIds.Contains(request.PipelineRecordId) &&
-            request.ExecutorInstanceId != null && !request.NativeCleanupConfirmed, cancellationToken).ConfigureAwait(false))
+            request.ExecutorInstanceId != null && !request.NativeCleanupConfirmed && request.ResidentDetachmentDispatchId == null,
+            cancellationToken).ConfigureAwait(false))
             throw new InvalidOperationException("source-delete-embedding-native-cleanup-unconfirmed");
         var batchIds = miniTaskIds.Length == 0
             ? []

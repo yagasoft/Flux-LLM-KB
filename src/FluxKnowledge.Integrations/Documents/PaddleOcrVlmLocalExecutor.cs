@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
@@ -12,7 +13,7 @@ namespace FluxKnowledge.Integrations.Documents;
 
 /// <summary>
 /// The fixed local-only PaddleOCR-VL executor. It writes only selected rasterized pages to a
-/// short-lived app-owned directory, starts the fixed J: runtime once, and accepts a bounded JSON
+/// short-lived app-owned directory, runs the fixed J: runtime, and accepts a bounded JSON
 /// result. It has no provider selection, input paths from callers, or model acquisition path.
 /// </summary>
 public sealed class PaddleOcrVlmLocalExecutor : IDocumentOcrExecutor
@@ -50,7 +51,50 @@ public sealed class PaddleOcrVlmLocalExecutor : IDocumentOcrExecutor
         RetainedSourceBytes retained,
         IReadOnlyList<int> pageIndexes,
         DocumentOcrExecutionContext execution,
+        CancellationToken cancellationToken) =>
+        (await ExecuteCoreAsync(retained, pageIndexes, execution, cancellationToken).ConfigureAwait(false)).Result;
+
+    internal async ValueTask<OwnedWarmModelProcess> StartWarmProcessAsync(
+        Guid residentId, string machineFingerprint, CancellationToken cancellationToken)
+    {
+        var verified = await _modelGate.EnsureVerifiedAsync(cancellationToken).ConfigureAwait(false);
+        if (!verified.Succeeded) throw new InvalidOperationException(verified.ReasonCode);
+        cancellationToken.ThrowIfCancellationRequested();
+
+        var directory = Path.Combine(_layout.TempRoot, "document-ocr-runtime");
+        var safety = new LiveRootStorageSafety(_layout, FileSystemLiveRootPathInspector.Instance);
+        safety.ValidateBeforeIo(directory);
+        Directory.CreateDirectory(directory);
+        safety.ValidateBeforeIo(directory);
+
+        return PaddleOcrVlmProcessRunner.StartWarm(directory, residentId, machineFingerprint);
+    }
+
+    internal ValueTask<PaddleOcrWarmExecutionResult> ExecuteWarmAsync(
+        RetainedSourceBytes retained,
+        IReadOnlyList<int> pageIndexes,
+        DocumentOcrExecutionContext execution,
+        OwnedWarmModelProcess process,
+        Func<DocumentOcrExecutionLease, OwnedWarmModelCommand, CancellationToken, ValueTask<bool>> authorizeNativeStart,
         CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(execution);
+        ArgumentNullException.ThrowIfNull(process);
+        ArgumentNullException.ThrowIfNull(authorizeNativeStart);
+        if (execution.Lease.Handle.CapacitySlotKey != PaddleOcrVlmRuntimeContract.CapacitySlotKey ||
+            execution.Lease.Handle.ExecutorKey != PaddleOcrVlmRuntimeContract.ExecutorKey)
+            throw new ArgumentException("document-ocr-warm-claim-invalid", nameof(execution));
+
+        return ExecuteCoreAsync(retained, pageIndexes, execution, cancellationToken,
+            (request, token) => PaddleOcrVlmProcessRunner.RunWarmAsync(request, process, authorizeNativeStart, token));
+    }
+
+    private async ValueTask<PaddleOcrWarmExecutionResult> ExecuteCoreAsync(
+        RetainedSourceBytes retained,
+        IReadOnlyList<int> pageIndexes,
+        DocumentOcrExecutionContext execution,
+        CancellationToken cancellationToken,
+        Func<PaddleOcrVlmProcessRequest, CancellationToken, ValueTask<PaddleOcrVlmProcessResult>>? runWarmProcess = null)
     {
         ArgumentNullException.ThrowIfNull(execution);
         execution.Lease.Validate();
@@ -59,23 +103,26 @@ public sealed class PaddleOcrVlmLocalExecutor : IDocumentOcrExecutor
         if (pageIndexes.Count == 0 || pageIndexes.Any(static index => index < 0) ||
             pageIndexes.Distinct().Count() != pageIndexes.Count)
         {
-            return Refused("document-ocr-page-selection-invalid");
+            return new(Refused("document-ocr-page-selection-invalid"), null, false);
         }
 
         var verified = await _modelGate.EnsureVerifiedAsync(cancellationToken).ConfigureAwait(false);
         if (!verified.Succeeded)
         {
-            return Refused(verified.ReasonCode);
+            return new(Refused(verified.ReasonCode), null, false);
         }
 
         string? workDirectory = null;
         var result = Refused("document-ocr-execution-failed");
         var cleanupFailed = false;
         var nativeCleanupUnproven = false;
+        var nativeReleaseConfirmed = false;
+        OwnedWarmModelIdle? idle = null;
         var phase = "temporary-storage";
         try
         {
             workDirectory = CreateWorkDirectory();
+            using var directoryLease = runWarmProcess is null ? null : PhysicalFileIdentity.OpenDirectoryLease(workDirectory);
             var expectedPages = pageIndexes.Order().ToArray();
             phase = "rasterization";
             var rasters = await _rasterizer.RenderAsync(
@@ -127,7 +174,9 @@ public sealed class PaddleOcrVlmLocalExecutor : IDocumentOcrExecutor
                 }
 
                 phase = "provider-execution";
-                var processResult = await _processRunner.RunAsync(
+                nativeCleanupUnproven = runWarmProcess is not null;
+                var runProcess = runWarmProcess ?? _processRunner.RunAsync;
+                var processResult = await runProcess(
                         new PaddleOcrVlmProcessRequest(
                             workDirectory,
                             inputPath,
@@ -137,20 +186,24 @@ public sealed class PaddleOcrVlmLocalExecutor : IDocumentOcrExecutor
                             execution),
                         cancellationToken)
                     .ConfigureAwait(false);
-                nativeCleanupUnproven = !processResult.CleanupConfirmed;
+                idle = processResult.Idle;
+                nativeReleaseConfirmed = processResult.CleanupConfirmed;
+                nativeCleanupUnproven = !nativeReleaseConfirmed && idle is null && !processResult.CommandUnsent;
                 phase = "provider-result";
                 result = processResult.Succeeded
                     ? await ReadResultAsync(
                         outputPath,
                         expectedPages,
                         rasters.ToDictionary(static page => page.PageIndex),
-                        cancellationToken).ConfigureAwait(false)
+                        cancellationToken,
+                        requireContainedOutput: idle is not null).ConfigureAwait(false)
                     : Refused(processResult.ReasonCode);
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            throw;
+            if (runWarmProcess is null) throw;
+            result = Refused("document-ocr-owner-interrupted");
         }
         catch (RetainedProcessorException exception)
         {
@@ -174,7 +227,8 @@ public sealed class PaddleOcrVlmLocalExecutor : IDocumentOcrExecutor
             }
         }
 
-        return cleanupFailed ? Refused("document-ocr-temporary-cleanup-failed") : result;
+        if (cleanupFailed) result = Refused("document-ocr-temporary-cleanup-failed");
+        return new(result, idle, nativeReleaseConfirmed);
     }
 
     private string CreateWorkDirectory()
@@ -222,15 +276,33 @@ public sealed class PaddleOcrVlmLocalExecutor : IDocumentOcrExecutor
         string outputPath,
         IReadOnlyList<int> expectedPages,
         IReadOnlyDictionary<int, PdfRasterizedPage> rasters,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool requireContainedOutput)
     {
-        var output = new FileInfo(outputPath);
-        if (!output.Exists || output.Length is < 1 or > MaximumResultBytes)
+        byte[] bytes;
+        if (requireContainedOutput)
         {
-            return Refused("document-ocr-provider-result-invalid");
+            try
+            {
+                var output = await ContainedFileReader.ReadAsync(Path.GetDirectoryName(outputPath)!, "output.json",
+                    MaximumResultBytes, cancellationToken).ConfigureAwait(false);
+                bytes = output.Bytes;
+            }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException or InvalidDataException)
+            {
+                return Refused("document-ocr-provider-result-invalid");
+            }
+        }
+        else
+        {
+            var output = new FileInfo(outputPath);
+            if (!output.Exists || output.Length is < 1 or > MaximumResultBytes)
+            {
+                return Refused("document-ocr-provider-result-invalid");
+            }
+            bytes = await File.ReadAllBytesAsync(outputPath, cancellationToken).ConfigureAwait(false);
         }
 
-        var bytes = await File.ReadAllBytesAsync(outputPath, cancellationToken).ConfigureAwait(false);
         try
         {
             _ = StrictUtf8.GetString(bytes);
@@ -351,7 +423,11 @@ internal sealed record PaddleOcrVlmProcessRequest(
     IReadOnlyList<string> ImageFilenames,
     DocumentOcrExecutionContext Execution);
 
-internal sealed record PaddleOcrVlmProcessResult(bool Succeeded, string ReasonCode, bool CleanupConfirmed = true)
+internal sealed record PaddleOcrWarmExecutionResult(
+    DocumentOcrExecutionResult Result, OwnedWarmModelIdle? Idle, bool NativeReleaseConfirmed);
+
+internal sealed record PaddleOcrVlmProcessResult(bool Succeeded, string ReasonCode, bool CleanupConfirmed = true,
+    OwnedWarmModelIdle? Idle = null, bool CommandUnsent = false)
 {
     public static PaddleOcrVlmProcessResult Completed { get; } = new(true, "document-ocr-complete");
 }
@@ -369,23 +445,11 @@ internal sealed class PaddleOcrVlmProcessRunner : IPaddleOcrVlmProcessRunner
             return new PaddleOcrVlmProcessResult(false, "document-ocr-runtime-script-missing");
         }
 
-        var startInfo = new ProcessStartInfo(PaddleOcrVlmModelGate.PythonExecutablePath)
-        {
-            UseShellExecute = false,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            CreateNoWindow = true,
-            WorkingDirectory = request.WorkingDirectory
-        };
-        startInfo.ArgumentList.Add("-I");
-        startInfo.ArgumentList.Add("-S");
-        startInfo.ArgumentList.Add(PaddleOcrVlmPythonScript.Path);
+        var startInfo = CreateStartInfo(request.WorkingDirectory);
         startInfo.ArgumentList.Add("--input");
         startInfo.ArgumentList.Add(request.InputPath);
         startInfo.ArgumentList.Add("--output");
         startInfo.ArgumentList.Add(request.OutputPath);
-        ConfigureOfflineEnvironment(startInfo);
-
         startInfo.ArgumentList.Add("--startup-gate");
         var outcome = await OwnedOcrProcessSupervisor.RunAsync(startInfo, request.Execution, cancellationToken).ConfigureAwait(false);
         if (outcome.FailureReason is not null) return new(false, outcome.FailureReason, outcome.CleanupConfirmed);
@@ -393,6 +457,81 @@ internal sealed class PaddleOcrVlmProcessRunner : IPaddleOcrVlmProcessRunner
         var failure = await ReadFailureReasonAsync(request.WorkingDirectory, request.OutputPath, cancellationToken).ConfigureAwait(false);
         return new(false, failure == "document-ocr-runtime-failed" ? RuntimeExitReason(outcome.ExitCode ?? -1) : failure, outcome.CleanupConfirmed);
     }
+    internal static OwnedWarmModelProcess StartWarm(string workingDirectory, Guid residentId, string machineFingerprint)
+    {
+        if (!File.Exists(PaddleOcrVlmPythonScript.Path))
+            throw new InvalidOperationException("document-ocr-runtime-script-missing");
+        var startInfo = CreateStartInfo(workingDirectory);
+        startInfo.ArgumentList.Add("--warm-worker");
+        startInfo.Environment["TEMP"] = workingDirectory;
+        startInfo.Environment["TMP"] = workingDirectory;
+        startInfo.Environment["TMPDIR"] = workingDirectory;
+        return OwnedWarmModelProcess.Start(startInfo, residentId, machineFingerprint);
+    }
+
+    internal static async ValueTask<PaddleOcrVlmProcessResult> RunWarmAsync(
+        PaddleOcrVlmProcessRequest request,
+        OwnedWarmModelProcess process,
+        Func<DocumentOcrExecutionLease, OwnedWarmModelCommand, CancellationToken, ValueTask<bool>> authorizeNativeStart,
+        CancellationToken cancellationToken)
+    {
+        var lease = request.Execution.Lease;
+        var nativeStartPermitted = false;
+        var permissionRefused = false;
+        try
+        {
+            var idle = await process.RunAsync(lease.ExecutionInstanceId, request.InputPath, request.OutputPath,
+                lease.DeadlineAtUtc, async (command, token) =>
+                {
+                    nativeStartPermitted = command.Process.MachineFingerprint == lease.Supervisor.Process.MachineFingerprint &&
+                        await authorizeNativeStart(lease, command, token).ConfigureAwait(false);
+                    permissionRefused = !nativeStartPermitted;
+                    return nativeStartPermitted;
+                }, cancellationToken).ConfigureAwait(false);
+            if (idle.Model != "ocr") throw new InvalidDataException("document-ocr-warm-model-mismatch");
+
+            return new(true, "document-ocr-complete", CleanupConfirmed: false, Idle: idle);
+        }
+        catch (Exception error) when (error is not OutOfMemoryException and not StackOverflowException)
+        {
+            var released = nativeStartPermitted && await TryStopWarmAsync(process).ConfigureAwait(false);
+            var reason = "document-ocr-native-supervision-failed";
+            if (permissionRefused) reason = "document-ocr-native-start-refused";
+            else if (cancellationToken.IsCancellationRequested) reason = "document-ocr-owner-interrupted";
+            else if (error is OperationCanceledException or TimeoutException) reason = "document-ocr-runtime-timeout";
+            else if (error is EndOfStreamException && released)
+                reason = await ReadFailureReasonAsync(request.WorkingDirectory, request.OutputPath, CancellationToken.None)
+                    .ConfigureAwait(false);
+            return new(false, reason, released, CommandUnsent: !nativeStartPermitted);
+        }
+    }
+
+    private static async ValueTask<bool> TryStopWarmAsync(OwnedWarmModelProcess process)
+    {
+        try { return await process.StopAndConfirmAsync(CancellationToken.None).ConfigureAwait(false); }
+        catch (Exception error) when (error is IOException or Win32Exception or InvalidOperationException)
+        {
+            return false;
+        }
+    }
+
+    private static ProcessStartInfo CreateStartInfo(string workingDirectory)
+    {
+        var startInfo = new ProcessStartInfo(PaddleOcrVlmModelGate.PythonExecutablePath)
+        {
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true,
+            WorkingDirectory = workingDirectory
+        };
+        startInfo.ArgumentList.Add("-I");
+        startInfo.ArgumentList.Add("-S");
+        startInfo.ArgumentList.Add(PaddleOcrVlmPythonScript.Path);
+        ConfigureOfflineEnvironment(startInfo);
+        return startInfo;
+    }
+
     private static void ConfigureOfflineEnvironment(ProcessStartInfo startInfo)
     {
         foreach (var key in startInfo.Environment.Keys

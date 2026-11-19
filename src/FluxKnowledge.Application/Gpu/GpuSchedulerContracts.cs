@@ -259,6 +259,8 @@ public sealed record GpuSchedulerStatusSnapshot(
     TimeSpan? UncertainCapacityAge)
 {
     public FluxKnowledge.Application.Contracts.GpuOcrOwnerStatus? OcrOwner { get; init; }
+    public int WarmModelSlotCount { get; init; }
+    public int ReleasingModelSlotCount { get; init; }
     public static GpuSchedulerStatusSnapshot Empty { get; } = new(
         0, 0, 0, 0, new Dictionary<GpuPriorityLane, int>(), false, null, 0, 0, 0, null, null);
 }

@@ -60,3 +60,7 @@ $null = New-Item -ItemType Directory -Path $outlookReceipts, $codexReceipts
 $mediaReceipts = Join-Path $ReceiptDirectory 'media-transcription'
 $null = New-Item -ItemType Directory -Path $mediaReceipts
 & $successorScript -SourceRoot $SourceRoot -ReceiptDirectory $mediaReceipts -MediaTranscription
+
+$residencyReceipts = Join-Path $ReceiptDirectory 'gpu-model-residency'
+$null = New-Item -ItemType Directory -Path $residencyReceipts
+& $successorScript -SourceRoot $SourceRoot -ReceiptDirectory $residencyReceipts -GpuResidency
