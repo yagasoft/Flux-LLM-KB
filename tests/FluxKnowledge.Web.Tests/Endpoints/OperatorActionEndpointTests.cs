@@ -125,6 +125,39 @@ public sealed class OperatorActionEndpointTests
     }
 
     [Fact]
+    public async Task Guided_reconciliation_commit_requires_same_origin_antiforgery_and_confirmation()
+    {
+        await using var host = await StartAsync(new RecordingOperatorActionStore([VisibleAction]));
+        const string path = "/api/operator-actions/retained-recovery/commit";
+        HttpRequestMessage Request(string origin, bool token)
+        {
+            var request = new HttpRequestMessage(HttpMethod.Post, path)
+            {
+                Content = new FormUrlEncodedContent(new Dictionary<string, string>
+                {
+                    ["kind"] = "zip",
+                    ["sourceRevisionId"] = "44444444-4444-4444-4444-444444444444",
+                    ["exactId"] = "55555555-5555-5555-5555-555555555555"
+                })
+            };
+            if (token) request.Headers.Add("X-CSRF-TOKEN", "valid");
+            request.Headers.TryAddWithoutValidation("Origin", origin);
+            return request;
+        }
+
+        using var crossOrigin = Request("https://example.invalid", true);
+        using var missingToken = Request("http://localhost", false);
+        using var missingConfirmation = Request("http://localhost", true);
+        using var deniedOrigin = await host.Client.SendAsync(crossOrigin);
+        using var deniedToken = await host.Client.SendAsync(missingToken);
+        using var deniedConfirmation = await host.Client.SendAsync(missingConfirmation);
+
+        Assert.Equal(HttpStatusCode.Forbidden, deniedOrigin.StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, deniedToken.StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, deniedConfirmation.StatusCode);
+    }
+
+    [Fact]
     public async Task Named_archive_zip_reconciliation_is_loopback_antiforgery_protected_and_idempotent()
     {
         var branchId = Guid.Parse("44444444-4444-4444-4444-444444444444");

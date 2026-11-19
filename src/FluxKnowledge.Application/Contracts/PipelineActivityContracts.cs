@@ -44,11 +44,19 @@ public sealed record PipelineWorkGroup(
     bool IsHistorical, string Reason, int Count);
 
 public sealed record GpuActivityGroup(
-    Guid? SourceRootId, string SourceName, string State, int Count);
+    Guid? SourceRootId, string SourceName, string State, int Count)
+{
+    public bool IsInteractive { get; init; }
+}
 
 public sealed record PipelineAttentionItem(
     Guid Id, Guid? SourceRootId, Guid? PipelineRecordId, string SourceName,
-    string Unit, string State, string Applicability, string Reason, DateTimeOffset? RecordedAtUtc);
+    string Unit, string State, string Applicability, string Reason, DateTimeOffset? RecordedAtUtc)
+{
+    public string? Stage { get; init; }
+    public string? ResultStatus { get; init; }
+    public string? CapacityStatus { get; init; }
+}
 
 public sealed record PipelineAttentionPage(int TotalCount, int Page, int PageSize, IReadOnlyList<PipelineAttentionItem> Items)
 {

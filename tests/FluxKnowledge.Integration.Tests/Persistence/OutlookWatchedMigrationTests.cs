@@ -1,8 +1,11 @@
 using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
+using FluxKnowledge.Domain.Outlook;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
+using FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
 using FluxKnowledge.Integration.Tests.Support;
+using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Migrations;
@@ -23,6 +26,70 @@ public sealed class OutlookWatchedMigrationTests(NativeSqlServerFixture fixture)
     [NativeSqlServerFact]
     public Task Workspace_notes_migration_preserves_schema_on_rollback_and_classifies_lost_acknowledgement() =>
         VerifyTypedMigrationAsync(Target, "20261118225053_BindCodexNotesToWorkspace", "-CodexWorkspace");
+
+    [NativeSqlServerTheory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Watched_schema_downgrade_preserves_binding_or_withdrawal_evidence(bool retainBinding)
+    {
+        await using var database = await fixture.CreateMigrationDatabaseAsync(Target);
+        await using var db = database.CreateContext();
+        var now = new DateTimeOffset(2026, 11, 18, 23, 30, 0, TimeSpan.Zero);
+        var privateRoot = SeedRoot("private");
+        var watchedRoot = retainBinding ? SeedRoot("watched") : (Guid?)null;
+        var profileId = Guid.NewGuid();
+        db.OutlookCaptureProfiles.Add(new()
+        {
+            Id = profileId, SourceRootId = privateRoot, WatchedSourceRootId = watchedRoot,
+            DisplayName = "Migration fixture", SpoolRoot = @"C:\migration-fixture\outlook-spool",
+            State = 1, IsEnabled = true, ConfigurationRevision = 1, CreatedAtUtc = now, UpdatedAtUtc = now
+        });
+        var exportId = Guid.NewGuid();
+        var withdrawnRevisions = $"""["{Guid.NewGuid():D}"]""";
+        if (!retainBinding)
+        {
+            var folderId = Guid.NewGuid();
+            db.OutlookCaptureFolders.Add(new()
+            {
+                Id = folderId, ProfileId = profileId, StoreId = "test-store", FolderEntryId = "test-folder",
+                DisplayName = "Test folder", State = 1
+            });
+            db.OutlookCaptureExports.Add(new()
+            {
+                Id = exportId, ProfileId = profileId, FolderId = folderId, EntryId = "test-entry",
+                SourceFingerprint = new string('a', 64), State = (int)OutlookExportState.Ingested, FencingToken = 1,
+                WatchedWithdrawalAtUtc = now, WatchedWithdrawalRevisionIdsJson = withdrawnRevisions
+            });
+        }
+        await db.SaveChangesAsync();
+        var history = (await db.Database.GetAppliedMigrationsAsync()).ToArray();
+
+        var failure = await Assert.ThrowsAsync<SqlException>(() => db.GetService<IMigrator>().MigrateAsync(Baseline));
+
+        Assert.Equal(51000, failure.Number);
+        Assert.Contains("The Outlook watched-source schema contains retained cutover evidence.", failure.Message);
+        Assert.Equal(history, (await db.Database.GetAppliedMigrationsAsync()).ToArray());
+        Assert.Equal(watchedRoot, await db.OutlookCaptureProfiles.Where(row => row.Id == profileId)
+            .Select(row => row.WatchedSourceRootId).SingleAsync());
+        if (!retainBinding)
+        {
+            var receipt = await db.OutlookCaptureExports.AsNoTracking().SingleAsync(row => row.Id == exportId);
+            Assert.Equal(now, receipt.WatchedWithdrawalAtUtc);
+            Assert.Equal(withdrawnRevisions, receipt.WatchedWithdrawalRevisionIdsJson);
+        }
+
+        Guid SeedRoot(string name)
+        {
+            var id = Guid.NewGuid();
+            db.SourceRootConfigurations.Add(new SourceRootConfigurationEntity
+            {
+                Id = id, DisplayName = name, CanonicalPath = $@"C:\migration-fixture\{name}",
+                State = 1, MaximumFileBytes = 1024, ReconciliationCadenceSeconds = 60,
+                ConfigurationRevision = 1, CreatedAtUtc = now, UpdatedAtUtc = now
+            });
+            return id;
+        }
+    }
 
     private async Task VerifyTypedMigrationAsync(string baseline, string target, string? mode = null)
     {

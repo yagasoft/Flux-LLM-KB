@@ -79,7 +79,7 @@ internal static partial class SqlDocumentInputRecovery
 
     // Native rows remain untouched. The generations describe the terminal state
     // committed atomically with the successor, so replay cannot invalidate itself.
-    private sealed record SettledNoResultBinding(Guid MiniTaskId, Guid BatchId, long AdmissionGeneration, Guid DispatchId,
+    internal sealed record SettledNoResultBinding(Guid MiniTaskId, Guid BatchId, long AdmissionGeneration, Guid DispatchId,
         Guid ExecutionInstanceId, Guid CleanupOperationId, string CleanupFingerprint, string RequestVersion, string TaskVersion,
         string BatchVersion, string DispatchVersion, long JobLeaseGeneration, Guid DeliveryId, long DeliveryLeaseGeneration);
 }

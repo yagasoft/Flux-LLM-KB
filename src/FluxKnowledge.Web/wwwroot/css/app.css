@@ -1,10 +1,19 @@
-:root { color-scheme: light dark; font-family: system-ui, sans-serif; }
-body { margin: 0; }
-.app-shell { max-width: 72rem; margin: auto; padding: 1rem; }
-.site-header { display: flex; gap: 2rem; align-items: center; flex-wrap: wrap; border-bottom: 1px solid currentColor; }
-.brand { font-weight: 700; text-decoration: none; }
-.nav-list { display: flex; gap: 1rem; margin: 0; padding: 0; list-style: none; flex-wrap: wrap; }
-main { padding-block: 1.5rem; }
+:root { color-scheme: light dark; font-family: system-ui, sans-serif; --line: light-dark(#d4dbe5, #435169); --canvas: light-dark(#fff, #111827); --panel: light-dark(#f3f6fa, #1b2638); --accent: light-dark(#154bad, #9abeea); --selected: light-dark(#e2ecfb, #263b59); }
+body { margin: 0; background: var(--canvas); color: light-dark(#152139, #e7edf6); }
+a { color: var(--accent); }
+.app-shell { display: grid; grid-template-columns: 12rem minmax(0, 1fr); min-height: 100vh; }
+.site-header { min-width: 0; padding: 1.75rem .75rem; background: var(--panel); border-inline-end: 1px solid var(--line); }
+.brand { display: block; margin: 0 .75rem 1.75rem; color: inherit; font-size: 1.12rem; font-weight: 750; text-decoration: none; }
+.nav-list { display: grid; gap: .25rem; margin: 0; padding: 0; list-style: none; }
+.nav-list a, .nav-more summary { display: block; border-radius: .4rem; padding: .65rem .75rem; color: inherit; text-decoration: none; }
+.nav-list a:hover, .nav-more summary:hover { background: var(--selected); }
+.nav-list a.active { background: var(--selected); color: var(--accent); font-weight: 650; }
+.nav-more { margin-top: 1.25rem; border-top: 1px solid var(--line); }
+.nav-more summary { display: list-item; cursor: pointer; }
+.nav-more .nav-list { margin-inline-start: .45rem; font-size: .93rem; }
+.skip-content { position: absolute; inset: .5rem auto auto .5rem; padding: .65rem; background: var(--canvas); transform: translateY(-200%); z-index: 1; }
+.skip-content:focus { transform: none; }
+main { min-width: 0; max-width: 84rem; padding: 2rem clamp(1rem, 3vw, 3.25rem); }
 :focus-visible { outline: 3px solid #ffbf47; outline-offset: 3px; }
 .status-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr)); gap: 1rem; }
 .status-grid div { border: 1px solid currentColor; border-radius: .25rem; padding: .75rem; }
@@ -14,11 +23,51 @@ main { padding-block: 1.5rem; }
 .search-results { padding-left: 1.25rem; } .visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 .diagnostic-details { margin-top: 1rem; } .diagnostic-details label { display: grid; gap: .25rem; margin-top: .75rem; } .diagnostic-value { max-width: 100%; overflow-wrap: anywhere; word-break: break-word; }
 .filter-drawer { margin-block: 1rem; } .filter-controls { display: flex; gap: .75rem; align-items: end; flex-wrap: wrap; margin-block: .75rem; } .filter-controls label { display: grid; gap: .25rem; } .folder-browser { border: 1px solid currentColor; border-radius: .25rem; padding: .75rem; margin-block: 1rem; } .folder-browser ul { padding-left: 1.25rem; } .indexed-preview { max-height: 24rem; overflow: auto; white-space: pre-wrap; border: 1px solid currentColor; padding: .75rem; }
-@media (max-width: 40rem) { .app-shell { padding: .75rem; } .site-header { align-items: flex-start; flex-direction: column; gap: .75rem; } .nav-list { flex-wrap: wrap; } .status-grid { grid-template-columns: 1fr; } .status-grid dd { font-size: 1.2rem; } }
+@media (max-width: 48rem) { .app-shell { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto 1fr; } .site-header { border-inline-end: 0; border-bottom: 1px solid var(--line); padding: .75rem; } .brand { margin: .15rem .5rem .55rem; } .nav-list { display: flex; flex-wrap: wrap; } .nav-list a, .nav-more summary { padding: .5rem; } .nav-more { margin-top: .4rem; } main { padding-block: 1.25rem; } }
+@media (max-width: 40rem) { .status-grid { grid-template-columns: 1fr; } .status-grid dd { font-size: 1.2rem; } }
 .pipeline-overview section { margin-block: 1.75rem; }
 .overview-header, .activity-heading, .source-progress-card header { display: flex; align-items: start; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
 .overview-header h1, .activity-heading h2, .source-progress-card h3 { margin-top: 0; }
 .overview-header button { flex-shrink: 0; }
+.overview-scope { display: flex; flex-wrap: wrap; align-items: end; gap: .65rem; }
+.overview-scope label { font-size: .85rem; }
+.overview-scope select, .overview-scope button { box-sizing: border-box; min-height: 2.6rem; }
+.overview-status-heading { display: flex; justify-content: space-between; align-items: start; gap: .85rem; }
+.overview-status-heading > div { flex: 1; }
+.overview-status-title { display: grid; }
+.overview-status-title h2, .overview-title-reserve { grid-area: 1 / 1; font-size: clamp(1.15rem, 2vw, 1.6rem); font-weight: 700; margin: 0; }
+.overview-title-reserve { visibility: hidden; }
+.overview-status-heading p { margin: .4rem 0 0; }
+.overview-metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border: 1px solid var(--line); border-radius: .55rem; }
+.overview-metrics > div { padding: .75rem 1rem; }
+.overview-metrics > div + div { border-inline-start: 1px solid var(--line); }
+.overview-metrics dt { font-size: .88rem; }
+.overview-metrics dd { margin: .25rem 0 0; font-size: 1.5rem; font-weight: 720; overflow-wrap: anywhere; }
+.issue-list { margin: 0; padding: 0; list-style: none; }
+.issue-workspace.has-selection { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(18rem, 1fr); align-items: start; gap: 1rem; }
+.issue-list-panel, .issue-inspector { min-width: 0; }
+.issue-inspector { background: var(--panel); border: 1px solid var(--line); border-radius: .6rem; padding: .85rem; }
+.pipeline-overview .issue-inspector section { margin-block: .75rem 0; }
+.issue-inspector h2 { margin-block: 0 .6rem; font-size: 1.15rem; }
+.inspector-close { display: block; margin-inline-start: auto; }
+.issue-list:not(:empty) { border: 1px solid var(--line); border-radius: .6rem; }
+.issue-row { display: grid; grid-template-columns: minmax(0, 1fr) max-content; gap: 1rem; align-items: center; padding: 1rem; }
+.issue-row + .issue-row { border-top: 1px solid var(--line); }
+.issue-row h3 { font-size: 1rem; margin: 0 0 .3rem; }
+.issue-row p { margin: 0 0 .3rem; overflow-wrap: anywhere; }
+.issue-row small { color: light-dark(#4b586e, #b7c5d8); }
+.issue-row button, .operation-link { padding: .55rem .8rem; border: 1px solid var(--accent); border-radius: .4rem; background: var(--canvas); color: var(--accent); font-weight: 620; text-decoration: none; cursor: pointer; }
+.issue-row button:hover, .operation-link:hover { background: var(--selected); }
+.issue-actions { display: flex; gap: .6rem; flex-wrap: wrap; align-items: center; }
+button:not(.count-link) { border: 1px solid var(--line); border-radius: .4rem; background: var(--canvas); color: inherit; cursor: pointer; }
+button:not(.count-link):hover:enabled { background: var(--selected); }
+button:not(.count-link):disabled { opacity: .65; cursor: default; }
+button.primary-action:not(.count-link) { background: light-dark(#154bad, #2d64c3); border-color: transparent; color: #fff; font-weight: 650; }
+button.primary-action:not(.count-link):hover:enabled { background: light-dark(#0d367f, #23549f); }
+.issue-row button:not(.count-link) { color: var(--accent); border-color: var(--accent); }
+.issue-row button.primary-action:not(.count-link) { color: #fff; }
+.guided-recovery-action > p:empty { margin: 0; }
+.overview-disclosure { border: 1px solid var(--line); border-radius: .5rem; padding: .65rem .8rem; }
 .activity-banner { border: 1px solid currentColor; border-radius: .25rem; padding: 1.25rem; }
 .activity-state { font-size: 1.5rem; font-weight: 700; margin-block: .5rem; }
 .activity-counts { grid-template-columns: repeat(4, minmax(0, 1fr)); margin-top: 1rem; }
@@ -28,6 +77,9 @@ main { padding-block: 1.5rem; }
 .source-progress-list { display: grid; gap: 1rem; }
 .source-progress-card { border: 1px solid currentColor; border-radius: .25rem; padding: 1rem; min-width: 0; }
 .source-progress-card h3 { margin-bottom: .35rem; }
+.source-progress-card { border-color: var(--line); border-radius: .5rem; }
+.source-progress-summary { display: flex; flex-wrap: wrap; gap: .35rem 1rem; margin-block: .25rem .65rem; }
+.source-progress-summary p { margin: 0; }
 .source-path { overflow-wrap: anywhere; margin-top: 0; }
 .count-link { border: 0; padding: 0; background: transparent; color: inherit; font: inherit; text-decoration: underline; cursor: pointer; }
 .count-link:focus-visible, .file-path summary:focus-visible { outline: 3px solid currentColor; outline-offset: 3px; }
@@ -47,9 +99,7 @@ main { padding-block: 1.5rem; }
 .source-file-counts dd { font-size: 1.3rem; font-weight: 700; margin: .25rem 0 0; }
 .status-freshness { font-size: .9rem; }
 .pipeline-warning { border-inline-start: .3rem solid currentColor; padding: .5rem .75rem; }
-.refresh-notice-slot { display: grid; margin-block: 1rem; }
-.refresh-notice-slot > .pipeline-warning { grid-area: 1 / 1; margin: 0; }
-.refresh-notice-reserve { visibility: hidden; pointer-events: none; user-select: none; }
+.refresh-notice { position: fixed; inset: auto 1rem 1rem auto; z-index: 2; margin: 0; max-width: min(32rem, calc(100vw - 4rem)); padding: .75rem 1rem; background: var(--panel); box-shadow: 0 4px 20px #0003; border-radius: .35rem; }
 .activity-list, .attention-counts { padding-inline-start: 1.25rem; }
 .activity-list li, .attention-counts li { margin-block: .5rem; }
 .scheduler-details > summary { font-weight: 600; cursor: pointer; }
@@ -68,4 +118,9 @@ main { padding-block: 1.5rem; }
   .activity-counts, .source-file-counts { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .75rem; }
   .overview-header { gap: .5rem; }
   .source-progress-card { padding: .85rem; }
+  .issue-row { grid-template-columns: 1fr; gap: .6rem; justify-items: start; }
+  .overview-metrics > div { padding: .6rem; }
+  .overview-metrics dd { font-size: 1.15rem; }
 }
+@media (max-width: 64rem) { .issue-workspace.has-selection { grid-template-columns: minmax(0, 1fr); } }
+@media (min-width: 64.001rem) { .issue-inspector { max-height: min(36rem, 76vh); overflow-y: auto; } }

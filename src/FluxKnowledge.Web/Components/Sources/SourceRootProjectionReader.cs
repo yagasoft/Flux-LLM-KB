@@ -24,7 +24,10 @@ public sealed class SourceRootProjectionReader(
     IDbContextFactory<FluxKnowledgeDbContext> contextFactory,
     ISourceRootPathPolicy pathPolicy,
     ISourceFileEnumerator enumerator,
-    ILocalSourceCapabilityHandlerRegistry handlers) : ISourceRootProjectionReader
+    ILocalSourceCapabilityHandlerRegistry handlers,
+    ISourceWorkAdmission? sourceAdmission = null,
+    IDeploymentValidationHold? deploymentValidationHold = null,
+    TimeProvider? timeProvider = null) : ISourceRootProjectionReader
 {
     internal async Task<JournalSourceRoot[]> ReadJournalRootsAsync(CancellationToken cancellationToken)
     {
@@ -99,11 +102,26 @@ public sealed class SourceRootProjectionReader(
         }
         var root = source.Root;
 
-        var requestState = await context.SourceScanRequests.AsNoTracking()
-            .Where(value => value.SourceRootId == rootId && value.RequestKind != SqlSourceVerificationStore.RequestKind)
-            .OrderByDescending(value => value.RequestedAtUtc).ThenByDescending(value => value.Id)
-            .Select(value => (int?)value.State)
-            .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+        var latestOrdinaryRequest = SqlNativeOperationStore.OrdinaryScanRequestsByRecency(context, rootId).AsNoTracking().Take(1);
+        var scan = await (from request in latestOrdinaryRequest
+            join job in context.SourceScanJobs.AsNoTracking() on request.Id equals job.SourceScanRequestId into jobs
+            from job in jobs.DefaultIfEmpty()
+            join outbox in context.SourceScanOutbox.AsNoTracking() on request.Id equals outbox.SourceScanRequestId into deliveries
+            from outbox in deliveries.DefaultIfEmpty()
+            select new { request.Id, request.State, request.RequestKind, request.RequestedBy, request.AuditEvidenceJson, Job = job, Outbox = outbox })
+            .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+        var now = (timeProvider ?? TimeProvider.System).GetUtcNow();
+        var isInterrupted = scan?.State == (int)SourceScanRequestState.Running &&
+            (scan.Job?.LeaseExpiresAtUtc is not { } expiry || expiry <= now);
+        SourceScanRecoveryProjection? scanRecovery = null;
+        if (scan is not null && (scan.State == (int)SourceScanRequestState.Failed || isInterrupted))
+        {
+            var refusal = deploymentValidationHold?.IsHeld == true
+                ? "deployment-validation-held"
+                : SqlNativeOperationStore.ScanRetryRefusal(root, scan.State, scan.RequestKind, scan.RequestedBy, scan.AuditEvidenceJson,
+                    scan.Job, scan.Outbox, now, sourceAdmission);
+            scanRecovery = new(scan.Id, scan.Job?.Id, isInterrupted, refusal);
+        }
         var lastFinishedRequest = await context.SourceScanRequests.AsNoTracking()
             .Where(value => value.SourceRootId == rootId && value.RequestKind != SqlSourceVerificationStore.RequestKind &&
                 (value.State == (int)SourceScanRequestState.Completed || value.State == (int)SourceScanRequestState.Failed))
@@ -298,7 +316,7 @@ public sealed class SourceRootProjectionReader(
             root.DisplayName,
             root.CanonicalPath,
             ((SourceRootState)root.State).ToString(),
-            requestState is null ? "No scan requested" : ((SourceScanRequestState)requestState.Value).ToString(),
+            scan is null ? "No scan requested" : ((SourceScanRequestState)scan.State).ToString(),
             root.LastScanCompletedAtUtc,
             lastFinishedRequest?.DiscoveredFileCount ?? 0,
             summary.Indexed,
@@ -313,6 +331,7 @@ public sealed class SourceRootProjectionReader(
             CurrentProcessingIssues = processingIssues,
             Files = files,
             EditableScope = editableScope,
+            ScanRecovery = scanRecovery,
             DeletionPhase = deletion?.Phase,
             DeletionReason = deletion?.ReasonCode,
             DeletionProgress = deletion is null ? null : new SourceDeletionProgressProjection(

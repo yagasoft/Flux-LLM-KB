@@ -49,15 +49,7 @@ internal static partial class SqlDefaultRetainedPolicy
 
     internal static async ValueTask<RetainedPolicyAdmission> PrepareAsync(FluxKnowledgeDbContext db, IRetainedSourceReader reader, Request request, CancellationToken token)
     {
-        var root = await db.SourceRootConfigurations.AsNoTracking().SingleAsync(value => value.Id == request.RootId, token);
-        var revision = await db.SourceRevisions.AsNoTracking().SingleAsync(value => value.Id == request.RevisionId, token);
-        var activity = await db.SourceActivities.AsNoTracking().SingleAsync(value => value.Id == request.ActivityId, token);
-        var branch = await db.SourceProcessorBranches.AsNoTracking().SingleOrDefaultAsync(value => value.SourceActivityId == activity.Id, token);
-        var descriptor = await SelectProcessorAsync(db, revision, activity, branch, token);
-        var isText = descriptor is null && MatchesText(root, revision, activity, request) &&
-            await ValidateLegacyTextPredecessorAsync(db, revision, activity, token).ConfigureAwait(false);
-        if (!MatchesScope(root, revision, request) || (!isText && descriptor is null) ||
-            await HasUnconfirmedBindingAsync(db, revision, token)) throw new NativeOperationException("policy-item-not-eligible");
+        var (root, revision, activity, descriptor, isText) = await ReadMetadataAsync(db, request, token).ConfigureAwait(false);
         // Verification happens before any SQL mutation transaction, and uses only app-retained bytes.
         var maximumBytes =
             descriptor?.Id == MediaMetadataRetainedProcessor.Capability.Id ? MediaMetadataRetainedProcessor.MaximumRetainedInputBytes :
@@ -81,8 +73,26 @@ internal static partial class SqlDefaultRetainedPolicy
             (int)(descriptor?.AcceptedActivityKind ?? SourceActivityKind.TextExtraction), isText);
     }
 
+    internal sealed record EligibleMetadata(SourceRootConfigurationEntity Root, SourceRevisionEntity Revision,
+        SourceActivityEntity Activity, SourceCapabilityDescriptor? Descriptor, bool IsText);
+
+    internal static async ValueTask<EligibleMetadata> ReadMetadataAsync(FluxKnowledgeDbContext db, Request request, CancellationToken token)
+    {
+        var root = await db.SourceRootConfigurations.AsNoTracking().SingleOrDefaultAsync(value => value.Id == request.RootId, token);
+        var revision = await db.SourceRevisions.AsNoTracking().SingleOrDefaultAsync(value => value.Id == request.RevisionId, token);
+        var activity = await db.SourceActivities.AsNoTracking().SingleOrDefaultAsync(value => value.Id == request.ActivityId, token);
+        if (root is null || revision is null || activity is null) throw new NativeOperationException("target-not-found");
+        var branch = await db.SourceProcessorBranches.AsNoTracking().SingleOrDefaultAsync(value => value.SourceActivityId == activity.Id, token);
+        var descriptor = await SelectProcessorAsync(db, revision, activity, branch, token);
+        var isText = descriptor is null && MatchesText(root, revision, activity, request) &&
+            await ValidateLegacyTextPredecessorAsync(db, revision, activity, token).ConfigureAwait(false);
+        if (!MatchesScope(root, revision, request) || (!isText && descriptor is null) ||
+            await HasUnconfirmedBindingAsync(db, revision, token)) throw new NativeOperationException("policy-item-not-eligible");
+        return new(root, revision, activity, descriptor, isText);
+    }
+
     internal static async Task ApplyAsync(FluxKnowledgeDbContext db, string payload, RetainedPolicyAdmission admission,
-        IReadOnlyList<NativeTargetVersion> targets, DateTimeOffset now, CancellationToken token)
+        IReadOnlyList<NativeTargetVersion> targets, string actor, DateTimeOffset now, CancellationToken token)
     {
         var request = Parse(payload);
         if (admission.RootId != request.RootId || admission.SourceRevisionId != request.RevisionId || admission.PredecessorActivityId != request.ActivityId ||
@@ -139,7 +149,7 @@ internal static partial class SqlDefaultRetainedPolicy
                 existing.UpdatedAtUtc = now;
                 if (existingBranch is not null) { existingBranch.State = (int)RetainedProcessorBranchState.Pending; existingBranch.UpdatedAtUtc = now; }
                 db.AuditEvents.Add(new AuditEventEntity { EventType = "source.default_policy_revalidated", EventFamily = "source", Severity = "information",
-                    Actor = "native-policy-reprocess", SourceRootId = root.Id, SourceRevisionId = revision.Id, SourceActivityId = existing.Id,
+                    Actor = actor, SourceRootId = root.Id, SourceRevisionId = revision.Id, SourceActivityId = existing.Id,
                     OccurredAtUtc = now, DetailsJson = existing.AttemptEvidenceJson });
             }
             return;
@@ -174,14 +184,14 @@ internal static partial class SqlDefaultRetainedPolicy
                 pending.UpdatedAtUtc = now;
                 pending.AttemptEvidenceJson = JsonSerializer.Serialize(new { policy = RetainedDefaultPolicy.Version, supersededByActivityId = successor.Id });
                 db.AuditEvents.Add(new AuditEventEntity { EventType = "source.unlinked_text_superseded", EventFamily = "source", Severity = "information",
-                    Actor = "native-policy-reprocess", SourceRootId = root.Id, SourceRevisionId = revision.Id, SourceActivityId = pending.Id,
+                    Actor = actor, SourceRootId = root.Id, SourceRevisionId = revision.Id, SourceActivityId = pending.Id,
                     OccurredAtUtc = now, DetailsJson = pending.AttemptEvidenceJson });
             }
         }
         if (descriptor is not null && !unsupported) db.SourceProcessorBranches.Add(new SourceProcessorBranchEntity { Id = Guid.NewGuid(), SourceActivityId = successor.Id,
             SourceRevisionId = revision.Id, InputSha256 = request.Hash, ProcessorVersion = descriptor.ProcessorVersion, ProcessorFingerprint = descriptor.ProcessorFingerprint,
             State = (int)RetainedProcessorBranchState.Pending, CreatedAtUtc = now, UpdatedAtUtc = now });
-        db.AuditEvents.Add(new AuditEventEntity { EventType = "source.default_policy_applied", EventFamily = "source", Severity = "information", Actor = "native-policy-reprocess",
+        db.AuditEvents.Add(new AuditEventEntity { EventType = "source.default_policy_applied", EventFamily = "source", Severity = "information", Actor = actor,
             SourceRootId = root.Id, SourceRevisionId = revision.Id, SourceActivityId = successor.Id, OccurredAtUtc = now,
             DetailsJson = JsonSerializer.Serialize(new { policy = RetainedDefaultPolicy.Version, predecessor = predecessor.Id, successor = successor.Id,
                 descriptor = admission.DescriptorFingerprint, inputSha256 = request.Hash, configurationRevision = root.ConfigurationRevision, verifiedByteLength = admission.ByteLength }) });
@@ -237,6 +247,8 @@ internal static partial class SqlDefaultRetainedPolicy
     internal static async ValueTask<bool> BindingIsCurrentAsync(FluxKnowledgeDbContext db, Guid activityId, CancellationToken token)
     {
         var activity = await db.SourceActivities.SingleAsync(value => value.Id == activityId, token);
+        if (SqlGuidedRetainedBinding.IsMarked(activity))
+            return await SqlGuidedRetainedBinding.IsCurrentAsync(db, activity, token).ConfigureAwait(false);
         if (SqlDocumentInputRecovery.IsMarked(activity) || await db.SourceActivityRelations.AnyAsync(value => value.SuccessorActivityId == activityId &&
                 value.RelationshipKind == "superseded-by-retained-processor" && value.ReasonCode == DocumentProcessingInput.DocumentRecoveryVersion, token))
             return await SqlDocumentInputRecovery.BindingIsCurrentAsync(db, activityId, token);
@@ -255,7 +267,7 @@ internal static partial class SqlDefaultRetainedPolicy
     internal static async Task BlockStaleAsync(FluxKnowledgeDbContext db, Guid activityId, SourceProcessorBranchEntity? branch, DateTimeOffset now, CancellationToken token)
     {
         var activity = await db.SourceActivities.SingleAsync(value => value.Id == activityId, token);
-        if (!SqlDocumentInputRecovery.IsMarked(activity) && !await db.SourceActivityRelations.AnyAsync(value => value.SuccessorActivityId == activityId &&
+        if (!SqlGuidedRetainedBinding.IsMarked(activity) && !SqlDocumentInputRecovery.IsMarked(activity) && !await db.SourceActivityRelations.AnyAsync(value => value.SuccessorActivityId == activityId &&
             (value.RelationshipKind == RetainedDefaultPolicy.RelationshipKind && value.ReasonCode == RetainedDefaultPolicy.Version ||
              value.RelationshipKind == "superseded-by-retained-processor" && value.ReasonCode == DocumentProcessingInput.DocumentRecoveryVersion), token)) return;
         if (activity.ResultingPipelineRecordId is not null) return;

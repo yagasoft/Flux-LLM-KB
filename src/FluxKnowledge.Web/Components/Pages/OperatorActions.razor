@@ -8,6 +8,10 @@
 
 <section aria-labelledby="operator-actions-heading">
     <h1 id="operator-actions-heading">Operator actions</h1>
+    @if (SourceRevisionId is { } revision && revision != Guid.Empty)
+    {
+        <RetainedRecoveryControls SourceRevisionId="revision" FailedJobId="JobId" BranchId="BranchId" OpenOnLoad="true" />
+    }
     <p>Review blocked retained-processing actions without exposing source content or private bindings.</p>
     <p role="status" aria-live="polite">@_status</p>
     <label><input type="checkbox" checked="@PageState.IncludeIgnored" @onchange="IncludeIgnoredChangedAsync" /> Include ignored</label>
@@ -45,6 +49,10 @@
 </section>
 
 @code {
+    [SupplyParameterFromQuery] public Guid? SourceRevisionId { get; set; }
+    [SupplyParameterFromQuery] public Guid? JobId { get; set; }
+    [SupplyParameterFromQuery] public Guid? BranchId { get; set; }
+
     private readonly CancellationTokenSource _stopping = new();
     private string _status = "Loading operator actions from SQL…";
 

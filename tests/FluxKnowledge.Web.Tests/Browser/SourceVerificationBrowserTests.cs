@@ -15,7 +15,7 @@ namespace FluxKnowledge.Web.Tests.Browser;
 public sealed class SourceVerificationBrowserTests
 {
     [BrowserFact]
-    public async Task Existing_source_page_explains_metadata_policy_and_only_queues_full_content_when_explicitly_requested()
+    public async Task Existing_source_page_explains_metadata_policy_and_queues_metadata_reconciliation()
     {
         await using var sql = new NativeSqlServerFixture();
         await sql.InitializeAsync();
@@ -64,11 +64,13 @@ public sealed class SourceVerificationBrowserTests
             await page.GetByRole(AriaRole.Link, new() { Name = "View", Exact = true }).ClickAsync();
             await page.GetByRole(AriaRole.Heading, new() { Name = "Weekly verification fixture", Exact = true }).WaitForAsync();
             var panel = page.Locator(".source-verification");
-            await panel.GetByText("Automatic checksum verification is disabled.", new() { Exact = false }).WaitForAsync();
+            await panel.GetByText("Files are checked using size and modification date.", new() { Exact = false }).WaitForAsync();
             Assert.Equal(0, await panel.GetByRole(AriaRole.Button, new() { Name = "Verify now", Exact = true }).CountAsync());
             Assert.Equal(0, await panel.GetByRole(AriaRole.Button, new() { Name = "Edit verification schedule", Exact = true }).CountAsync());
-            await panel.GetByRole(AriaRole.Button, new() { Name = "Full content rescan", Exact = true }).ClickAsync();
-            await panel.GetByText("Full content rescan was requested.", new() { Exact = true }).WaitForAsync();
+            Assert.Equal(0, await panel.GetByRole(AriaRole.Button, new() { Name = "Full content rescan", Exact = true }).CountAsync());
+            var reconcile = panel.GetByRole(AriaRole.Button, new() { Name = "Reconcile source metadata", Exact = true });
+            await reconcile.ClickAsync();
+            await panel.GetByText("Metadata reconciliation was requested.", new() { Exact = true }).WaitForAsync();
             await page.ReloadAsync(new() { WaitUntil = WaitUntilState.NetworkIdle });
             await panel.GetByText("Quiet, unchanged files are not reread.", new() { Exact = false }).WaitForAsync();
             Assert.Equal("Source root | Flux Knowledge", await page.TitleAsync());
@@ -76,7 +78,7 @@ public sealed class SourceVerificationBrowserTests
             await page.ScreenshotAsync(new() { Path = Path.Combine(evidence, "verification-desktop.png"), FullPage = true });
             await page.SetViewportSizeAsync(390, 844);
             await panel.GetByRole(AriaRole.Heading, new() { Name = "Source updates", Exact = true }).ScrollIntoViewIfNeededAsync();
-            Assert.True(await panel.GetByRole(AriaRole.Button, new() { Name = "Full content rescan", Exact = true }).IsVisibleAsync());
+            Assert.True(await reconcile.IsVisibleAsync());
             Assert.True(await page.EvaluateAsync<bool>("document.documentElement.scrollWidth <= window.innerWidth"));
             await page.ScreenshotAsync(new() { Path = Path.Combine(evidence, "verification-mobile.png"), FullPage = true });
             Assert.Empty(errors);
@@ -87,7 +89,8 @@ public sealed class SourceVerificationBrowserTests
             Assert.Empty(await db.SourceVerificationRuns.ToArrayAsync());
             Assert.False(await db.SourceScanRequests.AnyAsync(x => x.RequestKind == SqlSourceVerificationStore.RequestKind));
             Assert.False(await db.SourceArtifacts.AnyAsync());
-            Assert.Equal(1, await db.SourceScanRequests.CountAsync(x => x.RequestKind == 5));
+            Assert.Equal(1, await db.SourceScanRequests.CountAsync(x => x.RequestKind == 1));
+            Assert.False(await db.SourceScanRequests.AnyAsync(x => x.RequestKind == 5));
             }
             catch
             {

@@ -58,8 +58,23 @@ public static class VisioDocumentPipelineRunner
                 VisioDocumentInputProcessor.Capability.ProcessorFingerprint);
         }
 
+        // Apply the durable guided binding before ordering. A stale prepared branch
+        // still exists for history and drain, but must not occupy the next work slot.
+        var eligiblePreparation = context.SourceActivities.FromSqlInterpolated($"""
+            SELECT [activity].* FROM [SourceActivities] AS [activity]
+            INNER JOIN [SourceRevisions] AS [revision] ON [revision].[Id] = [activity].[SourceRevisionId]
+            INNER JOIN [SourceRootConfigurations] AS [root] ON [root].[Id] = [revision].[SourceRootId]
+            WHERE [activity].[DescriptorFingerprint] <> {SqlGuidedRetainedBinding.Fingerprint} OR
+                ([root].[FollowLinks] = 0 AND [root].[ConfigurationRevision] > 0 AND
+                 [activity].[InputFingerprint] COLLATE Latin1_General_100_BIN2 = [revision].[ContentSha256] COLLATE Latin1_General_100_BIN2 AND EXISTS (
+                    SELECT 1 FROM OPENJSON(CASE WHEN ISJSON([activity].[AttemptEvidenceJson]) = 1 THEN [activity].[AttemptEvidenceJson] END) [proof]
+                    WHERE [proof].[key] = N'configurationRevision'
+                    HAVING COUNT(*) = 1 AND MIN([proof].[type]) = 2 AND
+                        MIN(TRY_CONVERT(bigint, [proof].[value])) = [root].[ConfigurationRevision]))
+            """).AsNoTracking();
         var candidate = await baseCandidates
             .Where(value => value.Root.State == (int)SourceRootState.Enabled && value.Owner.SuppressedAtUtc == null &&
+                eligiblePreparation.Any(activity => activity.Id == value.Branch.SourceActivityId && activity.SourceRevisionId == value.Owner.Id) &&
                 (!(from member in context.SourceProcessorBranchMembers
                    join record in context.PipelineRecords on member.ChildSourceRevisionId equals record.SourceRevisionId
                    where member.BranchId == value.Branch.Id

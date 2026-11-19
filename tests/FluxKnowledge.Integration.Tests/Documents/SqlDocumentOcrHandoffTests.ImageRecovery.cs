@@ -417,6 +417,91 @@ public sealed partial class SqlDocumentOcrHandoffTests
             .RequestDocumentReprocessAsync(ImageRecoveryRequest(seed), CancellationToken.None)).Created);
     }
 
+    [NativeSqlServerTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Dashboard_document_confirmation_requires_current_physical_metadata_and_preserves_the_old_attempt(bool pdf)
+    {
+        var stamp = DateTimeOffset.UtcNow;
+        var seed = await CreateSettledImageFailureAsync(pdf, pdf ? "pdf-document-encrypted" : "image-document-dimensions-exceeded",
+            native: !pdf, sourceLastWriteAt: stamp);
+        GuidedRecoveryObservations observations;
+        await using (var prepare = await seed.Factory.CreateDbContextAsync())
+        {
+            var parent = await prepare.SourceRevisions.SingleAsync(value => value.Id == seed.ParentId);
+            var root = await prepare.SourceRootConfigurations.SingleAsync(value => value.Id == parent.SourceRootId);
+            root.HealthEvidenceJson = "{\"physicalIdentity\":{\"IdentityFingerprint\":\"" + new string('a', 64) + "\"}}";
+            await prepare.SaveChangesAsync();
+            observations = new(new(parent.StableSourceIdentity, "file", "parent", parent.ByteLength, stamp.ToFileTime(), 17, 0, 1));
+        }
+
+        var admission = new FixtureSourceAdmission(seed.Factory);
+        var expireAtCommit = true;
+        var native = new SqlNativeOperationStore(seed.Factory, TimeProvider.System,
+            afterSaveBeforeCommitInjector: () => observations.LeaseIsCurrent = !expireAtCommit);
+        var commands = new RetainedRecoveryNativeCommands(seed.Factory, native,
+            new RetainedProcessorOptions { ImageDocumentOcrEnabled = true }, admission, observations);
+        var target = new RetainedRecoveryTarget(pdf ? "pdf" : "image", seed.ParentId, seed.FailedJobId);
+        var preview = await commands.PreviewAsync(target, default);
+        var original = observations.Current;
+        observations.Current = original with { LastWriteTicks = original.LastWriteTicks + 1 };
+        var changed = await Assert.ThrowsAsync<FluxKnowledge.Application.IntegrationV1.NativeOperationException>(async () =>
+            await commands.CommitAsync(target, preview.Confirmation.ConfirmationId, "guided-changed-physical-document", default));
+        Assert.Equal("retained-recovery-input-changed", changed.ReasonCode);
+        observations.Current = original;
+
+        var invalidated = await Assert.ThrowsAsync<FluxKnowledge.Application.IntegrationV1.NativeOperationException>(async () =>
+            await commands.CommitAsync(target, preview.Confirmation.ConfirmationId, "guided-late-document-change", default));
+        Assert.Equal("retained-recovery-physical-proof-required", invalidated.ReasonCode);
+        Assert.Equal(0, observations.ActiveFileLeases);
+        await using (var refused = await seed.Factory.CreateDbContextAsync())
+            Assert.False(await refused.SourceActivityRelations.AnyAsync());
+        observations.LeaseIsCurrent = true;
+        expireAtCommit = false;
+
+        var result = await commands.CommitAsync(target, preview.Confirmation.ConfirmationId, $"guided-exact-document-{seed.ParentId:N}", default);
+        var progress = await commands.ReadProgressAsync(target, result.OperationId, default);
+        Assert.Equal("Queued", progress?.State);
+        await using var verify = await seed.Factory.CreateDbContextAsync();
+        var audit = await verify.AuditEvents.Where(value => value.EventType == "retained_processor.document_reprocess_requested")
+            .Select(value => value.Actor).SingleAsync();
+        Assert.Equal("web", audit);
+        Assert.Equal((int)PublicJobState.Failed, await verify.Jobs.Where(value => value.Id == seed.FailedJobId)
+            .Select(value => value.PublicState).SingleAsync());
+    }
+
+    private sealed class GuidedRecoveryObservations(SourceFileObservation initial) : ISourceObservationReader
+    {
+        public SourceFileObservation Current { get; set; } = initial;
+        public bool LeaseIsCurrent { get; set; } = true;
+        public int ActiveFileLeases { get; private set; }
+        public ISourceObservationLease Open(SourceRootConfiguration root, string relativePath)
+        {
+            ActiveFileLeases++;
+            return new ObservationScope(this, Current);
+        }
+        public IReadOnlyList<SourceNamespaceObservation> ReadRootAncestors(SourceRootConfiguration root) => [];
+        public ISourceRootObservationLease OpenRoot(SourceRootConfiguration root) => new Root();
+        public ISourceAbsenceLease? OpenAbsence(SourceRootConfiguration root, string relativePath) => null;
+
+        private sealed class ObservationScope(GuidedRecoveryObservations owner, SourceFileObservation current) : ISourceObservationLease
+        {
+            public SourceFileObservation Observation { get; } = current;
+            public void ValidateCurrent()
+            {
+                if (!owner.LeaseIsCurrent) throw new IOException("Injected file lease loss before commit");
+            }
+            public void Dispose() => owner.ActiveFileLeases--;
+        }
+
+        private sealed class Root : ISourceRootObservationLease
+        {
+            public IReadOnlyList<SourceNamespaceObservation> Ancestors => [];
+            public void ValidateCurrent() { }
+            public void Dispose() { }
+        }
+    }
+
     [NativeSqlServerFact]
     public async Task Exact_image_recovery_creates_one_fenced_successor_and_distinct_child_without_resetting_old_work()
     {
@@ -601,7 +686,7 @@ public sealed partial class SqlDocumentOcrHandoffTests
     private async Task<ImageFailureSeed> CreateSettledImageFailureAsync(bool pdf = false,
         string failureReason = "image-document-dimensions-exceeded", bool native = true,
         Func<RetainedProcessorDerivedChild, string>? predecessorLocator = null, bool withPhysicalHistory = false,
-        bool suppressPrevious = true, bool differentHistoryIdentity = false, int parentOriginKind = 0)
+        bool suppressPrevious = true, bool differentHistoryIdentity = false, int parentOriginKind = 0, DateTimeOffset? sourceLastWriteAt = null)
     {
         await SqlTestData.ClearPhase3SourceDataAsync(_fixture);
         var factory = SqlTestData.CreateFactory(_fixture);
@@ -633,7 +718,8 @@ public sealed partial class SqlDocumentOcrHandoffTests
                 ReconciliationCadenceSeconds = 900, CreatedAtUtc = now, UpdatedAtUtc = now });
             var parent = new FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.SourceRevisionEntity
             { Id = parentId, SourceRootId = rootId, StableSourceIdentity = parentStable, CanonicalPath = Path.Combine(sourceRoot, pdf ? "document.pdf" : "diagram.jpg"),
-                Revision = 1, ContentSha256 = hash, ByteLength = bytes.Length, Classification = descriptor.AcceptedClassification, Extension = contract.Extension, DiscoveredAtUtc = now };
+                Revision = 1, ContentSha256 = hash, ByteLength = bytes.Length, Classification = descriptor.AcceptedClassification,
+                Extension = contract.Extension, DiscoveredAtUtc = now, FileLastWriteAtUtc = sourceLastWriteAt };
             if (withPhysicalHistory) SqlTestData.AddPhysicalRevisionHistory(db, parent, suppressPrevious, differentHistoryIdentity);
             // Build the settled predecessor under a valid original ownership binding.
             db.SourceRevisions.Add(parent);

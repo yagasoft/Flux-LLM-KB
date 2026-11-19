@@ -95,6 +95,9 @@ public sealed class OutlookPageState(
         }
     }
 
+    public ValueTask<OutlookCatchUpStatus?> ReadCatchUpAsync(Guid profileId, Guid operationId, CancellationToken cancellationToken) =>
+        projectionReader.ReadCatchUpAsync(profileId, operationId, cancellationToken);
+
     public async ValueTask<OutlookBrowseRequest> RequestBrowseAsync(
         OutlookProfileDraft draft,
         CancellationToken cancellationToken)
@@ -265,21 +268,27 @@ public sealed class OutlookPageState(
     public async ValueTask<OutlookOperationReceipt> RequestCatchUpAsync(
         OutlookCaptureProfileId profileId,
         bool manualReconciliation,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Guid? confirmedOperationId = null,
+        long? expectedConfigurationRevision = null,
+        IReadOnlyList<Guid>? expectedFolderIds = null,
+        DateTimeOffset? confirmationExpiresAtUtc = null)
     {
         await operatorPolicy.EnsureMutationAllowedAsync(cancellationToken).ConfigureAwait(false);
-        var operationId = Guid.NewGuid();
+        var operationId = confirmedOperationId ?? Guid.NewGuid();
         var coalescingKey = manualReconciliation
             ? $"received-reconcile:{profileId.Value:N}"
             : $"manual:{profileId.Value:N}";
         var receipt = await store.RequestCatchUpAsync(
             new OutlookCatchUpRequest(
                 operationId,
-                RequestFingerprint("request-catchup", operationId, profileId.Value, coalescingKey),
+                RequestFingerprint("request-catchup", operationId, profileId.Value, coalescingKey, expectedConfigurationRevision),
                 profileId,
                 coalescingKey,
                 OutlookCatchUpProvenance.Manual,
-                manualReconciliation ? "received-time-reconciliation" : "manual-catch-up"),
+                manualReconciliation ? "received-time-reconciliation" : "manual-catch-up")
+                { ExpectedConfigurationRevision = expectedConfigurationRevision, ExpectedFolderIds = expectedFolderIds,
+                    ConfirmationExpiresAtUtc = confirmationExpiresAtUtc },
             cancellationToken).ConfigureAwait(false);
         await ReloadAsync(cancellationToken).ConfigureAwait(false);
         return receipt;

@@ -13,12 +13,11 @@ namespace FluxKnowledge.Integration.Tests.Sources;
 public sealed class SourceJournalMigrationDeploymentTests(NativeSqlServerFixture fixture) : IClassFixture<NativeSqlServerFixture>
 {
     [NativeSqlServerFact]
-    public async Task Already_applied_metadata_successor_round_trips_its_durable_journal_intent()
+    public async Task Already_applied_window_eligibility_successor_round_trips_its_durable_journal_intent()
     {
-        var factory = SqlTestData.CreateFactory(fixture);
-        await using var db = await factory.CreateDbContextAsync();
-        await db.GetService<IMigrator>().MigrateAsync();
-        await SqlSourceDeletionPendingQueueIndex.EnsureAsync(db,default);
+        await using var database = await fixture.CreateMigrationDatabaseAsync("20261117210606_PersistPassageWindowEligibility");
+        await using var db = database.CreateContext();
+        await SqlSourceDeletionPendingQueueIndex.EnsureAsync(db, default);
         var area = Path.Combine(@"I:\Codex Workspaces\Staging\FluxKnowledge", "JournalHeldIntent-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(area);
         try
@@ -28,7 +27,7 @@ public sealed class SourceJournalMigrationDeploymentTests(NativeSqlServerFixture
                 RedirectStandardOutput = true, RedirectStandardError = true };
             foreach (var argument in new[] { "-NoProfile", "-File", Path.Combine(source, "tests/native/source-journal-held-intent-sql.ps1"),
                 "-SourceRoot", source, "-ReceiptDirectory", area }) start.ArgumentList.Add(argument);
-            start.Environment["FLUXKNOWLEDGE_JOURNAL_DISPOSABLE_SQL"] = fixture.ConnectionString;
+            start.Environment["FLUXKNOWLEDGE_JOURNAL_DISPOSABLE_SQL"] = database.ConnectionString;
             using var process = Process.Start(start)!;
             var output = process.StandardOutput.ReadToEndAsync(); var errors = process.StandardError.ReadToEndAsync();
             using var deadline = new CancellationTokenSource(TimeSpan.FromMinutes(1));

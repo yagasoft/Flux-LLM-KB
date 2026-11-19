@@ -13,7 +13,7 @@ namespace FluxKnowledge.Integration.Tests.Sources;
 
 public sealed partial class SourceDeletionIntegrationTests
 {
-    [NativeSqlServerFact]
+    [SqlServerScaleFact]
     [Trait("Category", "Scale")]
     public async Task Final_graph_cleanup_bounds_audit_pages_and_completes_with_production_sized_metadata_fanout()
     {
@@ -23,7 +23,7 @@ public sealed partial class SourceDeletionIntegrationTests
         var operation = await AddDeletionAsync(source, now);
         await SeedFinalMetadataFanoutAsync(source, control, operation);
         var publications = await SeedPublicationQueryGraphAsync(source, control, 0);
-        await SeedUnrelatedPublicationsAsync(control, publications.ForeignBranch);
+        await SeedUnrelatedPublicationsAsync(control, publications.ForeignBranch, 600);
         var timing = new GraphCommandTimings();
         var artifactPages = new ArtifactPageRows();
         var ownership = new GraphOwnershipParameterBudget();

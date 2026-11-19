@@ -792,8 +792,9 @@ public sealed partial class EmbeddingGpuRequestTests(NativeSqlServerFixture fixt
         Assert.False((await new SqlDerivedIndexRecoveryStore(environment.Factory, TimeProvider.System).ReadActiveAsync(CancellationToken.None)).IsProjectionUnavailable);
 
         // Foreground retrieval uses the same durable admission, private execution and release path.
+        var foregroundWake = new ChannelGpuSchedulerWakeSignal();
         var foreground = new GpuInteractiveExecutor(scheduler, new Lifecycle(scheduler), scheduler,
-            new ChannelGpuSchedulerWakeSignal(), TimeProvider.System, Runtime.RuntimeKey, Runtime.SettingsFingerprint, Runtime.EstimatedBytes);
+            foregroundWake, TimeProvider.System, Runtime.RuntimeKey, Runtime.SettingsFingerprint, Runtime.EstimatedBytes);
         var reader = new SqlCorpusRetrievalReader(environment.Factory);
         var codec = new CorpusEvidenceCodec(new EphemeralDataProtectionProvider());
         var engine = new HybridPassageRetrievalEngine(reader, reader,
@@ -802,20 +803,31 @@ public sealed partial class EmbeddingGpuRequestTests(NativeSqlServerFixture fixt
             new BgeScheduledPassageInference(foreground, new BgeGpuInferenceSession(models)),
             new WindowsInteractiveGpuOwnerProbe(), codec, new LocalPrivateContentDisclosure());
         await SqlTestData.WaitForFullTextAsync(environment.Factory);
-        var search = engine.SearchAsync(new("Heading", 2, "all", null, null), CancellationToken.None).AsTask();
-        var foregroundBatches = new List<Guid>();
         using var foregroundBudget = new CancellationTokenSource(TimeSpan.FromSeconds(12));
-        // Embedding and ranking now release ownership separately around SQL/ANN.
-        // Drive the real handoffs for both phases, rather than leaving ranking queued.
-        while (!search.IsCompleted)
+        var search = engine.SearchAsync(new("Heading", 2, "all", null, null), foregroundBudget.Token).AsTask();
+        var foregroundBatches = new List<Guid>();
+        try
         {
-            await scheduler.RunAdmissionRoundAsync(Guid.NewGuid(), GpuSchedulerWakeReason.WorkReady, options,
-                gate.DecideAsync, foregroundBudget.Token);
-            var handle = (await scheduler.ReadPendingDispatchesAsync(foregroundBudget.Token)).SingleOrDefault();
-            if (handle is null) { await Task.Delay(10, foregroundBudget.Token); continue; }
-            Assert.Equal(foreground.ExecutorKey, handle.ExecutorKey);
-            foregroundBatches.Add(handle.BatchId);
-            await foreground.DeliverAsync(handle, foregroundBudget.Token);
+            // Each phase signals WorkReady after its durable handoff releases the admission fence.
+            while (!search.IsCompleted)
+            {
+                var waitingForWake = foregroundWake.WaitAsync(foregroundBudget.Token).AsTask();
+                if (await Task.WhenAny(waitingForWake, search) == search) break;
+                var reason = await waitingForWake;
+                Assert.Equal(GpuSchedulerWakeReason.WorkReady, reason);
+                var admission = await scheduler.RunAdmissionRoundAsync(Guid.NewGuid(), reason, options,
+                    gate.DecideAsync, foregroundBudget.Token);
+                Assert.Equal(GpuAdmissionDisposition.Admit, admission.Disposition);
+                var handle = Assert.Single(await scheduler.ReadPendingDispatchesAsync(foregroundBudget.Token));
+                Assert.Equal(foreground.ExecutorKey, handle.ExecutorKey);
+                foregroundBatches.Add(handle.BatchId);
+                await foreground.DeliverAsync(handle, foregroundBudget.Token);
+            }
+        }
+        finally
+        {
+            await foregroundBudget.CancelAsync();
+            await Record.ExceptionAsync(() => search);
         }
         var result = await search;
         Assert.Equal(2, foregroundBatches.Count);
@@ -851,7 +863,29 @@ public sealed partial class EmbeddingGpuRequestTests(NativeSqlServerFixture fixt
             await scheduler.RunAdmissionRoundAsync(Guid.NewGuid(), GpuSchedulerWakeReason.WorkReady,
                 new(4, 4096, TimeSpan.FromMinutes(1), TimeSpan.FromSeconds(1), TimeSpan.FromMinutes(1)),
                 (_, _) => ValueTask.FromResult(new GpuAdmissionDecision(GpuAdmissionDisposition.Admit, "gpu-0", "owner", null, EmbeddingGpuExecutor.Name)), CancellationToken.None);
-            await executor.DeliverAsync(Assert.Single(await scheduler.ReadPendingDispatchesAsync(CancellationToken.None)), CancellationToken.None);
+            var handle = Assert.Single(await scheduler.ReadPendingDispatchesAsync(CancellationToken.None));
+            await executor.DeliverAsync(handle, CancellationToken.None);
+
+            var settlement = await (from task in context.GpuMiniTasks.AsNoTracking()
+                join request in context.EmbeddingGpuRequests.AsNoTracking() on task.Id equals request.MiniTaskId
+                join batch in context.GpuBatches.AsNoTracking() on task.BatchId equals batch.Id
+                join dispatch in context.GpuExecutorDispatches.AsNoTracking() on batch.Id equals dispatch.BatchId
+                where dispatch.DispatchId == handle.DispatchId
+                select new { task.ExecutionState, request.NativeCleanupConfirmed, request.CleanupConfirmedAtUtc,
+                    request.ResultDigest, RequestState = request.State, BatchState = batch.State, DispatchState = dispatch.State })
+                .SingleAsync();
+            Assert.Equal(2, settlement.RequestState);
+            Assert.True(settlement.NativeCleanupConfirmed);
+            Assert.NotNull(settlement.CleanupConfirmedAtUtc);
+            Assert.Null(settlement.ResultDigest);
+            Assert.Equal((int)GpuMiniTaskExecutionState.OutcomeUncertain, settlement.ExecutionState);
+            Assert.Equal((int)GpuBatchState.Released, settlement.BatchState);
+            Assert.Equal((int)GpuExecutorDispatchState.DeliveryUncertain, settlement.DispatchState);
+            Assert.False(await context.GpuCapacitySlots.AnyAsync(value => value.ActiveBatchId == handle.BatchId));
+            Assert.Equal((int)PublicJobState.WorkerQueued, await context.Jobs.Where(value => value.Id == work.Job.JobId.Value)
+                .Select(value => value.PublicState).SingleAsync());
+            Assert.Null(await context.OutboxMessages.Where(value => value.Id == work.DispatchMessage.DispatchMessageId.Value)
+                .Select(value => value.DispatchedAtUtc).SingleAsync());
         }
         var last = await ClaimAsync(environment, now: DateTimeOffset.UtcNow.AddSeconds(10));
         var lastBatch = await checkpoints.ReadNextAsync(last, Runtime.Profile, CancellationToken.None);

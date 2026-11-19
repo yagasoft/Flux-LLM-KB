@@ -105,7 +105,7 @@ The final live file review found one image Extract job permanently failed after 
 - [x] Decide the separately reviewed recovery for the exact historical job from its current request/task/result/native-cleanup bindings. Eleven isolated scenarios qualify the private operation, including exact-plan reconciliation and terminal successor refusal. No public API or source re-ingestion is added.
 - [x] Include prevention and authorised historical recovery in final release/normal-workflow acceptance before closeout. One reviewed original-job requeue consumed the saved result and completed all five stages through publication, with original native/task/result bindings unchanged and no new OCR handoff.
 
-## Task 7: Collect legacy generation references before materialisation
+## Task 7: Collect earlier generation references before materialisation
 
 Two broader runs reproduced a timeout in unchanged initial generation-target capture. The single test and its immediate predecessor sequence passed alone, demonstrating a plan-sensitive query. The correlated generation scan asks whether each generation contains any root-owned vector. Discover distinct referenced generation IDs from the unchanged root vector query first, union the owned draft/checkpoint ID branch, then join to Format1 generation rows. Keep empty-branch checks inside the same fenced transaction. Preserve retirement timestamps, shared-reference authority, target creation and Format2 handling. Independent review approved set equivalence; a better plan must be measured rather than assumed.
 
@@ -124,7 +124,7 @@ The final normal Overview check shows seven older OCR records held with uncertai
 
 ## Task 9: Route prepared Visio CLI requests to the existing exact runner
 
-The first scoped command refused `document-reprocess-not-eligible` without extraction. The CLI always uses legacy reprocessing, although ordinary discovery already completed a current Visio preparation branch without a legacy supersession relation. The companion runner supports this shape. Independent design review approves delegating only an exact source revision, input hash, processor fingerprint, parent processor version and Completed branch. Check extractor availability before delegation because the companion runner may clean an expired execution before its own availability check. Preserve the legacy fallback.
+The first scoped command refused `document-reprocess-not-eligible` without extraction. The CLI always uses previous reprocessing, although ordinary discovery already completed a current Visio preparation branch without a previous supersession relation. The companion runner supports this shape. Independent design review approves delegating only an exact source revision, input hash, processor fingerprint, parent processor version and Completed branch. Check extractor availability before delegation because the companion runner may clean an expired execution before its own availability check. Preserve the previous fallback.
 
 - [x] Reproduce the CLI defect with a physical isolated source fixture; prove exact-binding refusals, availability before recovery and idempotent replay.
 - [x] Add the narrow delegation, run the affected SQL tests and build, then obtain independent implementation review. All 23 scoped SQL checks pass; the Release build has zero warnings/errors.

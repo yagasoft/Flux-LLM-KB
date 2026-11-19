@@ -1,5 +1,7 @@
 using FluxKnowledge.Application.Contracts;
+using FluxKnowledge.Application.IntegrationV1;
 using FluxKnowledge.Application.Ports;
+using FluxKnowledge.Application.Sources;
 using FluxKnowledge.Domain.Outlook;
 using FluxKnowledge.Domain.Sources;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
@@ -14,7 +16,8 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
 /// SQL-only control plane for Outlook capture. Private COM identifiers never leave this class or its entities.
 /// It deliberately does not construct Outlook, access the spool, or activate a processor.
 /// </summary>
-public sealed class SqlOutlookCaptureStore(IDbContextFactory<FluxKnowledgeDbContext> contextFactory, TimeProvider? timeProvider = null)
+public sealed class SqlOutlookCaptureStore(IDbContextFactory<FluxKnowledgeDbContext> contextFactory, TimeProvider? timeProvider = null,
+    IDeploymentValidationHold? deploymentValidationHold = null)
     : IOutlookCaptureStore, IOutlookCaptureRecoveryStore
 {
     private const int MaximumRecoveryBatchSize = 100;
@@ -150,16 +153,45 @@ public sealed class SqlOutlookCaptureStore(IDbContextFactory<FluxKnowledgeDbCont
     public ValueTask<OutlookOperationReceipt> RequestCatchUpAsync(OutlookCatchUpRequest request, CancellationToken cancellationToken)
     {
         request.Validate();
-        return MutateAsync("request-catchup", request.OperationId, request.RequestFingerprint, request.ProfileId.Value, async context =>
+        var expectedFolders = request.ExpectedFolderIds?.Order().ToArray();
+        var fingerprint = request.ExpectedConfigurationRevision is { } revision
+            ? Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(FormattableString.Invariant(
+                $"{request.RequestFingerprint}/{revision}/{request.ConfirmationExpiresAtUtc:O}/{(expectedFolders is null ? "unbound" : string.Join(',', expectedFolders))}"))))
+            : request.RequestFingerprint;
+        return MutateAsync("request-catchup", request.OperationId, fingerprint, request.ProfileId.Value, async context =>
         {
-            var profile = await context.OutlookCaptureProfiles.SingleOrDefaultAsync(x => x.Id == request.ProfileId.Value, cancellationToken).ConfigureAwait(false);
-            if (profile is null || !profile.IsEnabled || profile.State == (int)OutlookCaptureState.Disabled) return (false, (Guid?)null);
+            if (request.ExpectedConfigurationRevision is not null && deploymentValidationHold?.IsHeld == true)
+                throw new NativeOperationException("deployment-validation-held");
+            var profiles = request.ExpectedConfigurationRevision is null ? context.OutlookCaptureProfiles.AsQueryable() :
+                context.OutlookCaptureProfiles.FromSqlInterpolated($"SELECT * FROM [OutlookCaptureProfiles] WITH (UPDLOCK,HOLDLOCK) WHERE [Id]={request.ProfileId.Value}");
+            var profile = await profiles.SingleOrDefaultAsync(x => x.Id == request.ProfileId.Value, cancellationToken).ConfigureAwait(false);
+            CheckCatchUpDeadline();
+            if (profile is null || !profile.IsEnabled || profile.State == (int)OutlookCaptureState.Disabled ||
+                request.ExpectedConfigurationRevision is { } expected && profile.ConfigurationRevision != expected)
+                return (false, (Guid?)null);
+            if (expectedFolders is not null)
+            {
+                var current = await context.OutlookCaptureFolders.FromSqlInterpolated(
+                        $"SELECT * FROM [OutlookCaptureFolders] WITH (UPDLOCK,HOLDLOCK) WHERE [ProfileId]={request.ProfileId.Value}")
+                    .Where(folder => folder.State != (int)OutlookCaptureState.Disabled).Select(folder => folder.Id)
+                    .ToArrayAsync(cancellationToken).ConfigureAwait(false);
+                if (!current.Order().SequenceEqual(expectedFolders)) return (false, (Guid?)null);
+            }
             var existing = await context.OutlookCatchUps.SingleOrDefaultAsync(x => x.ProfileId == request.ProfileId.Value && x.CoalescingKey == request.CoalescingKey && (x.State == 0 || x.State == 1), cancellationToken).ConfigureAwait(false);
+            CheckCatchUpDeadline();
+            if (request.ExpectedConfigurationRevision is not null && deploymentValidationHold?.IsHeld == true)
+                throw new NativeOperationException("deployment-validation-held");
             if (existing is not null) return (true, (Guid?)existing.Id);
             var catchUp = new OutlookCatchUpEntity { Id = Guid.NewGuid(), ProfileId = request.ProfileId.Value, CoalescingKey = request.CoalescingKey, Provenance = (int)request.Provenance, State = 0, Reason = request.Reason };
             context.OutlookCatchUps.Add(catchUp);
             return (true, (Guid?)catchUp.Id);
-        }, cancellationToken);
+        }, cancellationToken, fenceOperation: request.ConfirmationExpiresAtUtc is not null);
+
+        void CheckCatchUpDeadline()
+        {
+            if (request.ConfirmationExpiresAtUtc is { } deadline && deadline <= _clock.GetUtcNow())
+                throw new NativeOperationException("confirmation-expired");
+        }
     }
 
     public async ValueTask<OutlookCatchUpClaimReceipt> ClaimCatchUpAsync(OutlookCatchUpClaimRequest request, CancellationToken cancellationToken)
@@ -463,7 +495,8 @@ public sealed class SqlOutlookCaptureStore(IDbContextFactory<FluxKnowledgeDbCont
         string fingerprint,
         Guid? profileId,
         Func<FluxKnowledgeDbContext, Task<(bool Accepted, Guid? ResourceId)>> mutate,
-        CancellationToken token)
+        CancellationToken token,
+        bool fenceOperation = false)
     {
         var result = await MutateDetailedAsync(
             kind,
@@ -475,7 +508,7 @@ public sealed class SqlOutlookCaptureStore(IDbContextFactory<FluxKnowledgeDbCont
                 var outcome = await mutate(context).ConfigureAwait(false);
                 return new MutationOutcome(outcome.Accepted, outcome.ResourceId);
             },
-            token).ConfigureAwait(false);
+            token, fenceOperation).ConfigureAwait(false);
         return new OutlookOperationReceipt(operationId, result.Accepted, true, result.IsOperationReplay);
     }
 
@@ -485,7 +518,8 @@ public sealed class SqlOutlookCaptureStore(IDbContextFactory<FluxKnowledgeDbCont
         string fingerprint,
         Guid? profileId,
         Func<FluxKnowledgeDbContext, Task<MutationOutcome>> mutate,
-        CancellationToken token)
+        CancellationToken token,
+        bool fenceOperation = false)
     {
         for (var attempt = 0; ; attempt++)
         {
@@ -497,7 +531,7 @@ public sealed class SqlOutlookCaptureStore(IDbContextFactory<FluxKnowledgeDbCont
                     fingerprint,
                     profileId,
                     mutate,
-                    token).ConfigureAwait(false);
+                    token, fenceOperation).ConfigureAwait(false);
             }
             catch (DbUpdateConcurrencyException) when (attempt < 2)
             {
@@ -530,7 +564,8 @@ public sealed class SqlOutlookCaptureStore(IDbContextFactory<FluxKnowledgeDbCont
         string fingerprint,
         Guid? profileId,
         Func<FluxKnowledgeDbContext, Task<MutationOutcome>> mutate,
-        CancellationToken token)
+        CancellationToken token,
+        bool fenceOperation)
     {
         await using var executionContext = await _contextFactory.CreateDbContextAsync(token).ConfigureAwait(false);
         var strategy = executionContext.Database.CreateExecutionStrategy();
@@ -538,7 +573,10 @@ public sealed class SqlOutlookCaptureStore(IDbContextFactory<FluxKnowledgeDbCont
         {
         await using var context = await _contextFactory.CreateDbContextAsync(token).ConfigureAwait(false);
         await using var transaction = await context.Database.BeginTransactionAsync(token).ConfigureAwait(false);
-        var prior = await context.OutlookCaptureOperations
+        var operationReceipts = fenceOperation ? context.OutlookCaptureOperations.FromSqlInterpolated(
+            $"SELECT * FROM [OutlookCaptureOperations] WITH (UPDLOCK,HOLDLOCK) WHERE [OperationId]={operationId}") :
+            context.OutlookCaptureOperations.AsQueryable();
+        var prior = await operationReceipts
             .SingleOrDefaultAsync(candidate => candidate.OperationId == operationId, token)
             .ConfigureAwait(false);
         if (prior is not null)

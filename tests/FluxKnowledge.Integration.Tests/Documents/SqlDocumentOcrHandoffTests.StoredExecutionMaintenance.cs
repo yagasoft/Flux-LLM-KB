@@ -171,9 +171,10 @@ public sealed partial class SqlDocumentOcrHandoffTests
     }
 
     private async Task<(IDbContextFactory<FluxKnowledgeDbContext> Factory, SqlDocumentOcrStore Store,
-        DocumentOcrStoredExecutionRecoveryBinding Binding)> SeedStoredExecutionMaintenanceAsync(bool actualMachine = false)
+        DocumentOcrStoredExecutionRecoveryBinding Binding)> SeedStoredExecutionMaintenanceAsync(bool actualMachine = false,
+            NativeSqlServerFixture? fixture = null)
     {
-        var (factory, claim, revision, hash) = await CreateClaimedPdfAsync();
+        var (factory, claim, revision, hash) = await CreateClaimedPdfAsync(clearData: fixture is null, fixture: fixture);
         var store = CreateStore(factory);
         var task = Assert.IsType<Guid>((await store.HandoffAsync(new(claim, revision, hash, [0]), default)).MiniTaskId);
         var handle = await AdmitDocumentOcrTaskAsync(factory);
@@ -199,7 +200,10 @@ public sealed partial class SqlDocumentOcrHandoffTests
     [NativeSqlServerFact]
     public async Task Stored_execution_CLI_settles_the_original_result_and_replays_without_requeue_or_model_loading()
     {
-        var (factory, _, binding) = await SeedStoredExecutionMaintenanceAsync(actualMachine: true);
+        // The offline command requires the current reviewed migration history.
+        await using var maintenance = new NativeSqlServerFixture();
+        await maintenance.InitializeAsync();
+        var (factory, _, binding) = await SeedStoredExecutionMaintenanceAsync(actualMachine: true, fixture: maintenance);
         var area = Path.Combine(Path.GetTempPath(), "FluxStoredOcrCli_" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(area);
         try
@@ -227,7 +231,7 @@ public sealed partial class SqlDocumentOcrHandoffTests
                 foreach (var argument in new[] { "exec", "--runtimeconfig", Path.ChangeExtension(assembly, "runtimeconfig.json"), "--depsfile",
                     Path.ChangeExtension(assembly, "deps.json"), typeof(FluxKnowledge.Cli.Commands.OcrRecoveryCommand).Assembly.Location,
                     "ocr-recovery", "apply", "--plan", plan, "--sha256", await HashAsync(plan) }) start.ArgumentList.Add(argument);
-                start.Environment["ConnectionStrings__FluxKnowledge"] = _fixture.ConnectionString;
+                start.Environment["ConnectionStrings__FluxKnowledge"] = maintenance.ConnectionString;
                 using var process = Process.Start(start)!;
                 var stdout = process.StandardOutput.ReadToEndAsync(); var stderr = process.StandardError.ReadToEndAsync();
                 using var budget = new CancellationTokenSource(TimeSpan.FromSeconds(45));

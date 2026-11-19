@@ -1,5 +1,7 @@
 @using System.Globalization
 @using FluxKnowledge.Application.Contracts
+@using FluxKnowledge.Application.Sources
+@using FluxKnowledge.Web.Components.OperatorActions
 @implements IAsyncDisposable
 @inject IProjectionReader Reader
 @inject ILogger<PipelineFileExplorer> Logger
@@ -26,8 +28,27 @@
                 <article class="pipeline-file-item" @key="file.SourceRevisionId">
                     <FilePath FullPath="@file.FullPath" ArchivePath="@file.ArchivePath" />
                     <p>@file.SourceName · @file.Category · <strong>@file.Stage · @file.State</strong></p>
-                    <p>@(file.Reason == "archive-expansion-completed-members-counted-separately" ? "Archive expanded; retained members are counted separately." : file.Reason)</p>
-                    @if (file.Category is "Blocked" or "Failed" or "Deferred" or "Unconfirmed") { <p>Next action: @file.NextAction</p> }
+                    @if (file.Category is "Blocked" or "Failed" or "Deferred" or "Unconfirmed")
+                    {
+                        <p>@file.NextAction</p>
+                        <p><a href="@($"/sources/{file.SourceRootId:D}")">Review source settings and scan status</a></p>
+                        @if (ActionsEnabled && IsAvailableForReconciliation(file))
+                        {
+                            <GuidedRecoveryAction Action="source_sync" TargetId="file.SourceRootId" SourceRootId="file.SourceRootId" ActionLabel="Reconcile source metadata" ReconcileMetadata="true" />
+                        }
+                    }
+                    else if (file.Reason == "archive-expansion-completed-members-counted-separately")
+                    {
+                        <p>Archive expanded. Its retained members have their own indexing status.</p>
+                    }
+                    @if (!string.IsNullOrWhiteSpace(file.Reason))
+                    {
+                        <details><summary>Recorded reason</summary><p>@file.Reason</p></details>
+                    }
+                    @if (ActionsEnabled && CanInspectRetainedRecovery(file))
+                    {
+                        <RetainedRecoveryControls SourceRevisionId="file.SourceRevisionId" />
+                    }
                     @if (file.State == "Queued continuation")
                     { <p>This is normal batch continuation: saved work is preserved while the next batch awaits processing.</p> }
                     @if (file.Jobs.Count > 0)
@@ -38,6 +59,13 @@
                                 <li>@job.Stage · @job.State · @job.Reason
                                     <p>Confirmed worker attempt elapsed: @Elapsed(job.AttemptStartedAtUtc, page.ObservedAtUtc). Worker heartbeat: unavailable.</p>
                                     <a href="@($"/corpus/{job.PipelineRecordId}")">View pipeline record</a>
+                                    @if (ActionsEnabled && file.Category == "Failed" && job.State == "Needs attention")
+                                    {
+                                        @if (job.Stage == "Publish")
+                                        { <GuidedRecoveryAction Action="publication_retry" TargetId="job.Id" PipelineRecordId="job.PipelineRecordId" ActionLabel="Retry publication" /> }
+                                        else if (job.Stage == "Embed")
+                                        { <GuidedRecoveryAction Action="embedding_retry" TargetId="job.Id" PipelineRecordId="job.PipelineRecordId" ActionLabel="Retry embedding" /> }
+                                    }
                                     <code>@job.Id</code></li>
                             }</ul>
                         </details>
@@ -74,6 +102,7 @@
 @code {
     [Parameter] public Guid? SourceRootId { get; set; }
     [Parameter] public IReadOnlyList<SourcePipelineProgress> Sources { get; set; } = [];
+    [Parameter] public bool ActionsEnabled { get; set; }
     private readonly CancellationTokenSource _stopping = new();
     private PipelineFilePage? _page;
     private PipelineFileFilter? _filter, _loadedFilter;
@@ -85,12 +114,33 @@
     private ElementReference _heading;
     private bool _focusResult;
     private string ScopeName => _loadedRoot is { } root ? Sources.FirstOrDefault(s => s.Id == root)?.Name ?? "Source binding unavailable" : "All configured sources";
+    private bool IsAvailableForReconciliation(PipelineFileItem file) =>
+        Sources.Any(source => source.Id == file.SourceRootId && source.Lifecycle == "Enabled") &&
+        (file.Category == "Unconfirmed" || file.Reason is "SourceContentNotAvailableLocally" or "SourceAccessContentUnavailable" or
+            "source-content-not-available-locally" or "SourceInUse" or "SourceChangedDuringDiscovery" or "CloudDirectoryNamespaceIncomplete");
+    private static bool CanInspectRetainedRecovery(PipelineFileItem file)
+    {
+        var extension = System.IO.Path.GetExtension(file.FullPath).ToLowerInvariant();
+        return file.Category == "Pending" && extension == ".vsdx" ||
+            file.Category is "Blocked" or "Failed" or "Deferred" &&
+            (extension is ".vsdx" or ".pdf" or ".png" or ".jpg" or ".jpeg" or ".zip" ||
+             file.Reason is RetainedDefaultPolicy.UnadmittedLegacyTextReason or "File extension is unknown to local source ingestion." ||
+             file.Reason.StartsWith("archive-", StringComparison.Ordinal));
+    }
     protected override void OnParametersSet()
     {
         if (_previousScope == SourceRootId) return;
         _previousScope = SourceRootId;
+        ClearSelection();
+    }
+    public void ClearSelection()
+    {
         _request++;
-        _page = null; _filter = null; _error = null; _loading = false;
+        _page = null;
+        _filter = null;
+        _error = null;
+        _loading = false;
+        _focusResult = false;
     }
     public async Task ShowAsync(PipelineFileFilter filter, Guid? root, int? summaryCount = null)
     {

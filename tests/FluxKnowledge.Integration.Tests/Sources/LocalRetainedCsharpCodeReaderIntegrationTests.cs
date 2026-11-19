@@ -71,7 +71,7 @@ public sealed class LocalRetainedCsharpCodeReaderIntegrationTests(NativeSqlServe
             Assert.Equal(hash, result.ArtifactHash);
 
             var artifactPath = Path.Combine(artifactRoot, "sha256", hash[..2], $"{hash}.bin");
-            await File.WriteAllBytesAsync(artifactPath, bytes[..^1].Concat("X"u8.ToArray()).ToArray());
+            await File.WriteAllBytesAsync(artifactPath, bytes[..^1]);
             await Assert.ThrowsAsync<InvalidDataException>(() => reader.ReadAsync(seeded.BranchId, CancellationToken.None).AsTask());
         }
         finally

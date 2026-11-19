@@ -56,7 +56,11 @@ public sealed record OutlookPageProjection(IReadOnlyList<OutlookProfileStatusPro
 public interface IOutlookProjectionReader
 {
     ValueTask<OutlookPageProjection> ReadAsync(CancellationToken cancellationToken);
+    ValueTask<OutlookCatchUpStatus?> ReadCatchUpAsync(Guid profileId, Guid operationId, CancellationToken cancellationToken) =>
+        ValueTask.FromResult<OutlookCatchUpStatus?>(null);
 }
+
+public sealed record OutlookCatchUpStatus(string State, int RetryCount, DateTimeOffset? NextAttemptAtUtc);
 
 public interface IOutlookSpoolHealthReader
 {
@@ -238,6 +242,28 @@ public sealed class SqlOutlookProjectionReader(
     IOutlookSpoolHealthReader spoolHealthReader,
     PersistedOutlookSpoolRootPolicy? spoolRootPolicy = null) : IOutlookProjectionReader
 {
+    public async ValueTask<OutlookCatchUpStatus?> ReadCatchUpAsync(Guid profileId, Guid operationId, CancellationToken cancellationToken)
+    {
+        await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        var row = await (from operation in context.OutlookCaptureOperations.AsNoTracking()
+                         join work in context.OutlookCatchUps.AsNoTracking() on operation.ResourceId equals (Guid?)work.Id
+                         where operation.OperationId == operationId && operation.ProfileId == profileId &&
+                             operation.Kind == "request-catchup" && operation.Accepted && work.ProfileId == profileId
+                         select new { work.State, work.RetryCount, work.NotBeforeUtc, work.LeaseOwner, work.LeaseExpiresAtUtc })
+            .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+        if (row is null) return null;
+        var state = row.State switch
+        {
+            0 when row.RetryCount > 0 => "Retry scheduled",
+            0 => "Queued for the Outlook companion",
+            1 when row.LeaseOwner is not null && row.LeaseExpiresAtUtc > DateTimeOffset.UtcNow => "Outlook companion has an active claim",
+            1 => "Claim no longer confirmed",
+            2 => "Catch-up completed",
+            3 => "Catch-up failed",
+            _ => "Status unavailable"
+        };
+        return new(state, row.RetryCount, row.State == 0 ? row.NotBeforeUtc : null);
+    }
     public async ValueTask<OutlookPageProjection> ReadAsync(CancellationToken cancellationToken)
     {
         await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
@@ -319,7 +345,7 @@ public sealed class SqlOutlookProjectionReader(
                 spool,
                 profile.CreatedAtUtc,
                 profile.UpdatedAtUtc,
-                catchUpTimes.GetValueOrDefault(profile.Id),
+                catchUpTimes.TryGetValue(profile.Id, out var lastSuccess) ? lastSuccess : null,
                 profile.IncrementalBasis == (int)OutlookIncrementalBasis.ReceivedTime
                     ? ["Received-time capture may miss older moved messages; run manual reconciliation when needed."]
                     : [],

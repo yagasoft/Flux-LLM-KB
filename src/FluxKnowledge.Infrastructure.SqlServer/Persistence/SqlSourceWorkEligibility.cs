@@ -31,6 +31,7 @@ internal static class SqlSourceWorkEligibility
                      [swParent].[OriginKind]=1 AND [swArchive].[OriginKind]=0 AND [swArchive].[SuppressedAtUtc] IS NULL
                        AND [swArchive].[SourceRootId]=[swInput].[SourceRootId]))))
               {{(includePending ? PendingScope : "")}}
+              {{(includeAdmission ? SqlGuidedRetainedBinding.DerivedInputFence : "")}}
               {{(includeAdmission ? AdmissionScope : "")}}
         ))
         """;

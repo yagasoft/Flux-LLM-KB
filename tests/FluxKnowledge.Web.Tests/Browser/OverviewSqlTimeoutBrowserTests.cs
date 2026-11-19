@@ -82,6 +82,7 @@ public sealed class OverviewSqlTimeoutBrowserTests
             await using var browser = await playwright.Chromium.LaunchAsync(BrowserLaunchOptions.Create());
             await using var page = await browser.NewPageAsync();
             await page.GotoAsync(host.BaseAddress.AbsoluteUri, new() { WaitUntil = WaitUntilState.NetworkIdle });
+            await page.GetByText("File counts and path", new() { Exact = true }).ClickAsync();
             await Assertions.Expect(Count("Known files", 1)).ToBeVisibleAsync();
             await Assertions.Expect(Count("Pending", 1)).ToBeVisibleAsync();
             var timestamp = page.Locator(".status-freshness time");

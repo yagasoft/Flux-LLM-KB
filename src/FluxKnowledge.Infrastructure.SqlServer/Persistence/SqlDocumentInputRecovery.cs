@@ -53,18 +53,47 @@ internal static partial class SqlDocumentInputRecovery
             await transaction.CommitAsync(token).ConfigureAwait(false);
             return new(false, true, existing[0].Branch.Id);
         }
+        var candidate = await ReadCandidateAsync(db, request, sourceAdmission, requireCurrentAdmission: false, token).ConfigureAwait(false);
+        if (candidate is null) return DocumentReprocessRequestResult.NotEligible;
+        var successor = await QueueCandidateAsync(db, candidate, "trusted-local-cli", DateTimeOffset.UtcNow, token).ConfigureAwait(false);
+        await db.SaveChangesAsync(token).ConfigureAwait(false);
+        await transaction.CommitAsync(token).ConfigureAwait(false);
+        return new(true, false, successor);
+    }
+
+    internal static async Task<ReprocessCandidate?> ReadCandidateAsync(FluxKnowledgeDbContext db,
+        DocumentReprocessRequest request, ISourceWorkAdmission? sourceAdmission, bool requireCurrentAdmission, CancellationToken token)
+    {
+        if (request.SourceRevisionId.Value == Guid.Empty || request.FailedExtractJobId is not { } jobId || jobId == Guid.Empty ||
+            request.ExpectedRootConfigurationRevision is not > 0 || !TryGetDescriptor(request.ExpectedProcessorFingerprint, out var descriptor))
+            return null;
         var binding = await ReadSettledFailureAsync(db, request.SourceRevisionId.Value, request.ExpectedInputSha256,
-            request.ExpectedRootConfigurationRevision.Value, descriptor.ProcessorFingerprint, jobId, null, token,
+            request.ExpectedRootConfigurationRevision!.Value, descriptor.ProcessorFingerprint, jobId, null, token,
             allowNoResultTransition: true).ConfigureAwait(false);
         if (binding is null || await db.SourceActivityRelations.AnyAsync(value => value.PredecessorActivityId == binding.PredecessorActivityId, token).ConfigureAwait(false))
-            return DocumentReprocessRequestResult.NotEligible;
+            return null;
+        if (await (from relation in db.SourceActivityRelations
+                   join activity in db.SourceActivities on relation.SuccessorActivityId equals activity.Id
+                   where activity.SourceRevisionId == binding.ParentRevisionId && relation.RelationshipKind == ParentRelationship &&
+                         relation.ReasonCode == DocumentProcessingInput.DocumentRecoveryVersion
+                   select relation.Id).AnyAsync(token).ConfigureAwait(false))
+            return null;
+        if ((requireCurrentAdmission || binding.NoResult is not null) &&
+            !await SqlSourceWorkEligibility.Inputs(db, sourceAdmission).AnyAsync(value => value.Id == binding.ParentRevisionId, token).ConfigureAwait(false))
+            return null;
+        return new(binding);
+    }
+
+    internal static async Task<Guid> QueueCandidateAsync(FluxKnowledgeDbContext db,
+        ReprocessCandidate candidate, string actor, DateTimeOffset now, CancellationToken token)
+    {
+        var binding = candidate.Binding;
+        if (!TryGetDescriptor(binding.ProcessorFingerprint, out var descriptor))
+            throw new InvalidOperationException("The exact document processor descriptor is required.");
         if (binding.NoResult is not null)
-        {
-            if (!await SqlSourceWorkEligibility.Inputs(db, sourceAdmission).AnyAsync(value => value.Id == binding.ParentRevisionId, token).ConfigureAwait(false))
-                return DocumentReprocessRequestResult.NotEligible;
             await TerminaliseNoResultAsync(db, binding, token).ConfigureAwait(false);
-        }
-        var activityId = Guid.NewGuid(); var branchId = Guid.NewGuid(); var now = DateTimeOffset.UtcNow;
+
+        var activityId = Guid.NewGuid(); var branchId = Guid.NewGuid();
         var admission = new RecoveryProof(DocumentProcessingInput.DocumentRecoveryVersion, activityId, branchId, binding);
         db.SourceActivities.Add(new SourceActivityEntity { Id = activityId, SourceRevisionId = binding.ParentRevisionId,
             ActivityKind = (int)SourceActivityKind.TextExtraction, ExecutionClass = (int)ExecutionClass.InProcess,
@@ -77,13 +106,13 @@ internal static partial class SqlDocumentInputRecovery
             CreatedAtUtc = now, UpdatedAtUtc = now });
         db.SourceActivityRelations.Add(new SourceActivityRelationEntity { Id = Guid.NewGuid(), PredecessorActivityId = binding.PredecessorActivityId,
             SuccessorActivityId = activityId, RelationshipKind = ParentRelationship, ReasonCode = DocumentProcessingInput.DocumentRecoveryVersion, CreatedAtUtc = now });
-        OperatorEventAppender.Add(db, new OperatorEventDraft("retained_processor.document_reprocess_requested", "retained_processor", "information", "trusted-local-cli", now,
+        OperatorEventAppender.Add(db, new OperatorEventDraft("retained_processor.document_reprocess_requested", "retained_processor", "information", actor, now,
             SourceRootId: binding.RootId, SourceRevisionId: binding.ParentRevisionId, SourceActivityId: activityId,
             CorrelationId: $"retained-processor:{branchId:N}", Details: new { kind = "document_input", reasonCode = DocumentProcessingInput.DocumentRecoveryVersion }));
-        await db.SaveChangesAsync(token).ConfigureAwait(false);
-        await transaction.CommitAsync(token).ConfigureAwait(false);
-        return new(true, false, branchId);
+        return branchId;
     }
+
+    internal sealed record ReprocessCandidate(FailureBinding Binding);
 
     internal static string ActivityFingerprint(Guid activityId) => DocumentProcessingInput.DocumentRecoveryActivityPrefix + activityId.ToString("N");
 
@@ -324,7 +353,7 @@ internal static partial class SqlDocumentInputRecovery
         return fingerprint == descriptor.ProcessorFingerprint;
     }
 
-    private static bool IsInScope(SourceRootConfigurationEntity root, SourceRevisionEntity revision)
+    internal static bool IsInScope(SourceRootConfigurationEntity root, SourceRevisionEntity revision)
     {
         try
         {
@@ -340,10 +369,10 @@ internal static partial class SqlDocumentInputRecovery
     }
 
     private sealed record RecoveryProof(string Version, Guid RecoveryActivityId, Guid RecoveryBranchId, FailureBinding Binding);
-    private sealed record FailureBinding(Guid RootId, long ConfigurationRevision, Guid ParentRevisionId, string InputSha256, long ByteLength,
+    internal sealed record FailureBinding(Guid RootId, long ConfigurationRevision, Guid ParentRevisionId, string InputSha256, long ByteLength,
         Guid ParentArtifactId, string ProcessorFingerprint, string FailureReason, Guid PredecessorActivityId, Guid PredecessorBranchId, Guid PredecessorMemberId, string PredecessorMemberFingerprint,
         Guid FailedChildRevisionId, Guid FailedChildActivityId, Guid FailedPipelineRecordId, long FailedPipelineRevision, Guid FailedJobId, NativeBinding? Native,
         SettledNoResultBinding? NoResult = null);
-    private sealed record NativeBinding(Guid MiniTaskId, Guid BatchId, long AdmissionGeneration, Guid DispatchId, Guid ResultReceiptOperationId, string ResultDigest,
+    internal sealed record NativeBinding(Guid MiniTaskId, Guid BatchId, long AdmissionGeneration, Guid DispatchId, Guid ResultReceiptOperationId, string ResultDigest,
         string ModelRuntimeKey, string SettingsFingerprint);
 }

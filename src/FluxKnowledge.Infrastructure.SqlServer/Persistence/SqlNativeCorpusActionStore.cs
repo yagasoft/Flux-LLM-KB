@@ -50,10 +50,19 @@ public sealed class SqlNativeCorpusActionStore(
         {
             var job = await context.SourceScanJobs.AsNoTracking().Where(value => value.Id == id).Select(value => new { value.Id, value.RowVersion, value.SourceScanRequestId }).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
             if (job is null || job.RowVersion.Length != 8) throw new NativeOperationException("target-not-found");
-            var request = await context.SourceScanRequests.AsNoTracking().Where(value => value.Id == job.SourceScanRequestId).Select(value => new { value.Id, value.RowVersion }).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+            var request = await context.SourceScanRequests.AsNoTracking().Where(value => value.Id == job.SourceScanRequestId)
+                .Select(value => new { value.Id, value.RowVersion, value.SourceRootId, RootRowVersion = value.SourceRoot.RowVersion })
+                .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
             var outbox = await context.SourceScanOutbox.AsNoTracking().Where(value => value.SourceScanRequestId == job.SourceScanRequestId).Select(value => new { value.Id, value.RowVersion }).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
-            if (request is null || outbox is null || request.RowVersion.Length != 8 || outbox.RowVersion.Length != 8) throw new NativeOperationException("target-not-found");
-            return [new NativeTargetVersion($"job:{job.Id:D}", Convert.ToBase64String(job.RowVersion)), new NativeTargetVersion($"request:{request.Id:D}", Convert.ToBase64String(request.RowVersion)), new NativeTargetVersion($"outbox:{outbox.Id:D}", Convert.ToBase64String(outbox.RowVersion))];
+            if (request is null || outbox is null || request.RowVersion.Length != 8 || request.RootRowVersion.Length != 8 || outbox.RowVersion.Length != 8)
+                throw new NativeOperationException("target-not-found");
+            return
+            [
+                new($"root:{request.SourceRootId:D}", Convert.ToBase64String(request.RootRowVersion)),
+                new($"request:{request.Id:D}", Convert.ToBase64String(request.RowVersion)),
+                new($"job:{job.Id:D}", Convert.ToBase64String(job.RowVersion)),
+                new($"outbox:{outbox.Id:D}", Convert.ToBase64String(outbox.RowVersion))
+            ];
         }
         var source = await context.SourceRootConfigurations.AsNoTracking().Where(value => value.Id == id)
             .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);

@@ -2,6 +2,7 @@ using System.Text.Json;
 using FluxKnowledge.Application.Contracts;
 using FluxKnowledge.Application.IntegrationV1;
 using FluxKnowledge.Application.IntegrationV1.Corpus;
+using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Sources;
 using FluxKnowledge.Application.Workers;
 using FluxKnowledge.Domain.Sources;
@@ -20,6 +21,7 @@ public sealed class NativeCorpusActionMatrixTests(NativeSqlServerFixture fixture
 {
     private static readonly DateTimeOffset Now = DateTimeOffset.Parse("2026-08-25T12:00:00+00:00");
     private readonly NativeSqlServerFixture _fixture = fixture;
+    private readonly SourceWorkAdmission _scanAdmission = new();
 
     [NativeSqlServerFact]
     public async Task Default_policy_update_is_revision_fenced_idempotent_and_can_save_without_scanning()
@@ -585,8 +587,17 @@ public sealed class NativeCorpusActionMatrixTests(NativeSqlServerFixture fixture
     {
         var root = await SeedRootAsync();
         var (jobId, requestId, outboxId) = await SeedFailedControlAsync(root);
-        var service = CreateService();
-        await CommitAsync(service, "job_retry", new { jobId }, "retry");
+        var wake = new RecordingSourceWakeSignal();
+        var service = CreateService(sourceScanWakeSignal: wake);
+        var retry = Mutation("job_retry", new { jobId });
+        var preview = await service.PreviewAsync(retry, "test", default);
+        Assert.Equal(0, wake.NotificationCount);
+        var receipt = await service.CommitAsync(retry, preview.ConfirmationId, "retry", "test", default);
+        Assert.Equal(1, wake.NotificationCount);
+        var replay = await service.CommitAsync(retry, preview.ConfirmationId, "retry", "test", default);
+        Assert.True(replay.WasReplay);
+        Assert.Equal(receipt.OperationId, replay.OperationId);
+        Assert.Equal(2, wake.NotificationCount);
         await using (var db = await SqlTestData.CreateFactory(_fixture).CreateDbContextAsync())
         {
             Assert.Equal((int)SourceScanJobState.Pending, (await db.SourceScanJobs.SingleAsync(value => value.Id == jobId)).State);
@@ -600,6 +611,173 @@ public sealed class NativeCorpusActionMatrixTests(NativeSqlServerFixture fixture
             await terminal.SaveChangesAsync();
         }
         await AssertReasonAsync("operation-fenced", () => PreviewAndCommitAsync(service, "job_retry", new { jobId }, "retry-terminal"));
+        Assert.Equal(2, wake.NotificationCount);
+    }
+
+    [NativeSqlServerTheory]
+    [InlineData(SourceRootState.Paused, "source-paused")]
+    [InlineData(SourceRootState.Deleting, "source-deleting")]
+    public async Task Job_retry_preview_refuses_an_inactive_root(SourceRootState state, string reason)
+    {
+        var rootId = await SeedRootAsync();
+        var (jobId, _, _) = await SeedFailedControlAsync(rootId);
+        await using var db = await SqlTestData.CreateFactory(_fixture).CreateDbContextAsync();
+        (await db.SourceRootConfigurations.SingleAsync(value => value.Id == rootId)).State = (int)state;
+        await db.SaveChangesAsync();
+
+        await AssertReasonAsync(reason, () => CreateService().PreviewAsync(Mutation("job_retry", new { jobId }), "test", default).AsTask());
+        Assert.Empty(await db.NativeOperationIntents.ToListAsync());
+    }
+
+    [NativeSqlServerFact]
+    public async Task Job_retry_commit_fences_a_root_configuration_change_after_target_resolution()
+    {
+        var rootId = await SeedRootAsync();
+        var (jobId, requestId, outboxId) = await SeedFailedControlAsync(rootId);
+        var mutation = Mutation("job_retry", new { jobId });
+        var preview = await CreateService().PreviewAsync(mutation, "test", default);
+        var factory = SqlTestData.CreateFactory(_fixture);
+        await using var db = await factory.CreateDbContextAsync();
+        var root = await db.SourceRootConfigurations.SingleAsync(value => value.Id == rootId);
+        root.ConfigurationRevision++;
+        root.ExcludePatternsJson = "[\"private/**\"]";
+        await db.SaveChangesAsync();
+
+        await AssertReasonAsync("operation-fenced", () => CommitPreparedScanRetryAsync(mutation, preview, "retry-changed-root"));
+        Assert.Equal((int)SourceScanJobState.Failed, (await db.SourceScanJobs.SingleAsync(value => value.Id == jobId)).State);
+        Assert.Equal((int)SourceScanRequestState.Failed, (await db.SourceScanRequests.SingleAsync(value => value.Id == requestId)).State);
+        Assert.Equal(Now, (await db.SourceScanOutbox.SingleAsync(value => value.Id == outboxId)).DispatchedAtUtc);
+        Assert.Empty(await db.NativeOperationReceipts.ToListAsync());
+    }
+
+    [NativeSqlServerFact]
+    public async Task Job_retry_preview_refuses_a_request_bound_to_a_previous_configuration()
+    {
+        var rootId = await SeedRootAsync();
+        var (jobId, requestId, _) = await SeedFailedControlAsync(rootId);
+        await using var db = await SqlTestData.CreateFactory(_fixture).CreateDbContextAsync();
+        var root = await db.SourceRootConfigurations.SingleAsync(value => value.Id == rootId);
+        var request = await db.SourceScanRequests.SingleAsync(value => value.Id == requestId);
+        request.AuditEvidenceJson = SourceRootControlAuditEvidence.CreateRequestEvidence(SourceRootControlConfiguration.From(root), "test", "test", Now);
+        root.ConfigurationRevision++;
+        root.ExcludePatternsJson = "[\"private/**\"]";
+        await db.SaveChangesAsync();
+
+        await AssertReasonAsync("source-scan-configuration-changed", () => CreateService().PreviewAsync(Mutation("job_retry", new { jobId }), "test", default).AsTask());
+        Assert.Empty(await db.NativeOperationIntents.ToListAsync());
+    }
+
+    [NativeSqlServerFact]
+    public async Task Job_retry_preview_requires_current_source_admission()
+    {
+        var rootId = await SeedRootAsync();
+        var (jobId, _, _) = await SeedFailedControlAsync(rootId);
+        var factory = SqlTestData.CreateFactory(_fixture);
+        var service = new NativeCorpusCommandService(
+            new SqlNativeOperationStore(factory, new FixedTimeProvider(Now)),
+            new SqlNativeCorpusActionStore(factory, new TestPathPolicy(), new LocalPrivateContentDisclosure()));
+
+        await AssertReasonAsync("source-scan-not-admitted", () => service.PreviewAsync(Mutation("job_retry", new { jobId }), "test", default).AsTask());
+        await using var db = await factory.CreateDbContextAsync();
+        Assert.Empty(await db.NativeOperationIntents.ToListAsync());
+    }
+
+    [NativeSqlServerFact]
+    public async Task Job_retry_rechecks_deployment_hold_after_transaction_admission()
+    {
+        var rootId = await SeedRootAsync();
+        var (jobId, _, _) = await SeedFailedControlAsync(rootId);
+        var factory = SqlTestData.CreateFactory(_fixture);
+        var hold = new MutableDeploymentHold();
+        var admission = new ObservedScanAdmission(_scanAdmission);
+        var commands = new NativeCorpusCommandService(
+            new SqlNativeOperationStore(factory, new FixedTimeProvider(Now), sourceAdmission: admission, deploymentValidationHold: hold),
+            new SqlNativeCorpusActionStore(factory, new TestPathPolicy(), new LocalPrivateContentDisclosure()),
+            deploymentValidationHold: hold);
+        var mutation = Mutation("job_retry", new { jobId });
+        var preview = await commands.PreviewAsync(mutation, "test", default);
+        admission.AfterRead = () => hold.IsHeld = true;
+
+        await AssertReasonAsync("deployment-validation-held", () => commands.CommitAsync(mutation, preview.ConfirmationId, "retry-hold", "test", default).AsTask());
+
+        await using var db = await factory.CreateDbContextAsync();
+        Assert.Empty(await db.NativeOperationReceipts.ToListAsync());
+        Assert.Equal((int)SourceScanJobState.Failed, await db.SourceScanJobs.Where(job => job.Id == jobId).Select(job => job.State).SingleAsync());
+        Assert.Null(await db.NativeOperationIntents.Where(intent => intent.Id == preview.IntentId).Select(intent => intent.ConsumedAtUtc).SingleAsync());
+    }
+
+    [NativeSqlServerFact]
+    public async Task Job_retry_preview_rejects_an_older_ordinary_request_and_commit_fences_a_newer_one()
+    {
+        var rootId = await SeedRootAsync();
+        var (jobId, _, _) = await SeedFailedControlAsync(rootId);
+        var service = CreateService();
+        var mutation = Mutation("job_retry", new { jobId });
+        var preview = await service.PreviewAsync(mutation, "test", default);
+        var (newerJob, _, _) = await SeedFailedControlAsync(rootId, requestedAtUtc: Now.AddSeconds(1));
+
+        await AssertReasonAsync("operation-fenced", () => CommitPreparedScanRetryAsync(mutation, preview, "retry-superseded"));
+        await AssertReasonAsync("operation-fenced", () => service.PreviewAsync(mutation, "test", default).AsTask());
+        var newerPreview = await service.PreviewAsync(Mutation("job_retry", new { jobId = newerJob }), "test", default);
+        Assert.Contains(newerPreview.Targets, target => target.TargetId == $"job:{newerJob:D}");
+
+        await using var db = await SqlTestData.CreateFactory(_fixture).CreateDbContextAsync();
+        Assert.Empty(await db.NativeOperationReceipts.ToListAsync());
+        Assert.Equal((int)SourceScanJobState.Failed, await db.SourceScanJobs.Where(job => job.Id == jobId).Select(job => job.State).SingleAsync());
+    }
+
+    [NativeSqlServerTheory]
+    [InlineData(0, "test", false)]
+    [InlineData(1, "web", false)]
+    [InlineData(1, "reconciliation", true)]
+    [InlineData(2, "watcher", true)]
+    [InlineData(3, "journal", true)]
+    [InlineData(5, "journal", false)]
+    public async Task Job_retry_allows_missing_configuration_only_for_legitimate_worker_requests(int kind, string requestedBy, bool allowed)
+    {
+        var rootId = await SeedRootAsync();
+        var (jobId, _, _) = await SeedFailedControlAsync(rootId, requestKind: kind, requestedBy: requestedBy, hasConfiguration: false);
+        var service = CreateService();
+        var mutation = Mutation("job_retry", new { jobId });
+
+        if (!allowed)
+        {
+            await AssertReasonAsync("source-scan-configuration-unavailable", () => service.PreviewAsync(mutation, "test", default).AsTask());
+            return;
+        }
+
+        var preview = await service.PreviewAsync(mutation, "test", default);
+        var receipt = await service.CommitAsync(mutation, preview.ConfirmationId, "retry-legacy-worker", "test", default);
+        Assert.Equal("completed", receipt.Outcome);
+        await SeedFailedControlAsync(rootId, requestedAtUtc: Now.AddSeconds(1));
+        var replay = await service.CommitAsync(mutation, preview.ConfirmationId, "retry-legacy-worker", "test", default);
+        Assert.True(replay.WasReplay);
+        Assert.Equal(receipt.OperationId, replay.OperationId);
+    }
+
+    [NativeSqlServerFact]
+    public async Task Job_retry_commit_rechecks_admission_and_replays_an_existing_receipt_after_admission_closes()
+    {
+        var rootId = await SeedRootAsync();
+        var (jobId, _, _) = await SeedFailedControlAsync(rootId);
+        var service = CreateService();
+        var mutation = Mutation("job_retry", new { jobId });
+        var preview = await service.PreviewAsync(mutation, "test", default);
+        _scanAdmission.MarkPrepared(rootId, 1);
+
+        await AssertReasonAsync("source-scan-not-admitted", () => CommitPreparedScanRetryAsync(mutation, preview, "retry-admission"));
+        await using var db = await SqlTestData.CreateFactory(_fixture).CreateDbContextAsync();
+        Assert.Equal((int)SourceScanJobState.Failed, await db.SourceScanJobs.Where(value => value.Id == jobId).Select(value => value.State).SingleAsync());
+        Assert.Empty(await db.NativeOperationReceipts.ToListAsync());
+
+        _scanAdmission.Admit(rootId, 1);
+        var receipt = await service.CommitAsync(mutation, preview.ConfirmationId, "retry-admission", "test", default);
+        _scanAdmission.MarkPrepared(rootId, 1);
+        var replay = await service.CommitAsync(mutation, preview.ConfirmationId, "retry-admission", "test", default);
+
+        Assert.True(replay.WasReplay);
+        Assert.Equal(receipt.OperationId, replay.OperationId);
+        Assert.Single(await db.NativeOperationReceipts.ToListAsync());
     }
 
     [NativeSqlServerFact]
@@ -869,12 +1047,13 @@ public sealed class NativeCorpusActionMatrixTests(NativeSqlServerFixture fixture
         Assert.Equal(ActorFingerprint("test"), EvidenceValue(updateRequest.AuditEvidenceJson, "releasedByFingerprint"));
     }
 
-    private NativeCorpusCommandService CreateService(ISourceRootPathPolicy? pathPolicy = null) => new(
-        new NativeOperationService(new SqlNativeOperationStore(SqlTestData.CreateFactory(_fixture), new FixedTimeProvider(Now)), []),
+    private NativeCorpusCommandService CreateService(ISourceRootPathPolicy? pathPolicy = null, ISourceScanWakeSignal? sourceScanWakeSignal = null) => new(
+        new NativeOperationService(new SqlNativeOperationStore(SqlTestData.CreateFactory(_fixture), new FixedTimeProvider(Now), sourceAdmission: _scanAdmission), []),
         new SqlNativeCorpusActionStore(
             SqlTestData.CreateFactory(_fixture),
             pathPolicy ?? new TestPathPolicy(),
-            new LocalPrivateContentDisclosure()));
+            new LocalPrivateContentDisclosure()),
+        sourceScanWakeSignal: sourceScanWakeSignal);
 
     private async Task<Guid> SeedRootAsync()
     {
@@ -886,14 +1065,23 @@ public sealed class NativeCorpusActionMatrixTests(NativeSqlServerFixture fixture
         return id;
     }
 
-    private async Task<(Guid jobId, Guid requestId, Guid outboxId)> SeedFailedControlAsync(Guid root)
+    private async Task<(Guid jobId, Guid requestId, Guid outboxId)> SeedFailedControlAsync(Guid root, int requestKind = 0,
+        string requestedBy = "test", bool hasConfiguration = true, DateTimeOffset? requestedAtUtc = null)
     {
         var requestId = Guid.NewGuid(); var jobId = Guid.NewGuid(); var outboxId = Guid.NewGuid();
         await using var db = await SqlTestData.CreateFactory(_fixture).CreateDbContextAsync();
-        db.SourceScanRequests.Add(new SourceScanRequestEntity { Id = requestId, SourceRootId = root, RequestKind = 0, RequestedBy = "test", RequestedAtUtc = Now, IsReleased = true, ReleasedAtUtc = Now, State = (int)SourceScanRequestState.Failed });
+        var configuration = SourceRootControlConfiguration.From(await db.SourceRootConfigurations.SingleAsync(value => value.Id == root));
+        db.SourceScanRequests.Add(new SourceScanRequestEntity
+        {
+            Id = requestId, SourceRootId = root, RequestKind = requestKind, RequestedBy = requestedBy,
+            RequestedAtUtc = requestedAtUtc ?? Now, IsReleased = true, ReleasedAtUtc = requestedAtUtc ?? Now,
+            State = (int)SourceScanRequestState.Failed,
+            AuditEvidenceJson = hasConfiguration ? SourceRootControlAuditEvidence.CreateRequestEvidence(configuration, requestedBy, requestedBy, Now) : null
+        });
         db.SourceScanJobs.Add(new SourceScanJobEntity { Id = jobId, SourceScanRequestId = requestId, State = (int)SourceScanJobState.Failed, DueAtUtc = Now, CreatedAtUtc = Now, UpdatedAtUtc = Now });
         db.SourceScanOutbox.Add(new SourceScanOutboxEntity { Id = outboxId, SourceScanRequestId = requestId, Operation = "source.scan", IdempotencyKey = $"source-scan:{requestId:N}", DueAtUtc = Now, CreatedAtUtc = Now, DispatchedAtUtc = Now });
         await db.SaveChangesAsync();
+        _scanAdmission.Admit(root, 1);
         return (jobId, requestId, outboxId);
     }
 
@@ -996,6 +1184,19 @@ public sealed class NativeCorpusActionMatrixTests(NativeSqlServerFixture fixture
         _ = await service.CommitAsync(mutation, preview.ConfirmationId, key, "test", CancellationToken.None);
     }
 
+    private Task<NativeActionReceipt> CommitPreparedScanRetryAsync(NativeCorpusMutation mutation, NativeActionPreview preview, string key)
+    {
+        var payload = NativeOperationCanonicalization.CanonicalizeJson(mutation.Payload.GetRawText());
+        var commit = new NativeActionCommitRequest(mutation.Action, payload, preview.ConfirmationId, key, "test")
+        {
+            Targets = preview.Targets,
+            RequestFingerprint = preview.RequestFingerprint,
+            CommitOperation = new NativeCorpusMutationCommitOperation(mutation.Action, payload)
+        };
+        var store = new SqlNativeOperationStore(SqlTestData.CreateFactory(_fixture), new FixedTimeProvider(Now), sourceAdmission: _scanAdmission);
+        return store.CommitAsync(commit, default).AsTask();
+    }
+
     private static NativeCorpusMutation Mutation(string action, object payload)
     {
         using var document = JsonDocument.Parse(JsonSerializer.Serialize(payload));
@@ -1073,6 +1274,24 @@ public sealed class NativeCorpusActionMatrixTests(NativeSqlServerFixture fixture
         public int NotificationCount { get; private set; }
         public void Notify() => NotificationCount++;
         public ValueTask WaitAsync(CancellationToken cancellationToken) => ValueTask.CompletedTask;
+    }
+
+    private sealed class MutableDeploymentHold : IDeploymentValidationHold
+    {
+        public bool IsHeld { get; set; }
+        public ValueTask WaitUntilReleasedAsync(CancellationToken cancellationToken) => throw new NotSupportedException();
+    }
+
+    private sealed class ObservedScanAdmission(ISourceWorkAdmission admission) : ISourceWorkAdmission
+    {
+        public Action? AfterRead { get; set; }
+
+        public IReadOnlyCollection<SourceWorkAdmittedRoot> ReadAdmittedRoots()
+        {
+            var roots = admission.ReadAdmittedRoots();
+            AfterRead?.Invoke();
+            return roots;
+        }
     }
 
     private sealed class RecordingSourceWakeSignal : ISourceScanWakeSignal

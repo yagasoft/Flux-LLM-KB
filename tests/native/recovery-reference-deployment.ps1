@@ -20,7 +20,10 @@ $updater=Parse 'scripts/deploy/update-native-iis-incremental.ps1'
 $restorer=Parse 'scripts/deploy/restore-outlook-scheduled-host.ps1'
 $entry=@($updater.EndBlock.Statements | Where-Object {$_ -is [Management.Automation.Language.TryStatementAst] -and $_.Body.Extent.Text.Contains('if ($ApplyRepositoryRecoveryAuthorityMigration -and $ReconcileRepositoryRecoveryRelease)')})
 Require ($entry.Count -eq 1) 'Actual updater operation boundary missing.'
+$migrationMode=@($updater.EndBlock.Statements | Where-Object {$_ -is [Management.Automation.Language.AssignmentStatementAst] -and $_.Left.VariablePath.UserPath -ceq 'applyAnyMigration'})
+Require ($migrationMode.Count -eq 1) 'Actual updater migration mode assignment missing.'
 Import-Module (Join-Path $SourceRoot 'scripts/deploy/recovery-reference-writer.psm1') -Force
+Import-Module (Join-Path $SourceRoot 'scripts/deploy/incremental-hybrid-passage-rebuild.psm1') -Force
 Import-Module (Join-Path $SourceRoot 'scripts/deploy/incremental-source-journal-helper.psm1') -Force
 Import-Module (Join-Path $SourceRoot 'scripts/deploy/incremental-source-journal-helper-task.psm1') -Force
 $script:scratch=Join-Path ([IO.Path]::GetTempPath()) ('flux-recovery-deployment-'+[guid]::NewGuid().ToString('N'))
@@ -61,6 +64,7 @@ function Invoke-Continuation([string]$mode) {
     $recoveryWriter=$null
     $sourceJournalHelperState=$null;$sourceJournalNativePorts=$null
     $mutex=[Threading.Mutex]::new($false,'Local\FluxKnowledge.RecoveryFixture.'+[guid]::NewGuid().ToString('N'))
+    Invoke-Expression $migrationMode[0].Extent.Text
     Invoke-Expression $entry[0].Extent.Text
 }
 try {

@@ -183,9 +183,6 @@ public sealed class NativeSqlServerFixture : IAsyncLifetime
     internal async Task<PreviousMigrationDatabase> CreateGpuSchedulerOpaqueKeyPreviousMigrationDatabaseAsync()
         => await CreateMigrationDatabaseAsync("20260802182703_AddGpuSchedulerBinaryFenceCollation").ConfigureAwait(false);
 
-    internal async Task<PreviousMigrationDatabase> CreateIdentitylessOutlookExportPreviousMigrationDatabaseAsync()
-        => await CreateMigrationDatabaseAsync("20260811143122_RecordOutlookExportBlockedReason").ConfigureAwait(false);
-
     internal async Task<PreviousMigrationDatabase> CreateRetainedProcessorForceRequestPreviousMigrationDatabaseAsync()
         => await CreateMigrationDatabaseAsync("20260813125157_AddRetainedProcessorBranchMemberChildForeignKeys").ConfigureAwait(false);
 
@@ -201,7 +198,7 @@ public sealed class NativeSqlServerFixture : IAsyncLifetime
     internal async Task<PreviousMigrationDatabase> CreateDocumentOcrPreviousMigrationDatabaseAsync()
         => await CreateMigrationDatabaseAsync("20260918193207_AddDocumentPublicationSelector").ConfigureAwait(false);
 
-    private async Task<PreviousMigrationDatabase> CreateMigrationDatabaseAsync(string targetMigration)
+    internal async Task<PreviousMigrationDatabase> CreateMigrationDatabaseAsync(string targetMigration)
     {
         if (string.IsNullOrWhiteSpace(_serverConnectionString))
         {

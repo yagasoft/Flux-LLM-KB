@@ -213,7 +213,7 @@ public sealed class TargetedSourceScanIntegrationTests(NativeSqlServerFixture fi
     }
 
     [NativeSqlServerFact]
-    public async Task Unavailable_journal_keeps_targeted_force_capture_and_metadata_backstop_without_certifying_coverage()
+    public async Task Unavailable_journal_keeps_targeted_capture_and_metadata_backstop_without_certifying_coverage()
     {
         var area = Path.Combine(@"I:\Codex Workspaces\Staging\FluxKnowledge", "JournalFallback-" + Guid.NewGuid().ToString("N"));
         var files = Path.Combine(area, "Sources");
@@ -250,8 +250,8 @@ public sealed class TargetedSourceScanIntegrationTests(NativeSqlServerFixture fi
                 savedCursor = (await inspect.SourceVolumeJournalCheckpoints.SingleAsync()).NextUsn;
 
             var stamp = File.GetLastWriteTimeUtc(edited);
-            await File.WriteAllTextAsync(edited, "later evidence"); // Same length; the known hint still forces capture.
-            File.SetLastWriteTimeUtc(edited, stamp);
+            await File.WriteAllTextAsync(edited, "later evidence"); // Same length, different modification time.
+            File.SetLastWriteTimeUtc(edited, stamp.AddMinutes(-1));
             var watch = new SqlSourceRootWatchStore(factory, clock, options);
             await watch.RecordSignalAsync(new(baseline.SourceRoot.Id, SourceWatchSignalKind.Changed, clock.Now, [new("one.txt")]), default);
             clock.Now += TimeSpan.FromSeconds(3);
@@ -259,6 +259,11 @@ public sealed class TargetedSourceScanIntegrationTests(NativeSqlServerFixture fi
             await watch.ReleaseScanAsync(batch, default);
             await incremental.PumpAsync(default);
             var target = Assert.IsType<ClaimedSourceScan>(await control.ClaimNextReleasedAsync("fallback", clock.Now, TimeSpan.FromMinutes(10), default));
+            var targetPlan = Assert.IsType<SourceIncrementalPlan>(await incremental.PrepareAsync(target.SourceRoot, target.ScanRequest, default));
+            Assert.True(targetPlan.IsFallback);
+            Assert.Null(targetPlan.Cursor);
+            Assert.False(targetPlan.IsNamespaceSweep);
+            Assert.Equal("one.txt", Assert.Single(targetPlan.Targets).RelativePath);
             reads = 0;
             var result = await worker.ScanAsync(target.SourceRoot, target.ScanRequest, default);
             await control.CompleteAsync(target, result, null, default);
@@ -306,10 +311,9 @@ public sealed class TargetedSourceScanIntegrationTests(NativeSqlServerFixture fi
             Assert.False(eventPlan.ForceFullContent);
             Assert.False(eventPlan.IsNamespaceSweep);
             Assert.All(eventPlan.Targets, item => Assert.Equal("one.txt", item.RelativePath));
-            // The native journal still contains the real edit already seen by the watcher.
-            // Replaying that actual file event may ingest it, but cannot reread its sibling.
+            // The replay covers a file whose size and modification time the watcher already captured.
             await control.CompleteAsync(journalEvent, await worker.ScanAsync(journalEvent.SourceRoot, journalEvent.ScanRequest, default), null, default);
-            Assert.Equal("later evidence"u8.Length, reads);
+            Assert.Equal(0, reads);
             clock.Now += baseline.SourceRoot.ReconciliationCadence + TimeSpan.FromSeconds(1);
             var restored = Assert.IsType<ClaimedSourceScan>(await control.ClaimNextReleasedAsync("weekly-after-recovery", clock.Now, TimeSpan.FromMinutes(10), default));
             reads = 0;

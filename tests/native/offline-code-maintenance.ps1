@@ -146,6 +146,7 @@ Invoke-Expression $journalGuard.Extent.Text
 # Explicit legacy-baseline observation for this offline-code fixture.
 function Get-DeploymentSourceJournalBoundary { @{Protected=$false} }
 $sourceJournalMode=$false
+$ApplyTypedSchemaMigration=$false
 $ApplyResumableSourceDeletionCleanupMigration=$false;$SiteName='DisposableOfflineCode';$ReadinessTimeoutSeconds=10
 foreach($parameter in $ast.ParamBlock.Parameters){$name=$parameter.Name.VariablePath.UserPath;if(!(Get-Variable -Name $name -ErrorAction SilentlyContinue)){Set-Variable -Name $name -Value $null}}
 $hostingChange=@{Attempted=$false};$deploymentValidation=@{HoldCreated=$true;Baseline='fixture'}

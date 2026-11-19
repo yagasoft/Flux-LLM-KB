@@ -1,0 +1,309 @@
+@using FluxKnowledge.Application.IntegrationV1
+@using FluxKnowledge.Infrastructure.SqlServer.Persistence
+@using Microsoft.Data.SqlClient
+@using Microsoft.JSInterop
+@implements IAsyncDisposable
+@inject RetainedRecoveryNativeCommands Commands
+@inject ILocalOperatorPolicy OperatorPolicy
+@inject IJSRuntime JavaScript
+
+<section aria-label="Document and archive recovery">
+    <form @ref="_form" hidden><AntiforgeryToken /></form>
+    @if (!_opened)
+    {
+        <button type="button" @onclick="ReviewAsync" disabled="@_busy">Check document or archive recovery</button>
+    }
+    else
+    {
+        @if (_pending is { } pending)
+        {
+            <p>Saved submission for @Label(pending.Target). Check its receipt before starting again.</p>
+            <button type="button" @onclick="CommitAsync" disabled="@_busy">Check or retry submission</button>
+            <button type="button" @onclick="DismissPendingAsync" disabled="@_busy">Discard saved submission</button>
+        }
+        else if (_preview is { } preview)
+        {
+            <h3>@Label(preview.Target)</h3>
+            <p>@preview.FileName, retained revision @preview.Revision</p>
+            <p>@preview.Confirmation.EffectSummary</p>
+            @if (preview.Target.Kind == "visio")
+            {
+                <p>The desktop companion must run Visio for this prepared document.</p>
+            }
+            <details>
+                <summary>Processor and evidence</summary>
+                <dl>
+                    <dt>Processor</dt><dd><code>@preview.Processor</code></dd>
+                    <dt>Reason</dt><dd><code>@preview.ReasonCode</code></dd>
+                    @if (preview.MemberReference is { } member)
+                    {
+                        <dt>Affected member reference</dt><dd><code>@member</code></dd>
+                    }
+                    @if (preview.Target.ExactId is { } exact)
+                    {
+                        <dt>@(preview.Target.Kind switch { "zip" => "Archive branch", "policy" => "Policy predecessor activity", _ => "Extract job" })</dt><dd><code>@exact</code></dd>
+                    }
+                </dl>
+            </details>
+            <button type="button" @onclick="CommitAsync" disabled="@_busy">Confirm recovery</button>
+            <button type="button" @onclick="CancelPreview" disabled="@_busy">Cancel</button>
+        }
+        else if (_receipt is null && _review is { } review)
+        {
+            @foreach (var target in review.Targets)
+            {
+                <button type="button" @onclick="() => PreviewAsync(target)" disabled="@_busy">Preview @Label(target).ToLowerInvariant()</button>
+            }
+            @if (review.Targets.Count == 0 && review.VisioProgress is null)
+            {
+                <p>No supported recovery is available for this retained revision. Review the recorded failure and the source health.</p>
+            }
+            <a href="@($"/sources/{review.SourceRootId:D}")">View source details</a>
+        }
+        @if (_receipt is { } receipt)
+        {
+            <p>@(receipt.WasReplay ? "Existing recovery request loaded." : "Recovery request queued.") <code>@receipt.OperationId</code></p>
+            <button type="button" @onclick="RefreshProgressAsync" disabled="@_busy">Refresh recovery progress</button>
+        }
+        else if (_review?.VisioProgress is not null)
+        {
+            <button type="button" @onclick="ReviewAsync" disabled="@_busy">Refresh recovery progress</button>
+        }
+        @if ((_progress ?? _review?.VisioProgress) is { } progress)
+        {
+            <p role="status">@progress.State
+                @if (progress.PublishedMembers is { } count) { <text> · @count searchable archive members</text> }
+                @if (progress.ReasonCode is { } reason) { <text> · @Message(reason)</text> }
+            </p>
+            @if (progress.State == "Waiting for the Visio desktop companion")
+            {
+                <p>Ensure Visio is installed and the local desktop companion is active in the interactive Windows session.</p>
+            }
+            @if (progress.BranchId is { } branchId) { <a href="@($"/sources/retained/{branchId:D}")">View retained branch</a> }
+        }
+    }
+    @if (_message is { } message) { <p role="status">@message</p> }
+</section>
+
+@code {
+    [Parameter, EditorRequired] public Guid SourceRevisionId { get; set; }
+    [Parameter] public Guid? FailedJobId { get; set; }
+    [Parameter] public Guid? BranchId { get; set; }
+    [Parameter] public bool OpenOnLoad { get; set; }
+
+    private readonly CancellationTokenSource _stopping = new();
+    private (Guid Revision, Guid? Job, Guid? Branch) _scope;
+    private ElementReference _form;
+    private IJSObjectReference? _module;
+    private RetainedRecoveryReview? _review;
+    private RetainedRecoveryPreview? _preview;
+    private string? _policyBinding;
+    private NativeActionReceipt? _receipt;
+    private RetainedRecoveryTarget? _submittedTarget;
+    private RetainedRecoveryProgress? _progress;
+    private string? _idempotencyKey;
+    private string? _message;
+    private bool _opened;
+    private bool _busy;
+    private PendingSubmission? _pending;
+    private int _generation;
+    private int _loadedPendingGeneration = -1;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        var input = (SourceRevisionId, FailedJobId, BranchId);
+        if (_scope == input) return;
+        _scope = input;
+        _generation++;
+        _review = null;
+        _preview = null;
+        _policyBinding = null;
+        _receipt = null;
+        _submittedTarget = null;
+        _progress = null;
+        _idempotencyKey = null;
+        _message = null;
+        _opened = _busy = false;
+        _pending = null;
+        if (OpenOnLoad && SourceRevisionId != Guid.Empty) await ReviewAsync();
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (_loadedPendingGeneration == _generation || _scope.Revision == Guid.Empty) return;
+        var generation = _loadedPendingGeneration = _generation;
+        try
+        {
+            await OperatorPolicy.EnsureMutationAllowedAsync(_stopping.Token);
+            var pending = await (await GetModuleAsync()).InvokeAsync<PendingSubmission?>("readPending", _stopping.Token, _scope.Revision);
+            if (generation != _generation || pending?.Target.SourceRevisionId != _scope.Revision) return;
+            _pending = pending;
+            _opened = true;
+            StateHasChanged();
+        }
+        catch (UnauthorizedAccessException) { }
+        catch (JSException) { }
+        catch (OperationCanceledException) when (_stopping.IsCancellationRequested) { }
+    }
+
+    private async Task ReviewAsync()
+    {
+        var scope = _scope;
+        _opened = true;
+        await RunAsync(async generation =>
+        {
+            await OperatorPolicy.EnsureMutationAllowedAsync(_stopping.Token);
+            var review = await Commands.ReadReviewAsync(scope.Revision, scope.Job, scope.Branch, _stopping.Token);
+            if (generation != _generation) return;
+            _review = review;
+            if (review is null) _message = "The retained revision has changed or is unavailable. Open its current entry in Sources.";
+        });
+    }
+
+    private async Task PreviewAsync(RetainedRecoveryTarget target)
+    {
+        await RunAsync(async generation =>
+        {
+            var result = await BrowserRequestAsync("preview", target);
+            if (generation != _generation) return;
+            _preview = result.Preview;
+            _policyBinding = result.PolicyBinding;
+            if (_preview is null) _message = Message(result.ReasonCode);
+            else _idempotencyKey = $"retained-recovery-{Guid.NewGuid():N}";
+        });
+    }
+
+    private async Task CommitAsync()
+    {
+        var submission = _pending ?? (_preview is { } preview && _idempotencyKey is { } key
+            ? new PendingSubmission(preview.Target, preview.Confirmation.ConfirmationId, key, _policyBinding)
+            : null);
+        if (submission is null) return;
+        await RunAsync(async generation =>
+        {
+            var revision = submission.Target.SourceRevisionId;
+            var module = await GetModuleAsync();
+            if (!await module.InvokeAsync<bool>("rememberPending", _stopping.Token, revision, submission))
+            {
+                if (generation == _generation) _message = "A saved recovery submission needs attention in this tab. Reopen that item to check its receipt.";
+                return;
+            }
+            if (generation != _generation) return;
+            _pending = submission;
+            var result = await BrowserRequestAsync("commit", submission.Target, submission.ConfirmationId, submission.IdempotencyKey, submission.PolicyBinding);
+            if (generation != _generation) return;
+            _receipt = result.Receipt;
+            if (_receipt is null)
+            {
+                _message = Message(result.ReasonCode);
+                return;
+            }
+            _submittedTarget = submission.Target;
+            _pending = null;
+            CancelPreview();
+            await module.InvokeVoidAsync("forgetPending", _stopping.Token, revision, submission.IdempotencyKey);
+            if (generation != _generation) return;
+            await RefreshProgressCoreAsync(generation);
+        });
+    }
+
+    private void CancelPreview()
+    {
+        _preview = null;
+        _idempotencyKey = null;
+        _policyBinding = null;
+    }
+
+    private Task DismissPendingAsync() => RunAsync(async generation =>
+    {
+        if (_pending is not { } pending) return;
+        await (await GetModuleAsync()).InvokeVoidAsync("forgetPending", _stopping.Token, pending.Target.SourceRevisionId, pending.IdempotencyKey);
+        if (generation != _generation) return;
+        _pending = null;
+        CancelPreview();
+    });
+
+    private Task RefreshProgressAsync() => RunAsync(RefreshProgressCoreAsync);
+
+    private async Task RefreshProgressCoreAsync(int generation)
+    {
+        if (_receipt is not { } receipt || _submittedTarget is not { } target) return;
+        await OperatorPolicy.EnsureMutationAllowedAsync(_stopping.Token);
+        var progress = await Commands.ReadProgressAsync(target, receipt.OperationId, _stopping.Token);
+        if (generation != _generation) return;
+        _progress = progress;
+        if (progress is null) _message = "The request is recorded. Current processing evidence is unavailable.";
+    }
+
+    private async ValueTask<IJSObjectReference> GetModuleAsync() =>
+        _module ??= await JavaScript.InvokeAsync<IJSObjectReference>("import", _stopping.Token, "./retained-recovery.js");
+
+    private async ValueTask<BrowserResult> BrowserRequestAsync(string step, RetainedRecoveryTarget target, string? confirmation = null,
+        string? key = null, string? policyBinding = null) =>
+        await (await GetModuleAsync()).InvokeAsync<BrowserResult>("request", _stopping.Token, _form, step, target, confirmation, key, policyBinding);
+
+    private async Task RunAsync(Func<int, Task> operation)
+    {
+        if (_busy) return;
+        var generation = _generation;
+        _busy = true;
+        _message = null;
+        try { await operation(generation); }
+        catch (OperationCanceledException) when (_stopping.IsCancellationRequested) { }
+        catch (UnauthorizedAccessException) { if (generation == _generation) _message = Message("operator-authority-denied"); }
+        catch (Exception exception) when (exception is SqlException or JSException or InvalidOperationException)
+        {
+            if (generation == _generation) _message = Message(_pending is not null ? "commit-uncertain" : "recovery-service-unavailable");
+        }
+        finally { if (generation == _generation) _busy = false; }
+    }
+
+    private static string Label(RetainedRecoveryTarget target) => target.Kind switch
+    {
+        "zip" => "ZIP encoding reconciliation",
+        "visio" => "Visio preparation",
+        "pdf" => "PDF reprocessing",
+        "policy" => "Retained policy reprocessing",
+        _ => "Image reprocessing"
+    };
+
+    private static string Message(string? reason) => reason switch
+    {
+        "retained-recovery-source-not-admitted" => "The source is paused or its current authority is unconfirmed. Review the source and its pending changes.",
+        "retained-recovery-physical-proof-required" => "The app cannot verify the exact local file and its source. Make the file available and reconcile source metadata.",
+        "retained-recovery-input-changed" or "retained-recovery-revision-unavailable" => "The retained revision has changed. Reconcile the source and reopen the current item.",
+        "retained-recovery-input-unavailable" => "The exact retained input is unavailable. Reconcile the source to check for a current copy.",
+        "archive-zip-reconciliation-not-eligible" => "The selected branch has no current UTF-8 reconciliation proof or already has a successor. Review the retained branch evidence.",
+        "archive-zip-descriptor-disabled" => "The current ZIP processor is disabled in this deployment.",
+        "archive-entry-path-invalid" => "The archive contains an unsafe member path. Replace it with a supported, safely packaged archive.",
+        "archive-input-too-large" or "archive-member-size-limit" or "archive-expanded-total-limit" => "The archive or one of its members exceeds a processor size limit. Supply a smaller archive or the original files separately.",
+        "policy-binding-stale" => "The confirmed source rules changed before processing. Review the current source rules.",
+        "document-image-processor-disabled" => "Image OCR is disabled in this deployment.",
+        "visio-preparation-not-eligible" => "The app cannot prepare another Visio attempt from this revision. Check the existing preparation or desktop companion.",
+        "document-reprocess-not-eligible" => "The exact failed Extract job, retained input or native cleanup proof could not be confirmed. Review the job and the Activity log. If recovery requires stopped maintenance, use the reviewed maintenance workflow.",
+        "policy-item-not-eligible" or "policy-successor-conflict" => "The selected retained item has no eligible successor under the current source rules. Review the rules and source details.",
+        "policy-processor-unavailable" => "The processor required for this retained item is unavailable in this deployment.",
+        "policy-processor-unsupported" => "The app has no supported parser for this retained format. Provide a supported copy at the source.",
+        "operator-authority-denied" => "Open the app from its configured local address to confirm this operator action.",
+        "deployment-validation-held" => "Recovery is paused while the deployment is being validated.",
+        "operation-fenced" or "confirmation-mismatch" or "confirmation-consumed" or "confirmation-expired" => "The preview is stale. Review current evidence and open a new preview.",
+        "commit-uncertain" => "The response was interrupted. Check or retry the same submission to recover its receipt.",
+        "recovery-service-unavailable" or null => "Recovery status is temporarily unavailable. Try again.",
+        _ => reason
+    };
+
+    public async ValueTask DisposeAsync()
+    {
+        _generation++;
+        await _stopping.CancelAsync();
+        _stopping.Dispose();
+        if (_module is not null)
+        {
+            try { await _module.DisposeAsync(); }
+            catch (JSDisconnectedException) { }
+        }
+    }
+
+    private sealed record BrowserResult(RetainedRecoveryPreview? Preview, NativeActionReceipt? Receipt, string? ReasonCode, string? PolicyBinding);
+    private sealed record PendingSubmission(RetainedRecoveryTarget Target, string ConfirmationId, string IdempotencyKey, string? PolicyBinding);
+}

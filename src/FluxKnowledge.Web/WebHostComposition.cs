@@ -589,7 +589,9 @@ public static class WebHostComposition
         services.AddScoped<OperatorActionService>();
         services.AddScoped<LocalOperatorConnectionContext>();
         services.AddScoped<ILocalOperatorPolicy, LocalOperatorPolicy>();
+        services.AddScoped<GuidedRecoveryActions>();
         services.AddScoped<OperatorActionPageState>();
+        services.AddScoped<RetainedRecoveryNativeCommands>();
         var localOcrEnabled = nativeRuntimeOptions?.LocalOcrEnabled == true;
         if (localOcrEnabled)
         {

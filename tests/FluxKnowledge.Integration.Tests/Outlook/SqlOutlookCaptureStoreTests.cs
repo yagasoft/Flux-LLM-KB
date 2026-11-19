@@ -3,6 +3,8 @@ using System.Reflection;
 using System.Security.Cryptography;
 using System.Text;
 using FluxKnowledge.Application.Contracts;
+using FluxKnowledge.Application.IntegrationV1;
+using FluxKnowledge.Application.Sources;
 using FluxKnowledge.Domain.Outlook;
 using FluxKnowledge.Domain.Sources;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
@@ -290,6 +292,78 @@ public sealed class SqlOutlookCaptureStoreTests(NativeSqlServerFixture fixture) 
             new OutlookCaptureProfileId(profileId), "manual", OutlookCatchUpProvenance.Manual), CancellationToken.None);
 
         Assert.False(result.Accepted);
+    }
+
+    [NativeSqlServerFact]
+    public async Task Guided_catch_up_refuses_changed_profile_and_replays_the_same_accepted_receipt()
+    {
+        var seed = await SeedCaptureAsync(includeFolder: true, includeActiveCatchUp: false);
+        await using var context = await CreateContextAsync();
+        var revision = await context.OutlookCaptureProfiles.Where(row => row.Id == seed.ProfileId)
+            .Select(row => row.ConfigurationRevision).SingleAsync();
+        var hold = new CatchUpHold();
+        var store = CreateStore(hold: hold);
+        var stale = new OutlookCatchUpRequest(Guid.NewGuid(), Fingerprint, new(seed.ProfileId), "guided-stale",
+            OutlookCatchUpProvenance.Manual) { ExpectedConfigurationRevision = revision + 1 };
+        var valid = new OutlookCatchUpRequest(Guid.NewGuid(), OtherFingerprint, new(seed.ProfileId), "guided-valid",
+            OutlookCatchUpProvenance.Manual) { ExpectedConfigurationRevision = revision, ExpectedFolderIds = [seed.FolderId],
+                ConfirmationExpiresAtUtc = Now.AddMinutes(2) };
+        var wrongFolder = valid with { OperationId = Guid.NewGuid(), ExpectedFolderIds = [Guid.NewGuid()] };
+
+        Assert.False((await store.RequestCatchUpAsync(stale, CancellationToken.None)).Accepted);
+        Assert.False((await store.RequestCatchUpAsync(wrongFolder, CancellationToken.None)).Accepted);
+        Assert.True((await store.RequestCatchUpAsync(valid, CancellationToken.None)).Accepted);
+        await context.OutlookCaptureProfiles.Where(row => row.Id == seed.ProfileId)
+            .ExecuteUpdateAsync(setters => setters.SetProperty(row => row.ConfigurationRevision, revision + 1));
+        hold.IsHeld = true;
+        var held = await Assert.ThrowsAsync<NativeOperationException>(async () =>
+            await store.RequestCatchUpAsync(valid with { OperationId = Guid.NewGuid() }, CancellationToken.None));
+        Assert.Equal("deployment-validation-held", held.ReasonCode);
+        var replay = await store.RequestCatchUpAsync(valid, CancellationToken.None);
+
+        Assert.True(replay.Accepted);
+        Assert.True(replay.IsReplay);
+        var laterStore = CreateStore(now: Now.AddMinutes(3));
+        Assert.True((await laterStore.RequestCatchUpAsync(valid, CancellationToken.None)).IsReplay);
+        var expired = await Assert.ThrowsAsync<NativeOperationException>(async () =>
+            await laterStore.RequestCatchUpAsync(valid with { OperationId = Guid.NewGuid(), ExpectedConfigurationRevision = revision + 1 },
+                CancellationToken.None));
+        Assert.Equal("confirmation-expired", expired.ReasonCode);
+        Assert.Equal("guided-valid", (await context.OutlookCatchUps.SingleAsync(row => row.ProfileId == seed.ProfileId)).CoalescingKey);
+        await context.OutlookCatchUps.Where(row => row.ProfileId == seed.ProfileId)
+            .ExecuteUpdateAsync(update => update.SetProperty(row => row.State, 2));
+    }
+
+    [NativeSqlServerFact]
+    public async Task Guided_catch_up_holds_profile_configuration_until_the_request_is_recorded()
+    {
+        var seed = await SeedCaptureAsync(includeFolder: false, includeActiveCatchUp: false);
+        await using var writer = await CreateContextAsync();
+        var revision = await writer.OutlookCaptureProfiles.Where(row => row.Id == seed.ProfileId)
+            .Select(row => row.ConfigurationRevision).SingleAsync();
+        var gate = new CatchUpReadGate();
+        var command = new OutlookCatchUpRequest(Guid.NewGuid(), Fingerprint, new(seed.ProfileId), "guided-fenced",
+            OutlookCatchUpProvenance.Manual) { ExpectedConfigurationRevision = revision };
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var request = CreateStore(gate).RequestCatchUpAsync(command, deadline.Token).AsTask();
+        try
+        {
+            await gate.Reached.Task.WaitAsync(deadline.Token);
+            await writer.Database.OpenConnectionAsync(deadline.Token);
+            await writer.Database.ExecuteSqlRawAsync("SET LOCK_TIMEOUT 1000", deadline.Token);
+            await using var competingUpdate = (SqlCommand)writer.Database.GetDbConnection().CreateCommand();
+            competingUpdate.CommandText = "UPDATE dbo.OutlookCaptureProfiles SET ConfigurationRevision = @revision WHERE Id = @profile";
+            competingUpdate.Parameters.AddWithValue("@revision", revision + 1);
+            competingUpdate.Parameters.AddWithValue("@profile", seed.ProfileId);
+            var conflict = await Assert.ThrowsAsync<SqlException>(async () => await competingUpdate.ExecuteNonQueryAsync(deadline.Token));
+            Assert.Equal(1222, conflict.Number);
+        }
+        finally { gate.Release.TrySetResult(); }
+
+        Assert.True((await request).Accepted);
+        Assert.Equal(1, await writer.OutlookCatchUps.CountAsync(row => row.ProfileId == seed.ProfileId));
+        await writer.OutlookCatchUps.Where(row => row.ProfileId == seed.ProfileId)
+            .ExecuteUpdateAsync(update => update.SetProperty(row => row.State, 2));
     }
 
     [NativeSqlServerFact]
@@ -825,8 +899,9 @@ public sealed class SqlOutlookCaptureStoreTests(NativeSqlServerFixture fixture) 
     private SqlOutlookCaptureStore CreateStore(
         IInterceptor? interceptor = null,
         bool useRetryingExecutionStrategy = false,
-        DateTimeOffset? now = null) =>
-        new(new TestDbContextFactory(_fixture.ConnectionString, interceptor, useRetryingExecutionStrategy), new ManualTimeProvider(now ?? Now));
+        DateTimeOffset? now = null,
+        IDeploymentValidationHold? hold = null) =>
+        new(new TestDbContextFactory(_fixture.ConnectionString, interceptor, useRetryingExecutionStrategy), new ManualTimeProvider(now ?? Now), hold);
 
     private async Task<FluxKnowledgeDbContext> CreateContextAsync() =>
         await SqlTestData.CreateFactory(_fixture).CreateDbContextAsync();
@@ -1060,6 +1135,26 @@ public sealed class SqlOutlookCaptureStoreTests(NativeSqlServerFixture fixture) 
                 }
             }
 
+            return result;
+        }
+    }
+
+    private sealed class CatchUpHold : IDeploymentValidationHold
+    {
+        public bool IsHeld { get; set; }
+        public ValueTask WaitUntilReleasedAsync(CancellationToken cancellationToken) => ValueTask.CompletedTask;
+    }
+
+    private sealed class CatchUpReadGate : DbCommandInterceptor
+    {
+        internal TaskCompletionSource Reached { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public override async ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(DbCommand command,
+            CommandEventData eventData, InterceptionResult<DbDataReader> result, CancellationToken cancellationToken = default)
+        {
+            if (command.CommandText.Contains("FROM [OutlookCatchUps]", StringComparison.Ordinal) && Reached.TrySetResult())
+                await Release.Task.WaitAsync(cancellationToken);
             return result;
         }
     }

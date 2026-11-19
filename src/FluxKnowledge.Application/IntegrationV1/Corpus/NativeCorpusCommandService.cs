@@ -25,7 +25,7 @@ public sealed class NativeCorpusCommandService
         ["source_verification_set"] = "Retired: checksum verification scheduling is disabled.",
         ["policy_reprocess"] = "Re-evaluate one exact retained item under the current policy and queue eligible text, preserving its original attempts and publication.",
         ["watcher_set"] = "Set persisted watcher state.",
-        ["job_retry"] = "Queue a supported job retry.",
+        ["job_retry"] = "Requeue the selected source scan and its existing delivery, preserving its previous attempts.",
         ["publication_retry"] = "Requeue exactly the selected terminal Publish job and its completed delivery.",
         ["embedding_retry"] = "Requeue exactly the selected terminal Embed job while preserving its compatible checkpoint and settled GPU work.",
         ["index_retention"] = "Remove one manifest-bound unreferenced historical generation and its exact membership, retaining a verified recovery snapshot.",
@@ -81,6 +81,7 @@ public sealed class NativeCorpusCommandService
             cancellationToken).ConfigureAwait(false);
         receipt = await _actionStore.FinalizeCommitAsync(action, Payload(command), receipt, cancellationToken).ConfigureAwait(false);
         if (action is "publication_retry" or "embedding_retry" or "policy_reprocess") _outboxWakeSignal?.Notify();
+        if (action == "job_retry") _sourceScanWakeSignal?.Notify();
         if (action is "root_create" or "root_resume" or "root_delete" or "source_sync" or "source_verify" or "source_verification_set" ||
             action == "root_update" && (!command.Payload.TryGetProperty("reconcile", out var reconcile) || reconcile.GetBoolean()))
         {

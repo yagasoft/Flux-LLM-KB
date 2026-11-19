@@ -1,6 +1,7 @@
 @implements IAsyncDisposable
 @using FluxKnowledge.Application.IntegrationV1.Corpus
 @using FluxKnowledge.Application.Ports
+@using FluxKnowledge.Web.Components.Status
 @inject ISourceVerificationStore VerificationStore
 @inject NativeCorpusCommandService CorpusCommands
 
@@ -48,6 +49,10 @@
             </details>
         }
         <div class="verification-actions">
+            @if (!ControlsDisabled && RootState == "Enabled" && status.Scanning?.PendingObligations > 0)
+            {
+                <GuidedRecoveryAction Action="source_sync" TargetId="RootId" SourceRootId="RootId" ActionLabel="Process pending changes" OnCommitted="RefreshAsync" />
+            }
             <button type="button" disabled="@(ControlsDisabled || RootState != "Enabled")" @onclick="ReconcileAsync">Reconcile source metadata</button>
             <button type="button" disabled="@_refreshing" @onclick="RefreshAsync">Refresh source status</button>
         </div>

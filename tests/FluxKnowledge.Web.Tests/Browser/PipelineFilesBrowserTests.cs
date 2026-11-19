@@ -40,8 +40,10 @@ public sealed class PipelineFilesBrowserTests
                 await page.EvaluateAsync("zoom => document.body.style.zoom = zoom", viewport.Zoom.ToString(System.Globalization.CultureInfo.InvariantCulture));
                 Assert.Equal(host.BaseAddress.AbsoluteUri, page.Url);
                 Assert.Contains("Overview", await page.TitleAsync(), StringComparison.Ordinal);
-                await Assertions.Expect(page.GetByText("Published — ready to query", new() { Exact = true }).First).ToBeVisibleAsync();
                 await page.GetByLabel("Source scope").SelectOptionAsync(PipelineOverviewBrowserTests.ControlledOverviewReader.FirstRoot.ToString());
+                var source = ExampleSourceCard(page);
+                await source.GetByText("File counts and path", new() { Exact = true }).ClickAsync();
+                await Assertions.Expect(source.GetByText("Published — ready to query", new() { Exact = true })).ToBeVisibleAsync();
                 var runningTask = page.Locator(".running-task-row");
                 var visiblePath = runningTask.Locator(".file-path > code");
                 await Assertions.Expect(visiblePath).ToBeVisibleAsync();
@@ -100,7 +102,8 @@ public sealed class PipelineFilesBrowserTests
                 await Assertions.Expect(explorer).ToContainTextAsync("Page 2");
                 await Assertions.Expect(explorer.Locator(".pipeline-file-item")).ToHaveCountAsync(5);
                 await page.GetByLabel("Source scope").SelectOptionAsync(PipelineOverviewBrowserTests.ControlledOverviewReader.SecondRoot.ToString());
-                await Assertions.Expect(explorer).Not.ToContainTextAsync("file-25.txt");
+                await Assertions.Expect(explorer).ToBeHiddenAsync();
+                await Assertions.Expect(page.Locator(".pipeline-file-explorer")).Not.ToContainTextAsync("file-25.txt");
                 Assert.True(await page.EvaluateAsync<bool>("document.documentElement.scrollWidth <= window.innerWidth"));
                 Assert.Empty(errors);
                 var screenshots = Environment.GetEnvironmentVariable("FLUXKNOWLEDGE_PIPELINE_SCREENSHOTS");
@@ -134,7 +137,9 @@ public sealed class PipelineFilesBrowserTests
             await using var page = await browser.NewPageAsync();
             await page.GotoAsync(host.BaseAddress.AbsoluteUri, new() { WaitUntil = WaitUntilState.NetworkIdle });
             await page.GetByLabel("Source scope").SelectOptionAsync(PipelineOverviewBrowserTests.ControlledOverviewReader.FirstRoot.ToString());
-            var open = page.GetByRole(AriaRole.Button, new() { Name = "Pending: 4", Exact = true });
+            var source = ExampleSourceCard(page);
+            await source.GetByText("File counts and path", new() { Exact = true }).ClickAsync();
+            var open = source.GetByRole(AriaRole.Button, new() { Name = "Pending: 4", Exact = true });
             var explorer = page.GetByRole(AriaRole.Region, new() { Name = "Affected files" });
             await open.ClickAsync();
             await Assertions.Expect(explorer.GetByRole(AriaRole.Alert)).ToContainTextAsync("zero count has not been confirmed");
@@ -154,11 +159,18 @@ public sealed class PipelineFilesBrowserTests
                     "D:/wrong-previous-source.txt", null, "Pending", "Embedding", "Queued", "", "", [], [])]));
             await page.GetByRole(AriaRole.Button, new() { Name = "Refresh status" }).ClickAsync();
             await Assertions.Expect(page.GetByLabel("Source scope")).ToHaveValueAsync(PipelineOverviewBrowserTests.ControlledOverviewReader.SecondRoot.ToString());
-            await Assertions.Expect(explorer).ToContainTextAsync("Select a file category");
-            await Assertions.Expect(explorer).Not.ToContainTextAsync("wrong-previous-source");
+            await Assertions.Expect(explorer).ToBeHiddenAsync();
+            var clearedExplorer = page.Locator(".pipeline-file-explorer");
+            await Assertions.Expect(clearedExplorer).ToContainTextAsync("Select a file category");
+            await Assertions.Expect(clearedExplorer).Not.ToContainTextAsync("wrong-previous-source");
         }
         finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
     }
+
+    private static ILocator ExampleSourceCard(IPage page) => page.Locator(".source-progress-card").Filter(new()
+    {
+        Has = page.GetByRole(AriaRole.Heading, new() { Name = "Example workspace", Exact = true })
+    });
 
     private sealed class FilesReader : IProjectionReader
     {

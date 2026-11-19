@@ -1,4 +1,4 @@
-param([Parameter(Mandatory)][string]$SourceRoot,[Parameter(Mandatory)][string]$ReceiptDirectory,[switch]$CodexWorkspace)
+param([Parameter(Mandatory)][string]$SourceRoot,[Parameter(Mandatory)][string]$ReceiptDirectory,[switch]$CodexWorkspace,[switch]$ForwardOnly)
 $ErrorActionPreference='Stop';Set-StrictMode -Version Latest
 foreach($name in @('incremental-vector-publication-metadata-migration','incremental-source-deletion-pending-queue-index','incremental-passage-window-eligibility-migration','incremental-source-journal-migration')){
  Import-Module (Join-Path $SourceRoot ('scripts/deploy/'+$name+'.psm1')) -Force
@@ -24,6 +24,15 @@ $read={Get-PassageWindowEligibilityDatabaseState $connectionText @mode}
 $initial=&$read
 $initial|ConvertTo-Json -Depth 5|Set-Content -LiteralPath (Join-Path $ReceiptDirectory 'initial-state.json') -Encoding utf8
 Check ((Get-PassageWindowEligibilityStateKind @mode $initial $initial.Identity) -ceq 'Old') 'Fixture must start at the exact predecessor.'
+if ($ForwardOnly) {
+ $state=New-PassageWindowEligibilityMigrationState @mode $initial $ReceiptDirectory 'owned-forward' ('a'*40) $contract.UpSha256
+ Invoke-PassageWindowEligibilityMigrationAttempt $state $read {} {
+  Invoke-PassageWindowEligibilityMigrationSql @mode $connectionText $sqlPath $initial.Identity
+ }
+ Check ($state.Applied -and $state.SettledState -ceq 'New') 'The exact successor was not applied.'
+ Assert-SourceJournalSchema (Get-SourceJournalDatabaseState $connectionText)
+ return
+}
 if ($CodexWorkspace) {
  Test-Sql 'ALTER TABLE dbo.KnowledgeItems ADD CodexWorkspaceRootId uniqueidentifier NULL;'
  try {

@@ -19,6 +19,58 @@ namespace FluxKnowledge.Integration.Tests.Documents;
 
 public sealed partial class VisioScopedPipelineIntegrationTests
 {
+    [NativeSqlServerFact]
+    public async Task Dashboard_prepares_visio_then_the_desktop_handoff_refuses_a_changed_root_configuration()
+    {
+        var path = Path.Combine(Path.GetTempPath(), "visio-guided-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(path);
+        try
+        {
+            var bytes = new byte[] { 1, 2, 3, 4 };
+            await File.WriteAllBytesAsync(Path.Combine(path, "public.vsdx"), bytes);
+            var observations = new WindowsSourceObservationReader();
+            SourceFileObservation observed;
+            var rootConfig = SourceRootConfiguration.Create(path, "Guided Visio", recursive: true, followLinks: false, maximumFileBytes: 1024);
+            using (var file = observations.Open(rootConfig, "public.vsdx")) observed = file.Observation;
+            var (request, _) = await SeedAsync(RetainedProcessorBranchState.Blocked, path, observed);
+            var factory = SqlTestData.CreateFactory(fixture);
+            await using (var metadata = await factory.CreateDbContextAsync())
+            {
+                using var authority = PhysicalFileIdentity.OpenDirectoryLease(path);
+                var root = await metadata.SourceRootConfigurations.SingleAsync();
+                root.HealthEvidenceJson = JsonSerializer.Serialize(new { physicalIdentity = new { authority.Identity.IdentityFingerprint } });
+                await metadata.SaveChangesAsync();
+            }
+            var admission = new FixtureSourceAdmission(factory);
+            var native = new SqlNativeOperationStore(factory, TimeProvider.System);
+            var commands = new RetainedRecoveryNativeCommands(factory, native, new RetainedProcessorOptions(), admission, observations);
+            var target = new RetainedRecoveryTarget("visio", request.SourceRevisionId.Value);
+            var preview = await commands.PreviewAsync(target, default);
+            var receipt = await commands.CommitAsync(target, preview.Confirmation.ConfirmationId, "visio-guided-test", default);
+            var waiting = await commands.ReadProgressAsync(target, receipt.OperationId, default);
+            var branchId = Assert.IsType<Guid>(waiting!.BranchId);
+            var branches = new SqlRetainedProcessorBranchStore(factory, TimeProvider.System, sourceAdmission: admission);
+            var claim = Assert.Single(await branches.ClaimAsync("guided-visio-preparation", 1, request.ExpectedProcessorFingerprint, default));
+            Assert.Equal(branchId, claim.BranchId);
+            var child = DocumentProcessingInput.CreateVisioChild(claim, new(request.SourceRevisionId, bytes, request.ExpectedInputSha256, bytes.Length));
+            Assert.True(await branches.CommitAsync(claim, new RetainedProcessorCompletion([child], new string('d', 64)), default));
+            Assert.Equal("Waiting for the Visio desktop companion", (await commands.ReadProgressAsync(target, receipt.OperationId, default))?.State);
+
+            var registration = new SqlRetainedTextRegistrationStore(factory, TimeProvider.System, sourceAdmission: admission);
+            Assert.NotNull(await registration.RegisterVisioBranchAsync(request, branchId, default));
+            await using (var change = await factory.CreateDbContextAsync())
+            {
+                var root = await change.SourceRootConfigurations.SingleAsync();
+                root.ConfigurationRevision++;
+                root.ExcludePatternsJson = "[\"*.vsdx\"]";
+                await change.SaveChangesAsync();
+            }
+            Assert.Null(await new SqlOutboxStore(factory, sourceAdmission: admission).ClaimVisioDocumentAsync(request, branchId,
+                "interactive-visio-guard", DateTimeOffset.UtcNow.AddSeconds(1), TimeSpan.FromMinutes(12), default));
+        }
+        finally { Directory.Delete(path, recursive: true); }
+    }
+
     [NativeSqlServerTheory]
     [InlineData(false)]
     [InlineData(true)]

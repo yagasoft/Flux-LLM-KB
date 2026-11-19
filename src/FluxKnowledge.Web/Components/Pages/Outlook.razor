@@ -1,11 +1,15 @@
 @page "/outlook"
 @implements IDisposable
 @using FluxKnowledge.Application.Contracts
+@using FluxKnowledge.Application.IntegrationV1
+@using FluxKnowledge.Application.Sources
 @using FluxKnowledge.Domain.Outlook
 @using FluxKnowledge.Web.Components.Outlook
 @using Microsoft.JSInterop
 @inject OutlookPageState PageState
 @inject IJSRuntime JavaScriptRuntime
+@inject IDeploymentValidationHold DeploymentHold
+@inject TimeProvider Clock
 
 <PageTitle>Outlook capture | Flux Knowledge</PageTitle>
 
@@ -14,7 +18,8 @@
     <p>The local Outlook host verifies folders and captures mail from classic Outlook.</p>
     <p role="status" aria-live="polite">@_status</p>
 
-    <p><button type="button" disabled="@_saving" @onclick="NewProfile">Add profile</button></p>
+    <p class="issue-actions"><button type="button" disabled="@_saving" @onclick="NewProfile">Add profile</button>
+        <button type="button" @onclick="RefreshStatusAsync">Refresh capture status</button></p>
 
     @if (PageState.Projection.Profiles.Count == 0)
     {
@@ -76,14 +81,47 @@
                     <button type="button" disabled="@_saving" @onclick="() => EditProfile(profile)">Edit</button>
                     <button type="button" @onclick="() => PauseAsync(profile.ProfileId)">Pause</button>
                     <button type="button" @onclick="() => RemoveAsync(profile.ProfileId)">Remove</button>
-                    <button type="button" disabled="@(profile.State == nameof(OutlookCaptureState.Disabled))" @onclick="() => CatchUpAsync(profile.ProfileId, false)">Catch up</button>
-                    @if (profile.IncrementalBasis == OutlookIncrementalBasis.ReceivedTime)
+                    @if (profile.State is not ("Disabled" or "Stale") && profile.Folders.Count > 0)
                     {
-                        <button type="button" @onclick="() => CatchUpAsync(profile.ProfileId, true)">Reconcile moved messages</button>
+                        <button type="button" disabled="@(CatchUpLocked || _saving)" @onclick="() => ReviewCatchUp(profile, false)">Preview catch-up</button>
+                        @if (profile.IncrementalBasis == OutlookIncrementalBasis.ReceivedTime)
+                        {
+                            <button type="button" disabled="@(CatchUpLocked || _saving)" @onclick="() => ReviewCatchUp(profile, true)">Preview overlap catch-up</button>
+                        }
                     }
                 </p>
             </article>
         }
+    }
+
+    @if (_pendingCatchUp is { } selection)
+    {
+        <section class="issue-inspector" aria-label="Outlook catch-up preview">
+            <h3>@(selection.ReconcileMovedMessages ? "Catch up within the overlap window" : "Catch up")</h3>
+            <p>Queue work for @selection.ProfileName. The Outlook companion uses the profile's configured folders, cursor and overlap when it claims the request.</p>
+            @if (selection.ReconcileMovedMessages)
+            {
+                <p>Older moved messages outside that window can still be missed.</p>
+            }
+            @if (selection.Folders.Count > 0)
+            {
+                <details><summary>Folders selected in this preview (@selection.Folders.Count)</summary>
+                    <ul>@foreach (var folder in selection.Folders) { <li>@folder.DisplayName</li> }</ul>
+                </details>
+            }
+            <button type="button" disabled="@_submittingCatchUp" @onclick="ConfirmCatchUpAsync">@(_checkCatchUpReceipt ? "Check or retry the same request" : "Confirm request")</button>
+            <button type="button" disabled="@CatchUpLocked" @onclick="() => _pendingCatchUp = null">Cancel</button>
+        </section>
+    }
+    @if (_lastCatchUp is { } submitted)
+    {
+        <section aria-label="Catch-up progress">
+            <h2>Catch-up progress</h2>
+            <p>@submitted.ProfileName · <code>@submitted.OperationId</code></p>
+            <p role="status">@(_catchUpProgress?.State ?? "Request accepted. Progress is unavailable in this sample.")
+                @if (_catchUpProgress?.NextAttemptAtUtc is { } due) { <span>· Next attempt @due.ToLocalTime()</span> }</p>
+            <button type="button" @onclick="RefreshCatchUpAsync">Refresh catch-up progress</button>
+        </section>
     }
 
     @if (_showForm)
@@ -144,6 +182,14 @@
     private bool _saving;
     private bool _watchingVerification;
     private string _status = "Loading Outlook capture status from SQL…";
+    private CatchUpSelection? _pendingCatchUp;
+    private CatchUpSelection? _lastCatchUp;
+    private OutlookCatchUpStatus? _catchUpProgress;
+    private bool _submittingCatchUp;
+    private bool _checkCatchUpReceipt;
+    private bool CatchUpLocked => _submittingCatchUp || _checkCatchUpReceipt;
+    private sealed record CatchUpSelection(Guid OperationId, Guid ProfileId, string ProfileName, long ConfigurationRevision,
+        IReadOnlyList<OutlookFolderStatusProjection> Folders, bool ReconcileMovedMessages, DateTimeOffset ExpiresAtUtc);
 
     protected override async Task OnInitializedAsync()
     {
@@ -293,13 +339,89 @@
         _status = "Profile removed from active capture configuration.";
     });
 
-    private async Task CatchUpAsync(Guid profileId, bool reconciliation) => await RunMutationAsync(async () =>
+    private async Task RefreshStatusAsync() => await RunMutationAsync(async () =>
     {
-        var receipt = await PageState.RequestCatchUpAsync(new OutlookCaptureProfileId(profileId), reconciliation, _stopping.Token);
-        _status = receipt.Accepted
-            ? "Durable catch-up work recorded for a later Outlook host claim."
-            : "Catch-up was not accepted because the profile is disabled.";
+        await PageState.ReloadAsync(_stopping.Token);
+        _status = "Current Outlook capture status loaded.";
     });
+
+    private void ReviewCatchUp(OutlookProfileStatusProjection profile, bool reconcileMovedMessages)
+    {
+        if (CatchUpLocked) return;
+        if (DeploymentHold.IsHeld)
+        {
+            _status = "Deployment validation is holding catch-up requests. Check again after it finishes.";
+            return;
+        }
+        _pendingCatchUp = new(Guid.NewGuid(), profile.ProfileId, profile.DisplayName, profile.ConfigurationRevision,
+            profile.Folders.ToArray(), reconcileMovedMessages, Clock.GetUtcNow().AddMinutes(2));
+    }
+
+    private async Task ConfirmCatchUpAsync()
+    {
+        if (_submittingCatchUp || _pendingCatchUp is not { } selection) return;
+        if (!_checkCatchUpReceipt && selection.ExpiresAtUtc <= Clock.GetUtcNow())
+        {
+            _pendingCatchUp = null;
+            _status = "The preview expired. Review the current profile and prepare a new request.";
+            return;
+        }
+        _submittingCatchUp = true;
+        try
+        {
+            var receipt = await PageState.RequestCatchUpAsync(new(selection.ProfileId), selection.ReconcileMovedMessages,
+                _stopping.Token, selection.OperationId, selection.ConfigurationRevision,
+                selection.Folders.Select(folder => folder.FolderId).ToArray(), selection.ExpiresAtUtc);
+            if (!receipt.Committed)
+            {
+                _checkCatchUpReceipt = true;
+                _status = "The request was not confirmed. Check or retry the same request.";
+                return;
+            }
+            _checkCatchUpReceipt = false;
+            _pendingCatchUp = null;
+            _status = receipt.Accepted
+                ? "Catch-up requested. Follow this request in Catch-up progress."
+                : "The profile or its folders changed after the preview. Review the current settings.";
+            if (receipt.Accepted)
+            {
+                _lastCatchUp = selection;
+                _catchUpProgress = null;
+                await RefreshCatchUpAsync();
+            }
+        }
+        catch (OperationCanceledException) when (_stopping.IsCancellationRequested) { }
+        catch (UnauthorizedAccessException)
+        {
+            _status = "A local operator connection is required to submit or check a catch-up request.";
+        }
+        catch (NativeOperationException exception) when (exception.ReasonCode == "deployment-validation-held")
+        {
+            _status = "Deployment validation is holding catch-up requests. Check again after it finishes.";
+        }
+        catch (NativeOperationException exception) when (exception.ReasonCode == "confirmation-expired")
+        {
+            _checkCatchUpReceipt = false;
+            _pendingCatchUp = null;
+            _status = "The preview expired. Review the current profile and prepare a new request.";
+        }
+        catch (Exception exception)
+        {
+            _checkCatchUpReceipt = true;
+            _status = OutlookPageState.ToSafeOperatorMessage(exception);
+        }
+        finally { _submittingCatchUp = false; }
+    }
+
+    private async Task RefreshCatchUpAsync()
+    {
+        if (_lastCatchUp is not { } submitted) return;
+        await RunMutationAsync(async () =>
+        {
+            var progress = await PageState.ReadCatchUpAsync(submitted.ProfileId, submitted.OperationId, _stopping.Token);
+            if (_lastCatchUp?.OperationId == submitted.OperationId) _catchUpProgress = progress;
+        });
+    }
 
     private async Task RunMutationAsync(Func<Task> mutation)
     {

@@ -14,6 +14,46 @@ namespace FluxKnowledge.Web.Tests.Browser;
 public sealed class PipelineOverviewBrowserTests
 {
     [BrowserFact]
+    public async Task A_current_issue_opens_its_source_files_and_restores_keyboard_focus_when_closed()
+    {
+        var reader = new ControlledOverviewReader { ShowUnavailableFile = true };
+        var root = BrowserTestRoots.Create($"FluxIssueInspector_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            await using var host = await PhaseOneVerticalSliceBrowserTests.BrowserHost.StartAsync(
+                "Server=unreachable.invalid;Database=unreachable;Integrated Security=true;Encrypt=true;TrustServerCertificate=true",
+                root, Path.Combine(root, "indexes"), services =>
+                {
+                    services.RemoveAll<IHostedService>();
+                    services.RemoveAll<IProjectionReader>();
+                    services.AddSingleton<IProjectionReader>(reader);
+                });
+            using var playwright = await Playwright.CreateAsync();
+            await using var browser = await playwright.Chromium.LaunchAsync(BrowserLaunchOptions.Create());
+            foreach (var width in new[] { 1440, 390 })
+            {
+                await using var page = await browser.NewPageAsync(new() { ViewportSize = new() { Width = width, Height = 1000 } });
+                await page.GotoAsync(host.BaseAddress.AbsoluteUri, new() { WaitUntil = WaitUntilState.NetworkIdle });
+                var needsAttention = page.Locator("#pipeline-attention");
+                await Assertions.Expect(needsAttention.GetByText("Files unavailable on this device")).ToBeVisibleAsync();
+                var review = needsAttention.GetByRole(AriaRole.Button, new() { Name = "Review files", Exact = true });
+                await review.FocusAsync();
+                await review.PressAsync("Enter");
+                await Assertions.Expect(page.Locator("#affected-files-heading")).ToBeFocusedAsync();
+                await Assertions.Expect(needsAttention.GetByText("report.pdf", new() { Exact = true })).ToBeVisibleAsync();
+                Assert.Equal(ControlledOverviewReader.SecondRoot, reader.LastFileScope);
+                await ScreenshotAsync(page, $"action-inspector-{width}.png");
+                Assert.True(await page.EvaluateAsync<bool>("document.documentElement.scrollWidth <= window.innerWidth"));
+                await needsAttention.GetByRole(AriaRole.Button, new() { Name = "Close file details" }).PressAsync("Enter");
+                await Assertions.Expect(page.Locator("#attention-heading")).ToBeFocusedAsync();
+                await Assertions.Expect(page.Locator("#affected-files-heading")).ToBeHiddenAsync();
+            }
+        }
+        finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
+    }
+
+    [BrowserFact]
     public async Task Journal_failure_is_visible_with_retry_schedule_and_pause_state_after_filter_and_refresh()
     {
         var now = DateTimeOffset.UtcNow;
@@ -199,6 +239,7 @@ public sealed class PipelineOverviewBrowserTests
             var page = await browser.NewPageAsync();
             await page.GotoAsync(host.BaseAddress.AbsoluteUri, new() { WaitUntil = WaitUntilState.NetworkIdle });
             await page.GetByLabel("Source scope").SelectOptionAsync(ControlledOverviewReader.FirstRoot.ToString());
+            await page.Locator("details:has(> summary:text-is('Job and GPU diagnostics'))").EvaluateAsync("element => element.open = true");
             await page.GetByRole(AriaRole.Button, new() { Name = "View pipeline job records" }).ClickAsync();
             await Assertions.Expect(page.Locator("#pipeline-attention tbody tr")).ToHaveCountAsync(25);
 
@@ -272,12 +313,14 @@ public sealed class PipelineOverviewBrowserTests
             await Assertions.Expect(page.Locator(".source-progress-card")).ToHaveCountAsync(1);
             await Assertions.Expect(page.Locator(".source-progress-card")).ToContainTextAsync("Acceptance source");
             await page.GetByLabel("Source scope").SelectOptionAsync("");
+            await page.Locator("details:has(> summary:text-is('Job and GPU diagnostics'))").EvaluateAsync("element => element.open = true");
             await page.GetByRole(AriaRole.Button, new() { Name = "View pipeline job records" }).ClickAsync();
             await Assertions.Expect(page.Locator("#pipeline-attention tbody tr")).ToHaveCountAsync(25);
             await page.GetByRole(AriaRole.Button, new() { Name = "Next records" }).ClickAsync();
             await Assertions.Expect(page.Locator("#pipeline-attention tbody tr")).ToHaveCountAsync(5);
 
             var delayed = reader.DelayNextAttention();
+            await page.Locator("details:has(> summary:text-is('Job and GPU diagnostics'))").EvaluateAsync("element => element.open = true");
             await page.GetByRole(AriaRole.Button, new() { Name = "View pipeline job records" }).ClickAsync();
             await reader.AttentionStarted.WaitAsync(TimeSpan.FromSeconds(5));
             await page.GetByLabel("Source scope").SelectOptionAsync(ControlledOverviewReader.SecondRoot.ToString());
@@ -314,6 +357,7 @@ public sealed class PipelineOverviewBrowserTests
             await page.EvaluateAsync("document.body.style.zoom = ''");
 
             await page.GetByLabel("Source scope").SelectOptionAsync(ControlledOverviewReader.FirstRoot.ToString());
+            await page.Locator("details:has(> summary:text-is('Job and GPU diagnostics'))").EvaluateAsync("element => element.open = true");
             await page.GetByRole(AriaRole.Button, new() { Name = "View pipeline job records" }).ClickAsync();
             await Assertions.Expect(page.Locator("#pipeline-attention tbody tr")).ToHaveCountAsync(25);
             reader.RemoveFirstRoot = true;
@@ -351,6 +395,8 @@ public sealed class PipelineOverviewBrowserTests
         public GpuOcrOwnerStatus? OcrOwner { get; set; }
         public string FirstRootLifecycle { get; set; } = "Enabled";
         public SourceJournalHealth? JournalHealth { get; set; }
+        public bool ShowUnavailableFile { get; set; }
+        public Guid? LastFileScope { get; private set; }
         private TaskCompletionSource<PipelineAttentionPage>? _delayedAttention;
         private TaskCompletionSource _attentionStarted = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public Task AttentionStarted => _attentionStarted.Task;
@@ -377,6 +423,11 @@ public sealed class PipelineOverviewBrowserTests
                      new(FirstRoot, "Example workspace", "Embed", PipelineWorkState.Historical, true, "Suppressed", 31)],
                     [new(null, "Interactive search", "Outcome uncertain", 179)], 0, 0, 0)
             };
+            if (ShowUnavailableFile) projection = projection with { Activity = projection.Activity with
+            {
+                FileCauses = [new(SecondRoot, "Blocked", "SourceContentNotAvailableLocally",
+                    "Make this file available in the sync client, then reconcile metadata.", 1)]
+            } };
             if (InconsistentReads) projection = projection with { Activity = projection.Activity with { IsConsistent = false } };
             return ValueTask.FromResult(RemoveFirstRoot ? projection with { Activity = projection.Activity with
             {
@@ -398,6 +449,14 @@ public sealed class PipelineOverviewBrowserTests
                     "Failed", "Historical", $"Retained outcome {i}", DateTimeOffset.UtcNow)).ToArray()));
         }
         public ValueTask<GpuSchedulerStatusProjection> ReadGpuSchedulerStatusAsync(CancellationToken ct) => ValueTask.FromResult(GpuSchedulerStatusProjection.Empty);
+        public ValueTask<PipelineFilePage> ReadPipelineFilesAsync(PipelineFileFilter filter, Guid? sourceRootId, int page, CancellationToken ct)
+        {
+            LastFileScope = sourceRootId;
+            return ValueTask.FromResult(new PipelineFilePage(1, 0, 25, DateTimeOffset.UtcNow,
+                [new(SecondRoot, Guid.NewGuid(), "Acceptance source", "C:\\acceptance-source\\report.pdf", null,
+                    "Blocked", "Extract", "Blocked", "SourceContentNotAvailableLocally",
+                    "Make this file available locally, then reconcile metadata.", [], [])]));
+        }
         public ValueTask<IReadOnlyList<PipelineRecordProjection>> ReadPipelineRecordsAsync(CancellationToken ct) => ValueTask.FromResult<IReadOnlyList<PipelineRecordProjection>>([]);
         public ValueTask<PipelineRecordProjection?> ReadPipelineRecordAsync(Guid id, CancellationToken ct) => ValueTask.FromResult<PipelineRecordProjection?>(null);
     }

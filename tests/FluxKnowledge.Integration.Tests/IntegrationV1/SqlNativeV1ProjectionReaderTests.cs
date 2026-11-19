@@ -357,11 +357,10 @@ public sealed class SqlNativeV1ProjectionReaderTests(NativeSqlServerFixture fixt
     }
 
     [NativeSqlServerTheory]
-    [InlineData(false, "retained-artifact-missing")]
-    [InlineData(true, "retained-artifact-checksum-invalid")]
-    public async Task Corpus_detail_reports_retained_artifact_integrity_reasons_without_reopening_a_source_original(
-        bool writeCorruptArtifact,
-        string expectedReason)
+    [InlineData(null, "retained-artifact-missing")]
+    [InlineData(-1, "retained-artifact-checksum-invalid")]
+    public async Task Corpus_detail_reports_missing_or_truncated_retained_artifacts_without_reopening_the_source_original(
+        int? artifactLengthAdjustment, string expectedReason)
     {
         var artifactRoot = Path.Combine(Path.GetTempPath(), $"flux-native-v1-retained-{Guid.NewGuid():N}");
         var originalRoot = Path.Combine(Path.GetTempPath(), $"flux-native-v1-original-{Guid.NewGuid():N}");
@@ -369,7 +368,7 @@ public sealed class SqlNativeV1ProjectionReaderTests(NativeSqlServerFixture fixt
         Directory.CreateDirectory(originalRoot);
         try
         {
-            var seeded = await SeedRetainedDetailBranchAsync(artifactRoot, originalRoot, writeCorruptArtifact);
+            var seeded = await SeedRetainedDetailBranchAsync(artifactRoot, originalRoot, artifactLengthAdjustment);
             var codec = new NativeV1ProjectionCursorCodec(new EphemeralDataProtectionProvider());
             using var retained = new SqlRetainedSourceReader(SqlTestData.CreateFactory(_fixture), artifactRoot);
             var disclosure = new LocalPrivateContentDisclosure();
@@ -402,7 +401,7 @@ public sealed class SqlNativeV1ProjectionReaderTests(NativeSqlServerFixture fixt
         Directory.CreateDirectory(originalRoot);
         try
         {
-            var seeded = await SeedRetainedDetailBranchAsync(artifactRoot, originalRoot, writeCorruptArtifact: null);
+            var seeded = await SeedRetainedDetailBranchAsync(artifactRoot, originalRoot, artifactLengthAdjustment: 0);
             var codec = new NativeV1ProjectionCursorCodec(new EphemeralDataProtectionProvider());
             using var retained = new SqlRetainedSourceReader(SqlTestData.CreateFactory(_fixture), artifactRoot);
             var disclosure = new LocalPrivateContentDisclosure();
@@ -510,7 +509,7 @@ public sealed class SqlNativeV1ProjectionReaderTests(NativeSqlServerFixture fixt
     private async Task<RetainedSeed> SeedRetainedDetailBranchAsync(
         string artifactRoot,
         string originalRoot,
-        bool? writeCorruptArtifact)
+        int? artifactLengthAdjustment)
     {
         var bytes = Encoding.UTF8.GetBytes("retained native v1 detail");
         var hash = Convert.ToHexStringLower(SHA256.HashData(bytes));
@@ -522,11 +521,11 @@ public sealed class SqlNativeV1ProjectionReaderTests(NativeSqlServerFixture fixt
         await File.WriteAllBytesAsync(originalPath, bytes);
         var artifactDirectory = Path.Combine(artifactRoot, "sha256", hash[..2]);
         Directory.CreateDirectory(artifactDirectory);
-        if (writeCorruptArtifact is not false)
+        if (artifactLengthAdjustment is { } adjustment)
         {
             await File.WriteAllBytesAsync(
                 Path.Combine(artifactDirectory, $"{hash}.bin"),
-                writeCorruptArtifact is true ? bytes[..^1].Concat("X"u8.ToArray()).ToArray() : bytes);
+                bytes[..(bytes.Length + adjustment)]);
         }
         var now = DateTimeOffset.UtcNow;
         await using var context = await SqlTestData.CreateFactory(_fixture).CreateDbContextAsync();

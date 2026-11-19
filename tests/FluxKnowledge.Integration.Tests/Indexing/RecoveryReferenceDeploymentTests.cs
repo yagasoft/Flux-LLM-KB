@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
+using FluxKnowledge.Application.Documents;
 using FluxKnowledge.Application.Gpu;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
 using FluxKnowledge.Integrations.Windows;
@@ -37,6 +38,9 @@ public sealed class RecoveryReferenceDeploymentTests(NativeSqlServerFixture fixt
     public async Task Updater_continuations_and_Outlook_receipts_use_the_actual_guarded_writer_lifetime()
     {
         await SqlTestData.ClearPipelineAsync(fixture);
+        await using var db = await SqlTestData.CreateFactory(fixture).CreateDbContextAsync();
+        db.GpuCapacitySlots.Add(new() { SlotKey = PaddleOcrVlmRuntimeContract.CapacitySlotKey, UpdatedAtUtc = DateTimeOffset.UtcNow });
+        await db.SaveChangesAsync();
         await RunDeploymentScriptAsync("recovery-reference-deployment.ps1");
     }
 

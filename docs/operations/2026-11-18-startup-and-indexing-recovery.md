@@ -62,7 +62,7 @@ failed development deployments:
   the maintenance gate. Ordinary deployment checks definite uncertain capacity
   early and does not repeat an unproved initial stop during journal containment.
 - The final graph guard lacked an OCR cleanup check. It now refuses unresolved
-  execution before deleting vectors or text. A legacy uncertain OCR request needs
+  execution before deleting vectors or text. A previous uncertain OCR request needs
   fresh physical cleanup proof; its old scheduler release receipt is insufficient.
   Version-2 cleanup-only stopped maintenance records that proof without completion,
   requeue, DDL, model acquisition or source backfill. Its current-schema start and
@@ -178,7 +178,7 @@ Live removal completion, the final original-file metadata comparison and fresh
 semantic acceptance remain open. No completion is claimed for those checks.
 All 11,608 manifests and 13,102 segments have been reclaimed and acknowledged.
 Cleanup-only stopped maintenance recorded fresh physical proof without changing
-the legacy OCR task, parent job or results. The new ordinary recovery packet
+the previous OCR task, parent job or results. The new ordinary recovery packet
 passed the native audit, sealing 23 packets with zero index pins. One fresh
 native command resumed the existing deletion operation without replay or manual
 reset. All 118,709,880 historical memberships have now drained. Final record purge
@@ -227,7 +227,7 @@ remains blocked until the unit commits. No timeout was increased.
 Physical cleanup now handles at most 16 targets of one storage kind per batch,
 with fresh shared-reference reads, per-target gate/lease checks and a single
 attempted-prefix receipt transaction. A matched disposable real-file comparison
-removed 120 unshared retained blobs and 24 legacy directories while preserving
+removed 120 unshared retained blobs and 24 previous directories while preserving
 eight shared blobs and the original-file control. SQL round trips fell from
 3,064 to 347 and elapsed worker time from 4.832 to 1.093 seconds. These are
 staging measurements for physical cleanup; combined release acceptance remains
@@ -370,8 +370,8 @@ existing policy. Recovery of the one historical terminal job is a separate,
 explicitly reviewed operational action; it must reuse its stored result and
 preserve original native execution evidence.
 
-Broader qualification twice exposed a plan-sensitive timeout in initial legacy
-generation capture. Capture now first selects distinct generations referenced
+Broader qualification twice exposed a plan-sensitive timeout while capturing
+references to older generations. Capture now first selects distinct generations referenced
 by owned vectors, unions generations owned through drafts/checkpoints, then
 joins Format1 generation rows. Shared generations, overlapping ownership,
 empty inputs, retirement timestamps and Format2 handling retain their existing
@@ -443,10 +443,10 @@ capture-and-restore path. No independent pre-deployment enablement observation
 was retained.
 
 The first command for the four remaining Visio inputs refused before extraction.
-The CLI unconditionally invoked legacy reprocessing even though ordinary
+The CLI unconditionally invoked previous reprocessing even though ordinary
 discovery had already prepared an exact current branch. The correction delegates
 that branch to the existing companion runner after checking Visio availability;
-legacy preparation remains available. All 23 scoped SQL checks pass, including
+previous preparation remains available. All 23 scoped SQL checks pass, including
 the reproduced failure, exact-binding refusals, availability before recovery and
 no second extraction on replay. The Release build has zero warnings and errors,
 and independent implementation review approves the correction. Fresh operator
@@ -475,9 +475,8 @@ After the predicate correction, all 53 affected SQL checks pass without skips.
 They include successful CLI extraction with a suppressed physical predecessor,
 idempotent completion and exact refusal of archive/derived owners with or without
 parents, suppressed current owners and wrong hash/root/branch requests. The
-Release build has zero warnings and errors. The earlier generic legacy
-reprocessing contract remains unchanged; this correction applies to the exact
-current Visio delivery selector.
+Release build has zero warnings and errors. This correction applies to the exact
+current Visio delivery selector. The generic reprocessing contract remains in force.
 
 ## Final runtime acceptance, 19 November
 

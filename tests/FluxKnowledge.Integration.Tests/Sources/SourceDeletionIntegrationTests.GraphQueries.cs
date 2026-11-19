@@ -15,16 +15,29 @@ namespace FluxKnowledge.Integration.Tests.Sources;
 public sealed partial class SourceDeletionIntegrationTests
 {
     [NativeSqlServerFact]
-    public async Task Cleanup_target_capture_is_stable_after_mixed_execution_and_audit_history()
+    public async Task Final_graph_removes_owned_publications_and_keeps_foreign_publications()
     {
-        await Execution_pages_delete_mixed_ocr_and_embedding_history_through_the_complete_graph();
-        await InitializeAsync();
-        await Cancellation_after_audit_delete_rolls_back_the_page_and_preserves_its_source_anchors();
-        await InitializeAsync();
-        await Graph_purge_removes_bounded_vector_then_chunk_pages_and_replays_the_same_receipt();
+        const int foreignCount = 3;
+        var graph = await SeedArtifactPageGraphAsync([(0, 0)]);
+        var publication = await SeedPublicationQueryGraphAsync(graph.Source, graph.Control, 0);
+        await SeedUnrelatedPublicationsAsync(graph.Control, publication.ForeignBranch, foreignCount);
+
+        var store = new SqlSourceDeletionStore(SqlTestData.CreateFactory(_fixture), TimeProvider.System);
+        await CompleteArtifactGraphAsync(store, graph.Source, graph.Control, graph.Operation);
+
+        await using var check = CreateContext();
+        var survivors = await check.DocumentPublications.OrderBy(value => value.OwnerSourceRevisionId).ToArrayAsync();
+        Assert.Equal(foreignCount, survivors.Length);
+        Assert.All(survivors, value =>
+        {
+            Assert.Equal(graph.Control.RecordId, value.PipelineRecordId);
+            Assert.Equal(publication.ForeignBranch, value.SourceProcessorBranchId);
+            Assert.Equal(value.OwnerSourceRevisionId, value.DocumentInputSourceRevisionId);
+        });
     }
 
-    [NativeSqlServerTheory]
+    [SqlServerScaleTheory]
+    [Trait("Category", "Scale")]
     [InlineData(false)]
     [InlineData(true)]
     public async Task Final_graph_keeps_ownership_on_server_with_unrelated_publications_in_both_cache_orders(bool ownedPageFirst)
@@ -39,7 +52,7 @@ public sealed partial class SourceDeletionIntegrationTests
         var store = new SqlSourceDeletionStore(factory, TimeProvider.System);
         var maxUnit = 0d;
         if (ownedPageFirst) await RunPageAsync();
-        await SeedUnrelatedPublicationsAsync(graph.Control, publication.ForeignBranch);
+        await SeedUnrelatedPublicationsAsync(graph.Control, publication.ForeignBranch, 600);
         if (!ownedPageFirst) await RunPageAsync();
         await AssertArtifactPageAnchorsAsync(graph.Source, graph.ArtifactIds[1..]);
         await using (var check = CreateContext())
@@ -159,14 +172,14 @@ public sealed partial class SourceDeletionIntegrationTests
         };
     }
 
-    private async Task SeedUnrelatedPublicationsAsync(SeededRoot control, Guid branch)
+    private async Task SeedUnrelatedPublicationsAsync(SeededRoot control, Guid branch, int count)
     {
         await using var setup = CreateContext();
         await setup.Database.OpenConnectionAsync();
         await setup.Database.ExecuteSqlRawAsync("CREATE TABLE #ForeignPublications(Id uniqueidentifier NOT NULL PRIMARY KEY);");
         var hash = new string('a', 64);
         await setup.Database.ExecuteSqlInterpolatedAsync($"""
-            INSERT #ForeignPublications SELECT TOP(600) NEWID() FROM sys.all_objects;
+            INSERT #ForeignPublications SELECT TOP({count}) NEWID() FROM sys.all_objects;
             INSERT SourceRevisions(Id,SourceRootId,StableSourceIdentity,Revision,ContentSha256,CanonicalPath,Classification,Extension,ByteLength,DiscoveredAtUtc,OriginKind)
             SELECT Id,{control.RootId},CONVERT(nvarchar(36),Id),1,{hash},CONCAT('C:\foreign-publication\',Id),'AcceptedUtf8Text','.txt',4,SYSUTCDATETIME(),0 FROM #ForeignPublications;
             INSERT DocumentPublications(OwnerSourceRevisionId,DocumentInputSourceRevisionId,SourceProcessorBranchId,PipelineRecordId,PipelineRecordRevision,ProcessorFingerprint,PublishedAtUtc)

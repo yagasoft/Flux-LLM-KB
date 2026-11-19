@@ -20,6 +20,32 @@ namespace FluxKnowledge.Integration.Tests.Sources;
 
 public sealed partial class DefaultRetainedPolicyIntegrationTests(NativeSqlServerFixture fixture) : IClassFixture<NativeSqlServerFixture>
 {
+    [NativeSqlServerFact]
+    public async Task Guided_policy_preview_uses_retained_metadata_and_commits_the_exact_predecessor_with_web_attribution()
+    {
+        var seeded = await SeedAsync(extension: ".rdl");
+        var factory = SqlTestData.CreateFactory(fixture);
+        using var reader = new SqlRetainedSourceReader(factory, seeded.ArtifactRoot);
+        var commands = new RetainedRecoveryNativeCommands(factory, new SqlNativeOperationStore(factory, TimeProvider.System),
+            new RetainedProcessorOptions(), new FixtureSourceAdmission(factory), corpusCommands: Service(reader));
+        var review = await commands.ReadReviewAsync(seeded.RevisionId, null, null, default);
+        var target = Assert.Single(review!.Targets);
+        Assert.Equal(new RetainedRecoveryTarget("policy", seeded.RevisionId, seeded.ActivityId), target);
+        var policy = await commands.PreviewPolicyAsync(target, default);
+        Assert.DoesNotContain(seeded.Hash, JsonSerializer.Serialize(policy.Preview), StringComparison.OrdinalIgnoreCase);
+
+        var receipt = await commands.CommitPolicyAsync(target, policy.Payload, policy.Preview.Confirmation.ConfirmationId, "guided-policy-test", default);
+        var replay = await commands.CommitPolicyAsync(target, policy.Payload, policy.Preview.Confirmation.ConfirmationId, "guided-policy-test", default);
+        Assert.True(replay.WasReplay);
+        Assert.Equal(receipt.OperationId, replay.OperationId);
+
+        await using var verify = await factory.CreateDbContextAsync();
+        var relation = await verify.SourceActivityRelations.SingleAsync(value => value.PredecessorActivityId == seeded.ActivityId);
+        Assert.Equal(RetainedDefaultPolicy.RelationshipKind, relation.RelationshipKind);
+        var audit = await verify.AuditEvents.SingleAsync(value => value.SourceActivityId == relation.SuccessorActivityId && value.EventType == "source.default_policy_applied");
+        Assert.Equal("web", audit.Actor);
+    }
+
     [NativeSqlServerTheory]
     [InlineData(".rdl")]
     [InlineData(".dart")]

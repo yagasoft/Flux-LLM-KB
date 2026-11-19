@@ -1,0 +1,43 @@
+# Self-service indexing and recovery
+
+## Workflow
+
+Make Overview answer three questions: can I search, is indexing making progress, and what can I do about a blocker? Show the scope and age of the last successful read. Display ongoing progress even when another file has failed. Group current issues by cause and affected source, with plain-language impact and an action next to each group. Label files, jobs and GPU tasks in their own units. Put earlier attempts in a collapsed history view with source and record links.
+
+Use the proposed Overview concept for the layout. The visual reference is the Overview concept attached to the self-service redesign discussion, showing current issues, a retry inspector, source progress and a collapsed Previous attempts view. The mockup uses fictional data. Give Overview, Search, Sources and Activity priority in app navigation. Keep diagnostics, history, Outlook capture, corpus browsing and code search reachable. Preserve existing routes and deep links. Use the same status and action labels from source and activity pages. On narrow screens, show issue details in a focused full-width view with keyboard support and sensible focus restoration.
+
+An issue opens an inspector with the selected files or job, impact, evidence, next action and progress. If OneDrive needs to make a file available, explain that step and offer a metadata rescan. For a paused source offer Resume when eligible. For failed indexing show the stage and exact supported retry. For a GPU task show result verification and resource release separately. Derive queued, running, recovered, failed and superseded from the attributable attempt. An accepted retry receipt is only the start. Mark a file searchable once its current publication is verified.
+
+## Approaches
+
+A guided-only approach adds confirmation even when a repair is deterministic. Automatic replay across all reasons risks overlap and stale work. The chosen hybrid lets evidence decide whether the app acts automatically, offers a scoped confirmation or explains which prerequisite is missing.
+
+The [action inventory](2026-11-19-self-service-recovery-actions.md) defines the complete automatic and guided implementation scope. Deliver the existing continuations and guided actions together. New automatic policies are candidates, disabled until the required isolated proof and activation authority are available.
+
+## Automatic recovery
+
+Surface existing automatic settlements from the authoritative scheduler and outbox owners. Reuse them rather than issuing duplicate recovery work. An interactive search is never replayed.
+
+Allow a new automatic requeue only for a current indexing job on a small allowlist of machine-readable interruption cases. The first candidate for automatic retry is a terminal failed Embed job with an existing resumable draft and exactly one unresolved input group. The durable interruption signal is a settled exact embedding request with no result digest and its linked task marked OutcomeUncertain. Require the linked executor dispatch to be terminal, trusted native cleanup confirmation, durable release of the matching batch ownership and no reservation for that batch. Require both the parent job and its outbox delivery to have settled lease state, no newer dispatch or competing claim, and fence late writes under the native transaction. Exclude before-draft failures, unstarted handoffs, uncertain dispatch delivery, unavailable current inputs and groups at the existing retry limit. The stage-specific native retry check must still accept the exact target. For GPU work also require trusted cleanup or no-start evidence for that exact dispatch and resource, as well as compatible input, model, generation and checkpoint bindings. Keep prior attempts and confirmed partial results. An expired lease, free capacity in isolation, age, or an unverified failure label is insufficient.
+
+Allow one new automatic requeue per pipeline record, source revision and logical stage, including across replacement job IDs, restarts and concurrent hosts. Several child attempts share the parent stage's budget. A document Extract successor uses the original retained source revision and logical extraction operation as its budget identity because a successor can create a fresh pipeline record. Claim the durable budget and commit the guarded mutation in the same SQL transaction, or use an existing durable receipt that enforces precisely that invariant in the mutation transaction. A different reason, worker, or policy version cannot renew the budget. A new revision can qualify independently. Preserve tighter existing retry limits. If the automatic attempt fails, stop at that scope and show guided recovery. Use bounded candidate reads and work per pass, and bounded retry timing for transient service errors. Respect source pause, holds and admission. Run on the service side so the browser can close.
+
+Show the decision and evidence category, selected scope, time, operation receipt, and latest attributable attempt progress and outcome. Store a durable decision and audit trail. Use bounded current-status projections; read history only when requested. The deployment-level policy defaults to observing candidates until an explicit activation for the target and policy. Automatic recovery excludes dead-letter replay, deletion, restarts, model acquisition and manual edits to durable state.
+
+## Guided recovery
+
+Use supported native previews for source scan job retry, Publish and Embed retry, source rescan and resume, and supported processor actions. For document text extraction, use the existing exact retained-document successor path. Preserve admission checks before launch and continuation, and acceptance of already-owned valid results during temporary admission loss. A settled attempt with no result requires exact durable input and execution binding, terminal release, trusted OwnedJobEmpty native cleanup, absence of result receipts and competing work, and a serialised proof-bound successor. The generic job_retry command applies to source scan jobs only. Show what the operation would change and which items it affects. Recheck authority, permission, current revision, ownership, policy, holds and confirmation freshness at commit. A stale preview returns a plain-language reason and may be refreshed. A lost response or double click returns the same durable result. Keep progress in the same inspector after submission.
+
+When evidence is missing, say which check cannot be satisfied and offer the next available inspection or prerequisite action. Confirmation does not bypass a technical safeguard. Production rollout, automatic policy activation, dead-letter processing and live validation require the existing independent review and explicit target-specific user approval.
+
+## Acceptance
+
+- In the isolated app, exercise healthy, catching-up, stale, blocked and history-only states, desktop and narrow views, navigation, selection, keyboard focus and accessible status feedback.
+- For each new automatic policy proposed for activation, use the normal isolated app to observe an eligible decision, one requeue or successor, stage progress and a current searchable result. Document and verify the guided-only behaviour for any candidate without sufficient evidence. Force another failure and prove the requeue count stays at one across polling, restart, concurrent hosts and replacement job IDs. Test a new revision, unknown cleanup, live owner, changed eligibility, paused source and disabled automation.
+- Follow preview, confirm, queued/running and completion from the UI. Prove target and permission checks, stale preview refusal, double submission and lost-response replay. Verify unproved ownership results in an explanation without a mutation.
+- Compare the browser to the accepted concept. Independently review the policy and transaction boundaries. Update architecture and roadmap with the implemented results, and perform repository closeout once implementation and isolated verification finish.
+
+
+## Integration with indexing restoration
+
+Coordinate with Restore indexing progress. Import its committed checkpoints before starting each substantial implementation batch and again before acceptance, rerun affected checks after each integration, and prefer its existing scheduler, proof and recovery contracts over parallel implementations. Restore indexing progress owns shared integration on codex/startup-core-20261117. The redesign includes the ad7c0fde OCR recovery changes, the 19f0faee Overview update and the 5c99e918 exact prepared Visio execution path. The redesign stays on its isolated feature branch. The restoration owner retains final integration and rollout.

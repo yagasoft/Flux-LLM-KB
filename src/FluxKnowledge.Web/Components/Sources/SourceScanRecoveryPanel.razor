@@ -1,0 +1,55 @@
+@using FluxKnowledge.Application.Contracts
+@using FluxKnowledge.Web.Components.Status
+@implements IDisposable
+@inject GuidedRecoveryActions RecoveryActions
+
+@{ var visibleJobs = VisibleJobs(); }
+@if (Scan is not null || visibleJobs.Length != 0)
+{
+    <section aria-labelledby="source-scan-recovery-heading">
+        <h2 id="source-scan-recovery-heading">Scan recovery</h2>
+        @if (Scan is { } scan)
+        {
+            <p>@(scan.IsInterrupted ? "The latest scan needs an ownership check." : "The latest scan failed.")</p>
+            @if (scan.ReasonCode is { } reason)
+            {
+                <p>@Prerequisite(reason)</p>
+            }
+        }
+        @foreach (var jobId in visibleJobs)
+        {
+            <GuidedRecoveryAction @key="jobId" Action="job_retry" TargetId="jobId" ActionLabel="Retry scan"
+                                  SourceRootId="SourceRootId" CanDismissReceipt="true" OnCommitted="OnCommitted" />
+        }
+    </section>
+}
+
+@code {
+    [Parameter, EditorRequired] public Guid SourceRootId { get; set; }
+    [Parameter] public SourceScanRecoveryProjection? Scan { get; set; }
+    [Parameter] public EventCallback OnCommitted { get; set; }
+
+    protected override void OnInitialized() => RecoveryActions.SubmissionsChanged += OnSubmissionsChanged;
+
+    private void OnSubmissionsChanged() => _ = InvokeAsync(StateHasChanged);
+
+    private Guid[] VisibleJobs()
+    {
+        var retained = RecoveryActions.Recent(SourceRootId, "job_retry").Select(attempt => attempt.Target.TargetId);
+        return Scan is { ReasonCode: null, JobId: { } current } ? retained.Prepend(current).Distinct().ToArray() : retained.ToArray();
+    }
+
+    public void Dispose() => RecoveryActions.SubmissionsChanged -= OnSubmissionsChanged;
+
+    private static string Prerequisite(string reason) => reason switch
+    {
+        "source-paused" => "Resume indexing for this source before retrying its scan.",
+        "source-deleting" => "Source removal is in progress. Check the cleanup status above.",
+        "source-scan-configuration-changed" => "The source rules changed. Review the current rules and reconcile metadata with those settings.",
+        "source-scan-configuration-unavailable" => "The scan's configuration cannot be verified. Review the current rules and reconcile metadata with those settings.",
+        "source-scan-not-admitted" => "The source is waiting for access and start-up checks. Check the source status before trying again.",
+        "source-scan-delivery-unavailable" => "The scan job or its delivery cannot be verified. Check Activity for the current scan evidence.",
+        "deployment-validation-held" => "Deployment validation is holding changes. Try again when the hold is released.",
+        _ => "Check Activity for the current scan job and delivery status before retrying."
+    };
+}

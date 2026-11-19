@@ -267,6 +267,10 @@ public sealed partial class PipelineActivitySqlTests(NativeSqlServerFixture fixt
         Assert.Equal(1, view.WaitingJobs);
         Assert.Equal(0, view.ReadyGpuTasks);
         Assert.DoesNotContain(overview.Activity.Jobs, j => j.Reason.Contains("PrivateOwner", StringComparison.Ordinal));
+        var attention = await ActivityReader().ReadPipelineAttentionAsync("current-gpu", root, 0, CancellationToken.None);
+        var uncertain = Assert.Single(attention.Items);
+        Assert.Equal("Result could not be verified", uncertain.ResultStatus);
+        Assert.Equal("Release evidence unavailable in this sample", uncertain.CapacityStatus);
         await using (var setup = factory.CreateDbContext())
         {
             (await setup.GpuExecutorDispatches.SingleAsync(d => d.BatchId == batchId)).OwnerKey = "PRIVATEOWNER";
@@ -439,6 +443,25 @@ public sealed partial class PipelineActivitySqlTests(NativeSqlServerFixture fixt
         var source = Assert.Single(overview.Activity.Sources, s => s.Id == root);
         Assert.Equal(1, source.PendingFiles);
         Assert.Equal(0, source.PublishedFiles);
+    }
+
+    [NativeSqlServerFact]
+    public async Task Current_attention_excludes_history_and_work_with_confirmed_progress()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var root = await AddActivityRootAsync(now);
+        var failed = await SeedActivityJobAsync(root, now, PublicJobState.Failed, null);
+        var historical = await SeedActivityJobAsync(root, now, PublicJobState.Failed, null, suppressed: true);
+        await SeedActivityJobAsync(root, now, PublicJobState.WorkerProcessing, now.AddMinutes(3), leaseGeneration: 1);
+        var reader = ActivityReader();
+
+        var current = await reader.ReadPipelineAttentionAsync("current-jobs", root, 0, CancellationToken.None);
+        var history = await reader.ReadPipelineAttentionAsync("historical-jobs", root, 0, CancellationToken.None);
+
+        Assert.Equal(failed, Assert.Single(current.Items).PipelineRecordId);
+        Assert.Equal(historical, Assert.Single(history.Items).PipelineRecordId);
+        Assert.Equal(1, current.TotalCount);
+        Assert.Equal(1, history.TotalCount);
     }
 
     [NativeSqlServerFact]

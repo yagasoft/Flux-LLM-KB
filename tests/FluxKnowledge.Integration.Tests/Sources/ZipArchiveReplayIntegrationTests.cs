@@ -6,6 +6,7 @@ using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Operations;
 using FluxKnowledge.Application.Sources;
 using FluxKnowledge.Application.Documents;
+using FluxKnowledge.Application.IntegrationV1;
 using FluxKnowledge.Application.Pipeline;
 using FluxKnowledge.Application.Workers;
 using FluxKnowledge.Cli.Commands;
@@ -441,10 +442,13 @@ public sealed class ZipArchiveReplayIntegrationTests(NativeSqlServerFixture fixt
             var relativePath = Path.Combine("sha256", hash[..2], $"{hash}.bin");
             Directory.CreateDirectory(Path.Combine(root, "sha256", hash[..2]));
             await File.WriteAllBytesAsync(Path.Combine(root, relativePath), zip);
-            var selected = await SeedDeferredZipAsync(hash, zip.Length, relativePath, extension: ".vsdx");
+            var selected = await SeedDeferredZipAsync(hash, zip.Length, relativePath, extension: ".vsdx", insideRoot: true);
             var unrelated = await SeedDeferredZipAsync(hash, zip.Length, relativePath, extension: ".vsdx");
             var legacyV1 = LegacyZipV1Capability();
-            var store = new SqlRetainedProcessorBranchStore(new ContextFactory(_fixture.ConnectionString), TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(new ContextFactory(_fixture.ConnectionString)));
+            var hold = new RecoveryTestHold();
+            var factory = new ContextFactory(_fixture.ConnectionString);
+            var store = new SqlRetainedProcessorBranchStore(factory, TimeProvider.System,
+                sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory), deploymentValidationHold: hold);
 
             Assert.True(await store.PromoteAsync(
                 new RetainedProcessorPromotionCandidate(selected.LegacyActivityId, new SourceRevisionId(selected.SourceRevisionId), hash),
@@ -460,12 +464,38 @@ public sealed class ZipArchiveReplayIntegrationTests(NativeSqlServerFixture fixt
             var unrelatedClaim = Assert.Single(await store.ClaimAsync("unrelated-v1", 1, legacyV1.ProcessorFingerprint, CancellationToken.None));
             Assert.True(await store.FailAsync(unrelatedClaim, new RetainedProcessorFailure("archive-entry-path-invalid", []), CancellationToken.None));
 
+            hold.IsHeld = true;
+            Assert.False((await store.ReconcileArchiveZipMemberNotUtf8Async(selectedClaim.BranchId, CancellationToken.None)).Accepted);
+            hold.IsHeld = false;
+            await using (var pause = CreateContext())
+            {
+                await pause.SourceRootConfigurations.Where(value => value.Id == selected.RootId)
+                    .ExecuteUpdateAsync(update => update.SetProperty(root => root.State, (int)SourceRootState.Paused));
+                Assert.False((await store.ReconcileArchiveZipMemberNotUtf8Async(selectedClaim.BranchId, CancellationToken.None)).Accepted);
+                await pause.SourceRootConfigurations.Where(value => value.Id == selected.RootId)
+                    .ExecuteUpdateAsync(update => update.SetProperty(root => root.State, (int)SourceRootState.Enabled));
+            }
+            await using (var queued = CreateContext())
+            {
+                const string relative = "scoped.vsdx";
+                var removal = new SourcePendingChangeEntity { Id = Guid.NewGuid(), SourceRootId = selected.RootId,
+                    RelativePath = relative, PathFingerprint = SqlSourceChangeJournalStore.PathKey(relative),
+                    Generation = 1, ReasonFlags = SourcePendingReasons.RemovalPending, LastUnjournaledGeneration = 1 };
+                queued.SourcePendingChanges.Add(removal);
+                await queued.SaveChangesAsync();
+                Assert.False((await store.ReconcileArchiveZipMemberNotUtf8Async(selectedClaim.BranchId, CancellationToken.None)).Accepted);
+                Assert.False(await queued.SourceProcessorBranches.AnyAsync(value => value.SourceRevisionId == selected.SourceRevisionId && value.Id != selectedClaim.BranchId));
+                queued.SourcePendingChanges.Remove(removal);
+                await queued.SaveChangesAsync();
+            }
             var reconciliation = await store.ReconcileArchiveZipMemberNotUtf8Async(selectedClaim.BranchId, CancellationToken.None);
 
             Assert.True(reconciliation.Created);
             Assert.NotNull(reconciliation.SuccessorBranchId);
+            hold.IsHeld = true;
             var replay = await store.ReconcileArchiveZipMemberNotUtf8Async(selectedClaim.BranchId, CancellationToken.None);
             Assert.True(replay.WasReplay);
+            hold.IsHeld = false;
             Assert.Equal(reconciliation.SuccessorBranchId, replay.SuccessorBranchId);
             await using (var verification = CreateContext())
             {
@@ -486,6 +516,10 @@ public sealed class ZipArchiveReplayIntegrationTests(NativeSqlServerFixture fixt
                 var relation = await verification.SourceActivityRelations.SingleAsync(value => value.SuccessorActivityId == successor.SourceActivityId);
                 Assert.Equal(oldBranch.SourceActivityId, relation.PredecessorActivityId);
                 Assert.Equal("superseded-by-archive-zip-member-skip-v2", relation.ReasonCode);
+                var activity = await verification.SourceActivities.SingleAsync(value => value.Id == successor.SourceActivityId);
+                Assert.Equal(SqlGuidedRetainedBinding.Fingerprint, activity.DescriptorFingerprint);
+                Assert.Equal("web", await verification.AuditEvents.Where(value => value.SourceActivityId == activity.Id &&
+                    value.EventType == "retained_processor.reconciled").Select(value => value.Actor).SingleAsync());
 
                 Assert.Single(await verification.SourceProcessorBranches.Where(value => value.SourceRevisionId == unrelated.SourceRevisionId).ToListAsync());
                 Assert.Equal((int)RetainedProcessorBranchState.Blocked,
@@ -506,6 +540,74 @@ public sealed class ZipArchiveReplayIntegrationTests(NativeSqlServerFixture fixt
             _resources.Dispose();
             if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
         }
+    }
+
+    [NativeSqlServerFact]
+    public async Task Guided_zip_reconciliation_fences_the_preview_and_replays_the_durable_confirmation()
+    {
+        const string hash = "d7b157427727a3509dc34a77445a3abed1bf05da9d079d595502d344fadf2a0d";
+        var input = await SeedDeferredZipAsync(hash, 4, Path.Combine("sha256", hash[..2], $"{hash}.bin"), insideRoot: true);
+        var factory = new ContextFactory(_fixture.ConnectionString);
+        var admission = new FixtureSourceAdmission(factory);
+        var bus = new SqlRetainedProcessorBranchStore(factory, TimeProvider.System, sourceAdmission: admission);
+        var legacy = LegacyZipV1Capability();
+        Assert.True(await bus.PromoteAsync(new(input.LegacyActivityId, new(input.SourceRevisionId), hash), legacy, CancellationToken.None));
+        var branch = Assert.Single(await bus.ClaimAsync("guided-zip-test", 1, legacy.ProcessorFingerprint, CancellationToken.None));
+        Assert.True(await bus.FailAsync(branch, new("archive-member-not-utf8", []), CancellationToken.None));
+
+        var deploymentHold = new RecoveryTestHold();
+        var commandStore = new SqlNativeOperationStore(factory, TimeProvider.System,
+            afterCommitFailureInjector: static () => throw new IOException("Injected lost web response"));
+        var commands = new RetainedRecoveryNativeCommands(factory, commandStore,
+            new RetainedProcessorOptions { ArchiveZipExpandEnabled = true }, admission, deploymentHold: deploymentHold);
+        var target = new RetainedRecoveryTarget("zip", input.SourceRevisionId, branch.BranchId);
+        var preview = await commands.PreviewAsync(target, CancellationToken.None);
+        Assert.Contains("whole archive branch", preview.Confirmation.EffectSummary, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(branch.BranchId, preview.Target.ExactId);
+
+        await using (var edit = CreateContext())
+        {
+            var root = await edit.SourceRootConfigurations.SingleAsync(value => value.Id == input.RootId);
+            root.UpdatedAtUtc = DateTimeOffset.UtcNow.AddHours(1);
+            await edit.SaveChangesAsync();
+        }
+        var stale = await Assert.ThrowsAsync<NativeOperationException>(async () =>
+            await commands.CommitAsync(target, preview.Confirmation.ConfirmationId, "stale-preview", CancellationToken.None));
+        Assert.Equal("operation-fenced", stale.ReasonCode);
+
+        var current = await commands.PreviewAsync(target, CancellationToken.None);
+        await Assert.ThrowsAsync<NativeOperationCommitUncertainException>(async () =>
+            await commands.CommitAsync(target, current.Confirmation.ConfirmationId, "fresh-preview", CancellationToken.None));
+        deploymentHold.IsHeld = true;
+        var receipt = await commands.CommitAsync(target, current.Confirmation.ConfirmationId, "fresh-preview", CancellationToken.None);
+        var replay = await commands.CommitAsync(target, current.Confirmation.ConfirmationId, "fresh-preview", CancellationToken.None);
+        var held = await Assert.ThrowsAsync<NativeOperationException>(async () =>
+            await commands.CommitAsync(target, current.Confirmation.ConfirmationId, "new-while-held", CancellationToken.None));
+        Assert.Equal("deployment-validation-held", held.ReasonCode);
+        var progress = await commands.ReadProgressAsync(target, receipt.OperationId, CancellationToken.None);
+        Assert.Equal(receipt.OperationId, replay.OperationId);
+        Assert.True(replay.WasReplay);
+        Assert.True(receipt.WasReplay);
+        Assert.Equal("Queued", progress?.State);
+        Assert.Null(await commands.ReadProgressAsync(target with { ExactId = Guid.NewGuid() }, receipt.OperationId, CancellationToken.None));
+        await using var proof = CreateContext();
+        var original = await proof.SourceProcessorBranches.SingleAsync(value => value.Id == branch.BranchId);
+        var successor = await proof.SourceActivityRelations.SingleAsync(value => value.PredecessorActivityId == original.SourceActivityId);
+        Assert.Equal("superseded-by-archive-zip-member-skip-v2", successor.ReasonCode);
+        var action = await proof.AuditEvents.SingleAsync(value => value.EventType == "retained_processor.reconciled" && value.SourceActivityId == successor.SuccessorActivityId);
+        Assert.Equal("web", action.Actor);
+
+        var changedRoot = await proof.SourceRootConfigurations.SingleAsync(value => value.Id == input.RootId);
+        changedRoot.ConfigurationRevision++;
+        changedRoot.ExcludePatternsJson = "[\"*.zip\"]";
+        await proof.SaveChangesAsync();
+        Assert.Empty(await bus.ClaimAsync("configured-out", 1, ZipArchiveRetainedProcessor.Capability.ProcessorFingerprint, CancellationToken.None));
+    }
+
+    private sealed class RecoveryTestHold : IDeploymentValidationHold
+    {
+        public bool IsHeld { get; set; }
+        public ValueTask WaitUntilReleasedAsync(CancellationToken cancellationToken) => throw new NotSupportedException();
     }
 
     [NativeSqlServerFact]
@@ -561,7 +663,7 @@ public sealed class ZipArchiveReplayIntegrationTests(NativeSqlServerFixture fixt
     public async Task Named_vsdx_reprocess_refuses_a_terminal_predecessor_already_owned_by_zip_reconciliation()
     {
         const string hash = "b4bb92557d83bc26c5f476b792c9e2d251bd83aa872a6b9cb21bb04771d6c61e";
-        var seeded = await SeedDeferredZipAsync(hash, 4, Path.Combine("sha256", hash[..2], $"{hash}.bin"), extension: ".vsdx");
+        var seeded = await SeedDeferredZipAsync(hash, 4, Path.Combine("sha256", hash[..2], $"{hash}.bin"), extension: ".vsdx", insideRoot: true);
         var factory = new ContextFactory(_fixture.ConnectionString);
         var store = new SqlRetainedProcessorBranchStore(factory, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         var legacy = LegacyZipV1Capability();
@@ -1337,13 +1439,15 @@ public sealed class ZipArchiveReplayIntegrationTests(NativeSqlServerFixture fixt
         Guid? sourceRootId = null,
         string? stableSourceIdentity = null,
         int revision = 1,
-        string? canonicalPath = null)
+        string? canonicalPath = null, bool insideRoot = false)
     {
         var rootId = sourceRootId ?? Guid.NewGuid(); var revisionId = Guid.NewGuid(); var activityId = Guid.NewGuid(); var now = DateTimeOffset.UtcNow;
+        var rootPath = $"C:\\zip-retained-tests\\{rootId:N}";
+        if (insideRoot) canonicalPath = Path.Combine(rootPath, "scoped" + extension);
         await using var context = CreateContext();
         if (sourceRootId is null)
         {
-        context.SourceRootConfigurations.Add(new SourceRootConfigurationEntity { Id = rootId, CanonicalPath = $"C:\\zip-retained-tests\\{rootId:N}", DisplayName = "Test", State = 0,
+            context.SourceRootConfigurations.Add(new SourceRootConfigurationEntity { Id = rootId, CanonicalPath = rootPath, DisplayName = "Test", State = 0,
             Recursive = true, IncludePatternsJson = "[]", ExcludePatternsJson = "[]", FollowLinks = false, MaximumFileBytes = 64L * 1024 * 1024,
             AllowedClassificationsJson = "[]", CrawlMode = 0, ReconciliationCadenceSeconds = 900, ConfigurationRevision = 1, CreatedAtUtc = now, UpdatedAtUtc = now });
         }

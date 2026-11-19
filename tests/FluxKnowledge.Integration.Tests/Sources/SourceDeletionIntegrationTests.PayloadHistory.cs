@@ -15,7 +15,7 @@ namespace FluxKnowledge.Integration.Tests.Sources;
 
 public sealed partial class SourceDeletionIntegrationTests
 {
-    [NativeSqlServerFact]
+    [SqlServerScaleFact]
     [Trait("Category","Scale")]
     public async Task Payload_pages_amortise_217685_task_history_with_replay_rollback_and_fresh_processes()
     {

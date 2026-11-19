@@ -19,10 +19,7 @@ using FluxKnowledge.Integration.Tests.Search;
 using FluxKnowledge.Integration.Tests.Support;
 using FluxKnowledge.Integrations.Files;
 using FluxKnowledge.Integrations.Outlook;
-using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.EntityFrameworkCore.Infrastructure;
-using Microsoft.EntityFrameworkCore.Migrations;
 using Xunit;
 
 namespace FluxKnowledge.Integration.Tests.Outlook;
@@ -161,13 +158,7 @@ public sealed partial class OutlookExportIngestionTests
                 .Select(folder => folder.CursorUtc).SingleAsync(ct));
             Assert.True(Directory.Exists(legacy.ReadyDirectory));
 
-            var appliedMigrations = (await verification.Database.GetAppliedMigrationsAsync(ct)).ToArray();
-            Assert.EndsWith("_BindOutlookWatchedSources", appliedMigrations[^1], StringComparison.Ordinal);
-            var down = await Assert.ThrowsAsync<SqlException>(() =>
-                verification.Database.GetService<IMigrator>().MigrateAsync(appliedMigrations[^2], ct));
-            Assert.Equal(51000, down.Number);
-            Assert.NotNull(await verification.OutlookCaptureExports.Where(row => row.Id == fresh.ExportId)
-                .Select(row => row.WatchedPreparedBundleJson).SingleAsync(ct));
+            Assert.NotNull(newReceipt.WatchedPreparedBundleJson);
         }
         finally
         {

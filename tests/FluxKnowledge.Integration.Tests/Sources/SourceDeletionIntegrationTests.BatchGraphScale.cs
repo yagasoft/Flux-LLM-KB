@@ -14,7 +14,7 @@ namespace FluxKnowledge.Integration.Tests.Sources;
 
 public sealed partial class SourceDeletionIntegrationTests
 {
-    [NativeSqlServerFact]
+    [SqlServerScaleFact]
     [Trait("Category","Scale")]
     public async Task Complete_graph_purge_clears_217685_tasks_and_receipts_across_20000_parents()
     {

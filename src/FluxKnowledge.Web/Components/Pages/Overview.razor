@@ -8,6 +8,7 @@
 @inject OverviewProjectionState ProjectionState
 @inject IProjectionReader ProjectionReader
 @inject StatusEventFeed StatusEvents
+@inject GuidedRecoveryActions GuidedActions
 @inject ILogger<Overview> AttentionLogger
 
 <PageTitle>Overview | Flux Knowledge</PageTitle>
@@ -17,53 +18,27 @@
     var global = PipelineActivityView.From(activity);
     var diagnostics = OverviewDiagnosticSummary.From(ProjectionState.Current.ActiveIndexGeneration, ProjectionState.Current.IndexRecovery);
     var scheduler = ProjectionState.Current.GpuSchedulerStatus;
+    var outlook = ProjectionState.Current.OutlookCapture;
     var stages = activity.FileStages.Where(s => SelectedRoot is null || s.SourceRootId == SelectedRoot)
         .GroupBy(s => new { s.Stage, s.State }).Select(g => new { g.Key.Stage, g.Key.State, Count = g.Sum(s => s.Count) }).ToArray();
     var ocrDemand = activity.OcrDemand.Where(s => SelectedRoot is null || s.SourceRootId == SelectedRoot).ToArray();
     var runningTasks = activity.RunningTasks.Where(t => SelectedRoot is null || t.SourceRootId == SelectedRoot).ToArray();
+    var existingRecoveries = view.Jobs.Where(j => !j.IsHistorical && RecoveryExplanation(j.Reason) is not null &&
+        j.State is PipelineWorkState.Waiting or PipelineWorkState.Queued or PipelineWorkState.Running).ToArray();
+    var foregroundResultCount = SelectedRoot is null ? activity.GpuTasks.Where(g => g.IsInteractive && g.State == "Outcome uncertain").Sum(g => g.Count) : 0;
+    var submitted = GuidedActions.Recent(SelectedRoot).Where(attempt =>
+        (attempt.Target.Action != "root_resume" || ProjectionState.IsStale ||
+         !view.Sources.Any(source => source.Id == attempt.Target.TargetId && source.Lifecycle == "Paused")) &&
+        (ProjectionState.IsStale || !(_attention?.Items.Any(item => item.Id == attempt.Target.TargetId && item.Applicability == "Current" &&
+            item.State == "Failed" && item.Stage is "Publish" or "Embed") ?? false))).ToArray();
     var refreshContext = ProjectionState.HasSnapshot
         ? "The last successful read is shown below and may be out of date."
         : "Current activity is unavailable; zero activity has not been confirmed.";
 }
 <div class="pipeline-overview">
     <header class="overview-header">
-        <div><h1>Pipeline overview</h1><p>Activity in the last committed sample, source progress and work needing attention.</p></div>
-        <button type="button" @onclick="RefreshAsync">Refresh status</button>
-    </header>
-    <p class="visually-hidden" role="status" aria-live="polite">@_announcement</p>
-    @* Reserve the longest built-in notice at the current width without announcing it. *@
-    <div class="refresh-notice-slot">
-        <p class="pipeline-warning refresh-notice-reserve" aria-hidden="true">Status changed during the read. Waiting for a consistent sample. @refreshContext</p>
-        @if (ProjectionState.IsStale)
-        {
-            <p class="pipeline-warning" role="alert">@ProjectionState.RefreshIssue @refreshContext</p>
-        }
-    </div>
-    @if (ProjectionState.LastSuccessfulReadAtUtc is { } observed)
-    {
-        <p class="status-freshness">Status as of <time datetime="@observed.ToString("O")">@Time(observed)</time>. Activity is confirmed in this committed sample; changes appear in later samples. Updates automatically every 10 seconds and when status changes.</p>
-    }
-    @foreach (var source in view.Sources.Where(s => s.JournalHealth is { IsUnavailable: true } or { RecoveryRequired: true } or { Mode: "JournalPartial" }))
-    {
-        <SourceJournalWarning Source="source" />
-    }
-    <section aria-labelledby="current-activity-heading" class="activity-banner">
-        <div class="activity-heading">
-            <div><h2 id="current-activity-heading">Current activity</h2><p class="activity-state">@view.State</p></div>
-            <a href="#pipeline-attention">Needs attention</a>
-        </div>
-        <p>@view.Message</p>
-        @if (scheduler.OcrOwner is { } owner)
-        {
-            <aside class="ocr-capacity-status" aria-label="GPU capacity owner">
-                <h3>@(owner.State == "Running" ? "OCR is using GPU capacity" : "OCR is holding GPU capacity")</h3>
-                <p>@owner.State · @owner.Executor · Last heartbeat: @(owner.HeartbeatAgeMinutes?.ToString("N0", CultureInfo.GetCultureInfo("en-GB")) ?? "unknown") minutes ago.
-                    @if (owner.DeadlineAtUtc is { } deadline) { <span>Execution deadline: @Time(deadline).</span> }</p>
-                <p>@owner.NextAction @if (owner.State != "Running") { <a href="/operator-actions">Operator actions</a> }</p>
-                <details><summary>Capacity diagnostics</summary><p>Reason: <code>@owner.ReasonCode</code></p>
-                    <p>Batch: <code>@owner.BatchId</code> · Execution: <code>@(owner.ExecutionInstanceId?.ToString() ?? "Legacy owner unconfirmed")</code></p></details>
-            </aside>
-        }
+        <h1>Overview</h1>
+        <div class="overview-scope">
         <label class="source-scope">Source scope
             <select @bind="_sourceScope" @bind:after="ScopeChangedAsync" disabled="@(!activity.IsAvailable)">
                 <option value="">All sources and app activity</option>
@@ -73,64 +48,228 @@
                 }
             </select>
         </label>
-        @if (activity.IsAvailable)
-        {
-            <p class="attention-summary"><a href="#pipeline-attention">Blocked files: @view.BlockedFiles · failed files: @view.FailedFiles · uncertain GPU tasks: @view.UncertainGpuTasks</a></p>
-            <dl class="status-grid activity-counts">
-                <div><dt>Running pipeline jobs</dt><dd><StatusCount Value="view.RunningJobs" /></dd></div>
-                <div><dt>Queued pipeline jobs</dt><dd><StatusCount Value="view.QueuedJobs" /></dd></div>
-                <div><dt>Waiting pipeline jobs</dt><dd><StatusCount Value="view.WaitingJobs" /></dd></div>
-                <div><dt>Active GPU tasks</dt><dd><StatusCount Value="view.ActiveGpuTasks" /></dd></div>
+            <button type="button" @onclick="RefreshAsync">Refresh status</button>
+        </div>
+    </header>
+    <p class="visually-hidden" role="status" aria-live="polite">@_announcement</p>
+    @if (ProjectionState.IsStale)
+    {
+        <p class="pipeline-warning refresh-notice" role="alert">@ProjectionState.RefreshIssue @refreshContext</p>
+    }
+    @if (ProjectionState.LastSuccessfulReadAtUtc is { } observed)
+    {
+        <p class="status-freshness">Status as of <time datetime="@observed.ToString("O")">@Time(observed)</time></p>
+    }
+    @if (activity.IsAvailable)
+    {
+        <section class="overview-status" aria-label="Search and indexing status">
+            <div class="overview-status-heading">
+                <div><div class="overview-status-title">
+                    <span class="overview-title-reserve" aria-hidden="true">Latest status is unavailable</span>
+                    <h2>@(ProjectionState.IsStale ? "Latest status is unavailable" : diagnostics.State == "Healthy" ? "Search index is ready" : $"Search index is {diagnostics.State.ToLowerInvariant()}")</h2>
+                    </div><p>@view.State · @view.Message</p></div>
+                <a class="operation-link" href="/search">Search</a>
+            </div>
+            <dl class="overview-metrics">
+                <div><dt>Searchable files</dt><dd><StatusCount Value="view.PublishedFiles" /></dd></div>
+                <div><dt>Files awaiting indexing</dt><dd><StatusCount Value="view.PendingFiles" /></dd></div>
+                <div><dt>Blocked or failed files</dt><dd><StatusCount Value="@(view.BlockedFiles + view.FailedFiles)" /></dd></div>
             </dl>
-            <p>@view.ReadyGpuTasks GPU tasks are ready; @view.WaitingGpuTasks GPU tasks await dispatch, retry or admission.</p>
-            @if (SelectedRoot is null)
+        </section>
+    }
+    @foreach (var source in view.Sources.Where(s => s.JournalHealth is { IsUnavailable: true } or { RecoveryRequired: true } or { Mode: "JournalPartial" }))
+    {
+        <SourceJournalWarning Source="source" />
+    }
+    <section id="pipeline-attention" aria-labelledby="attention-heading">
+        <h2 id="attention-heading" tabindex="-1" @ref="_attentionHeading">Needs attention</h2>
+        @if (!activity.IsAvailable)
+        {
+            <p>Current issues are unavailable. Refresh status to check for blockers.</p>
+        }
+        else
+        {
+            var causes = activity.FileCauses.Where(c => SelectedRoot is null || c.SourceRootId == SelectedRoot)
+                .OrderByDescending(c => c.Count).ThenBy(c => c.Reason, StringComparer.Ordinal).ToArray();
+            var pausedSources = view.Sources.Where(s => s.Lifecycle == "Paused").ToArray();
+            var issuesVisible = causes.Length > 0 || pausedSources.Length > 0 ||
+                view.BlockedFiles > 0 || view.FailedFiles > 0 || view.ProvisionalFiles > 0 ||
+                view.AttentionJobs > 0 || view.UncertainGpuTasks > 0 || view.UnconfirmedGpuTasks > 0 ||
+                view.Sources.Any(s => s.ScanErrors > 0 || s.UnconfirmedControls > 0 || s.LifecycleReason is not null) ||
+                diagnostics.State == "Blocked" || SelectedRoot is null && outlook.BlockedCount > 0 ||
+                activity.UncertainCapacitySlots > 0 && SelectedRoot is null;
+            @if (!issuesVisible)
             {
-                <p>@activity.ActiveScans source scans and @activity.ActiveProcessors retained processors have confirmed leases.</p>
+                <p>No current blockers in this sample.</p>
             }
-            else
+            <div class="issue-workspace @(_filesOpen ? "has-selection" : null)">
+            <div class="issue-list-panel">
+            <ul class="issue-list">
+                @foreach (var cause in causes)
+                {
+                    var sourceName = view.Sources.FirstOrDefault(s => s.Id == cause.SourceRootId)?.Name ?? "Source unavailable";
+                    <li class="issue-row" @key="(cause.SourceRootId, cause.Category, cause.Reason, cause.NextAction)">
+                        <div>
+                            <h3>@IssueTitle(cause)</h3>
+                            <p>@cause.NextAction</p>
+                            <small>@FormatCount(cause.Count, "file") · @sourceName</small>
+                        </div>
+                        <button type="button" @onclick="() => LoadFilesAsync(new(cause.Category, Reason: cause.Reason), cause.SourceRootId, cause.Count)">Review files</button>
+                    </li>
+                }
+                @foreach (var source in pausedSources)
+                {
+                    <li class="issue-row" @key="source.Id">
+                        <div><h3>Indexing is paused</h3><p>Changes to this source will wait until indexing resumes.</p><small>@source.Name</small></div>
+                        <div>
+                            @if (!ProjectionState.IsStale)
+                            {
+                                <GuidedRecoveryAction Action="root_resume" TargetId="source.Id" SourceRootId="source.Id" ActionLabel="Resume indexing" OnCommitted="RefreshAsync" />
+                            }
+                            <a href="@($"/sources/{source.Id}")">Source details</a>
+                        </div>
+                    </li>
+                }
+                @foreach (var source in view.Sources.Where(s => s.ScanErrors > 0 || s.UnconfirmedControls > 0 || s.LifecycleReason is not null))
+                {
+                    <li class="issue-row">
+                        <div><h3>Source activity needs review</h3><p>@SourceIssueSummary(source)</p><small>@source.Name</small></div>
+                        <a class="operation-link" href="@($"/sources/{source.Id}")">Review source</a>
+                    </li>
+                }
+                @if (diagnostics.State == "Blocked")
+                {
+                    <li class="issue-row">
+                        <div><h3>Search index recovery is blocked</h3><p>@diagnostics.Reason</p></div>
+                        <a class="operation-link" href="#index-health-heading">Review index health</a>
+                    </li>
+                }
+                @if (SelectedRoot is null && outlook.BlockedCount > 0)
+                {
+                    <li class="issue-row">
+                        <div><h3>Outlook capture needs review</h3><p>Check the selected folders, companion status and catch-up options.</p><small>@FormatCount(outlook.BlockedCount, "blocked export")</small></div>
+                        <a class="operation-link" href="/outlook">Review Outlook capture</a>
+                    </li>
+                }
+                @if (view.AttentionJobs > 0)
+                {
+                    <li class="issue-row">
+                        <div><h3>Indexing work needs review</h3><p>Some steps failed or have no valid worker or dispatch claim.</p><small>@FormatCount(view.AttentionJobs, "job")</small></div>
+                        <button type="button" @onclick='() => LoadAttentionAsync("current-jobs", 0)'>Review current jobs</button>
+                    </li>
+                }
+                @if (view.UncertainGpuTasks + view.UnconfirmedGpuTasks > 0 || SelectedRoot is null && activity.UncertainCapacitySlots > 0)
+                {
+                    <li class="issue-row">
+                        <div><h3>GPU work needs verification</h3><p>Check the recorded result and whether the GPU resources were released.</p>
+                            <small>@view.UncertainGpuTasks GPU tasks with uncertain outcomes · @view.UnconfirmedGpuTasks claims to verify</small>
+                            @if (foregroundResultCount > 0) { <p>@FormatCount(foregroundResultCount, "attempt") came from interactive search. Earlier search requests are never replayed.</p> }</div>
+                        <button type="button" @onclick='() => LoadAttentionAsync("current-gpu", 0)'>Check GPU evidence</button>
+                    </li>
+                }
+                @if (view.ProvisionalFiles > 0)
+                {
+                    <li class="issue-row">
+                        <div><h3>Files waiting for source verification</h3><p>Indexing will use the confirmed revision after source reconciliation.</p><small>@FormatCount(view.ProvisionalFiles, "file")</small></div>
+                        <button type="button" @onclick='() => LoadFilesAsync(new("Unconfirmed"), SelectedRoot, view.ProvisionalFiles)'>Review files</button>
+                    </li>
+                }
+            </ul>
+            @if (view.BlockedFiles > 0 || view.FailedFiles > 0)
             {
-                <p class="status-freshness">Across the app: @global.ActiveGpuTasks active GPU tasks and @global.UncertainGpuTasks GPU tasks with uncertain outcomes. Interactive search and local ingress are included only in the all-sources view.</p>
+                <p class="issue-actions">
+                    @if (view.BlockedFiles > 0) { <button type="button" @onclick='() => LoadFilesAsync(new("Blocked"), SelectedRoot, view.BlockedFiles)'>Review @FormatCount(view.BlockedFiles, "blocked file")</button> }
+                    @if (view.FailedFiles > 0) { <button type="button" @onclick='() => LoadFilesAsync(new("Failed"), SelectedRoot, view.FailedFiles)'>Review @FormatCount(view.FailedFiles, "failed file")</button> }
+                </p>
             }
-            @foreach (var source in view.Sources.Where(s => s.IsScanning || s.ActiveProcessors > 0 || s.ActiveSourceOperations > 0 || s.QueuedScans > 0 || s.WaitingScans > 0))
-            {
-                <p><strong>@source.Name</strong>: @(source.IsScanning ? "checking source changes; " : "")
-                    @source.ActiveProcessors active retained processors; @source.ActiveSourceOperations active source operations @source.LifecyclePhase;
-                    @source.QueuedScans queued source scans; @source.WaitingScans waiting source scans.</p>
-            }
-            @if (view.Jobs.Any(j => j.State is PipelineWorkState.Running or PipelineWorkState.Queued or PipelineWorkState.Waiting))
-            {
-                <ul class="activity-list">
-                    @foreach (var job in view.Jobs.Where(j => j.State is PipelineWorkState.Running or PipelineWorkState.Queued or PipelineWorkState.Waiting))
+            </div>
+            <div class="issue-inspector" hidden="@(!_filesOpen)">
+                <button class="inspector-close" type="button" @onclick="CloseFilesAsync">Close file details</button>
+                <PipelineFileExplorer @ref="_fileExplorer" SourceRootId="@SelectedRoot" Sources="@activity.Sources" ActionsEnabled="@(!ProjectionState.IsStale)" />
+            </div>
+            </div>
+            <details class="diagnostic-details overview-disclosure"><summary>Previous attempts</summary>
+                <p>@view.HistoricalJobs historical pipeline jobs and @view.HistoricalGpuTasks historical GPU attempts. Earlier records can help explain an interruption.</p>
+                <p class="issue-actions"><button type="button" @onclick='() => LoadAttentionAsync("historical-jobs", 0)'>View previous jobs</button>
+                    <button type="button" @onclick='() => LoadAttentionAsync("historical-gpu", 0)'>View previous GPU attempts</button></p>
+            </details>
+            <details class="diagnostic-details overview-disclosure"><summary>Job and GPU diagnostics</summary>
+                <p class="issue-actions"><button type="button" @onclick='() => LoadAttentionAsync("jobs", 0)'>View pipeline job records</button>
+                    <button type="button" @onclick='() => LoadAttentionAsync("gpu", 0)'>View GPU task records</button> <a href="/operator-actions">Review processor actions</a></p>
+            </details>
+        }
+        @if (_attentionError is not null) { <p role="alert">@_attentionError</p> }
+        @if (_attention is { } attention)
+        {
+            <div class="table-scroll"><table>
+                <caption>@attention.TotalCount @(_attentionUnit.EndsWith("jobs", StringComparison.Ordinal) ? "pipeline job" : "GPU task") records for @AttentionScopeLabel. Page @(attention.Page + 1). Loaded @Time(_attentionReadAtUtc).</caption>
+                <thead><tr><th>Source</th><th>Unit / status</th><th>Applicability</th><th>Reason</th><th>Details</th></tr></thead>
+                <tbody>
+                    @foreach (var item in attention.Items)
                     {
-                        <li><strong>@job.SourceName</strong> · @job.Stage · @job.State · @job.Count pipeline jobs. @job.Reason</li>
+                        <tr @key="item.Id"><td>@item.SourceName</td><td>@(item.Stage ?? item.Unit) · @item.State</td><td>@item.Applicability</td>
+                            <td>@item.Reason
+                                @if (item.ResultStatus is { } result) { <p>Result · @result</p> }
+                                @if (item.CapacityStatus is { } capacity) { <p>GPU resources · @capacity</p> }
+                            </td>
+                            <td>@if (item.PipelineRecordId is { } recordId) { <a href="@($"/corpus/{recordId}")">View record</a> }
+                                @if (!ProjectionState.IsStale && item.Applicability == "Current" && item.State == "Failed")
+                                {
+                                    @if (item.Stage == "Publish")
+                                    { <GuidedRecoveryAction Action="publication_retry" TargetId="item.Id" PipelineRecordId="item.PipelineRecordId" ActionLabel="Retry publication" OnCommitted="RefreshAsync" /> }
+                                    else if (item.Stage == "Embed")
+                                    { <GuidedRecoveryAction Action="embedding_retry" TargetId="item.Id" PipelineRecordId="item.PipelineRecordId" ActionLabel="Retry embedding" OnCommitted="RefreshAsync" /> }
+                                }
+                                <details><summary>Diagnostic identity</summary><code>@item.Id</code><p>@(item.Unit == "Pipeline job" ? "Last attempt or source registration" : "GPU task created"): @Time(item.RecordedAtUtc)</p></details></td></tr>
                     }
-                </ul>
-            }
-            <h3>Files behind running tasks</h3>
-            @if (runningTasks.Length > 0)
-            {
-                <div class="running-task-list">
-                    @foreach (var task in runningTasks)
-                    {
-                        <article class="running-task-row" @key="task.Id">
-                            @if (string.IsNullOrWhiteSpace(task.FullPath)) { <strong>@task.SourceName</strong> }
-                            else { <FilePath FullPath="@task.FullPath" ArchivePath="@task.ArchivePath" ShowFullPath="true" /> }
-                            <p>@task.SourceName · @task.Stage · @task.State @(task.IsHistorical ? "· Previous revision" : "")</p>
-                            <p>Confirmed worker attempt elapsed at this sample: @PipelineFileExplorer.Elapsed(task.AttemptStartedAtUtc, activity.ObservedAtUtc).</p>
-                            @if (task.PipelineRecordId is { } record) { <a href="@($"/corpus/{record}")">View pipeline record</a> }
-                        </article>
-                    }
-                </div>
-                <p class="status-freshness">Showing @runningTasks.Length task identities from a bounded app sample of at most 25; source filtering can exclude sampled rows.
-                    @if (SelectedRoot is null) { <span>@activity.RunningTaskCount running pipeline, GPU-search and selected retained-processor tasks in total.</span> }
-                    Worker heartbeat and GPU attempt timing are unavailable in these rows. Saved content progress is separate in file details.</p>
-            }
-            else if (view.RunningJobs > 0 || view.ActiveGpuTasks > 0 || view.Sources.Any(s => s.ActiveProcessors > 0))
-            { <p>Running task identities are unavailable in this bounded sample or outside the selected source scope.</p> }
-            else { <p>No file task has confirmed execution in this sample.</p> }
-            <button type="button" @onclick='() => LoadFilesAsync(new("Pending", State: "Running"), SelectedRoot)'>View running source files</button>
+                </tbody>
+            </table></div>
+            <p class="status-freshness">Record status is the retained pipeline label. Confirmed execution and current applicability are shown above.</p>
+            <p><button type="button" disabled="@(attention.Page == 0)" @onclick="() => LoadAttentionAsync(_attentionUnit, attention.Page - 1)">Previous records</button>
+                <button type="button" disabled="@((attention.Page + 1) * attention.PageSize >= attention.TotalCount)" @onclick="() => LoadAttentionAsync(_attentionUnit, attention.Page + 1)">Next records</button>
+                <button type="button" @onclick="() => LoadAttentionAsync(_attentionUnit, attention.Page)">Refresh records</button></p>
         }
     </section>
+    @if (submitted.Length > 0)
+    {
+        <section aria-labelledby="requested-recovery-heading">
+            <h2 id="requested-recovery-heading">Recovery requests</h2>
+            <ul class="issue-list">
+                @foreach (var attempt in submitted)
+                {
+                    <li class="issue-row" @key="attempt.Target">
+                        <div><h3>@attempt.Label</h3><p>@(view.Sources.FirstOrDefault(s => s.Id == attempt.SourceRootId)?.Name ?? "Selected indexing work")</p></div>
+                        <GuidedRecoveryAction Action="@attempt.Target.Action" TargetId="attempt.Target.TargetId" ActionLabel="@attempt.Label"
+                                              ReconcileMetadata="attempt.Target.ReconcileMetadata" SourceRootId="attempt.SourceRootId"
+                                              PipelineRecordId="attempt.PipelineRecordId" CanDismissReceipt="true" OnCommitted="RefreshAsync" />
+                    </li>
+                }
+            </ul>
+        </section>
+    }
+    @if (existingRecoveries.Length > 0 || activity.IsAvailable && diagnostics.State == "Recovering")
+    {
+        <section aria-labelledby="automatic-continuations-heading">
+            <h2 id="automatic-continuations-heading">@(ProjectionState.IsStale ? "Automatic work in the last update" : "Continuing automatically")</h2>
+            <ul class="issue-list">
+                @foreach (var job in existingRecoveries)
+                {
+                    <li class="issue-row">
+                        <div><h3>@RecoveryExplanation(job.Reason)</h3><small>@FormatCount(job.Count, "job") · @job.SourceName · @job.State</small></div>
+                        <a class="operation-link" href="@(job.SourceRootId is { } root ? $"/events?source={root:D}" : "/events")">View activity</a>
+                    </li>
+                }
+                @if (diagnostics.State == "Recovering")
+                {
+                    <li class="issue-row">
+                        <div><h3>Search index recovery</h3><p>@diagnostics.Reason</p>
+                            @if (ProjectionState.Current.IndexRecovery.NextRetryAtUtc is { } retryAt) { <small>Next scheduled attempt @Time(retryAt)</small> }</div>
+                        <a class="operation-link" href="#index-health-heading">View index health</a>
+                    </li>
+                }
+            </ul>
+        </section>
+    }
     <section aria-labelledby="source-progress-heading">
         <h2 id="source-progress-heading">Source progress</h2>
         <p>Known files include discovered files and retained archive members. The categories add up to Known files. Published — ready to query means the file's extracted text has completed indexing.</p>
@@ -142,9 +281,14 @@
         <div class="source-progress-list">
             @foreach (var source in view.Sources)
             {
-                <article class="source-progress-card">
+                <article class="source-progress-card" @key="source.Id">
                     <header><h3><a href="@($"/sources/{source.Id}")">@source.Name</a></h3><span>@source.Lifecycle</span></header>
-                    <p class="source-path">@source.Path</p>
+                    <div class="source-progress-summary">
+                        <p><strong>@source.PublishedFiles.ToString("N0", CultureInfo.GetCultureInfo("en-GB"))</strong> searchable</p>
+                        <p><strong>@source.PendingFiles.ToString("N0", CultureInfo.GetCultureInfo("en-GB"))</strong> awaiting indexing</p>
+                        <p><strong>@((source.BlockedFiles + source.FailedFiles).ToString("N0", CultureInfo.GetCultureInfo("en-GB")))</strong> blocked or failed</p>
+                    </div>
+                    <details><summary>File counts and path</summary><p class="source-path">@source.Path</p>
                     <dl class="source-file-counts">
                         <div><dt>Known files</dt><dd><button class="count-link" type="button" aria-label="@($"Known files: {source.KnownFiles:N0}")" @onclick='() => LoadFilesAsync(new("all"), source.Id, source.KnownFiles)'><StatusCount Value="source.KnownFiles" /></button></dd></div>
                         @foreach (var category in PipelineFilePresentation.Categories(source))
@@ -152,6 +296,7 @@
                             <div><dt>@category.Label</dt><dd><button class="count-link" type="button" aria-label="@($"{category.Label}: {category.Count:N0}")" @onclick="() => LoadFilesAsync(new(category.Category), source.Id, category.Count)"><StatusCount Value="category.Count" /></button></dd></div>
                         }
                     </dl>
+                    </details>
                     @if (source.IsScanning)
                     {
                         <p>Checking this source for changes. The inventory is incomplete while the scan runs.</p>
@@ -187,6 +332,81 @@
             <p>No source roots are configured in this scope. <a href="/sources">Sources and indexing</a></p>
         }
     </section>
+    <section aria-labelledby="current-activity-heading" class="activity-banner" id="current-activity">
+        <div class="activity-heading">
+            <div><h2 id="current-activity-heading">Current activity</h2><p class="activity-state">@view.State</p></div>
+            <a href="#pipeline-attention">Needs attention</a>
+        </div>
+        <p>@view.Message</p>
+        @if (scheduler.OcrOwner is { } owner)
+        {
+            <aside class="ocr-capacity-status" aria-label="GPU capacity owner">
+                <h3>@(owner.State == "Running" ? "OCR is using GPU capacity" : "OCR is holding GPU capacity")</h3>
+                <p>@owner.State · @owner.Executor · Last heartbeat: @(owner.HeartbeatAgeMinutes?.ToString("N0", CultureInfo.GetCultureInfo("en-GB")) ?? "unknown") minutes ago.
+                    @if (owner.DeadlineAtUtc is { } deadline) { <span>Execution deadline: @Time(deadline).</span> }</p>
+                <p>@owner.NextAction @if (owner.State != "Running") { <a href="/operator-actions">Operator actions</a> }</p>
+                <details><summary>Capacity diagnostics</summary><p>Reason: <code>@owner.ReasonCode</code></p>
+                    <p>Batch: <code>@owner.BatchId</code> · Execution: <code>@(owner.ExecutionInstanceId?.ToString() ?? "Legacy owner unconfirmed")</code></p></details>
+            </aside>
+        }
+        @if (activity.IsAvailable)
+        {
+            <p class="attention-summary"><a href="#pipeline-attention">Blocked files: @view.BlockedFiles · failed files: @view.FailedFiles · uncertain GPU tasks: @view.UncertainGpuTasks</a></p>
+            <dl class="status-grid activity-counts">
+                <div><dt>Running pipeline jobs</dt><dd><StatusCount Value="view.RunningJobs" /></dd></div>
+                <div><dt>Queued pipeline jobs</dt><dd><StatusCount Value="view.QueuedJobs" /></dd></div>
+                <div><dt>Waiting pipeline jobs</dt><dd><StatusCount Value="view.WaitingJobs" /></dd></div>
+                <div><dt>Active GPU tasks</dt><dd><StatusCount Value="view.ActiveGpuTasks" /></dd></div>
+            </dl>
+            <p>@view.ReadyGpuTasks GPU tasks are ready; @view.WaitingGpuTasks GPU tasks await dispatch, retry or admission.</p>
+            @if (SelectedRoot is null)
+            {
+                <p>@activity.ActiveScans source scans and @activity.ActiveProcessors retained processors have confirmed leases.</p>
+            }
+            else
+            {
+                <p class="status-freshness">Across the app: @global.ActiveGpuTasks active GPU tasks and @global.UncertainGpuTasks GPU tasks with uncertain outcomes. Interactive search and local ingress are included only in the all-sources view.</p>
+            }
+            @foreach (var source in view.Sources.Where(s => s.IsScanning || s.ActiveProcessors > 0 || s.ActiveSourceOperations > 0 || s.QueuedScans > 0 || s.WaitingScans > 0))
+            {
+                <p><strong>@source.Name</strong>: @(source.IsScanning ? "checking source changes; " : "")
+                    @source.ActiveProcessors active retained processors; @source.ActiveSourceOperations active source operations @source.LifecyclePhase;
+                    @source.QueuedScans queued source scans; @source.WaitingScans waiting source scans.</p>
+            }
+            @if (view.Jobs.Any(j => j.State is PipelineWorkState.Running or PipelineWorkState.Queued or PipelineWorkState.Waiting))
+            {
+                <ul class="activity-list">
+                    @foreach (var job in view.Jobs.Where(j => j.State is PipelineWorkState.Running or PipelineWorkState.Queued or PipelineWorkState.Waiting))
+                    {
+                        <li><strong>@job.SourceName</strong> · @job.Stage · @job.State · @job.Count pipeline jobs. @(RecoveryExplanation(job.Reason) ?? job.Reason)</li>
+                    }
+                </ul>
+            }
+            <h3>Files behind running tasks</h3>
+            @if (runningTasks.Length > 0)
+            {
+                <div class="running-task-list">
+                    @foreach (var task in runningTasks)
+                    {
+                        <article class="running-task-row" @key="task.Id">
+                            @if (string.IsNullOrWhiteSpace(task.FullPath)) { <strong>@task.SourceName</strong> }
+                            else { <FilePath FullPath="@task.FullPath" ArchivePath="@task.ArchivePath" ShowFullPath="true" /> }
+                            <p>@task.SourceName · @task.Stage · @task.State @(task.IsHistorical ? "· Previous revision" : "")</p>
+                            <p>Confirmed worker attempt elapsed at this sample: @PipelineFileExplorer.Elapsed(task.AttemptStartedAtUtc, activity.ObservedAtUtc).</p>
+                            @if (task.PipelineRecordId is { } record) { <a href="@($"/corpus/{record}")">View pipeline record</a> }
+                        </article>
+                    }
+                </div>
+                <p class="status-freshness">Showing @runningTasks.Length task identities from a bounded app sample of at most 25; source filtering can exclude sampled rows.
+                    @if (SelectedRoot is null) { <span>@activity.RunningTaskCount running pipeline, GPU-search and selected retained-processor tasks in total.</span> }
+                    Worker heartbeat and GPU attempt timing are unavailable in these rows. Saved content progress is separate in file details.</p>
+            }
+            else if (view.RunningJobs > 0 || view.ActiveGpuTasks > 0 || view.Sources.Any(s => s.ActiveProcessors > 0))
+            { <p>Running task identities are unavailable in this bounded sample or outside the selected source scope.</p> }
+            else { <p>No file task has confirmed execution in this sample.</p> }
+            <button type="button" @onclick='() => LoadFilesAsync(new("Pending", State: "Running"), SelectedRoot)'>View running source files</button>
+        }
+    </section>
     <section aria-labelledby="pending-stages-heading">
         <h2 id="pending-stages-heading">Where pending files are waiting</h2>
         @if (!activity.IsAvailable) { <p>File stage and OCR status unavailable. Zero pending files has not been confirmed.</p> }
@@ -211,61 +431,6 @@
                     else { <span>Requested page total unavailable.</span> }</p>
                 <p>@ocrDemand.Sum(o => o.DecisionUnconfirmedFiles) files await a confirmed OCR decision. Extraction status alone does not confirm OCR demand.</p>
             }
-        }
-    </section>
-    <PipelineFileExplorer @ref="_fileExplorer" SourceRootId="@SelectedRoot" Sources="@activity.Sources" />
-    <section id="pipeline-attention" aria-labelledby="attention-heading">
-        <h2 id="attention-heading">Needs attention</h2>
-        @if (activity.IsAvailable)
-        {
-            <ul class="attention-counts">
-                <li><strong>@view.BlockedFiles blocked files</strong> and <strong>@view.FailedFiles failed files</strong> in current sources.</li>
-                <li><strong>@view.AttentionJobs current pipeline jobs</strong> need attention or have unconfirmed ownership.</li>
-                <li><strong>@view.ProvisionalFiles files</strong> have unconfirmed current revision bindings.</li>
-                <li><strong>@view.HistoricalJobs historical pipeline jobs</strong> retain unresolved records.</li>
-                <li><strong>@view.UncertainGpuTasks</strong> GPU tasks with uncertain outcomes; <strong>@view.UnconfirmedGpuTasks</strong> GPU tasks with unconfirmed ownership.</li>
-                <li><strong>@view.HistoricalGpuTasks</strong> historical GPU attempts retain uncertain outcomes or superseded bindings.</li>
-            </ul>
-            <p>These counts use different units and may refer to the same work. Historical records are retained; they are not marked successful or added to the current queue.</p>
-            <ul class="file-cause-list">
-                @foreach (var cause in activity.FileCauses.Where(c => SelectedRoot is null || c.SourceRootId == SelectedRoot)
-                    .GroupBy(c => new { c.Category, c.Reason, c.NextAction }).OrderByDescending(g => g.Sum(c => c.Count)))
-                {
-                    var count = cause.Sum(c => c.Count);
-                    <li><button type="button" @onclick="() => LoadFilesAsync(new(cause.Key.Category, Reason: cause.Key.Reason), SelectedRoot, count)">@count @cause.Key.Category files · @cause.Key.Reason</button>
-                        <p>Next action: @cause.Key.NextAction</p></li>
-                }
-            </ul>
-            <p class="status-freshness">Showing up to 20 current causes per source. Use the blocked or failed file category to inspect every affected file. A resolved current file error does not settle an earlier native execution.</p>
-            <p><button type="button" @onclick='() => LoadAttentionAsync("jobs", 0)'>View pipeline job records</button>
-                <button type="button" @onclick='() => LoadAttentionAsync("gpu", 0)'>View GPU task records</button> <a href="/operator-actions">Operator actions</a></p>
-            @if (activity.UnconfirmedControls > 0)
-            {
-                <p class="pipeline-warning">Across the app: @activity.UnconfirmedControls source scan or processor claims have unconfirmed leases.</p>
-            }
-            @if (activity.UncertainCapacitySlots > 0)
-            {
-                <p class="pipeline-warning">@activity.UncertainCapacitySlots GPU capacity slots have uncertain or unconfirmed ownership. Native cleanup requires separate evidence.</p>
-            }
-        }
-        @if (_attentionError is not null) { <p role="alert">@_attentionError</p> }
-        @if (_attention is { } attention)
-        {
-            <div class="table-scroll"><table>
-                <caption>@attention.TotalCount @(_attentionUnit == "jobs" ? "pipeline job" : "GPU task") records in the current or historical backlog. Page @(attention.Page + 1). Loaded @Time(_attentionReadAtUtc).</caption>
-                <thead><tr><th>Source</th><th>Unit / status</th><th>Applicability</th><th>Reason</th><th>Details</th></tr></thead>
-                <tbody>
-                    @foreach (var item in attention.Items)
-                    {
-                        <tr><td>@item.SourceName</td><td>@item.Unit · @item.State</td><td>@item.Applicability</td><td>@item.Reason</td>
-                            <td>@if (item.PipelineRecordId is { } recordId) { <a href="@($"/corpus/{recordId}")">View record</a> }
-                                <details><summary>Diagnostic identity</summary><code>@item.Id</code><p>@(item.Unit == "Pipeline job" ? "Last attempt or source registration" : "GPU task created"): @Time(item.RecordedAtUtc)</p></details></td></tr>
-                    }
-                </tbody>
-            </table></div>
-            <p class="status-freshness">Record status is the retained pipeline label. Confirmed execution and current applicability are shown above.</p>
-            <p><button type="button" disabled="@(attention.Page == 0)" @onclick="() => LoadAttentionAsync(_attentionUnit, attention.Page - 1)">Previous records</button>
-                <button type="button" disabled="@((attention.Page + 1) * attention.PageSize >= attention.TotalCount)" @onclick="() => LoadAttentionAsync(_attentionUnit, attention.Page + 1)">Next records</button></p>
         }
     </section>
     <section aria-labelledby="index-health-heading">
@@ -330,17 +495,59 @@
     private DateTimeOffset? _attentionReadAtUtc;
     private long _attentionRequest;
     private PipelineFileExplorer? _fileExplorer;
-    private Task LoadFilesAsync(PipelineFileFilter filter, Guid? root, int? expected = null) =>
-        _fileExplorer?.ShowAsync(filter, root, expected) ?? Task.CompletedTask;
+    private bool _filesOpen;
+    private ElementReference _attentionHeading;
+    private async Task LoadFilesAsync(PipelineFileFilter filter, Guid? root, int? expected = null)
+    {
+        if (_fileExplorer is null) return;
+        _filesOpen = true;
+        StateHasChanged();
+        await _fileExplorer.ShowAsync(filter, root, expected);
+    }
+    private async Task CloseFilesAsync()
+    {
+        _filesOpen = false;
+        _fileExplorer?.ClearSelection();
+        await _attentionHeading.FocusAsync();
+    }
+    private string AttentionScopeLabel => _attentionUnit.StartsWith("current-", StringComparison.Ordinal) ? "current issues" :
+        _attentionUnit.StartsWith("historical-", StringComparison.Ordinal) ? "previous attempts" : "diagnostics";
+    private static string FormatCount(int count, string unit) => count == 1 ? $"1 {unit}" : $"{count:N0} {unit}s";
+    private static string? RecoveryExplanation(string reason) => reason switch
+    {
+        "index-storage-capacity-deferred" => "Publication is waiting for free index storage",
+        "publication-snapshot-conflict" => "Publication will retry after the index changes settle",
+        "embedding-gpu-retry" => "Embedding will retry from its saved progress",
+        _ => null
+    };
+    private static string SourceIssueSummary(SourcePipelineProgress source) => source.UnconfirmedControls > 0
+        ? "A scan or processor claim could not be confirmed. Check the source status before requesting new work."
+        : source.ScanErrors > 0 ? "The last scan could not check every item. Review the access or availability problems." :
+        "The source operation is waiting for a prerequisite. Review its last recorded step.";
+    private static string IssueTitle(PipelineFileCauseGroup cause) => cause.Reason switch
+    {
+        "SourceContentNotAvailableLocally" or "SourceAccessContentUnavailable" or "source-content-not-available-locally" => "Files unavailable on this device",
+        "CloudDirectoryNamespaceIncomplete" => "Some folders are unavailable on this device",
+        "SourceInUse" => "Files are in use",
+        "SourceAccessDenied" or "SourceAccessRepairNotApproved" or "SourceAccessExplicitDeny" => "Access to files needs review",
+        "pdf-document-password-required" or "office-document-encrypted" => "Files need to be unlocked",
+        "index-storage-capacity-deferred" => "Indexing is waiting for free space",
+        "source-revision-binding-unconfirmed" => "File revisions need verification",
+        _ when cause.Reason.StartsWith("document-ocr-", StringComparison.Ordinal) => "Text extraction needs review",
+        _ when cause.Category == "Failed" => "File processing failed",
+        _ => "File processing is blocked"
+    };
     private Guid? SelectedRoot => Guid.TryParse(_sourceScope, out var id) ? id : null;
     private static string Time(DateTimeOffset? value) => value?.ToLocalTime().ToString("dd MMM yyyy HH:mm:ss zzz", CultureInfo.InvariantCulture) ?? "Not recorded";
     protected override async Task OnInitializedAsync()
     {
+        GuidedActions.SubmissionsChanged += OnSubmissionsChanged;
         _subscription = await ProjectionState.SubscribeAndReloadAsync(StatusEvents, _stopping.Token);
         Announce();
         _observeTask = ObserveAsync(_subscription, _stopping.Token);
         _timerTask = RefreshPeriodicallyAsync(_stopping.Token);
     }
+    private void OnSubmissionsChanged() => _ = InvokeAsync(StateHasChanged);
     private void Announce()
     {
         var view = PipelineActivityView.From(ProjectionState.Current.Activity, SelectedRoot);
@@ -362,7 +569,17 @@
         }
         Announce();
     }
-    private Task ScopeChangedAsync() { _attentionRequest++; _attention = null; _attentionReadAtUtc = null; _attentionError = null; Announce(); return Task.CompletedTask; }
+    private Task ScopeChangedAsync()
+    {
+        _attentionRequest++;
+        _attention = null;
+        _attentionReadAtUtc = null;
+        _attentionError = null;
+        _filesOpen = false;
+        _fileExplorer?.ClearSelection();
+        Announce();
+        return Task.CompletedTask;
+    }
     private async Task LoadAttentionAsync(string unit, int page)
     {
         var request = ++_attentionRequest;
@@ -422,6 +639,7 @@
     }
     public async ValueTask DisposeAsync()
     {
+        GuidedActions.SubmissionsChanged -= OnSubmissionsChanged;
         await _stopping.CancelAsync();
         ProjectionState.ReleaseSharedSubscription();
         if (_subscription is not null) await _subscription.DisposeAsync();

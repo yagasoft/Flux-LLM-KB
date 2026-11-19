@@ -15,7 +15,7 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
 
 /// <summary>Durable branch claims and fenced completion writes for retained processors.</summary>
 public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowledgeDbContext> contextFactory, TimeProvider timeProvider,
-    ISourceWorkAdmission? sourceAdmission = null)
+    ISourceWorkAdmission? sourceAdmission = null, IDeploymentValidationHold? deploymentValidationHold = null)
     : IRetainedProcessorBranchStore
 {
     private const string RetainedCsharpSchemaMigration = "20260820101021_CloseRetainedCsharpMixedOutcomes";
@@ -2331,122 +2331,123 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
         return await ExecuteWithRetryAsync(async () =>
         {
             await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+            var rootId = await (from branch in context.SourceProcessorBranches.AsNoTracking()
+                                join owner in context.SourceRevisions.AsNoTracking() on branch.SourceRevisionId equals owner.Id
+                                where branch.Id == branchId
+                                select (Guid?)owner.SourceRootId).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+            if (rootId is not { } sourceRootId) return ArchiveZipMemberEncodingFailureReconciliationResult.NotEligible;
             await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken).ConfigureAwait(false);
-            var branch = await context.SourceProcessorBranches.FromSqlInterpolated($"""
-                SELECT * FROM [SourceProcessorBranches] WITH (UPDLOCK, HOLDLOCK)
-                WHERE [Id] = {branchId}
-                  AND [State] = {(int)RetainedProcessorBranchState.Blocked}
-                  AND [ProcessorVersion] = {"phase-5-zip-v1"}
-                  AND [ProcessorFingerprint] = {"phase-5-zip-retained-archive-v1"}
-                """).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
-            if (branch is null)
-            {
-                return ArchiveZipMemberEncodingFailureReconciliationResult.NotEligible;
-            }
-
-            var predecessor = await context.SourceActivities.FromSqlInterpolated($"""
-                SELECT * FROM [SourceActivities] WITH (UPDLOCK, HOLDLOCK)
-                WHERE [Id] = {branch.SourceActivityId}
-                  AND [SourceRevisionId] = {branch.SourceRevisionId}
-                  AND [ActivityKind] = {(int)SourceActivityKind.ArchiveExpansion}
-                  AND [ExecutionClass] = {(int)ExecutionClass.InProcess}
-                  AND [ProcessorVersion] = {"phase-5-zip-v1"}
-                  AND [InputFingerprint] = {branch.InputSha256}
-                """).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
-            if (predecessor is null ||
-                !await context.SourceProcessorAttempts.AnyAsync(value =>
-                    value.BranchId == branch.Id && value.LeaseGeneration == branch.LeaseGeneration &&
-                    value.FinishedAtUtc != null && value.OutcomeCode == "archive-member-not-utf8", cancellationToken).ConfigureAwait(false))
-            {
-                return ArchiveZipMemberEncodingFailureReconciliationResult.NotEligible;
-            }
-
-            const string reasonCode = "superseded-by-archive-zip-member-skip-v2";
-            var priorRelation = await context.SourceActivityRelations
-                .Where(value => value.PredecessorActivityId == predecessor.Id)
+            await SqlPublishedPassageSelection.AcquireFenceAsync(context, cancellationToken).ConfigureAwait(false);
+            var root = await context.SourceRootConfigurations.FromSqlInterpolated(
+                $"SELECT * FROM [SourceRootConfigurations] WITH (UPDLOCK,HOLDLOCK) WHERE [Id]={sourceRootId}")
                 .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
-            if (priorRelation is not null)
-            {
-                if (!string.Equals(priorRelation.RelationshipKind, "superseded-by-retained-processor", StringComparison.Ordinal) ||
-                    !string.Equals(priorRelation.ReasonCode, reasonCode, StringComparison.Ordinal))
-                {
-                    return ArchiveZipMemberEncodingFailureReconciliationResult.NotEligible;
-                }
-
-                var replay = await context.SourceProcessorBranches.SingleOrDefaultAsync(value =>
-                    value.SourceActivityId == priorRelation.SuccessorActivityId &&
-                    value.SourceRevisionId == branch.SourceRevisionId &&
-                    value.InputSha256 == branch.InputSha256 &&
-                    value.ProcessorVersion == ZipArchiveRetainedProcessor.Capability.ProcessorVersion &&
-                    value.ProcessorFingerprint == ZipArchiveRetainedProcessor.Capability.ProcessorFingerprint,
-                    cancellationToken).ConfigureAwait(false);
-                if (replay is null)
-                {
-                    return ArchiveZipMemberEncodingFailureReconciliationResult.NotEligible;
-                }
-
-                await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-                return new ArchiveZipMemberEncodingFailureReconciliationResult(false, true, replay.Id);
-            }
-
-            var revision = await context.SourceRevisions.FromSqlInterpolated($"""
-                SELECT * FROM [SourceRevisions] WITH (UPDLOCK, HOLDLOCK)
-                WHERE [Id] = {branch.SourceRevisionId}
-                  AND [ContentSha256] = {branch.InputSha256}
-                """).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
-            if (revision is null)
-            {
+            var snapshot = await ReadZipEncodingFailureAsync(context, branchId, cancellationToken).ConfigureAwait(false);
+            if (snapshot is null)
                 return ArchiveZipMemberEncodingFailureReconciliationResult.NotEligible;
+            if (snapshot.SuccessorBranchId is { } existing)
+            {
+                await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+                return new ArchiveZipMemberEncodingFailureReconciliationResult(false, true, existing);
             }
+
+            var revision = snapshot.Revision;
+            if (deploymentValidationHold?.IsHeld == true || root is null || root.State != (int)SourceRootState.Enabled || root.FollowLinks ||
+                revision.OriginKind != 0 || revision.SuppressedAtUtc is not null || revision.SourceRootId != root.Id ||
+                !SqlDocumentInputRecovery.IsInScope(root, revision) || snapshot.Branch.LeaseOwner is not null || snapshot.Branch.LeaseExpiresAtUtc is not null ||
+                !await SqlSourceWorkEligibility.Inputs(context, sourceAdmission).AnyAsync(value => value.Id == revision.Id, cancellationToken).ConfigureAwait(false))
+                return ArchiveZipMemberEncodingFailureReconciliationResult.NotEligible;
+
+            var retainedInput = await context.SourceArtifacts.AnyAsync(value => value.SourceRevisionId == revision.Id &&
+                value.ContentSha256 == revision.ContentSha256 && value.ByteLength == revision.ByteLength, cancellationToken).ConfigureAwait(false);
+            if (!retainedInput || await context.SourceRevisions.AnyAsync(value => value.Id != revision.Id && value.SourceRootId == root.Id &&
+                    value.SuppressedAtUtc == null && (value.StableSourceIdentity == revision.StableSourceIdentity || value.OriginKind == 0 &&
+                        EF.Functions.Collate(value.CanonicalPath, "Latin1_General_100_CI_AS") == revision.CanonicalPath), cancellationToken).ConfigureAwait(false) ||
+                await context.SourceProcessorBranches.AnyAsync(value => value.SourceRevisionId == revision.Id && value.Id != snapshot.Branch.Id &&
+                    (value.State == (int)RetainedProcessorBranchState.Pending || value.State == (int)RetainedProcessorBranchState.Running), cancellationToken).ConfigureAwait(false))
+                return ArchiveZipMemberEncodingFailureReconciliationResult.NotEligible;
 
             var now = await DatabaseUtcNowAsync(context, cancellationToken).ConfigureAwait(false);
-            var descriptor = ZipArchiveRetainedProcessor.Capability;
-            var successorActivity = new SourceActivityEntity
-            {
-                Id = Guid.NewGuid(),
-                SourceRevisionId = branch.SourceRevisionId,
-                ActivityKind = (int)descriptor.AcceptedActivityKind,
-                ExecutionClass = (int)ExecutionClass.InProcess,
-                ProcessorVersion = descriptor.ProcessorVersion,
-                InputFingerprint = branch.InputSha256,
-                DescriptorFingerprint = SourceActivityEntity.LegacyDescriptorFingerprint,
-                State = (int)SourceActivityState.Pending,
-                CreatedAtUtc = now,
-                UpdatedAtUtc = now
-            };
-            var successorBranch = new SourceProcessorBranchEntity
-            {
-                Id = Guid.NewGuid(),
-                SourceActivityId = successorActivity.Id,
-                SourceRevisionId = branch.SourceRevisionId,
-                InputSha256 = branch.InputSha256,
-                ProcessorVersion = descriptor.ProcessorVersion,
-                ProcessorFingerprint = descriptor.ProcessorFingerprint,
-                State = (int)RetainedProcessorBranchState.Pending,
-                CreatedAtUtc = now,
-                UpdatedAtUtc = now
-            };
-            context.SourceActivities.Add(successorActivity);
-            context.SourceProcessorBranches.Add(successorBranch);
-            context.SourceActivityRelations.Add(new SourceActivityRelationEntity
-            {
-                Id = Guid.NewGuid(),
-                PredecessorActivityId = predecessor.Id,
-                SuccessorActivityId = successorActivity.Id,
-                RelationshipKind = "superseded-by-retained-processor",
-                ReasonCode = reasonCode,
-                CreatedAtUtc = now
-            });
-            OperatorEventAppender.Add(context, new OperatorEventDraft(
-                "retained_processor.reconciled", "retained_processor", "information", "retained-processor",
-                now, SourceRootId: revision.SourceRootId, SourceRevisionId: revision.Id, SourceActivityId: successorActivity.Id,
-                CorrelationId: $"retained-processor:{successorBranch.Id:N}",
-                Details: new { kind = "archive_zip", reasonCode = "archive-member-not-utf8", predecessorBranchId = branch.Id, successorBranchId = successorBranch.Id }));
+            var successor = QueueZipEncodingSuccessor(context, snapshot, RetainedRecoveryNativeCommands.Actor, now, root.ConfigurationRevision);
             await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+            if (deploymentValidationHold?.IsHeld == true || sourceAdmission?.ReadAdmittedRoots().Any(value =>
+                    value.RootId == root.Id && value.ConfigurationRevision == root.ConfigurationRevision) != true)
+                return ArchiveZipMemberEncodingFailureReconciliationResult.NotEligible;
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-            return new ArchiveZipMemberEncodingFailureReconciliationResult(true, false, successorBranch.Id);
+            return new ArchiveZipMemberEncodingFailureReconciliationResult(true, false, successor);
         }, cancellationToken).ConfigureAwait(false);
     }
+
+    internal const string ZipEncodingSuccessorReason = "superseded-by-archive-zip-member-skip-v2";
+
+    internal static async Task<ZipEncodingFailure?> ReadZipEncodingFailureAsync(
+        FluxKnowledgeDbContext context, Guid branchId, CancellationToken cancellationToken)
+    {
+        var branch = await context.SourceProcessorBranches.FromSqlInterpolated($$"""
+            SELECT * FROM [SourceProcessorBranches] WITH (UPDLOCK, HOLDLOCK)
+            WHERE [Id] = {{branchId}}
+              AND [State] = {{(int)RetainedProcessorBranchState.Blocked}}
+              AND [ProcessorVersion] = {{"phase-5-zip-v1"}}
+              AND [ProcessorFingerprint] = {{"phase-5-zip-retained-archive-v1"}}
+            """).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+        if (branch is null) return null;
+
+        var predecessor = await context.SourceActivities.FromSqlInterpolated($$"""
+            SELECT * FROM [SourceActivities] WITH (UPDLOCK, HOLDLOCK)
+            WHERE [Id] = {{branch.SourceActivityId}}
+              AND [SourceRevisionId] = {{branch.SourceRevisionId}}
+              AND [ActivityKind] = {{(int)SourceActivityKind.ArchiveExpansion}}
+              AND [ExecutionClass] = {{(int)ExecutionClass.InProcess}}
+              AND [ProcessorVersion] = {{"phase-5-zip-v1"}}
+              AND [InputFingerprint] = {{branch.InputSha256}}
+            """).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+        var attempt = await context.SourceProcessorAttempts.SingleOrDefaultAsync(value =>
+            value.BranchId == branch.Id && value.LeaseGeneration == branch.LeaseGeneration &&
+            value.FinishedAtUtc != null && value.OutcomeCode == "archive-member-not-utf8",
+            cancellationToken).ConfigureAwait(false);
+        if (predecessor is null || attempt is null) return null;
+
+        var relation = await context.SourceActivityRelations.SingleOrDefaultAsync(
+            value => value.PredecessorActivityId == predecessor.Id, cancellationToken).ConfigureAwait(false);
+        Guid? successor = null;
+        if (relation is not null)
+        {
+            if (relation.RelationshipKind != "superseded-by-retained-processor" ||
+                relation.ReasonCode != ZipEncodingSuccessorReason) return null;
+
+            successor = await context.SourceProcessorBranches.Where(value =>
+                value.SourceActivityId == relation.SuccessorActivityId &&
+                value.SourceRevisionId == branch.SourceRevisionId &&
+                value.InputSha256 == branch.InputSha256 &&
+                value.ProcessorVersion == ZipArchiveRetainedProcessor.Capability.ProcessorVersion &&
+                value.ProcessorFingerprint == ZipArchiveRetainedProcessor.Capability.ProcessorFingerprint)
+                .Select(value => (Guid?)value.Id).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+            if (successor is null) return null;
+        }
+
+        var revision = await context.SourceRevisions.FromSqlInterpolated($$"""
+            SELECT * FROM [SourceRevisions] WITH (UPDLOCK, HOLDLOCK)
+            WHERE [Id] = {{branch.SourceRevisionId}}
+              AND [ContentSha256] = {{branch.InputSha256}}
+            """).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+        return revision is null ? null : new(branch, predecessor, attempt, revision, successor);
+    }
+
+    internal static Guid QueueZipEncodingSuccessor(
+        FluxKnowledgeDbContext context, ZipEncodingFailure snapshot, string actor, DateTimeOffset now, long? configurationRevision = null)
+    {
+        var successor = QueueDocumentBranch(context, snapshot.Revision, snapshot.Predecessor,
+            ZipArchiveRetainedProcessor.Capability, ZipEncodingSuccessorReason, now, configurationRevision);
+
+        OperatorEventAppender.Add(context, new OperatorEventDraft(
+            "retained_processor.reconciled", "retained_processor", "information", actor, now,
+            SourceRootId: snapshot.Revision.SourceRootId, SourceRevisionId: snapshot.Revision.Id,
+            SourceActivityId: successor.SourceActivityId, CorrelationId: $"retained-processor:{successor.Id:N}",
+            Details: new { kind = "archive_zip", reasonCode = "archive-member-not-utf8", predecessorBranchId = snapshot.Branch.Id, successorBranchId = successor.Id }));
+        return successor.Id;
+    }
+
+    internal sealed record ZipEncodingFailure(SourceProcessorBranchEntity Branch, SourceActivityEntity Predecessor,
+        SourceProcessorAttemptEntity Attempt, SourceRevisionEntity Revision, Guid? SuccessorBranchId);
 
     /// <summary>
     /// Creates one document-owned successor for an explicitly named retained VSDX or PDF
@@ -2472,207 +2473,241 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
         {
             await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
             await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken).ConfigureAwait(false);
-            var revision = await context.SourceRevisions.FromSqlInterpolated($"""
-                SELECT * FROM [SourceRevisions] WITH (UPDLOCK, HOLDLOCK)
-                WHERE [Id] = {request.SourceRevisionId.Value}
-                  AND [ContentSha256] = {request.ExpectedInputSha256}
-                  AND [SuppressedAtUtc] IS NULL
-                  AND [ParentSourceRevisionId] IS NULL
-                """).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
-            if (revision is null || !HasExpectedDocumentExtension(revision.Extension, descriptor))
-            {
+            var snapshot = await ReadExactDocumentPredecessorAsync(context, request, descriptor, cancellationToken).ConfigureAwait(false);
+            if (snapshot is null)
                 return DocumentReprocessRequestResult.NotEligible;
-            }
-
-            var root = await context.SourceRootConfigurations.FromSqlInterpolated($"""
-                SELECT * FROM [SourceRootConfigurations] WITH (UPDLOCK, HOLDLOCK)
-                WHERE [Id] = {revision.SourceRootId}
-                  AND [State] = {(int)SourceRootState.Enabled}
-                """).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
-            var artifact = await context.SourceArtifacts.FromSqlInterpolated($"""
-                SELECT * FROM [SourceArtifacts] WITH (UPDLOCK, HOLDLOCK)
-                WHERE [SourceRevisionId] = {revision.Id}
-                  AND [ContentSha256] = {request.ExpectedInputSha256}
-                  AND [ByteLength] = {revision.ByteLength}
-                """).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
-            if (root is null || artifact is null ||
-                !await IsExactDocumentDescriptorRunnableAsync(context, descriptor, cancellationToken).ConfigureAwait(false))
-            {
-                return DocumentReprocessRequestResult.NotEligible;
-            }
-
-            const string reasonCode = "superseded-by-exact-document-reprocess-v1";
-            var existing = await (from relation in context.SourceActivityRelations
-                                  join existingActivity in context.SourceActivities on relation.SuccessorActivityId equals existingActivity.Id
-                                  join existingBranch in context.SourceProcessorBranches on existingActivity.Id equals existingBranch.SourceActivityId
-                                  where existingActivity.SourceRevisionId == revision.Id &&
-                                        relation.RelationshipKind == "superseded-by-retained-processor" &&
-                                        relation.ReasonCode == reasonCode &&
-                                        existingBranch.InputSha256 == request.ExpectedInputSha256 &&
-                                        existingBranch.ProcessorVersion == descriptor.ProcessorVersion &&
-                                        existingBranch.ProcessorFingerprint == descriptor.ProcessorFingerprint
-                                  select existingBranch).ToListAsync(cancellationToken).ConfigureAwait(false);
-            if (existing.Count == 1)
+            if (snapshot.SuccessorBranchId is { } existing)
             {
                 await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-                return new DocumentReprocessRequestResult(false, true, existing[0].Id);
-            }
-            if (existing.Count != 0 || await context.SourceProcessorBranches.AnyAsync(value =>
-                    value.SourceRevisionId == revision.Id &&
-                    value.InputSha256 == request.ExpectedInputSha256 &&
-                    value.ProcessorFingerprint == descriptor.ProcessorFingerprint &&
-                    (value.State == (int)RetainedProcessorBranchState.Pending || value.State == (int)RetainedProcessorBranchState.Running), cancellationToken).ConfigureAwait(false))
-            {
-                return DocumentReprocessRequestResult.NotEligible;
+                return new(false, true, existing);
             }
 
-            var terminalLegacyBranches = await (from branch in context.SourceProcessorBranches
-                                                join activity in context.SourceActivities on branch.SourceActivityId equals activity.Id
-                                                where branch.SourceRevisionId == revision.Id &&
-                                                      branch.InputSha256 == request.ExpectedInputSha256 &&
-                                                      branch.State == (int)RetainedProcessorBranchState.Blocked &&
-                                                      branch.ProcessorVersion == "phase-5-zip-v1" &&
-                                                      branch.ProcessorFingerprint == "phase-5-zip-retained-archive-v1" &&
-                                                      activity.SourceRevisionId == revision.Id &&
-                                                      activity.ActivityKind == (int)SourceActivityKind.ArchiveExpansion &&
-                                                      activity.ExecutionClass == (int)ExecutionClass.InProcess &&
-                                                      activity.ProcessorVersion == "phase-5-zip-v1" &&
-                                                      activity.InputFingerprint == request.ExpectedInputSha256 &&
-                                                      !context.SourceActivityRelations.Any(relation =>
-                                                          relation.PredecessorActivityId == activity.Id) &&
-                                                      context.SourceProcessorAttempts.Any(attempt =>
-                                                          attempt.BranchId == branch.Id &&
-                                                          attempt.LeaseGeneration == branch.LeaseGeneration &&
-                                                          attempt.FinishedAtUtc != null &&
-                                                          attempt.OutcomeCode == "archive-member-not-utf8")
-                                                select activity).ToListAsync(cancellationToken).ConfigureAwait(false);
-            var deferredDocumentActivities = await context.SourceActivities.FromSqlInterpolated($"""
-                SELECT * FROM [SourceActivities] WITH (UPDLOCK, HOLDLOCK)
-                WHERE [SourceRevisionId] = {revision.Id}
-                  AND [ActivityKind] = {(int)SourceActivityKind.DocumentParsing}
-                  AND [ExecutionClass] = {(int)ExecutionClass.DeferredCapability}
-                  AND [InputFingerprint] = {request.ExpectedInputSha256}
-                  AND [State] = {(int)SourceActivityState.DeferredUnsupported}
-                  AND NOT EXISTS (
-                      SELECT 1 FROM [SourceProcessorBranches] WITH (UPDLOCK, HOLDLOCK)
-                      WHERE [SourceActivityId] = [SourceActivities].[Id])
-                  AND NOT EXISTS (
-                      SELECT 1 FROM [SourceActivityRelations] WITH (UPDLOCK, HOLDLOCK)
-                      WHERE [PredecessorActivityId] = [SourceActivities].[Id])
-                """).ToListAsync(cancellationToken).ConfigureAwait(false);
-            var terminalStructuralVsdx = descriptor.Id == VisioDocumentInputProcessor.Capability.Id
-                ? await (from branch in context.SourceProcessorBranches
-                         join activity in context.SourceActivities on branch.SourceActivityId equals activity.Id
-                         where branch.SourceRevisionId == revision.Id && branch.InputSha256 == request.ExpectedInputSha256 &&
-                               branch.ProcessorVersion == DocumentProcessingInput.Vsdx.ParentProcessorVersion &&
-                               branch.ProcessorFingerprint == DocumentProcessingInput.Vsdx.ParentProcessorFingerprint &&
-                               (branch.State == (int)RetainedProcessorBranchState.Completed || branch.State == (int)RetainedProcessorBranchState.Blocked) &&
-                                activity.SourceRevisionId == revision.Id && activity.InputFingerprint == request.ExpectedInputSha256 &&
-                                activity.ExecutionClass == (int)ExecutionClass.InProcess &&
-                                activity.ProcessorVersion == DocumentProcessingInput.Vsdx.ParentProcessorVersion &&
-                                (activity.State == (int)SourceActivityState.Completed ||
-                                 activity.State == (int)SourceActivityState.FailedTerminal ||
-                                 branch.State == (int)RetainedProcessorBranchState.Blocked &&
-                                 activity.State == (int)SourceActivityState.Pending &&
-                                 context.SourceProcessorAttempts.Any(attempt =>
-                                     attempt.BranchId == branch.Id &&
-                                     attempt.LeaseGeneration == branch.LeaseGeneration &&
-                                     attempt.FinishedAtUtc != null &&
-                                     attempt.OutcomeCode == "office-document-container-invalid")) &&
-                                !context.SourceActivityRelations.Any(relation => relation.PredecessorActivityId == activity.Id)
-                         select activity).ToListAsync(cancellationToken).ConfigureAwait(false)
-                : [];
-            var terminalFailedVisioV1 = descriptor.Id == VisioDocumentInputProcessor.Capability.Id
-                ? await (from branch in context.SourceProcessorBranches
-                         join activity in context.SourceActivities on branch.SourceActivityId equals activity.Id
-                         join member in context.SourceProcessorBranchMembers on branch.Id equals member.BranchId
-                         join record in context.PipelineRecords on member.ChildSourceRevisionId equals record.SourceRevisionId
-                         join job in context.Jobs on new { RecordId = record.Id, record.Revision }
-                             equals new { RecordId = job.PipelineRecordId, Revision = job.SourceRevision }
-                         where branch.SourceRevisionId == revision.Id &&
-                               branch.InputSha256 == request.ExpectedInputSha256 &&
-                               branch.ProcessorVersion == "phase-6-vsdx-visio-v1" &&
-                               branch.ProcessorFingerprint == "phase-6-vsdx-retained-visio-v1" &&
-                               branch.State == (int)RetainedProcessorBranchState.Completed &&
-                               activity.SourceRevisionId == revision.Id &&
-                               activity.ActivityKind == (int)SourceActivityKind.TextExtraction &&
-                               activity.ExecutionClass == (int)ExecutionClass.InProcess &&
-                               activity.ProcessorVersion == "phase-6-vsdx-visio-v1" &&
-                               activity.InputFingerprint == request.ExpectedInputSha256 &&
-                               (activity.State == (int)SourceActivityState.Pending ||
-                                activity.State == (int)SourceActivityState.Completed) &&
-                               !context.SourceActivityRelations.Any(relation => relation.PredecessorActivityId == activity.Id) &&
-                               member.Disposition == "completed" &&
-                               member.ChildSourceRevisionId != null &&
-                               record.ContentHash == request.ExpectedInputSha256 &&
-                               !record.IsDeleted &&
-                               job.Stage == (int)PipelineStage.Extract &&
-                               job.Operation == PipelineOperations.ExtractVisio &&
-                               job.PublicState == (int)FluxKnowledge.Domain.Jobs.PublicJobState.Failed &&
-                               job.Reason == "visio-document-connection-invalid" &&
-                               !context.DocumentPublications.Any(publication =>
-                                   publication.PipelineRecordId == record.Id &&
-                                   publication.PipelineRecordRevision == record.Revision)
-                         select activity).Distinct().ToListAsync(cancellationToken).ConfigureAwait(false)
-                : [];
-            var predecessors = terminalLegacyBranches
-                .Concat(deferredDocumentActivities)
-                .Concat(terminalStructuralVsdx)
-                .Concat(terminalFailedVisioV1)
-                .ToArray();
-            if (predecessors.Length != 1)
-            {
-                return DocumentReprocessRequestResult.NotEligible;
-            }
-
-            var predecessor = predecessors[0];
             var now = await DatabaseUtcNowAsync(context, cancellationToken).ConfigureAwait(false);
-            var successorActivity = new SourceActivityEntity
-            {
-                Id = Guid.NewGuid(),
-                SourceRevisionId = revision.Id,
-                ActivityKind = (int)descriptor.AcceptedActivityKind,
-                ExecutionClass = (int)ExecutionClass.InProcess,
-                ProcessorVersion = descriptor.ProcessorVersion,
-                InputFingerprint = request.ExpectedInputSha256,
-                DescriptorFingerprint = SourceActivityEntity.LegacyDescriptorFingerprint,
-                State = (int)SourceActivityState.Pending,
-                CreatedAtUtc = now,
-                UpdatedAtUtc = now
-            };
-            var successorBranch = new SourceProcessorBranchEntity
-            {
-                Id = Guid.NewGuid(),
-                SourceActivityId = successorActivity.Id,
-                SourceRevisionId = revision.Id,
-                InputSha256 = request.ExpectedInputSha256,
-                ProcessorVersion = descriptor.ProcessorVersion,
-                ProcessorFingerprint = descriptor.ProcessorFingerprint,
-                State = (int)RetainedProcessorBranchState.Pending,
-                CreatedAtUtc = now,
-                UpdatedAtUtc = now
-            };
-            context.SourceActivities.Add(successorActivity);
-            context.SourceProcessorBranches.Add(successorBranch);
-            context.SourceActivityRelations.Add(new SourceActivityRelationEntity
-            {
-                Id = Guid.NewGuid(),
-                PredecessorActivityId = predecessor.Id,
-                SuccessorActivityId = successorActivity.Id,
-                RelationshipKind = "superseded-by-retained-processor",
-                ReasonCode = reasonCode,
-                CreatedAtUtc = now
-            });
-            OperatorEventAppender.Add(context, new OperatorEventDraft(
-                "retained_processor.document_reprocess_requested", "retained_processor", "information", "trusted-local-cli",
-                now, SourceRootId: revision.SourceRootId, SourceRevisionId: revision.Id, SourceActivityId: successorActivity.Id,
-                CorrelationId: $"retained-processor:{successorBranch.Id:N}",
-                Details: new { kind = EventKind(descriptor.ProcessorFingerprint), predecessorActivityId = predecessor.Id, successorBranchId = successorBranch.Id }));
+            var successor = QueueExactDocumentSuccessor(context, snapshot, descriptor, "trusted-local-cli", now);
             await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-            return new DocumentReprocessRequestResult(true, false, successorBranch.Id);
+            return new DocumentReprocessRequestResult(true, false, successor);
         }, cancellationToken).ConfigureAwait(false);
     }
+
+    internal const string ExactDocumentSuccessorReason = "superseded-by-exact-document-reprocess-v1";
+
+    internal static async Task<ExactDocumentPredecessor?> ReadExactDocumentPredecessorAsync(
+        FluxKnowledgeDbContext context, DocumentReprocessRequest request, SourceCapabilityDescriptor descriptor,
+        CancellationToken cancellationToken)
+    {
+        var revision = await context.SourceRevisions.FromSqlInterpolated($"""
+            SELECT * FROM [SourceRevisions] WITH (UPDLOCK, HOLDLOCK)
+            WHERE [Id] = {request.SourceRevisionId.Value}
+              AND [ContentSha256] = {request.ExpectedInputSha256}
+              AND [SuppressedAtUtc] IS NULL
+              AND [ParentSourceRevisionId] IS NULL
+            """).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+        if (revision is null || !HasExpectedDocumentExtension(revision.Extension, descriptor))
+        {
+            return null;
+        }
+
+        var root = await context.SourceRootConfigurations.FromSqlInterpolated($"""
+            SELECT * FROM [SourceRootConfigurations] WITH (UPDLOCK, HOLDLOCK)
+            WHERE [Id] = {revision.SourceRootId}
+              AND [State] = {(int)SourceRootState.Enabled}
+            """).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+        var artifact = await context.SourceArtifacts.FromSqlInterpolated($"""
+            SELECT * FROM [SourceArtifacts] WITH (UPDLOCK, HOLDLOCK)
+            WHERE [SourceRevisionId] = {revision.Id}
+              AND [ContentSha256] = {request.ExpectedInputSha256}
+              AND [ByteLength] = {revision.ByteLength}
+            """).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+        if (root is null || artifact is null ||
+            !await IsExactDocumentDescriptorRunnableAsync(context, descriptor, cancellationToken).ConfigureAwait(false))
+        {
+            return null;
+        }
+
+        var existing = await (from relation in context.SourceActivityRelations
+                              join existingActivity in context.SourceActivities on relation.SuccessorActivityId equals existingActivity.Id
+                              join existingBranch in context.SourceProcessorBranches on existingActivity.Id equals existingBranch.SourceActivityId
+                              where existingActivity.SourceRevisionId == revision.Id &&
+                                    relation.RelationshipKind == "superseded-by-retained-processor" &&
+                                    relation.ReasonCode == ExactDocumentSuccessorReason &&
+                                    existingBranch.InputSha256 == request.ExpectedInputSha256 &&
+                                    existingBranch.ProcessorVersion == descriptor.ProcessorVersion &&
+                                    existingBranch.ProcessorFingerprint == descriptor.ProcessorFingerprint
+                              select existingBranch).ToListAsync(cancellationToken).ConfigureAwait(false);
+        if (existing.Count == 1)
+        {
+            return new(revision, root, artifact, null, existing[0].Id);
+        }
+        if (existing.Count != 0 || await context.SourceProcessorBranches.AnyAsync(value =>
+                value.SourceRevisionId == revision.Id &&
+                value.InputSha256 == request.ExpectedInputSha256 &&
+                value.ProcessorFingerprint == descriptor.ProcessorFingerprint &&
+                (value.State == (int)RetainedProcessorBranchState.Pending || value.State == (int)RetainedProcessorBranchState.Running), cancellationToken).ConfigureAwait(false))
+        {
+            return null;
+        }
+
+        var terminalLegacyBranches = await (from branch in context.SourceProcessorBranches
+                                            join activity in context.SourceActivities on branch.SourceActivityId equals activity.Id
+                                            where branch.SourceRevisionId == revision.Id &&
+                                                  branch.InputSha256 == request.ExpectedInputSha256 &&
+                                                  branch.State == (int)RetainedProcessorBranchState.Blocked &&
+                                                  branch.ProcessorVersion == "phase-5-zip-v1" &&
+                                                  branch.ProcessorFingerprint == "phase-5-zip-retained-archive-v1" &&
+                                                  activity.SourceRevisionId == revision.Id &&
+                                                  activity.ActivityKind == (int)SourceActivityKind.ArchiveExpansion &&
+                                                  activity.ExecutionClass == (int)ExecutionClass.InProcess &&
+                                                  activity.ProcessorVersion == "phase-5-zip-v1" &&
+                                                  activity.InputFingerprint == request.ExpectedInputSha256 &&
+                                                  !context.SourceActivityRelations.Any(relation =>
+                                                      relation.PredecessorActivityId == activity.Id) &&
+                                                  context.SourceProcessorAttempts.Any(attempt =>
+                                                      attempt.BranchId == branch.Id &&
+                                                      attempt.LeaseGeneration == branch.LeaseGeneration &&
+                                                      attempt.FinishedAtUtc != null &&
+                                                      attempt.OutcomeCode == "archive-member-not-utf8")
+                                            select activity).ToListAsync(cancellationToken).ConfigureAwait(false);
+        var deferredDocumentActivities = await context.SourceActivities.FromSqlInterpolated($"""
+            SELECT * FROM [SourceActivities] WITH (UPDLOCK, HOLDLOCK)
+            WHERE [SourceRevisionId] = {revision.Id}
+              AND [ActivityKind] = {(int)SourceActivityKind.DocumentParsing}
+              AND [ExecutionClass] = {(int)ExecutionClass.DeferredCapability}
+              AND [InputFingerprint] = {request.ExpectedInputSha256}
+              AND [State] = {(int)SourceActivityState.DeferredUnsupported}
+              AND NOT EXISTS (
+                  SELECT 1 FROM [SourceProcessorBranches] WITH (UPDLOCK, HOLDLOCK)
+                  WHERE [SourceActivityId] = [SourceActivities].[Id])
+              AND NOT EXISTS (
+                  SELECT 1 FROM [SourceActivityRelations] WITH (UPDLOCK, HOLDLOCK)
+                  WHERE [PredecessorActivityId] = [SourceActivities].[Id])
+            """).ToListAsync(cancellationToken).ConfigureAwait(false);
+        var terminalStructuralVsdx = descriptor.Id == VisioDocumentInputProcessor.Capability.Id
+            ? await (from branch in context.SourceProcessorBranches
+                     join activity in context.SourceActivities on branch.SourceActivityId equals activity.Id
+                     where branch.SourceRevisionId == revision.Id && branch.InputSha256 == request.ExpectedInputSha256 &&
+                           branch.ProcessorVersion == DocumentProcessingInput.Vsdx.ParentProcessorVersion &&
+                           branch.ProcessorFingerprint == DocumentProcessingInput.Vsdx.ParentProcessorFingerprint &&
+                           (branch.State == (int)RetainedProcessorBranchState.Completed || branch.State == (int)RetainedProcessorBranchState.Blocked) &&
+                            activity.SourceRevisionId == revision.Id && activity.InputFingerprint == request.ExpectedInputSha256 &&
+                            activity.ExecutionClass == (int)ExecutionClass.InProcess &&
+                            activity.ProcessorVersion == DocumentProcessingInput.Vsdx.ParentProcessorVersion &&
+                            (activity.State == (int)SourceActivityState.Completed ||
+                             activity.State == (int)SourceActivityState.FailedTerminal ||
+                             branch.State == (int)RetainedProcessorBranchState.Blocked &&
+                             activity.State == (int)SourceActivityState.Pending &&
+                             context.SourceProcessorAttempts.Any(attempt =>
+                                 attempt.BranchId == branch.Id &&
+                                 attempt.LeaseGeneration == branch.LeaseGeneration &&
+                                 attempt.FinishedAtUtc != null &&
+                                 attempt.OutcomeCode == "office-document-container-invalid")) &&
+                            !context.SourceActivityRelations.Any(relation => relation.PredecessorActivityId == activity.Id)
+                     select activity).ToListAsync(cancellationToken).ConfigureAwait(false)
+            : [];
+        var terminalFailedVisioV1 = descriptor.Id == VisioDocumentInputProcessor.Capability.Id
+            ? await (from branch in context.SourceProcessorBranches
+                     join activity in context.SourceActivities on branch.SourceActivityId equals activity.Id
+                     join member in context.SourceProcessorBranchMembers on branch.Id equals member.BranchId
+                     join record in context.PipelineRecords on member.ChildSourceRevisionId equals record.SourceRevisionId
+                     join job in context.Jobs on new { RecordId = record.Id, record.Revision }
+                         equals new { RecordId = job.PipelineRecordId, Revision = job.SourceRevision }
+                     where branch.SourceRevisionId == revision.Id &&
+                           branch.InputSha256 == request.ExpectedInputSha256 &&
+                           branch.ProcessorVersion == "phase-6-vsdx-visio-v1" &&
+                           branch.ProcessorFingerprint == "phase-6-vsdx-retained-visio-v1" &&
+                           branch.State == (int)RetainedProcessorBranchState.Completed &&
+                           activity.SourceRevisionId == revision.Id &&
+                           activity.ActivityKind == (int)SourceActivityKind.TextExtraction &&
+                           activity.ExecutionClass == (int)ExecutionClass.InProcess &&
+                           activity.ProcessorVersion == "phase-6-vsdx-visio-v1" &&
+                           activity.InputFingerprint == request.ExpectedInputSha256 &&
+                           (activity.State == (int)SourceActivityState.Pending ||
+                            activity.State == (int)SourceActivityState.Completed) &&
+                           !context.SourceActivityRelations.Any(relation => relation.PredecessorActivityId == activity.Id) &&
+                           member.Disposition == "completed" &&
+                           member.ChildSourceRevisionId != null &&
+                           record.ContentHash == request.ExpectedInputSha256 &&
+                           !record.IsDeleted &&
+                           job.Stage == (int)PipelineStage.Extract &&
+                           job.Operation == PipelineOperations.ExtractVisio &&
+                           job.PublicState == (int)FluxKnowledge.Domain.Jobs.PublicJobState.Failed &&
+                           job.Reason == "visio-document-connection-invalid" &&
+                           !context.DocumentPublications.Any(publication =>
+                               publication.PipelineRecordId == record.Id &&
+                               publication.PipelineRecordRevision == record.Revision)
+                     select activity).Distinct().ToListAsync(cancellationToken).ConfigureAwait(false)
+            : [];
+        var predecessors = terminalLegacyBranches
+            .Concat(deferredDocumentActivities)
+            .Concat(terminalStructuralVsdx)
+            .Concat(terminalFailedVisioV1)
+            .ToArray();
+        if (predecessors.Length != 1)
+        {
+            return null;
+        }
+
+        return new(revision, root, artifact, predecessors[0], null);
+    }
+
+    internal static Guid QueueExactDocumentSuccessor(FluxKnowledgeDbContext context, ExactDocumentPredecessor snapshot,
+        SourceCapabilityDescriptor descriptor, string actor, DateTimeOffset now, long? configurationRevision = null)
+    {
+        var predecessor = snapshot.Predecessor ?? throw new InvalidOperationException("The exact document predecessor is required.");
+        var successor = QueueDocumentBranch(context, snapshot.Revision, predecessor, descriptor, ExactDocumentSuccessorReason, now, configurationRevision);
+        OperatorEventAppender.Add(context, new OperatorEventDraft(
+            "retained_processor.document_reprocess_requested", "retained_processor", "information", actor,
+            now, SourceRootId: snapshot.Revision.SourceRootId, SourceRevisionId: snapshot.Revision.Id,
+            SourceActivityId: successor.SourceActivityId, CorrelationId: $"retained-processor:{successor.Id:N}",
+            Details: new { kind = EventKind(descriptor.ProcessorFingerprint), predecessorActivityId = predecessor.Id, successorBranchId = successor.Id }));
+        return successor.Id;
+    }
+
+    private static SourceProcessorBranchEntity QueueDocumentBranch(FluxKnowledgeDbContext context, SourceRevisionEntity revision,
+        SourceActivityEntity predecessor, SourceCapabilityDescriptor descriptor, string reasonCode, DateTimeOffset now, long? configurationRevision)
+    {
+        var successorActivity = new SourceActivityEntity
+        {
+            Id = Guid.NewGuid(),
+            SourceRevisionId = revision.Id,
+            ActivityKind = (int)descriptor.AcceptedActivityKind,
+            ExecutionClass = (int)ExecutionClass.InProcess,
+            ProcessorVersion = descriptor.ProcessorVersion,
+            InputFingerprint = revision.ContentSha256,
+            DescriptorFingerprint = configurationRevision is null ? SourceActivityEntity.LegacyDescriptorFingerprint : SqlGuidedRetainedBinding.Fingerprint,
+            AttemptEvidenceJson = configurationRevision is { } configuration ? SqlGuidedRetainedBinding.Evidence(configuration) : null,
+            State = (int)SourceActivityState.Pending,
+            CreatedAtUtc = now,
+            UpdatedAtUtc = now
+        };
+        var successorBranch = new SourceProcessorBranchEntity
+        {
+            Id = Guid.NewGuid(),
+            SourceActivityId = successorActivity.Id,
+            SourceRevisionId = revision.Id,
+            InputSha256 = revision.ContentSha256,
+            ProcessorVersion = descriptor.ProcessorVersion,
+            ProcessorFingerprint = descriptor.ProcessorFingerprint,
+            State = (int)RetainedProcessorBranchState.Pending,
+            CreatedAtUtc = now,
+            UpdatedAtUtc = now
+        };
+        context.SourceActivities.Add(successorActivity);
+        context.SourceProcessorBranches.Add(successorBranch);
+        context.SourceActivityRelations.Add(new SourceActivityRelationEntity
+        {
+            Id = Guid.NewGuid(),
+            PredecessorActivityId = predecessor.Id,
+            SuccessorActivityId = successorActivity.Id,
+            RelationshipKind = "superseded-by-retained-processor",
+            ReasonCode = reasonCode,
+            CreatedAtUtc = now
+        });
+        return successorBranch;
+    }
+
+    internal sealed record ExactDocumentPredecessor(SourceRevisionEntity Revision, SourceRootConfigurationEntity Root,
+        SourceArtifactEntity Artifact, SourceActivityEntity? Predecessor, Guid? SuccessorBranchId);
 
     /// <summary>Claims one exact document-owned successor and no other processor work.</summary>
     public async ValueTask<RetainedProcessorClaim?> ClaimDocumentBranchAsync(

@@ -7,6 +7,7 @@ using FluxKnowledge.Application.Knowledge;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Documents;
 using FluxKnowledge.Application.Gpu;
+using FluxKnowledge.Application.Sources;
 using FluxKnowledge.Domain.Gpu;
 using FluxKnowledge.Domain.Knowledge;
 using FluxKnowledge.Domain.Sources;
@@ -26,7 +27,8 @@ public sealed class SqlNativeOperationStore(
     Action? afterCommitFailureInjector = null,
     Action? beforeCommitInjector = null,
     Action? afterSaveBeforeCommitInjector = null, EmbeddingGpuRuntime? embeddingRuntime = null,
-    SqlIndexRetentionOperations? indexRetention = null, SourceJournalOptions? sourceJournalOptions = null) : INativeOperationStore
+    SqlIndexRetentionOperations? indexRetention = null, SourceJournalOptions? sourceJournalOptions = null,
+    ISourceWorkAdmission? sourceAdmission = null, IDeploymentValidationHold? deploymentValidationHold = null) : INativeOperationStore
 {
     private static readonly TimeSpan ConfirmationLifetime = TimeSpan.FromMinutes(5);
     private readonly IDbContextFactory<FluxKnowledgeDbContext> _contextFactory = contextFactory ?? throw new ArgumentNullException(nameof(contextFactory));
@@ -80,8 +82,25 @@ public sealed class SqlNativeOperationStore(
         };
 
         await using var context = await _contextFactory.CreateDbContextAsync(cancellationToken);
-        context.NativeOperationIntents.Add(intent);
-        await context.SaveChangesAsync(cancellationToken);
+        if (prepared.Action == "job_retry")
+        {
+            using var payload = JsonDocument.Parse(request.CanonicalPayload);
+            var jobId = RequiredGuid(payload.RootElement, "jobId");
+            await context.Database.CreateExecutionStrategy().ExecuteAsync(async () =>
+            {
+                await using var previewContext = await _contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+                await using var transaction = await previewContext.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken).ConfigureAwait(false);
+                _ = await ReadScanRetryAsync(previewContext, prepared.Targets, jobId, now, cancellationToken).ConfigureAwait(false);
+                previewContext.NativeOperationIntents.Add(intent);
+                await previewContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+                await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            }).ConfigureAwait(false);
+        }
+        else
+        {
+            context.NativeOperationIntents.Add(intent);
+            await context.SaveChangesAsync(cancellationToken);
+        }
         return new NativeActionPreview(intent.Id, confirmationId, intent.RequestFingerprint, intent.ExpiresAtUtc, prepared.Targets, prepared.EffectSummary);
     }
 
@@ -119,7 +138,7 @@ public sealed class SqlNativeOperationStore(
         if (prepared.Operation is NativeCorpusMutationCommitOperation { Action: "index_retention" or "index_retention_restore" })
             await (indexRetention ?? throw new NativeOperationException("index-retention-unavailable"))
                 .AcquireOwnershipAsync(context, cancellationToken).ConfigureAwait(false);
-        if (prepared.Operation is NativeCorpusMutationCommitOperation)
+        if (prepared.Operation is NativeCorpusMutationCommitOperation or RetainedRecoveryNativeCommands.CommitOperation)
             await SqlPublishedPassageSelection.AcquireFenceAsync(context, cancellationToken).ConfigureAwait(false);
         await AcquireApplicationLockAsync(
             context,
@@ -196,7 +215,11 @@ public sealed class SqlNativeOperationStore(
             throw new NativeOperationException("confirmation-consumed");
         }
 
-        await ApplyMutationAsync(context, prepared, cancellationToken);
+        using var retainedProof = prepared.Operation is RetainedRecoveryNativeCommands.CommitOperation recovery
+            ? await RetainedRecoveryNativeCommands.ApplyAsync(context, recovery, prepared.Targets, _timeProvider.GetUtcNow(), cancellationToken).ConfigureAwait(false)
+            : null;
+        if (prepared.Operation is not RetainedRecoveryNativeCommands.CommitOperation)
+            await ApplyMutationAsync(context, prepared, cancellationToken);
         var receipt = new NativeOperationReceiptEntity
         {
             OperationId = Guid.NewGuid(),
@@ -232,12 +255,17 @@ public sealed class SqlNativeOperationStore(
             sqlChangesSaved = true;
             _afterSaveBeforeCommitInjector?.Invoke();
             cancellationToken.ThrowIfCancellationRequested();
+            retainedProof?.EnsureCurrent();
             await transaction.CommitAsync(cancellationToken);
             committed = true;
             _afterCommitFailureInjector?.Invoke();
             cancellationToken.ThrowIfCancellationRequested();
         }
         catch (OperationCanceledException) when (!sqlChangesSaved)
+        {
+            throw;
+        }
+        catch (NativeOperationException) when (!committed && retainedProof is not null)
         {
             throw;
         }
@@ -291,6 +319,9 @@ public sealed class SqlNativeOperationStore(
             NativeCodeFeedbackCommitOperation feedback when
                 string.Equals(canonicalAction, "feedback", StringComparison.Ordinal) &&
                 string.Equals(feedback.CanonicalPayload, canonicalPayload, StringComparison.Ordinal) => feedback,
+            RetainedRecoveryNativeCommands.CommitOperation recovery when
+                canonicalAction == recovery.Action && canonicalPayload == recovery.Payload &&
+                request.ActorSurface == RetainedRecoveryNativeCommands.Actor => recovery,
             _ => throw new NativeOperationException("invalid-commit-operation")
         };
         return new PreparedCommit(
@@ -566,7 +597,7 @@ public sealed class SqlNativeOperationStore(
         if (operation.Action == "policy_reprocess")
         {
             await SqlDefaultRetainedPolicy.ApplyAsync(context, operation.CanonicalPayload,
-                operation.PolicyAdmission ?? throw new NativeOperationException("invalid-commit-operation"), targets, now, cancellationToken).ConfigureAwait(false);
+                operation.PolicyAdmission ?? throw new NativeOperationException("invalid-commit-operation"), targets, actor, now, cancellationToken).ConfigureAwait(false);
             return;
         }
         if (operation.Action == "root_create")
@@ -596,19 +627,15 @@ public sealed class SqlNativeOperationStore(
         }
         if (operation.Action == "job_retry")
         {
-            var jobId = RequiredGuid(payload, "jobId"); var job = await context.SourceScanJobs.SingleOrDefaultAsync(value => value.Id == jobId, cancellationToken);
-            FenceOne(targets, "job", jobId, job?.RowVersion);
-            var request = await context.SourceScanRequests.SingleOrDefaultAsync(value => value.Id == job!.SourceScanRequestId, cancellationToken);
-            FenceOne(targets, "request", request?.Id ?? Guid.Empty, request?.RowVersion);
-            var outbox = await context.SourceScanOutbox.SingleOrDefaultAsync(value => value.SourceScanRequestId == request!.Id, cancellationToken);
-            FenceOne(targets, "outbox", outbox?.Id ?? Guid.Empty, outbox?.RowVersion);
-            if (!IsRetryable(job!, request!, outbox!, now)) throw new NativeOperationException("operation-fenced");
+            var jobId = RequiredGuid(payload, "jobId");
+            var (request, job, outbox) = await ReadScanRetryAsync(context, targets, jobId, now, cancellationToken).ConfigureAwait(false);
+            if (deploymentValidationHold?.IsHeld == true) throw new NativeOperationException("deployment-validation-held");
 
             // Preserve the failed attempt history and failure reason. A retry only schedules the same fenced control again.
-            job!.State = (int)SourceScanJobState.Pending; job.LeaseOwner = null; job.LeaseExpiresAtUtc = null; job.DueAtUtc = now; job.UpdatedAtUtc = now;
-            request!.IsReleased = true; request.State = (int)SourceScanRequestState.Released; request.ReleasedAtUtc = now;
+            job.State = (int)SourceScanJobState.Pending; job.LeaseOwner = null; job.LeaseExpiresAtUtc = null; job.DueAtUtc = now; job.UpdatedAtUtc = now;
+            request.IsReleased = true; request.State = (int)SourceScanRequestState.Released; request.ReleasedAtUtc = now;
             request.AuditEvidenceJson = SourceRootControlAuditEvidence.AppendReleaseEvidence(request.AuditEvidenceJson, actor, now);
-            outbox!.DueAtUtc = now; outbox.DispatchedAtUtc = null; outbox.LeaseOwner = null; outbox.LeaseExpiresAtUtc = null;
+            outbox.DueAtUtc = now; outbox.DispatchedAtUtc = null; outbox.LeaseOwner = null; outbox.LeaseExpiresAtUtc = null;
             return;
         }
         var rootIdValue = RequiredGuid(payload, "rootId");
@@ -951,12 +978,86 @@ public sealed class SqlNativeOperationStore(
         !HasLiveLease(control.Job.LeaseOwner, control.Job.LeaseExpiresAtUtc, now) &&
         !HasLiveLease(control.Outbox.LeaseOwner, control.Outbox.LeaseExpiresAtUtc, now);
 
-    private static bool IsRetryable(SourceScanJobEntity job, SourceScanRequestEntity request, SourceScanOutboxEntity outbox, DateTimeOffset now)
+    private async Task<ActiveScanControl> ReadScanRetryAsync(FluxKnowledgeDbContext context, IReadOnlyList<NativeTargetVersion> targets,
+        Guid jobId, DateTimeOffset now, CancellationToken cancellationToken)
     {
-        if (request.RequestKind == SqlSourceVerificationStore.RequestKind && !SourcePolicyDefaults.ChecksumVerificationEnabled) return false;
-        var failed = job.State == (int)SourceScanJobState.Failed && request.State == (int)SourceScanRequestState.Failed;
+        var rootId = ScanRetryTargetId(targets, "root:");
+        var requestId = ScanRetryTargetId(targets, "request:");
+        // Use the source worker's root → request → job lock order. The root fence prevents a concurrent
+        // pause or configuration update until the retry and its receipt are committed together.
+        var root = await context.SourceRootConfigurations
+            .FromSqlInterpolated($"SELECT * FROM [SourceRootConfigurations] WITH (UPDLOCK, HOLDLOCK) WHERE [Id]={rootId}")
+            .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+        FenceOne(targets, "root", rootId, root?.RowVersion);
+        // The serializable read also fences a newly inserted request, even if its writer did not update the root row.
+        var request = await OrdinaryScanRequestsByRecency(context, rootId).FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+        if (request?.Id != requestId) throw new NativeOperationException("operation-fenced");
+        FenceOne(targets, "request", requestId, request.RowVersion);
+        var job = await context.SourceScanJobs.SingleOrDefaultAsync(value => value.Id == jobId && value.SourceScanRequestId == requestId, cancellationToken).ConfigureAwait(false);
+        FenceOne(targets, "job", jobId, job?.RowVersion);
+        var outbox = await context.SourceScanOutbox.SingleOrDefaultAsync(value => value.SourceScanRequestId == requestId, cancellationToken).ConfigureAwait(false);
+        FenceOne(targets, "outbox", outbox?.Id ?? Guid.Empty, outbox?.RowVersion);
+        var refusal = ScanRetryRefusal(root!, request.State, request.RequestKind, request.RequestedBy, request.AuditEvidenceJson,
+            job, outbox, now, sourceAdmission);
+        if (refusal is not null) throw new NativeOperationException(refusal);
+        return new(request, job!, outbox!);
+    }
+
+    internal static IOrderedQueryable<SourceScanRequestEntity> OrdinaryScanRequestsByRecency(FluxKnowledgeDbContext context, Guid rootId) =>
+        context.SourceScanRequests.Where(value => value.SourceRootId == rootId && value.RequestKind != SqlSourceVerificationStore.RequestKind)
+            .OrderByDescending(value => value.RequestedAtUtc).ThenByDescending(value => value.Id);
+
+    internal static string? ScanRetryRefusal(SourceRootConfigurationEntity root, int requestState, int requestKind, string requestedBy, string? auditEvidenceJson,
+        SourceScanJobEntity? job, SourceScanOutboxEntity? outbox, DateTimeOffset now, ISourceWorkAdmission? admission)
+    {
+        if (root.State == (int)SourceRootState.Deleting) return "source-deleting";
+        if (root.State != (int)SourceRootState.Enabled) return "source-paused";
+        if (job is null || outbox is null) return "source-scan-delivery-unavailable";
+        if (!IsRetryable(job, requestState, outbox, now)) return "operation-fenced";
+        var configurationRefusal = ScanConfigurationRefusal(auditEvidenceJson, requestKind, requestedBy, root);
+        if (configurationRefusal is not null) return configurationRefusal;
+        if (root.ReconciliationCadenceSeconds != SourcePolicyDefaults.MetadataReconciliationSeconds ||
+            admission?.ReadAdmittedRoots().Contains(new SourceWorkAdmittedRoot(root.Id, root.ConfigurationRevision)) != true)
+            return "source-scan-not-admitted";
+        return null;
+    }
+
+    private static Guid ScanRetryTargetId(IReadOnlyList<NativeTargetVersion> targets, string prefix)
+    {
+        var matching = targets.Where(target => target.TargetId.StartsWith(prefix, StringComparison.Ordinal)).ToArray();
+        if (matching.Length != 1 || !Guid.TryParseExact(matching[0].TargetId.AsSpan(prefix.Length), "D", out var id))
+            throw new NativeOperationException("operation-fenced");
+        return id;
+    }
+
+    private static string? ScanConfigurationRefusal(string? auditEvidenceJson, int requestKind, string requestedBy, SourceRootConfigurationEntity root)
+    {
+        const string unavailable = "source-scan-configuration-unavailable";
+        // These exact worker writers omit the configuration fingerprint. Their retry is still fenced to the current root.
+        var acceptsMissingEvidence = (requestKind, requestedBy) is (1, "reconciliation") or (2, "watcher") or (3, "journal");
+        var missingEvidenceRefusal = acceptsMissingEvidence ? null : unavailable;
+        if (auditEvidenceJson is null) return missingEvidenceRefusal;
+        try
+        {
+            using var evidence = JsonDocument.Parse(auditEvidenceJson);
+            if (evidence.RootElement.ValueKind != JsonValueKind.Object) return unavailable;
+            if (!evidence.RootElement.TryGetProperty("configurationFingerprint", out var fingerprint)) return missingEvidenceRefusal;
+            if (fingerprint.ValueKind != JsonValueKind.String || fingerprint.GetString() is not { Length: 64 } recorded ||
+                !recorded.All(Uri.IsHexDigit)) return unavailable;
+            return string.Equals(recorded, SourceRootControlConfiguration.From(root).Fingerprint, StringComparison.Ordinal)
+                ? null : "source-scan-configuration-changed";
+        }
+        catch (JsonException)
+        {
+            return unavailable;
+        }
+    }
+
+    private static bool IsRetryable(SourceScanJobEntity job, int requestState, SourceScanOutboxEntity outbox, DateTimeOffset now)
+    {
+        var failed = job.State == (int)SourceScanJobState.Failed && requestState == (int)SourceScanRequestState.Failed;
         var expiredRunning = job.State == (int)SourceScanJobState.Running &&
-            request.State == (int)SourceScanRequestState.Running &&
+            requestState == (int)SourceScanRequestState.Running &&
             job.LeaseExpiresAtUtc is { } expiry && expiry <= now;
         return (failed || expiredRunning) &&
             !HasLiveLease(job.LeaseOwner, job.LeaseExpiresAtUtc, now) &&

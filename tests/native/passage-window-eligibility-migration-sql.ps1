@@ -48,3 +48,11 @@ Invoke-PassageWindowEligibilityMigrationAttempt $state $read {} {throw 'Complete
 Invoke-PassageWindowEligibilityMigrationSql $connectionText $sqlPath $initial.Identity
 Check $state.Applied 'Already-new state was not validated.'
 Write-Output 'Owned SQL: exact79 to80, atomic rollback, lost acknowledgement and zero-DDL reapply passed.'
+
+$env:FLUXKNOWLEDGE_OUTLOOK_DISPOSABLE_SQL = $connectionText
+$successorScript = Join-Path $PSScriptRoot 'outlook-watched-source-migration-sql.ps1'
+$outlookReceipts = Join-Path $ReceiptDirectory 'watched-outlook'
+$codexReceipts = Join-Path $ReceiptDirectory 'codex-workspace'
+$null = New-Item -ItemType Directory -Path $outlookReceipts, $codexReceipts
+& $successorScript -SourceRoot $SourceRoot -ReceiptDirectory $outlookReceipts -ForwardOnly
+& $successorScript -SourceRoot $SourceRoot -ReceiptDirectory $codexReceipts -CodexWorkspace -ForwardOnly

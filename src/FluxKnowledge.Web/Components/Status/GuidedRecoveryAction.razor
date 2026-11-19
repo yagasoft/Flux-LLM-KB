@@ -1,0 +1,122 @@
+@implements IDisposable
+@using Microsoft.JSInterop
+@inject GuidedRecoveryActions RecoveryActions
+
+@if (_attempt is { } attempt)
+{
+    <div class="guided-recovery-action" aria-busy="@attempt.IsBusy.ToString().ToLowerInvariant()">
+        @if (attempt.IsCommitUnconfirmed)
+        {
+            <button type="button" @ref="_focusTarget" @onclick="ConfirmAsync" disabled="@attempt.IsBusy">Retry same request</button>
+        }
+        else if (attempt.Preview is { } preview)
+        {
+            <section aria-label="Recovery action preview" @ref="_focusTarget" tabindex="-1">
+                <p>@attempt.Effect</p>
+                <p>@attempt.TargetLabel <code class="diagnostic-value">@TargetId.ToString("D")</code></p>
+                <p>Confirm by <time datetime="@preview.ExpiresAtUtc.ToString("O")">@preview.ExpiresAtUtc.UtcDateTime.ToString("yyyy-MM-dd HH:mm:ss 'UTC'", System.Globalization.CultureInfo.InvariantCulture)</time>.</p>
+                <button class="primary-action" type="button" @onclick="ConfirmAsync" disabled="@attempt.IsBusy">Confirm @ActionLabel.ToLowerInvariant()</button>
+                <button type="button" @onclick="CancelPreview" disabled="@attempt.IsBusy">Cancel preview</button>
+                @if (preview.Targets.Count > 0)
+                {
+                    <details>
+                        <summary>Bound records (@preview.Targets.Count)</summary>
+                        <ul>
+                            @foreach (var target in preview.Targets)
+                            {
+                                <li><code class="diagnostic-value">@target.TargetId</code></li>
+                            }
+                        </ul>
+                    </details>
+                }
+            </section>
+        }
+        else if (attempt.Receipt is null)
+        {
+            <button type="button" @ref="_focusTarget" @onclick="PreviewAsync" disabled="@attempt.IsBusy">Preview @ActionLabel.ToLowerInvariant()</button>
+        }
+
+        <p role="status" aria-live="polite">@attempt.Message</p>
+        @if (attempt.Receipt is { } receipt)
+        {
+            <p>Operation receipt <code class="diagnostic-value">@receipt.OperationId.ToString("D")</code>. <a href="@ActivityLink" @ref="_focusTarget">View Activity</a></p>
+            @if (CanDismissReceipt) { <button type="button" @onclick="attempt.DismissReceipt">Dismiss receipt</button> }
+        }
+        @if (attempt.ReasonCode is { } reason)
+        {
+            <details><summary>Diagnostic reason</summary><code>@reason</code></details>
+        }
+    </div>
+}
+
+@code {
+    [Parameter, EditorRequired] public string Action { get; set; } = string.Empty;
+    [Parameter, EditorRequired] public Guid TargetId { get; set; }
+    [Parameter, EditorRequired] public string ActionLabel { get; set; } = string.Empty;
+    [Parameter] public bool ReconcileMetadata { get; set; }
+    [Parameter] public EventCallback OnCommitted { get; set; }
+    [Parameter] public bool CanDismissReceipt { get; set; }
+
+    private GuidedRecoveryActions.Attempt? _attempt;
+    private (string Action, Guid TargetId, bool ReconcileMetadata) _selection;
+
+    [Parameter] public Guid? SourceRootId { get; set; }
+    [Parameter] public Guid? PipelineRecordId { get; set; }
+
+    private string ActivityLink => PipelineRecordId is { } record ? $"/events?record={record:D}" :
+        SourceRootId is { } source ? $"/events?source={source:D}" : "/events";
+    private ElementReference _focusTarget;
+    private bool _restoreFocus;
+
+    protected override void OnParametersSet()
+    {
+        var selection = (Action, TargetId, ReconcileMetadata);
+        if (_selection == selection) return;
+        ReleaseAttempt();
+        _selection = selection;
+        _attempt = RecoveryActions.Select(Action, TargetId, ReconcileMetadata, SourceRootId, PipelineRecordId, ActionLabel);
+        if (_attempt is { } attempt) attempt.Changed += StateHasChanged;
+    }
+
+    private async Task ConfirmAsync()
+    {
+        if (_attempt is not { } attempt) return;
+        var accepted = await attempt.ConfirmAsync();
+        if (_attempt != attempt || attempt.IsBusy) return;
+        _restoreFocus = true;
+        if (accepted) await OnCommitted.InvokeAsync();
+    }
+
+    private async Task PreviewAsync()
+    {
+        if (_attempt is not { } attempt) return;
+        await attempt.PreviewAsync();
+        if (_attempt == attempt && !attempt.IsBusy) _restoreFocus = true;
+    }
+
+    private void CancelPreview()
+    {
+        if (_attempt is not { } attempt || attempt.IsBusy) return;
+        attempt.CancelPreview();
+        _restoreFocus = true;
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!_restoreFocus) return;
+        _restoreFocus = false;
+        try { await _focusTarget.FocusAsync(preventScroll: true); }
+        catch (JSDisconnectedException) { /* The circuit keeps any pending request. */ }
+    }
+
+    public void Dispose() => ReleaseAttempt();
+
+    private void ReleaseAttempt()
+    {
+        if (_attempt is not { } attempt) return;
+        attempt.Changed -= StateHasChanged;
+        RecoveryActions.Release(attempt);
+        _attempt = null;
+        _restoreFocus = false;
+    }
+}

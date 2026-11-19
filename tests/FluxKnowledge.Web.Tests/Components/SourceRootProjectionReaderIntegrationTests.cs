@@ -1,6 +1,8 @@
 using System.Data.Common;
+using System.Net;
 using FluxKnowledge.Application.Contracts;
 using FluxKnowledge.Application.Documents;
+using FluxKnowledge.Application.IntegrationV1.Corpus;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Sources;
 using FluxKnowledge.Domain.Jobs;
@@ -8,11 +10,18 @@ using FluxKnowledge.Domain.Pipeline;
 using FluxKnowledge.Domain.Sources;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
+using FluxKnowledge.Infrastructure.SqlServer.Visibility;
 using FluxKnowledge.Integration.Tests.Support;
+using FluxKnowledge.Web.Components.OperatorActions;
 using FluxKnowledge.Web.Components.Sources;
 using FluxKnowledge.Web.Components.Status;
+using Microsoft.AspNetCore.Components;
+using Microsoft.AspNetCore.Components.Web;
+using Microsoft.AspNetCore.Http;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Xunit;
 
 namespace FluxKnowledge.Web.Tests.Components;
@@ -21,6 +30,162 @@ public sealed partial class SourceRootProjectionReaderIntegrationTests(NativeSql
     : IClassFixture<NativeSqlServerFixture>
 {
     private readonly NativeSqlServerFixture _fixture = fixture;
+
+    [NativeSqlServerTheory]
+    [InlineData(SourceRootState.Enabled, "source-scan-not-admitted")]
+    [InlineData(SourceRootState.Paused, "source-paused")]
+    [InlineData(SourceRootState.Deleting, "source-deleting")]
+    public async Task Source_detail_reports_the_current_scan_prerequisite_without_exposing_an_older_failure(
+        SourceRootState state, string reason)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var rootId = Guid.NewGuid();
+        var factory = new TestDbContextFactory(_fixture.ConnectionString);
+        await using var setup = factory.CreateDbContext();
+        setup.SourceRootConfigurations.Add(new SourceRootConfigurationEntity
+        {
+            Id = rootId, CanonicalPath = $"I:\\scan-retry\\{rootId:N}", DisplayName = "Scan retry",
+            State = (int)state, ConfigurationRevision = 1, CreatedAtUtc = now, UpdatedAtUtc = now,
+            ReconciliationCadenceSeconds = SourcePolicyDefaults.MetadataReconciliationSeconds
+        });
+        _ = AddScanControl(setup, rootId, now.AddHours(-1), SourceScanJobState.Failed);
+        var scan = AddScanControl(setup, rootId, now, SourceScanJobState.Failed);
+        await setup.SaveChangesAsync();
+
+        var reader = new SourceRootProjectionReader(factory, new NoPathPolicy(), new NoEnumeration(), new LocalSourceCapabilityHandlerRegistry([]));
+        var detail = Assert.IsType<SourceRootDetailProjection>(await reader.ReadRootAsync(rootId, default));
+        Assert.Equal(new SourceScanRecoveryProjection(scan.RequestId, scan.JobId, false, reason), detail.ScanRecovery);
+
+        _ = AddScanControl(setup, rootId, now.AddMinutes(1), SourceScanJobState.Completed);
+        await setup.SaveChangesAsync();
+        detail = Assert.IsType<SourceRootDetailProjection>(await reader.ReadRootAsync(rootId, default));
+        Assert.Equal("Completed", detail.ScanState);
+        Assert.Null(detail.ScanRecovery);
+    }
+
+    [NativeSqlServerTheory]
+    [InlineData(SourceScanJobState.Failed, true, true, null)]
+    [InlineData(SourceScanJobState.Running, true, true, null)]
+    [InlineData(SourceScanJobState.Running, false, true, "source-scan-delivery-unavailable")]
+    [InlineData(SourceScanJobState.Failed, true, false, "source-scan-configuration-unavailable")]
+    public async Task Source_detail_can_retry_the_exact_current_scan_when_its_configuration_and_delivery_are_proved(
+        SourceScanJobState jobState, bool hasDelivery, bool hasConfiguration, string? reason)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var rootId = Guid.NewGuid();
+        var factory = new TestDbContextFactory(_fixture.ConnectionString);
+        await using var setup = factory.CreateDbContext();
+        setup.SourceRootConfigurations.Add(new SourceRootConfigurationEntity
+        {
+            Id = rootId, CanonicalPath = $"I:\\scan-retry\\{rootId:N}", DisplayName = "Scan retry",
+            State = (int)SourceRootState.Enabled, ConfigurationRevision = 1, CreatedAtUtc = now, UpdatedAtUtc = now,
+            ReconciliationCadenceSeconds = SourcePolicyDefaults.MetadataReconciliationSeconds
+        });
+        var isInterrupted = jobState == SourceScanJobState.Running;
+        var scan = AddScanControl(setup, rootId, now.AddMinutes(-5), jobState,
+            leaseExpires: isInterrupted ? now.AddMinutes(-1) : null, hasDelivery: hasDelivery, hasConfiguration: hasConfiguration);
+        await setup.SaveChangesAsync();
+
+        var admission = new SourceWorkAdmission();
+        admission.Admit(rootId, 1);
+        var reader = new SourceRootProjectionReader(factory, new NoPathPolicy(), new NoEnumeration(),
+            new LocalSourceCapabilityHandlerRegistry([]), sourceAdmission: admission);
+        var detail = Assert.IsType<SourceRootDetailProjection>(await reader.ReadRootAsync(rootId, default));
+        Assert.Equal(new SourceScanRecoveryProjection(scan.RequestId, scan.JobId, isInterrupted, reason), detail.ScanRecovery);
+
+        var commands = new NativeCorpusCommandService(new SqlNativeOperationStore(factory, TimeProvider.System, sourceAdmission: admission),
+            new SqlNativeCorpusActionStore(factory, new NoPathPolicy(), new LocalPrivateContentDisclosure()));
+        var http = new DefaultHttpContext();
+        http.Connection.RemoteIpAddress = IPAddress.Loopback;
+        var accessor = new HttpContextAccessor { HttpContext = http };
+        var policy = new LocalOperatorPolicy(new LocalOperatorConnectionContext(accessor));
+        accessor.HttpContext = null;
+        var services = new ServiceCollection().AddLogging().AddSingleton(commands).AddScoped<GuidedRecoveryActions>()
+            .AddSingleton<ILocalOperatorPolicy>(policy);
+        await using var provider = services.BuildServiceProvider();
+        await using var renderer = new HtmlRenderer(provider, provider.GetRequiredService<ILoggerFactory>());
+        var markup = await RenderPanelAsync(rootId, detail.ScanRecovery);
+
+        if (reason is not null)
+        {
+            Assert.Contains(hasDelivery ? "configuration cannot be verified" : "delivery cannot be verified", markup);
+            Assert.DoesNotContain("Preview retry scan", markup);
+            return;
+        }
+
+        Assert.Contains("Preview retry scan", markup);
+        Assert.DoesNotContain("Confirm retry scan", markup);
+        var scanTarget = $"job:{scan.JobId:D}";
+        Assert.False(await setup.NativeOperationIntents.AnyAsync(intent => intent.TargetMetadataJson.Contains(scanTarget)));
+        var actions = provider.GetRequiredService<GuidedRecoveryActions>();
+        var receipt = await renderer.Dispatcher.InvokeAsync(async () =>
+        {
+            var attempt = actions.Select("job_retry", scan.JobId, false, sourceRootId: rootId)!;
+            await attempt.PreviewAsync();
+            Assert.NotNull(attempt.Preview);
+            Assert.Contains(attempt.Preview.Targets, target => target.TargetId == scanTarget);
+            Assert.Contains(attempt.Preview.Targets, target => target.TargetId == $"root:{rootId:D}");
+            Assert.True(await attempt.ConfirmAsync());
+            actions.Release(attempt);
+            Assert.NotNull(attempt.Receipt);
+            return attempt.Receipt;
+        });
+
+        detail = Assert.IsType<SourceRootDetailProjection>(await reader.ReadRootAsync(rootId, default));
+        Assert.Equal("Released", detail.ScanState);
+        Assert.Null(detail.ScanRecovery);
+        var receiptMarkup = await RenderPanelAsync(rootId, detail.ScanRecovery);
+        Assert.Contains(receipt.OperationId.ToString("D"), receiptMarkup);
+        Assert.Contains($"/events?source={rootId:D}", receiptMarkup);
+        Assert.DoesNotContain(receipt.OperationId.ToString("D"), await RenderPanelAsync(Guid.NewGuid(), null));
+
+        await renderer.Dispatcher.InvokeAsync(() => Assert.Single(actions.Recent(rootId, "job_retry")).DismissReceipt());
+        Assert.DoesNotContain("Scan recovery", await RenderPanelAsync(rootId, null));
+
+        Task<string> RenderPanelAsync(Guid source, SourceScanRecoveryProjection? status) => renderer.Dispatcher.InvokeAsync(async () =>
+        {
+            var panel = await renderer.RenderComponentAsync<SourceScanRecoveryPanel>(ParameterView.FromDictionary(
+                new Dictionary<string, object?> { ["SourceRootId"] = source, ["Scan"] = status }));
+            return panel.ToHtmlString();
+        });
+    }
+
+    private static (Guid RequestId, Guid JobId) AddScanControl(FluxKnowledgeDbContext db, Guid rootId,
+        DateTimeOffset at, SourceScanJobState jobState, DateTimeOffset? leaseExpires = null, bool hasDelivery = true, bool hasConfiguration = true)
+    {
+        var requestId = Guid.NewGuid();
+        var jobId = Guid.NewGuid();
+        db.SourceScanRequests.Add(new SourceScanRequestEntity
+        {
+            Id = requestId, SourceRootId = rootId, RequestedBy = "projection-test", RequestedAtUtc = at,
+            IsReleased = true, ReleasedAtUtc = at,
+            AuditEvidenceJson = hasConfiguration ? SourceRootControlAuditEvidence.CreateRequestEvidence(
+                SourceRootControlConfiguration.From(db.SourceRootConfigurations.Local.Single(value => value.Id == rootId)),
+                "projection-test", "projection-test", at) : null,
+            State = (int)(jobState switch
+            {
+                SourceScanJobState.Failed => SourceScanRequestState.Failed,
+                SourceScanJobState.Completed => SourceScanRequestState.Completed,
+                SourceScanJobState.Running => SourceScanRequestState.Running,
+                _ => SourceScanRequestState.Released
+            })
+        });
+        db.SourceScanJobs.Add(new SourceScanJobEntity
+        {
+            Id = jobId, SourceScanRequestId = requestId, State = (int)jobState, DueAtUtc = at,
+            CreatedAtUtc = at, UpdatedAtUtc = at, LeaseOwner = leaseExpires is null ? null : "scan-owner",
+            LeaseExpiresAtUtc = leaseExpires
+        });
+        if (hasDelivery)
+        {
+            db.SourceScanOutbox.Add(new SourceScanOutboxEntity
+            {
+                Id = Guid.NewGuid(), SourceScanRequestId = requestId, Operation = "source.scan",
+                IdempotencyKey = $"source-scan:{requestId:N}", DueAtUtc = at, CreatedAtUtc = at, DispatchedAtUtc = at
+            });
+        }
+        return (requestId, jobId);
+    }
 
     [NativeSqlServerFact]
     public async Task Summary_publication_times_preserve_exact_record_binding_and_document_precedence()

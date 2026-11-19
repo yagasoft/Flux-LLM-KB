@@ -160,26 +160,37 @@ public sealed partial class SourceDeletionIntegrationTests
             await File.WriteAllTextAsync(verifier,"[ordered]@{CleanupVerified=$true;ObservedAtUtc=[DateTimeOffset]::UtcNow.ToString('O')}|ConvertTo-Json -Compress");
             static async Task<string> HashAsync(string path)=>Convert.ToHexString(SHA256.HashData(await File.ReadAllBytesAsync(path)));
             var plan=Path.Combine(area,"plan.json");
-            await File.WriteAllTextAsync(plan,JsonSerializer.Serialize(new {Version=2,Mode="CleanupOnly",Binding=(object?)null,TerminalBinding=binding,
-                ReleaseId="synthetic-cleanup-only",DatabaseIdentity=identity,OriginalHistory=(await db.Database.GetAppliedMigrationsAsync()).ToArray(),
-                OperationRoot=area,HoldPath=hold,ConfigurationPath=config,ConfigurationSha256=await HashAsync(config),
-                VerifierScriptPath=verifier,VerifierScriptSha256=await HashAsync(verifier)}));
-            var testAssembly=typeof(SourceDeletionIntegrationTests).Assembly.Location;
-            var start=new ProcessStartInfo("dotnet"){UseShellExecute=false,CreateNoWindow=true,RedirectStandardOutput=true,RedirectStandardError=true};
-            foreach(var argument in new[]{"exec","--runtimeconfig",Path.ChangeExtension(testAssembly,"runtimeconfig.json"),"--depsfile",
-                Path.ChangeExtension(testAssembly,"deps.json"),typeof(FluxKnowledge.Cli.Commands.OcrRecoveryCommand).Assembly.Location,
-                "ocr-recovery","apply","--plan",plan,"--sha256",await HashAsync(plan)}) start.ArgumentList.Add(argument);
-            start.Environment["ConnectionStrings__FluxKnowledge"]=_fixture.ConnectionString;
-            using var process=Process.Start(start)!;
-            var stdout=process.StandardOutput.ReadToEndAsync();var stderr=process.StandardError.ReadToEndAsync();
-            using var budget=new CancellationTokenSource(TimeSpan.FromSeconds(45));
-            try{await process.WaitForExitAsync(budget.Token);}catch{if(!process.HasExited)process.Kill(true);throw;}
-            var output=await stdout;Assert.True(process.ExitCode==0,output+await stderr);
-            using var result=JsonDocument.Parse(output);
+            var history=(await db.Database.GetAppliedMigrationsAsync()).ToArray();
+            var declined=await RunCleanupAsync(history.SkipLast(1).ToArray());
+            Assert.Equal(1,declined.ExitCode);
+            Assert.Contains("document-ocr-maintenance-database-binding-changed",declined.Error);
+            Assert.Empty(await db.GpuExecutorEvidence.ToArrayAsync());
+            var applied=await RunCleanupAsync(history);
+            Assert.True(applied.ExitCode==0,applied.Output+applied.Error);
+            using var result=JsonDocument.Parse(applied.Output);
             Assert.True(result.RootElement.GetProperty("CleanupConfirmed").GetBoolean());
             Assert.True(result.RootElement.GetProperty("CleanupOnly").GetBoolean());
             Assert.False(result.RootElement.TryGetProperty("Settled",out _));
             Assert.False(result.RootElement.TryGetProperty("Requeued",out _));
+
+            async Task<(int ExitCode,string Output,string Error)> RunCleanupAsync(string[] plannedHistory)
+            {
+                await File.WriteAllTextAsync(plan,JsonSerializer.Serialize(new {Version=2,Mode="CleanupOnly",Binding=(object?)null,TerminalBinding=binding,
+                    ReleaseId="synthetic-cleanup-only",DatabaseIdentity=identity,OriginalHistory=plannedHistory,
+                    OperationRoot=area,HoldPath=hold,ConfigurationPath=config,ConfigurationSha256=await HashAsync(config),
+                    VerifierScriptPath=verifier,VerifierScriptSha256=await HashAsync(verifier)}));
+                var testAssembly=typeof(SourceDeletionIntegrationTests).Assembly.Location;
+                var start=new ProcessStartInfo("dotnet"){UseShellExecute=false,CreateNoWindow=true,RedirectStandardOutput=true,RedirectStandardError=true};
+                foreach(var argument in new[]{"exec","--runtimeconfig",Path.ChangeExtension(testAssembly,"runtimeconfig.json"),"--depsfile",
+                    Path.ChangeExtension(testAssembly,"deps.json"),typeof(FluxKnowledge.Cli.Commands.OcrRecoveryCommand).Assembly.Location,
+                    "ocr-recovery","apply","--plan",plan,"--sha256",await HashAsync(plan)}) start.ArgumentList.Add(argument);
+                start.Environment["ConnectionStrings__FluxKnowledge"]=_fixture.ConnectionString;
+                using var process=Process.Start(start)!;
+                var stdout=process.StandardOutput.ReadToEndAsync();var stderr=process.StandardError.ReadToEndAsync();
+                using var budget=new CancellationTokenSource(TimeSpan.FromSeconds(45));
+                try{await process.WaitForExitAsync(budget.Token);}catch{if(!process.HasExited)process.Kill(true);throw;}
+                return (process.ExitCode,await stdout,await stderr);
+            }
         }
         finally{Directory.Delete(area,true);}
     }

@@ -195,7 +195,7 @@ public sealed class Phase3ASourceManagementBrowserTests
 
             await page.GotoAsync(host.BaseAddress.ToString(), new PageGotoOptions { WaitUntil = WaitUntilState.NetworkIdle });
             await page.GetByRole(AriaRole.Navigation, new() { Name = "Primary navigation" })
-                .GetByRole(AriaRole.Link, new() { Name = "Sources and indexing", Exact = true }).ClickAsync();
+                .GetByRole(AriaRole.Link, new() { Name = "Sources", Exact = true }).ClickAsync();
             await page.GetByRole(AriaRole.Heading, new() { Name = "Sources and indexing" }).WaitForAsync();
             await page.GetByRole(AriaRole.Button, new() { Name = "Add folder", Exact = true }).ClickAsync();
             await page.GetByRole(AriaRole.Heading, new() { Name = "Add folder" }).WaitForAsync();

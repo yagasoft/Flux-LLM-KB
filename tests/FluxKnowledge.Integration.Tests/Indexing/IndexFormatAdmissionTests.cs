@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using FluxKnowledge.Cli.Commands;
+using FluxKnowledge.Infrastructure.SqlServer.Persistence;
 using FluxKnowledge.Integration.Tests.Support;
 using FluxKnowledge.Web;
 using Microsoft.EntityFrameworkCore.Infrastructure;
@@ -21,7 +22,10 @@ public sealed class IndexFormatAdmissionTests(NativeSqlServerFixture fixture) : 
             "The existing segmented projection must survive a code-only update.", segmented: true);
         await using var db = await SqlTestData.CreateFactory(fixture).CreateDbContextAsync();
         var migrator = db.GetService<IMigrator>();
-        if (!journalSchema) await migrator.MigrateAsync("20261024061418_AddDocumentOcrExecutionLifecycle");
+        if (journalSchema)
+            await SqlSourceDeletionPendingQueueIndex.EnsureAsync(db, CancellationToken.None);
+        else
+            await migrator.MigrateAsync("20261024061418_AddDocumentOcrExecutionLifecycle");
         try
         {
             var root = SourceRoot();

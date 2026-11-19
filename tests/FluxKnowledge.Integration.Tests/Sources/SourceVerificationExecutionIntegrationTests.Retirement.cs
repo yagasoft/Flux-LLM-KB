@@ -63,9 +63,8 @@ public sealed partial class SourceVerificationExecutionIntegrationTests
         var commands = new NativeCorpusCommandService(new NativeOperationService(new SqlNativeOperationStore(scenario.Factory, TimeProvider.System), []),
             new SqlNativeCorpusActionStore(scenario.Factory, new SourceRootPathPolicy(new LocalIngressOptions([scenario.Sources])), new LocalPrivateContentDisclosure()));
         var retry = new NativeCorpusMutation("job_retry", JsonSerializer.SerializeToElement(new { jobId }));
-        var preview = await commands.PreviewAsync(retry, "test", default);
-        await Assert.ThrowsAsync<NativeOperationException>(() => commands.CommitAsync(retry, preview.ConfirmationId,
-            "retired-retry-" + Guid.NewGuid().ToString("N"), "test", default).AsTask());
+        var refusal = await Assert.ThrowsAsync<NativeOperationException>(() => commands.PreviewAsync(retry, "test", default).AsTask());
+        Assert.Equal("operation-fenced", refusal.ReasonCode);
         var snapshot = await RetirementSnapshotAsync(scenario);
         var again = await scenario.Verification.RetireForFeatureOffAsync(new WindowsSourceVerificationReaderSlot(scenario.Runtime), _ => ValueTask.CompletedTask, default);
         Assert.Equal(0, again.Runs + again.Requests + again.Jobs);

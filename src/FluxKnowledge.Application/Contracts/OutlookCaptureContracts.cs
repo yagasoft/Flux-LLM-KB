@@ -417,6 +417,10 @@ public sealed record OutlookCatchUpRequest(
     OutlookCatchUpProvenance Provenance,
     string? Reason = null)
 {
+    public long? ExpectedConfigurationRevision { get; init; }
+    public IReadOnlyList<Guid>? ExpectedFolderIds { get; init; }
+    public DateTimeOffset? ConfirmationExpiresAtUtc { get; init; }
+
     public void Validate()
     {
         OutlookCaptureContractValidation.RequireOperation(OperationId, RequestFingerprint);
@@ -426,6 +430,14 @@ public sealed record OutlookCatchUpRequest(
         {
             throw new ArgumentOutOfRangeException(nameof(Provenance));
         }
+
+        if (ExpectedConfigurationRevision is <= 0)
+            throw new ArgumentOutOfRangeException(nameof(ExpectedConfigurationRevision));
+        if (ExpectedFolderIds is { } folders &&
+            (ExpectedConfigurationRevision is null || folders.Any(id => id == Guid.Empty) || folders.Distinct().Count() != folders.Count))
+            throw new ArgumentException("Folder scope must identify unique folders in a confirmed configuration.", nameof(ExpectedFolderIds));
+        if (ConfirmationExpiresAtUtc is { } expiry && (expiry.Offset != TimeSpan.Zero || ExpectedConfigurationRevision is null))
+            throw new ArgumentException("Confirmation expiry requires UTC and a selected profile configuration.", nameof(ConfirmationExpiresAtUtc));
 
         OutlookCaptureContractValidation.RequireOptionalBoundedReason(Reason, nameof(Reason));
     }

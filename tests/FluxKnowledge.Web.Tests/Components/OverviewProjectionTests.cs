@@ -14,6 +14,50 @@ namespace FluxKnowledge.Web.Tests.Components;
 public sealed class OverviewProjectionTests
 {
     [Fact]
+    public async Task Overview_explains_an_automatic_publication_deferral_without_marking_it_recovered()
+    {
+        var now = DateTimeOffset.Parse("2026-11-19T10:00:00Z");
+        var root = Guid.NewGuid();
+        var activity = new PipelineActivitySummary(now, now, [],
+            [new(root, "Document library", "Publish", PipelineWorkState.Waiting, false,
+                "index-storage-capacity-deferred", 2)], [], 0, 0, 0);
+        using var factory = new OverviewApplicationFactory(CreateOverview(0, 2) with { Activity = activity });
+        using var client = factory.CreateClient();
+
+        var html = await client.GetStringAsync("/");
+
+        Assert.Contains("Continuing automatically", html, StringComparison.Ordinal);
+        Assert.Contains("Publication is waiting for free index storage", html, StringComparison.Ordinal);
+        Assert.Contains("2 jobs", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Overview_shows_a_next_step_for_current_files_and_keeps_history_in_a_disclosure()
+    {
+        var now = DateTimeOffset.Parse("2026-11-19T10:00:00Z");
+        var root = Guid.NewGuid();
+        var activity = new PipelineActivitySummary(now, now,
+            [new(root, "Example workspace", "C:\\workspace", "Paused", 7, 4, 0, 0, 2, 1, 0, 0,
+                now, now, now, false, null)],
+            [new(root, "Example workspace", "Embed", PipelineWorkState.Historical, true, "Suppressed", 12)],
+            [], 0, 0, 0)
+        {
+            FileCauses = [new(root, "Blocked", "SourceContentNotAvailableLocally", "Make the file available locally, then reconcile metadata.", 2)]
+        };
+        using var factory = new OverviewApplicationFactory(CreateOverview(0, 7) with { Activity = activity });
+        using var client = factory.CreateClient();
+
+        var html = await client.GetStringAsync("/");
+
+        Assert.Contains("Files unavailable on this device", html, StringComparison.Ordinal);
+        Assert.Contains("Review files", html, StringComparison.Ordinal);
+        Assert.Contains("resume indexing", html, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("<summary>Previous attempts</summary>", html, StringComparison.Ordinal);
+        Assert.True(html.IndexOf("id=\"pipeline-attention\"", StringComparison.Ordinal) <
+                    html.IndexOf("id=\"source-progress-heading\"", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task Overview_explains_the_global_capacity_owner_and_action_with_the_real_multi_day_age()
     {
         var owner = new GpuOcrOwnerStatus(Guid.NewGuid(), null, "paddleocr-vl-local", "Blocked", 5400, null,

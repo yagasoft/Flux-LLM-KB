@@ -56,9 +56,9 @@ public static class OcrRecoveryCommand
                     .SingleAsync(budget.Token);
                 var history=(await db.Database.GetAppliedMigrationsAsync(budget.Token)).ToArray();
                 if (!string.Equals(actual, plan.DatabaseIdentity, StringComparison.OrdinalIgnoreCase) ||
-                    (cleanupOnly || storedExecution ? history.Length!=80 || history.LastOrDefault()!="20261117210606_PersistPassageWindowEligibility" ||
-                        plan.OriginalHistory is null || !history.SequenceEqual(plan.OriginalHistory,StringComparer.Ordinal)
-                        : history.LastOrDefault()!="20261024061418_AddDocumentOcrExecutionLifecycle"))
+                    (cleanupOnly || storedExecution
+                        ? !MatchesReviewedHistory(db, history, plan.OriginalHistory)
+                        : history.LastOrDefault() != "20261024061418_AddDocumentOcrExecutionLifecycle"))
                     throw new InvalidOperationException("document-ocr-maintenance-database-binding-changed");
             }
             var store = new SqlDocumentOcrStore(factory, scheduler: null);
@@ -106,6 +106,11 @@ public static class OcrRecoveryCommand
             return 1;
         }
     }
+
+    private static bool MatchesReviewedHistory(FluxKnowledgeDbContext db, string[] history, string[]? plannedHistory) =>
+        history.LastOrDefault() == "20261118225053_BindCodexNotesToWorkspace" &&
+        plannedHistory is not null && history.SequenceEqual(plannedHistory, StringComparer.Ordinal) &&
+        history.SequenceEqual(db.Database.GetMigrations(), StringComparer.Ordinal);
 
     private static bool IsHash(string value) => value.Length == 64 && value.All(char.IsAsciiHexDigit);
     private static FileStream OpenRead(string path)

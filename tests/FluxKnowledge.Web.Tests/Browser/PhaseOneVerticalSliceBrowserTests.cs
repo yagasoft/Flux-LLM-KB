@@ -62,13 +62,13 @@ public sealed class PhaseOneVerticalSliceBrowserTests
             Assert.True(
                 overviewResponse.IsSuccessStatusCode,
                 $"Overview returned {(int)overviewResponse.StatusCode}: {overviewMarkup}");
-            Assert.Contains("Pipeline overview", overviewMarkup, StringComparison.Ordinal);
-            Assert.Contains("Index status", overviewMarkup, StringComparison.Ordinal);
+            Assert.Contains("<h1>Overview</h1>", overviewMarkup, StringComparison.Ordinal);
+            Assert.Contains("Search-index health", overviewMarkup, StringComparison.Ordinal);
             using var playwright = await Playwright.CreateAsync();
             await using var browser = await playwright.Chromium.LaunchAsync(BrowserLaunchOptions.Create());
             var page = await browser.NewPageAsync();
             await page.GotoAsync(host.BaseAddress.ToString(), new PageGotoOptions { WaitUntil = WaitUntilState.NetworkIdle });
-            await page.GetByRole(AriaRole.Heading, new() { Name = "Pipeline overview" }).WaitForAsync();
+            await page.GetByRole(AriaRole.Heading, new() { Name = "Overview", Exact = true }).WaitForAsync();
 
             using var response = await client.PostAsJsonAsync(
                 "/api/pipeline-records/utf8-file",
@@ -76,10 +76,12 @@ public sealed class PhaseOneVerticalSliceBrowserTests
             Assert.Equal(System.Net.HttpStatusCode.Accepted, response.StatusCode);
             Assert.NotNull(await response.Content.ReadFromJsonAsync<RegisterUtf8FileResult>());
 
+            await page.GetByText("Local GPU scheduler and retained totals", new() { Exact = true }).ClickAsync();
             await page.WaitForFunctionAsync(
                 """
-                () => [...document.querySelectorAll('.status-grid div')]
-                    .some(card => card.innerText.includes('Indexed records') && card.innerText.includes('1'))
+                () => [...document.querySelectorAll('.scheduler-details .status-grid div')]
+                    .some(card => card.querySelector('dt')?.textContent.trim() === 'Completed retained pipeline records' &&
+                        card.querySelector('dd')?.textContent.trim() === '1')
                 """,
                 null,
                 new PageWaitForFunctionOptions { Timeout = 30_000 });
@@ -94,6 +96,7 @@ public sealed class PhaseOneVerticalSliceBrowserTests
             var records = await recordsResponse.Content.ReadFromJsonAsync<IReadOnlyList<PipelineRecordProjection>>();
             Assert.Contains(records ?? [], record => record.SourceIdentity.EndsWith(fileName, StringComparison.Ordinal));
 
+            await page.GetByText("More tools", new() { Exact = true }).ClickAsync();
             await page.GetByRole(AriaRole.Link, new() { Name = "Pipeline records" }).ClickAsync();
             await page.GetByText(fileName, new PageGetByTextOptions { Exact = false }).WaitForAsync(
                 new LocatorWaitForOptions { Timeout = 30_000 });
@@ -198,6 +201,7 @@ public sealed class PhaseOneVerticalSliceBrowserTests
             application.MapFluxKnowledgeIndexHealth();
             application.MapFluxKnowledgeSearch();
             application.MapFluxKnowledgePipelineRecords();
+            application.MapFluxKnowledgeOperatorActions();
             application.MapFluxKnowledgeLocalRetainedDetails();
             application.MapFluxKnowledgeLocalRetainedCsharpCode();
             application.MapMcp("/mcp");
@@ -217,7 +221,7 @@ public sealed class PhaseOneVerticalSliceBrowserTests
         {
             private readonly DbContextOptions<FluxKnowledgeDbContext> _options =
                 new DbContextOptionsBuilder<FluxKnowledgeDbContext>()
-                    .UseSqlServer(connectionString)
+                    .UseSqlServer(connectionString, sql => sql.EnableRetryOnFailure())
                     .Options;
 
             public FluxKnowledgeDbContext CreateDbContext() => new(_options);

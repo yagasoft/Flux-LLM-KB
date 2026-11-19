@@ -410,6 +410,33 @@ public sealed partial class VisioScopedPipelineIntegrationTests(NativeSqlServerF
     }
 
     [NativeSqlServerTheory]
+    [InlineData("{\"configurationRevision\":1}")]
+    [InlineData("{\"configurationRevision\":\"2\"}")]
+    [InlineData("invalid-proof")]
+    public async Task Scheduled_selection_skips_a_stale_or_unproved_oldest_guided_branch(string evidence)
+    {
+        var factory = SqlTestData.CreateFactory(fixture);
+        var oldest = (await SeedAsync(RetainedProcessorBranchState.Blocked)).Request;
+        var oldestBranchId = await CompleteCurrentPreparationAsync(oldest, factory);
+        await using (var changed = await factory.CreateDbContextAsync())
+        {
+            await changed.SourceRootConfigurations.ExecuteUpdateAsync(set => set.SetProperty(root => root.ConfigurationRevision, 2L));
+            var activityId = await changed.SourceProcessorBranches.Where(branch => branch.Id == oldestBranchId)
+                .Select(branch => branch.SourceActivityId).SingleAsync();
+            await changed.SourceActivities.Where(activity => activity.Id == activityId).ExecuteUpdateAsync(set => set
+                .SetProperty(activity => activity.DescriptorFingerprint, SqlGuidedRetainedBinding.Fingerprint)
+                .SetProperty(activity => activity.AttemptEvidenceJson, evidence));
+        }
+        Assert.Null(await VisioDocumentPipelineRunner.ReadNextRequestAsync(factory, default));
+
+        var newer = (await SeedAsync(RetainedProcessorBranchState.Blocked)).Request;
+        await CompleteCurrentPreparationAsync(newer, factory);
+        var selected = await VisioDocumentPipelineRunner.ReadNextRequestAsync(factory, default);
+
+        Assert.Equal(newer.SourceRevisionId, selected?.SourceRevisionId);
+    }
+
+    [NativeSqlServerTheory]
     [InlineData(false)]
     [InlineData(true)]
     public async Task Scheduled_selection_drains_an_expired_execution_for_a_deleting_or_suppressed_source(bool suppressOwner)
@@ -496,7 +523,8 @@ public sealed partial class VisioScopedPipelineIntegrationTests(NativeSqlServerF
         Assert.Single(await check.Jobs.ToListAsync());
     }
 
-    private async Task<(DocumentReprocessRequest Request, Guid BranchId)> SeedAsync(RetainedProcessorBranchState state, string? physicalRoot = null)
+    private async Task<(DocumentReprocessRequest Request, Guid BranchId)> SeedAsync(RetainedProcessorBranchState state,
+        string? physicalRoot = null, SourceFileObservation? physicalFile = null)
     {
         var now = DateTimeOffset.UtcNow;
         var rootId = Guid.NewGuid();
@@ -514,9 +542,10 @@ public sealed partial class VisioScopedPipelineIntegrationTests(NativeSqlServerF
         });
         context.SourceRevisions.Add(new SourceRevisionEntity
         {
-            Id = revisionId, SourceRootId = rootId, StableSourceIdentity = "visio-public-test", Revision = 1,
+            Id = revisionId, SourceRootId = rootId, StableSourceIdentity = physicalFile?.Identity ?? "visio-public-test", Revision = 1,
             ContentSha256 = hash, CanonicalPath = physicalRoot is null ? "C:\\visio-scope\\public.vsdx" : Path.Combine(physicalRoot, "public.vsdx"), Classification = "VsdxDocumentContainer",
-            Extension = ".vsdx", ByteLength = 4, DiscoveredAtUtc = now
+            Extension = ".vsdx", ByteLength = 4, DiscoveredAtUtc = now,
+            FileLastWriteAtUtc = physicalFile is null ? null : DateTimeOffset.FromFileTime(physicalFile.LastWriteTicks)
         });
         context.SourceArtifacts.Add(new SourceArtifactEntity
         {

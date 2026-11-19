@@ -37,7 +37,9 @@ foreach ($drift in @('unknown-successor','duplicate-successor','changed-index-sc
     } catch {
         $failure=$_.Exception.Message
         $refused=$failure -match '^(index-schema-reconciliation-required|journal-schema-partial-or-unreviewed-state-retain-hold|journal-schema-baseline-history-changed)' -or
-            $failure -ceq 'journal-schema-unrecorded-vector-metadata-index'
+            $failure -ceq 'journal-schema-unrecorded-vector-metadata-index' -or
+            ($journalSchema -and $drift -cin @('unknown-successor','duplicate-successor') -and
+                $failure -ceq 'journal-schema-unrecorded-window-schema')
     }
     if (!$refused) {
         if ($null -ne $failure) { throw ('Unexpected index admission refusal for '+$drift+': '+$failure) }

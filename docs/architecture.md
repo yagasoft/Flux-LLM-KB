@@ -390,9 +390,10 @@ The existing 15-minute claim expiry remains the upper wait for recovery of an
 uncommitted claim whose process disappeared; expiry never proves native cleanup.
 
 The stopped OCR maintenance path has a separate version-2 cleanup-only mode for
-an exact legacy uncertain task belonging to a Deleting source. It pins the current
-80-migration history, schema, root/configuration, request/task/job row versions,
-single-member batch, dispatch, admission, owner and unowned capacity slot. Fresh
+an exact uncertain OCR task with no recorded execution identity on a source
+marked Deleting. It pins the matching updater and CLI's reviewed migration
+history, schema, root and configuration, request/task/job row versions,
+single-member batch, dispatch, admission, owner and capacity-slot state. Fresh
 OS/driver verification under publication/scheduler locks records physical cleanup
 evidence while preserving task/job state and stored results. It performs no DDL,
 completion or requeue. Replay binds the complete input and committed proof.
@@ -520,7 +521,7 @@ Normal application startup does not activate Outlook or change desktop tasks.
 Credentials, mail contents and spool data are private runtime material.
 An explicitly bound Outlook profile publishes committed mail bundles into a
 dedicated ordinary filesystem source. It stages searchable Markdown and original
-attachments outside the watched tree, records the exact staged files and legacy
+attachments outside the watched tree, records the exact staged files and previous
 withdrawal in SQL, and atomically promotes the bundle. The normal source pipeline
 owns discovery, extraction, OCR and search. The private spool keeps the capture
 receipts, original artifacts and cursor evidence. See
@@ -1225,6 +1226,28 @@ scans follow root, lease, same-root Git and full deployment-hold admission.
 Held initial scans and recorded retries are waiting; a future ordinary periodic
 check alone is not backlog. Paused intake without outstanding work may be idle.
 Unconfirmed scan/processor leases remain attributed to their source.
+
+The Overview puts current issues next to the affected source and an action that
+opens that scope. Previous attempts and ownership diagnostics use separate paged
+reads. A GPU result and the scheduler's evidence of released capacity are shown
+separately. Interactive attempts do not initiate indexing recovery. Existing
+workers retain responsibility for their bounded automatic continuations.
+
+Guided recovery reuses the native preview and scoped commit. The control keeps
+an ambiguous submission available under its original confirmation and operation
+identity as the Overview changes. Acceptance is shown as an accepted request.
+The exact source, retained branch, catch-up or pipeline evidence establishes the
+downstream progress. A source scan retry rechecks the latest ordinary scan,
+root configuration, durable delivery, owner and hold. The existing worker wakes
+after a successful queue receipt. Guided document recovery preserves prior
+native evidence and verifies the retained input and any required physical source
+authority. A prepared successor must still satisfy normal worker admission.
+
+Neither additional terminal GPU replay policy qualified. The established Embed
+continuation keeps its input-group budget and preserves executor uncertainty
+when the result is missing. Current OCR settlement does not prove the same
+physical input was restored after withdrawal. The eligible native actions for
+those cases remain available through guided review.
 
 Source-root `ErrorCount` (labelled `Failed files`) counts unresolved processing
 failures for current files. A failed activity with a verified completed,

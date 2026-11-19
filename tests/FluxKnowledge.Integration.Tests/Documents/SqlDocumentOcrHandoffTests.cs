@@ -362,6 +362,7 @@ public sealed partial class SqlDocumentOcrHandoffTests(NativeSqlServerFixture fi
         var (factory, claim, revisionId, hash) = await CreateClaimedPdfAsync();
         var store = CreateStore(factory);
         var handoff = await store.HandoffAsync(new(claim, revisionId, hash, [0]), CancellationToken.None);
+        Assert.True(handoff.Scheduled, handoff.ReasonCode);
         var handle = await AdmitDocumentOcrTaskAsync(factory);
         var executor = new BlockingCountingDocumentOcrExecutor();
         var signal = new RecordingOutboxWakeSignal();
@@ -422,12 +423,22 @@ public sealed partial class SqlDocumentOcrHandoffTests(NativeSqlServerFixture fi
         if (pauseSource)
         {
             await provider.GetRequiredService<PaddleOcrVlmCompletionCoordinator>().RecoverAsync(default);
-            Assert.True((await store.ReadCompletedAsync(claim, hash, default))!.Succeeded);
+            Assert.Equal(1, signal.Notifications);
+            Assert.Equal((int)DocumentOcrRequestState.Requeued,
+                await context.DocumentOcrRequests.Select(value => value.State).SingleAsync());
+            var resumed = await new SqlJobClaimStore(factory, sourceAdmission: new FixtureSourceAdmission(factory))
+                .ClaimNextDueAsync("resumed-ocr-consumer", DateTimeOffset.UtcNow, TimeSpan.FromMinutes(5), CancellationToken.None);
+            Assert.NotNull(resumed);
+            Assert.Equal(claim.JobId, resumed.JobId);
+            Assert.True(Assert.IsType<DocumentOcrExecutionResult>(await store.ReadCompletedAsync(resumed, hash, default)).Succeeded);
             Assert.Equal(1, executor.CallCount);
         }
         var (_, nextClaim, nextRevision, nextHash) = await CreateClaimedPdfAsync(clearData: false);
-        await store.HandoffAsync(new(nextClaim, nextRevision, nextHash, [0]), CancellationToken.None);
+        Assert.NotEqual(claim.JobId, nextClaim.JobId);
+        var nextHandoff = await store.HandoffAsync(new(nextClaim, nextRevision, nextHash, [0]), CancellationToken.None);
+        Assert.True(nextHandoff.Scheduled, nextHandoff.ReasonCode);
         var nextHandle = await AdmitDocumentOcrTaskAsync(factory);
+        Assert.NotEqual(handle.BatchId, nextHandle.BatchId);
         await using var nextProvider = CreateLocalExecutorProvider(
             factory, nextRevision, nextHash, executor, signal, new TestHostApplicationLifetime());
         await nextProvider.GetRequiredService<PaddleOcrVlmExecutorAdapter>()
@@ -571,9 +582,10 @@ public sealed partial class SqlDocumentOcrHandoffTests(NativeSqlServerFixture fi
     }
 
     private async Task<(IDbContextFactory<FluxKnowledgeDbContext> Factory, ClaimedJob Claim, SourceRevisionId RetainedSourceRevisionId, string ContentHash)>
-        CreateClaimedPdfAsync(bool clearData = true)
+        CreateClaimedPdfAsync(bool clearData = true, NativeSqlServerFixture? fixture = null)
     {
-        if (clearData) await SqlTestData.ClearPhase3SourceDataAsync(_fixture);
+        var database = fixture ?? _fixture;
+        if (clearData) await SqlTestData.ClearPhase3SourceDataAsync(database);
         var now = DateTimeOffset.Parse("2026-09-20T12:00:00+00:00");
         const string contentHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         var rootId = Guid.NewGuid();
@@ -582,7 +594,7 @@ public sealed partial class SqlDocumentOcrHandoffTests(NativeSqlServerFixture fi
         var pipelineRecordId = new PipelineRecordId(Guid.NewGuid());
         var jobId = new JobId(Guid.NewGuid());
         var dispatchId = new DispatchMessageId(Guid.NewGuid());
-        await using (var arrange = await SqlTestData.CreateFactory(_fixture).CreateDbContextAsync())
+        await using (var arrange = await SqlTestData.CreateFactory(database).CreateDbContextAsync())
         {
             arrange.SourceRootConfigurations.Add(new SourceRootConfigurationEntity
             {
@@ -662,7 +674,7 @@ public sealed partial class SqlDocumentOcrHandoffTests(NativeSqlServerFixture fi
             await arrange.SaveChangesAsync();
         }
 
-        var factory = SqlTestData.CreateFactory(_fixture);
+        var factory = SqlTestData.CreateFactory(database);
         var claim = await new SqlJobClaimStore(factory, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory)).ClaimNextDueAsync(
             "document-ocr-worker",
             now,

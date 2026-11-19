@@ -36,6 +36,11 @@ else
         </dl>
         <p>The failed-file count shows unresolved processing failures for current items. Completed replacement processing clears earlier failures from current item counts. Last scan issues shows access, availability and read observations from the last finished crawl; it can include repeated reports for one path. A later finished crawl replaces that total.</p>
     </section>
+    @if (PageState.Detail.Id == RootId)
+    {
+        <SourceScanRecoveryPanel @key="(nameof(SourceScanRecoveryPanel), RootId)" SourceRootId="RootId"
+                                 Scan="PageState.Detail.ScanRecovery" OnCommitted="ReloadAsync" />
+    }
     <SourceVerificationPanel @key="PageState.Detail.Id" RootId="PageState.Detail.Id" RootState="@PageState.Detail.State" CanonicalPath="@PageState.Detail.CanonicalPath" />
     <section aria-labelledby="source-files-heading">
         <h2 id="source-files-heading">Files</h2>

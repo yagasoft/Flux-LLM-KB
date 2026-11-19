@@ -85,6 +85,8 @@ public sealed record SourceScopeProjection(
     IReadOnlyList<string> IncludePatterns,
     IReadOnlyList<string> ExcludePatterns);
 
+public sealed record SourceScanRecoveryProjection(Guid RequestId, Guid? JobId, bool IsInterrupted, string? ReasonCode);
+
 public sealed record SourceRootDetailProjection(
     Guid Id,
     string DisplayName,
@@ -117,6 +119,9 @@ public sealed record SourceRootDetailProjection(
 
     [System.Text.Json.Serialization.JsonIgnore]
     public SourceScopeProjection? EditableScope { get; init; }
+
+    [System.Text.Json.Serialization.JsonIgnore]
+    public SourceScanRecoveryProjection? ScanRecovery { get; init; }
 
     // Local operator UI only: source filenames must not enter public JSON payloads.
     [System.Text.Json.Serialization.JsonIgnore]

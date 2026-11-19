@@ -170,7 +170,7 @@ public static class SqlPipelineActivityQuery
     {
         selectedBranches.EnsureFor(context);
         var sql = $$"""
-            SELECT t.Id, j.PipelineRecordId, s.SourceRootId, t.CreatedAtUtc,
+            SELECT t.Id, j.PipelineRecordId, s.SourceRootId, t.CreatedAtUtc, t.State AS ExecutionState,
               CASE
                 WHEN t.State = 3 AND (t.ParentJobId IS NOT NULL AND ({{HistoricalBinding}})
                   OR EXISTS (SELECT 1 FROM OPENJSON(@releasedGpuOutcomesJson) WITH (Id uniqueidentifier '$') released
@@ -326,6 +326,7 @@ public sealed class GpuTaskActivityRow
     public Guid? PipelineRecordId { get; set; }
     public Guid? SourceRootId { get; set; }
     public DateTimeOffset CreatedAtUtc { get; set; }
+    public int ExecutionState { get; set; }
     public string State { get; set; } = "";
     public bool IsInteractive { get; set; }
 }

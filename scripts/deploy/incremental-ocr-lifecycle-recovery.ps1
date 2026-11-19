@@ -6,6 +6,7 @@
 
 function Get-OcrLifecycleMigrationContract {
     [ordered]@{ Baseline='20261021010911_AddIndexRecoveryReferenceAudit';Target='20261024061418_AddDocumentOcrExecutionLifecycle';
+        CurrentSchemaTarget='20261118225053_BindCodexNotesToWorkspace';
         ScriptSha256='3A66996FC45853B16E7329B5D51C1E10DDD0F05F9AC842C702591E516115DC20';
         TargetSchemaSha256='0E47151306639D34CE7F884EBC3B3B005DF2A87480D8AE4DF7662CE13843F74B';
         DatabaseCollation='SQL_Latin1_General_CP1_CI_AS' }
@@ -87,10 +88,12 @@ function Assert-OcrLifecycleSchema($State,$Plan,[switch]$RequireOriginal) {
     $actual=@($State.History);$baseline=@($Plan.OriginalHistory)
     if($Plan.Version -in @(2,3)){
         $expectedMode=if($Plan.Version -eq 2){'CleanupOnly'}else{'StoredExecution'}
-        if($Plan.Mode -cne $expectedMode -or $baseline.Count -ne 80 -or $baseline[-1] -cne '20261117210606_PersistPassageWindowEligibility' -or
+        if($Plan.Mode -cne $expectedMode -or !$baseline.Count -or $baseline[-1] -cne $contract.CurrentSchemaTarget -or
             ($actual -join '|') -cne ($baseline -join '|') -or $State.SchemaSha256 -cne $contract.TargetSchemaSha256 -or
             @($State.Schema.Columns).Count -ne 19 -or @($State.Schema.Constraints).Count -ne 5 -or
             @($State.Schema.Constraints|Where-Object {$_.is_disabled -or $_.is_not_trusted}).Count){throw 'document-ocr-maintenance-schema-or-history-changed'}
+        $expected=@(Get-OcrReviewedMigrationPrefix (Join-Path $PSScriptRoot '../..') -All)
+        if (($expected -join '|') -cne ($baseline -join '|')) { throw 'document-ocr-maintenance-schema-or-history-changed' }
         return $true # Current schema is pinned; this mode never applies DDL.
     }
     $old=($actual -join '|') -ceq ($baseline -join '|') -and $actual[-1] -ceq $contract.Baseline -and
@@ -370,6 +373,8 @@ function New-OcrLifecycleRecoveryPlan([string]$Root,[string]$OperationRoot,[Guid
         throw 'document-ocr-maintenance-incompatible-mode'
     }
     $sameSchema=$CleanupOnly -or $StoredExecution
+    $version=if($StoredExecution){3}elseif($CleanupOnly){2}else{1}
+    $mode=if($StoredExecution){'StoredExecution'}elseif($CleanupOnly){'CleanupOnly'}
     $desktop=Read-OcrReviewedDesktopClassifications $DesktopClassificationsPath
     $operation=Assert-OcrPlainLocalPath $OperationRoot
     if (!$operation.StartsWith('I:\Codex Workspaces\',[StringComparison]::OrdinalIgnoreCase) -or [IO.Directory]::Exists($operation)) {
@@ -387,6 +392,8 @@ function New-OcrLifecycleRecoveryPlan([string]$Root,[string]$OperationRoot,[Guid
     if ((Get-FileHash -LiteralPath (Join-Path $PSScriptRoot 'ocr-lifecycle-schema-up.sql')).Hash -cne (Get-OcrLifecycleMigrationContract).ScriptSha256) {
         throw 'document-ocr-maintenance-migration-script-changed'
     }
+    $schemaBinding=@{Version=$version;Mode=$mode;DatabaseIdentity=$database.Identity;OriginalHistory=$database.History}
+    [void](Assert-OcrLifecycleSchema $database $schemaBinding -RequireOriginal)
     $smiPaths=@(Get-Command nvidia-smi.exe -ErrorAction SilentlyContinue | ForEach-Object Source)
     if (!$smiPaths.Count) { $smiPaths=@(Get-ChildItem -LiteralPath (Join-Path $env:SystemRoot 'System32/DriverStore/FileRepository') -Recurse -Filter 'nvidia-smi.exe' -File | ForEach-Object FullName) }
     if ($smiPaths.Count -ne 1) { throw 'document-ocr-maintenance-driver-tool-ambiguous' }
@@ -436,7 +443,7 @@ function New-OcrLifecycleRecoveryPlan([string]$Root,[string]$OperationRoot,[Guid
         [ordered]@{Role=$role;Root=$destination;Sha256=(Get-HybridPayloadFingerprint $destination)}
     })
     $releaseId=Get-OcrRecoveryReleaseId $commit ([bool]$sameSchema)
-    $plan=[ordered]@{Version=1;ReleaseId=$releaseId;CreatedAtUtc=[DateTimeOffset]::UtcNow.ToString('O');Commit=$commit;SourceRoot=$Root;
+    $plan=[ordered]@{Version=$version;ReleaseId=$releaseId;CreatedAtUtc=[DateTimeOffset]::UtcNow.ToString('O');Commit=$commit;SourceRoot=$Root;
         OperationRoot=$operation;DatabaseIdentity=$database.Identity;OriginalHistory=$database.History;
         MigrationSha256=(Get-OcrLifecycleMigrationContract).ScriptSha256;ImplementationSha256=(Get-OcrRecoveryImplementationHash);
         Binding=$legacy.Binding;StoredJsonSha256=$legacy.StoredJsonSha256;Payloads=$payloads;
@@ -451,7 +458,7 @@ function New-OcrLifecycleRecoveryPlan([string]$Root,[string]$OperationRoot,[Guid
         DesktopClassificationInputSha256=$desktop.InputSha256;ExcludedGpuExecutables=$excluded;VerifierScriptPath=(Join-Path $PSScriptRoot 'verify-ocr-stopped-maintenance.ps1');
         VerifierScriptSha256=(Get-FileHash -LiteralPath (Join-Path $PSScriptRoot 'verify-ocr-stopped-maintenance.ps1')).Hash}
     if($sameSchema){
-        $plan.Version=if($StoredExecution){3}else{2};$plan.Mode=if($StoredExecution){'StoredExecution'}else{'CleanupOnly'}
+        $plan.Mode=$mode
         $plan.TerminalBinding=$terminal;$plan.StoredExecutionBinding=$stored;$plan.Binding=$null;$plan.StoredJsonSha256=$null
         if($StoredExecution){$plan.PredecessorHoldBinding=$forward}
         $helper=@(Get-DeploymentSourceJournalPayloads|Where-Object Role -ceq 'Cli')
@@ -459,13 +466,13 @@ function New-OcrLifecycleRecoveryPlan([string]$Root,[string]$OperationRoot,[Guid
         $plan.PreservedHelperPayload=[ordered]@{Root=$helper[0].Root;Sha256=(Get-HybridPayloadFingerprint $helper[0].Root)}
         $plan.OwnedGpuStopTargets=@($beforeGpu|Where-Object {$_.Pid -in $ownedGpuWorkers}|ForEach-Object {@{Pid=$_.Pid;StartedUtc=$_.StartedUtc;Path=$_.Path}})
     }
-    [void](Assert-OcrLifecycleSchema $database $plan -RequireOriginal)
+    [void](Assert-OcrLifecycleSchema (Get-OcrLifecycleDatabaseState (Get-DeploymentSqlConnectionString)) $plan -RequireOriginal)
     $path=Join-Path $operation 'plan.json';Write-OcrRecoveryJson $path $plan
     [ordered]@{plan=$path;sha256=(Get-FileHash -LiteralPath $path).Hash;commit=$commit;database=$database.Identity;batch=$BatchId;
         actions=$(if($StoredExecution){@('retain or transfer the exact held owner','stop exact IIS and companion owners','prove native cleanup',
-            'pin unchanged schema80; no migration','record cleanup for the original execution and settle its saved result; no requeue or inference',
+            'pin unchanged reviewed schema; no migration','record cleanup for the original execution and settle its saved result; no requeue or inference',
             'activate matching payloads','validate held, release, validate normal continuation')}elseif($CleanupOnly){@('hold admissions','stop exact IIS and companion owners','prove native cleanup',
-            'pin unchanged schema80; no migration','record cleanup proof only; preserve task/job/results; no requeue',
+            'pin unchanged reviewed schema; no migration','record cleanup proof only; preserve task/job/results; no requeue',
             'activate matching payloads','validate held, release, validate native deletion')}else{@('hold admissions','stop exact IIS and companion owners','prove native cleanup','apply pinned additive migration',
             'settle exact legacy reservation preserving result','activate matching payloads','validate held, release, validate queue progress')});
         failure='hold retained and owners stopped; prior matching payloads restored only before start intent; no Down migration or settlement reversal'}

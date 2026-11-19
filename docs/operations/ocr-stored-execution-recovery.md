@@ -5,7 +5,8 @@ result is stored but whose native cleanup cannot be proved by normal recovery.
 An uncertain reservation blocks ordinary deployment. Its age, an exited PID or a
 scheduler receipt alone does not establish native cleanup.
 
-This mode retains schema 80. It preserves the original execution, supervisor and
+This mode retains the exact migration history of the matching updater and CLI.
+It preserves the original execution, supervisor and
 native process identities, claim/deadline, result, parent job and delivery. Fresh
 physical verification records cleanup for that execution; the existing settlement
 operation then releases exactly its capacity reservation. The CLI does not requeue
@@ -68,5 +69,5 @@ payloads and hold for explicit recovery instead of repeating the drain window.
 Scheduler admission defers without holding the publication fence while waiting
 for maintenance, allowing existing cleanup to finish.
 
-Version-1 legacy recovery and version-2 cleanup-only maintenance retain their
+Version-1 recovery and version-2 cleanup-only maintenance retain their
 existing contracts. Model payloads remain exclusively under `J:\Models`.

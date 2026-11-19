@@ -10,14 +10,34 @@ function Assert-Refused([scriptblock]$Action,[string]$Reason){
 }
 $state=Get-OcrLifecycleDatabaseState $connection
 $plan=@{Version=2;Mode='CleanupOnly';DatabaseIdentity=$state.Identity;OriginalHistory=@(Get-OcrReviewedMigrationPrefix $SourceRoot -All)}
-if(!(Assert-OcrLifecycleSchema $state $plan -RequireOriginal)){throw 'Schema80 not accepted.'}
+if(!(Assert-OcrLifecycleSchema $state $plan -RequireOriginal)){throw 'Reviewed current schema not accepted.'}
 $before=$state|ConvertTo-Json -Depth 20 -Compress
 # The normal migration entry point must return without executing any DDL.
 $stops=0
 $after=Invoke-OcrLifecycleMigration $connection $plan {$script:stops++} {throw 'DDL must not execute.'}
 if($stops -ne 1 -or ($after|ConvertTo-Json -Depth 20 -Compress) -cne $before){throw 'Cleanup-only changed schema.'}
-$drift=@{};foreach($key in $state.Keys){$drift[$key]=$state[$key]};$drift.History=@($state.History)[0..78]
+
+# A matching historical plan is insufficient for the current updater.
+$priorState=@{};foreach($key in $state.Keys){$priorState[$key]=$state[$key]}
+$priorPlan=@{};foreach($key in $plan.Keys){$priorPlan[$key]=$plan[$key]}
+foreach($successor in @('20261117210606_PersistPassageWindowEligibility','20261118224032_BindOutlookWatchedSources')){
+    $priorState.History=@($state.History | Where-Object { $_ -cle $successor })
+    $priorPlan.OriginalHistory=$priorState.History
+    Assert-Refused {Assert-OcrLifecycleSchema $priorState $priorPlan -RequireOriginal} 'schema-or-history-changed'
+}
+$storedPlan=@{};foreach($key in $plan.Keys){$storedPlan[$key]=$plan[$key]}
+$storedPlan.Version=3;$storedPlan.Mode='StoredExecution'
+if(!(Assert-OcrLifecycleSchema $state $storedPlan -RequireOriginal)){throw 'Reviewed current schema not accepted for stored execution.'}
+
+$drift=@{};foreach($key in $state.Keys){$drift[$key]=$state[$key]};$drift.History=@($state.History)[0..($state.History.Count-2)]
 Assert-Refused {Assert-OcrLifecycleSchema $drift $plan} 'schema-or-history-changed'
+$unexpected=@{};foreach($key in $plan.Keys){$unexpected[$key]=$plan[$key]}
+$unexpected.OriginalHistory=@($state.History)+@('20261119235959_UnreviewedMigration')
+$drift.History=$unexpected.OriginalHistory
+Assert-Refused {Assert-OcrLifecycleSchema $drift $unexpected} 'schema-or-history-changed'
+$unexpected.OriginalHistory=@($state.History);$unexpected.OriginalHistory[0]='20260101000000_UnreviewedMigration'
+$drift.History=$unexpected.OriginalHistory
+Assert-Refused {Assert-OcrLifecycleSchema $drift $unexpected} 'schema-or-history-changed'
 $drift=@{};foreach($key in $state.Keys){$drift[$key]=$state[$key]};$drift.SchemaSha256='0'*64
 Assert-Refused {Assert-OcrLifecycleSchema $drift $plan} 'schema-or-history-changed'
 $plan.Mode='CompleteAndRequeue'
